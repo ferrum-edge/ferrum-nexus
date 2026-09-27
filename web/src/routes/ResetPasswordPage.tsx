@@ -69,7 +69,7 @@ export function ResetPasswordPage(): ReactElement {
       footer={
         <>
           Link expired?{' '}
-          <Link to="/forgot-password" className="text-accent hover:underline">
+          <Link to="/forgot-password" className="text-accent-text hover:underline">
             Request a new one
           </Link>
         </>

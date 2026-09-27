@@ -124,7 +124,7 @@ export function NotificationsPage(): ReactElement {
                         {formatRelative(notification.created_at)}
                       </span>
                     </span>
-                    <span className="shrink-0 text-xs font-medium text-accent">
+                    <span className="shrink-0 text-xs font-medium text-accent-text">
                       {notification.link ? 'Open' : isUnread ? 'Mark read' : 'Read'}
                     </span>
                   </button>

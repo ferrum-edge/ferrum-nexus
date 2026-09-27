@@ -49,7 +49,7 @@ export function CardHeader({
         {icon ? (
           <span
             className={cn(
-              'flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent',
+              'flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent-text',
               !inlineActions && 'mt-0.5',
             )}
           >
@@ -77,7 +77,7 @@ export function CardBody({ className, children }: CardProps): ReactElement {
 export interface Crumb {
   label: string;
   /** Router path; the last crumb is usually the current page and has none. */
-  to?: '/' | '/catalog' | '/credentials' | '/messages' | '/apis' | '/admin/users';
+  to?: '/' | '/catalog' | '/credentials' | '/messages' | '/apis' | '/admin/users' | '/admin/apis';
 }
 
 export interface PageHeaderProps {
@@ -124,7 +124,7 @@ export function PageHeader({
             </ol>
           </nav>
         ) : eyebrow ? (
-          <p className="mb-1.5 text-[0.7rem] font-semibold tracking-[0.12em] text-accent uppercase">
+          <p className="mb-1.5 text-[0.7rem] font-semibold tracking-[0.12em] text-accent-text uppercase">
             {eyebrow}
           </p>
         ) : null}
@@ -177,7 +177,7 @@ export interface StatCardProps {
 }
 
 const STAT_TONES = {
-  accent: 'bg-accent-soft text-accent',
+  accent: 'bg-accent-soft text-accent-text',
   info: 'bg-info-soft text-info',
   success: 'bg-success-soft text-success',
   warning: 'bg-warning-soft text-warning',

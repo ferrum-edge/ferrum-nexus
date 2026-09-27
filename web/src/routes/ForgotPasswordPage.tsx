@@ -64,7 +64,7 @@ export function ForgotPasswordPage(): ReactElement {
       footer={
         <>
           Remembered it?{' '}
-          <Link to="/login" className="text-accent hover:underline">
+          <Link to="/login" className="text-accent-text hover:underline">
             Sign in
           </Link>
         </>

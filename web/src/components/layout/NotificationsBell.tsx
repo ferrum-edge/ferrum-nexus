@@ -54,7 +54,7 @@ export function NotificationsBell(): ReactElement {
           <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
             <p className="text-sm font-semibold text-fg">Notifications</p>
             {unread > 0 ? (
-              <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[0.7rem] font-medium text-accent tabular-nums">
+              <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[0.7rem] font-medium text-accent-text tabular-nums">
                 {unread} unread
               </span>
             ) : (
@@ -121,7 +121,7 @@ export function NotificationsBell(): ReactElement {
             <DropdownMenu.Item asChild>
               <Link
                 to="/notifications"
-                className="rounded-md px-2 py-1.5 text-xs font-medium text-accent outline-none hover:underline focus-visible:ring-2 focus-visible:ring-accent-ring"
+                className="rounded-md px-2 py-1.5 text-xs font-medium text-accent-text outline-none hover:underline focus-visible:ring-2 focus-visible:ring-accent-ring"
               >
                 View all
               </Link>

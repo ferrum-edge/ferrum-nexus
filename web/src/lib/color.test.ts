@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   contrastRatio,
   deriveAccentScale,
@@ -130,5 +132,104 @@ describe('informational badge contrast', () => {
       const background = compositeTint('rgb(56 189 248 / 0.12)', surface);
       expect(contrastRatio(parseHex('#0369a1')!, background)).toBeGreaterThanOrEqual(4.5);
     }
+  });
+});
+
+describe('accent text contrast', () => {
+  const surfaces = {
+    light: ['#ffffff', '#f4f6f9', '#f8fafc', '#f1f4f8'],
+    dark: ['#12151b', '#0a0c10', '#161a21', '#181c24', '#0d1015'],
+  };
+
+  it('darkens the default ember for light-theme text but keeps it for fills', () => {
+    const light = deriveAccentScale(parseHex('#f97316')!, 'light');
+    expect(light['--accent']).toBe('#f97316');
+    expect(light['--accent-text']).not.toBe('#f97316');
+    expect(deriveAccentScale(parseHex('#f97316')!, 'dark')['--accent-text']).toBe('#f97316');
+  });
+
+  describe.each(['light', 'dark'] as const)('%s theme', (theme) => {
+    it.each([
+      '#f97316',
+      '#ea580c',
+      '#4f46e5',
+      '#22d3ee',
+      '#ffff00',
+      '#16a34a',
+      '#777777',
+      '#ffffff',
+      '#000000',
+    ])('reaches 4.5:1 for %s on every surface and on its own tint', (hex) => {
+      const scale = deriveAccentScale(parseHex(hex)!, theme);
+      const ink = parseHex(scale['--accent-text'])!;
+      for (const surface of surfaces[theme]) {
+        expect(contrastRatio(ink, parseHex(surface)!)).toBeGreaterThanOrEqual(4.5);
+        const tinted = compositeTint(scale['--accent-soft'], surface);
+        expect(contrastRatio(ink, tinted)).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+  });
+});
+
+// Read from disk: Vitest stubs stylesheet imports, `?raw` included, to empty
+// strings. A path, not a URL: under jsdom `URL` is jsdom's, which `fs` refuses.
+const globalsCss = readFileSync(join(import.meta.dirname, '../styles/globals.css'), 'utf8');
+
+/** The custom properties one theme block of globals.css declares. */
+function themeTokens(selector: string): Record<string, string> {
+  const start = globalsCss.indexOf(`${selector} {`);
+  if (start === -1) throw new Error(`No ${selector} block in globals.css`);
+  const body = globalsCss.slice(start, globalsCss.indexOf('\n}', start));
+  const tokens: Record<string, string> = {};
+  for (const match of body.matchAll(/--([\w-]+):\s*([^;]+);/g))
+    tokens[match[1]!] = match[2]!.trim();
+  return tokens;
+}
+
+describe('built-in theme tokens (globals.css)', () => {
+  const themes = {
+    dark: themeTokens(":root,\n[data-theme='dark']"),
+    light: themeTokens("[data-theme='light']"),
+  };
+
+  describe.each(['light', 'dark'] as const)('%s theme', (theme) => {
+    const tokens = themes[theme];
+    const surfaces = ['base', 'surface', 'surface-hover', 'elevated', 'inset'].map((name) => {
+      const value = tokens[name];
+      if (!value || !parseHex(value)) throw new Error(`--${name} is not a hex colour`);
+      return value;
+    });
+
+    it.each(['fg', 'fg-muted', 'fg-subtle', 'accent-text'])(
+      '--%s reads at 4.5:1 on every surface',
+      (ink) => {
+        for (const surface of surfaces) {
+          expect(contrastRatio(parseHex(tokens[ink]!)!, parseHex(surface)!)).toBeGreaterThanOrEqual(
+            4.5,
+          );
+        }
+      },
+    );
+
+    it.each([
+      ['accent-text', 'accent-soft'],
+      ['success', 'success-soft'],
+      ['warning', 'warning-soft'],
+      ['danger', 'danger-soft'],
+      ['info', 'info-soft'],
+    ])('--%s reads at 4.5:1 on --%s over every surface', (ink, tint) => {
+      for (const surface of surfaces) {
+        const background = compositeTint(tokens[tint]!, surface);
+        expect(contrastRatio(parseHex(tokens[ink]!)!, background)).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+
+    it('reads a danger fill with --danger-fg', () => {
+      for (const fill of [tokens.danger!, tokens['danger-hover']!]) {
+        expect(
+          contrastRatio(parseHex(tokens['danger-fg']!)!, parseHex(fill)!),
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    });
   });
 });

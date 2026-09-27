@@ -128,6 +128,7 @@ export interface AccentScale {
   '--accent-hover': string;
   '--accent-active': string;
   '--accent-fg': string;
+  '--accent-text': string;
   '--accent-soft': string;
   '--accent-ring': string;
   '--accent-glow': string;
@@ -139,17 +140,25 @@ export interface AccentScale {
  * Hover moves *towards* the theme's background contrast direction: lighter on a
  * dark theme, darker on a light one, so a button always reads as "lit up" on
  * hover. Tints are translucent so they sit naturally on any surface.
+ *
+ * `--accent-text` is the accent as ink — links, accent badges, the active nav
+ * item — adjusted like `--info` so it stays readable on every surface and on
+ * the accent's own soft tint. A bright brand colour such as the default ember
+ * is under 3:1 on white, so the light theme darkens it; `--accent` itself stays
+ * the exact brand colour for fills.
  */
 export function deriveAccentScale(base: Rgb, theme: 'dark' | 'light'): AccentScale {
   const direction = theme === 'dark' ? 1 : -1;
   const hover = shiftLightness(base, 0.07 * direction);
   const active = shiftLightness(base, -0.05 * direction);
+  const softAlpha = theme === 'dark' ? 0.16 : 0.12;
   return {
     '--accent': toHex(base),
     '--accent-hover': toHex(hover),
     '--accent-active': toHex(active),
     '--accent-fg': toHex(readableForeground(base)),
-    '--accent-soft': withAlpha(base, theme === 'dark' ? 0.16 : 0.12),
+    '--accent-text': legibleInk(base, theme, softAlpha),
+    '--accent-soft': withAlpha(base, softAlpha),
     '--accent-ring': withAlpha(base, theme === 'dark' ? 0.45 : 0.35),
     '--accent-glow': withAlpha(base, theme === 'dark' ? 0.28 : 0.18),
   };
@@ -191,32 +200,54 @@ function mixTowardNeutral(base: Rgb, target: number, amount: number): Rgb {
 }
 
 /**
- * Badge text must contrast with the composited tint, not just the page white.
+ * `base` as readable text: the brand hue, mixed towards black (light theme) or
+ * white (dark theme) only as far as it takes to clear 4.5:1.
+ *
+ * Badge text must contrast with the composited tint, not just the page white,
+ * and plain text with the bare surface — which is the harder of the two when
+ * the brand colour is darker (light theme: lighter) than the surface itself.
  * Use the darkest light surface / lightest dark surface from globals.css so
  * this also covers cards, hover states and inset panels. Check the serialized
  * sRGB result after gamut clipping and rounding, with a small margin over 4.5.
  */
-function infoForeground(base: Rgb, theme: 'dark' | 'light', alpha: number): string {
+function legibleInk(base: Rgb, theme: 'dark' | 'light', alpha: number): string {
   const surface = theme === 'light' ? { r: 241, g: 244, b: 248 } : { r: 24, g: 28, b: 36 };
-  const background = {
+  const tinted = {
     r: base.r * alpha + surface.r * (1 - alpha),
     g: base.g * alpha + surface.g * (1 - alpha),
     b: base.b * alpha + surface.b * (1 - alpha),
   };
-  for (let step = 0; step < 20; step += 1) {
-    const candidate =
-      step === 0 ? base : mixTowardNeutral(base, theme === 'light' ? 0 : 1, step / 20);
-    const hex = toHex(candidate);
-    if (contrastRatio(parseHex(hex)!, background) >= 4.6) return hex;
+  const target = theme === 'light' ? 0 : 1;
+  const passes = (hex: string): boolean => {
+    const ink = parseHex(hex)!;
+    return contrastRatio(ink, tinted) >= 4.6 && contrastRatio(ink, surface) >= 4.6;
+  };
+  const unchanged = toHex(base);
+  if (passes(unchanged)) return unchanged;
+  // The smallest mix that passes, so the ink stays as close to the brand colour
+  // as legibility allows. Mixing only moves the ink away from both backgrounds
+  // once it has crossed them, so the passing amounts are one interval ending at 1.
+  let low = 0;
+  let high = 1;
+  let best: string | null = null;
+  for (let step = 0; step < 16; step += 1) {
+    const amount = (low + high) / 2;
+    const hex = toHex(mixTowardNeutral(base, target, amount));
+    if (passes(hex)) {
+      best = hex;
+      high = amount;
+    } else {
+      low = amount;
+    }
   }
   // Neutral ink is safe against every supported surface and brand tint.
-  return toHex(theme === 'light' ? NEAR_BLACK : WHITE);
+  return best ?? toHex(theme === 'light' ? NEAR_BLACK : WHITE);
 }
 
 export function deriveInfoScale(base: Rgb, theme: 'dark' | 'light'): InfoScale {
   const alpha = theme === 'dark' ? 0.16 : 0.12;
   return {
-    '--info': infoForeground(base, theme, alpha),
+    '--info': legibleInk(base, theme, alpha),
     '--info-soft': withAlpha(base, alpha),
   };
 }

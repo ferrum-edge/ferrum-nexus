@@ -80,11 +80,11 @@ export function Select<T extends string = string>({
                 disabled={option.disabled}
                 className={cn(
                   'relative flex cursor-pointer flex-col rounded-sm py-1.5 pr-3 pl-7 text-sm text-fg outline-none select-none',
-                  'data-[highlighted]:bg-accent-soft data-[highlighted]:text-accent',
+                  'data-[highlighted]:bg-accent-soft data-[highlighted]:text-accent-text',
                   'data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50',
                 )}
               >
-                <SelectPrimitive.ItemIndicator className="absolute top-2 left-2 text-accent">
+                <SelectPrimitive.ItemIndicator className="absolute top-2 left-2 text-accent-text">
                   <Icon name="check" className="h-3.5 w-3.5" />
                 </SelectPrimitive.ItemIndicator>
                 <SelectPrimitive.ItemText>{option.label}</SelectPrimitive.ItemText>

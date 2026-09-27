@@ -196,12 +196,15 @@ export function AsyncSelect<TItem>({
                 }}
                 className={cn(
                   'relative flex cursor-pointer flex-col rounded-sm py-1.5 pr-3 pl-7 text-sm text-fg outline-none select-none',
-                  'hover:bg-accent-soft hover:text-accent focus-visible:bg-accent-soft focus-visible:text-accent',
+                  'hover:bg-accent-soft hover:text-accent-text focus-visible:bg-accent-soft focus-visible:text-accent-text',
                   option.disabled && 'cursor-not-allowed opacity-50',
                 )}
               >
                 {option.value === value ? (
-                  <Icon name="check" className="absolute top-2 left-2 h-3.5 w-3.5 text-accent" />
+                  <Icon
+                    name="check"
+                    className="absolute top-2 left-2 h-3.5 w-3.5 text-accent-text"
+                  />
                 ) : null}
                 <span className="truncate">{option.label}</span>
                 {option.description ? (

@@ -79,7 +79,7 @@ export function ProfilePage(): ReactElement {
         <div className="flex flex-wrap items-center gap-x-5 gap-y-4 px-5 py-5">
           <span
             aria-hidden="true"
-            className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-accent-soft text-lg font-semibold text-accent ring-1 ring-accent/20"
+            className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-accent-soft text-lg font-semibold text-accent-text ring-1 ring-accent/20"
           >
             {initials(user.display_name)}
           </span>

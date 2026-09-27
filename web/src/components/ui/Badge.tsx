@@ -6,7 +6,7 @@ export type BadgeTone = 'neutral' | 'accent' | 'success' | 'warning' | 'danger' 
 
 const TONES: Readonly<Record<BadgeTone, string>> = {
   neutral: 'bg-neutral-soft text-fg-muted ring-fg-subtle/20',
-  accent: 'bg-accent-soft text-accent ring-accent/25',
+  accent: 'bg-accent-soft text-accent-text ring-accent/25',
   success: 'bg-success-soft text-success ring-success/25',
   warning: 'bg-warning-soft text-warning ring-warning/25',
   danger: 'bg-danger-soft text-danger ring-danger/25',

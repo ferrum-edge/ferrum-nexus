@@ -49,8 +49,10 @@ import {
   useDenyAccessRequest,
 } from '../hooks/useAccessRequests';
 import { useGrants, useRevokeGrant } from '../hooks/useGrants';
+import { useAuth } from '../stores/auth';
 import { useToast } from '../stores/toast';
 import { RoleGuard } from '../components/layout/RoleGuard';
+import { useNavLocationOverride } from '../components/layout/navLocation';
 import { ShowOnceSecretDialog } from '../components/credentials/ShowOnceSecretDialog';
 import { declaredMethods } from '../components/openapi/parse';
 import {
@@ -139,7 +141,7 @@ function GlanceTile({
 
   return (
     <div className="fx-card flex items-start gap-3 px-4 py-3">
-      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent">
+      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent-text">
         <Icon name={icon} className="h-4 w-4" />
       </span>
       <div className="min-w-0 flex-1">
@@ -187,7 +189,7 @@ function Avatar({ label }: { label: string }): ReactElement {
   return (
     <span
       aria-hidden="true"
-      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent"
+      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent-text"
     >
       {initialsOf(label)}
     </span>
@@ -1441,6 +1443,12 @@ function GatewayRepairBanner({ api }: { api: Api }): ReactElement {
 function ApiDetail({ apiId }: { apiId: string }): ReactElement {
   const query = useApi(apiId);
   const [tab, setTab] = useState('overview');
+  const viewerId = useAuth().user?.id;
+  // Only an owner or an administrator reaches this page, so an API someone else
+  // owns is being managed from Administration › All APIs, not "My APIs".
+  const ownerId = query.data?.api.owner_user_id;
+  const managingOthers = ownerId !== undefined && viewerId !== undefined && ownerId !== viewerId;
+  useNavLocationOverride(managingOthers ? '/admin/apis' : null);
 
   if (query.isLoading) return <LoadingPanel label="Loading API" />;
   if (query.isError || !query.data) {
@@ -1467,7 +1475,12 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
   return (
     <>
       <PageHeader
-        breadcrumbs={[{ label: 'My APIs', to: '/apis' }, { label: api.name }]}
+        breadcrumbs={[
+          managingOthers
+            ? { label: 'All APIs', to: '/admin/apis' }
+            : { label: 'My APIs', to: '/apis' },
+          { label: api.name },
+        ]}
         title={api.name}
         description={api.description ?? undefined}
         meta={

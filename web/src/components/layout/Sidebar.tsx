@@ -3,7 +3,8 @@ import type { ReactElement, ReactNode, Ref } from 'react';
 import { ROLE_LABELS, type Role, type User } from '@ferrum-nexus/shared';
 import { cn } from '../../lib/cn';
 import { Icon } from '../ui/Icon';
-import { NAV_SECTIONS, navItemsForSection } from './nav';
+import { NAV_SECTIONS, isNavItemActive, navItemsForSection } from './nav';
+import { useNavPathname } from './navLocation';
 
 export interface SidebarProps {
   id: string;
@@ -75,6 +76,9 @@ export function Sidebar({
   user,
   footer,
 }: SidebarProps): ReactElement {
+  // Not the router's own active state: a page may ask to be shown under another
+  // entry (an administrator managing someone else's API is in All APIs).
+  const pathname = useNavPathname();
   return (
     <aside
       id={id}
@@ -115,47 +119,48 @@ export function Sidebar({
                 {section.label}
               </p>
               <ul className="flex flex-col gap-0.5">
-                {items.map((item) => (
-                  <li key={item.to}>
-                    <Link
-                      to={item.to}
-                      activeOptions={{ exact: item.exact ?? false }}
-                      onClick={onNavigate}
-                      className={cn(
-                        'group relative flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium text-sidebar-fg',
-                        'transition-colors hover:bg-sidebar-hover hover:text-sidebar-fg-strong',
-                        'focus-visible:ring-2 focus-visible:ring-accent-ring focus-visible:outline-none',
-                      )}
-                      activeProps={{
-                        className:
-                          'bg-sidebar-active text-sidebar-active-fg hover:bg-sidebar-active hover:text-sidebar-active-fg',
-                        'aria-current': 'page',
-                      }}
-                    >
-                      {({ isActive }) => (
-                        <>
-                          <span
-                            aria-hidden="true"
-                            className={cn(
-                              'absolute top-1/2 -left-3 h-5 w-0.5 -translate-y-1/2 rounded-r-full bg-accent transition-opacity',
-                              isActive ? 'opacity-100' : 'opacity-0',
-                            )}
-                          />
-                          <Icon
-                            name={item.icon}
-                            className={cn(
-                              'h-4 w-4 transition-colors',
-                              isActive
-                                ? 'text-sidebar-active-fg'
-                                : 'text-sidebar-subtle group-hover:text-sidebar-fg-strong',
-                            )}
-                          />
-                          {item.label}
-                        </>
-                      )}
-                    </Link>
-                  </li>
-                ))}
+                {items.map((item) => {
+                  const isActive = isNavItemActive(item, pathname);
+                  return (
+                    <li key={item.to}>
+                      <Link
+                        to={item.to}
+                        // The router adds its own `aria-current` to a link it
+                        // considers active, after these props. Exact matching
+                        // keeps it from claiming a page beneath the item, which
+                        // `isNavItemActive` (or a page's override) decides.
+                        activeOptions={{ exact: true }}
+                        onClick={onNavigate}
+                        aria-current={isActive ? 'page' : undefined}
+                        className={cn(
+                          'group relative flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium',
+                          'transition-colors focus-visible:ring-2 focus-visible:ring-accent-ring focus-visible:outline-none',
+                          isActive
+                            ? 'bg-sidebar-active text-sidebar-active-fg'
+                            : 'text-sidebar-fg hover:bg-sidebar-hover hover:text-sidebar-fg-strong',
+                        )}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={cn(
+                            'absolute top-1/2 -left-3 h-5 w-0.5 -translate-y-1/2 rounded-r-full bg-accent transition-opacity',
+                            isActive ? 'opacity-100' : 'opacity-0',
+                          )}
+                        />
+                        <Icon
+                          name={item.icon}
+                          className={cn(
+                            'h-4 w-4 transition-colors',
+                            isActive
+                              ? 'text-sidebar-active-fg'
+                              : 'text-sidebar-subtle group-hover:text-sidebar-fg-strong',
+                          )}
+                        />
+                        {item.label}
+                      </Link>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           );
@@ -169,7 +174,7 @@ export function Sidebar({
             onClick={onNavigate}
             className="flex items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors hover:bg-sidebar-hover"
           >
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent ring-1 ring-accent/20">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent-text ring-1 ring-accent/20">
               {initials(user.display_name)}
             </span>
             <span className="min-w-0">

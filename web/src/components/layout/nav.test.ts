@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { ROLE_ORDER, type Role } from '@ferrum-nexus/shared';
 import {
   NAV_ITEMS,
+  isNavItemActive,
   locationForPath,
   navItemsForSection,
   requiredRoleForPath,
   visibleNavItems,
+  type NavItem,
 } from './nav';
 
 function pathsFor(role: Role | null): string[] {
@@ -111,5 +113,26 @@ describe('location bar', () => {
     expect(locationForPath('/nope')).toBeNull();
     // A prefix of a nav path is not that page.
     expect(locationForPath('/catalogue')).toBeNull();
+  });
+});
+
+describe('isNavItemActive', () => {
+  const item = (to: string): NavItem => NAV_ITEMS.find((entry) => entry.to === to)!;
+
+  it('matches the item itself and pages beneath it', () => {
+    expect(isNavItemActive(item('/apis'), '/apis')).toBe(true);
+    expect(isNavItemActive(item('/apis'), '/apis/new')).toBe(true);
+    expect(isNavItemActive(item('/apis'), '/apis/abc')).toBe(true);
+  });
+
+  it('does not match a sibling that merely shares a prefix', () => {
+    expect(isNavItemActive(item('/apis'), '/admin/apis')).toBe(false);
+    expect(isNavItemActive(item('/admin/apis'), '/apis/abc')).toBe(false);
+    expect(isNavItemActive(item('/catalog'), '/catalogue')).toBe(false);
+  });
+
+  it('matches the dashboard only on its own path', () => {
+    expect(isNavItemActive(item('/'), '/')).toBe(true);
+    expect(isNavItemActive(item('/'), '/apis')).toBe(false);
   });
 });

@@ -15,7 +15,7 @@ export interface EmptyStateProps {
 
 const TONES = {
   neutral: 'bg-neutral-soft text-fg-subtle ring-border',
-  accent: 'bg-accent-soft text-accent ring-accent/20',
+  accent: 'bg-accent-soft text-accent-text ring-accent/20',
   danger: 'bg-danger-soft text-danger ring-danger/20',
 } as const;
 

@@ -108,7 +108,7 @@ export function AuthShell({ title, description, children, footer }: AuthShellPro
             <ul className="mt-10 flex flex-col gap-6">
               {FEATURES.map((feature) => (
                 <li key={feature.title} className="flex items-start gap-3.5">
-                  <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent ring-1 ring-accent/20">
+                  <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-text ring-1 ring-accent/20">
                     <Icon name={feature.icon} className="h-4.5 w-4.5" />
                   </span>
                   <span>
@@ -163,7 +163,7 @@ export function AuthShell({ title, description, children, footer }: AuthShellPro
             {supportEmail ? (
               <p className={cn('mt-4 text-center text-xs text-fg-subtle', split && 'lg:hidden')}>
                 Need help? Contact{' '}
-                <a className="text-accent hover:underline" href={`mailto:${supportEmail}`}>
+                <a className="text-accent-text hover:underline" href={`mailto:${supportEmail}`}>
                   {supportEmail}
                 </a>
               </p>

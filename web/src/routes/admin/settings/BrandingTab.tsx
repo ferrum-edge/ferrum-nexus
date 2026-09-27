@@ -165,7 +165,7 @@ function ThemePreview({
             </span>
           </div>
           <div className="mt-1.5 flex min-w-0 flex-wrap gap-1">
-            <span className="rounded-full bg-accent-soft px-1.5 text-[0.5rem] font-medium text-accent">
+            <span className="rounded-full bg-accent-soft px-1.5 text-[0.5rem] font-medium text-accent-text">
               v2.4.0
             </span>
             <span className="rounded-full bg-info-soft px-1.5 text-[0.5rem] font-medium text-info">

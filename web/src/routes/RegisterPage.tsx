@@ -130,7 +130,7 @@ export function RegisterPage(): ReactElement {
       footer={
         <>
           Already registered?{' '}
-          <Link to="/login" className="text-accent hover:underline">
+          <Link to="/login" className="text-accent-text hover:underline">
             Sign in
           </Link>
         </>
@@ -225,12 +225,15 @@ export function RegisterPage(): ReactElement {
                       <span className="flex items-center gap-2">
                         <Icon
                           name={ROLE_ICONS[value]}
-                          className={cn('h-4 w-4', selected ? 'text-accent' : 'text-fg-subtle')}
+                          className={cn(
+                            'h-4 w-4',
+                            selected ? 'text-accent-text' : 'text-fg-subtle',
+                          )}
                         />
                         <span
                           className={cn(
                             'text-sm font-medium',
-                            selected ? 'text-accent' : 'text-fg',
+                            selected ? 'text-accent-text' : 'text-fg',
                           )}
                         >
                           {ROLE_LABELS[value]}

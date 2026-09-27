@@ -71,7 +71,7 @@ export function MessagesPage(): ReactElement {
                     {counterpart ? (
                       <span
                         aria-hidden="true"
-                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent ring-1 ring-accent/20"
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent-text ring-1 ring-accent/20"
                       >
                         {initials(counterpart.display_name)}
                       </span>

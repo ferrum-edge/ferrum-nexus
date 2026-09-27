@@ -140,6 +140,15 @@ export function locationForPath(pathname: string): LocationCrumbs | null {
   return { section: section?.label ?? '', page: item.label };
 }
 
+/**
+ * Whether `item` is the sidebar's current entry at `pathname`: the exact path,
+ * or — unless the item is `exact` — any page beneath it.
+ */
+export function isNavItemActive(item: NavItem, pathname: string): boolean {
+  if (pathname === item.to) return true;
+  return !item.exact && item.to !== '/' && pathname.startsWith(`${item.to}/`);
+}
+
 /** Nav entries a given role may see; `null` (signed out) sees nothing. */
 export function visibleNavItems(role: Role | null): NavItem[] {
   if (role === null) return [];
