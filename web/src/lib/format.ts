@@ -44,9 +44,38 @@ export function formatRelative(value: string | null | undefined): string {
   return formatter.format(Math.round(deltaMs / 1000), 'second');
 }
 
-/** Turn a snake_case identifier into a human-readable label. */
+/**
+ * Words `humanize` spells as acronyms rather than sentence case, keyed by their
+ * lower-case form: `api.publish` reads "API publish", not "Api publish".
+ */
+const ACRONYMS: Readonly<Record<string, string>> = {
+  acl: 'ACL',
+  acls: 'ACLs',
+  api: 'API',
+  apis: 'APIs',
+  captcha: 'CAPTCHA',
+  cors: 'CORS',
+  id: 'ID',
+  ids: 'IDs',
+  ip: 'IP',
+  jwt: 'JWT',
+  smtp: 'SMTP',
+  sso: 'SSO',
+  tls: 'TLS',
+  url: 'URL',
+  urls: 'URLs',
+};
+
+/**
+ * Turn a snake_case or dotted identifier (an audit action, a target type) into
+ * a sentence-case label, spelling known acronyms in capitals.
+ */
 export function humanize(value: string): string {
-  const spaced = value.replace(/[_.]+/g, ' ').trim();
+  const words = value
+    .split(/[\s_.]+/)
+    .filter((word) => word !== '')
+    .map((word) => ACRONYMS[word.toLowerCase()] ?? word);
+  const spaced = words.join(' ');
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 

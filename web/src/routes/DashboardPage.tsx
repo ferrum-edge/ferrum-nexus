@@ -360,7 +360,7 @@ export function DashboardPage(): ReactElement {
                           {humanize(entry.action)}
                         </span>
                         <span className="block truncate text-xs text-fg-subtle">
-                          {auditActorLabel(entry)} · {entry.target_type}
+                          {auditActorLabel(entry)} · {humanize(entry.target_type)}
                         </span>
                       </span>
                     </span>
