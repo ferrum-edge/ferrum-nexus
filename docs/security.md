@@ -1340,9 +1340,10 @@ Two bounds, at the two places the cost appears:
   characters, and one component's text repeats at every reference to it — a
   schema description at each `$ref`, an operation summary on each tag card —
   so displayed text is capped per occurrence: descriptions at 1,000
-  characters, and operation summaries, schema property names, types and enum
-  values at 200. A cut ends in `…` with a hint to download the specification,
-  and never splits a surrogate pair. Documents are parsed with
+  characters, and operation summaries, paths, operation IDs, parameter names
+  and locations, media-type keys, schema property names, types and enum values
+  at 200. A cut ends in `…` with a hint to download the specification, and
+  never splits a surrogate pair. Documents are parsed with
   `JSON.parse` when they open with `{` or `[`, as the server already does: the
   YAML parser accepts JSON but its flow-mapping parse is quadratic in mapping
   width, and routing a wide JSON document through it froze the reader's main
