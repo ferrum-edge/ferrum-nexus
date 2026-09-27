@@ -2,11 +2,10 @@
 
 For teams who **publish** APIs in the portal.
 
-Publishing is the moment a document becomes running gateway configuration:
-uploading an OpenAPI spec creates a proxy on Ferrum Edge, attaches an
-authentication plugin, and — if you make the API requestable — an access-control
-gate that only approved consumers pass. Everything after that is deciding who
-gets through it.
+Publishing turns an OpenAPI document into live gateway configuration. The
+portal creates a proxy on Ferrum Edge, attaches an authentication plugin and,
+if the API needs approval, an access-control gate that only approved callers
+pass. After that, your job is deciding who gets through.
 
 Related: [`client-guide.md`](client-guide.md) ·
 [`../getting-started.md`](../getting-started.md) · [`../api.md`](../api.md)
@@ -17,10 +16,10 @@ Related: [`client-guide.md`](client-guide.md) ·
 
 You need:
 
-- a **provider** account (or higher);
+- a **Provider** account (or higher);
 - an **OpenAPI 3.x** document, JSON or YAML;
-- an upstream the gateway can reach — a hostname resolvable from the _gateway_,
-  not from your laptop.
+- a backend the **gateway** can reach. `localhost` on your laptop is not the
+  gateway's localhost.
 
 A provider can do everything a client can, so you can also request access to
 other people's APIs from the same account.
@@ -29,33 +28,39 @@ other people's APIs from the same account.
 
 ## Publishing an API
 
-**My APIs → Publish an API.**
+1. In the sidebar, open **Publishing → My APIs** and choose **Publish an API**.
+2. Paste the document into the **OpenAPI document** editor, or use **Upload
+   file**.
+3. Fill in the settings beside it (described below): **Name**, **Slug**,
+   **Authentication**, **Visibility**, **Require an approved access request**,
+   **Upstream URL**, and the optional rate limit, CORS, enforcement and proxy
+   settings.
+4. Choose **Publish API**.
+
+If any step fails, everything created is removed and nothing is saved.
 
 ### What the document must contain
 
-Nexus is a portal, not a spec linter. It checks only what publishing actually
-depends on:
+The portal checks only what publishing depends on:
 
 - it parses as JSON or YAML and is an object;
-- `openapi` is a **3.x** version string — **Swagger 2.0 is rejected**
-  (`swagger: "2.0"`), because the fields Nexus reads do not exist there;
-- `info.title` is present — it becomes the catalog's display title;
-- `info.version` is present — it becomes the default revision label;
+- `openapi` is a **3.x** version. **Swagger 2.0 is rejected**;
+- `info.title` (the catalog title) and `info.version` (the version label) are
+  present;
 - `paths` is an object.
 
-Everything else — schema correctness, `$ref` resolution, operation shape — is
-left alone. Maximum document size is **2 MiB**, with at most **200 nested
-object/array levels** (the root is level one). Excessive nesting is refused at
-upload in both enforcement modes, before contacting the gateway.
+Schema correctness and `$ref` resolution are not checked. Size limits:
 
-A document also has to stay inside what the portal's documentation viewer can
-render: at most **100,000** schema nodes, parameter entries, media types and
-response entries added together, counted across `components.schemas` and every
-declared operation. Past that the upload is refused with `SPEC_INVALID` naming
-the four counts. It is a generous ceiling — the largest public APIs sit well below it —
-and it exists because every reader of your catalog entry renders the document in
-their own browser. A document under the ceiling that is still expensive to
-expand is truncated in the viewer rather than rendered in full.
+| Limit                                               | Value   |
+| --------------------------------------------------- | ------- |
+| Document size                                       | 2 MiB   |
+| Nesting depth (the root is level one)               | 200     |
+| Paths                                               | 2,000   |
+| Operations                                          | 3,000   |
+| Schema nodes + parameters + media types + responses | 100,000 |
+
+The last limit protects catalog readers, whose browsers render the document. A
+document past any limit is refused with `SPEC_INVALID` naming the limit.
 
 A minimal document that publishes cleanly:
 
@@ -77,892 +82,678 @@ paths:
 
 ### The upstream
 
-The gateway needs to know where to forward. Two sources, in order:
+The gateway forwards to, in order:
 
-1. **`upstream_url`**, if you supply one explicitly;
-2. otherwise the document's first usable **absolute** `servers[].url`, after
-   substituting each `{variable}` with its declared string `default`.
+1. the **Upstream URL** field, if you fill it in;
+2. otherwise the document's first usable **absolute** `servers[].url`.
 
-For example, `https://{environment}.api.example.com/v1` with
-`variables.environment.default: prod` uses `https://prod.api.example.com/v1`.
-A default must belong to `enum` when one is declared. Entries with unresolved
-server variables are skipped; if no usable server remains, supply valid defaults
-or an explicit `upstream_url`. The destination policy checks the expanded host.
-The expanded URL must fit the same **2,000-character** limit as typed
-`upstream_url`. An oversized value is refused at upload with a message naming
-the server URL field, such as `servers[0].url`.
-See the [OpenAPI Server Variable Object](https://spec.openapis.org/oas/v3.1.0.html#server-variable-object).
+Server variables are replaced with their string `default`, which must be in
+`enum` when one is declared. For example, `https://{env}.api.example.com/v1`
+with `variables.env.default: prod` becomes `https://prod.api.example.com/v1`.
+Entries with unresolved variables are skipped. Relative URLs (`/v2`) have no
+origin to resolve against and are skipped too. If nothing usable remains,
+publishing fails and asks for `upstream_url`. The upstream, after expansion,
+may be at most 2,000 characters.
 
-Relative server URLs (`/v2`, `./api`) are perfectly legal OpenAPI — they mean
-"same origin as wherever this document is served from" — but there is no origin
-to resolve them against here, so they yield no upstream and you must supply
-one. If neither source produces an absolute `http(s)` URL, publishing fails
-with a clear error naming `upstream_url`.
+Scheme, host, port and base path all come from that URL.
 
-Scheme, host, port and base path are all taken from that URL. It must be
-resolvable **from the gateway**: `localhost` on your laptop is not the
-gateway's localhost.
-
-**Private destinations are refused by default.** Before a publish is saved,
-Nexus checks the upstream against its SSRF guard. With the default
-`NEXUS_ALLOW_PRIVATE_UPSTREAMS=false`, a loopback, RFC 1918 / CGNAT / link-local
-address, a `.local` / `.internal` / `.localhost` / `.home.arpa` name, or a name
-that resolves to any private address is refused (and a name that does not
-resolve at all is refused too). That is why the minimal document above uses a
-public hostname that resolves — it publishes cleanly on the default settings,
-whereas a
-`…billing.internal…` upstream would not. A portal that legitimately fronts
-internal services (or local development against `host.docker.internal`) opts in
-with `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`; see
+**Private destinations are refused by default.** With
+`NEXUS_ALLOW_PRIVATE_UPSTREAMS=false` (the default), the portal refuses an
+upstream that is loopback, private (RFC 1918, CGNAT, link-local), named
+`localhost` or ending in `.local`, `.internal`, `.localhost` or `.home.arpa`,
+resolves to any private address, or does not resolve at all. A portal that
+fronts internal services opts in with `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`; see
 [`../operations.md`](../operations.md#server) and
-[`../security.md`](../security.md#1-threat-model). Keep the restrictive default
-anywhere the catalog is not fully trusted.
-
-If the gateway rejects a spec's structure or validation during publish, revision,
-or enforcement conversion, Nexus returns `400 EDGE_REJECTED_SPEC` with the
-gateway's explanation, capped at 500 characters. `details.gateway_code` carries
-the gateway's machine-readable code when present. Other gateway failures remain
-502; operators can find the complete bounded rejection response in server logs.
+[`../security.md`](../security.md#1-threat-model).
 
 ### Name, slug and listen path
 
-The **slug** determines where clients call you:
+Clients call your API at:
 
 ```
 https://<gateway-host>/<namespace>/<slug>/...
 ```
 
-Leave it blank and it is derived from the name (`Billing API v2` →
-`billing-api-v2`), lowercase, hyphen-separated, max 60 characters. Slugs are
-unique across the portal; a collision is a clear `409` so you can pick another.
+Leave **Slug** blank to derive it from the name (`Billing API v2` →
+`billing-api-v2`): lowercase letters, digits and hyphens, at most 60
+characters. Slugs are unique across the portal; a taken slug is a `409`.
 
-**Choose it carefully — changing it later is not offered.** It is baked into
-the gateway's listen path and into every client's configuration. If you truly
-must change it, publish a new API and retire the old one.
+**Choose the slug carefully: it cannot be changed.** It is part of every
+client's configuration. To move, publish a new API and retire the old one.
 
-### Authentication plugin
+### Authentication
 
-Pick how the gateway authenticates callers. This decides which credential type
-your clients must issue:
+Choose how the gateway authenticates callers. This decides which credential
+type clients issue:
 
-| Choice                        | Clients issue | They send                                                            |
-| ----------------------------- | ------------- | -------------------------------------------------------------------- |
-| **API Key** (`key_auth`)      | `keyauth`     | `X-API-Key: <key>`                                                   |
-| **HTTP Basic** (`basic_auth`) | `basicauth`   | Basic, username = the consumer's `nexus-user-<id>`                   |
-| **JWT** (`jwt_auth`)          | `jwt`         | `Authorization: Bearer <HS256 token>`, `sub` = the consumer username |
+| Authentication                | Clients issue | They send                                                                       |
+| ----------------------------- | ------------- | ------------------------------------------------------------------------------- |
+| **API Key** (`key_auth`)      | API Key       | `X-API-Key: <key>`                                                              |
+| **HTTP Basic** (`basic_auth`) | HTTP Basic    | Basic auth with their consumer username (`nexus-user-<id>` or `nexus-app-<id>`) |
+| **JWT** (`jwt_auth`)          | JWT           | `Authorization: Bearer <HS256 token>`, `sub` = the consumer username            |
 
-API Key is the usual default: simplest for callers, and the gateway hides the
-header from your upstream. Choose JWT when callers need short-lived
-credentials they mint themselves.
+API Key is the usual choice: simplest for callers, and the gateway removes the
+header before it reaches your backend. Choose JWT when callers should mint
+short-lived tokens themselves.
 
-> **With JWT, your upstream receives your callers' live tokens.** The gateway
-> strips an API key and a Basic password before forwarding, but it forwards
-> `Authorization: Bearer <token>` unchanged — Ferrum Edge has no option to hide
-> it, and a backend usually wants the claims. Each token is a working credential
-> for that caller until its `exp`, so treat the header as a secret: do not log
-> it, echo it, or pass it on to another service. Callers are told this too.
+> **With JWT, your backend receives callers' live tokens.** The gateway removes
+> an API key or Basic password before forwarding, but forwards
+> `Authorization: Bearer` unchanged; Ferrum Edge cannot hide it. Each token works
+> for that caller until its `exp`, so do not log it, echo it or pass it on.
 
-> **HTTP Basic needs one piece of gateway configuration.** Publishing fails
-> unless the operator has set `FERRUM_BASIC_AUTH_HMAC_SECRET` (at least 32
-> bytes) on Ferrum Edge — it is the key the gateway hashes Basic passwords
-> with, and it refuses to build the plugin without one. The publish error
-> carries the gateway's own message in `details.gateway_message`; ask an
-> operator to set it and try again.
+> **HTTP Basic needs gateway configuration.** Publishing fails unless the
+> operator has set `FERRUM_BASIC_AUTH_HMAC_SECRET` (at least 32 bytes) on Ferrum
+> Edge. The error carries the gateway's message in `details.gateway_message`.
 
-### Requestable
+### Require an approved access request
 
-**Requestable on** is the normal setting. It attaches an `access_control`
-plugin to the proxy that allows **only** the API's approved group, and it puts
-a Request access button on the catalog page. Nobody reaches your upstream
-without an approval you made.
+**On** (the normal setting) attaches an `access_control` plugin that admits
+only callers you approved, and shows a request form on the catalog page.
 
-**Requestable off** removes that gate: the API is still authenticated, but
-**every authenticated consumer in the portal can call it**. Use it for
-genuinely open internal utilities and nothing else. Existing grants stay on
-consumers and simply become inert.
+**Off** removes that gate. The API still needs a credential, but **every portal
+account with a credential of the right type can call it**. Use it only for
+genuinely open utilities. Existing grants stay but have no effect.
 
 ### Visibility
 
-| Visibility              | In the catalog        | Openable by link      | Requestable |
-| ----------------------- | --------------------- | --------------------- | ----------- |
-| **Public**              | listed for everyone   | yes                   | yes         |
-| **Internal (unlisted)** | **unlisted**          | **yes**               | yes         |
-| **Private**             | **only your viewers** | **only your viewers** | yes         |
+| Visibility              | In the catalog           | Opens from a link        | Can request access       |
+| ----------------------- | ------------------------ | ------------------------ | ------------------------ |
+| **Public**              | Listed                   | Yes                      | Yes                      |
+| **Internal (unlisted)** | Not listed               | Yes, for any account     | Yes                      |
+| **Private**             | Only for allowed viewers | Only for allowed viewers | Only for allowed viewers |
 
-**Internal means unlisted, not secret.** Anyone with the link can open the page,
-read the documentation and raise an access request. That is deliberate: it is
-how you hand a prospective client a link without putting the API in the shop
-window. It has always meant this and still does — adding Private did not change
-it.
+**Internal means unlisted, not secret.** Anyone with the link can read the
+docs and request access. Use it to hand a prospective client a link without
+advertising the API.
 
-**Private is the one that enforces.** A private API is invisible in the catalog
-and answers "not found" to anyone who is not you, an administrator, an approved
-client, or an account you have authorized. Guessing the slug does not help, and
-neither does searching — the listing, its totals and the specification endpoint
-all apply the same rule. An account that cannot see it cannot request access to
-it either.
+**Private hides the API** from everyone except you, admins, approved clients
+and accounts you authorize. To anyone else it answers "not found", in search,
+listings and the spec endpoint alike.
+
+**Visibility controls the documentation, not calls.** What stops unapproved
+callers is **Require an approved access request**. A private API with that
+turned off can be called by anyone who knows its URL and holds a credential. If
+the document itself is too sensitive for signed-in portal users, do not publish
+it here.
 
 #### Authorizing viewers
 
-**My APIs → the API → Viewers.** Enter the email address of an existing portal
-account and they can find and read the API.
+Open **My APIs → your API → Viewers**, enter the **Email address** of an
+existing portal account, optionally a **Note**, and choose **Authorize**. They
+are notified and can read the API.
 
-**Authorizing somebody is not approving them.** It lets them read the
-documentation. It does not let them call the API — for that they request access
-from the catalog page and you approve it, exactly as for any other client.
-Revoking a viewer likewise leaves any grant they hold alone; revoke that from
-the Grants tab.
-
-Two practical notes:
-
-- The account has to exist. An address nobody has registered is refused rather
-  than remembered, because an authorization belongs to an account and an
-  address can change hands.
-- The viewer list is kept whatever the visibility, and only enforces while the
-  API is Private. Switching to Public and back does not lose it.
-
-**Visibility is documentation, not enforcement.** What stops an unapproved
-caller reaching your upstream is the access-control gate (**Requestable on**),
-not whether the OpenAPI document is readable. A private API published with
-Requestable **off** is still callable by anyone who knows its URL.
-
-If a document itself is too sensitive to show a signed-in portal user, do not
-publish it here.
+- **Authorizing is not approving.** A viewer can read the docs, not call the
+  API; they still request access and you approve it. Removing a viewer does not
+  touch any grant they hold.
+- The account must already exist; an unregistered address is refused.
+- The list is kept whatever the visibility and is enforced only while the API
+  is Private.
 
 ### Rate limit
 
-Optional, and expressed as **requests per window**: a `limit` (1 – 1 000 000)
-and a `window_seconds` (1 – 86 400). `1000` per `60` is 1000 requests a minute.
-Both ceilings are the gateway's own, so a larger number is refused by the form
-rather than by the gateway half-way through publishing.
+Tick **Enforce a rate limit**, then set **Requests** (1–1,000,000) and a
+**Window** of per second, per minute or per hour. (The API accepts any window
+from 1 to 86,400 seconds.)
 
-The limit is **per consumer**, not per source IP — which is the point of a
-portal quota. One noisy client cannot exhaust everyone else's budget. Clients
-see rate-limit headers on their responses and a `429` when they exceed it.
+The limit is **per caller**, not per IP, so one noisy client cannot use up
+everyone else's budget. Callers get rate-limit headers and a `429` when they
+exceed it.
 
-⚠️ **The quota is enforced per gateway process.** If your operator runs more
-than one Ferrum Edge data-plane replica, each one counts separately, so the
-effective limit is your number multiplied by the replica count — unless they
-have configured Redis-synced counters (`FERRUM_RATE_LIMIT_SYNC_MODE=redis`).
-Ask them which it is before you rely on the number as a hard ceiling; and note
-that changing that setting only affects rate limits saved afterwards, so an old
-API may need its limit re-saved.
+> **The quota is counted per gateway process.** With several Ferrum Edge
+> replicas, each counts separately, so the real limit is your number times the
+> replica count, unless the operator runs Redis-synced counters
+> (`FERRUM_RATE_LIMIT_SYNC_MODE=redis`). Changing that setting affects only rate
+> limits saved afterwards, so an older API may need its limit saved again.
 
 ### CORS
 
-Optional for browsers calling your API directly. HTTP server-to-server clients
-are unaffected; the separate WebSocket option below also affects socket clients.
+Only needed when browsers call your API directly from another site.
 
-List the origins allowed to call you, one per line — `https://app.example.com`,
-scheme and host (and port, if it is not the default), no path. Up to 64 of them.
-Tick **Allow credentials** if those pages need to send cookies or an
-`Authorization` header cross-origin.
+- **CORS allowed origins**: one per line, up to 64. Scheme and host (and port
+  if non-default), no path, for example `https://app.example.com`.
+- **Allow credentials**: tick if those pages send cookies or an
+  `Authorization` header.
+- **Additional CORS request headers**: custom headers, one per line. The
+  authentication header and standard browser headers are allowed
+  automatically. Allowed methods follow the API's method list, plus `OPTIONS`.
 
-**Leaving the box empty is a real choice, not an omission.** No origins means no
-`cors` plugin is attached at all, so the gateway adds no CORS headers and a
-browser will refuse any cross-origin call to your API. That is the right setting
-for an API only ever called from a server. Clearing the box on an API that had a
-policy removes the plugin again.
+**An empty origins box is a real choice.** No `cors` plugin is attached, the
+gateway adds no CORS headers, and browsers refuse cross-origin calls. That is
+right for a server-to-server API. Clearing the box later removes the plugin.
 
-Note that CORS is a browser rule, not an access control: it decides which web
-pages may read your responses, and nothing else. What actually protects the data
-is the authentication plugin and the ACL group.
+CORS only decides which web pages may read your responses. Authentication and
+access control are what protect the data.
 
-Nexus automatically allows the authentication header (`X-API-Key` for API keys,
-`Authorization` for JWT and Basic auth), along with standard browser headers.
-Use **Additional CORS request headers** for custom headers, one name per line.
-The advertised methods follow your API's method list, with `OPTIONS` included
-for preflight. Operator-added gateway headers survive a portal save.
-
-**Enforce WebSocket origins** is a separate control, on by default.
-Edge accepts WebSocket upgrades on HTTP API paths, and its CORS plugin does not
-run on upgrades. Keep this option enabled for browser-only WebSocket APIs to reject
-pages from origins outside your list (CSWSH protection). It requires exact
-HTTP(S) origins; wildcards are not accepted. Edge also rejects clients that send
-**no Origin header**, so leave it off if your non-browser clients omit Origin.
-When off, upgrades from any origin pass this gate; authentication and ACLs still
-apply. Clearing CORS removes the gate too. Existing APIs retain their gateway
-policy until CORS is saved; legacy policies without this setting remain protected
-when saved unless the provider explicitly disables it.
+**Enforce WebSocket origins** (on by default) rejects WebSocket upgrades from
+origins outside your list. Edge accepts upgrades on API paths and its CORS
+plugin does not check them, so keep this on for browser WebSocket clients. It
+needs exact origins (no wildcards) and also rejects clients that send **no**
+`Origin` header, so turn it off if non-browser clients omit it. Authentication
+and access control apply either way.
 
 ### Enforcement level
 
-By default your OpenAPI document is **documentation**. It is stored, rendered in
-the catalog and handed to clients, and the gateway does not consult it: a client
-with a key and a grant can call `/nexus/billing/anything-at-all` and the request
-reaches your backend exactly like a declared one would. That is the right
-default — it never breaks an API whose document is incomplete — but it is
-usually not what "I uploaded my OpenAPI spec" feels like it should mean.
+By default your OpenAPI document is **documentation only**. The gateway does not
+consult it: a client with a key and a grant can call
+`/nexus/billing/anything-at-all` and the request reaches your backend. That
+never breaks an API with an incomplete document, but it may not be what you
+expect.
 
-The **OpenAPI enforcement** select, next to the spec editor, offers two levels.
+The **OpenAPI enforcement** select, under the document on the publish page and
+on the **Settings** tab, has two levels:
 
-**Documentation only (default).** The behaviour above. Nothing is enforced.
+- **Documentation only (default)** (`docs_only`): nothing is enforced.
+- **Reject requests to paths and methods not in the spec** (`routes`): the
+  gateway builds one rule per declared operation and answers anything else
+  with `400` and an `application/problem+json` body, before your backend is
+  contacted.
 
-**Reject requests to paths and methods not in the spec.** The portal hands your
-document to the gateway, which builds one rule per declared operation; anything
-matching none of them is answered `400` with an `application/problem+json` body,
-before your backend is ever contacted. Concretely, for a document declaring
-`GET /invoices` and `GET /invoices/{id}` published at `/nexus/billing`:
+For a document declaring `GET /invoices` and `GET /invoices/{id}`, published at
+`/nexus/billing`:
 
-| Request                              | Result                                   |
-| ------------------------------------ | ---------------------------------------- |
-| `GET /nexus/billing/invoices`        | forwarded                                |
-| `GET /nexus/billing/invoices/42`     | forwarded — `{id}` matches one segment   |
-| `GET /nexus/billing/invoices/42/pdf` | `400` — `{id}` never spans a `/`         |
-| `POST /nexus/billing/invoices`       | `400` — the document declares only `get` |
-| `HEAD /nexus/billing/invoices`       | `400` — see below                        |
-| `GET /nexus/billing/internal-debug`  | `400` — not in the document              |
+| Request                              | Result                                 |
+| ------------------------------------ | -------------------------------------- |
+| `GET /nexus/billing/invoices`        | forwarded                              |
+| `GET /nexus/billing/invoices/42`     | forwarded (`{id}` matches one segment) |
+| `GET /nexus/billing/invoices/42/pdf` | `400` (`{id}` never spans a `/`)       |
+| `POST /nexus/billing/invoices`       | `400` (only `get` is declared)         |
+| `HEAD /nexus/billing/invoices`       | `400` (see below)                      |
+| `GET /nexus/billing/internal-debug`  | `400` (not in the document)            |
 
 #### What it does not do
 
-**Request and response bodies are not validated.** A `POST` to a declared path
-reaches your backend whatever its body contains, even if your document declares
-a `requestBody` schema that the body violates. Enforcing schemas means
-materialising them out of the document — resolving `$ref`s, converting between
-JSON Schema drafts, handling media types and encodings — which is the gateway's
-own spec importer's job. A second implementation living in the portal would
-inevitably differ from it and start rejecting traffic the gateway itself would
-have accepted, so the portal generates only the part it can generate exactly.
+- **Bodies are not validated.** A `POST` to a declared path reaches your backend
+  whatever its body contains. Only the path and method are checked.
+- **`HEAD` is its own operation.** Declaring `get` does not declare `head`.
+  Declare `head`, `trace` or any other method your clients send.
+- **Trailing slashes are literal.** `/invoices` does not allow `/invoices/`.
+  Declare the spelling your clients use.
+- **`servers` entries do not affect matching.** Rules match the path clients
+  send, listen path included. The portal rewrites the document's server base to
+  your listen path in the copy it gives the gateway, and removes `servers`
+  overrides on paths, operations and reusable path items (they would otherwise
+  make every operation answer `400`). Your stored document is unchanged, and
+  `servers[0]` still names the upstream. Servers inside operation callbacks are
+  left alone.
+- **Path `$ref`s must stay inside the document's path items.** At `routes`, a
+  path whose `$ref` points anywhere other than `#/paths/`,
+  `#/components/pathItems/` or `#/webhooks/` (including another file) is refused
+  with a `400` naming the path. Inline it, move it under
+  `components.pathItems`, or publish at `docs_only`.
 
-**`HEAD` is a separate operation.** OpenAPI treats `head` as its own path-item
-key, so a document declaring only `get` on a path does not declare `head` on it,
-and a `HEAD` request is rejected. If your backend serves `HEAD`, declare it.
-The same goes for `TRACE` and any other method your clients actually send.
+In the catalog, clients at either level see the document with its `servers`
+replaced by the gateway address (or the listen path when no gateway address is
+configured).
 
-**Trailing slashes are literal.** A declared `/invoices` does not also allow
-`/invoices/`, and vice versa. Declare whichever spelling your clients use.
-
-**Your `servers` entry is not part of the matched path.** The rules are built
-against the path clients actually send — `/nexus/billing/invoices`, listen path
-included — and the portal rewrites the document's server base to your listen
-path before handing it over so they line up. Your own `servers[0]` keeps doing
-its other job: naming the upstream the gateway forwards to.
-
-**A `servers` on a path or an operation is ignored too.** OpenAPI lets you
-override `servers` on a path item, on a single operation, or on a reusable path
-item — under `components.pathItems`, `webhooks` or `components.callbacks` — and
-the nearest one wins. Any of those would override the rewrite above and produce
-rules for a path no client can send, so the portal removes them from the copy it
-submits: every declared operation would otherwise answer `400`. Nothing is
-removed from the stored upload or the provider's Specification editor. In the
-catalog and docs viewer, both enforcement levels instead show normalized
-JSON/YAML with OpenAPI root, path-item and operation `servers` replaced by the
-gateway address (the listen path alone when no public gateway origin is
-configured), including webhooks, reusable path items and callbacks. That consumer
-projection also rewrites Link Object `server` entries in components and response
-links, preserving schemas, examples and extensions. The enforcement copy leaves servers
-inside operation callbacks alone, because those describe requests your service
-makes outbound rather than ones this API serves.
-
-**A path that is a `$ref` has to point somewhere the portal can reach.** The
-gateway follows a path item's `$ref` anywhere in the document, so one pointing
-into a part the rewrite above does not cover could put a server base back and
-break every operation. `routes` uploads therefore refuse a path whose `$ref`
-leaves `#/paths/`, `#/components/pathItems/` or `#/webhooks/` — including a
-reference to another file — with a `400` naming the path. Write the path item
-inline, move it under `components.pathItems`, or publish at `docs_only`, which
-places no restrictions on the document at all.
-
-#### CORS preflights
-
-Nothing to do. A browser's `OPTIONS` preflight targets a path with no `options`
-operation behind it, but the gateway's CORS plugin runs well before the
-route check and answers the preflight itself, so it never reaches the rules.
-You do not have to declare an `options` operation, and adding or removing your
-CORS origins later does not disturb the enforced surface.
+**CORS preflights need nothing.** The gateway's CORS plugin answers `OPTIONS`
+preflights before the route check, so you do not declare `options`.
 
 #### Turning it on and off
 
-Both directions are available from the API's Settings tab, and the change is
-complete when the request returns.
+Change the level on the **Settings** tab. The change is complete when the save
+returns.
 
-**Switching between the two levels briefly interrupts the API.** The gateway can
-only attach the enforcement rules to a route it builds from your document, and
-only detach them by rebuilding the route without it — so the portal recreates
-the route in place. Your settings, your plugins, your credentials and your
-clients' grants all come through unchanged, and the URL never moves, but for a
-second or so the API answers `404`. Nothing else in the portal does this: spec
-uploads, CORS changes and every other setting are applied in place while the API
-keeps serving. Prefer a quiet moment for the switch, the way you would for a
-deploy.
+**Switching level briefly interrupts the API.** The gateway can only attach or
+detach the rules by rebuilding the route, so the portal recreates it in place.
+Settings, plugins, credentials, grants and the URL all carry over, but for about
+a second the API answers `404`. Nothing else does this: spec uploads and every
+other setting apply while the API keeps serving. Switch at a quiet moment.
 
-Every spec upload regenerates the rules — in place, without the interruption —
-so the enforced surface always matches the revision currently shown in the
-catalog: a path you delete from your document stops being reachable, and one you
-add becomes reachable, in the same operation. Because of that, uploading a
-document that declares **no** operations while enforcement is on is refused: the
-portal will not record a level it is not enforcing, and rules that allow nothing
-would reject every request. Switch back to documentation-only first if that is
-genuinely what you want.
+Every spec upload regenerates the rules in place, so the enforced paths always
+match the current revision. Uploading a document with **no** operations while
+at `routes` is refused (`400 SPEC_INVALID`, `details.reason: "no_operations"`),
+because it would reject every request. Switch to documentation only first if
+that is really what you want.
 
-### Advanced
+### Advanced proxy settings
 
-Three settings that go onto the gateway proxy itself rather than onto a plugin.
-All of them are optional, and all of them are safe to change on a live API.
+Three optional settings written onto the gateway proxy. All are safe to change
+on a live API.
 
-**Allowed HTTP methods.** Tick the methods your API actually serves and the
-gateway answers `405` to everything else — before authentication, before the
-access gate, before anything. Tick nothing and every method is accepted, which
-is the default and means a `GET`-only catalog API still accepts `POST` at the
-gateway once a client holds a key. The **Use the methods declared in the spec**
-button fills the list in from your OpenAPI document. You do not need to tick
-`OPTIONS` for CORS: the portal adds it to the gateway's copy of the list
-whenever you have a CORS policy, because a preflight rejected with `405` would
-never reach the CORS plugin.
+- **Allowed HTTP methods.** Tick the methods you serve and the gateway answers
+  `405` to all others, before authentication or any plugin. With none ticked
+  (the default), every method is accepted. **Use the methods declared in the
+  spec** fills the list from your document. `OPTIONS` is added automatically
+  when a CORS policy is set.
+- **Connect / Read / Write timeout (ms).** 100–300,000. Blank uses the gateway
+  defaults (5,000 / 30,000 / 30,000). The three are saved together: filling in
+  one gives the blank ones their default.
+- **Trip a circuit breaker when the backend fails.** After 5 consecutive
+  failures (500, 502, 503, 504 or a connection error), the gateway stops
+  forwarding for 30 seconds, then lets one probe through at a time until 3
+  succeed. Callers get a fast failure instead of a slow one. The thresholds are
+  fixed in the portal; the operator can change them on the proxy.
 
-**Backend timeouts.** Connect, read and write, in milliseconds, 100 – 300 000.
-Leave them blank to keep the gateway defaults shown in the boxes (5000 / 30 000
-/ 30 000). The read timeout is the one that matters most: without it a hung
-upstream holds a gateway worker for the full default. The three travel together
-— filling one in and leaving the others blank gives the blank ones their
-default value.
-
-**Circuit breaker.** When on, five consecutive failures (a 500, 502, 503 or 504,
-or a connection error) stop the gateway forwarding to your backend for thirty
-seconds; it then lets one probe through at a time until three succeed. Clients
-see a fast failure instead of a slow one, and a struggling backend is not
-hammered while it recovers. The thresholds are not adjustable from the portal —
-that is an operator setting on the proxy.
-
-### What publishing actually does
+### What publishing creates
 
 ```
-apis row ─── proxy          name `nexus-<slug>`, listening on /<namespace>/<slug>
-              │             plus your Advanced settings: allowed methods,
-              │             timeouts, circuit breaker, WebSocket origins
-              │
-              │ …then the proxy is told to run them
-              ├─ plugin_config  your auth plugin
-              ├─ plugin_config  access_control      — only when requestable
-              ├─ plugin_config  rate_limiting       — only when a rate limit is set
-              ├─ plugin_config  cors                — only when origins are listed
-              └─ plugin_config  openapi_validator   — only at the `routes` enforcement level,
-                                                      and built by the gateway from your document
+apis row ─── proxy  nexus-<slug>, listening on /<namespace>/<slug>
+              │     plus allowed methods, timeouts, circuit breaker, WebSocket origins
+              ├─ plugin  your auth plugin
+              ├─ plugin  access_control     only when approval is required
+              ├─ plugin  rate_limiting      only when a rate limit is set
+              ├─ plugin  cors               only when origins are listed
+              └─ plugin  openapi_validator  only at `routes`; built by the gateway from your document
 ```
 
-The last step matters: on Ferrum Edge a plugin has to be both configured _and_
-listed on the proxy before the gateway runs it, so publishing finishes by
-attaching the whole set to the proxy in one write. Nothing you configure here is
-live until that lands.
-
-**Your URL does not answer until all of it has landed.** The gateway starts
-serving a route the instant it is created, so the portal builds yours at a
-private, randomly named address first, attaches and switches on everything
-above, and moves it to `/<namespace>/<slug>` as the very last step. Until then
-your address returns `404`. It never returns an unauthenticated `200`: there is
-no moment in a publish when your API is reachable without the key, group or rate
-limit you asked for. The same is true of a level switch, which is why it shows as
-a brief `404` rather than as a brief open door.
-
-At the `routes` enforcement level the route itself is created _from_ your
-document rather than alongside it — the gateway will only build the enforcement
-rules for a route it owns. That is invisible day to day; the one place it shows
-is [switching levels](#turning-it-on-and-off).
-
-If any step fails, everything created is torn back down and nothing is saved on
-either side. A failed publish leaves no debris.
+**Your URL is never open by accident.** The portal builds the proxy at a
+private, random path, attaches and enables every plugin, and moves it to
+`/<namespace>/<slug>` last. Until then your URL answers `404`; it never answers
+without the authentication, access control or rate limit you chose. A level
+switch works the same way, which is why it shows as a brief `404`.
 
 ---
 
 ## Plugins
 
-**My APIs → the API → Plugins.** Everything on the Settings tab is part of what
-your API _is_ — how callers authenticate, whether they need a grant, their
-quota, browser CORS, spec enforcement. The Plugins tab is the layer on top:
-gateway behaviour you can add or take away at any time without republishing.
+**My APIs → your API → Plugins.** The **Settings** tab defines what your API
+is. The **Plugins** tab adds optional gateway behaviour you can switch on or off
+at any time without republishing.
 
-Each card is off until you turn it on. Turning one on writes a plugin
-configuration to the gateway and attaches it to your proxy in the same
-operation, so it is live the moment the card saves. If the gateway refuses the
-change nothing is saved on either side.
+Each card is off until you choose **Turn on**. Saving writes the plugin to the
+gateway and attaches it to your proxy in one step, so it is live immediately.
+If the gateway refuses, nothing is saved.
 
-### What is on offer
+| Plugin                   | What it does                                                                                | What callers see                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **Security headers**     | Adds browser hardening headers and strips headers that reveal your stack                    | No change in how the API is called                                                 |
+| **Request size limit**   | Rejects a request body over your limit (default 1 MiB) before it reaches your backend       | `413 Payload Too Large`; document the limit on upload endpoints                    |
+| **Response size limit**  | Refuses to relay a backend response over your limit (default 8 MiB)                         | `502 Bad Gateway`; paginate anything that can grow without bound                   |
+| **IP allow / deny list** | Restricts callers by source address. A deny match always wins                               | Unlisted addresses are rejected before authentication                              |
+| **Bot filter**           | Blocks requests whose `User-Agent` contains a listed string; an allow list is checked first | Legitimate SDKs should send a recognisable `User-Agent`                            |
+| **Correlation ID**       | Gives every call an id, forwards it to your backend and echoes it back                      | They can send their own id, or quote the gateway's in a support request            |
+| **Response compression** | Compresses responses (gzip, Brotli) when the caller asks                                    | A compressed body when they send `Accept-Encoding`                                 |
+| **Idempotency keys**     | A retried write with the same key replays the first response instead of running again       | They send a unique key per operation; reusing a key with a different body is `409` |
+| **Maintenance / sunset** | Returns a fixed response instead of calling your backend                                    | Your status and message: `503` for maintenance, `410` for a retired endpoint       |
 
-| Plugin                   | What it does                                                                                                    | What your consumers see                                                                                |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| **Security headers**     | Adds the browser hardening headers to every response and strips the ones that advertise your stack              | Nothing changes in how the API is called                                                               |
-| **Request size limit**   | Rejects an upload over your ceiling with `413`, before a byte reaches your backend                              | `413 Payload Too Large` — document the ceiling next to any upload endpoint                             |
-| **Response size limit**  | Refuses to relay a backend response over your ceiling, answering `502` instead                                  | `502 Bad Gateway` — paginate anything that can grow without bound                                      |
-| **IP allow / deny list** | Restricts who may call the API by source address. A deny match always beats an allow match                      | Callers from an unlisted address are rejected before authentication                                    |
-| **Bot filter**           | Blocks requests whose `User-Agent` matches a pattern you list                                                   | Legitimate SDKs should send a recognisable `User-Agent`; the allow list is checked first               |
-| **Correlation ID**       | Gives every call a stable id, forwards it to your backend and echoes it back                                    | They may send their own id, or read the one the gateway minted, and quote it in a support ticket       |
-| **Response compression** | Compresses responses when the caller asks for it                                                                | A compressed body when they send `Accept-Encoding`; every mainstream client handles it                 |
-| **Idempotency keys**     | Makes a retried write safe: the first call with a given key runs, an identical retry replays the first response | They send a unique key per operation and may safely retry; a reused key with a different body is `409` |
-| **Maintenance / sunset** | Answers with a canned response instead of calling your backend                                                  | The status and message you choose — `503` for a maintenance window, `410` for a retired endpoint       |
+Notes:
 
-The **bot filter is a coarse filter, not bot defence**: the `User-Agent` is
-client-controlled and trivially spoofed. It keeps casual scrapers off a public
-catalog API; it will not stop anyone who is trying.
+- The **bot filter** is coarse. `User-Agent` is trivially spoofed; it deters
+  casual scrapers, not determined ones.
+- **Security headers → Strict-Transport-Security** sends
+  `max-age=31536000; includeSubDomains`, pinning browsers to HTTPS for a year on
+  your whole domain and every subdomain. Turn it on only when that is true.
+- **Compression and idempotency keys work together.** The portal orders them so
+  headers are final before the idempotency fingerprint is taken. If an operator
+  has overridden the order in a conflicting way, the save says which priorities
+  to change.
+- **Response caching is no longer offered.** The gateway will not cache
+  authenticated responses unless your backend opts in (`Cache-Control: public`,
+  `must-revalidate` or `s-maxage`), so the portal could not promise hits. An
+  existing caching plugin stays in place and shows **Remove response caching**.
+  An operator can configure caching directly.
 
-**Security headers: HSTS is the one to think about.** Turning it on tells
-browsers to use HTTPS for your whole domain, including every subdomain, for a
-year. Only switch it on when that is true.
+### Limiting a plugin to some requests
 
-**Compression and idempotency keys work together.** Nexus sets compatible
-execution priorities so request headers are finalized before an idempotency
-fingerprint is taken. It preserves operator overrides; if those conflict, the
-save explains which priorities your gateway operator must adjust.
+The IP list, bot filter, idempotency keys and maintenance cards offer **Only run
+on some requests**: a **Methods** list, a **Path prefix**, or both. For example,
+to retire one endpoint, turn on Maintenance / sunset with status `410` and set
+the path prefix to that endpoint.
 
-**Response caching has been retired from the palette.** The default template
-cannot promise cache hits on authenticated APIs. Edge requires explicit backend
-shared-cache permission (`Cache-Control: public`, `must-revalidate`, or
-`s-maxage`), and consumer key settings do not grant it. Nexus does not override
-your backend's cache policy. Existing installations remain visible with a
-**Remove response caching** action; they are not silently deleted or disabled.
-An operator can configure caching directly after reviewing the backend policy.
+The prefix matches the full path clients send, so it starts with your gateway
+path (`/nexus/your-slug/…`). It must be a plain path: no `%` escapes,
+backslashes, or `.` / `..` segments.
 
-### Restricting a plugin to some requests
-
-Some cards offer **Only run on some requests** — a method list, a path prefix,
-or both. That is how you retire one endpoint without touching the rest: turn on
-Maintenance / sunset, choose `410`, and set the path prefix to the endpoint's
-path.
-
-The prefix is matched against the whole request path as the client sends it, so
-it starts with your gateway path (`/nexus/your-slug/…`); the placeholder in the
-box shows the right shape. It has to be a plain path — no `%` escapes, no
-backslashes, no `.` or `..` segments — because the gateway compares a
-canonicalised path that never contains any of those, so such a prefix could
-only ever silently fail to match.
-
-**Not every plugin can be restricted.** The cards without the option are ones
-the gateway applies to a whole proxy or not at all: security headers, the two
-size limits, compression and correlation IDs. Their effect is
-decided once for the proxy rather than per request, so a per-request condition
-could only be half applied — the gateway rejects it rather than pretend.
+The other cards (security headers, both size limits, compression and
+correlation ID) apply to the whole API; the gateway does not support per-request
+conditions for them.
 
 ### Pausing versus removing
 
-A configured card has an **Active** checkbox and a **Remove** button, and they
-are different things:
+- Untick **Active** and save to pause a plugin. Its settings stay on the gateway
+  and come back when you tick it again.
+- **Remove** deletes the plugin and its settings.
 
-- **Unchecking Active** leaves the configuration on the gateway with your
-  settings intact, but the gateway stops running it. Tick it again and you are
-  back where you were.
-- **Remove** detaches and deletes the configuration. The settings are gone.
+### Not offered
 
-Pause is the right one for a temporary change; remove is for a decision.
-
-### What is not offered, and why
-
-**Other authentication methods** — HMAC signatures, JWKS from your own identity
-provider, OAuth 2.0 token introspection, mutual TLS. These are not extra
-plugins on top of your authentication choice; they _replace_ it, and each needs
-its own kind of credential for the portal to issue, rotate and show once. They
-belong with the authentication setting on the Settings tab, and they are not
-built yet.
-
-**Serving your spec from the gateway** (`spec_expose`) — your document is
-already served by the portal's catalog, and publishing it at a second address
-on the gateway is a routing decision rather than a plugin toggle.
-
-**Everything operators use to run the gateway** — log shipping, tracing,
-metrics, alerting, mesh, fault injection, load testing. Those are how the
-platform is run, not how your API behaves for the people calling it. Ask your
-administrator if you need something from that list.
+- **Other authentication methods** (HMAC signatures, JWKS, OAuth 2.0
+  introspection, mutual TLS). These replace the authentication choice and need
+  new credential types; they are not built.
+- **Serving your spec from the gateway** (`spec_expose`). The catalog already
+  serves it.
+- **Operator plugins** (logging, tracing, metrics, fault injection and the
+  like). Ask your administrator.
 
 ---
 
 ## Usage and backend health
 
-**My APIs → the API → Overview → Usage.** The card is a live read of what the
-gateway itself reports for your proxy — refreshed every 30 seconds, cached for
-10 — not a Nexus database of its own.
+**My APIs → your API → Overview → Usage** is a live read of what the gateway
+reports for your proxy. The page refreshes it every 30 seconds; the server
+caches it for 10.
 
-It shows:
+| Row               | What it is                                                              |
+| ----------------- | ----------------------------------------------------------------------- |
+| **Backend**       | Healthy, Failing, Recovering or Unknown, with the reason                |
+| **Requests**      | Every call the gateway counted for this API                             |
+| **By status**     | The same total split into 2xx / 3xx / 4xx / 5xx                         |
+| **Turned away**   | `429` (rate limit), `401` (bad or missing credential), `403` (no grant) |
+| **Latency (p95)** | p95, with p50 and p99, in milliseconds                                  |
 
-| Row             | What it is                                                                                                                 |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| **Backend**     | Healthy, Failing, Recovering or Unknown, with a sentence saying why                                                        |
-| **Requests**    | Every call the gateway has counted for this API                                                                            |
-| **By status**   | The same total split into 2xx / 3xx / 4xx / 5xx                                                                            |
-| **Turned away** | The three refusals worth watching separately: `429` (your rate limit), `401` (bad or missing credential), `403` (no grant) |
-| **Latency**     | p95, with p50 and p99 beside it, in milliseconds                                                                           |
+**Counts are cumulative since the gateway process started.** A gateway restart
+resets them to zero. They are not "this week" or "since you published". Nexus
+keeps no history; for trends, point Prometheus and Grafana at the gateway (your
+administrator has the details in the operations guide).
 
-### Read the window before you read the numbers
+The card cannot tell you **who** is calling (there is no per-client breakdown),
+**which endpoints** are busy, or anything about calls that never reached the
+gateway.
 
-Every count is **cumulative since the gateway process started**. It is not "this
-week" and not "since you published" — a gateway restart puts every number back
-to zero. The line under the card says when the sample was taken.
+**Backend states:**
 
-That is a deliberate limit, not an oversight. Ferrum Edge exposes no per-proxy
-time window, and Nexus keeps no history, so any "requests this month" here would
-be invented. If you need rates, trends or retention, point Prometheus and
-Grafana at the gateway — your administrator has the details in the operations
-guide.
+- **Unknown**: the gateway has nothing to report, either because nothing has
+  called the API yet or because no circuit breaker is configured. It never
+  means the backend is down.
+- **Failing**: the circuit breaker has opened, or health checks removed a
+  target. The card says since when.
+- **Recovering**: the breaker is letting probe requests through.
 
-### What it cannot tell you
+If the card says gateway metrics are unavailable, the counters are missing, not
+zero; the API may be serving normally.
 
-- **Who is calling.** The gateway's request counter carries no consumer label,
-  so there is no per-client breakdown and no unique-consumer count. **Grants**
-  tells you who _may_ call; nothing tells you who did.
-- **Which endpoints are hot.** Counts are per API, not per path.
-- **Anything about a call that never reached the gateway.** A client with a DNS
-  problem or a blocked egress rule shows up nowhere here.
+### "Gateway deployment missing"
 
-### Making sense of "Unknown"
-
-Unknown means the gateway reported nothing about your backend, and the card says
-which of the two reasons applies:
-
-- **No traffic yet** — nothing has called this API since the gateway started.
-- **No circuit breaker is configured** — Edge tracks backend state through a
-  circuit breaker, and this proxy has none, so there is nothing to report even
-  though calls are flowing.
-
-Unknown is never a claim that your backend is down. **Failing** is: it means the
-circuit breaker has opened, or health checking has pulled a target out of
-rotation, and the `since` line says when that started. **Recovering** means the
-breaker is half-open and letting probe traffic through to find out whether the
-backend is back.
-
-If the card says gateway metrics are unavailable, Nexus could not read the
-request-counter scrape — the API itself may still be serving traffic normally.
-The displayed zero counters then mean missing measurements, not zero traffic.
-Independent backend state and gateway uptime can remain available. If only the
-backend-state read fails, counters remain valid and the backend is Unknown.
+If the gateway was rebuilt and no longer holds your proxy, the Overview shows
+**Gateway deployment missing** and your URL fails. Choose **Restore gateway
+deployment**. It rebuilds the proxy, authentication and access control from
+what the portal holds; grants and client credentials carry over.
 
 ---
 
 ## Updating an API
 
-**My APIs → the API → Settings.** Everything here is safe to change on a live
-API, but two of them have consequences worth reading first.
+**My APIs → your API → Settings**, then **Save settings**. Changes apply to the
+gateway immediately.
 
-| Change                     | Effect                                                                                                                                                                                       |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Name, description, version | Catalog metadata only.                                                                                                                                                                       |
-| Visibility                 | Documentation visibility only. Existing grants and calls are unaffected. Switching **to** Private starts enforcing the API's viewer list; switching away stops enforcing but keeps the list. |
-| Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.                                                                           |
-| Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                                                                                           |
-| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy and its default-on WebSocket origin check.                                                                                  |
-| Allowed methods            | Takes effect immediately. Untick everything to accept every method again.                                                                                                                    |
-| Timeouts, circuit breaker  | Take effect immediately. Clearing the timeout boxes restores the gateway defaults.                                                                                                           |
-| **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert.                                                                   |
-| **Authentication plugin**  | ⚠️ Refused while anyone holding access has a live credential of the old method, unless you confirm; they keep their credentials but lose this API until they re-issue.                       |
+| Change                                       | Effect                                                                                                             |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Name, description, version                   | Catalog text only.                                                                                                 |
+| Visibility                                   | Who can see the docs. Grants and calls are unaffected. Private enforces the viewer list; leaving Private keeps it. |
+| Upstream URL                                 | Moves the gateway's backend. Leave blank to keep the current one.                                                  |
+| Rate limit                                   | Adds, changes or (unticked) removes the quota.                                                                     |
+| CORS                                         | Adds, replaces or (emptied) removes the CORS policy and its WebSocket origin check.                                |
+| Allowed methods, timeouts, circuit breaker   | Apply immediately. Untick every method, or clear the timeouts, to return to the defaults.                          |
+| OpenAPI enforcement                          | Briefly interrupts the API; see [Turning it on and off](#turning-it-on-and-off).                                   |
+| **Require an approved access request → off** | Removes the gate. **Every portal account with a matching credential can call the API.**                            |
+| **Authentication**                           | Cuts off callers using the old method until they issue a new credential. See below.                                |
+| Status → Retired                             | See [Retiring versus deleting](#retiring-versus-deleting).                                                         |
 
-### Changing the authentication plugin
+### Changing the authentication method
 
 Credentials are typed. Switching from API Key to JWT does not convert anyone's
-key — it makes their key stop satisfying this API, from the moment you save.
+key: from the moment you save, their key no longer works on **this** API.
 
-**The portal will not let you do it by accident.** If anybody holding access has
-a live credential of the old type, the save is refused and the error says how
-many accounts that is. Tick **Cut off everyone using the old method until they
-re-issue, and notify them** on the Settings tab and save again to go ahead.
+When you change **Authentication**, the Settings tab shows a warning and a
+checkbox: **Invalidate portal-issued old-method credentials here and notify
+their holders**. If any account with access holds a live credential of the old
+type and you save without ticking it, the save is refused with
+`409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED`. The error says how many
+accounts would be affected, and nothing is written. Use that to check the
+impact before you commit.
 
-Nobody's credential is taken away. A credential belongs to the account that
-issued it, not to your API, and the same key authenticates every other API of
-that type they have access to — so the portal will not revoke it to settle a
-change on yours. What each of them loses is _this_ API, until they issue a
-credential of the new type; they are notified in-app and pointed at their
-credentials page to do exactly that.
+When you confirm:
 
-The one exception is the API's own **test consumer**: its key exists to call
-this API and nothing else, so the change really does make it useless and it is
-revoked with the swap, including one issued while the change is saving. **Create
-test consumer** again afterwards to get a key of the new type.
+- **Nobody's credential is revoked.** Credentials belong to the caller, not to
+  your API, and still work on their other APIs of that type. What they lose is
+  this API until they issue a credential of the new type.
+- Every affected account is notified and pointed to its credentials page.
+- The API's **test consumer** credential is revoked, since it exists only for
+  this API. Create a new one afterwards.
 
-So coordinate it: tell your consumers first, agree a window, then switch. If you
-only want to know how many accounts would be affected, send the change without
-the confirmation and read the count off the refusal — nothing is written.
+Tell your callers and agree a window before you switch.
 
-The count covers accounts with an active grant on this API. An API with
-**Requestable off** gates nobody, so there is no list of callers to count or
-notify: a swap on one of those is never refused, and its callers find out when
-their key stops working. Announce that one yourself.
+If **Require an approved access request** is off, there is no list of callers,
+so the change is never refused and nobody is notified. Announce it yourself.
 
 ---
 
 ## Updating the spec safely
 
-**My APIs → the API → Spec → Upload new revision.**
+**My APIs → your API → Specification**:
 
-Each upload is a new revision and becomes the current one. A bounded number of
-older revisions is retained — ten by default, `NEXUS_SPEC_HISTORY_LIMIT` on your
-portal — and anything past that is removed as each new revision lands. The
-version label defaults to the document's `info.version` — set it explicitly if
-your catalog version differs.
+1. Edit the document in the editor, or **Upload file**.
+2. Choose **Review changes**. The portal compares your draft with what the API
+   serves now.
+3. Read the comparison, then choose **Publish revision**.
 
-### Review before you publish
+Each published document becomes a new, current revision. The API's version
+label follows the document's `info.version`, so bump it when you publish. The
+portal keeps a limited number of older revisions (10 by default,
+`NEXUS_SPEC_HISTORY_LIMIT`) and drops the oldest as new ones arrive.
 
-**Review changes** compares the document in the editor against the one your API
-is serving and shows what would change before anything is published: operations
-added, operations removed, operations whose definition differs, and any change
-to `info` or `servers`. Operations that would **stop being served** are called
-out first, because those are the ones that break callers.
+### Reading the review
 
-Read that list as a prompt, not a verdict. The comparison reads paths, methods
-and the shape of each operation — it does not read schemas or follow `$ref`s,
-so a response that quietly drops a required field shows up as "responses
-changed" at most, and never as a breaking change. An empty breaking-change list
-means the comparison found nothing, not that your change is safe.
+The review lists operations that would **stop being served** first, then added
+operations, changed operations, and changes to `info` or `servers`. Removed
+operations are the ones that break callers.
+
+Treat it as a prompt, not a verdict. It compares paths, methods and the shape of
+each operation, but does not read schemas or follow `$ref`s. A response that
+quietly drops a required field shows up at most as "changed", never as
+breaking.
 
 ### Revision history and rollback
 
-**My APIs → the API → Spec → Revision history** lists every retained revision,
-newest first, with when it was published and by whom. **View document** shows
-the original upload, byte for byte.
+**Revision history** on the Specification tab lists retained revisions, newest
+first, with who published each and when. **View document** shows the original
+upload exactly.
 
-**Review & roll back** on an earlier revision shows the same comparison — this
-time from what your API serves today to what it would serve — and then
-republishes that document.
+**Review & roll back** on an older revision shows the comparison from what the
+API serves today, then **Roll back** republishes that document as a **new**
+revision. History is never rewritten. The API keeps its id, slug, URL, plugins
+and every approved client. If the gateway refuses, nothing changes.
 
-A rollback is a **new revision carrying the old document**. Nothing in your
-history is rewritten or deleted, and the API keeps its id, its slug, its
-`invoke_url`, its plugins and every approved client: none of your clients has
-to request access again. If the gateway refuses the change, the rollback fails
-and your catalog is left exactly as it was — it never half-lands.
+- A revision you see today can be pruned by later uploads. Rolling back to one
+  that is gone answers "no longer retained".
+- At the `routes` [enforcement level](#enforcement-level), a rollback changes
+  what the gateway accepts, exactly as an upload does.
 
-Two things to expect:
+### When an upload moves your backend
 
-- Retention applies to rollback targets too. A revision you can see today can be
-  pruned by later uploads; rolling back to one that is gone answers "no longer
-  retained" and writes nothing.
-- At the `routes` [enforcement level](#enforcement-level), rolling back changes
-  **what the gateway accepts**, immediately, in exactly the way an upload does.
-  The operations the review listed as removed start being rejected.
+An upload **can** move the gateway's backend. The rule:
 
-### The upstream-following rule
+> Your API follows its document while its recorded upstream is still the
+> `servers[0].url` of the **previous** revision. Then any change to that URL
+> (scheme, host, port **or base path**) moves the backend. If the recorded
+> upstream is anything else, it is pinned and uploads never touch it.
 
-Uploading a spec **can** move the gateway's backend. The rule is exact:
-
-> Your API follows its document while the upstream the portal records for it is
-> still the `servers[0].url` of the **previous** revision. Then a new revision
-> moves the backend whenever any part of that URL changes — scheme, host, port
-> **or base path**. If the recorded upstream is anything else, it is pinned and
-> uploads never touch it.
-
-The comparison is of the whole normalized URL, so `https://api.example.com/v2`
-and `https://api.example.com:443/v2/` are the same upstream, and moving
-`/v2` to `/v3` on the same host **is** a move.
+URLs are compared after normalization, so `https://api.example.com/v2` and
+`https://api.example.com:443/v2/` are the same, while `/v2` → `/v3` on the same
+host **is** a move.
 
 In practice:
 
-- If you have never set an explicit upstream, changing `servers[0].url` and
-  re-uploading **moves your traffic** — including a base-path-only change. That
-  is usually what you want, and occasionally a nasty surprise.
-- If you set the upstream explicitly, spec uploads are documentation-only, even
-  when your pin names the same host and port as the document.
-- Setting the upstream back to exactly what the current document says makes the
-  API follow it again — "pinned" is not a flag you have to clear, it is simply
-  "the recorded upstream is not the document's".
+- If you never set **Upstream URL**, editing `servers[0].url` and publishing
+  **moves your traffic**, even for a base-path-only change.
+- If you set **Upstream URL**, uploads only change documentation.
+- Setting the upstream back to exactly the document's URL makes the API follow
+  the document again.
 
-Set the upstream explicitly for anything production-facing. It makes "publish
-new docs" and "move the backend" two separate, deliberate acts.
-
-A move that cannot be saved is undone: the gateway's backend, the upstream the
-portal shows and the current revision always agree, both when the upload
-succeeds and when it fails.
+For production APIs, set **Upstream URL** explicitly so publishing docs and
+moving the backend stay separate decisions. If an upload that moves the backend
+fails, the move is undone.
 
 ### If enforcement is on
 
-At the `routes` [enforcement level](#enforcement-level) an upload also changes
-**what the gateway will accept**: a path you remove from the document stops
-being reachable the moment the revision lands, and one you add becomes
-reachable. Uploading is therefore a traffic change as well as a documentation
-change — check the diff of your `paths` before you publish, not only your
-prose. If the upload cannot be saved, the previous rules are put back, so a
-failed upload never leaves the gateway enforcing a revision the catalog does not
-show.
-
-An upload is applied in place: your API keeps serving throughout, and its
-authentication is never off for an instant. The interruption described under
-[Turning it on and off](#turning-it-on-and-off) applies only to _changing the
-level_, not to uploading a new revision at a level you are already on.
+At `routes`, an upload also changes **what the gateway accepts**: a removed path
+stops working when the revision lands, and an added one starts working. Check
+the path changes, not just the prose. A failed upload restores the previous
+rules. Uploads apply in place without interrupting the API; only
+[changing the level](#turning-it-on-and-off) causes the brief `404`.
 
 ### A safe update routine
 
-1. Upload to a staging portal first if you have one.
+1. Try the change on a staging portal first, if you have one.
 2. Publish additive changes (new endpoints, new optional fields) freely.
-3. For breaking changes, prefer a **new API with a new slug** — say
-   `billing-v3` — and retire the old one once clients have migrated. Clients get
-   a migration window instead of an outage.
-4. Bump the version label so the catalog shows what changed.
+3. For breaking changes, publish a **new API with a new slug** (say
+   `billing-v3`) and retire the old one once clients have moved.
+4. Bump `info.version` so the catalog shows the change.
 
 ---
 
 ## Reviewing access
 
-Requests for the APIs you own land in your inbox, with an in-app notification
-and an email.
+New requests notify you in-app and appear on your **Dashboard** under **Pending
+requests for your APIs**.
 
-Open **My APIs → the API → Requests** to review them. **Request status** defaults
-to **Pending**, so older requests awaiting a decision remain visible. Choose
-**Approved**, **Denied**, or **All** to review history; All also includes cancelled
-and revoked requests. The filter searches the full queue, not just the current page.
+Open **My APIs → your API → Requests**. **Request status** starts at **Pending**;
+choose **Approved**, **Denied** or **All** for history (All includes cancelled
+and revoked requests). Both **Requests** and **Grants** show 50 records per page
+with **Previous** / **Next**.
 
-Both **Requests** and **Grants** show up to 50 records per page, the matching total,
-and **Previous** / **Next** controls. Changing the status filter returns to the
-first page. After a decision or revocation, counts refresh and an empty later
-page moves back to the previous page.
-
-Each request shows the requester (name, email, company), the API, and their
-justification. Judge whether the case they made matches the data behind the
-API. If the justification is thin, **message them** rather than declining
-blind — the conversation stays attached to the request.
+Each request shows the requester (name, email, company) and their
+justification. If it is thin, use **Message** on the row to ask before you
+decide.
 
 ### Approve
 
-Approving adds the API's access group to that user's gateway consumer and
-records an active grant. You can attach a note, which the requester sees and
-receives by email.
+**Approve** adds the API's access group to the requester's gateway consumer and
+creates a grant. An optional **Decision note** is shown to the requester and
+emailed to them. Access is live at once: calls pass as soon as they hold a
+credential of the right type.
 
-Access is live immediately — as soon as they hold a credential of the right
-type, their calls pass. There is no separate publish step.
-
-If the gateway is unreachable when you approve, nothing is committed: the
-request stays pending and you can simply approve again once it recovers. The
-portal never claims access the gateway would not honour.
+If the gateway is unreachable, nothing is saved and the request stays pending.
+Approve again once the gateway is back.
 
 ### Deny
 
-Declining changes nothing on the gateway. **Attach a note.** A decline with a
-reason usually produces a corrected request; a silent one produces a support
-thread. The requester can request again after fixing whatever you raised.
+**Deny** changes nothing on the gateway. **Add a decision note.** A reason
+usually brings a corrected request; a silent decline brings a support thread.
+The requester can ask again.
 
 ### Revoke
 
-The **Grants** tab defaults to **Active**. Use **Grant status → Revoked** for
-revocation history or **All** for both statuses, and page through older grants
-with **Next**.
+On **Grants**, **Grant status** starts at **Active**; choose **Revoked** or
+**All** for history. **Revoke** removes the access group from that caller. Their
+next call gets `403`; their credential still works on their other APIs.
 
-**Grants → Revoke** removes the access group from that consumer. Effect is
-immediate: their next call gets a `403`. Their credential still authenticates —
-it just no longer authorises this API.
-
-Add a reason. It is recorded, shown to the grantee and emailed to them.
-Revoking also marks the originating request as revoked, so their history reads
-"approved, then revoked" rather than staying approved.
+Add a **Reason**. It is recorded, shown to the caller and emailed. The original
+request is marked revoked too.
 
 ### Who else can act on your API
 
-Portal **admins** and **super admins** can approve, deny and revoke on any API,
-and can edit or delete one. That is intentional — someone has to be able to cut
-off access at 3 a.m. when the owner is unreachable. Every such action is
-audited with the actor's identity, and emergency actions taken through god mode
-additionally require a recorded reason.
+Admins and super admins can approve, deny and revoke on any API, and edit or
+delete it, so someone can cut off access when you are unreachable. Every such
+action is audited with the actor, and god-mode actions also record a reason.
 
 ---
 
-## Test consumers
+## Test consumer
 
-**My APIs → the API → Create test consumer** gives you a disposable identity
-for your own API, so you can verify the whole path — routing, authentication,
-access control, rate limiting — without borrowing a real client's credential.
+**My APIs → your API → Test consumer → Create test credential** gives you a
+throwaway identity for your own API, so you can check routing, authentication,
+access control and rate limiting without borrowing a client's credential.
 
-It creates a consumer named `nexus-test-<api id>` carrying this API's access
-group, plus one credential of the API's authentication type. The secret is
-**shown once**, exactly like a client credential.
+It creates a gateway consumer named `nexus-test-<api id>` with this API's
+access group and one credential of the API's authentication type. The secret is
+**shown once**.
 
 ```bash
 curl -sS https://gateway.example.com/nexus/billing/invoices \
   -H "X-API-Key: <the test key>"
 ```
 
-Creating one again **replaces** the previous one — the old consumer is deleted
-and a fresh credential issued. That is the only way to reset its show-once
-state, and it is why a test consumer is not a substitute for a real credential:
-treat it as throwaway. Create one, verify, and do not build anything permanent
-on it.
+Creating it again **replaces** the previous one: the old consumer is deleted and
+a new credential issued. Do not build anything permanent on it.
 
-Worth testing with it after every significant change: a `200` on a normal call,
-a `401` with no credential, and — if you set a rate limit — a `429` under load.
+After a significant change, check for a `200` on a normal call, a `401` with no
+credential, and, if you set a rate limit, a `429` under load. The test consumer
+has its own rate-limit budget.
 
 ---
 
 ## Messaging clients
 
-**Messages** is a portal inbox. Clients can start a thread from your API's
-catalog page; you can reply, and start threads yourself.
+**Messages** is the portal inbox. Clients can message you from your API's
+catalog page, and you can reply. To start a conversation yourself, use
+**Message** on a row in **Requests** (to ask about a justification or explain a
+decision) or **Grants** (to warn callers about a change). Conversations about
+the same API with the same client continue in one thread.
 
-Use it for:
-
-- clarifying a thin justification before you decide — **Message** on the row in
-  **My APIs → the API → Requests**, which reaches the requester without leaving
-  the decision;
-- warning grantees about a breaking change or a maintenance window — the same
-  **Message** control on each row of the **Grants** tab;
-- explaining a decline in more detail than the note allowed — the request row
-  keeps its **Message** control after the decision.
-
-Threads about the same API with the same client continue rather than
-fragmenting, so the history stays in one place. Both sides get in-app
-notifications and email.
-
-For an announcement to _every_ portal user rather than one client, ask an
-administrator — that is what mass email and platform broadcast are for.
+For announcements to everyone, ask an administrator: that is what mass email
+and platform broadcasts are for.
 
 ---
 
 ## Retiring versus deleting
 
-These are very different operations and the difference matters.
+### Retire: reversible, breaks nothing
 
-### Retire — reversible, breaks nothing
+**Settings → Status → Retired**, then **Save settings**.
 
-**Settings → Status → Retired.**
+- The gateway is **untouched**. Existing grants and integrations keep working.
+- The API disappears from the catalog for everyone except you, its current
+  grantees and admins.
+- New access requests, and approval of still-pending ones, are refused.
 
-- The gateway is **untouched**: the proxy, its plugins and every active grant
-  keep working. Integrations already in production carry on.
-- The API disappears from the catalog for everyone **except** its owner, its
-  existing grantees and admins.
-- New access requests and approvals of still-pending requests are refused.
+Set the status back to **Published** to undo it. **This is almost always what
+you want.**
 
-Retirement is how you say "stop onboarding onto this" without breaking the
-people already on it. It is reversible — set the status back to Published.
+### Delete: permanent, breaks everything
 
-**This is almost always what you want.**
+**Settings → Danger zone → Delete API**, then type the slug to confirm.
 
-### Delete — permanent, breaks everything
-
-**Settings → Delete API.**
-
-- The proxy and all its plugins are **removed from the gateway**. Every call
-  starts failing immediately.
-- The access group is stripped from every grantee's consumer.
+- The proxy and its plugins are **removed from the gateway**. Every call fails
+  at once.
+- The access group is removed from every grantee.
 - All grants, access requests and spec revisions are deleted.
 - Grantees are notified that the API was removed.
 
-There is no undo, and re-publishing under the same slug does not restore
-anyone's access — every client has to request again.
+There is no undo. Publishing again under the same slug restores nobody's
+access; every client must request again.
 
-Sensible sequence for decommissioning: **retire**, tell your grantees, leave it
-retired for a migration window, then delete once nobody is calling it.
+To decommission: **retire**, tell your grantees, wait out a migration window,
+then delete once nobody is calling.
+
+---
+
+## Limits
+
+| Limit                     | Default | Set by the operator with   |
+| ------------------------- | ------- | -------------------------- |
+| APIs you own at once      | 50      | `NEXUS_MAX_APIS_PER_OWNER` |
+| Older spec revisions kept | 10      | `NEXUS_SPEC_HISTORY_LIMIT` |
+| CORS origins per API      | 64      | —                          |
+
+Past the API limit, publishing is refused with `429 QUOTA_EXCEEDED`. Deleting an
+API frees a slot; retiring one does not.
 
 ---
 
 ## Troubleshooting
 
-**"Publishing failed with a spec error."** The message names the offending
-field. Common causes: a Swagger 2.0 document (`swagger: "2.0"` — convert to
-OpenAPI 3); a missing `info.title` or `info.version`; a missing `paths` object;
-YAML that does not parse.
+**"Publishing failed with a spec error."** The message names the problem.
+Common causes: Swagger 2.0 (convert to OpenAPI 3); missing `info.title`,
+`info.version` or `paths`; YAML that does not parse; a size limit.
 
-**"No upstream could be determined."** Your document has no absolute
-`servers[].url` — only relative ones, or none. Supply `upstream_url` explicitly.
+**"No upstream could be determined."** The document has no usable absolute
+`servers[].url`. Fill in **Upstream URL**.
 
-**"The slug is already in use."** Someone published under that slug. Pick
-another; slugs are unique portal-wide.
+**"The upstream is refused."** It is private or does not resolve from the
+server. See [The upstream](#the-upstream).
 
-**"Publishing failed with a gateway error."** Ferrum Edge rejected or could not
-be reached. Nothing was saved — the operation rolled itself back cleanly, so
-retry once the gateway is healthy. If it persists, an admin can find the
-upstream error text in the server log; it is deliberately not shown in the
-browser.
+**"The slug is already in use."** Slugs are unique portal-wide. Pick another.
 
-**"A client says they get 403."** They are authenticated but not authorised:
-their grant was revoked or never approved. Check **Grants** for their account.
+**"Publishing failed with a gateway error."** Nothing was saved, so retry once
+the gateway is healthy. If the gateway rejected the request itself (for example
+the spec, or a missing `FERRUM_BASIC_AUTH_HMAC_SECRET`), the error includes its
+message: `400 EDGE_REJECTED_SPEC` with the gateway's reason (up to 500
+characters) for a refused spec, or `details.gateway_message` otherwise. For
+other failures the browser shows a generic `502`, and the details are in the
+server log.
 
-**"A client says they get 401."** Their credential is missing, revoked, or of
-the wrong type for this API — most often after an authentication-plugin change.
+**"A client gets 403."** They are authenticated but not approved for this API,
+or their credential belongs to a different identity than the grant. Check
+**Grants**.
 
-**"A client says they get 502/503."** That is your upstream, not the portal.
-Check the **Backend** row on the Overview tab first: _Failing_ confirms the
-gateway agrees with them and says since when. _Unknown_ does not clear your
-backend — it usually just means this proxy has no circuit breaker — so check
-that the backend is healthy and reachable **from the gateway**.
+**"A client gets 401."** Their credential is missing, revoked or the wrong type,
+most often after an authentication change.
 
-**"My rate limit is not being applied."** It attaches per consumer. Confirm the
-limit is saved in Settings, and remember a test consumer counts as its own
-consumer with its own budget.
+**"A client gets 502/503."** That is your backend. Check **Backend** on the
+Overview tab: **Failing** confirms it and says since when. **Unknown** does not
+clear your backend; it usually means there is no circuit breaker. Check the
+backend is healthy and reachable **from the gateway**.
+
+**"My rate limit is not applied."** Confirm it is saved on **Settings**. It is
+per caller, and each caller (including the test consumer) has its own budget.
+With several gateway replicas, see the note under [Rate limit](#rate-limit).

@@ -1,11 +1,12 @@
 # Admin guide
 
-For the people who run the portal: accounts and roles, organizations, branding,
-CAPTCHA, email, mass email, the audit log, and god mode.
+For the people who run the portal: accounts and roles, organizations, settings,
+email, mass email, the audit log, and god mode.
 
-Two roles are covered here. An **admin** manages users, content and settings.
-A **super admin** additionally controls who else becomes an administrator, and
-holds the four god-mode operations. Everything below says which is which.
+Everything here lives under **Administration** in the sidebar. Two roles use
+it. An **admin** manages accounts, APIs and most settings. A **super admin**
+also controls who holds admin roles, the security-sensitive settings, and god
+mode. Each section says which role it needs.
 
 Related: [`provider-guide.md`](provider-guide.md) ·
 [`../operations.md`](../operations.md) · [`../security.md`](../security.md)
@@ -16,335 +17,280 @@ Related: [`provider-guide.md`](provider-guide.md) ·
 
 ### The role model
 
-Roles are strictly ordered and a higher role inherits everything below it:
+Roles are ordered, and each role has everything the one below it has:
 
 ```
 client  <  provider  <  admin  <  super_admin
 ```
 
-| Role            | Gets                                                                                      |
-| --------------- | ----------------------------------------------------------------------------------------- |
-| **client**      | Catalog, access requests, own credentials, messaging, notifications, profile              |
-| **provider**    | Everything a client has, plus publishing APIs and deciding requests on their **own** APIs |
-| **admin**       | Everything, plus users, organizations, any API, any grant, settings, email, audit log     |
-| **super_admin** | Everything, plus granting/revoking admin roles and god mode                               |
+| Role            | Adds                                                                                  |
+| --------------- | ------------------------------------------------------------------------------------- |
+| **Client**      | Catalog, access requests, applications, credentials, messages, notifications, profile |
+| **Provider**    | Publishing APIs, and deciding access requests on their **own** APIs                   |
+| **Admin**       | Users, organizations, every API and grant, settings, templates, mass email, audit log |
+| **Super Admin** | Granting and removing admin roles; SMTP, CAPTCHA and gateway settings; god mode       |
 
-Only **client** and **provider** are self-selectable at registration. Admin
-roles are conferred, never requested.
+Visitors can register only as Client or Provider. Admin roles are granted by a
+super admin.
 
-### The rules the portal enforces for you
+### Rules the portal enforces
 
-Two guardrails you cannot switch off, and it is worth knowing them before you
-hit them:
+- **Only a super admin grants or removes admin roles.** An admin can move
+  accounts between Client and Provider, nothing more. An admin also cannot
+  disable or re-enable an Admin or Super Admin account. Either attempt returns
+  `403`.
+- **Only a super admin changes SMTP, CAPTCHA or the gateway address.** Whoever
+  controls the mail relay receives every verification and password-reset link;
+  whoever controls the gateway address decides where clients send their
+  credentials. Admins can still edit branding, registration policy, email
+  templates and send mass email.
+- **The last active super admin cannot be demoted or disabled.** The request is
+  refused with `409 LAST_SUPER_ADMIN`.
+- **Nobody can disable their own account**, through the Users page or god mode.
 
-**An admin cannot make another admin.** Only a **super admin** may promote an
-account _to_ `admin`/`super_admin`, or demote one _from_ those roles, or disable
-an existing administrator. An admin trying it gets a clear `403`. This is what
-keeps a single compromised admin account from escalating itself.
+> **Create a second super admin on day one.** If you lose the only one, recovery
+> needs server access; see
+> [`../operations.md`](../operations.md#recovering-a-portal-with-no-super-admin).
 
-**An admin cannot change the mail or CAPTCHA settings** either, for the same
-reason: repointing SMTP would deliver every verification and password-reset link
-to whoever did it. Branding, registration policy, email templates and mass email
-stay at `admin`.
+### The first super admin
 
-**The last active super admin is untouchable.** Demoting, disabling or removing
-the only remaining active `super_admin` is refused. The check asks "is anyone
-else left?", so it triggers exactly when it should.
-
-> **Create a second super admin on day one.** The guard is a safety net, not a
-> convenience — the situation where you notice it is one where you have already
-> lost your only administrator.
-
-You also cannot disable **your own** account, ordinary route or god mode. If you
-are the last active super admin, the "last one left" refusal is what you see —
-promote a second super admin first.
-
-### The first user
-
-The first account ever registered becomes `super_admin` automatically, is
-auto-verified, and bypasses the registration policy. That is how a fresh
-install bootstraps. Every later registration gets only the role it asked for,
-subject to your policy.
+While the portal has no active super admin, the next registration becomes one,
+is marked as verified, and ignores the registration policy. That registration
+must include the **bootstrap token**: `NEXUS_BOOTSTRAP_TOKEN`, or the one-time
+value the server prints at startup. The register form shows a **Bootstrap
+token** field while this applies. See
+[`../operations.md`](../operations.md#first-run-and-the-bootstrap-token).
 
 ### Managing accounts
 
-**Administration → Users.** Filter by role, status, organization, or search
-across email and display name.
+**Administration → Users** lists every account. Search by name or email, and
+filter by role, status and organization.
 
-Per account you can change the **display name**, **role**, **organization** and
-**status**. You cannot change someone's email address or password from here —
-they change their own password from their profile; an email change means a new
-account.
+On each row you can:
+
+- change the **role** with the role selector;
+- choose **Edit** to change the display name or organization;
+- choose **Disable** or **Enable**.
+
+You cannot change an account's email or password. Users change their own
+password from **Profile**; a new email address means a new account.
 
 ### Disabling an account
 
-Setting status to **disabled**:
+Disabling an account:
 
-- **destroys every session the account holds**, so open browser tabs get a
-  `401` on their next request rather than a working page;
+- ends every session it holds, so open browser tabs get `401` on their next
+  request;
 - blocks sign-in with `403 USER_DISABLED`;
-- **revokes every gateway identity the account holds** — its ACL groups and
-  every credential of every type on `nexus-user-<id>`, plus each provider test
-  consumer (`nexus-test-<api_id>`) it created, which is deleted outright;
-- leaves their **grants** in place, so re-enabling restores the access they had
-  been approved for.
+- **revokes its gateway access**: every credential of every type on its own
+  consumer and on each of its applications is deleted, its access groups are
+  removed, and any provider test consumer it created is deleted;
+- **keeps its grants**, so re-enabling can restore the access it was approved
+  for.
 
-The gateway half is not best-effort. If Edge is unreachable the account is still
-disabled and the response says `gateway_teardown: "pending"` — the revocation is
-queued and retried until it lands, and the user list shows the backlog. Treat a
-`pending` teardown as an incident that is still open: those keys keep
-authenticating until it clears. **Administration → Users** exposes a retry
-button per account.
+If the gateway is unreachable, the account is still disabled, the response
+says `gateway_teardown: "pending"`, and the revocation is retried until it
+succeeds. The row shows **Gateway revocation pending** with a **Retry** button.
+Treat that as an open incident: the account's keys keep working until it
+clears. See [`../operations.md`](../operations.md#11-gateway-revocation-for-disabled-accounts).
 
-Use **god mode → Disable user with "revoke grants"** when you also want the
-approvals themselves torn down rather than preserved for a re-enable.
+**Re-enabling** sets the status back to active and cancels any queued
+revocation. The user signs in normally. Access groups come back for every grant
+that is still active, but credentials do not: the user issues new ones. Revoked
+grants and test consumers are not recreated. If restoring the gateway groups
+fails, the request returns an error after the status has changed; enable the
+account again to finish. It is safe to repeat.
 
-Re-enabling is setting the status back to active; they sign in again
-normally, and any queued revocation is cancelled. Disabling or re-enabling an
-`admin` or `super_admin` requires a `super_admin`; a plain `admin` may still
-disable and re-enable clients and providers. Their credentials are _not_
-restored — a revoked key is gone, and they issue a new one. Re-enabling restores
-ACL groups for every retained active grant; revoked grants and disposable test
-consumers are not recreated. If the gateway restoration fails, the request
-returns an error after the portal status has changed. Retry the same active
-status update to finish restoring access; it is safe to repeat.
+To also withdraw the account's approvals, use [god mode → Disable an
+account](#disable-an-account) with **Also revoke every grant held by this
+account**.
 
 ---
 
 ## Organizations
 
-**Administration → Organizations.** A lightweight grouping — a name and an
-optional description — used to tag accounts, mainly so mass email can target
-"everyone at Acme" and so user lists can be filtered by customer.
+**Administration → Organizations** holds a name and optional description per
+organization. Names are unique, ignoring case.
 
-Create one, then assign accounts to it from **Administration → Users**: press
-**Edit** on the row and pick the organization (the same dialog renames the
-account). The directory has an organization filter and a status filter beside
-the role filter, so "everyone at Acme" and "every disabled account" are both one
-click rather than a walk through the pages.
-Organizations carry no permissions of their own: membership never grants or
-restricts access to anything. Access is always decided per user, per API.
-
-Names are unique case-insensitively.
+Assign an account to one from **Users → Edit**. Organizations exist for
+filtering the user list and targeting mass email ("everyone at Acme"). They
+carry no permissions: access is always decided per account, per API.
 
 ---
 
-## Branding
+## Settings
 
-**Administration → Settings → Branding.** Applies to the portal UI _and_ to
-every outbound email.
+**Administration → Settings** has five tabs: **Branding**, **Gateway**,
+**CAPTCHA** (which also holds the registration policy), **Email** and
+**Templates**.
 
-| Field                       | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Portal name**             | Header, page titles, and `{{portal_name}}` in every email.                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| **Logo**                    | Uploaded and stored as a data URL, max ~512 KiB encoded. A small PNG or SVG is right; a full-resolution photo will be rejected.                                                                                                                                                                                                                                                                                                                                               |
-| **Primary / accent colour** | Opaque CSS hex (`#rgb` or `#fff` / `#rrggbb`). Five- and seven-digit values are rejected; alpha (`#rgba` / `#rrggbbaa`) is not accepted because the colour swatch and palette only render opaque `#rrggbb`. The primary colour drives the whole accent scale (buttons, active navigation, focus rings, tints — with a foreground picked for contrast); the accent colour drives secondary emphasis such as informational badges. The live preview beside the form shows both. |
-| **Default theme**           | `dark`, `light`, or `system` — what a visitor sees before they choose. Individual users can override it and their choice is remembered locally.                                                                                                                                                                                                                                                                                                                               |
-| **Corners**                 | `Square`, `Subtle`, `Rounded` (default) or `Soft` — scales every card, control and dialog corner.                                                                                                                                                                                                                                                                                                                                                                             |
-| **Typeface**                | `System` (the visitor's UI font, no download), `Inter` or `Manrope`; the two named faces are bundled with the portal and served from it.                                                                                                                                                                                                                                                                                                                                      |
-| **Navigation rail**         | `Match surfaces` (the rail follows the theme) or `High contrast` (an always-dark rail beside light or dark content).                                                                                                                                                                                                                                                                                                                                                          |
-| **Sign-in layout**          | `Split` shows a branded hero panel (logo, tagline, feature highlights) beside the form on wide screens; `Centered` shows the form alone.                                                                                                                                                                                                                                                                                                                                      |
-| **Tagline**                 | Headline of the sign-in hero and the line under the title on the register page.                                                                                                                                                                                                                                                                                                                                                                                               |
-| **Support email**           | Surfaced in the footer. Point it at a monitored inbox.                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| **Footer text / links**     | An optional copyright or legal line and up to five `https` links (terms, privacy, documentation) shown in the shell footer and on the sign-in page.                                                                                                                                                                                                                                                                                                                           |
+### Branding
 
-Branding is served **unauthenticated** (the login page needs it before anyone
-signs in), so keep it to genuinely public information.
+Applies to the portal UI and every outbound email. Branding is served without
+sign-in (the login page needs it), so keep it to public information.
 
----
+| Field                     | Notes                                                                                               |
+| ------------------------- | --------------------------------------------------------------------------------------------------- |
+| **Portal name**           | Header, page titles, and `{{portal_name}}` in emails.                                               |
+| **Support email**         | Linked from the footer and the sign-in page. Use a monitored inbox.                                 |
+| **Tagline**               | Headline of the sign-in hero. Leave empty for the default.                                          |
+| **Logo**                  | PNG or SVG under 256 KB. Also used as the browser tab icon.                                         |
+| **Primary colour**        | `#rgb` or `#rrggbb`. Drives buttons, active navigation, focus rings and derived tints.              |
+| **Accent colour**         | `#rgb` or `#rrggbb`. Secondary emphasis such as informational badges.                               |
+| **Default theme**         | Dark, Light, or follow the visitor's system setting. Visitors can override it.                      |
+| **Corners**               | Square, Subtle, Rounded (default) or Soft.                                                          |
+| **Typeface**              | System (no download), Inter or Manrope (both bundled).                                              |
+| **Navigation rail**       | Match surfaces, or High contrast (an always-dark rail).                                             |
+| **Sign-in layout**        | Split (branded panel beside the form) or Centered (form only).                                      |
+| **Footer text** and links | An optional legal line and up to five `http(s)` links, shown in the footer and on the sign-in page. |
 
-## Gateway address
+Colours with alpha (`#rgba`, `#rrggbbaa`) are refused. The **Preview** card
+shows both themes as you edit.
 
-**Administration → Settings → Gateway.** One field, and the catalog is
-noticeably less useful without it.
+### Gateway (super admin)
 
-A client who has been approved and holds a credential still needs to know
-**where to send the request**. That address is the gateway's **proxy
-listener** — a different host and port from the Admin API Nexus talks to, and a
-different one again from the portal itself. Nexus cannot infer it, so until you
-set it every API reports a `null` invoke URL and the catalog can only show the
-listen path.
+**Public gateway URL** is the address clients send API requests to: the
+gateway's proxy listener. It is not the Admin API address Nexus uses, and not
+the portal's own address (`NEXUS_PUBLIC_URL`).
 
-| Field                  | Notes                                                                                                                                                                          |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Public gateway URL** | Absolute `http(s)` **origin** — scheme, host, and port if non-default. No path, no query string, no credentials; a trailing slash is stripped. E.g. `https://api.example.com`. |
+It must be an absolute `http(s)` origin: scheme, host, and port if
+non-default, with no path, query string or credentials. For example,
+`https://api.example.com`.
 
-Once it is set, every API in the catalog gains an **invoke URL** of
-`<origin>/<namespace>/<slug>`, shown with a copy button on the catalog detail
-page, next to each of a client's granted APIs, and on the provider's API
-overview.
+Once set, every API shows an invoke URL of `<origin>/<namespace>/<slug>` in the
+catalog, on the client's Credentials page and on the provider's API overview.
+Until then, clients see only the listen path and are told to ask you.
 
-Like SMTP and CAPTCHA this is **super-admin-only**: the address is published to
-every client as the place to send its gateway credentials, so whoever controls
-it can redirect those credentials to another origin. An ordinary `admin` can
-read it but not change it. It is also not the portal's own address — that is
-`NEXUS_PUBLIC_URL`, used for the links in outbound email.
+If the field is blank, the portal uses the `FERRUM_GATEWAY_PUBLIC_URL`
+environment variable. A saved value wins over the environment.
 
-Leaving the field blank falls back to the `FERRUM_GATEWAY_PUBLIC_URL`
-environment variable, which is the right place to set it if your deployment is
-configured entirely from the environment. The stored setting wins when both are
-present.
+This tab also shows **Gateway references need repair** when the gateway no
+longer holds objects the portal created, for example after the gateway was
+rebuilt. See [`../operations.md`](../operations.md#13-retargeting-or-rebuilding-ferrum-edge).
 
----
+### CAPTCHA (super admin)
 
-## CAPTCHA
+Protects sign-in and registration from automated abuse. Turn it on if
+self-service registration is open to the internet. Providers: **Cloudflare
+Turnstile**, **hCaptcha** and **Google reCAPTCHA**.
 
-**Administration → Settings → CAPTCHA.** Protects registration and sign-in from
-automated abuse. Enable it if self-service registration is open to the
-internet.
+1. At the vendor, create a site for your portal's domain and copy the **site
+   key** and **secret key**.
+2. In **Settings → CAPTCHA**, tick **Require a CAPTCHA challenge**, choose the
+   **Provider**, and paste both keys.
+3. Choose **Test this CAPTCHA configuration** and complete the challenge. You
+   cannot save until the test passes, and it runs again whenever you change the
+   provider or either key.
+4. Save. Then load the sign-in page in a private window and check the widget
+   works.
 
-> **Super admins only.** This section, like Email, is saved only for a
-> `super_admin`; an ordinary `admin` gets a permission error. It is the
-> registration brake, so turning it off is a platform-level decision.
-
-Supported providers: **Cloudflare Turnstile**, **hCaptcha**, **reCAPTCHA**.
-
-Setup, whichever you pick:
-
-1. Create a site at the vendor and register your portal's domain.
-2. Copy the **site key** and the **secret key**.
-3. In Settings → CAPTCHA: choose the provider, paste the site key, paste the
-   secret key, tick **Enabled**.
-4. Press **Test this CAPTCHA configuration** and complete the challenge that
-   appears. **Save** stays disabled until you do: the portal will not store a
-   challenge it has not just verified with the vendor itself.
-5. Save, then sign out and load the login page in a private window. The widget
-   should render; complete it and sign in.
-
-Two things to know:
+Things to know:
 
 - **The secret key is write-only.** It is stored encrypted and never shown
-  again — the form displays only whether one is set. Keep your own copy in a
-  password manager. You will need it after a `NEXUS_SECRET_KEY` rotation (see
-  [`../operations.md`](../operations.md#7-rotating-nexus_secret_key)).
-- **It fails closed.** Enabled with a missing or wrong secret, or an
-  unreachable vendor, means **nobody can register or sign in** — every attempt
-  returns a CAPTCHA error. The self-test in step 4 is what stops you saving
-  into that state, and it runs again whenever you change the provider, the site
-  key or the secret key. Turning CAPTCHA **off** never needs a challenge, so
-  you can always switch it off while you are still signed in.
-- **If the vendor breaks later**, and nobody can sign in to switch it off, an
-  operator restarts the server with `NEXUS_CAPTCHA_ENFORCEMENT=disabled`. Sign-in
-  and registration then skip the challenge without any of your settings
-  changing, this card shows a warning while it is in force, and the sessions it
-  admits are recorded in the audit log. No database editing is involved. See
+  again. Keep your own copy; you will need it after a `NEXUS_SECRET_KEY`
+  rotation ([`../operations.md`](../operations.md#7-rotating-nexus_secret_key)).
+- **It fails closed.** If the vendor later becomes unreachable or the secret
+  stops working, nobody can sign in or register. Turning CAPTCHA off never
+  needs a challenge, so a signed-in super admin can always switch it off.
+- **If nobody can sign in**, an operator restarts the server with
+  `NEXUS_CAPTCHA_ENFORCEMENT=disabled`. Challenges are skipped without changing
+  your settings, this card shows a warning, and sessions created meanwhile are
+  audited with `captcha_bypassed: true`. See
   [`../operations.md`](../operations.md#recovering-a-portal-locked-out-by-captcha).
 
-The site key is public by design (it appears in the login page's config). The
-secret never leaves the server.
+The site key is public by design; the secret never leaves the server.
 
----
+### Registration policy
 
-## Registration policy
+The **Registration** card sits on the CAPTCHA tab and is editable by any admin.
 
-**Administration → Settings → Registration.**
+| Setting                                       | Effect                                                                                      |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| **Allow self-service registration**           | Off means nobody can sign up; you create accounts.                                          |
+| **Require email verification before sign-in** | Users must click an emailed link before they can sign in.                                   |
+| **Self-selectable roles**                     | Which of Client and Provider a visitor may pick. Untick Provider to vet providers yourself. |
 
-| Setting                        | Effect                                                                                     |
-| ------------------------------ | ------------------------------------------------------------------------------------------ |
-| **Open registration**          | Off means no self-service sign-up at all; you create accounts.                             |
-| **Allowed roles**              | Which roles a visitor may self-select. Restrict to `client` if providers should be vetted. |
-| **Require email verification** | Users must click an emailed link before they can sign in.                                  |
+The sign-up form offers exactly the roles you allow. With none ticked, nobody
+can register; turn registration off instead so the form says so plainly.
 
-The sign-up form reads this policy from `GET /api/branding`, so it offers
-exactly the roles you allow and states the outcome plainly when only one is
-left. Clearing both leaves nobody able to register at all — close registration
-instead, which says so.
+> **Do not require email verification before email works.** With no SMTP host,
+> verification mail waits in the outbox and every new user is locked out.
+> Configure SMTP, send a test, then turn verification on.
 
-> **Do not turn on email verification before SMTP works.** Verification links
-> go through the outbox; with no SMTP host configured they queue forever and
-> every new user is locked out. Configure SMTP, send a test, _then_ enable it.
+Verification links expire after 24 hours. Users can request a new one from the
+confirmation screen or the sign-in page. There is no admin control to mark an
+address verified; if mail is broken, turn verification off until it is fixed.
 
-Verification links are single-use and expire after 24 hours. If a user's link
-expires or never arrives, the simplest remedy is to look them up in
-Administration → Users and confirm their status yourself.
+### Email (super admin for SMTP)
 
-The policy never applies to the very first account.
+**Settings → Email → Email delivery**:
 
----
+| Field                   | Notes                                                                                    |
+| ----------------------- | ---------------------------------------------------------------------------------------- |
+| **SMTP host**           | Until this is set, **all portal email queues and nothing is sent.**                      |
+| **Port**                | 587 for STARTTLS, 465 for implicit TLS.                                                  |
+| **Use TLS (implicit)**  | On for 465; off for STARTTLS on 587.                                                     |
+| **Username / Password** | Leave both empty for an unauthenticated relay. The password is write-only and encrypted. |
+| **From address**        | For example `Acme Portal <no-reply@acme.example>`. Your relay must accept it.            |
 
-## Email
+Saved settings override the deployment's environment variables. The email
+worker re-reads them every poll (5 seconds), so no restart is needed.
 
-**Administration → Settings → Email.**
+**Send test email** (any admin) sends one message **directly through SMTP**
+using the saved settings, not through the outbox, and shows the relay's own
+error (for example `535 authentication failed`). It defaults to your own
+address. Run it after every change.
 
-> **Super admins only.** SMTP settings are saved only for a `super_admin`; an
-> ordinary `admin` gets a permission error. Whoever controls the relay receives
-> every verification and password-reset link the portal sends, which makes this
-> a takeover of every account, not a preference. Email templates and mass email
-> stay at `admin`.
-
-### SMTP
-
-| Field                   | Notes                                                                                     |
-| ----------------------- | ----------------------------------------------------------------------------------------- |
-| **Host**                | Until this is set, **all portal email queues and nothing sends.**                         |
-| **Port**                | 587 for STARTTLS, 465 for implicit TLS.                                                   |
-| **Secure**              | On for implicit TLS (465); off for 587.                                                   |
-| **Username / Password** | Omit both for an unauthenticated relay. The password is write-only and stored encrypted.  |
-| **From address**        | RFC 5322, e.g. `Acme Portal <no-reply@acme.example>`. Must be one your relay will accept. |
-
-Settings saved here **override** the deployment's environment variables, so you
-can move to a different relay without a redeploy. The worker re-reads them on
-every poll — a fix takes effect within about five seconds, no restart.
-
-**Send test email** delivers a probe **straight through SMTP, bypassing the
-outbox**, so you get the real error immediately instead of finding it in the
-queue. A misconfiguration returns the relay's own message
-(`getaddrinfo ENOTFOUND …`, `535 authentication failed`). Always run it after
-changing anything.
-
-### The quiet failure mode
-
-With no SMTP host, queued mail sits in `pending` **indefinitely** rather than
-failing. That is deliberate — configuring SMTP later delivers the backlog
-instead of losing it — but it means "no email is arriving" and "no errors
-anywhere" can both be true at once. If users report missing mail, check the
-SMTP host first, and ask an operator to check the outbox queue
-([`../operations.md`](../operations.md#6-the-email-outbox)).
+**The quiet failure mode:** with no SMTP host, queued mail waits in `pending`
+indefinitely rather than failing, so configuring SMTP later delivers the
+backlog. It also means "no email arrives" and "no errors anywhere" can both be
+true. If users report missing mail, check the SMTP host first, then ask an
+operator to check the outbox ([`../operations.md`](../operations.md#6-the-email-outbox)).
 
 ### Email templates
 
-**Administration → Settings → Email templates.** Eight transactional templates,
-each with a built-in default you can override:
+**Settings → Templates** holds eight templates, each with a built-in default:
 
-| Key                  | Sent when                                              |
-| -------------------- | ------------------------------------------------------ |
-| `verification`       | A new account must verify its email address.           |
-| `password_reset`     | Someone asks to reset a password.                      |
-| `access_approved`    | An access request is approved.                         |
-| `access_denied`      | An access request is declined.                         |
-| `access_revoked`     | A grant is revoked.                                    |
-| `message_received`   | New activity in a portal thread (see the note below).  |
-| `mass`               | The frame around a mass email or a platform broadcast. |
-| `credential_rotated` | A user's gateway credential is rotated.                |
+| Key                  | Sent when                                         |
+| -------------------- | ------------------------------------------------- |
+| `verification`       | A new account must verify its email address.      |
+| `password_reset`     | Someone asks to reset a password.                 |
+| `access_approved`    | An access request is approved.                    |
+| `access_denied`      | An access request is declined.                    |
+| `access_revoked`     | A grant is revoked.                               |
+| `message_received`   | New activity in a message thread.                 |
+| `mass`               | The frame around a mass email or broadcast email. |
+| `credential_rotated` | A user's gateway credential is rotated.           |
 
-Each has a **subject**, an **HTML body** and a **plain-text body**; all three
-are required when you save. Editing one stores an override; until then the
-built-in default is used. Resolution is override-first, default-second — never
-a mix.
+Each has a **Subject**, **HTML body** and **Plain-text body**; all three are
+required to save. Saving stores an override. The portal uses your override if
+there is one, otherwise the default, never a mix.
 
-> **`message_received` is coalesced.** A recipient gets at most one of these per
-> thread per **10 minutes**, however many messages arrive in it — that is what
-> keeps a reply storm from becoming a mail storm. The default wording therefore
-> announces new activity and links to the thread instead of quoting a message.
-> `{{message_preview}}` is still available, but if you put it back it will quote
-> only the message that _opened_ the window; the rest send nothing. In-app
-> notifications are not coalesced — those stay one per message.
+`message_received` is sent at most once per recipient, per thread, per **10
+minutes**, however many messages arrive. The default wording therefore
+announces activity and links to the thread. `{{message_preview}}` quotes only
+the message that opened the window. In-app notifications are not batched.
+
+Handle three templates with care:
+
+- `verification` must keep `{{verification_url}}`, or new users cannot finish
+  signing up.
+- `password_reset` must keep `{{reset_url}}`, or nobody can recover a password.
+  The default also says the link expires in an hour, works once, and signs the
+  user out everywhere. Keep those facts in any rewrite.
+- In `mass`, `{{body_html}}` is inserted as HTML without escaping.
 
 #### Placeholders
 
-Write `{{variable_name}}`. An unknown or absent placeholder renders as an empty
-string, so a partially-filled template still sends. Values interpolated into
-the **HTML** body are HTML-escaped, so a display name containing `<script>` can
-never become markup; the subject and text body are plain text and interpolated
-verbatim.
+Write `{{name}}`. An unknown or missing placeholder renders as empty text.
+Values in the HTML body are HTML-escaped; the subject and plain-text body are
+inserted as-is. The editor lists the variables available for the open
+template.
 
-**Available in every template:**
+**Every template:** `portal_name` · `portal_url` · `recipient_name` ·
+`recipient_email` · `year`
 
-`portal_name` · `portal_url` · `recipient_name` · `recipient_email` · `year`
-
-**Per template, in addition:**
-
-| Template             | Extra placeholders                                                    |
+| Template             | Also available                                                        |
 | -------------------- | --------------------------------------------------------------------- |
 | `verification`       | `verification_url`                                                    |
 | `password_reset`     | `reset_url`                                                           |
@@ -355,353 +301,291 @@ verbatim.
 | `mass`               | `subject`, `body_html`, `body_text`                                   |
 | `credential_rotated` | `credential_label`, `credential_last4`, `credentials_url`             |
 
-The editor shows the exact list for the template you have open. Unknown
-placeholders render empty. The retired `reset_token` and `verification_token`
-placeholders also render empty in stored templates, but saving either one in
-the subject, HTML body or text body returns a validation error naming it.
-Replace them with `{{reset_url}}` or `{{verification_url}}` respectively before
-saving. These complete links are built by the server from `NEXUS_PUBLIC_URL`.
+The retired `reset_token` and `verification_token` placeholders render empty,
+and saving a template that contains either is refused. Use `{{reset_url}}` and
+`{{verification_url}}`; the server builds those links from `NEXUS_PUBLIC_URL`.
 
-Use action links only as an entire anchor destination, such as
-`<a href="{{reset_url}}">Reset password</a>`. In the text body, place the placeholder
-on its own line or after whitespace, with whitespace or the end of the body
-after it. Do not put it in the subject, HTML text, an image, CSS, another
-attribute, or a URL query parameter. This restriction also applies to
-`{{verification_url}}`. Any placeholder in a URL or attribute must supply the
-entire value; concatenated values such as `{{portal_url}}/help` are refused.
-Only a `*_url` placeholder (`portal_url`, `api_url`, `thread_url`, …) may fill a
-URL or attribute; names and notes such as `{{recipient_name}}` belong in text.
+**Links and attributes:**
 
-All template fields permit outbound HTTP(S) destinations only on the portal's
-public origin or an operator-approved exact host. An operator can set
-`NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS=assets.example.com,docs.example.com:8443`
-in the server environment; administrators cannot change this list in Settings.
-The default list is empty. Subdomains and different ports are not implicitly
-approved. `javascript:` and `data:` are always refused, as are active HTML,
-HTML comments, malformed tags/attributes, CSS escapes/comments/imports and
-unsupported named HTML entities (use literal Unicode or numeric entities for
-additional typography). Simple inline styles and approved CSS `url(...)` work.
+- Only a `*_url` placeholder (`portal_url`, `api_url`, `thread_url`, …) may
+  appear in a URL or attribute, and it must be the **whole** value.
+  `{{portal_url}}/help` is refused.
+- Put `{{reset_url}}` and `{{verification_url}}` only as a whole anchor target,
+  such as `<a href="{{reset_url}}">Reset password</a>`. In the plain-text body,
+  surround them with whitespace or put them on their own line. Never put them
+  in the subject, visible HTML text, an image, CSS, another attribute or a
+  query parameter.
+- Absolute links must point at the portal's own origin or a host the operator
+  approved with `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` (comma-separated exact
+  `host[:port]`; empty by default; not editable in Settings). Subdomains and
+  other ports are not implied.
+- Always refused: `javascript:` and `data:` URLs, active HTML, HTML comments,
+  malformed tags or attributes, CSS escapes, comments and imports, and
+  unsupported named entities (use literal characters or numeric entities).
+  Simple inline styles and approved CSS `url(...)` work.
 
-A refused save returns an error naming the field, host or construct, and the
-operator setting. Stored templates and rendered destinations are checked again
-before queueing, including raw HTML from the mass-email composer. A legacy
-template that fails validation is skipped in favour of the built-in template
-and a warning is logged; replace the offending content or restore the default
-template to clear the warning. Rendered content that fails the check (such as
-a mass email linking to an unapproved host) is refused and nothing is queued.
+A refused save names the field and the host or construct. Templates are checked
+again before each email is queued, including mass-email HTML. A stored template
+that no longer passes is skipped in favour of the default, with a warning in the
+server log; edit it or restore the default to clear the warning. A mass email
+that links to an unapproved host is refused and nothing is queued.
 
-Each successful save records `body_html_sha256` and `body_text_sha256` in the
-`admin.template_update` audit details: SHA-256 hex digests of the exact UTF-8
-body strings, without storing the bodies in the audit log.
-
-Three worth handling carefully. `verification_url` is the only way a new user
-can complete sign-up, so never remove it from the `verification` template, and
-`reset_url` is the only way anyone recovers a forgotten password — a
-`password_reset` override without it strands every user who asks. In `mass`,
-`body_html` is inserted **as HTML** without escaping (that is the point of a
-composer), so only administrators can author it.
-
-The `password_reset` default also tells the recipient that the link expires in
-an hour, that it can be used once, and that using it signs them out everywhere.
-Keep that in any rewrite: those three facts are what stop a confused user from
-filing a support ticket.
+Each save is audited as `admin.template_update`, with SHA-256 digests of the two
+bodies (`body_html_sha256`, `body_text_sha256`) rather than the bodies
+themselves.
 
 ---
 
 ## Mass email
 
-**Administration → Mass email.** Compose a subject and a body and send to a
-selected audience.
+**Administration → Mass email** sends one announcement to a chosen audience.
+
+1. Choose the **Audience** (below).
+2. Write a **Subject** (up to 300 characters) and a **Plain-text body**. The
+   **HTML body** is optional; if you leave it empty, the plain text is used.
+3. Choose **Send** and confirm.
 
 ### Audience
 
-| Scope                 | Reaches                                                                                  |
-| --------------------- | ---------------------------------------------------------------------------------------- |
-| **Everyone**          | Every **active** account. Other filters are ignored. Disabled accounts are never mailed. |
-| **Filtered**          | Combine roles, status and organization.                                                  |
-| **Specific accounts** | A list you name, up to 5000.                                                             |
+| Audience              | Reaches                                                                |
+| --------------------- | ---------------------------------------------------------------------- |
+| **Everyone**          | Every **active** account. Disabled accounts are never included.        |
+| **Filtered**          | Any combination of **Roles**, **Account status** and **Organization**. |
+| **Specific accounts** | Accounts you pick with **Find an account**, up to 5000.                |
 
-Under **Filtered**, roles are a multi-select: tick as many as you mean, or leave
-them all clear for every role. **Administrators are two roles.** A send ticked
-only for _Admin_ does not reach a `super_admin`, so the incident audience you
-almost always want is the **All administrative roles** button, which ticks both.
-Status chooses between active and disabled accounts, and the organization
-picker narrows to one customer.
+Under **Filtered**, leave every role unticked to include all roles.
+**Admin and Super Admin are separate roles**: ticking only Admin misses every
+super admin. **All administrative roles** ticks both.
 
-Under **Specific accounts**, search by name or email and add each recipient;
-**Add myself** is the one-click version of the pre-send test below.
+**Add myself**, under Specific accounts, is the quick way to send yourself a
+test first.
 
 ### How it sends
 
-**One queued message per recipient**, never a BCC blast. A bad address retries
-and eventually fails on its own instead of taking the whole send down with it,
-and each recipient's delivery state is visible individually.
+Each recipient gets their own queued message, never a BCC. One bad address
+retries and fails on its own without affecting the rest.
 
-The response tells you three things: `recipients` (how many matched),
-`enqueued` (how many rows were actually created) and `batch_id` (the campaign
-key those rows were filed under).
+The whole campaign is queued in one transaction: it is either queued in full or
+not at all. The response reports `recipients` (audience size), `enqueued`
+(messages queued) and `batch_id`. A failure returns `500` with
+`details: { batch_id, recipients, enqueued: 0 }`; a busy portal returns `409`.
+Both are safe to retry.
 
-**The whole fan-out is one transaction**, so a campaign either went out whole or
-not at all — there is no state in which some of your audience was mailed and
-nothing recorded it. A failure answers `500` with
-`details: { batch_id, recipients, enqueued: 0 }`, and retrying with that
-`batch_id` as the campaign key is safe whether the failure was real or only a
-lost response. If the portal was simply too busy you get `409` instead, with the
-same `batch_id` — that one is only ever "try again".
+One campaign may reach at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` accounts (5000
+by default). A larger audience is refused before anything is queued, with a
+message naming the limit and the setting. On a MongoDB-backed portal a long
+body lowers the practical limit, to roughly 800 recipients at 10 KB.
 
-That is also why **one campaign has a recipient ceiling**:
-`NEXUS_MAX_MASS_EMAIL_RECIPIENTS`, 5 000 by default. Everything the campaign
-queues has to fit in one transaction, and on a MongoDB-backed portal a long body
-brings the real limit down sharply — roughly 800 recipients at 10 KB of message.
-An audience past the ceiling is refused before anything is queued, with a message
-naming the limit, the audience size and the setting for your operator to raise.
+### Retrying safely
 
-### Idempotency
+The composer gives each campaign a random ID. After a timeout or network error,
+send the **unchanged** form again from the same page: it reuses the ID, so
+nobody is mailed twice. **Mass email already queued** means the first attempt
+had succeeded and the retry added nothing.
 
-The composer generates a random 32-character campaign ID when you first send.
-After a timeout or network failure, retry the unchanged submission in the same
-page to reuse that ID and avoid duplicate messages. An **already queued** notice
-means the earlier attempt queued the campaign and the retry added no messages.
-Unexpected deduplication on a fresh campaign is shown as an error.
+Changing the content or audience, or a successful send, starts a new campaign.
+Reloading or leaving the page loses the ID, so check the audit log
+(`admin.mass_email`) before sending again.
 
-After a successful response, the next send gets a fresh ID, even with the same
-subject and audience. Changing the submitted content or audience also starts a
-new campaign. Reloading or leaving the page loses the retry ID, so check the
-audit log before resending after navigation. Subjects may contain up to 300
-characters; their length does not affect the campaign ID.
+API callers get the same protection by sending an `idempotency_key` (8–128
+characters). Without one, **every send is a new campaign**.
 
-For API callers, supply an **idempotency key** (8–128 characters) and the send becomes
-at-most-once: re-posting the same request with the same key enqueues nothing
-new. Use it whenever you are sending to a large audience — if the request times
-out, you can safely retry without double-mailing everyone.
+### Before you send
 
-Without a key, each send is a fresh batch and **sending twice mails everyone
-twice**.
+- Send to yourself first (Specific accounts → **Add myself**).
+- Read the plain-text body as well as the HTML; many clients show it.
+- Run **Send test email**, so you are not queueing thousands of messages
+  against a broken relay.
 
-### Before you press send
-
-- Send to yourself first: choose **Specific accounts**, press **Add myself**,
-  and send. That is an explicit audience of one and costs nothing to repeat.
-- Check the plain-text body as well as the HTML — plenty of clients render it.
-- Confirm SMTP is healthy; otherwise you are queueing thousands of messages
-  against a relay that is not working.
-- Every send is audited with the subject, audience scope and counts.
+Every send is audited with the subject, audience and counts.
 
 ---
 
 ## The audit log
 
-**Administration → Audit log.** Every state-changing operation in the portal
-writes exactly one row. It is append-only — nothing in the application can edit
-or delete an entry.
+**Administration → Audit log** records every state-changing operation. It is
+append-only: nothing in the application edits or deletes an entry.
 
-Each row records **who** (actor and their role at the time), **what** (a
-dot-namespaced action such as `access.approve`), **which thing** (target type
-and id), **structured detail**, the client **IP**, and **when**.
+Each row records **who** (the actor and their role at the time), **what** (an
+action such as `access.approve`), the **target** (type and id), structured
+details, the client IP, and when.
 
-Filter by actor, action, target type, target id, and a time range.
+Filter by **action** (exact name), **actor user ID**, **target ID**, and a
+**From**/**To** time range. The API (`GET /api/admin/audit-logs`) also filters
+by `target_type`.
 
-### Reading it
+Actions are named `<domain>.<verb>`. Domains: `auth`, `user`, `org`, `api`,
+`access`, `application`, `credential`, `test_consumer`, `message`,
+`notification`, `admin`, `gateway` and `god`. The full catalog, with each
+action's details, is in [`../security.md`](../security.md#10-audit-event-catalog).
 
-Actions are `<domain>.<verb>`: `auth.*`, `user.*`, `org.*`, `api.*`,
-`access.*`, `credential.*`, `message.*`, `notification.*`, `admin.*` and
-`god.*`. The complete catalog, with what each `details` object contains, is in
-[`../security.md`](../security.md#10-audit-event-catalog).
+Common investigations:
 
-Investigations that come up often:
+| Question                        | Filter                                                  |
+| ------------------------------- | ------------------------------------------------------- |
+| Everything one person did       | Actor user ID = their id                                |
+| Who approved this request       | Target ID = the access request id                       |
+| History of one API              | Target ID = the API id                                  |
+| When was this credential issued | Target ID = the credential id                           |
+| Emergency actions this month    | Action = each `god.*` action in turn, with a date range |
 
-| Question                          | Filter                                                            |
-| --------------------------------- | ----------------------------------------------------------------- |
-| Everything one person did         | `actor_user_id` = their id                                        |
-| Who approved this access          | `target_type` = `access_request`, `target_id` = the request id    |
-| Every emergency action this month | `action` starting `god.` (query one at a time), with a date range |
-| History of one API                | `target_type` = `api`, `target_id` = the API id                   |
-| When was this credential issued   | `target_type` = `credential`, `target_id` = the credential id     |
+The log does **not** contain:
 
-### What it does not contain
-
-**Reads.** Browsing the catalog, opening a spec, listing grants and reading the
-audit log itself write no rows. The log records _changes_; auditing every page
-view would bury them.
-
-**Secrets.** A settings update records the _names_ of the keys that changed and
-never their values. A credential event records the type and the last four
-characters, never the material.
-
-**Failed sign-ins.** They are rate-limited rather than logged — recording them
-would let anyone fill the table by guessing.
+- **reads** (browsing, opening specs, reading the audit log);
+- **secrets**: a settings change records which keys changed, never their
+  values; a credential event records the type and last four characters only;
+- **failed sign-ins**, which are rate-limited instead, so nobody can flood the
+  table by guessing.
 
 ---
 
-## God mode (super admin only)
+## God mode (super admin)
 
-**Administration → God mode.** Four emergency operations, all requiring a
-**written reason**.
+**Administration → God mode** holds four emergency operations. Each needs a
+written **Reason** and a typed confirmation.
 
-Nothing here is a new capability — every action is reachable through an ordinary
-endpoint by _somebody_. What god mode adds is doing it to **someone else's
-resources without being the owner**, and the obligation to say why.
+God mode adds no new capability. It lets you act on **someone else's**
+resources without owning them, and records why. Every action writes two audit
+rows: the ordinary one (`access.revoke`, `api.delete`, …) and a `god.*` row with
+your reason.
 
-Every god-mode action writes **two** audit rows: the ordinary one for the
-underlying operation (`access.revoke`, `api.delete`, …) and a `god.*` row
-carrying your reason. An emergency action leaves a trail of both what was done
-and why it was done this way.
+Each picker lists the 200 most recent records. For anything older, paste the
+exact **Grant ID**, **API ID** or **Account ID**. Check the ID shown in the
+confirmation dialog before you confirm. The usual role, self-disable and
+last-super-admin rules still apply.
 
-The grant, API, and account pickers list the most recent page (up to 200
-records). For a record outside that page, paste its exact identifier into
-**Grant ID**, **API ID**, or **Account ID**. Selecting a recent record fills the
-same field. The confirmation dialog displays the exact target ID; verify it
-before typing the confirmation phrase. Existing server-side role, self-disable,
-and last-super-admin restrictions apply equally to pasted IDs.
+### Emergency grant revocation
 
-### Revoke grant
+**Affects:** one identity, one API. Confirm by typing `REVOKE`.
 
-**Blast radius: one user, one API.**
+Revokes any grant, whoever owns the API. The API's access group is removed from
+the grantee's gateway consumer, so their next call to that API gets `403`. Their
+credential and their other APIs are untouched.
 
-Revokes any grant regardless of who owns the API. The access group is removed
-from that user's gateway consumer; their next call to that API is a `403`.
-Their credential still authenticates, and their access to every other API is
-untouched.
+_Use when_ access must stop now and the provider cannot be reached.
 
-_Use when_ a provider is unreachable and access must stop now.
+### Delete an API
 
-### Delete API
+**Affects:** one API and all its consumers. **Irreversible.** Confirm by typing
+the API's slug (`DELETE` for an ID outside the picker list).
 
-**Blast radius: one API, every consumer of it. Irreversible.**
+Removes the API, its gateway proxy and plugins, whoever owns it. Calls start
+failing immediately; the access group comes off every grantee; all grants,
+requests and spec revisions are deleted; grantees are notified.
 
-Removes the API and its gateway proxy and plugins whoever owns it. Every call
-starts failing immediately, the access group is stripped from every grantee, and
-all grants, requests and spec revisions are deleted. Grantees are notified.
+**Also revoke every active grant for this API** records each grant as its own
+`access.revoke` entry before the deletion. The grants go either way; this makes
+each one visible in the audit log. Turn it on during an incident.
 
-**Revoke grants** (optional) additionally records each revocation as an
-individual `access.revoke` entry before the deletion. Deletion removes the
-grants either way; this makes each one legible to a later audit review. Turn it
-on if the deletion is part of an incident.
+_Use when_ an API is leaking data or breaking policy and the owner cannot act.
+Otherwise ask the provider to **retire** it, which stops new onboarding without
+breaking anyone.
 
-_Use when_ an API is leaking data or violating policy and the owner cannot act.
-For anything less urgent, ask the provider to **retire** it instead — retiring
-stops new onboarding without breaking live integrations.
+### Disable an account
 
-### Disable user
+**Affects:** one account, everywhere. Confirm by typing the account's email
+(`DISABLE` for an ID outside the picker list).
 
-**Blast radius: one account, everywhere.**
+Disables the account exactly as [Disabling an account](#disabling-an-account)
+describes: sessions end, sign-in is blocked, and its gateway credentials are
+revoked. **Also revoke every grant held by this account** additionally revokes
+its approvals, so re-enabling it later does not restore any access. For a
+security incident, turn it on.
 
-Disables the account, **destroys every session it holds** (open tabs get a
-`401` on the next request), and blocks sign-in.
+Refused for the last active super admin and for your own account.
 
-**Revoke grants** (optional but usually correct) additionally strips every
-access group from their gateway consumer. Without it, the person is locked out
-of the _portal_ while their API keys keep working against the _gateway_ — the
-gap that catches people out. For a security incident, turn it on.
+_Use when_ an account is compromised or someone has left.
 
-Refused for the **last active super admin**, and for your own account.
+### Platform broadcast
 
-_Use when_ an account is compromised or an employee has left.
+**Affects:** everyone in the audience except you. Confirm by typing `BROADCAST`.
 
-### Broadcast
+Each recipient gets a bell notification and the message in their **platform
+inbox thread**, where any admin can follow up. Tick **Also send this as an
+email** to queue an email too. The audience picker works as in [mass
+email](#audience); use **All administrative roles** for an incident, because
+ticking only Admin leaves out every super admin.
 
-**Blast radius: everyone in the selected audience.**
+Limits, checked before anything is written:
 
-Sends a platform message: a bell notification to every recipient, plus the
-message dropped into each recipient's **platform inbox thread** — so it survives
-being dismissed from the bell, and any administrator can follow up in the same
-thread. Optionally enqueues an email as well.
+- `NEXUS_MAX_BROADCAST_RECIPIENTS` (default 5000) per broadcast;
+- `NEXUS_MAX_BROADCASTS_PER_DAY` (default 20) per super admin in a rolling
+  24 hours. A slot is used as soon as you confirm, even if the send then
+  fails. An audience that matches nobody is refused and uses no slot.
 
-Audience selection works exactly like mass email (everyone / filtered /
-specific accounts), including the **All administrative roles** shortcut — which
-is the one you want for an incident, because ticking _Admin_ alone leaves every
-super admin out.
-The composer reuses its email campaign key after a failed request, so retrying
-unchanged content does not queue duplicate mail. A successful send starts a new
-campaign for the next composition. API callers can supply `idempotency_key`
-(8–128 characters); use a new key for an intentional repeat. Without a key,
-identical subject/body and audience are deduplicated per sender and recipient.
-This protection applies to email; in-app notifications/messages remain per call.
-You are excluded from your own broadcast.
+Broadcasts do not count against your own daily message allowance.
 
-**Two ceilings bound a broadcast**, both checked before anything is written:
-`NEXUS_MAX_BROADCAST_RECIPIENTS` (default 5 000) on one announcement's audience,
-and `NEXUS_MAX_BROADCASTS_PER_DAY` (default 20) on how many you may send in a
-rolling 24 hours. Exceeding either is refused with a message naming the limit,
-the audience size and the setting to raise. Broadcast messages do **not** count
-against your own daily messaging allowance — one announcement writes a row per
-account, and charging those to you used to block your ordinary messages, support
-follow-ups included, for the rest of the day.
+The response reports `delivered` (inboxes reached) and `failed`. One unreachable
+account never stops the rest. The audit log records the attempt
+(`god.broadcast`) and the outcome (`god.broadcast_complete`) separately.
 
-The response says how far it got: `delivered` is the number of accounts whose
-inbox actually received it, and `failed` the number it could not reach. A single
-unreachable account never stops the rest of an emergency announcement, so those
-two are how a partial send tells you. A daily slot is spent the moment you
-confirm, whether the send then succeeds or not — the audit trail records the
-attempt (`god.broadcast`) separately from its outcome
-(`god.broadcast_complete`). An audience that matches nobody is refused outright
-and costs you nothing.
+Retrying unchanged content from the same form does not send duplicate email.
+API callers can pass `idempotency_key` (8–128 characters); without one,
+identical content to the same audience is still not emailed twice. This applies
+to email only: in-app notifications and inbox messages are sent on every call.
 
-_Use for_ incident notices, maintenance windows and forced credential
-rotations — anything people must not miss. For routine announcements, prefer
-**mass email**: broadcast creates an inbox thread per recipient, which is a lot
-of noise for a newsletter.
+_Use for_ incidents, maintenance windows and forced credential rotations. For
+routine news, use **mass email**: a broadcast adds an inbox thread per
+recipient.
 
 ---
 
 ## Routine checks
 
-**Daily-ish**
+**Daily**
 
-- `GET /api/health` is `ok` (or `degraded` with a known gateway issue).
+- `GET /api/health` reports `ok` (or `degraded` for a known gateway issue).
 - No unexpected `god.*` entries in the audit log.
+- No accounts showing **Gateway revocation pending** on the Users page.
 
 **Weekly**
 
 - Skim the audit log for `user.role_change` and `api.delete`.
 - Check the email outbox for `failed` rows
   ([`../operations.md`](../operations.md#6-the-email-outbox)).
-- Review pending access requests that no provider has touched — clients tend to
-  message support rather than chase.
+- Look for access requests no provider has answered. Clients tend to message
+  support rather than chase.
 
-**On a schedule**
+**Periodically**
 
-- Confirm at least **two** active super admins exist.
-- Review admin accounts: is everyone who holds `admin` still supposed to?
-- Verify backups restore — of the Nexus database **and** the Ferrum Edge state.
-- Send an SMTP test; relay credentials expire quietly.
+- Confirm at least **two** active super admins.
+- Review who holds Admin and Super Admin.
+- Test that backups restore, for both the Nexus database **and** Ferrum Edge.
+- Run **Send test email**; relay credentials expire quietly.
 
 ---
 
 ## Troubleshooting
 
-**"I cannot promote someone to admin."** You are an `admin`, not a
-`super_admin`. Only a super admin confers admin roles.
+**"I cannot promote someone to admin."** Only a super admin can grant admin
+roles.
 
 **"I cannot disable this account."** It is the last active super admin, it is
-an administrator and you are only an admin, or it is your own account.
+an administrator and you are an admin, or it is your own account.
 
-**"Nobody can sign in or register after I enabled CAPTCHA."** CAPTCHA fails
-closed, so a secret that is missing or wrong, or a vendor that is unreachable,
-refuses every sign-in. Saving an activation now requires passing a self-test in
-Settings → CAPTCHA first, so this should only happen if the vendor breaks
-afterwards. While you are still signed in, untick **Enabled** and save — that
-needs no challenge. If nobody is signed in, an operator restarts the server with
-`NEXUS_CAPTCHA_ENFORCEMENT=disabled`
+**"Nobody can sign in or register after CAPTCHA was turned on."** CAPTCHA fails
+closed, so a broken vendor or secret refuses every attempt. If a super admin is
+still signed in, untick **Require a CAPTCHA challenge** and save. Otherwise an
+operator restarts the server with `NEXUS_CAPTCHA_ENFORCEMENT=disabled`
 ([runbook](../operations.md#recovering-a-portal-locked-out-by-captcha)).
 
-**"New users never get their verification email."** SMTP is unconfigured or
-broken, so verification mail is sitting in the queue. Fix SMTP and send a test;
-the backlog will drain. As a stopgap, disable **Require email verification**.
+**"New users never get their verification email."** SMTP is missing or broken
+and the mail is waiting in the outbox. Fix SMTP and send a test; the backlog
+then drains. Meanwhile, turn off **Require email verification before sign-in**.
 
-**"A user says they were disabled but their API key still works."** Expected —
-disabling blocks the portal, not the gateway. Use god mode → Disable user with
-**revoke grants**, or revoke their grants individually.
+**"A disabled user's API key still works."** The gateway revocation has not
+finished. On **Users**, look for **Gateway revocation pending** on that account
+and choose **Retry**. If it keeps failing, the gateway is unreachable; see
+[`../operations.md`](../operations.md#11-gateway-revocation-for-disabled-accounts).
 
-**"A provider is unresponsive and a client is blocked."** Any admin can approve,
-deny or revoke on any API through the ordinary routes — you do not need god
-mode for that, and the ordinary route leaves a cleaner trail. Open
-**Administration → All APIs** and click the row: it takes you to that API's
-management workspace, requests and grants included, whoever owns it. The
-catalog page carries the same **Manage API** link for an administrator.
+**"A provider is unresponsive and a client is blocked."** Any admin can
+approve, deny or revoke on any API without god mode, and that leaves a cleaner
+trail. Open **Administration → All APIs** and select the API to reach its
+management page, including **Requests** and **Grants**. The catalog page also
+shows **Manage API** to admins.
 
-**"Everything gateway-related is failing with a 502."** The Ferrum Edge Admin
-API is unreachable or rejecting Nexus's credentials. Check
-`GET /api/health/edge`; if it is down, this is an operator issue — see
-[`../operations.md`](../operations.md#9-health-checks). The portal itself keeps
-working; only publishing, approvals and credential operations are affected.
+**"Everything gateway-related fails with 502."** Nexus cannot reach the Ferrum
+Edge Admin API, or Edge rejects its credentials. Check `GET /api/health/edge`
+and hand it to an operator ([`../operations.md`](../operations.md#9-health-checks)).
+The portal keeps working; publishing, approvals and credential operations fail
+until it is fixed.

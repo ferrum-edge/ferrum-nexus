@@ -11,60 +11,56 @@
   <img src="https://img.shields.io/badge/TypeScript-strict-blue" alt="TypeScript" />
 </p>
 
-Ferrum Nexus is the multi-user developer portal and workflow layer that sits in
-front of [Ferrum Edge](https://github.com/ferrum-edge/ferrum-edge). Ferrum Edge
-owns proxies, upstreams, plugins, consumers, credentials, and runtime gateway
-behavior. **Ferrum Nexus owns portal accounts, approvals, messaging,
-notifications, branding, audit history, request state, and the user-facing API
-catalog.**
+Ferrum Nexus is the multi-user developer portal in front of
+[Ferrum Edge](https://github.com/ferrum-edge/ferrum-edge).
 
-The browser never talks to the Ferrum Edge Admin API directly — every gateway
-mutation goes through the Nexus backend, which enforces RBAC, audit logging,
-and per-user authorization before forwarding to Edge.
+- **Ferrum Edge** owns proxies, upstreams, plugins, consumers, credentials and
+  runtime gateway behavior.
+- **Ferrum Nexus** owns portal accounts, approvals, messaging, notifications,
+  branding, audit history, request state and the API catalog.
+
+The browser never calls the Ferrum Edge Admin API. Every gateway change goes
+through the Nexus backend, which checks roles and ownership and writes an audit
+row before calling Edge.
 
 > Required Notice: Copyright Ferrum Nexus (https://github.com/ferrum-edge)
 
 ## Development status
 
-`v0.1.0` is the first supported Ferrum Nexus release, paired with Ferrum Edge
-`v0.9.7` — see the [release notes](docs/release-notes.md) for the supported
-combination and its known limitations.
+`v0.1.0` is the first supported release, paired with Ferrum Edge `v0.9.7`. The
+[release notes](docs/release-notes.md) list the supported pair and its known
+limitations.
 
-- **Production upgrades.** `v0.1.0` froze the `001_initial` schema baseline. Schema
-  changes now ship as forward migrations that upgrade a released database in place,
-  CI rejects edits to released migrations, and upgrades never require a reset — see
+- **Production upgrades.** Schema changes ship as forward migrations that
+  upgrade a released database in place; upgrades never require a reset. See
   [schema versioning and upgrades](docs/operations.md#schema-versioning-and-upgrades)
   and [backup and restore](docs/operations.md#5-backup-and-restore).
-- **Development databases.** A disposable database created before `v0.1.0` must be
-  recreated — see the [development reset](docs/operations.md#buildout-schema-policy).
+- **Development databases.** A disposable database created before `v0.1.0` must
+  be recreated with the [development reset](docs/operations.md#buildout-schema-policy).
   Never apply that reset to a database you need to keep.
 
 ## Features
 
-- **API clients** can register, verify their email (and re-send the link),
-  reset a forgotten password, manage contact info, create and rotate
-  gateway credentials, browse the API catalog with rendered OpenAPI docs,
-  request access with a justification, message providers, and receive
-  email + in-app notifications.
-- **API providers** can publish OpenAPI specs (which create Ferrum Edge
-  proxies), choose whether an API is externally requestable, review and
-  approve / deny / revoke access requests, edit safe runtime settings (rate
-  limits, auth plugin selection, access policy, browser CORS policy, the
-  upstream), message clients, and create test consumers for their own APIs.
-- **Portal admins** can configure CAPTCHA, branding, email senders and
-  templates, send mass emails, manage users / providers / APIs / grants,
-  view a historical audit log, and use **god mode** for emergency revoke,
-  spec deletion, user disablement, and direct platform messaging.
-- **Ferrum integration** uses one Ferrum consumer per _identity_ per namespace:
-  a client account (`nexus-user-<id>`), or one of its **applications**
-  (`nexus-app-<id>`). Approvals add an `acl_group`
-  (`nexus:api:<api_id>:approved`) to that consumer; revocations remove it. Each
-  requestable API gets an `access_control` plugin that allows only that group.
-- **Applications** let one account keep its integrations apart: each has its own
-  approved APIs and its own credentials, and because the boundary is the Edge
-  consumer, two applications of one owner approved for different APIs cannot
-  call each other's. Account-scoped access is unchanged and remains the
-  default.
+- **API clients** register, verify their email, reset a forgotten password,
+  browse the catalog with rendered OpenAPI docs, request access with a
+  justification, issue and rotate gateway credentials, message providers, and
+  get email and in-app notifications.
+- **API providers** publish OpenAPI specs (each one becomes a Ferrum Edge
+  proxy), choose whether an API needs an access request, approve, deny or
+  revoke access, edit runtime settings (rate limit, auth plugin, access policy,
+  CORS, upstream), message clients, and create test consumers for their own
+  APIs.
+- **Portal admins** configure CAPTCHA, branding, email and templates, send mass
+  email, manage users, APIs and grants, read the audit log, and use **god
+  mode** to revoke a grant, delete an API, disable a user or broadcast to users.
+- **Gateway mapping.** Each identity gets one Ferrum consumer: an account
+  (`nexus-user-<id>`) or one of its **applications** (`nexus-app-<id>`). An
+  approval adds the ACL group `nexus:api:<api_id>:approved` to that consumer
+  and a revocation removes it. Each requestable API has an `access_control`
+  plugin that allows only that group.
+- **Applications** keep one account's integrations apart. Each has its own
+  approved APIs and credentials, so two applications of the same owner cannot
+  call each other's APIs. Account-level access remains the default.
 
 ## Screenshots
 
@@ -137,27 +133,23 @@ cp .env.example .env
 # edit .env — at minimum set NEXUS_SECRET_KEY and FERRUM_ADMIN_JWT_SECRET
 # (both at least 32 characters; FERRUM_ADMIN_URL defaults to http://127.0.0.1:9000)
 
-npm run migrate   # builds shared, then initializes the schema
-npm run dev
+npm run migrate   # builds shared, then migrates the database
+npm run dev       # backend :8787, web :5173
 ```
 
-Both commands read the root `.env` (looked up in the working directory and its
-parent, so the workspace scripts find it too). Anything already exported in the
-shell wins over the file, and a deployed image with no `.env` is unaffected.
-A relative `NEXUS_SQLITE_PATH` resolves from `server/`, where the workspace
-scripts run.
+Open <http://127.0.0.1:5173>. The backend listens on `http://127.0.0.1:8787`.
 
-Open <http://127.0.0.1:5173>. The backend serves on `http://127.0.0.1:8787`.
+- Both commands read the repo-root `.env`. Variables already exported in the
+  shell win over the file.
+- A relative `NEXUS_SQLITE_PATH` resolves from `server/`, where the workspace
+  scripts run, so the default database is `server/data/nexus.sqlite`.
+- The Vite dev server listens on `NEXUS_WEB_PORT` (alias `VITE_DEV_PORT`) and
+  proxies `/api` to `NEXUS_API_PROXY_TARGET`, or to `NEXUS_PORT` when that is
+  unset. A port that is already taken fails the start instead of moving to the
+  next free one.
 
-Those are the defaults. The Vite half reads the same repo-root `.env` as the
-BFF: `NEXUS_WEB_PORT` (alias `VITE_DEV_PORT`) is the SPA listen port, and
-`/api` is proxied to `NEXUS_API_PROXY_TARGET` or, when that is unset, to
-`http://127.0.0.1:<NEXUS_PORT>` (`NEXUS_PORT` is the existing API bind port).
-A taken port fails the Vite process instead of silently moving to the next
-one. Invalid values fail with the variable name in the error.
-
-To run a second clone beside a stack that already holds 5173/8787, point that
-checkout's `.env` at a free pair and a separate SQLite file:
+To run a second clone beside a stack that already holds 5173/8787, give that
+checkout's `.env` its own ports and SQLite file:
 
 ```bash
 NEXUS_PORT=8788
@@ -166,14 +158,13 @@ NEXUS_PUBLIC_URL=http://127.0.0.1:5175
 NEXUS_SQLITE_PATH=./data/nexus-b.sqlite
 ```
 
-Give the second stack its own Edge namespace and gateway ports too if it is
-not sharing the first gateway.
+If the second stack does not share the first gateway, give it its own Edge
+namespace and gateway ports too.
 
-The first user to register becomes the initial `super_admin`, so that one
-registration has to prove it comes from you: while the portal has no super
-admin the sign-up form asks for a **bootstrap token**. Set
-`NEXUS_BOOTSTRAP_TOKEN` yourself, or leave it blank and copy the token the
-server prints at startup:
+The first account to register becomes the `super_admin`. While the portal has
+no active super admin, registration requires a **bootstrap token**. Set
+`NEXUS_BOOTSTRAP_TOKEN` (at least 16 characters), or leave it blank and copy
+the token the server prints at startup:
 
 ```
 FIRST-RUN BOOTSTRAP: this portal has no super_admin yet.
@@ -181,69 +172,82 @@ FIRST-RUN BOOTSTRAP: this portal has no super_admin yet.
     2f6c1b…  ← paste this into the form's "Bootstrap token" field
 ```
 
-The generated token lives for the life of that process and differs per
-instance, so pin `NEXUS_BOOTSTRAP_TOKEN` for anything running more than one.
+A generated token changes on every restart and differs per instance, so set
+`NEXUS_BOOTSTRAP_TOKEN` when you run more than one instance.
 
 ### Locked out by CAPTCHA
 
-CAPTCHA is configured in **Admin → Settings** and fails closed, so a wrong site
-key or an unreachable vendor refuses every password login, the super admin's
-included. Saving an activation therefore requires solving the challenge in that
-settings page first — the portal verifies the token with the vendor before it
-stores the configuration. If a portal is stuck anyway (the vendor broke after
-the fact, say), start the server with `NEXUS_CAPTCHA_ENFORCEMENT=disabled`,
-which makes sign-in and registration skip the challenge without changing a
-stored setting, fix the configuration, then remove the variable and restart.
-Every session admitted that way is audited, and the running server says so at
-startup. Full runbook:
+CAPTCHA is configured in **Administration → Settings** and fails closed: a
+wrong site key or an unreachable vendor blocks every password login, including
+the super admin's. To prevent that, saving a CAPTCHA configuration requires
+solving its challenge first.
+
+If a portal is stuck anyway, restart the server with
+`NEXUS_CAPTCHA_ENFORCEMENT=disabled`. Sign-in and registration then skip the
+challenge without changing the stored setting. Fix the configuration, remove
+the variable and restart. The server prints a banner at startup while the
+variable is set, and every session it admits is audited. Full runbook:
 [`docs/operations.md`](docs/operations.md#recovering-a-portal-locked-out-by-captcha).
 
 ## Database
 
-Ferrum Nexus uses string UUIDs across all databases so PostgreSQL, MySQL,
-SQLite, and MongoDB share the same logical schema.
+PostgreSQL, MySQL, SQLite and MongoDB share one logical schema with string
+UUID keys. Choose the driver in `.env`:
 
 ```bash
-# choose with NEXUS_DB_DRIVER in .env
-NEXUS_DB_DRIVER=sqlite      # default; file at ./data/nexus.sqlite
+NEXUS_DB_DRIVER=sqlite      # default; NEXUS_SQLITE_PATH=./data/nexus.sqlite
 NEXUS_DB_DRIVER=postgres    # NEXUS_DB_URL=postgres://...
 NEXUS_DB_DRIVER=mysql       # NEXUS_DB_URL=mysql://...
 NEXUS_DB_DRIVER=mongodb     # NEXUS_DB_URL=mongodb+srv://...
 ```
 
-> Note: with MongoDB, multi-document workflows require a replica set for
-> transactional atomicity. See [`docs/operations.md`](docs/operations.md).
+MongoDB must be a replica set: Nexus needs multi-document transactions and
+refuses to start against a standalone server unless
+`NEXUS_DB_ALLOW_STANDALONE=true` (development only). See
+[`docs/operations.md`](docs/operations.md).
 
 ## Docker
 
 ```bash
 docker build -t ferrum-nexus -f docker/Dockerfile .
-# FERRUM_ADMIN_JWT_SECRET must match the gateway's own value, and both
-# secrets must be at least 32 characters or the server refuses to start.
-# The container binds 0.0.0.0, so publish the port on loopback (as below)
-# rather than `-p 8787:8787`, which would offer it on every host interface.
 docker run --rm -p 127.0.0.1:8787:8787 \
+  --add-host=host.docker.internal:host-gateway \
   -e NEXUS_SECRET_KEY=$(openssl rand -hex 32) \
+  -e NEXUS_PUBLIC_URL=http://127.0.0.1:8787 \
+  -e NEXUS_COOKIE_SECURE=false \
   -e FERRUM_ADMIN_URL=http://host.docker.internal:9000 \
+  -e FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true \
   -e FERRUM_ADMIN_JWT_SECRET="$FERRUM_ADMIN_JWT_SECRET" \
   ferrum-nexus
 ```
 
-The bootstrap token is printed to the container log
-(`docker logs`); pass `-e NEXUS_BOOTSTRAP_TOKEN=…` to choose it instead.
+- Both secrets must be at least 32 characters, and `FERRUM_ADMIN_JWT_SECRET`
+  must match the gateway's, or the server refuses to start.
+- `FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true` is required for a plain `http://`
+  Admin API URL on any host other than loopback.
+- `NEXUS_COOKIE_SECURE=false` is for plain-http local use only. Behind TLS,
+  set `NEXUS_PUBLIC_URL` to the `https://` origin and drop it.
+- The container listens on `0.0.0.0`, so publish the port on loopback as shown
+  rather than `-p 8787:8787`, which exposes it on every host interface.
+- Without a volume on `/app/data`, the SQLite database is lost with the
+  container.
 
-For a full stack alongside Postgres and a Ferrum Edge instance, use the
-[compatibility record](release/compatibility.env) from this checkout. It selects
-the published Edge v0.9.7 image by digest, the same image selected by CI. The
-Nexus image is built from this checkout, so for the supported release check out
-its tag first (`git checkout --detach v0.1.0`). See the
-[release notes](docs/release-notes.md) for the supported pair.
+The bootstrap token is printed to the container log (`docker logs`). Pass
+`-e NEXUS_BOOTSTRAP_TOKEN=…` to choose it instead.
+
+### Full stack with Compose
+
+The Compose example runs Nexus, PostgreSQL and Ferrum Edge. The
+[compatibility record](release/compatibility.env) selects the Edge `v0.9.7`
+image by digest, the same image CI tests. The Nexus image is built from your
+checkout, so check out the release tag first
+(`git checkout --detach v0.1.0`).
 
 The four secrets and the Edge image are required. Keep the secrets stable for
-the life of the stack; save them in a secret manager rather than generating new
-ones when restarting it. Run from the repository root (every release tag's
-[verbatim quickstart gate](docs/release-notes.md#release-step) runs this block
-exactly as written, in a clean runner, through to an authenticated request):
+the life of the stack: store them in a secret manager instead of generating new
+ones on restart. Run from the repository root. The
+[verbatim quickstart gate](docs/release-notes.md#release-step) runs this exact
+block in a clean runner for every release tag:
 
 <!-- compose-quickstart:start -->
 
@@ -261,12 +265,12 @@ docker compose up -d
 
 <!-- compose-quickstart:end -->
 
-The portal is at <http://127.0.0.1:8787>. `docker compose logs nexus` shows
-the first-run bootstrap token. For retained data, TLS, backup and restore, and
-the supported single-active-writer model, read [operations](docs/operations.md),
-including its production upgrade procedure. Follow the
-[getting-started walkthrough](docs/getting-started.md) to register, publish an
-API, and make an authenticated request through Edge.
+The portal is at <http://127.0.0.1:8787> and the gateway's proxy listener at
+<http://127.0.0.1:8000>. `docker compose logs nexus` shows the bootstrap token.
+Next, follow the [getting-started walkthrough](docs/getting-started.md) to
+publish an API and call it through Edge. Before production, read
+[operations](docs/operations.md) for TLS, backups, upgrades and the
+single-active-writer model.
 
 ## Documentation
 

@@ -1,11 +1,6 @@
 # Client guide
 
-For developers who want to **use** an API published in the portal.
-
-Your job is a short loop: find the API, ask for access, wait for the provider's
-decision, issue a credential, call the API. This guide walks each step and
-explains the couple of places where the portal behaves in a way that is not
-obvious.
+For developers who want to **call** an API published in the portal.
 
 Related: [`provider-guide.md`](provider-guide.md) ·
 [`../getting-started.md`](../getting-started.md) · [`../api.md`](../api.md)
@@ -15,320 +10,285 @@ Related: [`provider-guide.md`](provider-guide.md) ·
 ## The one-minute version
 
 1. **Register**, and verify your email if the portal asks.
-2. **Browse the catalog** and read the API's documentation.
-3. **Request access** with a justification. Wait for the provider.
-4. **Issue a credential** of the type that API uses. **Save the secret — it is
+2. **Find the API** in **API catalog** and read its documentation.
+3. **Request access** on the API's **Access** tab. Wait for the provider.
+4. **Issue a credential** of the type that API uses. **Save the secret: it is
    shown once.**
-5. **Call the API** through the gateway at `/<namespace>/<slug>`.
+5. **Call the API** through the gateway at `<gateway>/<namespace>/<slug>`.
 
-Two ideas do all the work, and keeping them apart will save you a support
-ticket: a **credential** proves who you are, and a **grant** decides what you
-may reach. A missing credential is a `401`. A missing grant is a `403`.
+A **credential** proves who you are. A **grant** (an approved request) decides
+what you may reach. A bad or missing credential is a `401`. A missing grant is a
+`403`.
 
 ---
 
 ## Registering and signing in
 
-Open the portal and choose **Register**. You need an email address, a display
-name and a password of **at least 12 characters**; company and phone are
-optional and only help providers recognise you when they review your request.
+On the sign-in page, choose **Register**. You need:
 
-Pick the role **Client**. (Choose _Provider_ only if you also intend to publish
-APIs — a provider can do everything a client can.)
+- a display name and an email address;
+- a password of at least **12 characters**;
+- optionally, a company and phone number. They help providers recognise you
+  when they review your request.
 
-Depending on how your portal is configured you may hit one of these:
+Under **Account type**, pick **Client**. Pick **Provider** only if you also
+want to publish APIs; a provider can do everything a client can. If the portal
+allows only one type, the form tells you which one you get.
 
-- **Registration is closed.** Self-service sign-up is off; ask an admin to
-  create your account.
-- **A CAPTCHA challenge.** Complete it as part of the form.
-- **Email verification required.** You will not be able to sign in until you
-  click the link in the verification email. It is single-use and expires after
-  **24 hours**. If it has expired or never arrived, use **Resend the
-  verification email** — it is on the confirmation screen after you register,
-  and on the sign-in page whenever a sign-in is refused for an unverified
-  address. A new link replaces the old one, so use the most recent email. The
-  portal will only send one every 10 minutes; if a second click seems to do
-  nothing, check your spam folder before trying again.
+Depending on how the portal is configured, you may see:
 
-If verification is _not_ required, registering signs you straight in.
+- **"Not accepting self-service accounts".** Registration is closed. Ask an
+  administrator to create your account.
+- **A CAPTCHA.** Complete it as part of the form.
+- **"Check your inbox for a verification link".** You cannot sign in until you
+  click the link. It works once and expires after **24 hours**. If it expired
+  or never arrived, use **Resend the verification email**. It appears on the
+  confirmation screen, and on the sign-in page when a sign-in is refused for an
+  unverified address. A new link replaces the old one. The portal sends at most
+  one every 10 minutes, so check your spam folder before clicking again.
+
+If verification is not required, your account is ready straight away.
 
 ### If you forget your password
 
-Choose **Forgot password?** under the password box on the sign-in page, enter
-the address you registered with, and follow the link in the email. The link is
-single-use and expires after **one hour**.
+1. On the sign-in page, choose **Forgot password?**.
+2. Enter the address you registered with.
+3. Follow the link in the email. It works once and expires after **one hour**.
 
-Two things to expect:
+What to expect:
 
-- The confirmation says "if an account exists for that address" and says it for
-  every address. That is deliberate: the portal will not tell an anonymous
-  visitor which addresses are registered. It is not a sign that anything went
-  wrong.
-- **Setting a new password signs you out everywhere** — every browser, tab and
-  device. Sign in again with the new password. Your API credentials are
-  unaffected: keys, Basic auth users and JWT secrets keep working, because they
-  authenticate to the gateway rather than to the portal.
-
-If the link has expired, just request another. Only one reset link per account
-is live at a time, and requesting a second inside 10 minutes sends nothing —
-so if no email arrives, wait rather than clicking repeatedly. If you never
-receive one, the address may not be registered, or the account may have been
-disabled; ask an administrator.
+- The confirmation always says "If an account exists for that address". The
+  portal never tells a visitor which addresses are registered.
+- **Setting a new password signs you out everywhere.** Your API credentials
+  keep working, because they authenticate to the gateway, not the portal.
+- Only one reset link is live at a time, and a second request within 10
+  minutes sends nothing. If no email arrives, wait rather than clicking again.
+  If it never arrives, the address may not be registered or the account may be
+  disabled. Ask an administrator.
 
 ### Your profile
 
-**Profile** lets you change your display name, company and phone, and set a new
-password (you will need your current one). You cannot change your own email,
-role or account status from here — ask an admin.
+**Profile** lets you change your display name, company and phone, and set a
+new password (you need your current one). Changing your password signs out your
+other sessions. Only an administrator can change your email, role or account
+status.
 
 ---
 
 ## Browsing the catalog
 
-**API catalog** lists every API you are allowed to see. Each card shows the
-name, version, owner and a badge for your relationship to it:
+**API catalog** lists every API you are allowed to see. Search by name, slug
+or description. Each card shows the API's version, authentication method,
+owner, and a badge for your relationship to it:
 
-| Badge            | Meaning                                                      |
-| ---------------- | ------------------------------------------------------------ |
-| **No access**    | The API is requestable, and you have never asked for access. |
-| **Open access**  | Approval is not required; any portal account may call it.    |
-| **Pending**      | Your request is waiting on the provider.                     |
-| **Granted**      | You have active access.                                      |
-| **Denied**       | The provider declined your last request.                     |
-| **Revoked**      | Access you had was withdrawn.                                |
-| **You own this** | You published this one.                                      |
+| Badge            | Meaning                                             |
+| ---------------- | --------------------------------------------------- |
+| **No access**    | The API needs approval and you have not asked yet.  |
+| **Open access**  | No approval needed. Any portal account may call it. |
+| **Pending**      | Your request is waiting on the provider.            |
+| **Granted**      | You have active access.                             |
+| **Denied**       | The provider declined your last request.            |
+| **Revoked**      | Access you had was withdrawn.                       |
+| **You own this** | You published this API.                             |
 
-Search by name, slug, or description and use pagination to browse the results.
-The catalog page displays requestability and internal-visibility badges; it
-does not offer requestability or visibility filter controls. Those filters are
-available through the [catalog API](../api.md).
+Cards also carry **Requestable** or **Open**, and **Unlisted**, **Private** or
+**Retired** where they apply.
 
 ### Reading the documentation
 
-Open an API to get its rendered OpenAPI documentation — paths, operations,
-parameters, request and response schemas — plus the raw document if you would
-rather feed it to your own tooling. **You do not need access to read the
-docs.** That is deliberate: you should be able to tell whether an API is worth
-requesting before you ask.
+Open an API and choose the **Documentation** tab for the rendered OpenAPI
+document: operations, parameters, and request and response schemas. **You do
+not need access to read the docs**, so you can judge an API before you ask for
+it. For your own tooling, `GET /api/catalog/<slug>/spec` returns the document
+as uploaded (`raw_spec`).
 
-Operations appear under each of their tags. Large documents initially show up
-to 200 entries; the **Show more** control reveals up to 200 additional entries
-per click. When operations appear under multiple tags, the paging count is
-labeled **operation entries** and includes each appearance. The header counts
-each operation only once.
+Large documents show 200 operation entries at first; **Show 200 more** adds
+the next batch. An operation listed under several tags counts once per tag.
 
-### "I was sent a link but I cannot find it in the catalog"
+### "I was sent a link but cannot find the API in the catalog"
 
-That is an **internal** API. Internal means _unlisted_, not private: it does not
-appear in general browsing, but anyone with the link can open it, read the
-documentation and request access through the normal flow. Follow the link the
-provider gave you.
+It is an **internal** (unlisted) API. It does not appear in browsing, but
+anyone with the link can open it, read the docs and request access. Use the
+link the provider gave you.
 
 ### "The API I was using has disappeared"
 
-It was probably **retired**. Retirement stops an API circulating to new users;
-it does not break anything already running. If you hold an active grant it
-stays visible to you and your integration keeps working. If you do not, the
-provider has stopped onboarding — message them.
+It was probably **retired**. A retired API takes no new requests, but it keeps
+working for everyone already approved, and stays visible to them. If you had no
+grant, the provider has stopped onboarding. Message them.
 
 ---
 
 ## Requesting access
 
-An API accepts requests only if the provider marked it **requestable**. If the
-Request access button is missing, the API is either not requestable, retired, or
-the identity chosen under **Requesting for** already has access or a pending
-request.
+1. Open the API and choose the **Access** tab.
+2. Under **Requesting for**, choose who the access is for: **My account**, or
+   one of your [applications](#applications).
+3. Fill in **Why do you need access?** (up to 2000 characters).
+4. Choose **Request access**.
 
-Access is tracked per identity — your account and each of your applications
-separately. The **Access** tab shows the status of whichever identity you have
-selected, and says which application owns an existing request or grant. A
-pending request or a grant for one application does not stop you requesting the
-same API for another application, or for your account; pick that identity and
-submit. The picker searches and pages through your active applications, so it
-works however many you have.
-
-Click **Request access** and write a justification (up to 2000 characters).
-Treat it as the case you are making to a human, because it is one. Say:
-
-- what your integration does;
-- which endpoints you need;
-- roughly what call volume to expect;
-- who to contact on your side.
-
-"Need access" gets declined. "Nightly reconciliation of partner invoices —
+Write the justification for a human reviewer. Say what your integration does,
+which endpoints you need, roughly how many calls to expect, and who to contact.
+"Need access" gets declined. "Nightly reconciliation of partner invoices:
 `GET /invoices` and `GET /invoices/{id}`, about 200 calls a night, owner is the
 Payments team" gets approved.
 
-The provider is notified immediately. You will get an in-app notification and
-an email when they decide.
+The provider is notified straight away. You get an in-app notification, and an
+email, when they decide.
 
-### Tracking a request
+Access is tracked **per identity**. The Access tab shows the state of the
+identity you picked. A grant or pending request for one application does not
+stop you requesting the same API for another identity.
 
-The **Dashboard** shows your open requests and active grants; the catalog badge
-reflects the current state. You can **cancel** your own request while it is
-still pending — useful if you asked for the wrong API. Once decided, it can no
-longer be cancelled.
+If there is no request form, the API does not need approval (the tab says so),
+it is retired, or the selected identity already has a grant or a pending
+request.
+
+### Tracking and withdrawing a request
+
+The **Dashboard** lists your access requests and credentials. While a request
+is pending, **Withdraw request** on the Access tab cancels it. Once the provider
+has decided, it can no longer be withdrawn.
 
 ### If you are declined
 
-The provider can attach a note explaining why; it appears with the decision and
-in the email. Fix whatever they raised and request again — a declined request
-does not block a new one. If the note is unclear, **message the provider**
-(below); that is faster than re-requesting blind.
+The provider's note appears under **Last decision** on the Access tab and in
+the email. Fix what they raised and request again; a declined request does not
+block a new one. If the note is unclear, [message the
+provider](#messaging-a-provider).
 
 ---
 
 ## Applications
 
-By default everything you do belongs to **your account**: you request access as
-yourself, and a credential you issue works for every API your account is
-approved for. That is simple, and it is the right answer while you have one
-integration.
+By default everything belongs to **your account**: you request access as
+yourself, and a credential issued to your account works for every API your
+account is approved for. That is enough while you have one integration.
 
-An **application** is a second identity you own, for when you have more than
-one. Each has its own approved APIs and its own credentials, so a credential
-issued to your billing worker can call only what the billing worker was
-approved for — not what your mobile app was. That boundary is real: it is
-enforced by the gateway, not by the portal hiding things.
+An **application** is a separate identity you own. Each application is approved
+for its own APIs and has its own credentials. A credential issued to your
+billing worker can call only what the billing worker was approved for. The
+gateway enforces this.
 
-**Applications → New application**, then choose it when you request access and
-when you issue a credential.
-
-Two things worth knowing:
+To create one: **Applications → New application**, give it a name, then choose
+it under **Requesting for** and under **Identity** when you issue a credential.
 
 - **A label is not an identity.** Naming a credential "production" changes
-  nothing about what it can call. The **Identity** field on the issue form is
-  the one that does.
-- **Disabling is not revoking.** Disabling an application stops it acquiring
-  _new_ access and new credentials; the credentials it already has go on
-  working. To stop them, delete the application — which takes its gateway
-  identity with it — or revoke its access.
+  nothing about what it can call. Only the **Identity** field does.
+- **Disable** stops an application getting new access or new credentials. Its
+  existing credentials keep working.
+- **Delete** removes its gateway identity. Its credentials stop working at once
+  and its approvals are given up. You must type the application's name to
+  confirm, and it cannot be undone.
 
-Your account's own access is unaffected by any of this, and nothing you already
-have changes when you create your first application.
+Your account's own access is never affected by your applications.
 
 ---
 
 ## Credentials
 
-**Credentials** is where you mint the secrets your code actually sends. Each
-one belongs to **one identity** — your account, or one of your applications —
-and works for every API _that identity_ is approved for that uses the matching
-authentication type.
+**Credentials** is where you create the secrets your code sends. Each
+credential belongs to **one identity** (your account or one application) and
+works for every API that identity is approved for that uses the matching
+authentication method. The **Your API access** card on the same page lists your
+granted APIs with the address to call.
 
 ### Choosing a type
 
-Match the API's authentication method — the catalog page for each API says
-which one it uses:
+Match the API's authentication method, shown on its catalog page:
 
-| API uses   | Issue this credential | What you send                                                                                                                              |
-| ---------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| API Key    | **keyauth**           | `X-API-Key: <key>`                                                                                                                         |
-| HTTP Basic | **basicauth**         | Basic auth, username as shown when the credential was issued (`nexus-user-<your id>`, or `nexus-app-<application id>`), password as issued |
-| JWT        | **jwt**               | `Authorization: Bearer <token you sign>`                                                                                                   |
+| API uses   | Credential type              | What you send                                                                              |
+| ---------- | ---------------------------- | ------------------------------------------------------------------------------------------ |
+| API Key    | **API Key** (`keyauth`)      | `X-API-Key: <key>`                                                                         |
+| HTTP Basic | **HTTP Basic** (`basicauth`) | Basic auth: the consumer username (`nexus-user-<id>` or `nexus-app-<id>`) and the password |
+| JWT        | **JWT** (`jwt`)              | `Authorization: Bearer <token you sign>`                                                   |
 
-If you are approved for two APIs that use different methods, issue one
-credential of each type. The method is the provider's choice, not yours — and it
-decides whether the provider's own server ever sees your credential, so read
-[Your token reaches the provider's backend](#jwt-jwt) before you use **jwt**.
+If you use APIs with different methods, issue one credential of each type. The
+method is the provider's choice. It also decides whether the provider's server
+sees your credential: read [Your token reaches the provider's
+backend](#jwt-jwt) before you use JWT.
 
 ### Issuing one
 
-**Credentials → Issue credential**, choose the **identity** (your account, or
-one of your applications — this is what decides which APIs the secret can
-call), pick the type, give it a label you will
-recognise later (`nightly-job`, `staging`, `laptop`), and confirm.
+1. **Credentials → Issue credential**.
+2. **Identity**: your account, or one of your applications. This decides which
+   APIs the credential can call.
+3. **Credential type**: as in the table above.
+4. **Label** (optional): a note to yourself, such as `nightly-job`.
+5. Choose **Issue**.
 
-> ### The secret is shown exactly once
->
-> Copy it into your secret store **before you close the dialog.** The portal
-> stores only a fingerprint and the last four characters; the gateway redacts
-> credential material on every read. Nobody can recover it — not an
-> administrator, not the database. If you lose it, **rotate**.
+> **The secret is shown exactly once.**
+> Copy it into your secret store before you close the dialog. The portal keeps
+> only a fingerprint and the last four characters. Nobody can recover it, not
+> even an administrator. If you lose it, rotate.
 
-After the dialog closes, the credentials list shows the label, type, `…last4`
-and status — never the secret.
+The dialog shows, per type:
 
-### What the dialog gives you, per type
-
-- **keyauth** — a single key, e.g. `nxs_pQ7v3H2s…`.
-- **basicauth** — a **username** and a password. The username is your
-  _consumer_ username (`nexus-user-<your id>`), not your email. That is a
-  gateway requirement, not a portal quirk: the basic-auth credential has no
-  username field of its own, and the gateway looks you up by the consumer name.
-- **jwt** — a **signing secret** and a **key** (again your consumer username).
-  You mint your own tokens with these; see below.
+- **API Key**: the key, for example `nxs_pQ7v3H2s…`.
+- **HTTP Basic**: a username and a password. The username is the identity's
+  **consumer username** (`nexus-user-<your id>` or
+  `nexus-app-<application id>`), not your email. The gateway looks you up by
+  that name.
+- **JWT**: a **JWT signing secret** and the **JWT subject (sub)**, which is the
+  consumer username. You sign your own tokens with these.
 
 ### Rotating
 
-**Rotate** replaces a credential in one step. A new secret is created on the
-gateway and the previous value is revoked as part of the same operation — there
-is no window where both work for you to switch clients over. Callers using the
-old secret start receiving `401` as soon as gateway configuration propagates,
-which can interrupt them until you deploy the new value.
+**Rotate** replaces a credential in one step. The new secret is created and
+the old one is revoked in the same operation. There is no overlap: callers
+still using the old secret get `401` as soon as the gateway applies the change.
+The new secret is shown once.
 
-The rotation dialog shows the new secret **once**, same rule as issuing. Deploy
-it before those callers retry.
-
-If you need both secrets live during a cutover, **issue a new credential**,
-deploy it, then **revoke** the old one. Portals cap how many live credentials
-of one type you may hold (commonly **2**). Issue is refused with `409 CONFLICT`
-when you are already at the cap — revoke something unused first so you have
-room to create the extra credential.
+For a cutover with no downtime, **issue** a new credential, deploy it, then
+**revoke** the old one.
 
 ### Revoking
 
-**Revoke** deletes the credential from the gateway immediately. Anything still
-using it starts getting `401`. Revoke as soon as a secret has leaked, a laptop
-is lost, or an integration is decommissioned.
+**Revoke** deletes the credential from the gateway. Anything still using it gets
+`401`. Revoke as soon as a secret leaks, a laptop is lost, or an integration is
+retired.
 
-Hitting `409 CONFLICT` on issue means you are at the per-type cap — revoke or
-rotate an existing one first.
+### The per-type limit
+
+Each identity may hold a limited number of live credentials of each type
+(**2** by default; the operator sets `FERRUM_MAX_CREDENTIALS_PER_TYPE`). Issuing
+past the limit returns `409 CONFLICT`. Revoke or rotate one first.
 
 ---
 
 ## Calling an API
 
-Requests go to the **gateway's proxy listener**, not to the portal.
+Requests go to the **gateway**, not to the portal.
 
-**The catalog tells you the address.** Open the API, and the **Call this API**
-panel on the _Access_ tab shows the full **invoke URL** with a copy button,
-along with a copyable `curl` example for the identity you select — your account
-or one of your applications. On an API that needs approval the panel appears
-only for an identity that holds the grant, and its consumer (`nexus-user-<id>`
-or `nexus-app-<id>`) is the Basic username or JWT `sub` in the example, so use a
-credential issued to that same identity. The same URL appears next to each of
-your granted APIs on the **Credentials** page. Append the operation path from
-the OpenAPI document to it:
+**The Access tab tells you where.** Once the selected identity can call the API,
+the **Call this API** panel shows the **Invoke URL**, the header to send, the
+consumer name, and a copyable `curl` example for that identity. Use a
+credential issued to the same identity. Append the operation path from the
+OpenAPI document:
 
 ```
-<invoke URL>/<the path from the OpenAPI document>
+<invoke URL>/<path from the OpenAPI document>
 ```
 
-The invoke URL is the gateway's public origin followed by the API's listen
-path, which is always `/<namespace>/<slug>` — for a namespace of `nexus` and a
-slug of `billing`, `https://gateway.example.com/nexus/billing`.
+The invoke URL is the gateway's public address plus `/<namespace>/<slug>`. For
+namespace `nexus` and slug `billing`:
+`https://gateway.example.com/nexus/billing`.
 
-If the panel shows only the listen path and says the gateway address is not
-published, your portal administrator has not configured one yet. Ask them for
-the gateway host rather than guessing a port — the portal deliberately shows
-nothing rather than an address that might not route.
+If the panel shows only a **Gateway path** and says no gateway address is
+configured, ask an administrator for the gateway address. Do not guess a port.
 
-### API key (`keyauth`)
+### API key
 
 ```bash
 curl -sS https://gateway.example.com/nexus/billing/invoices \
   -H "X-API-Key: nxs_pQ7v3H2s…"
 ```
 
-### HTTP Basic (`basicauth`)
+### HTTP Basic
 
-The username is the credential's **consumer username** — `nexus-user-<your id>`
-for your account, `nexus-app-<application id>` for an application — exactly the
-value the issue dialog showed you. `-u` has curl base64-encode
-`username:password` into the `Authorization: Basic` header; quote the pair so
-the shell leaves punctuation in the password alone.
+The username is the consumer username the issue dialog showed you. `-u` builds
+the `Authorization: Basic` header. Quote the pair so the shell leaves the
+password alone.
 
 ```bash
 curl -sS https://gateway.example.com/nexus/billing/invoices \
@@ -337,9 +297,8 @@ curl -sS https://gateway.example.com/nexus/billing/invoices \
 
 ### JWT (`jwt`)
 
-You sign your own short-lived HS256 tokens with the secret you were issued. The
-**`sub` claim must be your consumer username** (the `jwt_key` value from the
-dialog) — that is how the gateway identifies you.
+Sign short-lived HS256 tokens with the signing secret. The **`sub` claim must
+be the consumer username**, and the token must carry an `exp`.
 
 ```js
 // npm i jose
@@ -347,7 +306,7 @@ import { SignJWT } from 'jose';
 
 const token = await new SignJWT({})
   .setProtectedHeader({ alg: 'HS256' })
-  .setSubject('nexus-user-7c1d…') // jwt_key from the issue dialog
+  .setSubject('nexus-user-7c1d…') // "JWT subject (sub)" from the issue dialog
   .setIssuedAt()
   .setExpirationTime('5m')
   .sign(new TextEncoder().encode(process.env.NEXUS_JWT_SECRET));
@@ -358,138 +317,126 @@ curl -sS https://gateway.example.com/nexus/billing/invoices \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Keep the lifetime short and mint per request or per batch. Never ship the
-signing secret to a browser or a mobile app — anyone holding it can mint tokens
-as you.
+Keep lifetimes short. Never ship the signing secret to a browser or mobile app:
+anyone holding it can mint tokens as you.
 
-> ### Your token reaches the provider's backend
->
-> The gateway strips an API key and a Basic password out of a request before it
-> forwards it upstream. It does **not** strip `Authorization: Bearer`. A JWT
-> usually carries claims the backend wants, and the gateway offers no option to
-> hide it — so the provider's server sees every token you sign.
->
-> Your **signing secret is never forwarded**, so a provider cannot mint tokens
-> as you. It can replay a token you sent it until that token expires, and the
-> gateway does not cap `exp` — the lifetime is whatever you sign. That is one
-> more reason to keep it short. Put nothing in a custom claim you would not show
-> the provider.
->
-> This applies only to **jwt**. If an API uses **keyauth** or **basicauth**,
-> that credential stops at the gateway and never reaches the provider.
+> **Your token reaches the provider's backend.**
+> The gateway strips an API key or Basic password before forwarding a request.
+> It does **not** strip `Authorization: Bearer`, so the provider's server sees
+> every token you send. It can replay a token until it expires (the gateway does
+> not cap `exp`), but it never sees your signing secret. Keep tokens short-lived
+> and put nothing in a claim you would not show the provider.
 
 ### Reading the failure
 
-| Status        | Meaning                                         | Do this                                                                                                    |
-| ------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **401**       | The gateway did not recognise your credential.  | Wrong or missing header; wrong credential _type_ for this API; the credential was revoked or rotated away. |
-| **403**       | Authenticated, but not authorised for this API. | Your grant was revoked, or was never approved. Check the catalog badge.                                    |
-| **404**       | Wrong path.                                     | Check the namespace and slug, and that the path exists in the document.                                    |
-| **429**       | Rate limit.                                     | The provider set a per-consumer quota. Back off, and watch the rate-limit headers below.                   |
-| **502 / 503** | The API's own backend is unhealthy.             | Not your credential. Message the provider.                                                                 |
+| Status        | Meaning                                     | What to check                                                                               |
+| ------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| **401**       | The gateway did not accept your credential. | Header missing or wrong; wrong credential type for this API; credential revoked or rotated. |
+| **403**       | Authenticated, but not approved.            | Grant revoked or never approved, or the credential belongs to a different identity.         |
+| **404**       | Wrong path.                                 | Namespace, slug, and that the path exists in the document.                                  |
+| **429**       | Rate limit.                                 | Back off; see below.                                                                        |
+| **502 / 503** | The API's backend is unhealthy.             | Not your credential. Message the provider.                                                  |
 
-A useful diagnostic: **401 is about the credential, 403 is about the grant.**
-If you can call one approved API but not another, the credential is fine and
-the second grant is the problem.
+If you can call one approved API but not another, the credential is fine and the
+second grant is the problem.
 
 ### Staying under a rate limit
 
-The portal does not display your remaining quota. It cannot: the budget is
-counted at the gateway, per consumer, and Nexus never sees it. What you get
-instead is better — the gateway tells you on every call.
+The portal does not show your remaining quota; the gateway counts it. When a
+provider sets a quota, responses carry:
 
-Whenever a provider sets a quota, Nexus turns on the gateway's header exposure,
-so responses carry:
+| Header                  | Meaning                      |
+| ----------------------- | ---------------------------- |
+| `x-ratelimit-limit`     | Requests allowed per window  |
+| `x-ratelimit-remaining` | Requests left in this window |
+| `x-ratelimit-window`    | Window length, in seconds    |
 
-| Header                  | Meaning                              |
-| ----------------------- | ------------------------------------ |
-| `x-ratelimit-limit`     | Requests allowed in one window       |
-| `x-ratelimit-remaining` | How many of them you have left       |
-| `x-ratelimit-window`    | The length of the window, in seconds |
-
-The names go out lowercase; HTTP header names are case-insensitive, so most
-clients will hand them to you as `X-RateLimit-Remaining` just as happily.
-
-Two things worth knowing:
-
-- They ride on the requests the limiter **admitted**. Read `x-ratelimit-remaining`
-  as it approaches zero and slow down — do not wait for the `429` to tell you.
-  A request that never reached the rate-limit check carries no such headers at
-  all, so their absence is not a signal.
-- There is **no reset timestamp**. `x-ratelimit-window` is what you have: after a
-  `429`, backing off for at least that many seconds is the safe move.
-
-If a call has no rate-limit headers at all and never returns `429`, the API
-simply has no quota set on it.
+Slow down as `x-ratelimit-remaining` nears zero rather than waiting for a `429`.
+There is no reset timestamp: after a `429`, wait at least
+`x-ratelimit-window` seconds. Requests rejected before the rate-limit check
+carry no headers, and an API with no quota never sends them.
 
 ---
 
 ## Messaging a provider
 
-**Messages** is a portal inbox — a conversation with a provider, optionally
-about a specific API, kept alongside the access request it relates to.
+**Messages** is the portal inbox.
 
-Start one from an API's catalog page (**Message the provider**) or from
-Messages. Give it a subject and a body; the provider is notified in-app and by
-email, and their reply comes back the same way.
+- To reach a provider, open their API and choose **Message provider**. Asking
+  the same provider about the same API again continues the existing thread.
+- To reach the portal administrators (account problems, an unresponsive
+  provider), choose **Messages → New message**. Any administrator can reply.
 
-Asking the same provider about the same API twice continues the existing
-thread rather than starting a new one, so the whole history stays in one place.
-
-Leaving the recipient empty addresses the **platform administrators** instead —
-use that for account problems, a provider who is not responding, or anything
-that is not about one specific API. Any admin can pick it up.
+The other side is notified in-app and by email, and replies come back the same
+way. Each account can send a limited number of messages per day (200 by
+default).
 
 ---
 
 ## Notifications
 
-The bell in the header. You are notified when:
+The bell in the header shows your ten latest notifications. **View all** opens
+the full list, where you can page back and show **Unread only**. Click a
+notification to mark it read and open the related page. **Mark all read** clears
+the badge.
 
-- your access request is **approved**, **denied** or **revoked**;
+You are notified when:
+
+- your access request is **approved** or **denied**, or your access is
+  **revoked**;
 - someone **messages** you;
 - one of your **credentials is rotated**;
-- an API you have access to **changes its authentication method** — which
-  stops your credential of the old type working _on that API_ — or is
-  **removed**;
+- an API you use **changes its authentication method** (your old credential
+  stops working on that API only) or is **removed**;
+- a provider lets you **view a private API**, or an administrator **changes your
+  role**;
 - an administrator sends a **platform announcement**.
 
-The bell shows the ten latest notifications. Select **View all** to browse older
-ones in the notifications inbox, page through them, or show only unread items.
-Click a notification to mark it read and open its relevant page when it has one;
-**Mark all read** clears the badge.
-Most of these arrive by email too, if the portal has SMTP configured.
+Most of these also arrive by email if the portal has email configured.
 
-Notifications are a convenience, not a record. If you need to know exactly what
-happened and when, ask an administrator to check the audit log.
+---
+
+## Limits
+
+| Limit                                     | Default         | Set by the operator with                     |
+| ----------------------------------------- | --------------- | -------------------------------------------- |
+| Live credentials per type, per identity   | 2               | `FERRUM_MAX_CREDENTIALS_PER_TYPE`            |
+| Applications per account                  | 20              | `NEXUS_MAX_APPLICATIONS_PER_OWNER`           |
+| Access requests per account, rolling 24 h | 20              | `NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY` |
+| Messages per account, rolling 24 h        | 200             | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`        |
+| Justification length                      | 2000 characters | —                                            |
 
 ---
 
 ## Troubleshooting
 
-**"I lost my API key."** It cannot be recovered by anyone. Rotate the
-credential and update your integration with the new secret.
+**"I lost my API key."** Nobody can recover it. Rotate the credential and deploy
+the new secret.
 
 **"My integration broke overnight and I changed nothing."** In order of
-likelihood: your grant was revoked (check the catalog badge — you would have
-been notified); the provider changed the API's **authentication method**, so
-credentials of the old type no longer satisfy that API (you are notified; your
-credential is not revoked and still works on your other APIs of that type —
-issue one of the new type for this one); the provider retired or deleted the
-API.
+likelihood:
 
-**"I get 401 with a credential I just issued."** Check you are using the right
-_type_ for that API, and the right header. For `basicauth`, the username is
-`nexus-user-<id>`, not your email. For `jwt`, the `sub` claim must be that same
-consumer username.
+- your grant was revoked (check the catalog badge; you were notified);
+- the provider changed the API's authentication method. Your credential still
+  works on your other APIs; issue one of the new type for this one;
+- the API was deleted.
 
-**"Request access is greyed out."** The API is not requestable, or it is
-retired, or you already have an active grant or a pending request.
+**"I get 401 with a credential I just issued."** Check the credential type
+matches the API, and the header. For HTTP Basic the username is the consumer
+username, not your email. For JWT, `sub` must be that same consumer username and
+the token needs an `exp`.
 
-**"I cannot sign in."** Verify your email if the portal requires it; if you
-have been repeatedly retrying, you may have tripped the sign-in rate limit
-(20 attempts per minute) — wait a minute. If your account was disabled, an
-administrator has to re-enable it.
+**"I get 403 but my account is approved."** The grant belongs to one identity.
+A credential issued to a different identity (your account versus an
+application) cannot use it.
 
-**"No emails are arriving."** The portal may not have SMTP configured yet.
-In-app notifications still work; mention it to an administrator.
+**"There is no Request access form."** The API needs no approval, is retired,
+or the selected identity already has a grant or a pending request. The
+**Request access** button stays disabled until you write a justification.
+
+**"I cannot sign in."** Verify your email if the portal requires it. After many
+attempts you may hit the sign-in rate limit (20 per minute); wait a minute. A
+disabled account can only be re-enabled by an administrator.
+
+**"No emails are arriving."** The portal may not have email configured yet.
+In-app notifications still work; tell an administrator.

@@ -17,7 +17,7 @@ do not duplicate them in this directory.
   --effort <low|medium|high|xhigh|max>
 ```
 
-`--effort` is accepted for parity with the sibling skills; the shared launcher pins the Cursor
+`--effort` is accepted for parity with the sibling skills but ignored; the shared launcher pins the Cursor
 Composer 2.5 model. Append `--fast` only when the user explicitly requests fast mode for that
 dispatch or fleet, and `--name NAME` only to label a worker.
 
