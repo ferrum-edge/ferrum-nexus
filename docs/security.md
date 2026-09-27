@@ -728,7 +728,8 @@ rotate its limiter key and forge the IP in the audit log.
 `MAX_SPEC_BYTES` bounds the upload, not what it decodes to, and so not the
 server memory a parse — or the catalog's re-serialization of the result — takes.
 A YAML alias repeats its anchor at every use and the parsed document does not
-remember that it was an alias, so the re-serialization writes out every copy. Nexus adds the UTF-8 bytes of every mapping key and scalar, at every place
+remember that it was an alias, so the re-serialization writes out every copy.
+Nexus adds the UTF-8 bytes of every mapping key and scalar, at every place it
 occurs, plus a per-item indentation charge in the same iterative walk that
 bounds nesting, and refuses a document past
 `MAX_SPEC_EXPANDED_BYTES` (4 MiB, twice `MAX_SPEC_BYTES`) with

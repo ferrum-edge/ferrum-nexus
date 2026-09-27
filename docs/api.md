@@ -1504,6 +1504,10 @@ the Edge proxy and plugins, then stores the API.
 - 2 MiB; at most 2 000 paths and 3 000 operations.
 - At most 200 levels of object/array nesting
   (`details.reason: "nesting_too_deep"`).
+- YAML mapping keys must be scalar (`details.reason: "non_scalar_key"`); an alias
+  key that names a scalar is accepted.
+- YAML values must be plain objects, arrays or scalars
+  (`details.reason: "unsupported_node"`).
 - At most 100 000 render units — schema nodes (including
   `components.schemas`), parameters, media types and responses together
   (`details.reason: "too_much_to_render"`, with the counts reached). A local

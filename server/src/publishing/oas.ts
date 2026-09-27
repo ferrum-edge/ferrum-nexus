@@ -645,6 +645,15 @@ function scalarBytes(value: unknown): number {
   return String(value).length;
 }
 
+/** A string scalar contributes one indentation item for itself and each newline. */
+function stringIndentItems(value: string): number {
+  let items = 1;
+  for (const character of value) {
+    if (character === '\n') items += 1;
+  }
+  return items;
+}
+
 /**
  * Bound traversal and later serialization without using the JavaScript call
  * stack: nesting past {@link MAX_SPEC_DEPTH}, a cyclic alias, and resolved text
@@ -689,10 +698,10 @@ function assertSpecShape(value: unknown): void {
   const pending: Frame[] = [];
   let total = 0;
 
-  const charge = (frame: Frame, bytes: number): void => {
+  const charge = (frame: Frame, bytes: number, items = 1): void => {
     frame.bytes += bytes;
-    frame.chargedItems += 1;
-    total += bytes + 2 * (frame.depth - 1) + 4;
+    frame.chargedItems += items;
+    total += bytes + items * (2 * (frame.depth - 1) + 4);
     if (total > MAX_SPEC_EXPANDED_BYTES) throw expandedTooLarge();
   };
 
@@ -730,7 +739,9 @@ function assertSpecShape(value: unknown): void {
     pending.push(frame);
     // Mapping keys are text; array elements are charged when visited below.
     if (!Array.isArray(entryValue)) {
-      for (const key of Object.keys(entryValue)) charge(frame, byteLength(key));
+      for (const key of Object.keys(entryValue)) {
+        charge(frame, byteLength(key), stringIndentItems(key));
+      }
     }
   };
 
@@ -741,7 +752,8 @@ function assertSpecShape(value: unknown): void {
       const child = frame.children[frame.childIndex++];
       if (Array.isArray(frame.value)) charge(frame, 0);
       if (child === null || typeof child !== 'object') {
-        charge(frame, scalarBytes(child));
+        const items = typeof child === 'string' ? stringIndentItems(child) : 1;
+        charge(frame, scalarBytes(child), items);
         continue;
       }
       if (active.has(child)) {
@@ -1106,7 +1118,7 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
 
 /**
  * The text the catalog serves for a parsed document: JSON pretty-printed with
- * two-space indentation, or YAML as the `yaml` library writes it.
+ * two-space indentation, or YAML with line folding disabled.
  *
  * Shared by the catalog and by {@link parseUploadedOpenApiSpec}, so a document
  * is measured at upload by exactly the serialization it will be served as.
@@ -1117,7 +1129,7 @@ export function renderCatalogSpec(
 ): string {
   return contentType === 'application/json'
     ? JSON.stringify(document, null, 2)
-    : stringifyYaml(document);
+    : stringifyYaml(document, { lineWidth: 0 });
 }
 
 /**

@@ -132,17 +132,19 @@ describe('resolved OpenAPI document size', () => {
 
   it('refuses deeply nested JSON whose indentation exceeds the limit during parsing', () => {
     const scalarCount = 1_000_000;
-    const deepArray =
-      '['.repeat(198) +
-      '[' +
-      '0,'.repeat(scalarCount - 1) +
-      '0' +
-      ']'.repeat(199);
+    const deepArray = '['.repeat(198) + '[' + '0,'.repeat(scalarCount - 1) + '0' + ']'.repeat(199);
     const minified =
       '{"openapi":"3.1.0","info":{"title":"Deep","version":"1"},' +
       `"paths":{},"x-deep":${deepArray}}`;
     assert.ok(Buffer.byteLength(minified) < MAX_SPEC_BYTES);
     expectExpandedTooLarge(() => parseOpenApiSpec(minified));
+  });
+
+  it('counts newlines in a deeply nested YAML string as indentation items', () => {
+    const nested = '['.repeat(195) + JSON.stringify('\n'.repeat(12_000)) + ']'.repeat(195);
+    const spec = [SAMPLE_SPEC_YAML.trimEnd(), `x-deep: ${nested}`, ''].join('\n');
+    assert.ok(Buffer.byteLength(spec) < MAX_SPEC_BYTES);
+    expectExpandedTooLarge(() => parseOpenApiSpec(spec));
   });
 });
 
@@ -337,7 +339,10 @@ describe('publishing and serving an alias-expanded document', () => {
 
   it('publishes and serves a spec that reuses small fragments through aliases', async () => {
     const spec = [
-      SAMPLE_SPEC_YAML.trimEnd(),
+      SAMPLE_SPEC_YAML.trimEnd().replace(
+        '  description: Invoices and payments.',
+        '  description: |\n    Invoices and\n    payments.',
+      ),
       'x-shared: &shared Shared prose',
       'x-uses: [*shared, *shared, *shared]',
       '',
@@ -348,6 +353,7 @@ describe('publishing and serving an alias-expanded document', () => {
 
     fresh();
     const served = await catalog.spec(owner, 'alias-small');
+    assert.equal(parseOpenApiSpec(served.raw_spec).description, 'Invoices and\npayments.');
     assert.match(served.raw_spec, /x-uses:\n {2}- Shared prose\n {2}- Shared prose\n/);
   });
 
