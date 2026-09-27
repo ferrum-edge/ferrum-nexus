@@ -246,11 +246,7 @@ function PublishForm(): ReactElement {
           <CardBody className="flex flex-col gap-5">
             <SpecEditor value={spec} onChange={setSpec} />
             <div className="border-t border-border pt-5">
-              <SpecEnforcementSelect
-                className="max-w-xl"
-                value={specEnforcement}
-                onValueChange={setSpecEnforcement}
-              />
+              <SpecEnforcementSelect value={specEnforcement} onValueChange={setSpecEnforcement} />
             </div>
           </CardBody>
         </Card>
