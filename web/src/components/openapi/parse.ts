@@ -15,6 +15,7 @@
  */
 
 import {
+  MAX_SPEC_BYTES,
   MAX_SPEC_EXPANDED_BYTES,
   createOpenApiRefResolver,
   keyOpenApiParameters,
@@ -321,67 +322,60 @@ export function specByteLength(text: string, limit = Number.POSITIVE_INFINITY): 
   return new TextEncoder().encode(text).length;
 }
 
-/**
- * Largest document the viewer parses: what the catalog serves.
- *
- * The catalog serves a re-serialization of the stored upload (pretty-printed
- * JSON, or YAML written out again) that may be up to `MAX_SPEC_EXPANDED_BYTES`
- * long, twice the upload's `MAX_SPEC_BYTES`; `renderSpec` in
- * `server/src/catalog/service.ts` refuses to serve anything larger. A tighter
- * cap here would refuse a document the portal published and serves. The upload
- * limit is enforced separately, by the publish forms (`specProblem`).
- */
-export const MAX_VIEWER_SPEC_BYTES = MAX_SPEC_EXPANDED_BYTES;
+/** How much text {@link parseSpecText} parses, and how many YAML aliases it resolves. */
+export interface SpecParseLimits {
+  /** Largest document, in UTF-8 bytes, that is parsed at all. */
+  maxBytes: number;
+  /** yaml's `maxAliasCount`. */
+  maxAliasCount: number;
+}
 
 /**
- * yaml's `maxAliasCount` for the viewer: the server's rendering stays under it.
- *
- * The catalog writes its YAML with `yaml`'s `stringify`, which emits an object
- * the document shares once, anchored, and an alias at every other place — and
- * the server-URL rewrite shares one `servers` array across the root and every
- * path item and operation that declared servers. yaml's default of 100 refuses
- * such a document past about 100 of them.
- *
- * yaml counts, per anchor, its uses so far times the most any alias nested
- * inside it expands, which is at most the number of places the anchored content
- * appears once aliases are resolved. The server's parse (`assertSpecShape` in
- * `server/src/publishing/oas.ts`) charges at least four bytes of
- * `MAX_SPEC_EXPANDED_BYTES` for every mapping key, scalar and array element at
- * every place it appears, and each rewritten `servers` array sits where the
- * upload already paid for a `servers` key. So no document the catalog serves
- * reaches a count of `MAX_SPEC_EXPANDED_BYTES`. The bound still refuses a
- * pasted document built to expand exponentially, and conversion does not copy
- * aliased content (every alias yields the anchor's one object), so the walks
- * over the result stay bounded by the renderer's own budgets.
+ * The server's upload limits (`MAX_SPEC_BYTES`, and `YAML_MAX_ALIAS_COUNT` in
+ * `server/src/publishing/oas.ts`), which the publish forms mirror.
  */
-export const VIEWER_YAML_MAX_ALIAS_COUNT = MAX_SPEC_EXPANDED_BYTES;
+export const UPLOAD_SPEC_LIMITS: SpecParseLimits = {
+  maxBytes: MAX_SPEC_BYTES,
+  maxAliasCount: 100,
+};
 
 /**
- * How the viewer reads YAML: the server's options (`YAML_SPEC_OPTIONS` in
+ * What the catalog serves: a re-serialization of the stored upload
+ * (pretty-printed JSON, or YAML written out again) up to
+ * `MAX_SPEC_EXPANDED_BYTES`, twice the upload limit. The catalog writes YAML
+ * without anchors or aliases, so the server's upload alias limit of 100 refuses
+ * no served document.
+ */
+export const CATALOG_SPEC_LIMITS: SpecParseLimits = {
+  maxBytes: MAX_SPEC_EXPANDED_BYTES,
+  maxAliasCount: 100,
+};
+
+/**
+ * How YAML is read: the server's options (`YAML_SPEC_OPTIONS` in
  * `server/src/publishing/oas.ts`) — the core schema whatever a `%YAML 1.1`
  * directive says, no merge keys and no `!!omap`/`!!set`/`!!binary`/`!!timestamp`
  * resolution — so a document reads here as the server read it.
  */
-const VIEWER_YAML_OPTIONS = {
-  schema: 'core',
-  merge: false,
-  resolveKnownTags: false,
-  maxAliasCount: VIEWER_YAML_MAX_ALIAS_COUNT,
-} as const;
+const YAML_SPEC_OPTIONS = { schema: 'core', merge: false, resolveKnownTags: false } as const;
 
 /**
  * Parse an OpenAPI document supplied as JSON or YAML text.
  *
  * JSON first — see the module docblock for why the distinction is not merely
  * cosmetic. Never throws: syntax errors and structurally invalid documents both
- * come back as `{ ok: false, error }`.
+ * come back as `{ ok: false, error }`. `limits` defaults to the server's upload
+ * limits; the catalog viewer passes {@link CATALOG_SPEC_LIMITS}.
  */
-export function parseSpecText(text: string): SpecParseResult {
-  // A document the catalog would not serve is not worth a synchronous parse.
-  if (specByteLength(text, MAX_VIEWER_SPEC_BYTES) > MAX_VIEWER_SPEC_BYTES) {
+export function parseSpecText(
+  text: string,
+  limits: SpecParseLimits = UPLOAD_SPEC_LIMITS,
+): SpecParseResult {
+  // A document past the limit is not worth a synchronous parse.
+  if (specByteLength(text, limits.maxBytes) > limits.maxBytes) {
     return {
       ok: false,
-      error: `The specification is larger than the ${formatBytes(MAX_VIEWER_SPEC_BYTES)} limit.`,
+      error: `The specification is larger than the ${formatBytes(limits.maxBytes)} limit.`,
     };
   }
   const trimmed = text.trim();
@@ -396,7 +390,10 @@ export function parseSpecText(text: string): SpecParseResult {
     }
   } else {
     try {
-      parsed = parseYaml(trimmed, VIEWER_YAML_OPTIONS) as unknown;
+      parsed = parseYaml(trimmed, {
+        ...YAML_SPEC_OPTIONS,
+        maxAliasCount: limits.maxAliasCount,
+      }) as unknown;
     } catch (error) {
       return { ok: false, error: `Could not parse the specification: ${reason(error)}` };
     }

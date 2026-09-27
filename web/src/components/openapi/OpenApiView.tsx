@@ -15,6 +15,7 @@ import {
 import {
   asRecord,
   asString,
+  CATALOG_SPEC_LIMITS,
   displayedRef,
   displayText,
   MAX_DISPLAYED_DESCRIPTION_LENGTH,
@@ -427,7 +428,7 @@ export interface OpenApiViewProps {
  * this is what keeps the ones it accepts cheap to look at.
  */
 export function OpenApiView({ text }: OpenApiViewProps): ReactElement {
-  const result = useMemo(() => parseSpecText(text), [text]);
+  const result = useMemo(() => parseSpecText(text, CATALOG_SPEC_LIMITS), [text]);
 
   if (!result.ok) {
     return (

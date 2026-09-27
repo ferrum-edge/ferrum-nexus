@@ -7,6 +7,7 @@ import {
   MAX_API_SLUG_LENGTH,
   MAX_CORS_ORIGINS,
   MAX_RATE_LIMIT_REQUESTS,
+  MAX_SPEC_BYTES,
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 import { API, RAW_SPEC, SPEC } from '../../test/fixtures';
@@ -208,6 +209,26 @@ describe('API publishing', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Publish API' }));
     await screen.findByText('API published');
     expect(screen.queryByText(/Fix it before publishing/)).not.toBeInTheDocument();
+  });
+
+  it('refuses a pasted document over the upload limit without parsing it', () => {
+    renderPage(<ApiNewPage />);
+    changeField(/^Name/, 'Billing API');
+    const document = JSON.parse(RAW_SPEC) as Record<string, unknown>;
+    const oversized = JSON.stringify({
+      ...document,
+      servers: [{ url: 'https://billing.example.test' }],
+      'x-filler': 'a'.repeat(MAX_SPEC_BYTES),
+    });
+    const json = vi.spyOn(JSON, 'parse');
+    changeField(/OpenAPI specification/, oversized);
+    submitForm();
+    expect(
+      screen.getByText(/larger than the 2\.00 MB limit\. Fix it before publishing/),
+    ).toBeInTheDocument();
+    // Not parsed for its server URL or declared methods either.
+    expect(json.mock.calls.some(([text]) => text === oversized)).toBe(false);
+    expect(apisApi.publish).not.toHaveBeenCalled();
   });
 
   it('bounds generated slugs and normalizes accents like the server', () => {

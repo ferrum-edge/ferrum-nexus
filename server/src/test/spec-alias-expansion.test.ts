@@ -12,6 +12,8 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
+import { isAlias, parseDocument, stringify, visit } from 'yaml';
+
 import {
   MAX_SPEC_BYTES,
   MAX_SPEC_EXPANDED_BYTES,
@@ -33,6 +35,7 @@ import {
   parseUploadedOpenApiSpec,
   renderCatalogSpec,
 } from '../publishing/oas.js';
+import { rewriteSpecServers } from '../publishing/spec-document.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 /** Size of the anchored scalar the alias fixtures repeat. */
@@ -266,6 +269,54 @@ describe('an upload measured as the catalog will serve it', () => {
 
   it('accepts a document whose formatted form fits', () => {
     assert.equal(parseUploadedOpenApiSpec(SAMPLE_SPEC_YAML).title, 'Billing API');
+  });
+});
+
+describe('the catalog rendering of YAML', () => {
+  it('writes a servers array shared by many operations without anchors or aliases', () => {
+    // Every path item and operation declares servers, so the server-URL rewrite
+    // shares one array across all 301 places.
+    const lines = ['openapi: 3.0.3', 'info:', '  title: Shared Servers', "  version: '1.0.0'"];
+    lines.push('servers:', '  - url: https://upstream.example.test', 'paths:');
+    for (let index = 0; index < 150; index += 1) {
+      lines.push(
+        `  /things/${index}:`,
+        '    servers:',
+        '      - url: https://upstream.example.test',
+        '    get:',
+        '      servers:',
+        '        - url: https://upstream.example.test',
+        '      responses:',
+        "        '200':",
+        '          description: ok',
+      );
+    }
+    const parsed = parseUploadedOpenApiSpec(`${lines.join('\n')}\n`);
+    const document = rewriteSpecServers(
+      parsed.document,
+      'https://gateway.example.test',
+      'catalog',
+    );
+    // yaml's default stringify anchors the shared array once and aliases it 300 times.
+    assert.equal(stringify(document, { lineWidth: 0 }).match(/servers: \*/g)?.length, 300);
+
+    const rendered = renderCatalogSpec(document, parsed.contentType);
+
+    const yaml = parseDocument(rendered);
+    let anchorsOrAliases = 0;
+    visit(yaml, {
+      Node(_key, node) {
+        if (isAlias(node) || node.anchor) anchorsOrAliases += 1;
+      },
+    });
+    assert.equal(anchorsOrAliases, 0);
+    assert.doesNotMatch(rendered, /[&*]a\d/);
+    assert.equal(rendered.match(/url: https:\/\/gateway\.example\.test/g)?.length, 301);
+    // Round-trips under this server's own parse and its alias limit of 100.
+    const reparsed = parseOpenApiSpec(rendered);
+    assert.equal(reparsed.operationCount, 150);
+    assert.deepEqual(reparsed.document.servers, [{ url: 'https://gateway.example.test' }]);
+    assert.equal(catalogSpecFitsLimit(rendered), true);
   });
 });
 

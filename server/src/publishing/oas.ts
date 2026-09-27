@@ -1116,7 +1116,17 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
 
 /**
  * The text the catalog serves for a parsed document: JSON pretty-printed with
- * two-space indentation, or YAML with line folding disabled.
+ * two-space indentation, or YAML with line folding disabled and no anchors or
+ * aliases.
+ *
+ * yaml's `stringify` otherwise writes an object the document shares once,
+ * anchored, and an alias at every other place. The server-URL rewrite shares
+ * one `servers` array across the root and every path item and operation that
+ * declared servers, so such a rendering could carry more aliases than a YAML
+ * reader with the default alias limit of 100 (this server's own parse
+ * included) accepts. Every occurrence is already charged by the parse-time
+ * walk, and the rendering is measured against `MAX_SPEC_EXPANDED_BYTES`, so
+ * writing shared objects out in full stays bounded.
  *
  * Shared by the catalog and by {@link parseUploadedOpenApiSpec}, so a document
  * is measured at upload by exactly the serialization it will be served as.
@@ -1127,7 +1137,7 @@ export function renderCatalogSpec(
 ): string {
   return contentType === 'application/json'
     ? JSON.stringify(document, null, 2)
-    : stringifyYaml(document, { lineWidth: 0 });
+    : stringifyYaml(document, { lineWidth: 0, aliasDuplicateObjects: false });
 }
 
 /**
