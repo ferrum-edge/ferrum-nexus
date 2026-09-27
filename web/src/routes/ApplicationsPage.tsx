@@ -236,6 +236,7 @@ function ApplicationsList(): ReactElement {
           />
         ) : (
           <DataTable
+            bare
             columns={columns}
             data={query.data?.items ?? []}
             total={query.data?.total ?? 0}
