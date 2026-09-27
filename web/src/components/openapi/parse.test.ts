@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import { MAX_SPEC_BYTES } from '@ferrum-nexus/shared';
-import { parseSpecText } from './parse';
+import {
+  displayedRef,
+  displayText,
+  MAX_DISPLAYED_REF_LENGTH,
+  parseSpecText,
+  TRUNCATED_TEXT_HINT,
+  truncateDisplayText,
+} from './parse';
 
 // The YAML parser is spied on rather than timed: the defect this guards is not
 // "YAML is slow" but "a JSON document was handed to the YAML parser at all",
@@ -106,5 +113,52 @@ describe('parseSpecText', () => {
     expect(result.spec.groups).toHaveLength(1);
     expect(result.spec.groups[0]?.operations).toHaveLength(1);
     expect(result.spec.groups[0]?.operations[0]?.tags).toEqual(['Things']);
+  });
+});
+
+/** A high surrogate with no low surrogate after it — a character cut in half. */
+const LONE_HIGH_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/;
+
+describe('truncateDisplayText', () => {
+  it('returns text within the limit unchanged, without an ellipsis', () => {
+    expect(truncateDisplayText('abc', 3)).toBe('abc');
+    expect(truncateDisplayText('', 3)).toBe('');
+  });
+
+  it('cuts text past the limit and marks the cut', () => {
+    expect(truncateDisplayText('abcdef', 3)).toBe('abc…');
+  });
+
+  it('never splits a surrogate pair at the boundary', () => {
+    // U+1F600 is two UTF-16 code units, at indices 2 and 3.
+    const text = 'ab\u{1F600}cd';
+
+    expect(truncateDisplayText(text, 3)).toBe('ab…');
+    expect(truncateDisplayText(text, 4)).toBe('ab\u{1F600}…');
+    expect(truncateDisplayText(text, 3)).not.toMatch(LONE_HIGH_SURROGATE);
+  });
+
+  it('keeps a displayed $ref free of half characters', () => {
+    const ref = `#/${'x'.repeat(MAX_DISPLAYED_REF_LENGTH - 3)}\u{1F600}tail`;
+
+    const shown = displayedRef(ref);
+
+    expect(shown).not.toMatch(LONE_HIGH_SURROGATE);
+    expect(shown).toBe(`#/${'x'.repeat(MAX_DISPLAYED_REF_LENGTH - 3)}…`);
+  });
+});
+
+describe('displayText', () => {
+  it('titles only text it cut', () => {
+    expect(displayText('short', 10)).toEqual({ text: 'short', title: undefined });
+    expect(displayText('x'.repeat(11), 10)).toEqual({
+      text: `${'x'.repeat(10)}…`,
+      title: TRUNCATED_TEXT_HINT,
+    });
+  });
+
+  it('returns null for absent or empty text', () => {
+    expect(displayText(null, 10)).toBeNull();
+    expect(displayText('', 10)).toBeNull();
   });
 });

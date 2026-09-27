@@ -1336,7 +1336,13 @@ Two bounds, at the two places the cost appears:
   page, divided between the operations the reader has expanded, rather than a
   fresh one per schema. A branch that exhausts it renders one "truncated"
   affordance and its siblings are **not walked**, so exhaustion stops mounting
-  DOM rather than merely stopping recursion. Documents are parsed with
+  DOM rather than merely stopping recursion. The allowance counts nodes, not
+  characters, and one component's text repeats at every reference to it — a
+  schema description at each `$ref`, an operation summary on each tag card —
+  so displayed text is capped per occurrence: descriptions at 1,000
+  characters, and operation summaries, schema property names, types and enum
+  values at 200. A cut ends in `…` with a hint to download the specification,
+  and never splits a surrogate pair. Documents are parsed with
   `JSON.parse` when they open with `{` or `[`, as the server already does: the
   YAML parser accepts JSON but its flow-mapping parse is quadratic in mapping
   width, and routing a wide JSON document through it froze the reader's main

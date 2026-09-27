@@ -6,6 +6,9 @@ import {
   asRecord,
   asString,
   displayedRef,
+  displayText,
+  MAX_DISPLAYED_DESCRIPTION_LENGTH,
+  MAX_DISPLAYED_NAME_LENGTH,
   refName,
   resolveRef,
   UNRESOLVED_REF,
@@ -114,21 +117,30 @@ function TypeLine({ schema }: { schema: SpecNode }): ReactElement | null {
 
   if (parts.length === 0 && !enumValues) return null;
 
+  // Every `$ref` to this schema repeats these strings, so each is cut per occurrence.
+  const typeText = displayText(parts.join(' '), MAX_DISPLAYED_NAME_LENGTH);
   return (
     <span className="flex flex-wrap items-center gap-1.5">
-      {parts.length > 0 ? (
-        <code className="font-mono text-xs text-info">{parts.join(' ')}</code>
+      {typeText ? (
+        <code className="font-mono text-xs text-info" title={typeText.title}>{typeText.text}</code>
       ) : null}
       {enumValues ? (
         <span className="flex flex-wrap gap-1">
-          {enumValues.slice(0, 12).map((value, index) => (
-            <code
-              key={`${String(value)}-${index}`}
-              className="rounded-xs bg-neutral-soft px-1 font-mono text-[0.7rem] text-fg-muted"
-            >
-              {typeof value === 'string' ? value : JSON.stringify(value)}
-            </code>
-          ))}
+          {enumValues.slice(0, 12).map((value, index) => {
+            const valueText = displayText(
+              typeof value === 'string' ? value : JSON.stringify(value),
+              MAX_DISPLAYED_NAME_LENGTH,
+            );
+            return (
+              <code
+                key={index}
+                className="rounded-xs bg-neutral-soft px-1 font-mono text-[0.7rem] text-fg-muted"
+                title={valueText?.title}
+              >
+                {valueText?.text ?? ''}
+              </code>
+            );
+          })}
           {enumValues.length > 12 ? (
             <span className="text-xs text-fg-subtle">+{enumValues.length - 12} more</span>
           ) : null}
@@ -232,7 +244,9 @@ function renderNode(
     );
   }
 
-  const description = asString(node.description);
+  // One schema's description is repeated at every `$ref` to it, while the budget
+  // charges each occurrence as one node whatever its length.
+  const description = displayText(asString(node.description), MAX_DISPLAYED_DESCRIPTION_LENGTH);
   const properties = asRecord(node.properties);
   const requiredNames = new Set(
     (asArray(node.required) ?? []).map(asString).filter((entry): entry is string => entry !== null),
@@ -293,7 +307,9 @@ function renderNode(
         <TypeLine schema={node} />
       </SchemaRow>
       {description ? (
-        <p className={cn('text-xs text-fg-muted', depth > 0 && 'pl-3')}>{description}</p>
+        <p className={cn('text-xs text-fg-muted', depth > 0 && 'pl-3')} title={description.title}>
+          {description.text}
+        </p>
       ) : null}
 
       {composition && compositionRows.length > 0 ? (
@@ -330,9 +346,14 @@ function SchemaRow({
   depth: number;
   children: ReactNode;
 }): ReactElement {
+  const shownName = displayText(name ?? null, MAX_DISPLAYED_NAME_LENGTH);
   return (
     <div className={cn('flex flex-wrap items-center gap-2 py-px', depth > 0 && 'pl-0')}>
-      {name ? <code className="font-mono text-xs font-semibold text-fg">{name}</code> : null}
+      {shownName ? (
+        <code className="font-mono text-xs font-semibold text-fg" title={shownName.title}>
+          {shownName.text}
+        </code>
+      ) : null}
       {required ? (
         <span className="text-[0.65rem] font-semibold tracking-[0.08em] text-danger uppercase">
           required

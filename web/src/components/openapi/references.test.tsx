@@ -8,7 +8,13 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { OpenApiView } from './OpenApiView';
-import { parseSpecText, type SpecEntry, type SpecOperation } from './parse';
+import {
+  MAX_DISPLAYED_DESCRIPTION_LENGTH,
+  parseSpecText,
+  TRUNCATED_TEXT_HINT,
+  type SpecEntry,
+  type SpecOperation,
+} from './parse';
 
 afterEach(cleanup);
 
@@ -435,7 +441,10 @@ describe('reusable component references', () => {
 
     const renderedDescriptions = screen.getAllByText(/^x+…$/);
     expect(renderedDescriptions).toHaveLength(100);
-    expect(renderedDescriptions.every((node) => node.textContent?.length === 1_001)).toBe(true);
+    for (const node of renderedDescriptions) {
+      expect(node.textContent).toHaveLength(MAX_DISPLAYED_DESCRIPTION_LENGTH + 1);
+      expect(node).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
+    }
   });
 
   it('shortens a long unresolved reference in the placeholder', () => {
