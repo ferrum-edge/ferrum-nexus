@@ -279,6 +279,7 @@ import {
   assertUpstreamAllowed,
   formatUpstreamUrl,
   parseOpenApiSpec,
+  parseUploadedOpenApiSpec,
   parseUpstreamUrl,
   resolveUpstream,
   slugify,
@@ -1379,7 +1380,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     // re-publish and gated the same way a first publish is.
     assertNamespaceRoutable();
 
-    const parsed = parseOpenApiSpec(specText);
+    const parsed = parseUploadedOpenApiSpec(specText);
     let previous = await store.apiSpecs.findCurrentByApi(api.id);
     const nextVersion = version?.trim() || parsed.version;
     const proxyId = api.ferrum_proxy_id;
@@ -1718,7 +1719,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const name = input.name.trim();
       if (name === '') throw validationFailed('An API name is required');
 
-      const parsed = parseOpenApiSpec(input.spec);
+      const parsed = parseUploadedOpenApiSpec(input.spec);
       const upstream = resolveUpstream(parsed, input.upstream_url);
       await assertUpstreamAllowed(upstream, upstreamPolicy);
       const slug = await resolveSlug(input.slug, name);
@@ -2980,7 +2981,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // Parsed rather than merely compared: a document the portal would refuse
       // at upload has to be refused here too, or the review would describe a
       // change that cannot actually be made.
-      const parsed = parseOpenApiSpec(specText);
+      const parsed = parseUploadedOpenApiSpec(specText);
       const current = await store.apiSpecs.findCurrentByApi(api.id);
       return diffAgainstCurrent(current, { document: parsed.document, summary: null });
     },

@@ -363,6 +363,27 @@ export const MAX_SPEC_BYTES = 2 * 1024 * 1024;
 /** Maximum object/array nesting, counting the document root as level one. */
 export const MAX_SPEC_DEPTH = 200;
 
+/**
+ * Maximum size in UTF-8 bytes of an OpenAPI document's text once its YAML
+ * aliases are resolved: every mapping key and scalar, counted at every place it
+ * occurs.
+ *
+ * {@link MAX_SPEC_BYTES} bounds the upload, not what it decodes to. A YAML alias
+ * repeats its anchor wherever it appears, and nothing that reads the parsed
+ * document — the catalog's re-serialization above all — preserves the alias, so
+ * one large anchored scalar named a hundred times would otherwise become a
+ * hundred copies of itself in server memory. Without aliases a document's keys
+ * and scalars never add up to more than its source bytes (no JSON or YAML
+ * escape encodes to more UTF-8 than it is written in, bar the two-character
+ * `\L`/`\P` line separators), so twice {@link MAX_SPEC_BYTES} leaves every
+ * document that merely reuses small fragments as much again of headroom, while
+ * capping the expansion at a small multiple of the upload rather than about a
+ * hundred. The document as the catalog serves it — pretty-printed JSON or
+ * re-serialized YAML — is bounded by this too: an upload whose rendering is
+ * larger is refused, and the catalog refuses to serve one.
+ */
+export const MAX_SPEC_EXPANDED_BYTES = 2 * MAX_SPEC_BYTES;
+
 /** Maximum upstream URL length, whether typed or expanded from an OpenAPI server. */
 export const MAX_UPSTREAM_URL_LENGTH = 2_000;
 

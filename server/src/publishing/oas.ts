@@ -11,7 +11,16 @@
  * Nexus is a portal, not a spec linter. It checks only what publishing actually
  * depends on:
  *
- * - the document parses as JSON or YAML and is a JSON object;
+ * - the document parses as JSON or YAML and is a JSON object. YAML is read
+ *   with the YAML 1.2 core schema whatever `%YAML` directive it carries — no
+ *   merge keys, no `!!omap`/`!!set`/`!!binary`/`!!timestamp` types — and every
+ *   mapping key must be a scalar, so the parse yields only plain objects,
+ *   arrays and scalars, which is all an OpenAPI document is;
+ * - its keys and scalars, plus the indentation needed to serialize each
+ *   occurrence, add up to no more than {@link MAX_SPEC_EXPANDED_BYTES} once
+ *   YAML aliases are resolved. `MAX_SPEC_BYTES` bounds the upload, but an alias
+ *   repeats its anchor at every use and serialization writes each copy out in
+ *   full;
  * - `openapi` is a **3.x** version string — Swagger 2.0 (`swagger: "2.0"`) is
  *   rejected, because the gateway-facing fields Nexus reads (`servers`) do not
  *   exist there;
@@ -61,11 +70,19 @@
 import { Resolver } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
-import { parse as parseYaml } from 'yaml';
+import {
+  isAlias,
+  isScalar,
+  parseDocument as parseYamlDocument,
+  stringify as stringifyYaml,
+  visit,
+  type Node as YamlNode,
+} from 'yaml';
 
 import {
   MAX_SPEC_BYTES,
   MAX_SPEC_DEPTH,
+  MAX_SPEC_EXPANDED_BYTES,
   MAX_SPEC_OPERATIONS,
   MAX_SPEC_PATHS,
   MAX_SPEC_RENDER_UNITS,
@@ -79,7 +96,7 @@ import {
 
 export { slugify } from '@ferrum-nexus/shared';
 
-import { specInvalid, type NexusError } from '../lib/errors.js';
+import { isNexusError, specInvalid, type NexusError } from '../lib/errors.js';
 
 /** Upstream a proxy should forward to, decomposed into Edge's proxy fields. */
 export interface SpecUpstream {
@@ -541,16 +558,119 @@ function parseDocument(text: string): { value: unknown; contentType: ParsedSpec[
     }
   }
   try {
-    return { value: parseYaml(text) as unknown, contentType: 'application/yaml' };
+    return { value: parseYamlSpec(text), contentType: 'application/yaml' };
   } catch (cause) {
+    if (isNexusError(cause)) throw cause;
     throw specInvalid('The document is not valid YAML or JSON', {
       reason: cause instanceof Error ? cause.message : String(cause),
     });
   }
 }
 
-/** Bound traversal and later serialization without using the JavaScript call stack. */
-function assertSpecDepth(value: unknown): void {
+/**
+ * How every OpenAPI document is read as YAML.
+ *
+ * Explicit options win over a `%YAML 1.1` directive, which would otherwise
+ * switch the document to the YAML 1.1 schema: merge keys (`<<: *a`) copy an
+ * anchor's entries without counting against the alias limit, and `!!omap`,
+ * `!!set`, `!!binary` and `!!timestamp` decode to a `Map`, `Set`,
+ * `Uint8Array` or `Date` whose contents a walk over plain objects cannot see.
+ * `resolveKnownTags: false` keeps those tags from resolving under the core
+ * schema too, where they are otherwise honoured when written explicitly. An
+ * unknown tag is only a warning, and its node is read as the plain mapping,
+ * sequence or string it is written as.
+ */
+const YAML_SPEC_OPTIONS = { schema: 'core', merge: false, resolveKnownTags: false } as const;
+
+/** The alias limit yaml applies when converting a document, pinned rather than inherited. */
+const YAML_MAX_ALIAS_COUNT = 100;
+
+/**
+ * Parse one YAML document into plain data.
+ *
+ * Parsed in two steps so every mapping key can be checked before anything is
+ * converted: a key that is a mapping or a sequence becomes a JavaScript
+ * property name only by being stringified, which the parser does once per
+ * occurrence and at a cost that grows with the document's anchors. OpenAPI
+ * keys are strings, so refusing anything but a scalar key loses no valid
+ * document.
+ *
+ * @throws NexusError `SPEC_INVALID` with `reason: 'non_scalar_key'`; any other
+ * throw is a parse failure the caller reports
+ */
+function parseYamlSpec(text: string): unknown {
+  const doc = parseYamlDocument(text, YAML_SPEC_OPTIONS);
+  if (doc.errors.length > 0) throw doc.errors[0];
+
+  // An alias names the latest anchor of that name before it, and the visit is
+  // in document order, so an anchor is always recorded before an alias of it.
+  const anchors = new Map<string, YamlNode>();
+  visit(doc, {
+    Node(_key, node) {
+      if (!isAlias(node) && node.anchor) anchors.set(node.anchor, node);
+    },
+    Pair(_key, pair) {
+      const key = isAlias(pair.key) ? anchors.get(pair.key.source) : pair.key;
+      if (!isScalar(key)) {
+        throw specInvalid('Every mapping key in the OpenAPI document must be a string', {
+          reason: 'non_scalar_key',
+        });
+      }
+    },
+  });
+
+  return doc.toJS({ maxAliasCount: YAML_MAX_ALIAS_COUNT }) as unknown;
+}
+
+/** `SPEC_INVALID` for resolved text past {@link MAX_SPEC_EXPANDED_BYTES}. */
+function expandedTooLarge(): NexusError {
+  return specInvalid(
+    `The document is larger than the ${Math.floor(MAX_SPEC_EXPANDED_BYTES / 1024)} KiB limit ` +
+      'once expanded for serving',
+    { reason: 'expanded_too_large', limit: MAX_SPEC_EXPANDED_BYTES },
+  );
+}
+
+/** An array, or an object whose prototype is `Object.prototype` or `null`. */
+function isPlainContainer(value: object): boolean {
+  const prototype: unknown = Object.getPrototypeOf(value);
+  if (Array.isArray(value)) return prototype === Array.prototype;
+  return prototype === Object.prototype || prototype === null;
+}
+
+/** UTF-8 bytes one scalar contributes to the resolved document's text. */
+function scalarBytes(value: unknown): number {
+  if (typeof value === 'string') return byteLength(value);
+  if (value === null || value === undefined) return 0;
+  return String(value).length;
+}
+
+/** A string scalar contributes one indentation item for itself and each YAML newline. */
+function stringIndentItems(value: string, contentType: ParsedSpec['contentType']): number {
+  let items = 1;
+  if (contentType !== 'application/yaml') return items;
+  for (const character of value) {
+    if (character === '\n') items += 1;
+  }
+  return items;
+}
+
+/**
+ * Bound traversal and later serialization without using the JavaScript call
+ * stack: nesting past {@link MAX_SPEC_DEPTH}, a cyclic alias, and resolved text
+ * plus serialization indentation past {@link MAX_SPEC_EXPANDED_BYTES}.
+ *
+ * The text is counted per *occurrence*: a YAML alias hands every place that
+ * names it the same object or string, and every one of them is written out
+ * again when the document is serialized. A subtree is still walked only once —
+ * its height and its size are memoised when it completes, and a later
+ * occurrence is charged from the memo. The memo stores raw text bytes, the
+ * number of charged items, and their relative depths, so indentation is
+ * recalculated for each occurrence without re-walking the subtree. The running
+ * total is checked after every charge. JSON cannot alias, but is counted the
+ * same way.
+ */
+function assertSpecShape(value: unknown, contentType: ParsedSpec['contentType']): void {
   if (value === null || typeof value !== 'object') return;
 
   interface Frame {
@@ -559,13 +679,42 @@ function assertSpecDepth(value: unknown): void {
     children: unknown[];
     childIndex: number;
     maxChildHeight: number;
+    /** Resolved key and scalar bytes, excluding indentation. */
+    bytes: number;
+    /** Number of keys, scalars, and array elements charged in this subtree. */
+    chargedItems: number;
+    /** Sum of charged-item depths relative to this frame's depth. */
+    relativeDepths: number;
+  }
+
+  interface CompletedSize {
+    bytes: number;
+    chargedItems: number;
+    relativeDepths: number;
   }
 
   const active = new WeakSet<object>();
   const completedHeights = new WeakMap<object, number>();
+  const completedSizes = new WeakMap<object, CompletedSize>();
   const pending: Frame[] = [];
+  let total = 0;
+
+  const charge = (frame: Frame, bytes: number, items = 1): void => {
+    frame.bytes += bytes;
+    frame.chargedItems += items;
+    total += bytes + items * (2 * (frame.depth - 1) + 4);
+    if (total > MAX_SPEC_EXPANDED_BYTES) throw expandedTooLarge();
+  };
 
   const push = (entryValue: object, depth: number): void => {
+    // Defence in depth behind the parse options: a `Map`, `Set`, `Date` or
+    // typed array has no own enumerable properties, so it would be charged
+    // nothing here and still be written out in full by the serializer.
+    if (!isPlainContainer(entryValue)) {
+      throw specInvalid('The OpenAPI document contains a value that is not JSON data', {
+        reason: 'unsupported_node',
+      });
+    }
     if (depth > MAX_SPEC_DEPTH) {
       throw specInvalid(`The document exceeds the ${MAX_SPEC_DEPTH} level nesting limit`, {
         reason: 'nesting_too_deep',
@@ -578,13 +727,23 @@ function assertSpecDepth(value: unknown): void {
       });
     }
     active.add(entryValue);
-    pending.push({
+    const frame: Frame = {
       value: entryValue,
       depth,
       children: Object.values(entryValue),
       childIndex: 0,
       maxChildHeight: 0,
-    });
+      bytes: 0,
+      chargedItems: 0,
+      relativeDepths: 0,
+    };
+    pending.push(frame);
+    // Mapping keys are text; array elements are charged when visited below.
+    if (!Array.isArray(entryValue)) {
+      for (const key of Object.keys(entryValue)) {
+        charge(frame, byteLength(key), stringIndentItems(key, contentType));
+      }
+    }
   };
 
   push(value, 1);
@@ -592,7 +751,12 @@ function assertSpecDepth(value: unknown): void {
     const frame = pending[pending.length - 1]!;
     if (frame.childIndex < frame.children.length) {
       const child = frame.children[frame.childIndex++];
-      if (child === null || typeof child !== 'object') continue;
+      if (child === null || typeof child !== 'object') {
+        const items = typeof child === 'string' ? stringIndentItems(child, contentType) : 1;
+        charge(frame, scalarBytes(child), items);
+        continue;
+      }
+      if (Array.isArray(frame.value)) charge(frame, 0);
       if (active.has(child)) {
         throw specInvalid('The OpenAPI document contains a cyclic YAML alias', {
           reason: 'cyclic_alias',
@@ -607,6 +771,14 @@ function assertSpecDepth(value: unknown): void {
           });
         }
         frame.maxChildHeight = Math.max(frame.maxChildHeight, completedHeight);
+        const size = completedSizes.get(child);
+        if (size) {
+          total += size.bytes + size.chargedItems * (2 * frame.depth + 4) + 2 * size.relativeDepths;
+          if (total > MAX_SPEC_EXPANDED_BYTES) throw expandedTooLarge();
+          frame.bytes += size.bytes;
+          frame.chargedItems += size.chargedItems;
+          frame.relativeDepths += size.relativeDepths + size.chargedItems;
+        }
         continue;
       }
       push(child, frame.depth + 1);
@@ -615,10 +787,22 @@ function assertSpecDepth(value: unknown): void {
 
     const height = frame.maxChildHeight + 1;
     completedHeights.set(frame.value, height);
+    const size = {
+      bytes: frame.bytes,
+      chargedItems: frame.chargedItems,
+      relativeDepths: frame.relativeDepths,
+    };
+    completedSizes.set(frame.value, size);
     active.delete(frame.value);
     pending.pop();
     const parent = pending[pending.length - 1];
-    if (parent) parent.maxChildHeight = Math.max(parent.maxChildHeight, height);
+    if (parent) {
+      parent.maxChildHeight = Math.max(parent.maxChildHeight, height);
+      // Already in `total`: only the parent's own subtree size grows.
+      parent.bytes += frame.bytes;
+      parent.chargedItems += frame.chargedItems;
+      parent.relativeDepths += frame.relativeDepths + frame.chargedItems;
+    }
   }
 }
 
@@ -629,7 +813,7 @@ function assertSpecDepth(value: unknown): void {
  * subtree, and re-walking it for every occurrence is exponential. The memo
  * makes the walk linear while still charging each occurrence what it costs to
  * render, which is the number this limit is about. Cyclic aliases are already
- * rejected by {@link assertSpecDepth}, so the walk terminates.
+ * rejected by {@link assertSpecShape}, so the walk terminates.
  */
 function countNodes(root: unknown, memo: WeakMap<object, number>): number {
   if (root === null || typeof root !== 'object') return 0;
@@ -849,7 +1033,7 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
 
   const raw = text.trim();
   const { value, contentType } = parseDocument(raw);
-  assertSpecDepth(value);
+  assertSpecShape(value, contentType);
 
   if (!isRecord(value)) {
     throw specInvalid('The OpenAPI document must be a JSON or YAML object');
@@ -928,6 +1112,50 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
     raw,
     document: value,
   };
+}
+
+/**
+ * The text the catalog serves for a parsed document: JSON pretty-printed with
+ * two-space indentation, or YAML with line folding disabled.
+ *
+ * Shared by the catalog and by {@link parseUploadedOpenApiSpec}, so a document
+ * is measured at upload by exactly the serialization it will be served as.
+ */
+export function renderCatalogSpec(
+  document: Record<string, unknown>,
+  contentType: ParsedSpec['contentType'],
+): string {
+  return contentType === 'application/json'
+    ? JSON.stringify(document, null, 2)
+    : stringifyYaml(document, { lineWidth: 0 });
+}
+
+/**
+ * {@link parseOpenApiSpec} for a document being *uploaded* — a publish, a spec
+ * revision, a rollback or a diff preview — which must also be one the catalog
+ * will serve.
+ *
+ * The parse-time walk charges indentation before serialization, and this render
+ * check remains the backstop for quoting and line breaks. The catalog refuses
+ * to serve a rendering over {@link MAX_SPEC_EXPANDED_BYTES}; the catalog check
+ * also refuses (fails closed for) the rare document the server-URL rewrite
+ * pushes over that limit. The catalog still checks its own output for rows
+ * stored before this check existed.
+ *
+ * @throws NexusError `SPEC_INVALID` with `reason: 'expanded_too_large'` for a
+ * rendering past the limit, and everything {@link parseOpenApiSpec} throws
+ */
+export function parseUploadedOpenApiSpec(text: string): ParsedSpec {
+  const parsed = parseOpenApiSpec(text);
+  const rendered = renderCatalogSpec(parsed.document, parsed.contentType);
+  if (byteLength(rendered) > MAX_SPEC_EXPANDED_BYTES) {
+    throw specInvalid(
+      `The document is larger than the ${Math.floor(MAX_SPEC_EXPANDED_BYTES / 1024)} KiB limit ` +
+        'once formatted for the catalog',
+      { reason: 'expanded_too_large', limit: MAX_SPEC_EXPANDED_BYTES },
+    );
+  }
+  return parsed;
 }
 
 /**

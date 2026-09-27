@@ -26,6 +26,26 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- OpenAPI documents are bounded by what they expand to, not only by their
+  upload size (#421). The UTF-8 size of a document's keys and scalars once
+  YAML aliases are resolved, plus estimated per-item indentation, and the size
+  of the document as the catalog serves it, may not exceed
+  `MAX_SPEC_EXPANDED_BYTES` (4 MiB, twice
+  `MAX_SPEC_BYTES`); publishing, revising, rolling back or diffing past it
+  answers `400 SPEC_INVALID` with `details.reason = "expanded_too_large"`, so
+  minified JSON that pretty-prints past the limit is refused at upload rather
+  than accepted and then not served. YAML is now read with the YAML 1.2 core
+  schema even when it declares `%YAML 1.1`: `<<` merge keys are ordinary keys,
+  and `!!omap`, `!!set`, `!!binary` and `!!timestamp` tags are ignored, so the
+  node reads as the plain mapping, sequence or string it is written as. A
+  mapping or sequence used as a mapping key answers
+  `details.reason = "non_scalar_key"`, and a parsed value that is not a plain
+  object, array or scalar `details.reason = "unsupported_node"`. The catalog
+  reads YAML with the same schema for stored revisions: `yes`, `no`, `on` and
+  `off` stay strings, and `0777` reads as decimal 777. Stored revisions are
+  re-read with those rules. The catalog refuses to cache or serve a rendering
+  larger than the limit, so a revision accepted before this change fails closed
+  instead of being written out in full.
 - A revocation rollback no longer re-activates a grant whose account was
   disabled meanwhile (#420). When the gateway refuses a targeted revocation's
   ACL removal, the rollback re-reads the grantee under the account's lifecycle

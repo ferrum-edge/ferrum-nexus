@@ -66,9 +66,8 @@
 
 import { createHash } from 'node:crypto';
 
-import { stringify as stringifyYaml } from 'yaml';
-
 import {
+  MAX_SPEC_EXPANDED_BYTES,
   clampPageSize,
   roleAtLeast,
   type AccessRequest,
@@ -96,7 +95,7 @@ import type {
 } from '../db/store.js';
 import { notFound, specInvalid } from '../lib/errors.js';
 import { LruCache } from '../lib/lru-cache.js';
-import { parseOpenApiSpec, type ParsedSpec } from '../publishing/oas.js';
+import { parseOpenApiSpec, renderCatalogSpec, type ParsedSpec } from '../publishing/oas.js';
 import { canListApi, canViewApi, resolveReadAccess, type ApiReadAccess } from './read-access.js';
 import { presentApi, type GatewayUrlSource } from '../publishing/present.js';
 import { rewriteSpecServers } from '../publishing/spec-document.js';
@@ -135,6 +134,11 @@ export interface CatalogService {
   canList(viewer: UserRecord, api: ApiRecord, access: ApiReadAccess): boolean;
   /** Whether `viewer` may open `api`'s detail page and read its spec. */
   canView(viewer: UserRecord, api: ApiRecord, access: ApiReadAccess): boolean;
+}
+
+/** Whether the rendered catalog spec fits the byte limit used for cache entries. */
+export function catalogSpecFitsLimit(serialized: string): boolean {
+  return Buffer.byteLength(serialized) <= MAX_SPEC_EXPANDED_BYTES;
 }
 
 /**
@@ -210,6 +214,10 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
     const cached = specCache.get(key);
     if (cached !== undefined) return cached;
 
+    // The parser refuses a document whose YAML aliases resolve past
+    // `MAX_SPEC_EXPANDED_BYTES` before anything is serialized, and it runs on
+    // every stored row, so a revision stored before that limit existed fails
+    // here too rather than being written out a hundred times over.
     let parsed: ParsedSpec;
     try {
       parsed = parseOpenApiSpec(rawSpec);
@@ -218,14 +226,18 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       return null;
     }
     const document = rewriteSpecServers(parsed.document, serverUrl, 'catalog');
-    const rendering = {
-      raw_spec:
-        parsed.contentType === 'application/json'
-          ? JSON.stringify(document, null, 2)
-          : stringifyYaml(document),
-      content_type: parsed.contentType,
-    };
-    specCache.set(key, rendering, key.length + Buffer.byteLength(rendering.raw_spec));
+    const serialized = renderCatalogSpec(document, parsed.contentType);
+    // Serialization adds indentation and quoting the parse-time count does not
+    // see, so the output is bounded as well. An upload is measured by the same
+    // rendering, so this refuses only a row stored before that check existed:
+    // it is remembered like one that does not parse, and its text is never cached.
+    if (!catalogSpecFitsLimit(serialized)) {
+      specCache.set(key, null, key.length);
+      return null;
+    }
+    const bytes = Buffer.byteLength(serialized);
+    const rendering = { raw_spec: serialized, content_type: parsed.contentType };
+    specCache.set(key, rendering, key.length + bytes);
     return rendering;
   }
 

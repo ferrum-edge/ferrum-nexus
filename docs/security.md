@@ -723,6 +723,44 @@ named by `NEXUS_TRUSTED_PROXIES` (unset: trust nothing). It takes a hop count
 at startup; `/0` is refused. Trusting an unfiltered header would let a client
 rotate its limiter key and forge the IP in the audit log.
 
+### Parsed documents are bounded by what they decode to
+
+`MAX_SPEC_BYTES` bounds the upload, not what it decodes to, and so not the
+server memory a parse — or the catalog's re-serialization of the result — takes.
+A YAML alias repeats its anchor at every use and the parsed document does not
+remember that it was an alias, so the re-serialization writes out every copy.
+Nexus adds the UTF-8 bytes of every mapping key and scalar, at every place it
+occurs, plus a per-item indentation charge in the same iterative walk that
+bounds nesting, and refuses a document past
+`MAX_SPEC_EXPANDED_BYTES` (4 MiB, twice `MAX_SPEC_BYTES`) with
+`400 SPEC_INVALID` and `details.reason = "expanded_too_large"`. Without aliases
+a document's compact keys and scalars fit within its source, but the bound
+also accounts for bytes repeated at each alias occurrence and estimated
+serialization indentation. This iterative estimate is checked before
+rendering; the rendered byte length is then checked as a backstop for quoting,
+line breaks, and other serialization costs. One large anchored scalar aliased
+a hundred times — about a hundredfold expansion under the YAML parser's own
+per-anchor alias count — is refused. JSON cannot alias but is counted with its
+own indentation estimate. Two YAML features would bypass that count, and
+neither is honoured:
+the YAML 1.1 schema a `%YAML 1.1` directive selects decodes `!!omap` and
+`!!set` into a `Map` or `Set` whose contents a walk over plain objects cannot
+see, and applies merge keys (`<<: *a`) without charging them against the
+parser's alias count. Every document is read with the YAML 1.2 core schema,
+merge keys off and those tags unresolved, whatever directive it carries; the
+walk refuses any value that is not a plain object, array or scalar
+(`reason = "unsupported_node"`); and a mapping key must be a scalar
+(`reason = "non_scalar_key"`), since a collection key is stringified once per
+occurrence at a cost that grows with the document's anchors.
+Quoting and line breaks are not included in the estimate, so an upload (a
+publish, a spec revision, a rollback or a diff) is also rendered exactly as the
+catalog will serve it and refused with the same reason when that is larger than
+`MAX_SPEC_EXPANDED_BYTES`. The catalog parses every
+stored revision with the same checks before rendering it and refuses — and
+caches only the refusal of — a rendering larger than `MAX_SPEC_EXPANDED_BYTES`,
+so a revision accepted before these limits existed fails closed rather than
+being written out in full.
+
 ### Publishing is bounded per account
 
 Provider registration is open by default, and one publish stores a spec, creates
