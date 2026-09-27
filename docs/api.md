@@ -231,7 +231,7 @@ Example for an admin session:
 ```json
 {
   "status": "ok",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "uptime_seconds": 1284,
   "checked_at": "2026-08-31T09:12:44.117Z",
   "database": { "status": "ok", "latency_ms": 1, "error": null, "driver": "postgres" },
