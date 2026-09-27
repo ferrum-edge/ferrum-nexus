@@ -16,7 +16,11 @@ import {
   asRecord,
   asString,
   displayedRef,
+  displayText,
+  MAX_DISPLAYED_DESCRIPTION_LENGTH,
+  MAX_DISPLAYED_NAME_LENGTH,
   parseSpecText,
+  type DisplayText,
   type HttpMethod,
   type ParsedSpec,
   type ResolvedSpecEntry,
@@ -75,10 +79,14 @@ function UnresolvedReference({ entry }: { entry: UnresolvedSpecEntry }): ReactEl
 
 /**
  * A followed entry's description: an OpenAPI 3.1 sibling of its `$ref` when
- * there is one, the referenced object's own otherwise.
+ * there is one, the referenced object's own otherwise. Cut per occurrence, since
+ * every reference to one component repeats its text.
  */
-function entryDescription(entry: ResolvedSpecEntry): string | null {
-  return entry.overrides.description ?? asString(entry.node.description);
+function entryDescription(entry: ResolvedSpecEntry): DisplayText | null {
+  return displayText(
+    entry.overrides.description ?? asString(entry.node.description),
+    MAX_DISPLAYED_DESCRIPTION_LENGTH,
+  );
 }
 
 /**
@@ -121,17 +129,25 @@ function renderParameterTable(
     }
     const parameter = entry.node;
     const description = entryDescription(entry);
+    const name = displayText(asString(parameter.name), MAX_DISPLAYED_NAME_LENGTH);
+    const location = displayText(asString(parameter.in), MAX_DISPLAYED_NAME_LENGTH);
     rows.push(
       <tr
         key={`${asString(parameter.name) ?? 'param'}-${index}`}
         className="border-b border-border last:border-b-0"
       >
         <td className="py-2 pr-3 align-top">
-          <code className="font-mono text-xs text-fg">{asString(parameter.name) ?? '—'}</code>
-          {description ? <p className="mt-0.5 text-xs text-fg-muted">{description}</p> : null}
+          <code className="font-mono text-xs text-fg" title={name?.title}>
+            {name?.text ?? '—'}
+          </code>
+          {description ? (
+            <p className="mt-0.5 text-xs text-fg-muted" title={description.title}>
+              {description.text}
+            </p>
+          ) : null}
         </td>
-        <td className="py-2 pr-3 align-top font-mono text-xs text-fg-muted">
-          {asString(parameter.in) ?? '—'}
+        <td className="py-2 pr-3 align-top font-mono text-xs text-fg-muted" title={location?.title}>
+          {location?.text ?? '—'}
         </td>
         <td className="py-2 pr-3 align-top text-xs">
           {parameter.required === true ? (
@@ -198,9 +214,12 @@ function renderContentSchemas(
       break;
     }
     const media = asRecord(value);
+    const displayedMediaType = displayText(mediaType, MAX_DISPLAYED_NAME_LENGTH);
     rendered.push(
       <div key={mediaType}>
-        <p className="mb-1 font-mono text-xs text-fg-subtle">{mediaType}</p>
+        <p className="mb-1 font-mono text-xs text-fg-subtle" title={displayedMediaType?.title}>
+          {displayedMediaType?.text}
+        </p>
         {media && media.schema !== undefined ? (
           renderSchema({ schema: media.schema, doc, budget })
         ) : (
@@ -232,6 +251,11 @@ function OperationCard({
   // invocation: one budget per card, shared by every schema the card mounts.
   const budget = createRenderBudget(allowance);
   const truncated = open && budget.remaining <= 0;
+  // An operation is rendered once per tag it carries, so its text is cut per card.
+  const path = displayText(operation.path, MAX_DISPLAYED_NAME_LENGTH);
+  const summary = displayText(operation.summary, MAX_DISPLAYED_NAME_LENGTH);
+  const description = displayText(operation.description, MAX_DISPLAYED_DESCRIPTION_LENGTH);
+  const operationId = displayText(operation.operationId, MAX_DISPLAYED_NAME_LENGTH);
 
   return (
     <div className="border-b border-border last:border-b-0">
@@ -252,10 +276,15 @@ function OperationCard({
         <Badge tone={METHOD_TONES[operation.method]} mono className={METHOD_PILL}>
           {operation.method}
         </Badge>
-        <code className="truncate font-mono text-sm font-medium text-fg">{operation.path}</code>
-        {operation.summary ? (
-          <span className="hidden min-w-0 flex-1 truncate text-sm text-fg-muted md:block">
-            {operation.summary}
+        <code className="truncate font-mono text-sm font-medium text-fg" title={path?.title}>
+          {path?.text}
+        </code>
+        {summary ? (
+          <span
+            className="hidden min-w-0 flex-1 truncate text-sm text-fg-muted md:block"
+            title={summary.title}
+          >
+            {summary.text}
           </span>
         ) : null}
         {operation.deprecated ? <Badge tone="warning">deprecated</Badge> : null}
@@ -270,12 +299,17 @@ function OperationCard({
             <TruncationNotice />
           ) : (
             <>
-              {operation.description ? (
-                <p className="text-sm whitespace-pre-line text-fg-muted">{operation.description}</p>
+              {description ? (
+                <p className="text-sm whitespace-pre-line text-fg-muted" title={description.title}>
+                  {description.text}
+                </p>
               ) : null}
-              {operation.operationId ? (
+              {operationId ? (
                 <p className="text-xs text-fg-subtle">
-                  operationId: <code className="font-mono">{operation.operationId}</code>
+                  operationId:{' '}
+                  <code className="font-mono" title={operationId.title}>
+                    {operationId.text}
+                  </code>
                 </p>
               ) : null}
 
@@ -325,7 +359,11 @@ function renderRequestBody(entry: SpecEntry, doc: SpecNode, budget: RenderBudget
       {body.required === true ? (
         <p className="mb-1 text-xs font-medium text-danger">required</p>
       ) : null}
-      {description ? <p className="mb-2 text-sm text-fg-muted">{description}</p> : null}
+      {description ? (
+        <p className="mb-2 text-sm text-fg-muted" title={description.title}>
+          {description.text}
+        </p>
+      ) : null}
       {renderContentSchemas(body.content, doc, budget)}
     </>
   );
@@ -349,12 +387,15 @@ function renderResponses(
       rendered.push(<TruncationNotice key="__truncated" />);
       break;
     }
+    const description = entry.resolved ? entryDescription(entry) : null;
     rendered.push(
       <div key={status} className="rounded-md border border-border bg-surface p-3">
         <div className="mb-1.5 flex flex-wrap items-center gap-2">
           <Badge tone={statusTone(status)}>{status}</Badge>
           {entry.resolved ? (
-            <span className="text-sm text-fg-muted">{entryDescription(entry) ?? ''}</span>
+            <span className="text-sm text-fg-muted" title={description?.title}>
+              {description?.text ?? ''}
+            </span>
           ) : (
             <UnresolvedReference entry={entry} />
           )}

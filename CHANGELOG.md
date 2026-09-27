@@ -360,6 +360,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - Conversation list previews now fetch the newest message for the whole page in
   one adapter query, preserving the `(created_at, id)` ordering and empty-thread
   previews. A 200-thread page used to issue 200 separate message lookups (#394).
+  The batched query does one indexed newest-message lookup per thread, so it no
+  longer reads and sorts every message of every thread on the page.
 - A consumer repair that resumes after its lease lapsed no longer writes a
   second `gateway.consumer_repair` row when the account's repair rows for that
   consumer already list every stale credential row it would have revoked:
@@ -386,6 +388,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   the lease fence refuses is documented as ending with the row still
   `retiring`, and a test now shows the fence alone keeps such a row there
   (#413).
+- The API viewer caps displayed text per occurrence, since its render budget
+  counts nodes rather than characters and one component's text repeats
+  wherever it is referenced (#417). Parameter, request-body, response,
+  operation and schema descriptions show at most 1,000 characters, and
+  operation summaries, schema property names, types and enum values at most
+  200; a cut never splits a surrogate pair, ends in `…`, and carries a hover
+  hint to download the specification for the rest. Displayed `$ref`s use the
+  same surrogate-safe cut.
 
 ## [0.1.0] - 2026-09-25
 

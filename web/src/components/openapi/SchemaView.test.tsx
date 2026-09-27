@@ -2,7 +2,12 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createRenderBudget, MAX_PAGE_NODES, SchemaView } from './SchemaView';
 import { OpenApiView } from './OpenApiView';
-import type { SpecNode } from './parse';
+import {
+  MAX_DISPLAYED_DESCRIPTION_LENGTH,
+  MAX_DISPLAYED_NAME_LENGTH,
+  TRUNCATED_TEXT_HINT,
+  type SpecNode,
+} from './parse';
 
 afterEach(cleanup);
 
@@ -60,6 +65,58 @@ describe('SchemaView', () => {
       />,
     );
     expect(screen.getByText(/circular →/)).toBeInTheDocument();
+  });
+
+  it('cuts a referenced schema description at every $ref to it', () => {
+    // The budget charges each resolved $ref as a node whatever its text, so
+    // one long description repeated per reference must be cut per occurrence.
+    const description = 'd'.repeat(100_000);
+    const properties = Object.fromEntries(
+      Array.from({ length: 500 }, (_, index) => [
+        `p${index}`,
+        { $ref: '#/components/schemas/Wide' },
+      ]),
+    );
+    const doc = { components: { schemas: { Wide: { type: 'string', description } } } } as SpecNode;
+
+    render(
+      <SchemaView
+        doc={doc}
+        budget={createRenderBudget()}
+        schema={{ type: 'object', properties }}
+      />,
+    );
+
+    const shown = screen.getAllByText(/^d+…$/);
+    expect(shown).toHaveLength(500);
+    for (const node of shown) {
+      expect(node.textContent).toHaveLength(MAX_DISPLAYED_DESCRIPTION_LENGTH + 1);
+      expect(node).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
+    }
+  });
+
+  it('cuts long property names, types and enum values', () => {
+    const long = 'n'.repeat(10_000);
+    const doc = { components: { schemas: {} } } as SpecNode;
+
+    render(
+      <SchemaView
+        doc={doc}
+        budget={createRenderBudget()}
+        schema={{
+          type: 'object',
+          properties: { [long]: { type: 'string', format: long, enum: [long] } },
+        }}
+      />,
+    );
+
+    // The property name and the enum value.
+    const cut = [...screen.getAllByText(/^n+…$/), screen.getByText(/^string <n+…$/)];
+    expect(cut).toHaveLength(3);
+    for (const node of cut) {
+      expect(node.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
+      expect(node).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
+    }
   });
 
   it('bounds a combinatorial fan-out document instead of hanging', () => {

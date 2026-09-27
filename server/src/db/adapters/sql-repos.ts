@@ -2404,16 +2404,23 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     findLatestByThreads: async (threadIds) => {
       if (threadIds.length === 0) return [];
       const placeholders = threadIds.map(() => '?').join(', ');
+      // One `(thread_id, created_at)` index seek per requested thread for its
+      // newest message id, then a primary-key lookup, rather than reading and
+      // ranking every message of every thread on the page. An empty thread has
+      // no match and yields no row.
       const rows = await queryAll(
         exec,
-        `SELECT m.* FROM messages AS m
-         WHERE m.thread_id IN (${placeholders})
-           AND NOT EXISTS (
-             SELECT 1 FROM messages AS n
-             WHERE n.thread_id = m.thread_id
-               AND (n.created_at > m.created_at
-                 OR (n.created_at = m.created_at AND n.id > m.id))
-           )`,
+        `SELECT m.* FROM (
+           SELECT (
+             SELECT n.id FROM messages AS n
+             WHERE n.thread_id = t.id
+             ORDER BY n.created_at DESC, n.id DESC
+             LIMIT 1
+           ) AS latest_id
+           FROM message_threads AS t
+           WHERE t.id IN (${placeholders})
+         ) AS l
+         JOIN messages AS m ON m.id = l.latest_id`,
         threadIds,
       );
       return rows.map(mapMessage);
