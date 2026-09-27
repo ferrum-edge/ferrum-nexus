@@ -8,7 +8,14 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { OpenApiView } from './OpenApiView';
-import { parseSpecText, type SpecEntry, type SpecOperation } from './parse';
+import {
+  MAX_DISPLAYED_DESCRIPTION_LENGTH,
+  MAX_DISPLAYED_NAME_LENGTH,
+  parseSpecText,
+  TRUNCATED_TEXT_HINT,
+  type SpecEntry,
+  type SpecOperation,
+} from './parse';
 
 afterEach(cleanup);
 
@@ -416,6 +423,117 @@ describe('reusable component references', () => {
     fireEvent.click(screen.getByRole('button', { expanded: false }));
     expect(screen.getByText('sibling 0')).toBeInTheDocument();
     expect(screen.queryByText('component description')).not.toBeInTheDocument();
+  });
+
+  it('bounds repeated referenced response descriptions', () => {
+    const description = 'x'.repeat(100_000);
+    const responses = Object.fromEntries(
+      Array.from({ length: 100 }, (_, index) => [
+        String(200 + index),
+        { $ref: '#/components/responses/Wide' },
+      ]),
+    );
+    const text = JSON.stringify(
+      jsonSpec({ '/items': { get: { responses } } }, { responses: { Wide: { description } } }),
+    );
+
+    render(<OpenApiView text={text} />);
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+
+    const renderedDescriptions = screen.getAllByText(/^x+…$/);
+    expect(renderedDescriptions).toHaveLength(100);
+    for (const node of renderedDescriptions) {
+      expect(node.textContent).toHaveLength(MAX_DISPLAYED_DESCRIPTION_LENGTH + 1);
+      expect(node).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
+    }
+  });
+
+  it('bounds a media type repeated across referenced responses', () => {
+    const mediaType = `application/${'x'.repeat(10_000)}`;
+    const responses = Object.fromEntries(
+      Array.from({ length: 50 }, (_, index) => [
+        String(200 + index),
+        { $ref: '#/components/responses/Wide' },
+      ]),
+    );
+    const text = JSON.stringify(
+      jsonSpec(
+        { '/items': { get: { responses } } },
+        {
+          responses: {
+            Wide: {
+              description: 'ok',
+              content: { [mediaType]: { schema: { type: 'string' } } },
+            },
+          },
+        },
+      ),
+    );
+
+    render(<OpenApiView text={text} />);
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+
+    const renderedMediaTypes = screen.getAllByText(/^application\/x+…$/);
+    expect(renderedMediaTypes).toHaveLength(50);
+    for (const node of renderedMediaTypes) {
+      expect(node.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
+      expect(node).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
+    }
+  });
+
+  it('bounds parameter names and locations repeated through references', () => {
+    const parameterName = 'n'.repeat(10_000);
+    const parameterLocation = 'i'.repeat(10_000);
+    const parameters = Array.from({ length: 50 }, () => ({
+      $ref: '#/components/parameters/Wide',
+    }));
+    const text = JSON.stringify(
+      jsonSpec(
+        { '/items': { get: { parameters, responses: OK } } },
+        {
+          parameters: {
+            Wide: { name: parameterName, in: parameterLocation },
+          },
+        },
+      ),
+    );
+
+    render(<OpenApiView text={text} />);
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+
+    const renderedNames = screen.getAllByText(/^n+…$/);
+    expect(renderedNames).toHaveLength(50);
+    for (const node of renderedNames) {
+      expect(node.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
+      expect(node).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
+    }
+    const renderedLocations = screen.getAllByText(/^i+…$/);
+    expect(renderedLocations).toHaveLength(50);
+    for (const node of renderedLocations) {
+      expect(node.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
+      expect(node).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
+    }
+  });
+
+  it('bounds a long operation path on the tag card and its operation ID', () => {
+    const path = `/${'p'.repeat(10_000)}`;
+    const operationId = 'o'.repeat(10_000);
+    const text = JSON.stringify(
+      jsonSpec({
+        [path]: { get: { operationId, responses: OK } },
+      }),
+    );
+
+    render(<OpenApiView text={text} />);
+
+    const renderedPath = screen.getByText(/^\/p+…$/);
+    expect(renderedPath.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
+    expect(renderedPath).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
+
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+    const renderedOperationId = screen.getByText(/^o+…$/);
+    expect(renderedOperationId.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
+    expect(renderedOperationId).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
   });
 
   it('shortens a long unresolved reference in the placeholder', () => {
