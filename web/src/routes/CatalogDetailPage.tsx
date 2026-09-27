@@ -399,12 +399,11 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
         : 'nexus-user-<your id>';
   const holder =
     applicationId === null ? 'your account' : (access.data?.application?.name ?? identityName);
-  // A retired API takes no new access requests, but an identity that already
-  // holds an active grant may still call it (#376). Everywhere else an API that
-  // needs no approval is callable by any identity, and a requestable one only
-  // by the selected identity once it holds an active grant (#374).
-  const canCall =
-    access.data?.grant?.status === 'active' || (api.status !== 'retired' && !api.requestable);
+  // A retired API takes no new access requests, but retirement does not change
+  // who may call it (#376). An API that needs no approval remains callable by
+  // any identity, while a requestable one requires an active grant for the
+  // selected identity (#374).
+  const canCall = access.data?.grant?.status === 'active' || !api.requestable;
 
   if (api.access_state === 'owner') {
     return (
@@ -449,7 +448,7 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
           }
         />
         <CardBody>
-          {api.status === 'retired' ? (
+          {api.status === 'retired' && api.requestable ? (
             <div className="flex flex-col gap-4">
               <p className="text-sm text-fg-muted">
                 This API is retired. Existing access remains available, but new access requests are
