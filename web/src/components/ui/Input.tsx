@@ -13,6 +13,12 @@ const CONTROL_CLASS =
 
 export interface FieldProps {
   label: string;
+  /**
+   * Keep the label for assistive technology only — for a control in a filter
+   * bar whose placeholder or value already says what it is, beside controls
+   * that carry an `aria-label` and no visible label.
+   */
+  hideLabel?: boolean;
   htmlFor: string;
   hint?: ReactNode;
   error?: string | null;
@@ -24,6 +30,7 @@ export interface FieldProps {
 /** Label + control + hint/error wrapper; every form control uses one. */
 export function Field({
   label,
+  hideLabel = false,
   htmlFor,
   hint,
   error,
@@ -33,7 +40,10 @@ export function Field({
 }: FieldProps): ReactElement {
   return (
     <div className={cn('flex min-w-0 flex-col gap-1.5', className)}>
-      <label htmlFor={htmlFor} className="text-sm font-medium text-fg">
+      <label
+        htmlFor={htmlFor}
+        className={cn('text-sm font-medium text-fg', hideLabel && 'sr-only')}
+      >
         {label}
         {required ? (
           <span className="ml-1 text-danger" aria-hidden="true">

@@ -17,6 +17,8 @@ export interface AsyncSelectPageParams {
 
 export interface AsyncSelectProps<TItem> {
   label: string;
+  /** Visually hide the label (it still names the control); see {@link Field}. */
+  hideLabel?: boolean;
   value: string;
   /** Called with the chosen value and the option it came from. */
   onValueChange: (value: string, option: SelectOption) => void;
@@ -66,6 +68,7 @@ const SEARCH_DEBOUNCE_MS = 250;
  */
 export function AsyncSelect<TItem>({
   label,
+  hideLabel,
   value,
   onValueChange,
   queryKey,
@@ -133,7 +136,7 @@ export function AsyncSelect<TItem>({
   };
 
   return (
-    <Field label={label} htmlFor={id} hint={hint} className={className}>
+    <Field label={label} hideLabel={hideLabel} htmlFor={id} hint={hint} className={className}>
       <button
         id={id}
         type="button"

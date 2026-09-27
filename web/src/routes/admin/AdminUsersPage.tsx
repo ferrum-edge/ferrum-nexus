@@ -4,6 +4,7 @@ import {
   DEFAULT_PAGE_SIZE,
   ROLE_LABELS,
   ROLE_ORDER,
+  roleAtLeast,
   type GetOrganizationResponse,
   type Organization,
   type Role,
@@ -12,6 +13,7 @@ import {
 } from '@ferrum-nexus/shared';
 import { formatDateTime, formatRelative } from '../../lib/format';
 import { useRetryGatewayTeardown, useUpdateUser, useUser, useUsers } from '../../hooks/useUsers';
+import { useAuth } from '../../stores/auth';
 import { useToast } from '../../stores/toast';
 import { RoleGuard } from '../../components/layout/RoleGuard';
 import { Badge } from '../../components/ui/Badge';
@@ -43,6 +45,43 @@ function initials(displayName: string): string {
   const first = words[0]?.[0] ?? '';
   const last = words.length > 1 ? (words[words.length - 1]?.[0] ?? '') : '';
   return `${first}${last}`.toUpperCase();
+}
+
+/**
+ * Why `actor` cannot change `target`'s role from its row, or `null` when they
+ * can.
+ *
+ * Mirrors the server's rules (`server/src/users/service.ts`) so a row offers a
+ * select only where a change can succeed, and a plain role badge — with the
+ * reason — where it cannot. The server still decides.
+ */
+function roleLockReason(actor: User | null, target: User, lastSuperAdmin: boolean): string | null {
+  if (actor === null) return null;
+  if (!roleAtLeast(actor.role, 'super_admin') && roleAtLeast(target.role, 'admin')) {
+    return 'Only a super admin can change an administrator’s role.';
+  }
+  if (lastSuperAdmin && target.role === 'super_admin' && target.status === 'active') {
+    return 'The last active super admin cannot be demoted.';
+  }
+  return null;
+}
+
+/** Why `actor` cannot disable (or re-enable) `target`, or `null` when they can. */
+function statusLockReason(
+  actor: User | null,
+  target: User,
+  lastSuperAdmin: boolean,
+): string | null {
+  if (actor === null) return null;
+  if (!roleAtLeast(actor.role, 'super_admin') && roleAtLeast(target.role, 'admin')) {
+    return 'Only a super admin can disable or re-enable an administrator.';
+  }
+  if (target.status !== 'active') return null;
+  if (lastSuperAdmin && target.role === 'super_admin') {
+    return 'The last active super admin cannot be disabled.';
+  }
+  if (target.id === actor.id) return 'You cannot disable your own account.';
+  return null;
 }
 
 /**
@@ -220,6 +259,30 @@ function UsersTable(): ReactElement {
     ...(orgFilter === 'all' ? {} : { org_id: orgFilter }),
   });
 
+  const { user: actor } = useAuth();
+  // Only asked when a super admin is on screen: whether they are the last
+  // active one, whose role and status the server refuses to change.
+  const superAdminOnPage = (query.data?.items ?? []).some(
+    (row) => row.role === 'super_admin' && row.status === 'active',
+  );
+  const activeSuperAdmins = useUsers(
+    { role: 'super_admin', status: 'active', limit: 1 },
+    superAdminOnPage,
+  );
+  const lastSuperAdmin = activeSuperAdmins.data?.total === 1;
+  // A plain admin may move accounts between client and provider only.
+  const actorRole = actor?.role ?? null;
+  const assignableRoles = useMemo(
+    () =>
+      ROLE_ORDER.filter(
+        (role) =>
+          actorRole === null ||
+          roleAtLeast(actorRole, 'super_admin') ||
+          !roleAtLeast(role, 'admin'),
+      ),
+    [actorRole],
+  );
+
   const update = useUpdateUser();
   const toast = useToast();
   const [statusTarget, setStatusTarget] = useState<User | null>(null);
@@ -253,12 +316,26 @@ function UsersTable(): ReactElement {
       {
         id: 'role',
         header: 'Role',
-        cell: ({ row }) => (
-          <div className="flex items-center gap-2">
-            <RoleBadge role={row.original.role} />
+        // One control per row: the select where the role can be changed, and
+        // the badge alone — with the reason — where it cannot.
+        cell: ({ row }) => {
+          const locked = roleLockReason(actor, row.original, lastSuperAdmin);
+          if (locked) {
+            return (
+              <Tooltip label={locked}>
+                <span
+                  tabIndex={0}
+                  className="inline-flex rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-ring"
+                >
+                  <RoleBadge role={row.original.role} />
+                </span>
+              </Tooltip>
+            );
+          }
+          return (
             <Select<Role>
               aria-label={`Change role for ${row.original.display_name}`}
-              className="h-8 w-32 text-xs"
+              className="h-8 w-36 text-xs"
               value={row.original.role}
               onValueChange={(role) => {
                 if (role === row.original.role) return;
@@ -267,10 +344,10 @@ function UsersTable(): ReactElement {
                   { onSuccess: () => toast.success(`Role updated to ${ROLE_LABELS[role]}`) },
                 );
               }}
-              options={ROLE_ORDER.map((value) => ({ value, label: ROLE_LABELS[value] }))}
+              options={assignableRoles.map((value) => ({ value, label: ROLE_LABELS[value] }))}
             />
-          </div>
-        ),
+          );
+        },
       },
       {
         id: 'organization',
@@ -322,24 +399,34 @@ function UsersTable(): ReactElement {
       {
         id: 'actions',
         header: '',
-        cell: ({ row }) => (
-          <div className="flex justify-end gap-2">
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => setEditTarget(row.original)}
-              aria-label={`Edit ${row.original.display_name}`}
-            >
-              Edit
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => setStatusTarget(row.original)}>
-              {row.original.status === 'active' ? 'Disable' : 'Enable'}
-            </Button>
-          </div>
-        ),
+        cell: ({ row }) => {
+          const active = row.original.status === 'active';
+          const statusLocked = statusLockReason(actor, row.original, lastSuperAdmin);
+          return (
+            <div className="flex justify-end gap-1.5">
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setEditTarget(row.original)}
+                aria-label={`Edit ${row.original.display_name}`}
+              >
+                Edit
+              </Button>
+              <Button
+                size="sm"
+                variant={active ? 'ghost-danger' : 'ghost'}
+                disabled={statusLocked !== null}
+                title={statusLocked ?? undefined}
+                onClick={() => setStatusTarget(row.original)}
+              >
+                {active ? 'Disable' : 'Enable'}
+              </Button>
+            </div>
+          );
+        },
       },
     ],
-    [update, toast, pendingTeardowns],
+    [update, toast, pendingTeardowns, actor, lastSuperAdmin, assignableRoles],
   );
 
   return (
@@ -353,7 +440,11 @@ function UsersTable(): ReactElement {
         onOffsetChange={setOffset}
         loading={query.isLoading}
         toolbar={
-          <>
+          // Its own wrapping row, top-aligned, so opening the organization
+          // picker (which unfolds in place) grows the bar downwards instead of
+          // re-centring the controls beside it. On a phone: search, then role
+          // and status side by side, then organization.
+          <div className="flex w-full flex-wrap items-start gap-2">
             <SearchInput
               wrapperClassName="w-full sm:w-64"
               aria-label="Search users"
@@ -366,7 +457,7 @@ function UsersTable(): ReactElement {
             />
             <Select<Role | 'all'>
               aria-label="Filter by role"
-              className="w-40"
+              className="w-[calc(50%-0.25rem)] sm:w-40"
               value={roleFilter}
               onValueChange={(value) => {
                 setRoleFilter(value);
@@ -382,7 +473,7 @@ function UsersTable(): ReactElement {
             />
             <Select<UserStatus | 'all'>
               aria-label="Filter by status"
-              className="w-40"
+              className="w-[calc(50%-0.25rem)] sm:w-40"
               value={statusFilter}
               onValueChange={(value) => {
                 setStatusFilter(value);
@@ -396,6 +487,8 @@ function UsersTable(): ReactElement {
             />
             <AsyncSelect<Organization>
               label="Filter by organization"
+              hideLabel
+              className="w-full sm:w-56"
               value={orgFilter === 'all' ? '' : orgFilter}
               onValueChange={(value) => {
                 setOrgFilter(value || 'all');
@@ -408,7 +501,7 @@ function UsersTable(): ReactElement {
               searchPlaceholder="Search organizations"
               emptyLabel="No organizations found."
             />
-          </>
+          </div>
         }
         empty={
           <EmptyState

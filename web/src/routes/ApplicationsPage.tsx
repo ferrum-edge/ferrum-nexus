@@ -144,7 +144,7 @@ function ApplicationsList(): ReactElement {
             >
               {row.original.status === 'active' ? 'Disable' : 'Enable'}
             </Button>
-            <Button variant="ghost" onClick={() => setDeleting(row.original)}>
+            <Button variant="ghost-danger" onClick={() => setDeleting(row.original)}>
               Delete
             </Button>
           </div>
