@@ -360,7 +360,9 @@ function renderRequestBody(entry: SpecEntry, doc: SpecNode, budget: RenderBudget
         <p className="mb-1 text-xs font-medium text-danger">required</p>
       ) : null}
       {description ? (
-        <p className="mb-2 text-sm text-fg-muted" title={description.title}>{description.text}</p>
+        <p className="mb-2 text-sm text-fg-muted" title={description.title}>
+          {description.text}
+        </p>
       ) : null}
       {renderContentSchemas(body.content, doc, budget)}
     </>

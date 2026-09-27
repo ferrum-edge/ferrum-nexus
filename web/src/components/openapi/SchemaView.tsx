@@ -122,7 +122,9 @@ function TypeLine({ schema }: { schema: SpecNode }): ReactElement | null {
   return (
     <span className="flex flex-wrap items-center gap-1.5">
       {typeText ? (
-        <code className="font-mono text-xs text-info" title={typeText.title}>{typeText.text}</code>
+        <code className="font-mono text-xs text-info" title={typeText.title}>
+          {typeText.text}
+        </code>
       ) : null}
       {enumValues ? (
         <span className="flex flex-wrap gap-1">
