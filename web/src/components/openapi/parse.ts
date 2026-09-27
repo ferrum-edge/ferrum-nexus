@@ -15,7 +15,7 @@
  */
 
 import {
-  MAX_SPEC_BYTES,
+  MAX_SPEC_EXPANDED_BYTES,
   createOpenApiRefResolver,
   keyOpenApiParameters,
   mergeOpenApiParameters,
@@ -310,7 +310,8 @@ function reason(error: unknown): string {
 }
 
 /**
- * UTF-8 byte length of `text`, the unit the server's `MAX_SPEC_BYTES` counts.
+ * UTF-8 byte length of `text`, the unit the server's `MAX_SPEC_BYTES` and
+ * `MAX_SPEC_EXPANDED_BYTES` count.
  *
  * UTF-8 never takes fewer bytes than UTF-16 code units, so a string longer
  * than `limit` code units is reported as `limit + 1` without being encoded.
@@ -321,6 +322,54 @@ export function specByteLength(text: string, limit = Number.POSITIVE_INFINITY): 
 }
 
 /**
+ * Largest document the viewer parses: what the catalog serves.
+ *
+ * The catalog serves a re-serialization of the stored upload (pretty-printed
+ * JSON, or YAML written out again) that may be up to `MAX_SPEC_EXPANDED_BYTES`
+ * long, twice the upload's `MAX_SPEC_BYTES`; `renderSpec` in
+ * `server/src/catalog/service.ts` refuses to serve anything larger. A tighter
+ * cap here would refuse a document the portal published and serves. The upload
+ * limit is enforced separately, by the publish forms (`specProblem`).
+ */
+export const MAX_VIEWER_SPEC_BYTES = MAX_SPEC_EXPANDED_BYTES;
+
+/**
+ * yaml's `maxAliasCount` for the viewer: the server's rendering stays under it.
+ *
+ * The catalog writes its YAML with `yaml`'s `stringify`, which emits an object
+ * the document shares once, anchored, and an alias at every other place — and
+ * the server-URL rewrite shares one `servers` array across the root and every
+ * path item and operation that declared servers. yaml's default of 100 refuses
+ * such a document past about 100 of them.
+ *
+ * yaml counts, per anchor, its uses so far times the most any alias nested
+ * inside it expands, which is at most the number of places the anchored content
+ * appears once aliases are resolved. The server's parse (`assertSpecShape` in
+ * `server/src/publishing/oas.ts`) charges at least four bytes of
+ * `MAX_SPEC_EXPANDED_BYTES` for every mapping key, scalar and array element at
+ * every place it appears, and each rewritten `servers` array sits where the
+ * upload already paid for a `servers` key. So no document the catalog serves
+ * reaches a count of `MAX_SPEC_EXPANDED_BYTES`. The bound still refuses a
+ * pasted document built to expand exponentially, and conversion does not copy
+ * aliased content (every alias yields the anchor's one object), so the walks
+ * over the result stay bounded by the renderer's own budgets.
+ */
+export const VIEWER_YAML_MAX_ALIAS_COUNT = MAX_SPEC_EXPANDED_BYTES;
+
+/**
+ * How the viewer reads YAML: the server's options (`YAML_SPEC_OPTIONS` in
+ * `server/src/publishing/oas.ts`) — the core schema whatever a `%YAML 1.1`
+ * directive says, no merge keys and no `!!omap`/`!!set`/`!!binary`/`!!timestamp`
+ * resolution — so a document reads here as the server read it.
+ */
+const VIEWER_YAML_OPTIONS = {
+  schema: 'core',
+  merge: false,
+  resolveKnownTags: false,
+  maxAliasCount: VIEWER_YAML_MAX_ALIAS_COUNT,
+} as const;
+
+/**
  * Parse an OpenAPI document supplied as JSON or YAML text.
  *
  * JSON first — see the module docblock for why the distinction is not merely
@@ -328,11 +377,11 @@ export function specByteLength(text: string, limit = Number.POSITIVE_INFINITY): 
  * come back as `{ ok: false, error }`.
  */
 export function parseSpecText(text: string): SpecParseResult {
-  // A document the portal cannot accept is not worth a synchronous parse.
-  if (specByteLength(text, MAX_SPEC_BYTES) > MAX_SPEC_BYTES) {
+  // A document the catalog would not serve is not worth a synchronous parse.
+  if (specByteLength(text, MAX_VIEWER_SPEC_BYTES) > MAX_VIEWER_SPEC_BYTES) {
     return {
       ok: false,
-      error: `The specification is larger than the ${formatBytes(MAX_SPEC_BYTES)} limit.`,
+      error: `The specification is larger than the ${formatBytes(MAX_VIEWER_SPEC_BYTES)} limit.`,
     };
   }
   const trimmed = text.trim();
@@ -347,7 +396,7 @@ export function parseSpecText(text: string): SpecParseResult {
     }
   } else {
     try {
-      parsed = parseYaml(trimmed) as unknown;
+      parsed = parseYaml(trimmed, VIEWER_YAML_OPTIONS) as unknown;
     } catch (error) {
       return { ok: false, error: `Could not parse the specification: ${reason(error)}` };
     }

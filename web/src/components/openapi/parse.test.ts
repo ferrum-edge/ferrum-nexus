@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { parse as parseYaml } from 'yaml';
-import { MAX_SPEC_BYTES } from '@ferrum-nexus/shared';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { MAX_SPEC_BYTES, MAX_SPEC_EXPANDED_BYTES } from '@ferrum-nexus/shared';
 import {
   displayedRef,
   displayText,
   MAX_DISPLAYED_REF_LENGTH,
+  MAX_VIEWER_SPEC_BYTES,
   parseSpecText,
   TRUNCATED_TEXT_HINT,
   truncateDisplayText,
@@ -50,18 +51,44 @@ describe('parseSpecText', () => {
     expect(parseYaml).not.toHaveBeenCalled();
   });
 
+  it('accepts what the catalog serves: the rendered limit, not the upload limit', () => {
+    expect(MAX_VIEWER_SPEC_BYTES).toBe(MAX_SPEC_EXPANDED_BYTES);
+    expect(MAX_VIEWER_SPEC_BYTES).toBeGreaterThan(MAX_SPEC_BYTES);
+  });
+
+  it('parses a document just under the rendered limit, past the upload limit', () => {
+    const head = '{"openapi":"3.0.3","info":{"title":"Big API","version":"1.0.0","description":"';
+    const tail = '"},"paths":{}}';
+    const filler = 'a'.repeat(MAX_SPEC_EXPANDED_BYTES - 1024 - head.length - tail.length);
+    const json = `${head}${filler}${tail}`;
+    const yaml = `openapi: 3.0.3\ninfo:\n  title: Big API\n  description: ${filler}\npaths: {}\n`;
+    expect(json.length).toBeGreaterThan(MAX_SPEC_BYTES);
+    expect(yaml.length).toBeGreaterThan(MAX_SPEC_BYTES);
+    expect(json.length).toBeLessThan(MAX_SPEC_EXPANDED_BYTES);
+    expect(yaml.length).toBeLessThan(MAX_SPEC_EXPANDED_BYTES);
+
+    for (const text of [json, yaml]) {
+      const result = parseSpecText(text);
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      expect(result.spec.title).toBe('Big API');
+      expect(result.spec.description).toHaveLength(filler.length);
+    }
+  });
+
   it('refuses a document over the byte limit without parsing it', () => {
     vi.mocked(parseYaml).mockClear();
     const json = vi.spyOn(JSON, 'parse');
 
     // Under the limit in UTF-16 code units, over it in UTF-8 bytes.
-    const yaml = `openapi: 3.0.3\ninfo:\n  title: ${'é'.repeat(MAX_SPEC_BYTES / 2)}\npaths: {}\n`;
+    const title = 'é'.repeat(MAX_SPEC_EXPANDED_BYTES / 2);
+    const yaml = `openapi: 3.0.3\ninfo:\n  title: ${title}\npaths: {}\n`;
     const result = parseSpecText(yaml);
-    const jsonResult = parseSpecText(`{"openapi":"${'a'.repeat(MAX_SPEC_BYTES)}"}`);
+    const jsonResult = parseSpecText(`{"openapi":"${'a'.repeat(MAX_SPEC_EXPANDED_BYTES)}"}`);
 
     expect(result).toEqual({
       ok: false,
-      error: 'The specification is larger than the 2.00 MB limit.',
+      error: 'The specification is larger than the 4.00 MB limit.',
     });
     expect(jsonResult.ok).toBe(false);
     expect(parseYaml).not.toHaveBeenCalled();
@@ -79,6 +106,73 @@ describe('parseSpecText', () => {
     if (!result.ok) return;
     expect(result.spec.title).toBe('YAML API');
     expect(parseYaml).toHaveBeenCalledTimes(1);
+  });
+
+  it('parses the catalog rendering that aliases one servers array past 100 times', () => {
+    // What the catalog serves: the server-URL rewrite shares one `servers`
+    // array across the root and every path item and operation that declared
+    // servers, and yaml's stringify writes it once and aliases it everywhere else.
+    const servers = [{ url: 'https://gateway.example.test/v1' }];
+    const paths: Record<string, unknown> = {};
+    for (let index = 0; index < 150; index += 1) {
+      paths[`/things/${index}`] = {
+        servers,
+        get: { servers, responses: { '200': { description: 'ok' } } },
+      };
+    }
+    const text = stringifyYaml(
+      { openapi: '3.0.3', info: { title: 'Aliased API', version: '1.0.0' }, servers, paths },
+      { lineWidth: 0 },
+    );
+    expect(text.match(/servers: \*/g)?.length).toBe(300);
+    // yaml's default alias limit is what refused this document before.
+    expect(() => parseYaml(text)).toThrow(/alias count/);
+
+    const result = parseSpecText(text);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spec.servers).toEqual([
+      { url: 'https://gateway.example.test/v1', description: null },
+    ]);
+    expect(result.spec.operationCount).toBe(150);
+  });
+
+  it('still refuses YAML aliases that expand exponentially', () => {
+    // Each anchor names the previous one twice: 2^30 places once resolved.
+    const lines = ['openapi: 3.0.3', 'info:', '  title: Laughs', "  version: '1.0.0'"];
+    lines.push('x-laughs:', '  l0: &l0 [lol, lol]');
+    for (let level = 1; level <= 30; level += 1) {
+      lines.push(`  l${level}: &l${level} [*l${level - 1}, *l${level - 1}]`);
+    }
+    lines.push('paths: {}');
+
+    const result = parseSpecText(lines.join('\n'));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/alias count/);
+  });
+
+  it('reads YAML with the core schema, as the server does', () => {
+    const text = [
+      '%YAML 1.1',
+      '---',
+      'openapi: 3.0.3',
+      'info:',
+      '  title: Core API',
+      "  version: '1.0.0'",
+      'x-base: &base { a: 1 }',
+      'x-merged: { <<: *base }',
+      'paths: {}',
+    ].join('\n');
+
+    const result = parseSpecText(text);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // No merge keys: `<<` stays a key rather than copying the anchor's entries.
+    expect(result.spec.doc['x-merged']).toEqual({ '<<': { a: 1 } });
   });
 
   it('reports a JSON syntax error as one instead of retrying it as YAML', () => {
