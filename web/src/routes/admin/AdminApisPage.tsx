@@ -113,7 +113,7 @@ function AllApisTable(): ReactElement {
           />
           <Select<ApiStatus | 'all'>
             aria-label="Filter by status"
-            className="w-40"
+            className="w-full sm:w-40"
             value={statusFilter}
             onValueChange={(value) => {
               setStatusFilter(value);
