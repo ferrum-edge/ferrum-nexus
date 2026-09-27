@@ -734,12 +734,15 @@ occurs, plus a per-item indentation charge in the same iterative walk that
 bounds nesting, and refuses a document past
 `MAX_SPEC_EXPANDED_BYTES` (4 MiB, twice `MAX_SPEC_BYTES`) with
 `400 SPEC_INVALID` and `details.reason = "expanded_too_large"`. Without aliases
-a document's compact keys and scalars fit within its source, while the second
-2 MiB is headroom for indentation and legitimate reuse. One large anchored
-scalar aliased a hundred times — about a hundredfold expansion under the YAML
-parser's own per-anchor alias count — is refused. JSON cannot alias but is
-counted the same way. Two YAML features would bypass that count, and neither is
-honoured:
+a document's compact keys and scalars fit within its source, but the bound
+also accounts for bytes repeated at each alias occurrence and estimated
+serialization indentation. This iterative estimate is checked before
+rendering; the rendered byte length is then checked as a backstop for quoting,
+line breaks, and other serialization costs. One large anchored scalar aliased
+a hundred times — about a hundredfold expansion under the YAML parser's own
+per-anchor alias count — is refused. JSON cannot alias but is counted with its
+own indentation estimate. Two YAML features would bypass that count, and
+neither is honoured:
 the YAML 1.1 schema a `%YAML 1.1` directive selects decodes `!!omap` and
 `!!set` into a `Map` or `Set` whose contents a walk over plain objects cannot
 see, and applies merge keys (`<<: *a`) without charging them against the

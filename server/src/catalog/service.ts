@@ -136,6 +136,11 @@ export interface CatalogService {
   canView(viewer: UserRecord, api: ApiRecord, access: ApiReadAccess): boolean;
 }
 
+/** Whether the rendered catalog spec fits the byte limit used for cache entries. */
+export function catalogSpecFitsLimit(serialized: string): boolean {
+  return Buffer.byteLength(serialized) <= MAX_SPEC_EXPANDED_BYTES;
+}
+
 /**
  * One normalized catalog document: what `GET /api/catalog/:slug/spec` serves
  * for a revision at one server address. `null` records a stored document the
@@ -226,11 +231,11 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
     // see, so the output is bounded as well. An upload is measured by the same
     // rendering, so this refuses only a row stored before that check existed:
     // it is remembered like one that does not parse, and its text is never cached.
-    const bytes = Buffer.byteLength(serialized);
-    if (bytes > MAX_SPEC_EXPANDED_BYTES) {
+    if (!catalogSpecFitsLimit(serialized)) {
       specCache.set(key, null, key.length);
       return null;
     }
+    const bytes = Buffer.byteLength(serialized);
     const rendering = { raw_spec: serialized, content_type: parsed.contentType };
     specCache.set(key, rendering, key.length + bytes);
     return rendering;

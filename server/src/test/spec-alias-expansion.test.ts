@@ -20,6 +20,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import {
+  catalogSpecFitsLimit,
   createCatalogService,
   type CatalogService,
   type CatalogSpecRendering,
@@ -27,7 +28,11 @@ import {
 import type { UserRecord } from '../db/store.js';
 import { isNexusError, type NexusError } from '../lib/errors.js';
 import { LruCache } from '../lib/lru-cache.js';
-import { parseOpenApiSpec, parseUploadedOpenApiSpec } from '../publishing/oas.js';
+import {
+  parseOpenApiSpec,
+  parseUploadedOpenApiSpec,
+  renderCatalogSpec,
+} from '../publishing/oas.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 /** Size of the anchored scalar the alias fixtures repeat. */
@@ -130,6 +135,19 @@ describe('resolved OpenAPI document size', () => {
     assert.equal(parseOpenApiSpec(json).contentType, 'application/json');
   });
 
+  it('accepts a large JSON spec with scalar arrays and multiline descriptions', () => {
+    const json = JSON.stringify({
+      openapi: '3.1.0',
+      info: { title: 'Large JSON', version: '1', description: 'line\n'.repeat(60_000) },
+      paths: {},
+      'x-nested': {
+        first: { second: { values: new Array<string>(195_000).fill('word') } },
+      },
+    });
+    assert.ok(Buffer.byteLength(json) > 1_500_000 && Buffer.byteLength(json) < MAX_SPEC_BYTES);
+    assert.equal(parseUploadedOpenApiSpec(json).contentType, 'application/json');
+  });
+
   it('refuses deeply nested JSON whose indentation exceeds the limit during parsing', () => {
     const scalarCount = 1_000_000;
     const deepArray = '['.repeat(198) + '[' + '0,'.repeat(scalarCount - 1) + '0' + ']'.repeat(199);
@@ -227,6 +245,15 @@ describe('YAML read as plain data whatever its directive', () => {
 });
 
 describe('an upload measured as the catalog will serve it', () => {
+  it('refuses a rendered document over the catalog size limit', () => {
+    const rendered = renderCatalogSpec(
+      { values: new Array<number>(900_000).fill(0) },
+      'application/json',
+    );
+    assert.ok(Buffer.byteLength(rendered) > MAX_SPEC_EXPANDED_BYTES);
+    assert.equal(catalogSpecFitsLimit(rendered), false);
+  });
+
   it('refuses minified JSON whose expanded form outgrows the limit during parsing', () => {
     const minified = minifiedFillerSpec();
     assert.ok(Buffer.byteLength(minified) < MAX_SPEC_BYTES);

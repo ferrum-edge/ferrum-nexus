@@ -645,9 +645,10 @@ function scalarBytes(value: unknown): number {
   return String(value).length;
 }
 
-/** A string scalar contributes one indentation item for itself and each newline. */
-function stringIndentItems(value: string): number {
+/** A string scalar contributes one indentation item for itself and each YAML newline. */
+function stringIndentItems(value: string, contentType: ParsedSpec['contentType']): number {
   let items = 1;
+  if (contentType !== 'application/yaml') return items;
   for (const character of value) {
     if (character === '\n') items += 1;
   }
@@ -669,7 +670,7 @@ function stringIndentItems(value: string): number {
  * total is checked after every charge. JSON cannot alias, but is counted the
  * same way.
  */
-function assertSpecShape(value: unknown): void {
+function assertSpecShape(value: unknown, contentType: ParsedSpec['contentType']): void {
   if (value === null || typeof value !== 'object') return;
 
   interface Frame {
@@ -740,7 +741,7 @@ function assertSpecShape(value: unknown): void {
     // Mapping keys are text; array elements are charged when visited below.
     if (!Array.isArray(entryValue)) {
       for (const key of Object.keys(entryValue)) {
-        charge(frame, byteLength(key), stringIndentItems(key));
+        charge(frame, byteLength(key), stringIndentItems(key, contentType));
       }
     }
   };
@@ -750,12 +751,12 @@ function assertSpecShape(value: unknown): void {
     const frame = pending[pending.length - 1]!;
     if (frame.childIndex < frame.children.length) {
       const child = frame.children[frame.childIndex++];
-      if (Array.isArray(frame.value)) charge(frame, 0);
       if (child === null || typeof child !== 'object') {
-        const items = typeof child === 'string' ? stringIndentItems(child) : 1;
+        const items = typeof child === 'string' ? stringIndentItems(child, contentType) : 1;
         charge(frame, scalarBytes(child), items);
         continue;
       }
+      if (Array.isArray(frame.value)) charge(frame, 0);
       if (active.has(child)) {
         throw specInvalid('The OpenAPI document contains a cyclic YAML alias', {
           reason: 'cyclic_alias',
@@ -1032,7 +1033,7 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
 
   const raw = text.trim();
   const { value, contentType } = parseDocument(raw);
-  assertSpecShape(value);
+  assertSpecShape(value, contentType);
 
   if (!isRecord(value)) {
     throw specInvalid('The OpenAPI document must be a JSON or YAML object');
