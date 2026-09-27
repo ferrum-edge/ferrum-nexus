@@ -19,7 +19,7 @@ do not duplicate them in this directory.
 
 The shared launcher defaults to `opencode/laguna-s-2.1-free`; pass `--model opencode/<model>`
 only for an explicit alternative opencode model. `--effort` is accepted for parity with the
-sibling skills.
+sibling skills but ignored.
 
 Read the canonical skill before dispatch for remote CI validation, effort selection, preflight,
 isolation, failure handling, and verification. For implementer mode, read

@@ -53,10 +53,9 @@ confirmation. Every dispatch prompt, including continuation prompts, must carry 
    launcher refuses `--model` (exit 2) unless it names exactly that model, so no other
    Qwen/DeepSeek variant and no rolling alias is dispatchable from this skill. Do not
    substitute a different provider or model.
-6. The pin is the **dated snapshot**, not the rolling `deepseek-v4-pro` alias. The operator pinned
-   `-0813` for its limited-time discounted rate; the rolling alias also serves on this plan, so
-   this pin is a cost choice rather than an availability constraint. Re-pin here and in
-   `scripts/dispatch-agent.sh` together, and re-validate, if the snapshot is retired.
+6. Despite the skill's name, the pin is `deepseek-v4.1-flash`, not a `deepseek-v4-pro` model.
+   To change it, re-pin here, in `scripts/dispatch-agent.sh`, and in the `.claude/skills` wrapper
+   together, and re-validate.
 
 ## Isolate every worker
 
