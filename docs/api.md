@@ -1521,10 +1521,10 @@ YAML documents are read with the YAML 1.2 core schema, even when they declare
 `!!timestamp` tags are ignored. `yes`, `no`, `on` and `off` stay strings, and
 `0777` reads as decimal 777. Stored revisions are re-read with the same rules.
 
-The resolved document is bounded by its estimated serialized size: UTF-8 bytes
-for every mapping key and scalar at each occurrence, plus per-item indentation.
-The catalog's rendered output is checked as a backstop. Either limit is 4 MiB
-and returns `400 SPEC_INVALID` with
+The document is bounded by its estimated size when expanded for serving: UTF-8
+bytes for every mapping key and scalar at each occurrence, plus per-item
+indentation. The catalog's rendered output is checked as a backstop. Either
+limit is 4 MiB and returns `400 SPEC_INVALID` with
 `details: { reason: "expanded_too_large", limit: 4194304 }`. The same rules apply
 to spec revisions, rollbacks and upload diffs.
 

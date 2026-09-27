@@ -626,7 +626,7 @@ function parseYamlSpec(text: string): unknown {
 function expandedTooLarge(): NexusError {
   return specInvalid(
     `The document is larger than the ${Math.floor(MAX_SPEC_EXPANDED_BYTES / 1024)} KiB limit ` +
-      'once its YAML aliases are resolved',
+      'once expanded for serving',
     { reason: 'expanded_too_large', limit: MAX_SPEC_EXPANDED_BYTES },
   );
 }

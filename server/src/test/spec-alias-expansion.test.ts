@@ -227,10 +227,10 @@ describe('YAML read as plain data whatever its directive', () => {
 });
 
 describe('an upload measured as the catalog will serve it', () => {
-  it('refuses minified JSON whose formatted form outgrows the limit', () => {
+  it('refuses minified JSON whose expanded form outgrows the limit during parsing', () => {
     const minified = minifiedFillerSpec();
     assert.ok(Buffer.byteLength(minified) < MAX_SPEC_BYTES);
-    assert.doesNotThrow(() => parseOpenApiSpec(minified));
+    expectExpandedTooLarge(() => parseOpenApiSpec(minified));
     expectSpecInvalid(() => parseUploadedOpenApiSpec(minified), {
       reason: 'expanded_too_large',
       limit: MAX_SPEC_EXPANDED_BYTES,
@@ -385,7 +385,7 @@ describe('publishing and serving an alias-expanded document', () => {
     assert.ok(stats.bytes < 1024, 'no expanded document was cached');
   });
 
-  it('refuses to serve a stored document whose serialization outgrows the limit', async (t) => {
+  it('refuses to serve a stored document whose serialization outgrows the limit', async () => {
     const api = await harness.store.apis.findBySlug('alias-stored');
     assert.ok(api);
     const record = await harness.store.apiSpecs.findCurrentByApi(api.id);
@@ -394,20 +394,25 @@ describe('publishing and serving an alias-expanded document', () => {
     // Stored before uploads were measured by their formatted form.
     const minified = minifiedFillerSpec();
     assert.ok(Buffer.byteLength(minified) < MAX_SPEC_BYTES);
-    assert.doesNotThrow(() => parseOpenApiSpec(minified));
+    await harness.store.apiSpecs.create({
+      api_id: api.id,
+      version: 'legacy-oversized',
+      raw_spec: minified,
+      parsed_title: record.parsed_title,
+      parsed_version: record.parsed_version,
+      is_current: true,
+    });
 
     fresh();
-    t.mock.method(harness.store.apiSpecs, 'findCurrentByApi', async () => ({
-      ...record,
-      id: '00000000-0000-4000-8000-00000000f111',
-      raw_spec: minified,
-    }));
-    await assert.rejects(
-      () => catalog.spec(owner, 'alias-stored'),
-      (error: unknown) => isNexusError(error) && error.code === 'SPEC_INVALID',
-    );
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await assert.rejects(
+        () => catalog.spec(owner, 'alias-stored'),
+        (error: unknown) => isNexusError(error) && error.code === 'SPEC_INVALID',
+      );
+    }
     const stats = cache.stats();
     assert.equal(stats.misses, 1);
+    assert.equal(stats.hits, 1, 'the refusal is cached, not re-parsed');
     assert.ok(stats.bytes < 1024, 'the oversized rendering was not cached');
   });
 });
