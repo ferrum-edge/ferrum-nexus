@@ -24,6 +24,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   only public upstreams, and the release notes' release step requires the
   gate's green run.
 
+### Changed
+
+- A polish pass over the web portal: audit labels spell acronyms ("API
+  publish", not "Api publish"); API visibility, access mode and credential
+  type show labels instead of raw values (`public`, `keyauth`); the
+  Notifications page is named in the header; a message thread counts its
+  messages only while older ones are unloaded; the dashboard's stat cards
+  leave no empty slot and pair up on a phone; the admin Users page has one
+  aligned filter row and one role control per account, the badge alone (with
+  the reason) where the server would refuse a change; and the publish form's
+  OpenAPI enforcement select runs full width.
+
 ### Fixed
 
 - OpenAPI documents are bounded by what they expand to, not only by their
@@ -59,6 +71,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   than giving up after one wait, and its retry after a failed combined write is
   a transaction of its own, fenced by the revocation's lease unless the fence is
   what refused it.
+- The Applications page lists only the caller's own applications. For an
+  administrator it listed every account's applications under "Your
+  applications", with Disable and Delete offered on other people's
+  integrations.
 - Opening a thread or replying no longer answers `500` for a message that was
   already stored and audited when working out who to notify fails (#393).
   Recipient discovery — the other seat of a direct thread, the owner of a
