@@ -772,10 +772,7 @@ function assertSpecShape(value: unknown): void {
         frame.maxChildHeight = Math.max(frame.maxChildHeight, completedHeight);
         const size = completedSizes.get(child);
         if (size) {
-          total +=
-            size.bytes +
-            size.chargedItems * (2 * frame.depth + 4) +
-            2 * size.relativeDepths;
+          total += size.bytes + size.chargedItems * (2 * frame.depth + 4) + 2 * size.relativeDepths;
           if (total > MAX_SPEC_EXPANDED_BYTES) throw expandedTooLarge();
           frame.bytes += size.bytes;
           frame.chargedItems += size.chargedItems;
