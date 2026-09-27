@@ -324,7 +324,7 @@ function UsersTable(): ReactElement {
           <div className="flex items-center gap-3">
             <span
               aria-hidden="true"
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent-text"
             >
               {initials(row.original.display_name)}
             </span>

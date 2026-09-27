@@ -63,7 +63,7 @@ function ApplicationsList(): ReactElement {
         header: 'Application',
         cell: ({ row }) => (
           <span className="flex min-w-0 items-center gap-2.5">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent-text">
               <Icon name="stack" className="h-3.5 w-3.5" />
             </span>
             <span className="min-w-0">

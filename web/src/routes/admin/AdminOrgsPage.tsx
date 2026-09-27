@@ -88,7 +88,7 @@ function OrgsTable({ onCreate }: { onCreate: () => void }): ReactElement {
           <div className="flex items-center gap-3">
             <span
               aria-hidden="true"
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent-text"
             >
               <Icon name="building" className="h-4 w-4" />
             </span>

@@ -14,7 +14,7 @@ export function Spinner({ className, label }: SpinnerProps): ReactElement {
         viewBox="0 0 24 24"
         fill="none"
         aria-hidden="true"
-        className={cn('h-5 w-5 animate-spin text-accent', className)}
+        className={cn('h-5 w-5 animate-spin text-accent-text', className)}
       >
         <circle
           cx="12"

@@ -172,7 +172,9 @@ function Radio({
         <label htmlFor={id} className="cursor-pointer text-sm font-medium text-fg">
           {label}
         </label>
-        <p className="text-xs text-fg-subtle">{description}</p>
+        {/* Muted, not subtle, while selected: the subtle grey drops under 4.5:1
+            on the accent tint. */}
+        <p className={cn('text-xs', checked ? 'text-fg-muted' : 'text-fg-subtle')}>{description}</p>
       </div>
     </div>
   );

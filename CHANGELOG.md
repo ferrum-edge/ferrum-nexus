@@ -6,6 +6,25 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Text now meets WCAG AA contrast (4.5:1) throughout the portal, in both themes
+  and with any branding colour. Secondary text, the accent used as text (links,
+  "Requestable" and other accent badges, the active navigation item) and the
+  success, warning and danger badge text were all below it in the light theme —
+  the default accent was under 3:1 on white — and secondary text was below it
+  in the dark theme. A new `--accent-text` token is derived from the primary
+  branding colour the way `--info` already was: the brand hue, darkened or
+  lightened only as far as legibility on every surface and on the accent's own
+  tint requires, while fills keep the exact brand colour. The light theme's
+  success, warning and danger inks are darker, both themes' secondary grey is
+  adjusted, and the dark theme's danger button now uses dark text on its light
+  red. `color.test.ts` checks every text token in `globals.css` against every
+  surface and tint.
+- An administrator managing another provider's API is shown under
+  Administration › All APIs — in the header's location bar, the sidebar and the
+  page's breadcrumb — instead of Publishing › My APIs.
+
 ## [0.2.0] - 2026-09-27
 
 Paired with Ferrum Edge `v0.9.8`. Upgrades a `v0.1.0` database in place with

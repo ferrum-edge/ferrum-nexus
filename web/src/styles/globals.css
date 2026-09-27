@@ -45,13 +45,16 @@
   /* Text. */
   --fg: #e9edf3;
   --fg-muted: #a4aebc;
-  --fg-subtle: #6e7888;
+  /* Secondary text still clears 4.5:1 on every surface (was #6e7888, ~4.1:1). */
+  --fg-subtle: #7c8696;
 
   /* Ember accent (branding overrides the whole scale at runtime). */
   --accent: #f97316;
   --accent-hover: #fb8b3c;
   --accent-active: #ea640c;
   --accent-fg: #1a0d02;
+  /* The accent as ink: links, accent badges, the active nav item. */
+  --accent-text: #f97316;
   --accent-soft: rgb(249 115 22 / 0.16);
   --accent-ring: rgb(249 115 22 / 0.45);
   --accent-glow: rgb(249 115 22 / 0.28);
@@ -63,6 +66,8 @@
   --warning-soft: rgb(251 191 36 / 0.14);
   --danger: #f87171;
   --danger-hover: #fb8f8f;
+  /* Ink on a danger fill: this red is light, so white would be ~2.7:1. */
+  --danger-fg: #1a0606;
   --danger-soft: rgb(248 113 113 / 0.14);
   --info: #38bdf8;
   --info-soft: rgb(56 189 248 / 0.16);
@@ -76,7 +81,7 @@
   --sidebar-border: var(--border);
   --sidebar-hover: var(--neutral-soft);
   --sidebar-active-bg: var(--accent-soft);
-  --sidebar-active-fg: var(--accent);
+  --sidebar-active-fg: var(--accent-text);
 
   /* Elevation. */
   --shadow-card: 0 1px 2px rgb(0 0 0 / 0.35), 0 0 0 1px rgb(255 255 255 / 0.015) inset;
@@ -108,22 +113,28 @@
 
   --fg: #0f1419;
   --fg-muted: #4b5563;
-  --fg-subtle: #7b8494;
+  /* Secondary text clears 4.5:1 on every surface (was #7b8494, ~3.5:1). */
+  --fg-subtle: #626c7b;
 
   --accent: #ea580c;
   --accent-hover: #c2410c;
   --accent-active: #9a3412;
   --accent-fg: #ffffff;
+  /* The accent darkened to read as text (runtime branding derives its own). */
+  --accent-text: #b04006;
   --accent-soft: rgb(234 88 12 / 0.12);
   --accent-ring: rgb(234 88 12 / 0.35);
   --accent-glow: rgb(234 88 12 / 0.18);
 
-  --success: #059669;
+  /* State inks darkened so badge text clears 4.5:1 on its own soft tint; the
+     tints keep the original hues. */
+  --success: #067453;
   --success-soft: rgb(5 150 105 / 0.1);
-  --warning: #b45309;
+  --warning: #92400e;
   --warning-soft: rgb(180 83 9 / 0.1);
-  --danger: #dc2626;
-  --danger-hover: #b91c1c;
+  --danger: #b91c1c;
+  --danger-hover: #991b1b;
+  --danger-fg: #ffffff;
   --danger-soft: rgb(220 38 38 / 0.1);
   /* Readable badge ink before the runtime branding palette arrives. */
   --info: #0369a1;
@@ -137,7 +148,7 @@
   --sidebar-border: var(--border);
   --sidebar-hover: var(--neutral-soft);
   --sidebar-active-bg: var(--accent-soft);
-  --sidebar-active-fg: var(--accent);
+  --sidebar-active-fg: var(--accent-text);
 
   --shadow-card: 0 1px 2px rgb(15 23 42 / 0.05), 0 1px 3px rgb(15 23 42 / 0.04);
   --shadow-raised: 0 6px 20px -8px rgb(15 23 42 / 0.18);
@@ -149,7 +160,7 @@
   --sidebar-bg: #0b0f17;
   --sidebar-fg: #aab4c3;
   --sidebar-fg-strong: #f1f5f9;
-  --sidebar-subtle: #66718a;
+  --sidebar-subtle: #7a8499;
   --sidebar-border: #1c2230;
   --sidebar-hover: rgb(255 255 255 / 0.05);
   --sidebar-active-bg: rgb(255 255 255 / 0.08);
@@ -187,6 +198,7 @@
   --color-accent-hover: var(--accent-hover);
   --color-accent-active: var(--accent-active);
   --color-accent-fg: var(--accent-fg);
+  --color-accent-text: var(--accent-text);
   --color-accent-soft: var(--accent-soft);
   --color-accent-ring: var(--accent-ring);
   --color-accent-glow: var(--accent-glow);
@@ -197,6 +209,7 @@
   --color-warning-soft: var(--warning-soft);
   --color-danger: var(--danger);
   --color-danger-hover: var(--danger-hover);
+  --color-danger-fg: var(--danger-fg);
   --color-danger-soft: var(--danger-soft);
   --color-info: var(--info);
   --color-info-soft: var(--info-soft);
@@ -300,7 +313,7 @@
   }
 
   :focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 2px;
     border-radius: var(--radius-xs);
   }

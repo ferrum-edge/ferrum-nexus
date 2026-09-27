@@ -163,7 +163,7 @@ function AuditTable(): ReactElement {
           }
           return (
             <details className="max-w-xs">
-              <summary className="cursor-pointer text-xs font-medium text-accent hover:underline">
+              <summary className="cursor-pointer text-xs font-medium text-accent-text hover:underline">
                 JSON
               </summary>
               <pre className="mt-2 overflow-x-auto rounded-md border border-border bg-inset p-3 font-mono text-xs text-fg-muted">

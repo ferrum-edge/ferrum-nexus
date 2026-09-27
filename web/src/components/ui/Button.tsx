@@ -41,8 +41,8 @@ const VARIANTS: Readonly<Record<ButtonVariant, string>> = {
   'ghost-danger':
     'bg-transparent text-fg-muted border-transparent hover:bg-danger-soft hover:text-danger',
   danger:
-    'bg-danger text-white border-danger shadow-[0_1px_2px_rgb(0_0_0/0.25)] hover:bg-danger-hover hover:border-danger-hover',
-  link: 'bg-transparent border-transparent text-accent hover:underline px-0 h-auto',
+    'bg-danger text-danger-fg border-danger shadow-[0_1px_2px_rgb(0_0_0/0.25)] hover:bg-danger-hover hover:border-danger-hover',
+  link: 'bg-transparent border-transparent text-accent-text hover:underline px-0 h-auto',
 };
 
 const SIZES: Readonly<Record<ButtonSize, string>> = {

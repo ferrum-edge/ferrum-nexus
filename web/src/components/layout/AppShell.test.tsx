@@ -4,12 +4,15 @@ import {
   createRoute,
   createRouter,
   RouterProvider,
+  useParams,
 } from '@tanstack/react-router';
 import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TooltipProvider } from '../ui/Tooltip';
 import { AppShell } from './AppShell';
+import { useNavLocationOverride } from './navLocation';
 
 vi.mock('../../stores/auth', () => ({
   useAuth: () => ({
@@ -54,6 +57,13 @@ function stubDesktopMode(initialMatches: boolean): (matches: boolean) => void {
   };
 }
 
+/** An API detail page that, like the real one, files someone else's API under All APIs. */
+function ApiDetailStub(): ReactElement {
+  const { apiId } = useParams({ strict: false });
+  useNavLocationOverride(apiId === 'someone-elses' ? '/admin/apis' : null);
+  return <h1>API detail page</h1>;
+}
+
 async function renderShell(path = '/'): Promise<void> {
   const root = createRootRoute({ component: AppShell });
   const routes = [
@@ -67,8 +77,13 @@ async function renderShell(path = '/'): Promise<void> {
       component: () => <h1>{title}</h1>,
     }),
   );
+  const detail = createRoute({
+    getParentRoute: () => root,
+    path: '/apis/$apiId',
+    component: ApiDetailStub,
+  });
   const router = createRouter({
-    routeTree: root.addChildren(routes),
+    routeTree: root.addChildren([...routes, detail]),
     history: createMemoryHistory({ initialEntries: [path] }),
   });
   render(
@@ -234,5 +249,43 @@ describe('mobile navigation drawer', () => {
     cleanup();
 
     expect(query.removeEventListener).toHaveBeenCalledWith('change', expect.any(Function));
+  });
+});
+
+describe('current location', () => {
+  function sidebarLink(name: string): HTMLElement {
+    return within(drawer()).getByRole('link', { name, hidden: true });
+  }
+
+  function locationBar(): string {
+    return screen.getByRole('banner').textContent ?? '';
+  }
+
+  it('files a page beneath a nav entry under that entry', async () => {
+    await renderShell('/apis/mine');
+    await screen.findByRole('heading', { name: 'API detail page' });
+
+    expect(sidebarLink('My APIs')).toHaveAttribute('aria-current', 'page');
+    expect(sidebarLink('All APIs')).not.toHaveAttribute('aria-current');
+    expect(locationBar()).toContain('Publishing');
+    expect(locationBar()).toContain('My APIs');
+  });
+
+  it('lets a page file itself under another entry', async () => {
+    await renderShell('/apis/someone-elses');
+    await screen.findByRole('heading', { name: 'API detail page' });
+
+    expect(sidebarLink('All APIs')).toHaveAttribute('aria-current', 'page');
+    expect(sidebarLink('My APIs')).not.toHaveAttribute('aria-current');
+    expect(locationBar()).toContain('Administration');
+    expect(locationBar()).toContain('All APIs');
+    expect(locationBar()).not.toContain('My APIs');
+  });
+
+  it('marks exactly one entry on a nav page itself', async () => {
+    await renderShell('/apis');
+
+    expect(sidebarLink('My APIs')).toHaveAttribute('aria-current', 'page');
+    expect(sidebarLink('Dashboard')).not.toHaveAttribute('aria-current');
   });
 });

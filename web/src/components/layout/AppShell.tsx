@@ -6,6 +6,7 @@ import { Spinner } from '../ui/Spinner';
 import { BrandingFooter } from '../auth/AuthShell';
 import { Icon } from '../ui/Icon';
 import { Header } from './Header';
+import { NavLocationProvider } from './navLocation';
 import { Sidebar } from './Sidebar';
 import { useDesktopSidebar } from './useDesktopSidebar';
 
@@ -93,51 +94,53 @@ export function AppShell(): ReactElement {
   const footerLinks = branding?.footer_links ?? [];
 
   return (
-    <div className="min-h-full">
-      <Sidebar
-        id={sidebarId}
-        sidebarRef={sidebarRef}
-        role={user.role}
-        open={sidebarOpen}
-        isDesktop={isDesktop}
-        onNavigate={() => setSidebarOpen(false)}
-        portalName={portalName}
-        logoDataUrl={branding?.logo_data_url ?? null}
-        user={user}
-      />
-      {mobileOpen ? (
-        <button
-          type="button"
-          aria-label="Close navigation"
-          onClick={() => setSidebarOpen(false)}
-          className="animate-fade-in fixed inset-0 z-30 bg-overlay backdrop-blur-[2px] lg:hidden"
-        />
-      ) : null}
-      <div className="flex min-h-full flex-col lg:pl-64">
-        <Header
+    <NavLocationProvider>
+      <div className="min-h-full">
+        <Sidebar
+          id={sidebarId}
+          sidebarRef={sidebarRef}
+          role={user.role}
+          open={sidebarOpen}
+          isDesktop={isDesktop}
+          onNavigate={() => setSidebarOpen(false)}
           portalName={portalName}
-          sidebarId={sidebarId}
-          sidebarOpen={mobileOpen}
-          sidebarToggleRef={sidebarToggleRef}
+          logoDataUrl={branding?.logo_data_url ?? null}
           user={user}
-          onToggleSidebar={() => setSidebarOpen((open) => !open)}
         />
-        {needsEmailVerification ? <VerifyEmailBanner /> : null}
-        <main
-          key={location.pathname}
-          className="animate-fade-in mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8"
-        >
-          <Outlet />
-        </main>
-        <footer className="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-x-6 gap-y-2 px-4 py-4 text-xs text-fg-subtle sm:px-6 lg:px-8">
-          <BrandingFooter text={footerText ?? portalName} links={footerLinks} />
-          {supportEmail ? (
-            <a className="transition-colors hover:text-fg" href={`mailto:${supportEmail}`}>
-              Support: {supportEmail}
-            </a>
-          ) : null}
-        </footer>
+        {mobileOpen ? (
+          <button
+            type="button"
+            aria-label="Close navigation"
+            onClick={() => setSidebarOpen(false)}
+            className="animate-fade-in fixed inset-0 z-30 bg-overlay backdrop-blur-[2px] lg:hidden"
+          />
+        ) : null}
+        <div className="flex min-h-full flex-col lg:pl-64">
+          <Header
+            portalName={portalName}
+            sidebarId={sidebarId}
+            sidebarOpen={mobileOpen}
+            sidebarToggleRef={sidebarToggleRef}
+            user={user}
+            onToggleSidebar={() => setSidebarOpen((open) => !open)}
+          />
+          {needsEmailVerification ? <VerifyEmailBanner /> : null}
+          <main
+            key={location.pathname}
+            className="animate-fade-in mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8"
+          >
+            <Outlet />
+          </main>
+          <footer className="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-x-6 gap-y-2 px-4 py-4 text-xs text-fg-subtle sm:px-6 lg:px-8">
+            <BrandingFooter text={footerText ?? portalName} links={footerLinks} />
+            {supportEmail ? (
+              <a className="transition-colors hover:text-fg" href={`mailto:${supportEmail}`}>
+                Support: {supportEmail}
+              </a>
+            ) : null}
+          </footer>
+        </div>
       </div>
-    </div>
+    </NavLocationProvider>
   );
 }

@@ -186,7 +186,7 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
         <div className="flex min-w-0 flex-1 items-start gap-3">
           <span
             className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${
-              saved ? 'bg-accent-soft text-accent' : 'bg-neutral-soft text-fg-subtle'
+              saved ? 'bg-accent-soft text-accent-text' : 'bg-neutral-soft text-fg-subtle'
             }`}
           >
             <Icon name={pluginIcon(descriptor)} className="h-4 w-4" />

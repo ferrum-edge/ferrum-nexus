@@ -210,7 +210,7 @@ export function CredentialsPage(): ReactElement {
         header: 'Label',
         cell: ({ row }) => (
           <span className="flex items-center gap-2.5">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent-text">
               <Icon
                 name={CREDENTIAL_TYPE_ICONS[row.original.credential_type]}
                 className="h-3.5 w-3.5"

@@ -19,7 +19,8 @@ vi.mock('@tanstack/react-router', async () => {
   const { TestLink } = await import('../../test/helpers');
   return { Link: TestLink, useParams: () => ({ apiId: 'api-1' }), useNavigate: () => navigate };
 });
-vi.mock('../stores/auth', () => ({ useAuth: () => ({ hasRole: () => true }) }));
+const viewer = vi.hoisted(() => ({ user: undefined as { id: string } | undefined }));
+vi.mock('../stores/auth', () => ({ useAuth: () => ({ hasRole: () => true, user: viewer.user }) }));
 vi.mock('../components/ui/Select', async () => {
   const { NativeLabeledSelect } = await import('../../test/helpers');
   return { LabeledSelect: NativeLabeledSelect };
@@ -45,6 +46,7 @@ const EMPTY_DIFF: SpecDiff = {
 
 beforeEach(() => {
   api = { ...API };
+  viewer.user = { id: API.owner_user_id };
   rawSpec = RAW_SPEC;
   navigate.mockReset();
   vi.spyOn(apisApi, 'get').mockImplementation(async () => ({
@@ -113,6 +115,25 @@ describe('provider API workspace', () => {
     const allRequests = screen.getByText('Access requests (all time)');
     expect(allRequests.nextElementSibling).toHaveTextContent('5');
     expect(screen.getByText(API.listen_path)).toBeInTheDocument();
+  });
+
+  it('files the owner under My APIs and an administrator under All APIs', async () => {
+    renderPage(<ApiDetailPage />);
+    const breadcrumb = await screen.findByRole('navigation', { name: 'Breadcrumb' });
+    expect(within(breadcrumb).getByRole('link', { name: 'My APIs' })).toHaveAttribute(
+      'href',
+      '/apis',
+    );
+    cleanup();
+
+    viewer.user = { id: 'admin-1' };
+    renderPage(<ApiDetailPage />);
+    const adminBreadcrumb = await screen.findByRole('navigation', { name: 'Breadcrumb' });
+    expect(within(adminBreadcrumb).getByRole('link', { name: 'All APIs' })).toHaveAttribute(
+      'href',
+      '/admin/apis',
+    );
+    expect(within(adminBreadcrumb).queryByRole('link', { name: 'My APIs' })).toBeNull();
   });
 
   it('offers a return link when the API is missing', async () => {

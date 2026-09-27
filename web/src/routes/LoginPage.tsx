@@ -61,7 +61,7 @@ export function LoginPage(): ReactElement {
       footer={
         <>
           Need an account?{' '}
-          <Link to="/register" className="text-accent hover:underline">
+          <Link to="/register" className="text-accent-text hover:underline">
             Register
           </Link>
         </>
@@ -107,7 +107,7 @@ export function LoginPage(): ReactElement {
             value={password}
             onChange={(event) => setPassword(event.target.value)}
           />
-          <Link to="/forgot-password" className="self-end text-xs text-accent hover:underline">
+          <Link to="/forgot-password" className="self-end text-xs text-accent-text hover:underline">
             Forgot password?
           </Link>
         </div>

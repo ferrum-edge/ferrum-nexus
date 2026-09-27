@@ -1,5 +1,5 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { Link, useLocation, useNavigate } from '@tanstack/react-router';
+import { Link, useNavigate } from '@tanstack/react-router';
 import type { ReactElement, Ref } from 'react';
 import { ROLE_LABELS, type User } from '@ferrum-nexus/shared';
 import { useAuth } from '../../stores/auth';
@@ -7,6 +7,7 @@ import { useTheme } from '../../stores/theme';
 import { Icon } from '../ui/Icon';
 import { Tooltip } from '../ui/Tooltip';
 import { locationForPath } from './nav';
+import { useNavPathname } from './navLocation';
 import { NotificationsBell } from './NotificationsBell';
 import { initials } from './Sidebar';
 
@@ -39,7 +40,7 @@ function UserMenu({ user }: { user: User }): ReactElement {
           className="flex items-center gap-2 rounded-md py-1 pr-1.5 pl-1 text-sm text-fg transition-colors hover:bg-neutral-soft focus-visible:ring-2 focus-visible:ring-accent-ring focus-visible:outline-none"
           aria-label="Account menu"
         >
-          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent ring-1 ring-accent/20">
+          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent-text ring-1 ring-accent/20">
             {initials(user.display_name)}
           </span>
           <span className="hidden max-w-40 truncate font-medium sm:block">{user.display_name}</span>
@@ -53,13 +54,13 @@ function UserMenu({ user }: { user: User }): ReactElement {
           className="fx-pop animate-pop-in z-50 w-64 p-1"
         >
           <div className="flex items-center gap-3 border-b border-border px-2.5 py-2.5">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-sm font-semibold text-accent ring-1 ring-accent/20">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-sm font-semibold text-accent-text ring-1 ring-accent/20">
               {initials(user.display_name)}
             </span>
             <div className="min-w-0">
               <p className="truncate text-sm font-medium text-fg">{user.display_name}</p>
               <p className="truncate text-xs text-fg-muted">{user.email}</p>
-              <p className="mt-0.5 text-[0.7rem] font-medium tracking-wide text-accent uppercase">
+              <p className="mt-0.5 text-[0.7rem] font-medium tracking-wide text-accent-text uppercase">
                 {ROLE_LABELS[user.role]}
               </p>
             </div>
@@ -108,8 +109,7 @@ export function Header({
   onToggleSidebar,
   user,
 }: HeaderProps): ReactElement {
-  const { pathname } = useLocation();
-  const crumbs = locationForPath(pathname);
+  const crumbs = locationForPath(useNavPathname());
   return (
     <header className="fx-glass sticky top-0 z-30 flex h-16 items-center justify-between gap-3 border-b border-border px-4 sm:px-6">
       <div className="flex min-w-0 items-center gap-2">
