@@ -3,7 +3,8 @@ import { cn } from '../../lib/cn';
 import { Spinner } from './Spinner';
 
 /** Visual weight of a button. */
-export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'link' | 'outline';
+export type ButtonVariant =
+  'primary' | 'secondary' | 'ghost' | 'ghost-danger' | 'danger' | 'link' | 'outline';
 
 /** Control height. */
 export type ButtonSize = 'sm' | 'md' | 'lg' | 'icon' | 'icon-sm';
@@ -34,6 +35,11 @@ const VARIANTS: Readonly<Record<ButtonVariant, string>> = {
     'bg-elevated text-fg border-border shadow-[0_1px_2px_rgb(0_0_0/0.08)] hover:border-border-strong hover:bg-surface-hover',
   outline: 'bg-transparent text-fg border-border-strong hover:bg-neutral-soft',
   ghost: 'bg-transparent text-fg-muted border-transparent hover:bg-neutral-soft hover:text-fg',
+  // A destructive row action beside ghost ones: it reads the same at rest and
+  // takes the danger tone on hover. A variant rather than hover classes passed
+  // to `ghost`, because `cn` only joins lists and the ghost hover would win.
+  'ghost-danger':
+    'bg-transparent text-fg-muted border-transparent hover:bg-danger-soft hover:text-danger',
   danger:
     'bg-danger text-white border-danger shadow-[0_1px_2px_rgb(0_0_0/0.25)] hover:bg-danger-hover hover:border-danger-hover',
   link: 'bg-transparent border-transparent text-accent hover:underline px-0 h-auto',

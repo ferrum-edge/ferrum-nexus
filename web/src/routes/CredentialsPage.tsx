@@ -283,12 +283,7 @@ export function CredentialsPage(): ReactElement {
               <Button size="sm" variant="secondary" onClick={() => setRotating(row.original)}>
                 Rotate
               </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="hover:bg-danger-soft hover:text-danger"
-                onClick={() => setRevoking(row.original)}
-              >
+              <Button size="sm" variant="ghost-danger" onClick={() => setRevoking(row.original)}>
                 Revoke
               </Button>
             </div>

@@ -186,6 +186,9 @@ describe('catalog browsing', () => {
     expect(screen.getByText(API.invoke_url!)).toBeInTheDocument();
     expect(screen.getByText('100 requests / 60s')).toBeInTheDocument();
     expect(screen.getByText('Billing specification (1.0.0)')).toBeInTheDocument();
+    // The visibility reads as a label, not the raw `public` value.
+    expect(screen.getByText('Public')).toBeInTheDocument();
+    expect(screen.queryByText('public')).not.toBeInTheDocument();
     expect(catalogApi.spec).not.toHaveBeenCalled();
     selectTab('Documentation');
     expect(screen.getByRole('status')).toHaveTextContent('Loading specification');

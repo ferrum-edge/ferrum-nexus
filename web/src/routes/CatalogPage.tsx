@@ -7,7 +7,7 @@ import { Card, PageHeader } from '../components/ui/Card';
 import { EmptyState } from '../components/ui/EmptyState';
 import { SearchInput } from '../components/ui/Input';
 import { PaginationBar } from '../components/ui/DataTable';
-import { StatusPill } from '../components/ui/StatusPill';
+import { StatusPill, VisibilityBadge } from '../components/ui/StatusPill';
 
 const GRID = 'grid gap-4 md:grid-cols-2 xl:grid-cols-3';
 
@@ -49,8 +49,7 @@ function CatalogCard({ api }: { api: CatalogApi }): ReactElement {
           ) : (
             <Badge>Open</Badge>
           )}
-          {api.visibility === 'internal' ? <Badge tone="warning">Unlisted</Badge> : null}
-          {api.visibility === 'private' ? <Badge tone="danger">Private</Badge> : null}
+          {api.visibility === 'public' ? null : <VisibilityBadge visibility={api.visibility} />}
         </div>
         {api.owner ? (
           <div className="flex min-w-0 items-center gap-1.5">

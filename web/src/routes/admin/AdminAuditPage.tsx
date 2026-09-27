@@ -1,6 +1,7 @@
 import { auditActorLabel } from '../../lib/audit';
 import { useMemo, useState, type ReactElement } from 'react';
 import { DEFAULT_PAGE_SIZE, type AuditLog } from '@ferrum-nexus/shared';
+import { cn } from '../../lib/cn';
 import { formatDateTime, formatRelative, humanize } from '../../lib/format';
 import { useAuditLogs } from '../../hooks/useAuditLogs';
 import { RoleGuard } from '../../components/layout/RoleGuard';
@@ -48,7 +49,9 @@ function actionTone(action: string): BadgeTone {
  *
  * The control is wrapped rather than given a width class: `Input` hard-codes
  * `w-full`, and `cn` only joins class lists, so a competing width utility would
- * be decided by stylesheet order rather than by this call.
+ * be decided by stylesheet order rather than by this call. On a phone the
+ * field takes the whole row, and its label a fixed width, so stacked fields
+ * ("From", "To") line their controls up.
  */
 function ToolbarField({
   label,
@@ -58,15 +61,19 @@ function ToolbarField({
 }: {
   label: string;
   htmlFor: string;
+  /** The control's width from `sm` up, e.g. `sm:w-52`. */
   width: string;
   children: ReactElement;
 }): ReactElement {
   return (
-    <span className="flex items-center gap-1.5">
-      <label htmlFor={htmlFor} className="text-xs whitespace-nowrap text-fg-subtle">
+    <span className="flex w-full items-center gap-1.5 sm:w-auto">
+      <label
+        htmlFor={htmlFor}
+        className="w-9 shrink-0 text-xs whitespace-nowrap text-fg-subtle sm:w-auto"
+      >
         {label}
       </label>
-      <span className={width}>{children}</span>
+      <span className={cn('min-w-0 flex-1 sm:flex-none', width)}>{children}</span>
     </span>
   );
 }
@@ -214,7 +221,7 @@ function AuditTable(): ReactElement {
               onChange={(event) => setFilters({ ...filters, target: event.target.value })}
             />
           </span>
-          <ToolbarField label="From" htmlFor="filter-from" width="w-52">
+          <ToolbarField label="From" htmlFor="filter-from" width="sm:w-52">
             <Input
               id="filter-from"
               type="datetime-local"
@@ -222,7 +229,7 @@ function AuditTable(): ReactElement {
               onChange={(event) => setFilters({ ...filters, from: event.target.value })}
             />
           </ToolbarField>
-          <ToolbarField label="To" htmlFor="filter-to" width="w-52">
+          <ToolbarField label="To" htmlFor="filter-to" width="sm:w-52">
             <Input
               id="filter-to"
               type="datetime-local"

@@ -1,6 +1,7 @@
 import { auditActorLabel } from '../lib/audit';
 import { Link } from '@tanstack/react-router';
 import type { ReactElement, ReactNode } from 'react';
+import { CREDENTIAL_TYPE_LABELS } from '../lib/credential-labels';
 import { formatRelative, humanize } from '../lib/format';
 import { useAccessRequests } from '../hooks/useAccessRequests';
 import { useAuditLogs } from '../hooks/useAuditLogs';
@@ -50,16 +51,19 @@ function Section({
   to,
   children,
 }: {
-  title: string;
+  title: ReactNode;
   icon: IconName;
   to: PanelLink;
   children: ReactNode;
 }): ReactElement {
   return (
-    <Card>
+    // `min-w-0`: a grid item is otherwise as wide as its unbroken title, and
+    // the truncating header would push the page sideways on a phone.
+    <Card className="min-w-0">
       <CardHeader
         title={title}
         icon={icon}
+        inlineActions
         actions={
           <Link to={to} className={buttonClassName({ variant: 'ghost', size: 'sm' })}>
             View all
@@ -149,10 +153,14 @@ export function DashboardPage(): ReactElement {
         }
       />
 
-      {/* Three across keeps every label readable and never strands a fifth
-          tile alone on a row: five cards wrap as three plus two. */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {/* Two rows by scope: the caller's own three stats, then — for an
+          administrator — the portal's two, which span wider rather than
+          leaving a sixth slot empty. On a phone the cards pair up two to a
+          row in their compact form, and the third personal stat takes the
+          whole row instead of stranding a half-width orphan. */}
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-6">
         <StatCard
+          className="xl:col-span-2"
           icon="grant"
           tone="success"
           label="Active grants"
@@ -162,6 +170,7 @@ export function DashboardPage(): ReactElement {
           to="/catalog"
         />
         <StatCard
+          className="xl:col-span-2"
           icon="key"
           label="Active credentials"
           hint="Keys you can rotate or revoke"
@@ -169,8 +178,19 @@ export function DashboardPage(): ReactElement {
           loading={myCredentials.isLoading}
           to="/credentials"
         />
-        {canProvider ? null : (
+        {canProvider ? (
           <StatCard
+            className="col-span-2"
+            icon="stack"
+            label="APIs you publish"
+            hint="Live in the catalog"
+            value={providerApis.data?.total ?? 0}
+            loading={providerApis.isLoading}
+            to="/apis"
+          />
+        ) : (
+          <StatCard
+            className="col-span-2"
             icon="inbox"
             tone="info"
             label="Access requests"
@@ -180,41 +200,33 @@ export function DashboardPage(): ReactElement {
             to="/catalog"
           />
         )}
-        {canProvider ? (
-          <StatCard
-            icon="stack"
-            label="APIs you publish"
-            hint="Live in the catalog"
-            value={providerApis.data?.total ?? 0}
-            loading={providerApis.isLoading}
-            to="/apis"
-          />
-        ) : null}
         {canAdmin ? (
-          <StatCard
-            icon="users"
-            tone="info"
-            label="Portal accounts"
-            hint="Clients, providers and admins"
-            value={allUsers.data?.total ?? 0}
-            loading={allUsers.isLoading}
-            to="/admin/users"
-          />
-        ) : null}
-        {canAdmin ? (
-          <StatCard
-            icon="spec"
-            tone="success"
-            label="Published APIs"
-            hint="Across the whole portal"
-            value={allApis.data?.total ?? 0}
-            loading={allApis.isLoading}
-            to="/admin/apis"
-          />
+          <>
+            <StatCard
+              className="xl:col-span-3"
+              icon="users"
+              tone="info"
+              label="Portal accounts"
+              hint="Clients, providers and admins"
+              value={allUsers.data?.total ?? 0}
+              loading={allUsers.isLoading}
+              to="/admin/users"
+            />
+            <StatCard
+              className="xl:col-span-3"
+              icon="spec"
+              tone="success"
+              label="Published APIs"
+              hint="Across the whole portal"
+              value={allApis.data?.total ?? 0}
+              loading={allApis.isLoading}
+              to="/admin/apis"
+            />
+          </>
         ) : null}
       </div>
 
-      <div className="mt-6 grid gap-6 lg:grid-cols-2">
+      <div className="mt-6 grid gap-6 xl:grid-cols-2">
         <Section title="My access requests" icon="inbox" to="/catalog">
           {myRequests.data && myRequests.data.items.length > 0 ? (
             <ul>
@@ -252,7 +264,17 @@ export function DashboardPage(): ReactElement {
         </Section>
 
         {canProvider ? (
-          <Section title="Pending requests for your APIs" icon="grant" to="/apis">
+          <Section
+            // A phone has room for "Pending requests" beside "View all"; the
+            // rest stays readable to assistive technology.
+            title={
+              <>
+                Pending requests<span className="max-sm:sr-only"> for your APIs</span>
+              </>
+            }
+            icon="grant"
+            to="/apis"
+          >
             {providerRequests.data && providerRequests.data.items.length > 0 ? (
               <ul>
                 {providerRequests.data.items.map((request) => (
@@ -309,7 +331,7 @@ export function DashboardPage(): ReactElement {
                   <Row key={credential.id}>
                     <span className="min-w-0">
                       <span className="block truncate text-sm font-medium text-fg">
-                        {credential.label ?? credential.credential_type}
+                        {credential.label ?? CREDENTIAL_TYPE_LABELS[credential.credential_type]}
                       </span>
                       <span className="block font-mono text-xs text-fg-subtle">
                         ••••{credential.last4}
@@ -360,7 +382,7 @@ export function DashboardPage(): ReactElement {
                           {humanize(entry.action)}
                         </span>
                         <span className="block truncate text-xs text-fg-subtle">
-                          {auditActorLabel(entry)} · {entry.target_type}
+                          {auditActorLabel(entry)} · {humanize(entry.target_type)}
                         </span>
                       </span>
                     </span>

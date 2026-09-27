@@ -1,7 +1,15 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ROLE_ORDER } from '@ferrum-nexus/shared';
-import { RoleBadge, StatusPill, statusLabel, type StatusValue } from './StatusPill';
+import {
+  AccessModeBadge,
+  RoleBadge,
+  StatusPill,
+  VisibilityBadge,
+  statusLabel,
+  visibilityLabel,
+  type StatusValue,
+} from './StatusPill';
 
 afterEach(cleanup);
 
@@ -58,5 +66,34 @@ describe('RoleBadge', () => {
     expect(screen.getByText('Provider')).toBeInTheDocument();
     expect(screen.getByText('Admin')).toBeInTheDocument();
     expect(screen.getByText('Super Admin')).toBeInTheDocument();
+  });
+});
+
+describe('VisibilityBadge', () => {
+  it('labels every visibility for people, not with its raw value', () => {
+    expect(visibilityLabel('public')).toBe('Public');
+    // Unlisted, not "Internal": it is not secret (issue #288).
+    expect(visibilityLabel('internal')).toBe('Unlisted');
+    expect(visibilityLabel('private')).toBe('Private');
+  });
+
+  it('tones private as the one to notice', () => {
+    render(<VisibilityBadge visibility="private" />);
+    expect(screen.getByText('Private').className).toContain('text-danger');
+  });
+});
+
+describe('AccessModeBadge', () => {
+  it('renders open access as a neutral badge beside the requestable one', () => {
+    render(
+      <>
+        <AccessModeBadge requestable />
+        <AccessModeBadge requestable={false} />
+      </>,
+    );
+    expect(screen.getByText('Requestable').className).toContain('bg-accent-soft');
+    const open = screen.getByText('Open');
+    expect(open.className).toContain('bg-neutral-soft');
+    expect(open.className).toContain('rounded-full');
   });
 });

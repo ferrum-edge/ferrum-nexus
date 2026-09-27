@@ -23,6 +23,12 @@ export interface DataTableProps<TData> {
   /** Row click handler; makes rows keyboard-activatable when provided. */
   onRowClick?: (row: TData) => void;
   className?: string;
+  /**
+   * Leave off the table's own card chrome (border, radius, shadow), for a
+   * table that sits inside a `Card` under its header — otherwise the
+   * two outlines nest.
+   */
+  bare?: boolean;
   /** Optional toolbar rendered above the header row (filters, counts). */
   toolbar?: ReactNode;
 }
@@ -64,6 +70,7 @@ export function DataTable<TData>({
   empty,
   onRowClick,
   className,
+  bare = false,
   toolbar,
 }: DataTableProps<TData>): ReactElement {
   const table = useReactTable<TData>({
@@ -78,7 +85,7 @@ export function DataTable<TData>({
   const showPagination = onOffsetChange !== undefined && rowCount > limit;
 
   return (
-    <div className={cn('fx-card overflow-hidden', className)}>
+    <div className={cn(!bare && 'fx-card', 'overflow-hidden', className)}>
       {toolbar ? (
         <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
           {toolbar}

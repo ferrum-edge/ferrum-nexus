@@ -28,7 +28,7 @@ import { EmptyState } from '../components/ui/EmptyState';
 import { Icon, type IconName } from '../components/ui/Icon';
 import { LabeledTextarea } from '../components/ui/Input';
 import { LoadingPanel } from '../components/ui/Spinner';
-import { StatusPill } from '../components/ui/StatusPill';
+import { StatusPill, visibilityLabel } from '../components/ui/StatusPill';
 import { Tabs } from '../components/ui/Tabs';
 
 /** One tile in the strip of runtime facts under the page header. */
@@ -63,7 +63,9 @@ function GlanceTile({
 function AtAGlance({ detail }: { detail: CatalogDetailResponse }): ReactElement {
   const { api, spec } = detail;
   return (
-    <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+    // Four across only from xl: at lg the sidebar leaves each tile too narrow
+    // for a rate limit or an access mode, which truncated.
+    <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <GlanceTile
         icon="lock"
         label="Authentication"
@@ -132,7 +134,7 @@ function Overview({ detail }: { detail: CatalogDetailResponse }): ReactElement {
         {/* Version, authentication, rate limit and access already sit in the
             at-a-glance strip above, so the record below holds the rest. */}
         <dl>
-          <DetailRow label="Visibility">{api.visibility}</DetailRow>
+          <DetailRow label="Visibility">{visibilityLabel(api.visibility)}</DetailRow>
           <DetailRow label="Owner">{api.owner?.display_name ?? '—'}</DetailRow>
           <DetailRow label="Specification">
             {spec

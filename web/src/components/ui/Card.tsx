@@ -19,6 +19,12 @@ export interface CardHeaderProps {
   actions?: ReactNode;
   /** Optional leading glyph, tinted with the accent. */
   icon?: IconName;
+  /**
+   * Keep `actions` on the title line at every width, truncating the title
+   * instead of wrapping the actions below it — for a one-line header whose
+   * action is a short link ("View all").
+   */
+  inlineActions?: boolean;
   className?: string;
 }
 
@@ -28,27 +34,36 @@ export function CardHeader({
   description,
   actions,
   icon,
+  inlineActions = false,
   className,
 }: CardHeaderProps): ReactElement {
   return (
     <div
       className={cn(
-        'flex flex-wrap items-start justify-between gap-3 border-b border-border px-5 py-4',
+        'flex justify-between gap-3 border-b border-border px-5 py-4',
+        inlineActions ? 'items-center' : 'flex-wrap items-start',
         className,
       )}
     >
-      <div className="flex min-w-0 items-start gap-3">
+      <div className={cn('flex min-w-0 gap-3', inlineActions ? 'items-center' : 'items-start')}>
         {icon ? (
-          <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent">
+          <span
+            className={cn(
+              'flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent',
+              !inlineActions && 'mt-0.5',
+            )}
+          >
             <Icon name={icon} className="h-4 w-4" />
           </span>
         ) : null}
         <div className="min-w-0">
-          <h2 className="text-sm font-semibold text-fg">{title}</h2>
+          <h2 className={cn('text-sm font-semibold text-fg', inlineActions && 'truncate')}>
+            {title}
+          </h2>
           {description ? <p className="mt-1 text-sm text-fg-muted">{description}</p> : null}
         </div>
       </div>
-      {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
+      {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
     </div>
   );
 }
@@ -88,7 +103,9 @@ export function PageHeader({
 }: PageHeaderProps): ReactElement {
   return (
     <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between sm:gap-x-6">
-      <div className="min-w-0 flex-1">
+      {/* A 20rem basis, not 0: with a zero basis a wide set of actions never
+          wraps and squeezes the title into a narrow column instead. */}
+      <div className="min-w-0 flex-1 sm:basis-80">
         {breadcrumbs && breadcrumbs.length > 0 ? (
           <nav aria-label="Breadcrumb" className="mb-2">
             <ol className="flex flex-wrap items-center gap-1 text-xs text-fg-subtle">
@@ -155,6 +172,8 @@ export interface StatCardProps {
   /** Tone of the icon tile. */
   tone?: 'accent' | 'info' | 'success' | 'warning';
   loading?: boolean;
+  /** Placement in the parent grid (a column span). */
+  className?: string;
 }
 
 const STAT_TONES = {
@@ -164,7 +183,15 @@ const STAT_TONES = {
   warning: 'bg-warning-soft text-warning',
 } as const;
 
-/** Headline number with an icon tile, used on the dashboard. */
+/**
+ * Headline number with an icon tile, used on the dashboard.
+ *
+ * The card lays itself out by its own width, not the viewport's: in a narrow
+ * grid cell (a phone's two columns) the icon and arrow share the top row and
+ * the number sits under them, and from `@3xs` (16rem) up it is one row with
+ * the hint. So the same card stays compact in a half-width cell and reads in
+ * full wherever it spans the row.
+ */
 export function StatCard({
   icon,
   label,
@@ -173,43 +200,46 @@ export function StatCard({
   to,
   tone = 'accent',
   loading = false,
+  className,
 }: StatCardProps): ReactElement {
   const body = (
-    <>
+    <span className="grid h-full grid-cols-[auto_1fr] items-center gap-x-4 gap-y-2.5 p-3 [grid-template-areas:'icon_arrow'_'text_text'] @3xs:grid-cols-[auto_1fr_auto] @3xs:p-4 @3xs:[grid-template-areas:'icon_text_arrow']">
       <span
         className={cn(
-          'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg',
+          'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg [grid-area:icon] @3xs:h-10 @3xs:w-10',
           STAT_TONES[tone],
         )}
       >
-        <Icon name={icon} className="h-5 w-5" />
+        <Icon name={icon} className="h-4 w-4 @3xs:h-5 @3xs:w-5" />
       </span>
-      <span className="min-w-0 flex-1">
+      <span className="min-w-0 [grid-area:text]">
         {loading ? (
           <span className="fx-skeleton block h-7 w-12" />
         ) : (
-          <span className="block text-2xl font-semibold tracking-tight text-fg tabular-nums">
+          <span className="block text-xl font-semibold tracking-tight text-fg tabular-nums @3xs:text-2xl">
             {value}
           </span>
         )}
         <span className="block truncate text-sm text-fg-muted">{label}</span>
-        {hint ? <span className="mt-0.5 block truncate text-xs text-fg-subtle">{hint}</span> : null}
+        {hint ? (
+          <span className="mt-0.5 hidden truncate text-xs text-fg-subtle @3xs:block">{hint}</span>
+        ) : null}
       </span>
       {to ? (
         <Icon
           name="arrow-right"
-          className="h-4 w-4 text-fg-subtle transition-transform group-hover:translate-x-0.5 group-hover:text-fg"
+          className="h-4 w-4 justify-self-end text-fg-subtle transition-transform [grid-area:arrow] group-hover:translate-x-0.5 group-hover:text-fg"
         />
       ) : null}
-    </>
+    </span>
   );
-  const className = 'fx-card group flex items-center gap-4 p-4';
+  const classes = cn('fx-card group block @container', className);
   if (to) {
     return (
-      <Link to={to} className={cn(className, 'fx-card-interactive')}>
+      <Link to={to} className={cn(classes, 'fx-card-interactive')}>
         {body}
       </Link>
     );
   }
-  return <div className={className}>{body}</div>;
+  return <div className={classes}>{body}</div>;
 }

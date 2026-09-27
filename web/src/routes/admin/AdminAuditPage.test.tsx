@@ -53,7 +53,7 @@ it('renders named, unknown and system actors distinctly in the audit table', () 
 
 it('attributes dashboard activity to the actor without calling unknown users system', () => {
   render(<DashboardPage />);
-  expect(screen.getByText('Ada · access_request')).toBeInTheDocument();
-  expect(screen.getByText('Unknown user (deleted-id) · access_request')).toBeInTheDocument();
-  expect(screen.getByText('system · access_request')).toBeInTheDocument();
+  expect(screen.getByText('Ada · Access request')).toBeInTheDocument();
+  expect(screen.getByText('Unknown user (deleted-id) · Access request')).toBeInTheDocument();
+  expect(screen.getByText('system · Access request')).toBeInTheDocument();
 });

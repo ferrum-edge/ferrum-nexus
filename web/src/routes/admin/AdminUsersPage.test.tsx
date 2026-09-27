@@ -14,6 +14,14 @@ vi.mock('../../components/layout/RoleGuard', () => ({
 vi.mock('../../stores/toast', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn() }),
 }));
+/** The signed-in administrator; each test may swap it. */
+const session = vi.hoisted(() => ({
+  user: { id: 'actor-1', role: 'super_admin' } as { id: string; role: string },
+}));
+vi.mock('../../stores/auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../stores/auth')>()),
+  useAuth: () => ({ user: session.user }),
+}));
 // Radix Select cannot be driven under jsdom (no layout, no pointer capture).
 // Both pickers here are plain value pickers, so stand in native <select>s that
 // keep the same props contract and accessible names.
@@ -100,6 +108,7 @@ function renderUsers(organizations: Organization[] = []): void {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  session.user = { id: 'actor-1', role: 'super_admin' };
 });
 
 describe('gateway revocation visibility', () => {
@@ -120,6 +129,12 @@ describe('gateway revocation visibility', () => {
         status === 'sending' ? 'Gateway revocation in progress' : 'Gateway revocation pending',
       ),
     ).toBeInTheDocument();
+    // The tooltip explaining the badge needs a focusable DOM trigger: `Badge`
+    // passes none of the trigger's props through, so it never opened.
+    const badge = screen.getByText(
+      status === 'sending' ? 'Gateway revocation in progress' : 'Gateway revocation pending',
+    );
+    expect(badge.parentElement).toHaveAttribute('tabindex', '0');
     const button = screen.getByRole('button', { name: 'Retry' });
     expect(button).toBeEnabled();
     fireEvent.click(button);
@@ -311,6 +326,129 @@ describe('organization and status management', () => {
         display_name: assigned.display_name,
         org_id: late.id,
       }),
+    );
+  });
+});
+
+/**
+ * The role column showed a badge *and* a select naming the same role. It now
+ * shows one control: the select where the change can succeed, and the badge
+ * alone where the server would refuse it.
+ */
+describe('role and status controls', () => {
+  const founder: User = {
+    ...member,
+    id: 'actor-1',
+    email: 'root@example.test',
+    display_name: 'Riley Root',
+    role: 'super_admin',
+    org_id: null,
+  };
+  const admin: User = {
+    ...member,
+    id: 'admin-2',
+    email: 'admin@example.test',
+    display_name: 'Ari Admin',
+    role: 'admin',
+    org_id: null,
+  };
+  const client: User = { ...member, org_id: null };
+
+  /** Rendered text outside the native `<option>`s the select mock renders. */
+  const visible = (text: string): HTMLElement[] =>
+    screen.queryAllByText(text).filter((element) => element.tagName !== 'OPTION');
+
+  it('shows a changeable role as a select only, without a duplicate badge', async () => {
+    vi.spyOn(usersApi, 'list').mockResolvedValue({
+      items: [client],
+      total: 1,
+      pending_gateway_teardowns: 0,
+    });
+    renderUsers();
+    const select = await screen.findByLabelText('Change role for Ada Member');
+    expect(select).toHaveValue('client');
+    expect(visible('Client')).toHaveLength(0);
+  });
+
+  it('shows the last active super admin as a badge, and offers no disable', async () => {
+    const list = vi
+      .spyOn(usersApi, 'list')
+      .mockImplementation(async (query = {}) =>
+        query.role === 'super_admin'
+          ? { items: [founder], total: 1, pending_gateway_teardowns: 0 }
+          : { items: [founder, client], total: 2, pending_gateway_teardowns: 0 },
+      );
+    renderUsers();
+    await waitFor(() => expect(visible('Super Admin')).toHaveLength(1));
+    expect(list).toHaveBeenCalledWith(
+      expect.objectContaining({ role: 'super_admin', status: 'active' }),
+    );
+    expect(screen.queryByLabelText('Change role for Riley Root')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Change role for Ada Member')).toBeInTheDocument();
+
+    const [own, other] = screen.getAllByRole('button', { name: 'Disable' });
+    expect(own).toBeDisabled();
+    expect(own).toHaveAttribute('title', 'The last active super admin cannot be disabled.');
+    expect(other).toBeEnabled();
+  });
+
+  it('keeps a super admin changeable while another one is active', async () => {
+    const second: User = { ...founder, id: 'super-2', display_name: 'Sam Super' };
+    vi.spyOn(usersApi, 'list').mockResolvedValue({
+      items: [founder, second],
+      total: 2,
+      pending_gateway_teardowns: 0,
+    });
+    renderUsers();
+    expect(await screen.findByLabelText('Change role for Sam Super')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByLabelText('Change role for Riley Root')).toBeInTheDocument(),
+    );
+    // Still not your own account, though.
+    const [own, other] = screen.getAllByRole('button', { name: 'Disable' });
+    expect(own).toHaveAttribute('title', 'You cannot disable your own account.');
+    expect(other).toBeEnabled();
+  });
+
+  it('offers a plain admin only the roles it may assign, and locks administrators', async () => {
+    session.user = { id: 'admin-9', role: 'admin' };
+    vi.spyOn(usersApi, 'list').mockResolvedValue({
+      items: [admin, client],
+      total: 2,
+      pending_gateway_teardowns: 0,
+    });
+    renderUsers();
+    const select = await screen.findByLabelText('Change role for Ada Member');
+    expect(
+      within(select)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['Client', 'Provider']);
+    expect(screen.queryByLabelText('Change role for Ari Admin')).not.toBeInTheDocument();
+    expect(visible('Admin')).toHaveLength(1);
+    const [adminRow, clientRow] = screen.getAllByRole('button', { name: 'Disable' });
+    expect(adminRow).toBeDisabled();
+    expect(adminRow).toHaveAttribute(
+      'title',
+      'Only a super admin can disable or re-enable an administrator.',
+    );
+    expect(clientRow).toBeEnabled();
+  });
+
+  it('labels every filter for assistive technology, and none visibly', async () => {
+    vi.spyOn(usersApi, 'list').mockResolvedValue({
+      items: [client],
+      total: 1,
+      pending_gateway_teardowns: 0,
+    });
+    renderUsers();
+    await screen.findByText(client.email);
+    expect(screen.getByRole('searchbox', { name: 'Search users' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Filter by role')).toBeInTheDocument();
+    expect(screen.getByLabelText('Filter by status')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Filter by organization' })).toBeInTheDocument();
+    expect(screen.getByText('Filter by organization', { selector: 'label' })).toHaveClass(
+      'sr-only',
     );
   });
 });

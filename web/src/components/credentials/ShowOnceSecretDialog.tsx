@@ -1,5 +1,6 @@
 import { useState, type ReactElement } from 'react';
 import type { ShowOnceSecret } from '@ferrum-nexus/shared';
+import { CREDENTIAL_TYPE_LABELS } from '../../lib/credential-labels';
 import { FormNotice } from '../auth/AuthShell';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
@@ -78,9 +79,7 @@ export function ShowOnceSecretDialog({
           <span className="text-xs font-medium tracking-wide text-fg-subtle uppercase">
             Credential type
           </span>
-          <Badge tone="accent" mono>
-            {secret.type}
-          </Badge>
+          <Badge tone="accent">{CREDENTIAL_TYPE_LABELS[secret.type]}</Badge>
         </div>
 
         <div className="flex flex-col gap-4 rounded-md border border-border bg-inset/50 p-4">
