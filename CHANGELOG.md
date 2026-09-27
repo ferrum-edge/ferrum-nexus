@@ -402,8 +402,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   the id tie-break (`{thread_id: 1, created_at: -1, _id: -1}` on MongoDB,
   `(thread_id, created_at, id)` on SQLite and PostgreSQL; MySQL's InnoDB index
   already carries the primary key, so its step changes nothing). The MongoDB
-  `$lookup` now joins with `localField`/`foreignField` so the planner can use
-  the index.
+  `$lookup` keeps its `let`/`$expr` form, so every supported server version
+  still runs it; MongoDB 5.0 and later serve its `$eq` from the new index.
 - A consumer repair that resumes after its lease lapsed no longer writes a
   second `gateway.consumer_repair` row when the account's repair rows for that
   consumer already list every stale credential row it would have revoked:

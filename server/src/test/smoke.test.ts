@@ -30,7 +30,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { after, before, describe, it } from 'node:test';
 
-import { MongoClient } from 'mongodb';
+import { MongoClient, type Document } from 'mongodb';
 import mysql from 'mysql2/promise';
 import pg from 'pg';
 
@@ -47,6 +47,7 @@ import {
   type RequestContext,
 } from '../auth/service.js';
 import { loadConfig } from '../config/index.js';
+import { latestMessagesPipeline } from '../db/adapters/mongodb/index.js';
 import { createStore } from '../db/index.js';
 import type {
   EnqueueEmailInput,
@@ -4823,8 +4824,23 @@ describe('mongodb newest-message index', () => {
         ]),
       );
 
-      // The per-thread lookup is one index seek: it examines a single document
-      // instead of fetching and sorting the thread's whole history.
+      // The production pipeline's `$lookup` seeks the index once per thread:
+      // it examines one message per thread instead of fetching and sorting
+      // the busy thread's whole history.
+      const aggregatePlan = await db
+        .collection('threads')
+        .aggregate(latestMessagesPipeline([busy.id, quiet.id]))
+        .explain('executionStats');
+      const stages = (aggregatePlan.stages ?? []) as Document[];
+      const lookupStage = stages.find((stage) => '$lookup' in stage);
+      assert.ok(lookupStage, JSON.stringify(aggregatePlan));
+      assert.ok(
+        (lookupStage.indexesUsed as string[] | undefined)?.includes('ix_messages_thread_latest'),
+        JSON.stringify(lookupStage),
+      );
+      assert.equal(lookupStage.totalDocsExamined, 2, JSON.stringify(lookupStage));
+
+      // The same seek as a plain find: a single document examined.
       const plan = await messages
         .find({ thread_id: busy.id })
         .sort({ created_at: -1, _id: -1 })

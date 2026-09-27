@@ -1275,6 +1275,36 @@ async function applyMessageThreadLatest(db: Db): Promise<void> {
   }
 }
 
+/**
+ * The aggregation behind `messages.findLatestByThreads`, run on `threads`:
+ * one newest-message lookup per requested thread, rather than reading and
+ * sorting every message of every thread on the page. The correlated `$eq`
+ * plus {@link NEWEST_FIRST} is exactly the `ix_messages_thread_latest` key, so
+ * each lookup is a single index seek (MongoDB 5.0+ serves an `$eq` inside
+ * `$expr` from the `from` collection's index; older servers still answer
+ * correctly). An empty thread has no match and is dropped by the `$unwind`.
+ * Exported so the smoke suite can explain the exact production pipeline.
+ */
+export function latestMessagesPipeline(threadIds: readonly string[]): Document[] {
+  return [
+    { $match: { _id: { $in: [...threadIds] } } },
+    {
+      $lookup: {
+        from: COLLECTIONS.messages,
+        let: { threadId: '$_id' },
+        pipeline: [
+          { $match: { $expr: { $eq: ['$thread_id', '$$threadId'] } } },
+          { $sort: NEWEST_FIRST },
+          { $limit: 1 },
+        ],
+        as: 'latest',
+      },
+    },
+    { $unwind: '$latest' },
+    { $replaceRoot: { newRoot: '$latest' } },
+  ];
+}
+
 /** The baseline creates every index; document fields are written by repositories. */
 export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
   {
@@ -3147,30 +3177,8 @@ class MongoStore implements NexusStore {
 
     findLatestByThreads: async (threadIds) => {
       if (threadIds.length === 0) return [];
-      // One newest-message lookup per requested thread, rather than reading and
-      // sorting every message of every thread on the page. The equality join
-      // plus `NEWEST_FIRST` is exactly the `ix_messages_thread_latest` key, so
-      // each lookup is a single index seek; the `localField`/`foreignField`
-      // form lets the planner use it, where a `let`/`$expr` correlation may
-      // not. An empty thread has no match and is dropped by the `$unwind`.
       const docs = await this.col(COLLECTIONS.threads)
-        .aggregate(
-          [
-            { $match: { _id: { $in: threadIds } } },
-            {
-              $lookup: {
-                from: COLLECTIONS.messages,
-                localField: '_id',
-                foreignField: 'thread_id',
-                pipeline: [{ $sort: NEWEST_FIRST }, { $limit: 1 }],
-                as: 'latest',
-              },
-            },
-            { $unwind: '$latest' },
-            { $replaceRoot: { newRoot: '$latest' } },
-          ],
-          this.opts,
-        )
+        .aggregate(latestMessagesPipeline(threadIds), this.opts)
         .toArray();
       return docs.map((doc) => mapMessage(doc as Row));
     },

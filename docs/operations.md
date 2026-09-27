@@ -542,8 +542,11 @@ owns. It copies no data:
 which adds the message id (`_id` descending on MongoDB), so finding each
 thread's newest message is one index seek per thread. It changes no data. On
 MySQL it is a no-op, because InnoDB already appends the primary key to the
-existing index. On a large `messages` table, building the index can take a
-while at startup.
+existing index. On MongoDB the step also drops `ix_messages_thread`. On a
+large `messages` table, building the index can take a while at startup, and on
+PostgreSQL and SQLite the build blocks writes to `messages` until it finishes,
+so during a rolling deploy message sends stall briefly while the new instance
+migrates.
 
 **CI enforces this.** `server/src/db/released-migrations.test.ts` fails when a
 released migration's file or MongoDB snapshot no longer matches its checksum,

@@ -173,7 +173,11 @@ describe('buildout schema baseline', () => {
         plan.some((detail) => detail.includes('ix_messages_thread_latest')),
         plan.join('\n'),
       );
-      assert.equal(plan.some((detail) => detail.includes('TEMP B-TREE')), false, plan.join('\n'));
+      assert.equal(
+        plan.some((detail) => detail.includes('TEMP B-TREE')),
+        false,
+        plan.join('\n'),
+      );
     } finally {
       db.close();
     }
