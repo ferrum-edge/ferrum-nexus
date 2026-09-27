@@ -1,7 +1,14 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { OpenApiView } from './OpenApiView';
-import { parseSpecText, resolveRef, UNRESOLVED_REF } from './parse';
+import {
+  MAX_DISPLAYED_DESCRIPTION_LENGTH,
+  MAX_DISPLAYED_NAME_LENGTH,
+  parseSpecText,
+  resolveRef,
+  TRUNCATED_TEXT_HINT,
+  UNRESOLVED_REF,
+} from './parse';
 
 const YAML_SPEC = `
 openapi: 3.0.3
@@ -173,6 +180,50 @@ describe('OpenApiView', () => {
     expect(screen.getAllByText('Invoice').length).toBeGreaterThan(0);
     expect(screen.getByText('id')).toBeInTheDocument();
     expect(screen.getByText('circular → Invoice')).toBeInTheDocument();
+  });
+
+  it('cuts an operation summary and description on every tag card it appears on', () => {
+    const text = JSON.stringify({
+      openapi: '3.0.3',
+      info: { title: 'Wordy API', version: '1.0.0' },
+      paths: {
+        '/wordy': {
+          get: {
+            tags: ['A', 'B', 'C'],
+            summary: 's'.repeat(10_000),
+            description: 'q'.repeat(10_000),
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      },
+    });
+
+    render(<OpenApiView text={text} />);
+
+    // Summaries render on every collapsed card, without a click.
+    const summaries = screen.getAllByText(/^s+…$/);
+    expect(summaries).toHaveLength(3);
+    for (const node of summaries) {
+      expect(node.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
+      expect(node).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
+    }
+
+    for (const button of screen.getAllByRole('button', { expanded: false })) {
+      fireEvent.click(button);
+    }
+
+    const descriptions = screen.getAllByText(/^q+…$/);
+    expect(descriptions).toHaveLength(3);
+    for (const node of descriptions) {
+      expect(node.textContent).toHaveLength(MAX_DISPLAYED_DESCRIPTION_LENGTH + 1);
+      expect(node).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
+    }
+  });
+
+  it('leaves a short summary whole and untitled', () => {
+    render(<OpenApiView text={YAML_SPEC} />);
+
+    expect(screen.getByText('List invoices')).not.toHaveAttribute('title');
   });
 
   it('renders a JSON document as well as YAML', () => {

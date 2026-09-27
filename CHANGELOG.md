@@ -371,6 +371,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   the lease fence refuses is documented as ending with the row still
   `retiring`, and a test now shows the fence alone keeps such a row there
   (#413).
+- The API viewer caps displayed text per occurrence, since its render budget
+  counts nodes rather than characters and one component's text repeats
+  wherever it is referenced (#417). Parameter, request-body, response,
+  operation and schema descriptions show at most 1,000 characters, and
+  operation summaries, schema property names, types and enum values at most
+  200; a cut never splits a surrogate pair, ends in `…`, and carries a hover
+  hint to download the specification for the rest. Displayed `$ref`s use the
+  same surrogate-safe cut.
 
 ## [0.1.0] - 2026-09-25
 

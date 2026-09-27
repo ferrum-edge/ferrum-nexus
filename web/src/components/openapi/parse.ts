@@ -419,9 +419,52 @@ export function resolveRef(doc: SpecNode, ref: string): SpecNode | typeof UNRESO
 /** Longest `$ref` shown in full; the document can make one as long as it likes. */
 export const MAX_DISPLAYED_REF_LENGTH = 200;
 
+/**
+ * Longest description shown per occurrence.
+ *
+ * The render budget counts nodes, not characters, and one component's text is
+ * repeated wherever it is referenced — every `$ref` to a schema, every tag an
+ * operation carries — so each occurrence is cut rather than the document once.
+ */
+export const MAX_DISPLAYED_DESCRIPTION_LENGTH = 1_000;
+
+/** Longest operation summary, schema property name, type or enum value shown per occurrence. */
+export const MAX_DISPLAYED_NAME_LENGTH = 200;
+
+/** Hover hint on text {@link displayText} cut, worded like `TruncationNotice`. */
+export const TRUNCATED_TEXT_HINT = 'Truncated — download the specification to read the rest.';
+
+/**
+ * `text` cut to at most `max` UTF-16 code units, with `…` appended only when
+ * something was cut. A cut never splits a surrogate pair: when the last kept
+ * unit would be a lone high surrogate, the cut moves one unit earlier.
+ */
+export function truncateDisplayText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let end = Math.max(0, max);
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${text.slice(0, end)}…`;
+}
+
+/** Document text ready to render, with a {@link TRUNCATED_TEXT_HINT} title when it was cut. */
+export interface DisplayText {
+  text: string;
+  title: string | undefined;
+}
+
+/** `text` cut by {@link truncateDisplayText}; `null` for absent or empty text. */
+export function displayText(text: string | null, max: number): DisplayText | null {
+  if (!text) return null;
+  return {
+    text: truncateDisplayText(text, max),
+    title: text.length > max ? TRUNCATED_TEXT_HINT : undefined,
+  };
+}
+
 /** `ref` for display, cut to {@link MAX_DISPLAYED_REF_LENGTH} characters. */
 export function displayedRef(ref: string): string {
-  return ref.length > MAX_DISPLAYED_REF_LENGTH ? `${ref.slice(0, MAX_DISPLAYED_REF_LENGTH)}…` : ref;
+  return truncateDisplayText(ref, MAX_DISPLAYED_REF_LENGTH);
 }
 
 /**
