@@ -26,6 +26,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- A revocation rollback no longer re-activates a grant whose account was
+  disabled meanwhile (#420). When the gateway refuses a targeted revocation's
+  ACL removal, the rollback re-reads the grantee under the account's lifecycle
+  key and in the transaction that would restore the grant, and leaves the grant
+  `revoked` unless the account is still `active` and — read from the gateway
+  under the consumer's key — the grant's ACL group is still on the consumer, so
+  neither a later re-enable nor a disable and re-enable that landed in between
+  brings the access back; `access.revoke_rollback` then records
+  `grant_restored: false` with a `restore_skipped_reason`. The rollback also
+  undoes only its own claim, waits out a key an instance crashed holding rather
+  than giving up after one wait, and its retry after a failed combined write is
+  a transaction of its own, fenced by the revocation's lease unless the fence is
+  what refused it.
 - Opening a thread or replying no longer answers `500` for a message that was
   already stored and audited when working out who to notify fails (#393).
   Recipient discovery — the other seat of a direct thread, the owner of a
