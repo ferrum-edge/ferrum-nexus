@@ -3106,12 +3106,26 @@ class MongoStore implements NexusStore {
 
     findLatestByThreads: async (threadIds) => {
       if (threadIds.length === 0) return [];
-      const docs = await this.col(COLLECTIONS.messages)
+      // One bounded newest-message lookup per requested thread, rather than
+      // reading and sorting every message of every thread on the page. An empty
+      // thread has no match and is dropped by the `$unwind`.
+      const docs = await this.col(COLLECTIONS.threads)
         .aggregate(
           [
-            { $match: { thread_id: { $in: threadIds } } },
-            { $sort: { thread_id: 1, created_at: -1, _id: -1 } },
-            { $group: { _id: '$thread_id', latest: { $first: '$$ROOT' } } },
+            { $match: { _id: { $in: threadIds } } },
+            {
+              $lookup: {
+                from: COLLECTIONS.messages,
+                let: { threadId: '$_id' },
+                pipeline: [
+                  { $match: { $expr: { $eq: ['$thread_id', '$$threadId'] } } },
+                  { $sort: NEWEST_FIRST },
+                  { $limit: 1 },
+                ],
+                as: 'latest',
+              },
+            },
+            { $unwind: '$latest' },
             { $replaceRoot: { newRoot: '$latest' } },
           ],
           this.opts,
