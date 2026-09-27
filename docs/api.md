@@ -1900,6 +1900,12 @@ Uploads accept at most 200 nested object/array levels, counting the root as leve
 one, in either enforcement mode. Deeper documents return `400 SPEC_INVALID` with
 `details: { reason: "nesting_too_deep", limit: 200 }` before a gateway call.
 
+The document's text once YAML aliases are resolved — the UTF-8 bytes of every
+mapping key and scalar, counted at every place each occurs — may not exceed
+**4 MiB** (4,194,304 bytes, twice the upload limit). A document whose aliases
+expand past it returns `400 SPEC_INVALID` with
+`details: { reason: "expanded_too_large", limit: 4194304 }` before a gateway call.
+
 A document must also stay inside what the built-in documentation viewer can
 render. Bytes, paths and operations do not bound that: one declared operation
 can carry any number of parameters, media types and schema nodes, and every

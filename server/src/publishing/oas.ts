@@ -12,6 +12,10 @@
  * depends on:
  *
  * - the document parses as JSON or YAML and is a JSON object;
+ * - its keys and scalars add up to no more than {@link MAX_SPEC_EXPANDED_BYTES}
+ *   once YAML aliases are resolved. `MAX_SPEC_BYTES` bounds the upload, but an
+ *   alias repeats its anchor at every use, and everything downstream — the
+ *   catalog's re-serialization above all — writes each copy out in full;
  * - `openapi` is a **3.x** version string — Swagger 2.0 (`swagger: "2.0"`) is
  *   rejected, because the gateway-facing fields Nexus reads (`servers`) do not
  *   exist there;
@@ -66,6 +70,7 @@ import { parse as parseYaml } from 'yaml';
 import {
   MAX_SPEC_BYTES,
   MAX_SPEC_DEPTH,
+  MAX_SPEC_EXPANDED_BYTES,
   MAX_SPEC_OPERATIONS,
   MAX_SPEC_PATHS,
   MAX_SPEC_RENDER_UNITS,
@@ -549,8 +554,37 @@ function parseDocument(text: string): { value: unknown; contentType: ParsedSpec[
   }
 }
 
-/** Bound traversal and later serialization without using the JavaScript call stack. */
-function assertSpecDepth(value: unknown): void {
+/** `SPEC_INVALID` for resolved text past {@link MAX_SPEC_EXPANDED_BYTES}. */
+function expandedTooLarge(): NexusError {
+  return specInvalid(
+    `The document is larger than the ${Math.floor(MAX_SPEC_EXPANDED_BYTES / 1024)} KiB limit ` +
+      'once its YAML aliases are resolved',
+    { reason: 'expanded_too_large', limit: MAX_SPEC_EXPANDED_BYTES },
+  );
+}
+
+/** UTF-8 bytes one scalar contributes to the resolved document's text. */
+function scalarBytes(value: unknown): number {
+  if (typeof value === 'string') return byteLength(value);
+  if (value === null || value === undefined) return 0;
+  return String(value).length;
+}
+
+/**
+ * Bound traversal and later serialization without using the JavaScript call
+ * stack: nesting past {@link MAX_SPEC_DEPTH}, a cyclic alias, and resolved text
+ * past {@link MAX_SPEC_EXPANDED_BYTES}.
+ *
+ * The text is counted per *occurrence*: a YAML alias hands every place that
+ * names it the same object or string, and every one of them is written out
+ * again when the document is serialized. A subtree is still walked only once —
+ * its height and its size are memoised when it completes, and a later
+ * occurrence is charged both from the memo — and the running total is checked
+ * after every charge, so the walk stops at the first key or scalar past the
+ * limit and never measures more than the limit plus that one string. JSON
+ * cannot alias, but is counted the same way.
+ */
+function assertSpecShape(value: unknown): void {
   if (value === null || typeof value !== 'object') return;
 
   interface Frame {
@@ -559,11 +593,21 @@ function assertSpecDepth(value: unknown): void {
     children: unknown[];
     childIndex: number;
     maxChildHeight: number;
+    /** Resolved text of this subtree so far. */
+    bytes: number;
   }
 
   const active = new WeakSet<object>();
   const completedHeights = new WeakMap<object, number>();
+  const completedBytes = new WeakMap<object, number>();
   const pending: Frame[] = [];
+  let total = 0;
+
+  const charge = (frame: Frame, bytes: number): void => {
+    frame.bytes += bytes;
+    total += bytes;
+    if (total > MAX_SPEC_EXPANDED_BYTES) throw expandedTooLarge();
+  };
 
   const push = (entryValue: object, depth: number): void => {
     if (depth > MAX_SPEC_DEPTH) {
@@ -578,13 +622,19 @@ function assertSpecDepth(value: unknown): void {
       });
     }
     active.add(entryValue);
-    pending.push({
+    const frame: Frame = {
       value: entryValue,
       depth,
       children: Object.values(entryValue),
       childIndex: 0,
       maxChildHeight: 0,
-    });
+      bytes: 0,
+    };
+    pending.push(frame);
+    // Array indices are not written out as text; mapping keys are.
+    if (!Array.isArray(entryValue)) {
+      for (const key of Object.keys(entryValue)) charge(frame, byteLength(key));
+    }
   };
 
   push(value, 1);
@@ -592,7 +642,10 @@ function assertSpecDepth(value: unknown): void {
     const frame = pending[pending.length - 1]!;
     if (frame.childIndex < frame.children.length) {
       const child = frame.children[frame.childIndex++];
-      if (child === null || typeof child !== 'object') continue;
+      if (child === null || typeof child !== 'object') {
+        charge(frame, scalarBytes(child));
+        continue;
+      }
       if (active.has(child)) {
         throw specInvalid('The OpenAPI document contains a cyclic YAML alias', {
           reason: 'cyclic_alias',
@@ -607,6 +660,7 @@ function assertSpecDepth(value: unknown): void {
           });
         }
         frame.maxChildHeight = Math.max(frame.maxChildHeight, completedHeight);
+        charge(frame, completedBytes.get(child) ?? 0);
         continue;
       }
       push(child, frame.depth + 1);
@@ -615,10 +669,15 @@ function assertSpecDepth(value: unknown): void {
 
     const height = frame.maxChildHeight + 1;
     completedHeights.set(frame.value, height);
+    completedBytes.set(frame.value, frame.bytes);
     active.delete(frame.value);
     pending.pop();
     const parent = pending[pending.length - 1];
-    if (parent) parent.maxChildHeight = Math.max(parent.maxChildHeight, height);
+    if (parent) {
+      parent.maxChildHeight = Math.max(parent.maxChildHeight, height);
+      // Already in `total`: only the parent's own subtree size grows.
+      parent.bytes += frame.bytes;
+    }
   }
 }
 
@@ -629,7 +688,7 @@ function assertSpecDepth(value: unknown): void {
  * subtree, and re-walking it for every occurrence is exponential. The memo
  * makes the walk linear while still charging each occurrence what it costs to
  * render, which is the number this limit is about. Cyclic aliases are already
- * rejected by {@link assertSpecDepth}, so the walk terminates.
+ * rejected by {@link assertSpecShape}, so the walk terminates.
  */
 function countNodes(root: unknown, memo: WeakMap<object, number>): number {
   if (root === null || typeof root !== 'object') return 0;
@@ -849,7 +908,7 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
 
   const raw = text.trim();
   const { value, contentType } = parseDocument(raw);
-  assertSpecDepth(value);
+  assertSpecShape(value);
 
   if (!isRecord(value)) {
     throw specInvalid('The OpenAPI document must be a JSON or YAML object');

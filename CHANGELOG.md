@@ -26,6 +26,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Specs whose YAML aliases expand beyond 4 MiB are refused (#421). An
+  OpenAPI document is now bounded by the UTF-8 size of its keys and scalars
+  once aliases are resolved — `MAX_SPEC_EXPANDED_BYTES`, twice
+  `MAX_SPEC_BYTES` — as well as by its upload size, and publishing or
+  revising past it answers `400 SPEC_INVALID` with
+  `details.reason = "expanded_too_large"`. The catalog applies the same check
+  to stored revisions, and refuses to cache or serve a re-serialized document
+  larger than the limit, so a revision accepted before this change fails
+  closed instead of being written out in full at every alias.
 - Opening a thread or replying no longer answers `500` for a message that was
   already stored and audited when working out who to notify fails (#393).
   Recipient discovery — the other seat of a direct thread, the owner of a

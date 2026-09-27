@@ -69,6 +69,7 @@ import { createHash } from 'node:crypto';
 import { stringify as stringifyYaml } from 'yaml';
 
 import {
+  MAX_SPEC_EXPANDED_BYTES,
   clampPageSize,
   roleAtLeast,
   type AccessRequest,
@@ -210,6 +211,10 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
     const cached = specCache.get(key);
     if (cached !== undefined) return cached;
 
+    // The parser refuses a document whose YAML aliases resolve past
+    // `MAX_SPEC_EXPANDED_BYTES` before anything is serialized, and it runs on
+    // every stored row, so a revision stored before that limit existed fails
+    // here too rather than being written out a hundred times over.
     let parsed: ParsedSpec;
     try {
       parsed = parseOpenApiSpec(rawSpec);
@@ -218,14 +223,20 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       return null;
     }
     const document = rewriteSpecServers(parsed.document, serverUrl, 'catalog');
-    const rendering = {
-      raw_spec:
-        parsed.contentType === 'application/json'
-          ? JSON.stringify(document, null, 2)
-          : stringifyYaml(document),
-      content_type: parsed.contentType,
-    };
-    specCache.set(key, rendering, key.length + Buffer.byteLength(rendering.raw_spec));
+    const serialized =
+      parsed.contentType === 'application/json'
+        ? JSON.stringify(document, null, 2)
+        : stringifyYaml(document);
+    // Serialization adds indentation and quoting the parse-time count does not
+    // see, so the output is bounded as well: a document too large to serve is
+    // refused and remembered like one that does not parse; its text is never cached.
+    const bytes = Buffer.byteLength(serialized);
+    if (bytes > MAX_SPEC_EXPANDED_BYTES) {
+      specCache.set(key, null, key.length);
+      return null;
+    }
+    const rendering = { raw_spec: serialized, content_type: parsed.contentType };
+    specCache.set(key, rendering, key.length + bytes);
     return rendering;
   }
 

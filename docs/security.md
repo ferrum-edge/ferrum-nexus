@@ -1323,6 +1323,22 @@ Two bounds, at the two places the cost appears:
   then.
   One declared operation can carry thousands of parameters and dozens of media
   types per body; counting paths and operations sees none of that.
+- **Once aliases are resolved.** `MAX_SPEC_BYTES` bounds the upload, not what
+  it decodes to: a YAML alias repeats its anchor at every use, and the parsed
+  document does not remember that it was an alias, so the catalog's
+  re-serialization writes out every copy. Nexus therefore adds up the UTF-8
+  bytes of every mapping key and scalar, at every place each occurs, in the
+  same iterative walk that bounds nesting, and refuses a document past
+  `MAX_SPEC_EXPANDED_BYTES` (4 MiB, twice `MAX_SPEC_BYTES`) with
+  `400 SPEC_INVALID` and `details.reason = "expanded_too_large"`. Without
+  aliases a document's keys and scalars never outgrow its source, so the
+  second 2 MiB is headroom for legitimate reuse, while one large anchored
+  scalar aliased a hundred times — about a hundredfold expansion under the
+  YAML parser's own per-anchor alias count — is refused. JSON cannot alias
+  but is counted the same way. The catalog parses every stored revision with
+  the same check before rendering it, so a revision accepted before the limit
+  existed fails closed, and it also refuses — and caches only the refusal
+  of — a re-serialized document larger than `MAX_SPEC_EXPANDED_BYTES`.
 - **While following references.** Parameter, request-body and response
   `$ref`s are followed — by the viewer, the publish-time counter and the
   revision comparison alike — through one resolver per document that memoises
