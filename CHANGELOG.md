@@ -38,6 +38,21 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- The API viewer no longer refuses a document the catalog serves (#425). The
+  catalog's YAML rendering wrote one shared `servers` array once, anchored,
+  and aliased it at every path item and operation that declared servers, so a
+  document with more than about 100 of them was past the alias limit of 100
+  that the viewer (and the server's own parse) applies. Served YAML carries no
+  anchors or aliases unless written out in full it would exceed
+  `MAX_SPEC_EXPANDED_BYTES` (then it is served aliased, as before), so every
+  document accepted before is still accepted.
+  The viewer also refused catalog documents over the 2 MiB upload limit
+  although the catalog serves renderings up to `MAX_SPEC_EXPANDED_BYTES`
+  (4 MiB); it now accepts those, and reads YAML with the server's options
+  (core schema, no merge keys, no tag resolution). The publish forms are
+  unchanged: they refuse documents over 2 MiB before parsing them, and YAML
+  whose alias limit of 100 (the anchor counting as one use) is exceeded.
+
 - OpenAPI documents are bounded by what they expand to, not only by their
   upload size (#421). The UTF-8 size of a document's keys and scalars once
   YAML aliases are resolved, plus estimated per-item indentation, and the size

@@ -141,6 +141,26 @@ describe('OpenAPI specification editor', () => {
     expect(isSpecValid(specOfBytes(MAX_SPEC_BYTES + 1))).toBe(false);
   });
 
+  it('refuses a YAML document with more aliases than the server accepts', () => {
+    const aliasedSpec = (aliases: number): string =>
+      [
+        'openapi: 3.0.3',
+        'info:',
+        '  title: Aliased',
+        "  version: '1.0.0'",
+        'x-shared: &shared { description: Reused }',
+        'x-uses:',
+        ...Array.from({ length: aliases }, () => '  - *shared'),
+        'paths: {}',
+      ].join('\n');
+
+    // The server's alias limit is 100 (`YAML_MAX_ALIAS_COUNT`), and yaml counts the
+    // anchored node as one use, so 99 aliases is the most it accepts.
+    expect(specProblem(aliasedSpec(99))).toBeNull();
+    expect(specProblem(aliasedSpec(100))).toBe('The OpenAPI document could not be parsed.');
+    expect(specProblem(aliasedSpec(150))).toBe('The OpenAPI document could not be parsed.');
+  });
+
   it('refuses an oversized file before reading it and keeps the draft', () => {
     const { container } = render(<Editor initialValue={RAW_SPEC} />);
     const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;

@@ -1,13 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { parse as parseYaml } from 'yaml';
-import { MAX_SPEC_BYTES } from '@ferrum-nexus/shared';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { MAX_SPEC_BYTES, MAX_SPEC_EXPANDED_BYTES } from '@ferrum-nexus/shared';
 import {
+  CATALOG_SPEC_LIMITS,
   displayedRef,
   displayText,
   MAX_DISPLAYED_REF_LENGTH,
   parseSpecText,
   TRUNCATED_TEXT_HINT,
   truncateDisplayText,
+  UPLOAD_SPEC_LIMITS,
 } from './parse';
 
 // The YAML parser is spied on rather than timed: the defect this guards is not
@@ -50,20 +52,60 @@ describe('parseSpecText', () => {
     expect(parseYaml).not.toHaveBeenCalled();
   });
 
+  it('applies the server upload limits by default and the rendered limit for the catalog', () => {
+    expect(UPLOAD_SPEC_LIMITS).toEqual({ maxBytes: MAX_SPEC_BYTES, maxAliasCount: 100 });
+    expect(CATALOG_SPEC_LIMITS).toEqual({ maxBytes: MAX_SPEC_EXPANDED_BYTES, maxAliasCount: 100 });
+  });
+
+  it('parses a catalog document just under the rendered limit, past the upload limit', () => {
+    const head = '{"openapi":"3.0.3","info":{"title":"Big API","version":"1.0.0","description":"';
+    const tail = '"},"paths":{}}';
+    const filler = 'a'.repeat(MAX_SPEC_EXPANDED_BYTES - 1024 - head.length - tail.length);
+    const json = `${head}${filler}${tail}`;
+    const yaml = `openapi: 3.0.3\ninfo:\n  title: Big API\n  description: ${filler}\npaths: {}\n`;
+    expect(json.length).toBeGreaterThan(MAX_SPEC_BYTES);
+    expect(yaml.length).toBeGreaterThan(MAX_SPEC_BYTES);
+    expect(json.length).toBeLessThan(MAX_SPEC_EXPANDED_BYTES);
+    expect(yaml.length).toBeLessThan(MAX_SPEC_EXPANDED_BYTES);
+
+    for (const text of [json, yaml]) {
+      const result = parseSpecText(text, CATALOG_SPEC_LIMITS);
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      expect(result.spec.title).toBe('Big API');
+      expect(result.spec.description).toHaveLength(filler.length);
+      // The publish forms still refuse it: it is past the upload limit.
+      expect(parseSpecText(text)).toEqual({
+        ok: false,
+        error: 'The specification is larger than the 2.00 MB limit.',
+      });
+    }
+  });
+
   it('refuses a document over the byte limit without parsing it', () => {
     vi.mocked(parseYaml).mockClear();
     const json = vi.spyOn(JSON, 'parse');
 
     // Under the limit in UTF-16 code units, over it in UTF-8 bytes.
-    const yaml = `openapi: 3.0.3\ninfo:\n  title: ${'é'.repeat(MAX_SPEC_BYTES / 2)}\npaths: {}\n`;
-    const result = parseSpecText(yaml);
-    const jsonResult = parseSpecText(`{"openapi":"${'a'.repeat(MAX_SPEC_BYTES)}"}`);
+    const title = 'é'.repeat(MAX_SPEC_EXPANDED_BYTES / 2);
+    const yaml = `openapi: 3.0.3\ninfo:\n  title: ${title}\npaths: {}\n`;
+    const result = parseSpecText(yaml, CATALOG_SPEC_LIMITS);
+    const jsonResult = parseSpecText(
+      `{"openapi":"${'a'.repeat(MAX_SPEC_EXPANDED_BYTES)}"}`,
+      CATALOG_SPEC_LIMITS,
+    );
+    // Past the upload limit, under the rendered one: refused by default.
+    const upload = parseSpecText(`{"openapi":"${'a'.repeat(MAX_SPEC_BYTES)}"}`);
 
     expect(result).toEqual({
       ok: false,
-      error: 'The specification is larger than the 2.00 MB limit.',
+      error: 'The specification is larger than the 4.00 MB limit.',
     });
     expect(jsonResult.ok).toBe(false);
+    expect(upload).toEqual({
+      ok: false,
+      error: 'The specification is larger than the 2.00 MB limit.',
+    });
     expect(parseYaml).not.toHaveBeenCalled();
     expect(json).not.toHaveBeenCalled();
     json.mockRestore();
@@ -79,6 +121,106 @@ describe('parseSpecText', () => {
     if (!result.ok) return;
     expect(result.spec.title).toBe('YAML API');
     expect(parseYaml).toHaveBeenCalledTimes(1);
+  });
+
+  it('parses the catalog rendering of a servers array shared by 300 places', () => {
+    // The server-URL rewrite shares one `servers` array across the root and
+    // every path item and operation that declared servers; the catalog writes
+    // it out in full at each place (`renderCatalogSpec`), never as an alias.
+    const servers = [{ url: 'https://gateway.example.test/v1' }];
+    const paths: Record<string, unknown> = {};
+    for (let index = 0; index < 150; index += 1) {
+      paths[`/things/${index}`] = {
+        servers,
+        get: { servers, responses: { '200': { description: 'ok' } } },
+      };
+    }
+    const document = {
+      openapi: '3.0.3',
+      info: { title: 'Shared API', version: '1.0.0' },
+      servers,
+      paths,
+    };
+    const text = stringifyYaml(document, { lineWidth: 0, aliasDuplicateObjects: false });
+    expect(text).not.toMatch(/[&*]a\d/);
+    expect(text.match(/url: https:\/\/gateway\.example\.test\/v1/g)?.length).toBe(301);
+
+    const result = parseSpecText(text, CATALOG_SPEC_LIMITS);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spec.servers).toEqual([
+      { url: 'https://gateway.example.test/v1', description: null },
+    ]);
+    expect(result.spec.operationCount).toBe(150);
+
+    // Aliased instead, the same document is past the alias limit of 100.
+    const aliased = stringifyYaml(document, { lineWidth: 0 });
+    expect(aliased.match(/servers: \*/g)?.length).toBe(300);
+    expect(parseSpecText(aliased, CATALOG_SPEC_LIMITS)).toMatchObject({ ok: false });
+  });
+
+  it('refuses more YAML aliases than the server accepts at upload', () => {
+    const aliasedSpec = (aliases: number): string =>
+      [
+        'openapi: 3.0.3',
+        'info:',
+        '  title: Aliased',
+        "  version: '1.0.0'",
+        'x-shared: &shared { description: Reused }',
+        'x-uses:',
+        ...Array.from({ length: aliases }, () => '  - *shared'),
+        'paths: {}',
+      ].join('\n');
+
+    // yaml counts the anchored node as one use, so 99 aliases is the most accepted.
+    for (const limits of [undefined, CATALOG_SPEC_LIMITS]) {
+      expect(parseSpecText(aliasedSpec(99), limits).ok).toBe(true);
+      for (const aliases of [100, 150]) {
+        const result = parseSpecText(aliasedSpec(aliases), limits);
+        expect(result.ok).toBe(false);
+        if (result.ok) continue;
+        expect(result.error).toMatch(/alias count/);
+      }
+    }
+  });
+
+  it('still refuses YAML aliases that expand exponentially', () => {
+    // Each anchor names the previous one twice: 2^30 places once resolved.
+    const lines = ['openapi: 3.0.3', 'info:', '  title: Laughs', "  version: '1.0.0'"];
+    lines.push('x-laughs:', '  l0: &l0 [lol, lol]');
+    for (let level = 1; level <= 30; level += 1) {
+      lines.push(`  l${level}: &l${level} [*l${level - 1}, *l${level - 1}]`);
+    }
+    lines.push('paths: {}');
+
+    for (const limits of [undefined, CATALOG_SPEC_LIMITS]) {
+      const result = parseSpecText(lines.join('\n'), limits);
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      expect(result.error).toMatch(/alias count/);
+    }
+  });
+
+  it('reads YAML with the core schema, as the server does', () => {
+    const text = [
+      '%YAML 1.1',
+      '---',
+      'openapi: 3.0.3',
+      'info:',
+      '  title: Core API',
+      "  version: '1.0.0'",
+      'x-base: &base { a: 1 }',
+      'x-merged: { <<: *base }',
+      'paths: {}',
+    ].join('\n');
+
+    const result = parseSpecText(text);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // No merge keys: `<<` stays a key rather than copying the anchor's entries.
+    expect(result.spec.doc['x-merged']).toEqual({ '<<': { a: 1 } });
   });
 
   it('reports a JSON syntax error as one instead of retrying it as YAML', () => {

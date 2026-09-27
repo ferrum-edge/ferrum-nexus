@@ -1116,7 +1116,24 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
 
 /**
  * The text the catalog serves for a parsed document: JSON pretty-printed with
- * two-space indentation, or YAML with line folding disabled.
+ * two-space indentation, or YAML with line folding disabled and, whenever it
+ * fits, no anchors or aliases.
+ *
+ * yaml's `stringify` otherwise writes an object the document shares once,
+ * anchored, and an alias at every other place. The server-URL rewrite shares
+ * one `servers` array across the root and every path item and operation that
+ * declared servers, so such a rendering could carry more aliases than a YAML
+ * reader with the default alias limit of 100 (this server's own parse
+ * included) accepts. So YAML is written out in full first.
+ *
+ * Written out in full, a document can outgrow `MAX_SPEC_EXPANDED_BYTES` where
+ * its aliased form does not: a long server URL repeated at thousands of places.
+ * Such a document is served aliased, as every YAML document was before, rather
+ * than refused, so every document accepted before is still accepted, and the
+ * callers' check of the returned text against the limit still bounds what is
+ * served. The aliased text is rendered first, and the full one only when
+ * {@link estimateUnaliasedYamlBytes} bounds it within the limit, so a document
+ * that would expand to many times the limit is never built in full.
  *
  * Shared by the catalog and by {@link parseUploadedOpenApiSpec}, so a document
  * is measured at upload by exactly the serialization it will be served as.
@@ -1125,9 +1142,101 @@ export function renderCatalogSpec(
   document: Record<string, unknown>,
   contentType: ParsedSpec['contentType'],
 ): string {
-  return contentType === 'application/json'
-    ? JSON.stringify(document, null, 2)
-    : stringifyYaml(document, { lineWidth: 0 });
+  if (contentType === 'application/json') return JSON.stringify(document, null, 2);
+  const aliased = stringifyYaml(document, { lineWidth: 0 });
+  if (estimateUnaliasedYamlBytes(aliased) > MAX_SPEC_EXPANDED_BYTES) return aliased;
+  const unaliased = stringifyYaml(document, { lineWidth: 0, aliasDuplicateObjects: false });
+  return byteLength(unaliased) > MAX_SPEC_EXPANDED_BYTES ? aliased : unaliased;
+}
+
+/**
+ * An upper bound on the UTF-8 size of `aliased` — YAML as yaml's `stringify`
+ * writes it with line folding disabled — once every alias is written out in
+ * full, computed from the aliased text alone in one walk of its parse.
+ *
+ * Each alias adds its anchored node's own text, itself with the aliases inside
+ * it written out, plus, on every line of that copy, the indentation it may gain
+ * by moving from the anchor to the alias: at most the alias's column plus two,
+ * less the anchor's indentation. The copy's first line is charged that
+ * indentation again, and the alias and anchor markers are never deducted (an
+ * alias is longer than the line break its copy may start with), so the bound
+ * only over-counts. An alias inside the node it names (a cycle), or
+ * text that does not parse, is unbounded.
+ *
+ * Returns early once past {@link MAX_SPEC_EXPANDED_BYTES}, so a value over the
+ * limit means only that: over the limit.
+ */
+export function estimateUnaliasedYamlBytes(aliased: string): number {
+  const doc = parseYamlDocument(aliased);
+  if (doc.errors.length > 0) return Number.POSITIVE_INFINITY;
+
+  // What the aliases inside each anchored node add to it, filled in document
+  // order: every alias inside a node precedes the end of the node, and every
+  // alias of a node follows it.
+  const added = new Map<unknown, { bytes: number; lines: number }>();
+  const expanded = new Map<YamlNode, { bytes: number; lines: number; indent: number }>();
+  const indentAt = (offset: number): number => {
+    const lineStart = aliased.lastIndexOf('\n', offset - 1) + 1;
+    let end = lineStart;
+    while (aliased[end] === ' ') end += 1;
+    return end - lineStart;
+  };
+  const expandedSize = (node: YamlNode): { bytes: number; lines: number; indent: number } => {
+    let size = expanded.get(node);
+    if (size === undefined) {
+      const [start, , end] = node.range ?? [0, 0, aliased.length];
+      const text = aliased.slice(start, end);
+      const inside = added.get(node) ?? { bytes: 0, lines: 0 };
+      size = {
+        bytes: byteLength(text) + inside.bytes,
+        lines: lineCount(text) + inside.lines,
+        indent: indentAt(start),
+      };
+      expanded.set(node, size);
+    }
+    return size;
+  };
+
+  let total = byteLength(aliased);
+  const anchors = new Map<string, YamlNode>();
+  visit(doc, {
+    Node(_key, node, path) {
+      if (!isAlias(node)) {
+        if (node.anchor) {
+          anchors.set(node.anchor, node);
+          added.set(node, { bytes: 0, lines: 0 });
+        }
+        return undefined;
+      }
+      const target = anchors.get(node.source);
+      if (target === undefined || path.includes(target)) {
+        total = Number.POSITIVE_INFINITY;
+        return visit.BREAK;
+      }
+      const size = expandedSize(target);
+      const aliasStart = node.range?.[0] ?? 0;
+      const column = aliasStart - (aliased.lastIndexOf('\n', aliasStart - 1) + 1);
+      const shift = Math.max(0, column + 2 - size.indent);
+      const bytes = size.bytes + size.lines * shift + size.indent;
+      total += bytes;
+      for (const ancestor of path) {
+        const inside = added.get(ancestor);
+        if (inside !== undefined) {
+          inside.bytes += bytes;
+          inside.lines += size.lines;
+        }
+      }
+      return total > MAX_SPEC_EXPANDED_BYTES ? visit.BREAK : undefined;
+    },
+  });
+  return total;
+}
+
+/** Lines in `text`: one more than its line breaks. */
+function lineCount(text: string): number {
+  let lines = 1;
+  for (let at = text.indexOf('\n'); at !== -1; at = text.indexOf('\n', at + 1)) lines += 1;
+  return lines;
 }
 
 /**

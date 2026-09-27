@@ -807,7 +807,14 @@ opens the catalog entry. Its rendering cost is bounded in three places:
   names, types and enum values at 200. A cut ends in `…` with a hint to
   download the specification. Documents starting with `{` or `[` are parsed
   with `JSON.parse`, not the YAML parser, whose flow-mapping parse is
-  quadratic.
+  quadratic. The viewer parses what the catalog serves: documents up to
+  `MAX_SPEC_EXPANDED_BYTES`, read as YAML with the server's options (core
+  schema, no merge keys, no tag resolution) and the server's alias limit of 100. Served YAML carries no anchors or aliases unless written out in full it
+  would exceed `MAX_SPEC_EXPANDED_BYTES` (then it is served aliased, as
+  before), so a `servers` array the server-URL rewrite shares across every
+  path item and operation is normally written out in full rather than aliased
+  past that limit. The publish forms apply the upload limits: 2 MiB, checked
+  before parsing, and the alias limit of 100.
 
 The render budget also protects readers from documents published before the
 publish-time ceiling existed.
