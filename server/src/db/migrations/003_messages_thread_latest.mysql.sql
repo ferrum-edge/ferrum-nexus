@@ -1,0 +1,8 @@
+-- Ferrum Nexus 003 — newest-message index per thread (MySQL 8 dialect).
+--
+-- Intentionally empty. The other backends add `id` to the `(thread_id,
+-- created_at)` messages index so the newest-message lookup's `id` tie-break
+-- is served by the index (003_messages_thread_latest.sql). InnoDB already
+-- appends the primary key to every secondary index, so `ix_messages_thread`
+-- is `(thread_id, created_at, id)` here and needs no change. The id exists so
+-- every backend applies the same migrations.
