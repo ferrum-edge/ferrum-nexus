@@ -343,8 +343,9 @@ export const UPLOAD_SPEC_LIMITS: SpecParseLimits = {
  * What the catalog serves: a re-serialization of the stored upload
  * (pretty-printed JSON, or YAML written out again) up to
  * `MAX_SPEC_EXPANDED_BYTES`, twice the upload limit. The catalog writes YAML
- * without anchors or aliases, so the server's upload alias limit of 100 refuses
- * no served document.
+ * without anchors or aliases unless written out in full it would exceed
+ * `MAX_SPEC_EXPANDED_BYTES` (then it is served aliased, as before), so the
+ * server's upload alias limit of 100 refuses no other served document.
  */
 export const CATALOG_SPEC_LIMITS: SpecParseLimits = {
   maxBytes: MAX_SPEC_EXPANDED_BYTES,

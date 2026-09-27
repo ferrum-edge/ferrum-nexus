@@ -154,8 +154,10 @@ describe('OpenAPI specification editor', () => {
         'paths: {}',
       ].join('\n');
 
-    // The server resolves at most 100 aliases (`YAML_MAX_ALIAS_COUNT`).
-    expect(specProblem(aliasedSpec(100))).toBeNull();
+    // The server's alias limit is 100 (`YAML_MAX_ALIAS_COUNT`), and yaml counts the
+    // anchored node as one use, so 99 aliases is the most it accepts.
+    expect(specProblem(aliasedSpec(99))).toBeNull();
+    expect(specProblem(aliasedSpec(100))).toBe('The OpenAPI document could not be parsed.');
     expect(specProblem(aliasedSpec(150))).toBe('The OpenAPI document could not be parsed.');
   });
 

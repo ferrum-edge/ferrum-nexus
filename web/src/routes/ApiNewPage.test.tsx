@@ -221,14 +221,18 @@ describe('API publishing', () => {
       'x-filler': 'a'.repeat(MAX_SPEC_BYTES),
     });
     const json = vi.spyOn(JSON, 'parse');
-    changeField(/OpenAPI specification/, oversized);
-    submitForm();
-    expect(
-      screen.getByText(/larger than the 2\.00 MB limit\. Fix it before publishing/),
-    ).toBeInTheDocument();
-    // Not parsed for its server URL or declared methods either.
-    expect(json.mock.calls.some(([text]) => text === oversized)).toBe(false);
-    expect(apisApi.publish).not.toHaveBeenCalled();
+    try {
+      changeField(/OpenAPI specification/, oversized);
+      submitForm();
+      expect(
+        screen.getByText(/larger than the 2\.00 MB limit\. Fix it before publishing/),
+      ).toBeInTheDocument();
+      // Not parsed for its server URL or declared methods either.
+      expect(json.mock.calls.some(([text]) => text === oversized)).toBe(false);
+      expect(apisApi.publish).not.toHaveBeenCalled();
+    } finally {
+      json.mockRestore();
+    }
   });
 
   it('bounds generated slugs and normalizes accents like the server', () => {

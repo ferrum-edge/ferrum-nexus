@@ -173,12 +173,15 @@ describe('parseSpecText', () => {
         'paths: {}',
       ].join('\n');
 
-    expect(parseSpecText(aliasedSpec(100)).ok).toBe(true);
+    // yaml counts the anchored node as one use, so 99 aliases is the most accepted.
     for (const limits of [undefined, CATALOG_SPEC_LIMITS]) {
-      const result = parseSpecText(aliasedSpec(150), limits);
-      expect(result.ok).toBe(false);
-      if (result.ok) continue;
-      expect(result.error).toMatch(/alias count/);
+      expect(parseSpecText(aliasedSpec(99), limits).ok).toBe(true);
+      for (const aliases of [100, 150]) {
+        const result = parseSpecText(aliasedSpec(aliases), limits);
+        expect(result.ok).toBe(false);
+        if (result.ok) continue;
+        expect(result.error).toMatch(/alias count/);
+      }
     }
   });
 

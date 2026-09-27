@@ -292,11 +292,7 @@ describe('the catalog rendering of YAML', () => {
       );
     }
     const parsed = parseUploadedOpenApiSpec(`${lines.join('\n')}\n`);
-    const document = rewriteSpecServers(
-      parsed.document,
-      'https://gateway.example.test',
-      'catalog',
-    );
+    const document = rewriteSpecServers(parsed.document, 'https://gateway.example.test', 'catalog');
     // yaml's default stringify anchors the shared array once and aliases it 300 times.
     assert.equal(stringify(document, { lineWidth: 0 }).match(/servers: \*/g)?.length, 300);
 
@@ -317,6 +313,37 @@ describe('the catalog rendering of YAML', () => {
     assert.equal(reparsed.operationCount, 150);
     assert.deepEqual(reparsed.document.servers, [{ url: 'https://gateway.example.test' }]);
     assert.equal(catalogSpecFitsLimit(rendered), true);
+  });
+
+  it('serves a document aliased when written out in full it would outgrow the limit', () => {
+    // 1,500 path items and operations each declare a short server; the rewrite
+    // shares one long gateway URL across all 3,001 places.
+    const lines = ['openapi: 3.0.3', 'info:', '  title: Long Server', "  version: '1.0.0'"];
+    lines.push('servers:', '  - url: /', 'paths:');
+    for (let index = 0; index < 1500; index += 1) {
+      lines.push(
+        `  /things/${index}:`,
+        '    servers: [{ url: / }]',
+        '    get:',
+        '      servers: [{ url: / }]',
+        "      responses: { '200': { description: ok } }",
+      );
+    }
+    // Accepted at upload: the document as written is small.
+    const parsed = parseUploadedOpenApiSpec(`${lines.join('\n')}\n`);
+    assert.equal(parsed.operationCount, 1500);
+    const serverUrl = `https://gateway.example.test/${'v'.repeat(3000)}`;
+    const document = rewriteSpecServers(parsed.document, serverUrl, 'catalog');
+    const unaliased = stringify(document, { lineWidth: 0, aliasDuplicateObjects: false });
+    assert.ok(Buffer.byteLength(unaliased) > MAX_SPEC_EXPANDED_BYTES);
+
+    const rendered = renderCatalogSpec(document, parsed.contentType);
+
+    // Still served, as before: the aliased rendering fits.
+    assert.equal(catalogSpecFitsLimit(rendered), true);
+    assert.equal(rendered, stringify(document, { lineWidth: 0 }));
+    assert.equal(rendered.match(/servers: \*/g)?.length, 3000);
+    assert.equal(rendered.split(serverUrl).length - 1, 1);
   });
 });
 
