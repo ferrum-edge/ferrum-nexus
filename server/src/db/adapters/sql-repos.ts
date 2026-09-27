@@ -2405,18 +2405,22 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       if (threadIds.length === 0) return [];
       const placeholders = threadIds.map(() => '?').join(', ');
       // One `(thread_id, created_at)` index seek per requested thread for its
-      // newest message, rather than reading and ranking every message of every
-      // thread on the page. An empty thread has no match and yields no row.
+      // newest message id, then a primary-key lookup, rather than reading and
+      // ranking every message of every thread on the page. An empty thread has
+      // no match and yields no row.
       const rows = await queryAll(
         exec,
-        `SELECT m.* FROM message_threads AS t
-         JOIN messages AS m ON m.id = (
-           SELECT n.id FROM messages AS n
-           WHERE n.thread_id = t.id
-           ORDER BY n.created_at DESC, n.id DESC
-           LIMIT 1
-         )
-         WHERE t.id IN (${placeholders})`,
+        `SELECT m.* FROM (
+           SELECT (
+             SELECT n.id FROM messages AS n
+             WHERE n.thread_id = t.id
+             ORDER BY n.created_at DESC, n.id DESC
+             LIMIT 1
+           ) AS latest_id
+           FROM message_threads AS t
+           WHERE t.id IN (${placeholders})
+         ) AS l
+         JOIN messages AS m ON m.id = l.latest_id`,
         threadIds,
       );
       return rows.map(mapMessage);
