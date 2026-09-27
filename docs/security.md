@@ -809,8 +809,7 @@ opens the catalog entry. Its rendering cost is bounded in three places:
   with `JSON.parse`, not the YAML parser, whose flow-mapping parse is
   quadratic. The viewer parses what the catalog serves: documents up to
   `MAX_SPEC_EXPANDED_BYTES`, read as YAML with the server's options (core
-  schema, no merge keys, no tag resolution) and the server's alias limit of
-  100. Served YAML carries no anchors or aliases unless written out in full it
+  schema, no merge keys, no tag resolution) and the server's alias limit of 100. Served YAML carries no anchors or aliases unless written out in full it
   would exceed `MAX_SPEC_EXPANDED_BYTES` (then it is served aliased, as
   before), so a `servers` array the server-URL rewrite shares across every
   path item and operation is normally written out in full rather than aliased
