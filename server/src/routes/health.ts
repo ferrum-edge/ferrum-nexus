@@ -79,7 +79,7 @@ import {
 } from '../ferrum-admin/index.js';
 
 /** Version reported by `GET /api/health`. */
-export const NEXUS_VERSION = process.env.npm_package_version ?? '0.1.0';
+export const NEXUS_VERSION = process.env.npm_package_version ?? '0.2.0';
 
 /** Services this route plugin needs. */
 export interface HealthRoutesOptions {

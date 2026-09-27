@@ -6,6 +6,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-27
+
+Paired with Ferrum Edge `v0.9.8`. Upgrades a `v0.1.0` database in place with
+the forward migrations `002_api_gateway_plugins` and
+`003_messages_thread_latest`. See [`docs/release-notes.md`](docs/release-notes.md)
+for the supported combination and the upgrade steps.
+
 ### Added
 
 - The verbatim quickstart gate (#287), closing out the `v0.1.0` release
@@ -26,6 +33,21 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- **Ferrum Edge `v0.9.8` is the supported gateway.** `release/compatibility.env`
+  pins
+  `ferrumedge/ferrum-edge:v0.9.8@sha256:e5b204f9448d4ec210a57dbd2badece5f4359d5d544522fa48dcdfeef033b385`
+  (the multi-architecture index) and names `NEXUS_RELEASE_TAG=v0.2.0`; the
+  README quickstart, the Compose example, the getting-started walkthrough and
+  the `acceptance` job all read it. Edge `v0.9.8` changes its data plane, mesh
+  and Workload API but none of the Admin API resources Nexus writes, and its
+  database baseline is the one `v0.9.7` created, so an Edge data volume from a
+  `v0.1.0` stack is kept as it is.
+- **`002_api_gateway_plugins` and `003_messages_thread_latest` are frozen.**
+  The released-migration manifest records both with `release: 'v0.2.0'`, so CI
+  now rejects any edit to them on every backend. The released-baseline upgrade
+  test now starts once from each release in the manifest, so the upgrade from
+  a `v0.1.0` database stays covered. The workspace packages and the `version`
+  fallback of `GET /api/health` are `0.2.0`.
 - A polish pass over the web portal: audit labels spell acronyms ("API
   publish", not "Api publish"); API visibility, access mode and credential
   type show labels instead of raw values (`public`, `keyauth`); the

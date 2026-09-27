@@ -1,9 +1,9 @@
 # Operations
 
-Deployment reference for Ferrum Nexus (first supported release: `v0.1.0`):
-configuration, databases and upgrades, containers, TLS, backup and restore, key
-rotation, the email outbox, scaling limits, health checks, metrics and gateway
-recovery.
+Deployment reference for Ferrum Nexus (current release: `v0.2.0`; first
+supported release: `v0.1.0`): configuration, databases and upgrades, containers,
+TLS, backup and restore, key rotation, the email outbox, scaling limits, health
+checks, metrics and gateway recovery.
 
 - Architecture background: [`architecture.md`](architecture.md)
 - Security posture: [`security.md`](security.md)
@@ -498,7 +498,9 @@ development-only reset that destroys data.
 `server/src/db/migrations/` plus the MongoDB step of the same id in
 `server/src/db/adapters/mongodb/index.ts`) is frozen in `v0.1.0`.
 `server/src/db/released-migrations.ts` records it with per-backend SHA-256
-checksums and `release: 'v0.1.0'`.
+checksums and `release: 'v0.1.0'`, and the forward migrations
+`002_api_gateway_plugins` and `003_messages_thread_latest` with
+`release: 'v0.2.0'`.
 
 **A released migration never changes.** A database only applies migrations its
 ledger lacks, so editing an applied one would make fresh and upgraded installs
@@ -515,9 +517,9 @@ diverge. Every schema change is a **new forward migration**:
    (its MongoDB index snapshot). The release that ships it sets `release` to its
    tag, which freezes it.
 
-**Current forward migrations.** `002_api_gateway_plugins` (pending release)
-adds the `api_gateway_plugins` table, which records the Edge plugin config id of
-each config the portal creates for an API (auth, `access_control`,
+**Released forward migrations.** `002_api_gateway_plugins` (shipped in
+`v0.2.0`) adds the `api_gateway_plugins` table, which records the Edge plugin
+config id of each config the portal creates for an API (auth, `access_control`,
 `rate_limiting`, `cors`). Settings changes then only touch configs the portal
 owns. It copies no data:
 
@@ -537,7 +539,7 @@ owns. It copies no data:
 - A leftover auth config beside the portal's stays attached after an
   `auth_plugin` change and is listed under `outgoing_auth_configs_remaining`.
 
-`003_messages_thread_latest` (pending release) replaces the messages index
+`003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
 `ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,
 which adds the message id (`_id` descending on MongoDB), so finding each
 thread's newest message is one index seek per thread. It changes no data. On
@@ -555,9 +557,10 @@ before a released one, when backends disagree on ids, or when a released MongoDB
 step's indexes drift. Never update a released checksum to make it pass.
 
 **Upgrade coverage.** `server/src/test/baseline-upgrade.test.ts` builds a
-database as the released migrations leave it, seeds it with baseline-shaped
-rows, migrates with the current code, reads every value back, and migrates again
-to prove the re-run is a no-op. SQLite runs in every CI job; PostgreSQL, MySQL
+database as each release in the manifest left it (`v0.1.0`, then `v0.2.0`; every
+release is a supported upgrade source), seeds it with baseline-shaped rows,
+migrates with the current code, reads every value back, and migrates again to
+prove the re-run is a no-op. SQLite runs in every CI job; PostgreSQL, MySQL
 and MongoDB run in the `store-contracts` job. Per backend:
 
 - **SQLite, PostgreSQL:** each migration and its ledger row commit in one
@@ -827,7 +830,7 @@ docker compose up -d
 
 The four secrets and `FERRUM_EDGE_IMAGE` are required (`${VAR:?…}`); keep the
 secrets stable across restarts. [`release/compatibility.env`](../release/compatibility.env)
-pins the Edge image by digest: Ferrum Edge `v0.9.7` for Nexus `v0.1.0`. That is
+pins the Edge image by digest: Ferrum Edge `v0.9.8` for Nexus `v0.2.0`. That is
 the release the acceptance suite ([`e2e/`](../e2e/README.md)) tests against;
 other Edge versions are unverified.
 
@@ -922,7 +925,7 @@ nothing about accounts, approvals or audit history.
    credentials and ACL groups, plugin configs, upstreams and API specs. Back up
    Edge's database with its own tooling, or use Edge's Admin API `GET /backup`
    (restore with `POST /restore?confirm=true`; see Edge's
-   [backup and restore reference](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.7/docs/admin_backup_restore.md)).
+   [backup and restore reference](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.8/docs/admin_backup_restore.md)).
 4. **Edge secrets**, especially `FERRUM_BASIC_AUTH_HMAC_SECRET`. Basic-auth
    credentials are stored as HMACs under it, so a different value rejects every
    basic-auth client.

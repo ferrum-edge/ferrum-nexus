@@ -1,8 +1,9 @@
 /**
- * Upgrading a database the released baseline created (issue #286).
+ * Upgrading a database a supported release created (issue #286).
  *
  * Each backend builds a database exactly as a release left it: only the
- * migrations in `RELEASED_MIGRATIONS` are applied, through the adapter's own
+ * migrations `RELEASED_MIGRATIONS` lists for that release and the earlier ones
+ * are applied, through the adapter's own
  * migration primitives, and the fixture below is written **as raw rows in the
  * baseline's physical shape** — not through the current store, whose write
  * path is the thing that changes between releases. The current store then
@@ -13,11 +14,13 @@
  * `NEXUS_SECRET_KEY`. Migrating again — in the same process and after a
  * restart — must change nothing, ledger included.
  *
- * The released prefix is read from the manifest — the entries a release has
- * shipped, not the pending ones — and the current schema is whatever
- * `store.migrate()` builds, so every forward migration — the first is
- * `002_api_gateway_plugins` — is applied here on top of a populated baseline
- * with no change to the harness.
+ * The suite runs once per release in the manifest, oldest first: every
+ * released database is a supported upgrade source. Each release's prefix is
+ * read from the manifest — the entries up to its last one, never the pending
+ * ones — and the current schema is whatever `store.migrate()` builds, so every
+ * forward migration a release has not shipped (from `v0.1.0`,
+ * `002_api_gateway_plugins` and `003_messages_thread_latest`) is applied here
+ * on top of a populated database with no change to the harness.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
@@ -65,9 +68,24 @@ const FIXTURE_PASSWORD = 'correct-horse-battery-staple';
 /** The plaintext behind the encrypted `smtp.password` row. */
 const SMTP_PASSWORD = 'fixture-smtp-password';
 
-/** Migrations a release shipped; a pending (`release: null`) entry is applied on upgrade. */
-const SHIPPED_MIGRATIONS = RELEASED_MIGRATIONS.filter((entry) => entry.release !== null);
-const RELEASED_IDS = SHIPPED_MIGRATIONS.map((entry) => entry.id);
+/** A release a database can be upgraded from, and the migration ids it created one with. */
+interface UpgradeSource {
+  release: string;
+  ids: readonly string[];
+}
+
+/**
+ * Every release in the manifest, oldest first, each with the migrations it and
+ * the releases before it shipped. A pending (`release: null`) entry belongs to
+ * none of them: it is applied on upgrade.
+ */
+const UPGRADE_SOURCES: readonly UpgradeSource[] = RELEASED_MIGRATIONS.flatMap((entry, index) => {
+  if (entry.release === null || RELEASED_MIGRATIONS[index + 1]?.release === entry.release) {
+    return [];
+  }
+  const ids = RELEASED_MIGRATIONS.slice(0, index + 1).map((shipped) => shipped.id);
+  return [{ release: entry.release, ids }];
+});
 
 /* ── The fixture ────────────────────────────────────────────────────────── */
 
@@ -723,8 +741,8 @@ interface LedgerRow {
 interface UpgradeTarget {
   /** Every migration id the current code applies, in order. */
   currentIds: string[];
-  /** Build the database as the released baseline left it, holding `fixture`. */
-  seedBaseline(fixture: FixtureRow[]): Promise<void>;
+  /** Build the database as the release that applied `ids` left it, holding `fixture`. */
+  seedBaseline(fixture: FixtureRow[], ids: readonly string[]): Promise<void>;
   /** The migration ledger, read without the store. */
   ledger(): Promise<LedgerRow[]>;
   /** A current-version store over the same database, initialized but not migrated. */
@@ -758,9 +776,9 @@ async function openStore(config: ReturnType<typeof loadConfig>): Promise<NexusSt
   return store;
 }
 
-/** The released prefix of a SQL dialect's migrations. */
-function releasedSql(dialect: MigrationDialect): MigrationFile[] {
-  return loadMigrations(dialect).filter((migration) => RELEASED_IDS.includes(migration.id));
+/** The released prefix of a SQL dialect's migrations: the ones in `ids`. */
+function releasedSql(dialect: MigrationDialect, ids: readonly string[]): MigrationFile[] {
+  return loadMigrations(dialect).filter((migration) => ids.includes(migration.id));
 }
 
 /** `INSERT` for one fixture row, with `quote` for identifiers and `mark(i)` for parameters. */
@@ -803,10 +821,10 @@ async function sqliteTarget(): Promise<UpgradeTarget> {
   const path = join(dir, 'nexus.sqlite');
   return {
     currentIds: loadMigrations('sqlite').map((migration) => migration.id),
-    async seedBaseline(fixture) {
+    async seedBaseline(fixture, ids) {
       const db = openSqliteDatabase(path);
       try {
-        await runMigrations(createSqliteMigrationDriver(db), releasedSql('sqlite'));
+        await runMigrations(createSqliteMigrationDriver(db), releasedSql('sqlite', ids));
         db.transaction(() => {
           for (const entry of fixture) {
             const { sql, values } = insertSql(entry, doubleQuoted, () => '?');
@@ -843,8 +861,8 @@ async function postgresTarget(adminUrl: string): Promise<UpgradeTarget> {
   const pool = new pg.Pool({ connectionString: url });
   return {
     currentIds: loadMigrations('pg').map((migration) => migration.id),
-    async seedBaseline(fixture) {
-      await runMigrations(createPostgresMigrationDriver(pool), releasedSql('pg'));
+    async seedBaseline(fixture, ids) {
+      await runMigrations(createPostgresMigrationDriver(pool), releasedSql('pg', ids));
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
@@ -884,8 +902,8 @@ async function mysqlTarget(adminUrl: string): Promise<UpgradeTarget> {
   const pool = mysql.createPool(url);
   return {
     currentIds: loadMigrations('mysql').map((migration) => migration.id),
-    async seedBaseline(fixture) {
-      await runMysqlMigrations(pool, releasedSql('mysql'));
+    async seedBaseline(fixture, ids) {
+      await runMysqlMigrations(pool, releasedSql('mysql', ids));
       const connection = await pool.getConnection();
       try {
         await connection.beginTransaction();
@@ -947,8 +965,8 @@ async function mongoTarget(baseUrl: string): Promise<UpgradeTarget> {
   const db = client.db(database);
   return {
     currentIds: MONGO_MIGRATIONS.map((step) => step.id).sort((a, b) => a.localeCompare(b)),
-    async seedBaseline(fixture) {
-      const released = MONGO_MIGRATIONS.filter((step) => RELEASED_IDS.includes(step.id));
+    async seedBaseline(fixture, ids) {
+      const released = MONGO_MIGRATIONS.filter((step) => ids.includes(step.id));
       await runMongoMigrations(db, released);
       for (const entry of fixture) {
         await db.collection(entry.table).insertOne(mongoDocument(entry));
@@ -973,77 +991,79 @@ async function mongoTarget(baseUrl: string): Promise<UpgradeTarget> {
 
 function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>): void {
   describe(`released baseline upgrade — ${label}`, { timeout: 120_000 }, () => {
-    it('upgrades a baseline database without losing data, and re-runs as a no-op', async () => {
-      const target = await makeTarget();
-      try {
-        const fixture = await buildFixture();
-        await target.seedBaseline(fixture);
-        const baseline = await target.ledger();
-        assert.deepEqual(
-          baseline.map((row) => row.id),
-          RELEASED_IDS,
-          'the fixture starts from exactly the released migrations',
-        );
-
-        let upgraded: LedgerRow[] = [];
-        let preserved: unknown[] = [];
-        const store = await target.openStore();
+    for (const { release, ids } of UPGRADE_SOURCES) {
+      it(`upgrades a ${release} database without losing data, and re-runs as a no-op`, async () => {
+        const target = await makeTarget();
         try {
-          await store.migrate();
-          upgraded = await target.ledger();
+          const fixture = await buildFixture();
+          await target.seedBaseline(fixture, ids);
+          const baseline = await target.ledger();
           assert.deepEqual(
-            upgraded.map((row) => row.id),
-            target.currentIds,
+            baseline.map((row) => row.id),
+            ids,
+            `the fixture starts from exactly the migrations ${release} shipped`,
           );
-          // The released rows are the ones the baseline wrote: nothing was
-          // re-applied or re-recorded on the way up.
-          assert.deepEqual(
-            upgraded.filter((row) => RELEASED_IDS.includes(row.id)),
-            baseline,
-          );
-          preserved = await assertFixturePreserved(store, fixture);
-          await assertPortalInvariants(store);
 
-          // The forward migration's table is usable on the upgraded database,
-          // including a role recorded as owning no config.
-          await store.apiGatewayPlugins.replace(ID.ledger, {
-            auth: 'edge-auth-ledger',
-            cors: null,
-          });
-          assert.deepEqual(
-            (await store.apiGatewayPlugins.listByApi(ID.ledger)).map((row) => [
-              row.role,
-              row.ferrum_plugin_config_id,
-            ]),
-            [
-              ['auth', 'edge-auth-ledger'],
-              ['cors', null],
-            ],
-          );
-          assert.equal(await store.apiGatewayPlugins.deleteByApi(ID.ledger), 2);
+          let upgraded: LedgerRow[] = [];
+          let preserved: unknown[] = [];
+          const store = await target.openStore();
+          try {
+            await store.migrate();
+            upgraded = await target.ledger();
+            assert.deepEqual(
+              upgraded.map((row) => row.id),
+              target.currentIds,
+            );
+            // The released rows are the ones the baseline wrote: nothing was
+            // re-applied or re-recorded on the way up.
+            assert.deepEqual(
+              upgraded.filter((row) => ids.includes(row.id)),
+              baseline,
+            );
+            preserved = await assertFixturePreserved(store, fixture);
+            await assertPortalInvariants(store);
 
-          // Re-running in the same process changes nothing.
-          await store.migrate();
-          assert.deepEqual(await target.ledger(), upgraded);
-          assert.deepEqual(await assertFixturePreserved(store, fixture), preserved);
+            // The forward migration's table is usable on the upgraded database,
+            // including a role recorded as owning no config.
+            await store.apiGatewayPlugins.replace(ID.ledger, {
+              auth: 'edge-auth-ledger',
+              cors: null,
+            });
+            assert.deepEqual(
+              (await store.apiGatewayPlugins.listByApi(ID.ledger)).map((row) => [
+                row.role,
+                row.ferrum_plugin_config_id,
+              ]),
+              [
+                ['auth', 'edge-auth-ledger'],
+                ['cors', null],
+              ],
+            );
+            assert.equal(await store.apiGatewayPlugins.deleteByApi(ID.ledger), 2);
+
+            // Re-running in the same process changes nothing.
+            await store.migrate();
+            assert.deepEqual(await target.ledger(), upgraded);
+            assert.deepEqual(await assertFixturePreserved(store, fixture), preserved);
+          } finally {
+            await store.close();
+          }
+
+          // Nor does the next boot, which is what every restart does.
+          const restarted = await target.openStore();
+          try {
+            await restarted.migrate();
+            assert.deepEqual(await target.ledger(), upgraded);
+            assert.deepEqual(await assertFixturePreserved(restarted, fixture), preserved);
+            await assertPortalInvariants(restarted);
+          } finally {
+            await restarted.close();
+          }
         } finally {
-          await store.close();
+          await target.teardown();
         }
-
-        // Nor does the next boot, which is what every restart does.
-        const restarted = await target.openStore();
-        try {
-          await restarted.migrate();
-          assert.deepEqual(await target.ledger(), upgraded);
-          assert.deepEqual(await assertFixturePreserved(restarted, fixture), preserved);
-          await assertPortalInvariants(restarted);
-        } finally {
-          await restarted.close();
-        }
-      } finally {
-        await target.teardown();
-      }
-    });
+      });
+    }
   });
 }
 

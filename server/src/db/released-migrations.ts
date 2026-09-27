@@ -63,9 +63,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
   },
   {
     id: '002_api_gateway_plugins',
-    // Pending: the next release sets `release`. Until then an edit to its
-    // artifacts updates these checksums in the same change.
-    release: null,
+    // Frozen: shipped in v0.2.0. Never edit these checksums; a schema change
+    // is a new forward migration.
+    release: 'v0.2.0',
     sha256: {
       sqlite: '60a1cca8245753350feca41756af35b06094f238de935a798ec191f3bdb0fc2b',
       pg: 'c16ac5c1318044e96909d6c9b16a388fb66550163927497be9458c132cda3679',
@@ -75,9 +75,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
   },
   {
     id: '003_messages_thread_latest',
-    // Pending: the next release sets `release`. Until then an edit to its
-    // artifacts updates these checksums in the same change.
-    release: null,
+    // Frozen: shipped in v0.2.0. Never edit these checksums; a schema change
+    // is a new forward migration.
+    release: 'v0.2.0',
     sha256: {
       sqlite: '8a5c81214aeab27665631cabbc44342f052c99a280a698492de1ed209ce7a751',
       pg: '7ddd30ac68ef9e5e1694794bbbd10b7c8a47ac25ce3aa0a28473d829885fbaec',

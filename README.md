@@ -27,9 +27,9 @@ row before calling Edge.
 
 ## Development status
 
-`v0.1.0` is the first supported release, paired with Ferrum Edge `v0.9.7`. The
-[release notes](docs/release-notes.md) list the supported pair and its known
-limitations.
+`v0.2.0` is the current release, paired with Ferrum Edge `v0.9.8`; `v0.1.0` was
+the first supported release. The [release notes](docs/release-notes.md) list the
+supported pair, how to upgrade from `v0.1.0`, and the known limitations.
 
 - **Production upgrades.** Schema changes ship as forward migrations that
   upgrade a released database in place; upgrades never require a reset. See
@@ -238,10 +238,10 @@ The bootstrap token is printed to the container log (`docker logs`). Pass
 ### Full stack with Compose
 
 The Compose example runs Nexus, PostgreSQL and Ferrum Edge. The
-[compatibility record](release/compatibility.env) selects the Edge `v0.9.7`
+[compatibility record](release/compatibility.env) selects the Edge `v0.9.8`
 image by digest, the same image CI tests. The Nexus image is built from your
 checkout, so check out the release tag first
-(`git checkout --detach v0.1.0`).
+(`git checkout --detach v0.2.0`).
 
 The four secrets and the Edge image are required. Keep the secrets stable for
 the life of the stack: store them in a secret manager instead of generating new
