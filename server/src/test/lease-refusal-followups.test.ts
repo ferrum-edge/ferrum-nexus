@@ -25,8 +25,13 @@
  *    retry that commits is the one that moved and recorded it (issue #413).
  * 7. A revocation rollback that an account disable overtook leaves the grant
  *    `revoked` rather than handing a later re-enable its group back, both in
- *    the combined transaction and in the retry after a fence refusal
- *    (issue #420).
+ *    the combined transaction and in the retry after a fence refusal — and so
+ *    does one whose group a disable and re-enable took off in between, though
+ *    the account is active again. A status flip from another instance waits
+ *    for the restore's lifecycle key, a lifecycle key an instance crashed
+ *    holding is waited out, a disabled application's grant still goes back,
+ *    a grant claimed again by somebody else is left alone, and a fenced retry
+ *    the fence refuses runs again outside the lease (issue #420).
  */
 
 import assert from 'node:assert/strict';
@@ -34,7 +39,9 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import {
   aclGroupForApi,
+  consumerUsernameForApplication,
   consumerUsernameForUser,
+  type CreateApplicationResponse,
   type IssueCredentialResponse,
   type PublishApiResponse,
   type RepairGatewayReferencesResponse,
@@ -44,7 +51,8 @@ import {
 import { AuditAction } from '../audit/service.js';
 import type { CredentialRepo, NexusStore, TransactionOptions } from '../db/store.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
-import { LEASE_LOST_MESSAGE } from '../lib/lease-fence.js';
+import { userLifecycleLockKey } from '../lib/keyed-serializer.js';
+import { isLeaseLost, LEASE_LOST_MESSAGE } from '../lib/lease-fence.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 /** The owner another portal instance takes a lapsed lease under. */
@@ -72,6 +80,10 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     restorePatches = [];
     harness = await buildTestApp({
       deps: {
+        // Short enough that a lifecycle key an instance crashed holding times
+        // a waiter out many times over before its lease lapses. Nothing here
+        // contends for one across instances otherwise, so no other test waits.
+        storeLockWaitMs: 100,
         logger: {
           level: 'warn',
           stream: {
@@ -632,12 +644,16 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
 
   /* ── 3 and 4: a revocation rollback ───────────────────────────────────── */
 
-  /** A client approved for a fresh API, with the grant and the API's proxy. */
-  async function grantee(): Promise<{
+  /**
+   * A client approved for a fresh API, with the grant and the API's proxy.
+   * With `application`, the grant is for an application the client owns.
+   */
+  async function grantee(options: { application?: boolean } = {}): Promise<{
     session: TestSession;
     apiId: string;
     proxyId: string;
     grantId: string;
+    applicationId: string | null;
   }> {
     nonce += 1;
     const published = await harness.authed(provider, {
@@ -658,10 +674,24 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     assert.ok(proxyId);
 
     const session = await client();
+    let applicationId: string | null = null;
+    if (options.application) {
+      const created = await harness.authed(session, {
+        method: 'POST',
+        url: '/api/applications',
+        payload: { name: `Follow-up app ${nonce}`, description: 'Integration' },
+      });
+      assert.equal(created.statusCode, 201, created.body);
+      applicationId = created.json<CreateApplicationResponse>().application.id;
+    }
     const requested = await harness.authed(session, {
       method: 'POST',
       url: '/api/access-requests',
-      payload: { api_id: apiId, justification: 'Integration access' },
+      payload: {
+        api_id: apiId,
+        justification: 'Integration access',
+        ...(applicationId === null ? {} : { application_id: applicationId }),
+      },
     });
     assert.equal(requested.statusCode, 201, requested.body);
     const requestId = requested.json<{ access_request: { id: string } }>().access_request.id;
@@ -671,9 +701,13 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
       payload: {},
     });
     assert.equal(approved.statusCode, 200, approved.body);
-    const grant = await harness.store.grants.findActiveByApiAndUser(apiId, session.user.id, null);
+    const grant = await harness.store.grants.findActiveByApiAndUser(
+      apiId,
+      session.user.id,
+      applicationId,
+    );
     assert.ok(grant);
-    return { session, apiId, proxyId, grantId: grant.id };
+    return { session, apiId, proxyId, grantId: grant.id, applicationId };
   }
 
   function groupsOf(userId: string): string[] | undefined {
@@ -692,11 +726,16 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     return harness.store.auditLogs.count({ action, target_id: targetId });
   }
 
-  /** Make the gateway refuse the next write to `userId`'s consumer. */
-  function refuseNextConsumerWrite(userId: string): void {
-    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(userId));
+  /** Make the gateway refuse the next write to the consumer named `username`. */
+  function refuseNextWriteTo(username: string): void {
+    const consumer = harness.edge.consumerByUsername(username);
     assert.ok(consumer);
     harness.edge.queueFailure(500, { error: 'refused' }, `/consumers/${consumer.id}`, 'PUT');
+  }
+
+  /** Make the gateway refuse the next write to `userId`'s consumer. */
+  function refuseNextConsumerWrite(userId: string): void {
+    refuseNextWriteTo(consumerUsernameForUser(userId));
   }
 
   it('puts a refused revocation back alone when the fence refuses its rollback', async () => {
@@ -926,6 +965,364 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     await reenable(session.user.id);
     assert.equal((await harness.store.grants.findById(grantId))?.status, 'revoked');
     assert.ok(!(groupsOf(session.user.id) ?? []).includes(group));
+  });
+
+  /** A promise the test resolves itself, for holding one side of a race. */
+  function gate(): { opened: Promise<void>; open: () => void } {
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    return { opened, open };
+  }
+
+  /**
+   * Hold the revocation at the gateway step — after its claim committed,
+   * before its ACL removal — until `release` is called, then make the gateway
+   * refuse that removal from the consumer named `username`. What the test does
+   * meanwhile runs as requests of its own, outside the revocation's async
+   * context and the lease it holds.
+   */
+  function pauseBeforeRemoval(username: string): { reached: Promise<void>; release: () => void } {
+    const provisioner = harness.services.credentials.provisioner;
+    const mutate = provisioner.mutateAclGroups.bind(provisioner);
+    const arrival = gate();
+    const departure = gate();
+    let paused = false;
+    provisioner.mutateAclGroups = async (...args) => {
+      if (!paused) {
+        paused = true;
+        arrival.open();
+        await departure.opened;
+        refuseNextWriteTo(username);
+      }
+      return mutate(...args);
+    };
+    restorePatches.push(() => {
+      provisioner.mutateAclGroups = mutate;
+    });
+    return { reached: arrival.opened, release: departure.open };
+  }
+
+  /** Note when the gateway refuses an ACL write, so a test can find the rollback after it. */
+  function watchRefusal(): () => boolean {
+    const provisioner = harness.services.credentials.provisioner;
+    const mutate = provisioner.mutateAclGroups.bind(provisioner);
+    let refused = false;
+    provisioner.mutateAclGroups = async (...args) => {
+      try {
+        return await mutate(...args);
+      } catch (error) {
+        refused = true;
+        throw error;
+      }
+    };
+    restorePatches.push(() => {
+      provisioner.mutateAclGroups = mutate;
+    });
+    return () => refused;
+  }
+
+  async function setStatus(
+    app: TestApp,
+    userId: string,
+    status: 'active' | 'disabled',
+  ): Promise<void> {
+    const response = await app.authed(superAdmin, {
+      method: 'PATCH',
+      url: `/api/users/${userId}`,
+      payload: { status },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+  }
+
+  it('leaves it revoked when the account was disabled and re-enabled meanwhile', async () => {
+    const { session, apiId, grantId } = await grantee();
+    const userId = session.user.id;
+    const group = aclGroupForApi(apiId);
+    const paused = pauseBeforeRemoval(consumerUsernameForUser(userId));
+    const revoking = revoke(grantId);
+    await paused.reached;
+
+    // Separate requests, while the revocation waits at the gateway: the
+    // disable's teardown strips the account's groups, and the re-enable
+    // rebuilds them from its active grants, which no longer include the one
+    // the revocation claimed.
+    await setStatus(harness, userId, 'disabled');
+    assert.ok(!(groupsOf(userId) ?? []).includes(group), 'the teardown took the group off');
+    await setStatus(harness, userId, 'active');
+    assert.ok(!(groupsOf(userId) ?? []).includes(group), 'the rebuild left it off');
+    paused.release();
+
+    const failed = await revoking;
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    // The account is active again, but the group the rollback would restore
+    // over is gone, so the grant stays revoked.
+    const grant = await harness.store.grants.findById(grantId);
+    assert.equal(grant?.status, 'revoked');
+    if (grant?.access_request_id) {
+      const request = await harness.store.accessRequests.findById(grant.access_request_id);
+      assert.equal(request?.status, 'revoked');
+    }
+    const rollback = await rollbackOf(grantId);
+    assert.equal(rollback?.grant_restored, false);
+    assert.equal(rollback?.restore_skipped_reason, 'group_absent');
+    assert.ok(logged('its ACL group is no longer on the consumer'));
+
+    // So the next rebuild from active grants does not hand the access back.
+    await setStatus(harness, userId, 'disabled');
+    await setStatus(harness, userId, 'active');
+    assert.equal((await harness.store.grants.findById(grantId))?.status, 'revoked');
+    assert.ok(!(groupsOf(userId) ?? []).includes(group));
+  });
+
+  it('orders a status flip from another instance after the restore it overlaps', async () => {
+    const { session, apiId, grantId } = await grantee();
+    const userId = session.user.id;
+    const group = aclGroupForApi(apiId);
+    const other = await buildTestApp({ store: harness.store, edge: harness.edge });
+    try {
+      refuseNextConsumerWrite(userId);
+      const refused = watchRefusal();
+
+      // Hold the rollback inside its keys, just before it opens the
+      // transaction that restores the grant.
+      const store = harness.store;
+      const realTransaction = store.transaction.bind(store);
+      const arrival = gate();
+      const departure = gate();
+      let held = false;
+      store.transaction = async <T>(
+        fn: (tx: NexusStore) => Promise<T>,
+        options?: TransactionOptions,
+      ): Promise<T> => {
+        if (refused() && !held) {
+          held = true;
+          arrival.open();
+          await departure.opened;
+        }
+        return realTransaction(fn, options);
+      };
+      restorePatches.push(() => {
+        store.transaction = realTransaction;
+      });
+
+      const revoking = revoke(grantId);
+      await arrival.opened;
+
+      // Another instance disables the account now. Its status flip needs the
+      // grantee's lifecycle key, which the rollback holds, so it cannot commit
+      // until the restore has — and the restore still finds the account active.
+      const disabling = setStatus(other, userId, 'disabled');
+      await new Promise<void>((resolve) => setTimeout(resolve, 300));
+      assert.equal(
+        (await harness.store.users.findById(userId))?.status,
+        'active',
+        'the disable waits for the key the restore holds',
+      );
+      departure.open();
+
+      const failed = await revoking;
+      assert.equal(failed.statusCode, 502, failed.body);
+      await disabling;
+
+      assert.equal((await harness.store.grants.findById(grantId))?.status, 'active');
+      const rollback = await rollbackOf(grantId);
+      assert.equal(rollback?.grant_restored, true);
+      assert.equal(rollback?.restore_skipped_reason, undefined);
+      assert.equal((await harness.store.users.findById(userId))?.status, 'disabled');
+      // The disable came second, so its teardown took the restored grant's
+      // group off like any other active grant's, and a re-enable puts it back.
+      assert.ok(!(groupsOf(userId) ?? []).includes(group));
+      await setStatus(harness, userId, 'active');
+      assert.ok((groupsOf(userId) ?? []).includes(group));
+    } finally {
+      await other.close();
+    }
+  });
+
+  it('waits out a lifecycle key an instance crashed holding, then restores', async () => {
+    const { session, apiId, grantId } = await grantee();
+    const key = userLifecycleLockKey(session.user.id);
+    // On its way to the gateway, the revocation is overtaken by an instance
+    // that takes the grantee's lifecycle key and crashes holding it. Nothing
+    // releases that lease; it lapses on its own, many times over the waits
+    // this harness gives a store-level key.
+    const provisioner = harness.services.credentials.provisioner;
+    const mutate = provisioner.mutateAclGroups.bind(provisioner);
+    let abandoned = false;
+    provisioner.mutateAclGroups = async (...args) => {
+      if (!abandoned) {
+        abandoned = true;
+        const now = Date.now();
+        assert.equal(
+          await harness.store.leases.acquire(
+            key,
+            OTHER_INSTANCE,
+            new Date(now + 1_500).toISOString(),
+            new Date(now).toISOString(),
+          ),
+          true,
+        );
+        refuseNextConsumerWrite(session.user.id);
+      }
+      return mutate(...args);
+    };
+    restorePatches.push(() => {
+      provisioner.mutateAclGroups = mutate;
+    });
+
+    const failed = await revoke(grantId);
+    assert.ok(abandoned, 'the key was abandoned while the revocation was in flight');
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    // The rollback outwaited the abandoned lease rather than leaving the grant
+    // revoked over a group that is still on.
+    assert.deepEqual(groupsOf(session.user.id), [aclGroupForApi(apiId)]);
+    assert.equal((await harness.store.grants.findById(grantId))?.status, 'active');
+    const rollback = await rollbackOf(grantId);
+    assert.equal(rollback?.grant_restored, true);
+    assert.ok(!logged('retrying alone'), 'the combined rollback itself waited the key out');
+    assert.equal(
+      await harness.store.leases.release(key, OTHER_INSTANCE),
+      false,
+      'the crashed instance no longer holds the key',
+    );
+  });
+
+  it('restores as before when the gateway cannot say whether the group is on', async () => {
+    const { session, apiId, grantId } = await grantee();
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(session.user.id));
+    assert.ok(consumer);
+    refuseNextConsumerWrite(session.user.id);
+    // The removal's own read goes through; the rollback's fails.
+    harness.edge.queueFailure(500, { error: 'unavailable' }, `/consumers/${consumer.id}`, 'GET', 1);
+
+    const failed = await revoke(grantId);
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    assert.ok(logged('restoring as though its group is on'), 'the rollback could not read it');
+    assert.deepEqual(groupsOf(session.user.id), [aclGroupForApi(apiId)]);
+    assert.equal((await harness.store.grants.findById(grantId))?.status, 'active');
+    const rollback = await rollbackOf(grantId);
+    assert.equal(rollback?.grant_restored, true);
+  });
+
+  it('puts back the grant of an application that is disabled', async () => {
+    const { session, apiId, grantId, applicationId } = await grantee({ application: true });
+    assert.ok(applicationId);
+    const username = consumerUsernameForApplication(applicationId);
+    const group = aclGroupForApi(apiId);
+    // Disabling an application revokes nothing and leaves its groups on.
+    const disabled = await harness.authed(session, {
+      method: 'PATCH',
+      url: `/api/applications/${applicationId}`,
+      payload: { status: 'disabled' },
+    });
+    assert.equal(disabled.statusCode, 200, disabled.body);
+    assert.deepEqual(harness.edge.consumerByUsername(username)?.acl_groups, [group]);
+    refuseNextWriteTo(username);
+
+    const failed = await revoke(grantId);
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    // The group is still on, so the grant goes back like any other.
+    assert.deepEqual(harness.edge.consumerByUsername(username)?.acl_groups, [group]);
+    assert.equal((await harness.store.grants.findById(grantId))?.status, 'active');
+    const rollback = await rollbackOf(grantId);
+    assert.equal(rollback?.grant_restored, true);
+    assert.equal(rollback?.restore_skipped_reason, undefined);
+  });
+
+  it('leaves alone a grant that was put back and revoked again meanwhile', async () => {
+    const { session, grantId } = await grantee();
+    const paused = pauseBeforeRemoval(consumerUsernameForUser(session.user.id));
+    const revoking = revoke(grantId);
+    await paused.reached;
+
+    // Meanwhile somebody else's claim replaces this revocation's: the grant
+    // is put back and revoked again, under a different `revoked_at` and
+    // `revoked_by`.
+    assert.ok(
+      await harness.store.grants.updateIfStatus(grantId, 'revoked', {
+        status: 'active',
+        revoked_by: null,
+        revoked_at: null,
+      }),
+    );
+    const newer = await harness.store.grants.updateIfStatus(grantId, 'active', {
+      status: 'revoked',
+      revoked_by: superAdmin.user.id,
+      revoked_at: isoInSeconds(1),
+    });
+    assert.ok(newer);
+    paused.release();
+
+    const failed = await revoking;
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    // That claim is not this rollback's to undo.
+    const grant = await harness.store.grants.findById(grantId);
+    assert.equal(grant?.status, 'revoked');
+    assert.equal(grant?.revoked_by, superAdmin.user.id);
+    assert.equal(grant?.revoked_at, newer.revoked_at);
+    const rollback = await rollbackOf(grantId);
+    assert.equal(rollback?.grant_restored, false);
+    assert.equal(rollback?.restore_skipped_reason, undefined);
+  });
+
+  it('retries outside the lease when the fence refuses the fenced retry', async () => {
+    const { session, apiId, proxyId, grantId } = await grantee();
+    const key = `proxy:${proxyId}`;
+    refuseNextConsumerWrite(session.user.id);
+    const refused = watchRefusal();
+
+    // The combined rollback fails for a reason of its own — not the fence —
+    // and the revocation has meanwhile stalled past its TTL, so another
+    // instance holds the proxy key by the time the retry, still fenced by it,
+    // reaches its commit.
+    const store = harness.store;
+    const realTransaction = store.transaction.bind(store);
+    const outcomes: string[] = [];
+    store.transaction = async <T>(
+      fn: (tx: NexusStore) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> => {
+      if (!refused()) return realTransaction(fn, options);
+      if (outcomes.length === 0) {
+        await takeOver(key);
+        outcomes.push('dropped');
+        throw new Error('the connection dropped before the commit');
+      }
+      try {
+        const result = await realTransaction(fn, options);
+        outcomes.push('committed');
+        return result;
+      } catch (error) {
+        outcomes.push(isLeaseLost(error) ? 'fenced' : 'failed');
+        throw error;
+      }
+    };
+    restorePatches.push(() => {
+      store.transaction = realTransaction;
+    });
+
+    const failed = await revoke(grantId);
+    assert.equal(failed.statusCode, 502, failed.body);
+    assert.deepEqual(outcomes.slice(0, 3), ['dropped', 'fenced', 'committed']);
+    assert.ok(logged('retrying alone'), 'the combined rollback failed');
+    assert.equal(
+      await harness.store.leases.release(key, OTHER_INSTANCE),
+      true,
+      "the retry left the new holder's lease alone",
+    );
+
+    // The group is still on, so the grant is back.
+    assert.deepEqual(groupsOf(session.user.id), [aclGroupForApi(apiId)]);
+    assert.equal((await harness.store.grants.findById(grantId))?.status, 'active');
+    const rollback = await rollbackOf(grantId);
+    assert.equal(rollback?.grant_restored, true);
   });
 
   /* ── 2: a retirement whose delete provably never applied ──────────────── */

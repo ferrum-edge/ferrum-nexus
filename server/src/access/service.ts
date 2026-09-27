@@ -90,6 +90,15 @@
  * key and in the transaction that would restore the grant, and leaves the
  * grant `revoked` when the account is no longer active — the teardown takes
  * the group off, and the rollback row says why nothing went back.
+ *
+ * Nor does it put back a grant whose group is no longer on the consumer. An
+ * account disabled and re-enabled while the revocation was in flight is
+ * active again by the time the rollback looks, but its teardown stripped the
+ * group and the re-enable rebuilt the groups from active grants alone, so a
+ * grant restored then would be `active` with no group — and the next rebuild
+ * would hand back the access both revocations withdrew. The rollback reads
+ * the consumer under its key, which every group writer holds, and restores
+ * only a grant whose group is still there.
  */
 
 import {
@@ -131,7 +140,9 @@ import {
   validationFailed,
 } from '../lib/errors.js';
 import {
+  LEASE_TTL_MS,
   accessRequestBudgetLockKey,
+  isLockTimeout,
   userLifecycleLockKey,
   type KeyedSerializer,
 } from '../lib/keyed-serializer.js';
@@ -275,10 +286,23 @@ export interface BulkRevocationResult {
 
 /**
  * Why a revocation rollback left the grant it claimed `revoked`: the grantee's
- * account is disabled or gone, or the application holding the grant is.
- * Recorded as `restore_skipped_reason` on `access.revoke_rollback`.
+ * account is disabled or gone, the application holding the grant is gone, or
+ * the grant's ACL group is no longer on its identity's consumer. Recorded as
+ * `restore_skipped_reason` on `access.revoke_rollback`.
  */
-type RevocationRestoreSkip = 'grantee_disabled' | 'grantee_missing' | 'application_missing';
+type RevocationRestoreSkip =
+  | 'grantee_disabled'
+  | 'grantee_missing'
+  | 'application_missing'
+  | 'group_absent';
+
+/** The log line a rollback that left its grant `revoked` writes, by reason. */
+const RESTORE_SKIP_MESSAGES: Record<RevocationRestoreSkip, string> = {
+  grantee_disabled: 'Left a failed revocation revoked: its grantee is no longer active',
+  grantee_missing: 'Left a failed revocation revoked: its grantee no longer exists',
+  application_missing: 'Left a failed revocation revoked: its application no longer exists',
+  group_absent: 'Left a failed revocation revoked: its ACL group is no longer on the consumer',
+};
 
 /** What a revocation rollback did with the grant it claimed. */
 interface RevocationRestore {
@@ -574,7 +598,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * grants or will be rebuilt from the active ones on a re-enable, and an
    * `active` grant restored behind it would hand that re-enable the access
    * this revocation was withdrawing. The account teardown that follows the
-   * disable takes the group off.
+   * disable takes the group off. Nor, finally, is one whose group
+   * `groupPresent` says is gone: the rollback exists only because the group
+   * is still on, and a grant restored without it would be handed the group by
+   * the next rebuild from active grants.
    *
    * Re-runnable: a re-run finds nothing left in `revoked` to move.
    */
@@ -582,6 +609,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     db: NexusStore,
     claim: GrantRecord,
     request: AccessRequestRecord | null,
+    groupPresent: boolean,
   ): Promise<RevocationRestore> {
     const current = await db.grants.findById(claim.id);
     if (
@@ -594,6 +622,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     }
     const skipped = await restoreRefusal(db, current);
     if (skipped) return { restored: false, skipped };
+    if (!groupPresent) return { restored: false, skipped: 'group_absent' };
     const back = await db.grants.updateIfStatus(claim.id, 'revoked', {
       status: 'active',
       revoked_by: null,
@@ -611,17 +640,92 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   }
 
   /**
-   * Restore `claim` in a transaction of its own, under its grantee's
-   * lifecycle key — the key every account status flip commits under — so no
-   * disable can land between the grantee check and the restore on any
-   * instance. The transaction is fenced by that key and by whatever lease the
+   * Whether `group` is still on the gateway consumer `consumerId`. Read by a
+   * caller holding that consumer's key, so no group writer can change the
+   * answer before the caller is done.
+   *
+   * An unreadable consumer answers `true`. The rollback asking follows a
+   * removal the gateway refused, so the group is most likely still on, and a
+   * grant left `revoked` over a live group is the gap the rollback exists to
+   * close; restoring as it did before this check is the safer mistake.
+   */
+  async function groupStillOn(consumerId: string, group: string): Promise<boolean> {
+    try {
+      const live = await edge.consumers.get(consumerId);
+      return live !== null && (live.acl_groups ?? []).includes(group);
+    } catch (error) {
+      deps.log?.(
+        {
+          consumer_id: consumerId,
+          acl_group: group,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Could not read the consumer of a failed revocation; restoring as though its group is on',
+      );
+      return true;
+    }
+  }
+
+  /**
+   * Run one restore of `claim` in a transaction of its own, handing `body`
+   * whether the grant's group is still on its identity's consumer.
+   *
+   * Taken under the consumer's key, which every writer of its groups holds —
+   * an approval, a revocation, the disable teardown and the re-enable rebuild —
+   * so the group cannot come or go between the read and the commit; and
+   * inside it, under the grantee's lifecycle key — the key every account
+   * status flip commits under — so no disable can land between the grantee
+   * check and the restore on any instance. Consumer key first, as the lock
+   * order requires. An identity with no consumer row has no group to restore
+   * over. The transaction is fenced by both keys and by whatever lease the
    * caller holds.
    */
-  function restoreUnderLifecycle<T>(
+  async function restoreOnce<T>(
     claim: GrantRecord,
-    body: (tx: NexusStore) => Promise<T>,
+    body: (tx: NexusStore, groupPresent: boolean) => Promise<T>,
   ): Promise<T> {
-    return lifecycleLocks(userLifecycleLockKey(claim.user_id), () => store.transaction(body));
+    const underLifecycle = (groupPresent: boolean): Promise<T> =>
+      lifecycleLocks(userLifecycleLockKey(claim.user_id), () =>
+        store.transaction((tx) => body(tx, groupPresent)),
+      );
+    const consumer = await store.consumers.findByUserAndNamespace(
+      claim.user_id,
+      namespace,
+      claim.application_id,
+    );
+    if (!consumer) return underLifecycle(false);
+    const consumerId = consumer.ferrum_consumer_id;
+    return edge.serializePerKey(consumerId, async () =>
+      underLifecycle(await groupStillOn(consumerId, claim.acl_group)),
+    );
+  }
+
+  /**
+   * {@link restoreOnce}, tried again for as long as a key it needs may be
+   * held by an instance that crashed holding it.
+   *
+   * A key whose wait ran out ({@link isLockTimeout}) ran nothing, so another
+   * attempt is safe; and a lease an abandoned section left behind has expired
+   * {@link LEASE_TTL_MS} after `since`, the start of the rollback's first
+   * attempt. So a timed-out attempt that started within that window is tried
+   * again, and only one that started after it — which a live holder, renewing
+   * its lease, must have outlasted — gives up. Every other failure, a
+   * unique-index refusal included, is the caller's to handle.
+   */
+  async function restoreUnderKeys<T>(
+    claim: GrantRecord,
+    since: number,
+    body: (tx: NexusStore, groupPresent: boolean) => Promise<T>,
+  ): Promise<T> {
+    for (;;) {
+      const attempt = Date.now();
+      try {
+        return await restoreOnce(claim, body);
+      } catch (error) {
+        if (isLockTimeout(error) && attempt - since <= LEASE_TTL_MS) continue;
+        throw error;
+      }
+    }
   }
 
   /** Copy a restore's outcome onto an `access.revoke_rollback` row's details. */
@@ -644,8 +748,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * Both halves go back under compare-and-set, so a revocation that lost a
    * later race — somebody re-approved the API in the meantime, and a new
    * active grant now owns the partial unique index — is recorded as unrestored
-   * rather than forced. A grant whose grantee was disabled in the meantime is
-   * not put back at all (see {@link restoreRevoked}), and the row says why.
+   * rather than forced. A grant whose grantee was disabled in the meantime, or
+   * whose group is no longer on the consumer, is not put back at all (see
+   * {@link restoreRevoked}), and the row says why. A key the restore needs that
+   * a crashed instance left held is waited out ({@link restoreUnderKeys}).
    * Every step is best-effort: the caller re-throws the original gateway
    * failure and an operator needs the trail either way.
    */
@@ -671,9 +777,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     // never left reading as revoked in the trail. The row's id is minted here
     // so that a failure below can tell whether it committed after all.
     const rollbackId = newId();
+    const since = Date.now();
     try {
-      await restoreUnderLifecycle(claim, async (tx) => {
-        recordRestore(details, await restoreRevoked(tx, claim, request));
+      await restoreUnderKeys(claim, since, async (tx, groupPresent) => {
+        recordRestore(details, await restoreRevoked(tx, claim, request, groupPresent));
         await audit
           .forStore(tx)
           .record(
@@ -690,15 +797,17 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // the restore is retried, which is safe because it is a compare-and-set.
       if (await auditRowCommitted(store, { type: 'grant', id: claim.id }, rollbackId)) {
         // The transaction committed and only its acknowledgement was lost:
-        // the grant is back and its row says so. Restoring again would act
-        // on whatever has happened to the grant since — a new revocation's
-        // claim — and a second row would record one rollback twice.
+        // whatever it did with the grant — put it back, or left it `revoked`
+        // for a reason its row names — stands, and its row says which.
+        // Restoring again would act on whatever has happened to the grant
+        // since — a new revocation's claim — and a second row would record
+        // one rollback twice.
         deps.log?.(
           {
             grant_id: claim.id,
             error: error instanceof Error ? error.message : String(error),
           },
-          'A failed revocation was returned to active, though its acknowledgement was lost',
+          'The rollback of a failed revocation committed, though its acknowledgement was lost',
         );
       } else {
         // Nothing went back with it. Whatever failed — the rollback row's
@@ -708,10 +817,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         // shows as withdrawn, with nothing to repair it, whereas a missing
         // rollback row is only a gap in the trail. So the restore is retried on
         // its own, without the row, in a transaction of its own under the
-        // grantee's lifecycle key: the grant goes back only from this claim,
-        // only while its grantee is active, and never over an active grant a
-        // newer approval committed for the same identity (the partial unique
-        // index refuses that).
+        // same keys: the grant goes back only from this claim, only while its
+        // grantee is active and its group is still on, and never over an
+        // active grant a newer approval committed for the same identity (the
+        // partial unique index refuses that).
         deps.log?.(
           {
             grant_id: claim.id,
@@ -723,14 +832,17 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         // Fenced by this revocation's proxy lease while it still holds it. Once
         // the fence has refused — the lease changed hands while the revocation
         // stalled — a fenced retry could only be refused again, so it runs
-        // outside that lease, fenced by the lifecycle key alone: the
-        // compare-and-sets above are what keep it off whatever the new holder
-        // did. Any other refusal, a unique-index one included, is not retried
-        // again and leaves the grant unrestored for an operator to investigate.
+        // outside that lease, fenced by the consumer and lifecycle keys alone:
+        // the compare-and-sets above are what keep it off whatever the new
+        // holder did. A key held past its wait is waited out as above. Any
+        // other refusal, a unique-index one included, is not retried again and
+        // leaves the grant unrestored for an operator to investigate.
         let unfenced = isLeaseLost(error);
         for (;;) {
           const retry = (): Promise<RevocationRestore> =>
-            restoreUnderLifecycle(claim, (tx) => restoreRevoked(tx, claim, request));
+            restoreUnderKeys(claim, since, (tx, groupPresent) =>
+              restoreRevoked(tx, claim, request, groupPresent),
+            );
           try {
             outcome = await (unfenced ? outsideHeldLeases(retry) : retry());
             break;
@@ -771,10 +883,11 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       }
     }
 
+    const skipped = details.restore_skipped_reason as RevocationRestoreSkip | undefined;
     deps.log?.(
       details,
-      details.restore_skipped_reason
-        ? 'Left a failed revocation revoked: its grantee is no longer active'
+      skipped
+        ? RESTORE_SKIP_MESSAGES[skipped]
         : 'Rolled back a revocation the gateway would not accept',
     );
   }

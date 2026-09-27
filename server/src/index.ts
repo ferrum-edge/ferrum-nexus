@@ -216,6 +216,15 @@ export interface BuildServerDeps {
    * without waiting half a minute per case. Nothing in production sets it.
    */
   sendLockWaitMs?: number;
+  /**
+   * The same seam for the store-level locks — the last-super-admin key and
+   * each account's lifecycle key. Defaults to `LEASE_WAIT_MS` (30 s).
+   *
+   * For the tests that leave a lifecycle key to an instance that crashed while
+   * holding it, and assert what a caller that must still land — a revocation
+   * rollback — does once its waits run out. Nothing in production sets it.
+   */
+  storeLockWaitMs?: number;
 }
 
 /** Shared per-IP budget for sensitive `/api/auth` routes, including credential guessing. */
@@ -323,6 +332,7 @@ export async function buildServer(
   const locks = createKeyedSerializer({
     leases: deps.store.leases,
     conflictMessage: SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
+    ...(deps.storeLockWaitMs === undefined ? {} : { waitMs: deps.storeLockWaitMs }),
   });
 
   /**
