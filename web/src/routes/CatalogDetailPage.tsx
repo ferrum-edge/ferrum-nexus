@@ -63,7 +63,9 @@ function GlanceTile({
 function AtAGlance({ detail }: { detail: CatalogDetailResponse }): ReactElement {
   const { api, spec } = detail;
   return (
-    <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+    // Four across only from xl: at lg the sidebar leaves each tile too narrow
+    // for a rate limit or an access mode, which truncated.
+    <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <GlanceTile
         icon="lock"
         label="Authentication"
