@@ -4828,7 +4828,7 @@ describe('mongodb newest-message index', () => {
       // it examines one message per thread instead of fetching and sorting
       // the busy thread's whole history.
       const aggregatePlan = await db
-        .collection('threads')
+        .collection('message_threads')
         .aggregate(latestMessagesPipeline([busy.id, quiet.id]))
         .explain('executionStats');
       const stages = (aggregatePlan.stages ?? []) as Document[];
