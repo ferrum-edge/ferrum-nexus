@@ -347,7 +347,8 @@ describe('MessageThreadPage', () => {
     for (const entry of all) {
       expect(screen.getByText(entry.body)).toBeInTheDocument();
     }
-    expect(screen.getByText(/Showing 20 of 20 messages/)).toBeInTheDocument();
+    // Everything is on screen, so there is nothing left to count.
+    expect(screen.queryByText(/^Showing /)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Load older messages' })).not.toBeInTheDocument();
   });
 
@@ -364,6 +365,8 @@ describe('MessageThreadPage', () => {
 
     await screen.findByText('body m12');
     expect(threadsApi.get).toHaveBeenCalledTimes(1);
+    // Counted while older messages are still to load.
+    expect(screen.getByText('Showing 5 of 12 messages')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
     await screen.findByText('body m7');
@@ -373,7 +376,7 @@ describe('MessageThreadPage', () => {
 
     expect(threadsApi.get).toHaveBeenCalledTimes(1);
     expect(vi.mocked(threadsApi.messages)).toHaveBeenCalledTimes(2);
-    expect(screen.getByText('Showing 12 of 12 messages')).toBeInTheDocument();
+    expect(screen.queryByText(/^Showing /)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Load older messages' })).not.toBeInTheDocument();
   });
 
@@ -396,7 +399,7 @@ describe('MessageThreadPage', () => {
     route.threadId = 'thread-2';
     rerenderThread();
     await screen.findByText('body other');
-    expect(screen.getByText('Showing 1 of 1 messages')).toBeInTheDocument();
+    expect(screen.queryByText(/^Showing /)).not.toBeInTheDocument();
     expect(screen.queryByText('body m12')).not.toBeInTheDocument();
     expect(screen.queryByText('body m20')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Load older messages' })).not.toBeInTheDocument();

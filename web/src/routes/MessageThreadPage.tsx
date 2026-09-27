@@ -199,6 +199,9 @@ export function MessageThreadPage(): ReactElement {
   const sendingHere = send.isPending && send.variables?.id === thread.id;
 
   const nextBefore = loadOlderCursor(cursors);
+  const total = Math.max(history.total, thread.messages.total);
+  // Worth saying only while part of the conversation is still unloaded.
+  const partial = nextBefore !== null || messages.length < total;
 
   const older = (): void => {
     if (!nextBefore || loadOlder.isPending) return;
@@ -237,22 +240,24 @@ export function MessageThreadPage(): ReactElement {
 
       <Card className="flex flex-col overflow-hidden">
         <div className="flex flex-col gap-5 px-5 py-5">
-          <div className="flex flex-col items-center gap-1.5">
-            {nextBefore ? (
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                loading={loadOlder.isPending}
-                onClick={older}
-              >
-                Load older messages
-              </Button>
-            ) : null}
-            <span className="text-[0.7rem] text-fg-subtle tabular-nums">
-              Showing {messages.length} of {Math.max(history.total, thread.messages.total)} messages
-            </span>
-          </div>
+          {partial ? (
+            <div className="flex flex-col items-center gap-1.5">
+              {nextBefore ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  loading={loadOlder.isPending}
+                  onClick={older}
+                >
+                  Load older messages
+                </Button>
+              ) : null}
+              <span className="text-[0.7rem] text-fg-subtle tabular-nums">
+                Showing {messages.length} of {total} {total === 1 ? 'message' : 'messages'}
+              </span>
+            </div>
+          ) : null}
 
           {messages.length === 0 ? (
             <EmptyState
