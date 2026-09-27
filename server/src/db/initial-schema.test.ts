@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { openSqliteDatabase } from './adapters/sqlite/index.js';
-import { loadMigrations, splitSqlStatements } from './migrate.js';
+import { createSqliteMigrationDriver, openSqliteDatabase } from './adapters/sqlite/index.js';
+import { loadMigrations, runMigrations, splitSqlStatements } from './migrate.js';
 
 describe('buildout schema baseline', () => {
   it('ships one complete initial schema for each SQL dialect', () => {
@@ -10,7 +10,7 @@ describe('buildout schema baseline', () => {
       const files = loadMigrations(dialect);
       assert.deepEqual(
         files.map((file) => file.id),
-        ['001_initial', '002_api_gateway_plugins'],
+        ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest'],
       );
       const statements = splitSqlStatements(files[0]!.sql);
       assert.ok(statements.length > 0);
@@ -136,6 +136,44 @@ describe('buildout schema baseline', () => {
       // Deleting the API takes its ownership record with it.
       db.exec("DELETE FROM apis WHERE id = 'a'");
       assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM api_gateway_plugins').get(), { n: 0 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("replaces the messages thread index with one that serves a thread's newest message", async () => {
+    // InnoDB already suffixes secondary indexes with the primary key, so the
+    // MySQL step is intentionally empty, which its runner accepts.
+    const mysqlStep = loadMigrations('mysql').find(
+      (file) => file.id === '003_messages_thread_latest',
+    );
+    assert.ok(mysqlStep, 'mysql ships 003_messages_thread_latest');
+    assert.deepEqual(splitSqlStatements(mysqlStep.sql), []);
+
+    const db = openSqliteDatabase(':memory:');
+    try {
+      await runMigrations(createSqliteMigrationDriver(db), loadMigrations('sqlite'));
+      const indexes = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'messages'")
+        .all()
+        .map((row) => (row as { name: string }).name);
+      assert.ok(indexes.includes('ix_messages_thread_latest'));
+      assert.equal(indexes.includes('ix_messages_thread'), false, 'the old index is dropped');
+
+      // The per-thread subquery of `findLatestByThreads`: the `id` tie-break
+      // comes from the index, not from a temporary sort of the thread.
+      const plan = db
+        .prepare(
+          'EXPLAIN QUERY PLAN SELECT n.id FROM messages AS n WHERE n.thread_id = ? ' +
+            'ORDER BY n.created_at DESC, n.id DESC LIMIT 1',
+        )
+        .all('t')
+        .map((row) => String((row as { detail: unknown }).detail));
+      assert.ok(
+        plan.some((detail) => detail.includes('ix_messages_thread_latest')),
+        plan.join('\n'),
+      );
+      assert.equal(plan.some((detail) => detail.includes('TEMP B-TREE')), false, plan.join('\n'));
     } finally {
       db.close();
     }

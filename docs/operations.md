@@ -537,6 +537,14 @@ owns. It copies no data:
 - A leftover auth config beside the portal's stays attached after an
   `auth_plugin` change and is listed under `outgoing_auth_configs_remaining`.
 
+`003_messages_thread_latest` (pending release) replaces the messages index
+`ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,
+which adds the message id (`_id` descending on MongoDB), so finding each
+thread's newest message is one index seek per thread. It changes no data. On
+MySQL it is a no-op, because InnoDB already appends the primary key to the
+existing index. On a large `messages` table, building the index can take a
+while at startup.
+
 **CI enforces this.** `server/src/db/released-migrations.test.ts` fails when a
 released migration's file or MongoDB snapshot no longer matches its checksum,
 when a released migration is deleted or renamed, when a new migration sorts

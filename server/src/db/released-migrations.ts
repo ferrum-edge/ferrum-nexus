@@ -73,4 +73,16 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
       mongodb: '00e15264f7de04cb8bb29dc59bb2f013582a024ee0cb9eb024918e4997ff17dc',
     },
   },
+  {
+    id: '003_messages_thread_latest',
+    // Pending: the next release sets `release`. Until then an edit to its
+    // artifacts updates these checksums in the same change.
+    release: null,
+    sha256: {
+      sqlite: '8a5c81214aeab27665631cabbc44342f052c99a280a698492de1ed209ce7a751',
+      pg: '7ddd30ac68ef9e5e1694794bbbd10b7c8a47ac25ce3aa0a28473d829885fbaec',
+      mysql: '53ca8bd32bb8e812396a366307747afb877552999a3d06bcfacd3014ba3cbbca',
+      mongodb: '0e9319c397b60336397b54a85d2bd9a52aa398d555d7457752ebe0a234993b9e',
+    },
+  },
 ];

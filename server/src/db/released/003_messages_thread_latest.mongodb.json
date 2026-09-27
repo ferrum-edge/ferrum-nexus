@@ -1,0 +1,12 @@
+{
+  "id": "003_messages_thread_latest",
+  "backend": "mongodb",
+  "description": "Frozen snapshot of MESSAGE_THREAD_LATEST_INDEXES in server/src/db/adapters/mongodb/index.ts",
+  "indexes": [
+    {
+      "collection": "messages",
+      "name": "ix_messages_thread_latest",
+      "key": { "thread_id": 1, "created_at": -1, "_id": -1 }
+    }
+  ]
+}

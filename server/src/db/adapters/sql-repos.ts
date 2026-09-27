@@ -2404,7 +2404,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     findLatestByThreads: async (threadIds) => {
       if (threadIds.length === 0) return [];
       const placeholders = threadIds.map(() => '?').join(', ');
-      // One `(thread_id, created_at)` index seek per requested thread for its
+      // One `(thread_id, created_at, id)` index seek per requested thread for its
       // newest message id, then a primary-key lookup, rather than reading and
       // ranking every message of every thread on the page. An empty thread has
       // no match and yields no row.

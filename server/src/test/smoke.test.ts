@@ -48,7 +48,13 @@ import {
 } from '../auth/service.js';
 import { loadConfig } from '../config/index.js';
 import { createStore } from '../db/index.js';
-import type { EnqueueEmailInput, LeaseRepo, NexusStore, UserRecord } from '../db/store.js';
+import type {
+  EnqueueEmailInput,
+  LeaseRepo,
+  NexusStore,
+  ThreadRecord,
+  UserRecord,
+} from '../db/store.js';
 import { createCrypto } from '../lib/crypto.js';
 import { isNexusError } from '../lib/errors.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
@@ -4710,6 +4716,128 @@ describe('mongodb standalone rule', () => {
         await cleaner.db(database).dropDatabase();
       } finally {
         await cleaner.close();
+        await store.close();
+      }
+    }
+  });
+});
+
+/* ── The MongoDB newest-message index ───────────────────────────────────── */
+
+const mongoUrl = process.env.NEXUS_TEST_MONGO_URL;
+
+describe('mongodb newest-message index', () => {
+  if (mongoUrl === undefined || mongoUrl.trim() === '') {
+    it('skipped — set NEXUS_TEST_MONGO_URL to run', { skip: 'NEXUS_TEST_MONGO_URL is not set' });
+    return;
+  }
+
+  it("reads each thread's newest message through ix_messages_thread_latest", async () => {
+    const database = throwawayDbName();
+    const url = withDatabase(mongoUrl, database);
+    const store = createStore(testConfig('mongodb', url));
+    const mongo = new MongoClient(url);
+    try {
+      await store.init();
+      await store.migrate();
+      await mongo.connect();
+      const db = mongo.db(database);
+      const messages = db.collection('messages');
+
+      // `003_messages_thread_latest` replaces the baseline's thread index with
+      // one whose key is the whole newest-first sort.
+      const indexes = await messages.indexes();
+      const latestIndex = indexes.find((index) => index.name === 'ix_messages_thread_latest');
+      assert.ok(latestIndex, 'the newest-message index exists');
+      assert.deepEqual(Object.entries(latestIndex.key), [
+        ['thread_id', 1],
+        ['created_at', -1],
+        ['_id', -1],
+      ]);
+      assert.equal(
+        indexes.some((index) => index.name === 'ix_messages_thread'),
+        false,
+        'the superseded index is dropped',
+      );
+
+      const makeIndexUser = (role: 'client' | 'provider'): Promise<UserRecord> =>
+        store.users.create({
+          email: `${newId()}@example.test`,
+          password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+          display_name: 'Index User',
+          role,
+          status: 'active',
+          email_verified: false,
+        });
+      const sender = await makeIndexUser('client');
+      const recipient = await makeIndexUser('provider');
+      const makeIndexThread = (subject: string): Promise<ThreadRecord> =>
+        store.threads.create({
+          subject,
+          created_by: sender.id,
+          participant_a: sender.id,
+          participant_b: recipient.id,
+        });
+      const busy = await makeIndexThread('Busy');
+      const quiet = await makeIndexThread('Quiet');
+
+      // A long history, then two messages tied on the newest timestamp: the
+      // larger id wins, as in every other adapter.
+      for (let age = 60; age > 10; age -= 1) {
+        await store.messages.create({
+          thread_id: busy.id,
+          sender_user_id: sender.id,
+          body: `History ${age}`,
+          created_at: isoInSeconds(-age),
+        });
+      }
+      const tiedAt = isoInSeconds(-5);
+      const [lowId, highId] = [newId(), newId()].sort();
+      const tiedHigh = await store.messages.create({
+        id: highId,
+        thread_id: busy.id,
+        sender_user_id: recipient.id,
+        body: 'Tied, larger id',
+        created_at: tiedAt,
+      });
+      await store.messages.create({
+        id: lowId,
+        thread_id: busy.id,
+        sender_user_id: sender.id,
+        body: 'Tied, smaller id',
+        created_at: tiedAt,
+      });
+      const only = await store.messages.create({
+        thread_id: quiet.id,
+        sender_user_id: sender.id,
+        body: 'Only message',
+        created_at: isoInSeconds(-30),
+      });
+
+      const latest = await store.messages.findLatestByThreads([busy.id, quiet.id]);
+      assert.deepEqual(
+        new Map(latest.map((message) => [message.thread_id, message.id])),
+        new Map([
+          [busy.id, tiedHigh.id],
+          [quiet.id, only.id],
+        ]),
+      );
+
+      // The per-thread lookup is one index seek: it examines a single document
+      // instead of fetching and sorting the thread's whole history.
+      const plan = await messages
+        .find({ thread_id: busy.id })
+        .sort({ created_at: -1, _id: -1 })
+        .limit(1)
+        .explain('executionStats');
+      assert.equal(plan.executionStats?.totalDocsExamined, 1);
+      assert.match(JSON.stringify(plan.queryPlanner?.winningPlan), /ix_messages_thread_latest/);
+    } finally {
+      try {
+        await mongo.connect();
+        await mongo.db(database).dropDatabase();
+      } finally {
+        await mongo.close();
         await store.close();
       }
     }

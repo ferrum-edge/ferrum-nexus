@@ -1239,6 +1239,42 @@ export const API_GATEWAY_PLUGIN_INDEXES: readonly IndexDefinition[] = [
   },
 ];
 
+/**
+ * `003_messages_thread_latest`: the newest message of a thread is the first in
+ * {@link NEWEST_FIRST} order, `(created_at desc, _id desc)`. The baseline's
+ * `ix_messages_thread` key `(thread_id, created_at)` leaves the `_id`
+ * tie-break to an in-memory sort of the whole thread, so this index carries
+ * `_id` too and replaces it: the newest-message lookup becomes one index seek
+ * per thread, and an oldest-first read of a thread walks the same index
+ * backwards.
+ */
+export const MESSAGE_THREAD_LATEST_INDEXES: readonly IndexDefinition[] = [
+  {
+    collection: 'messages',
+    name: 'ix_messages_thread_latest',
+    key: { thread_id: 1, created_at: -1, _id: -1 },
+  },
+];
+
+/** The baseline messages index {@link MESSAGE_THREAD_LATEST_INDEXES} supersedes. */
+const SUPERSEDED_MESSAGES_THREAD_INDEX = 'ix_messages_thread';
+
+/**
+ * Create the newest-message index, then drop the one it supersedes. Re-runnable:
+ * `createIndex` is a no-op for an identical index, and an index or collection
+ * that is already gone is what the drop wants.
+ */
+async function applyMessageThreadLatest(db: Db): Promise<void> {
+  await createIndexes(db, MESSAGE_THREAD_LATEST_INDEXES);
+  try {
+    await db.collection(COLLECTIONS.messages).dropIndex(SUPERSEDED_MESSAGES_THREAD_INDEX);
+  } catch (error) {
+    // 26 NamespaceNotFound, 27 IndexNotFound.
+    const code = (error as { code?: unknown }).code;
+    if (code !== 26 && code !== 27) throw error;
+  }
+}
+
 /** The baseline creates every index; document fields are written by repositories. */
 export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
   {
@@ -1250,6 +1286,11 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
     id: '002_api_gateway_plugins',
     indexes: API_GATEWAY_PLUGIN_INDEXES,
     apply: (db: Db): Promise<void> => createIndexes(db, API_GATEWAY_PLUGIN_INDEXES),
+  },
+  {
+    id: '003_messages_thread_latest',
+    indexes: MESSAGE_THREAD_LATEST_INDEXES,
+    apply: applyMessageThreadLatest,
   },
 ];
 
@@ -3106,9 +3147,12 @@ class MongoStore implements NexusStore {
 
     findLatestByThreads: async (threadIds) => {
       if (threadIds.length === 0) return [];
-      // One bounded newest-message lookup per requested thread, rather than
-      // reading and sorting every message of every thread on the page. An empty
-      // thread has no match and is dropped by the `$unwind`.
+      // One newest-message lookup per requested thread, rather than reading and
+      // sorting every message of every thread on the page. The equality join
+      // plus `NEWEST_FIRST` is exactly the `ix_messages_thread_latest` key, so
+      // each lookup is a single index seek; the `localField`/`foreignField`
+      // form lets the planner use it, where a `let`/`$expr` correlation may
+      // not. An empty thread has no match and is dropped by the `$unwind`.
       const docs = await this.col(COLLECTIONS.threads)
         .aggregate(
           [
@@ -3116,12 +3160,9 @@ class MongoStore implements NexusStore {
             {
               $lookup: {
                 from: COLLECTIONS.messages,
-                let: { threadId: '$_id' },
-                pipeline: [
-                  { $match: { $expr: { $eq: ['$thread_id', '$$threadId'] } } },
-                  { $sort: NEWEST_FIRST },
-                  { $limit: 1 },
-                ],
+                localField: '_id',
+                foreignField: 'thread_id',
+                pipeline: [{ $sort: NEWEST_FIRST }, { $limit: 1 }],
                 as: 'latest',
               },
             },

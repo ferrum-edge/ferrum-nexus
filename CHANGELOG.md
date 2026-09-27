@@ -394,6 +394,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   previews. A 200-thread page used to issue 200 separate message lookups (#394).
   The batched query does one indexed newest-message lookup per thread, so it no
   longer reads and sorts every message of every thread on the page.
+- On MongoDB, the newest-message lookup behind conversation list previews is
+  now a single index seek per thread instead of a fetch and sort of the
+  thread's whole history (#422). The new forward migration
+  `003_messages_thread_latest` replaces the messages index
+  `(thread_id, created_at)` with `ix_messages_thread_latest`, which also covers
+  the id tie-break (`{thread_id: 1, created_at: -1, _id: -1}` on MongoDB,
+  `(thread_id, created_at, id)` on SQLite and PostgreSQL; MySQL's InnoDB index
+  already carries the primary key, so its step changes nothing). The MongoDB
+  `$lookup` now joins with `localField`/`foreignField` so the planner can use
+  the index.
 - A consumer repair that resumes after its lease lapsed no longer writes a
   second `gateway.consumer_repair` row when the account's repair rows for that
   consumer already list every stale credential row it would have revoked:
