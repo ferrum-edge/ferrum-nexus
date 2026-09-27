@@ -31,6 +31,7 @@ import type { UserRecord } from '../db/store.js';
 import { isNexusError, type NexusError } from '../lib/errors.js';
 import { LruCache } from '../lib/lru-cache.js';
 import {
+  estimateUnaliasedYamlBytes,
   parseOpenApiSpec,
   parseUploadedOpenApiSpec,
   renderCatalogSpec,
@@ -294,7 +295,13 @@ describe('the catalog rendering of YAML', () => {
     const parsed = parseUploadedOpenApiSpec(`${lines.join('\n')}\n`);
     const document = rewriteSpecServers(parsed.document, 'https://gateway.example.test', 'catalog');
     // yaml's default stringify anchors the shared array once and aliases it 300 times.
-    assert.equal(stringify(document, { lineWidth: 0 }).match(/servers: \*/g)?.length, 300);
+    const aliased = stringify(document, { lineWidth: 0 });
+    assert.equal(aliased.match(/servers: \*/g)?.length, 300);
+    // Bounded within the limit, so the full rendering is attempted.
+    const unaliased = stringify(document, { lineWidth: 0, aliasDuplicateObjects: false });
+    const estimate = estimateUnaliasedYamlBytes(aliased);
+    assert.ok(estimate >= Buffer.byteLength(unaliased));
+    assert.ok(estimate <= MAX_SPEC_EXPANDED_BYTES);
 
     const rendered = renderCatalogSpec(document, parsed.contentType);
 
@@ -336,6 +343,11 @@ describe('the catalog rendering of YAML', () => {
     const document = rewriteSpecServers(parsed.document, serverUrl, 'catalog');
     const unaliased = stringify(document, { lineWidth: 0, aliasDuplicateObjects: false });
     assert.ok(Buffer.byteLength(unaliased) > MAX_SPEC_EXPANDED_BYTES);
+    // Bounded past the limit from the aliased text alone, so the full rendering
+    // is never built.
+    assert.ok(
+      estimateUnaliasedYamlBytes(stringify(document, { lineWidth: 0 })) > MAX_SPEC_EXPANDED_BYTES,
+    );
 
     const rendered = renderCatalogSpec(document, parsed.contentType);
 
@@ -344,6 +356,27 @@ describe('the catalog rendering of YAML', () => {
     assert.equal(rendered, stringify(document, { lineWidth: 0 }));
     assert.equal(rendered.match(/servers: \*/g)?.length, 3000);
     assert.equal(rendered.split(serverUrl).length - 1, 1);
+  });
+
+  it('bounds the full rendering of nested and deeply aliased objects from above', () => {
+    const inner = { text: 'x'.repeat(50), items: [1, 2], note: 'line one\nline two' };
+    const outer = { inner, list: [inner, { deep: inner }] };
+    const documents: Record<string, unknown>[] = [
+      { top: outer, nested: { deeper: [{ at: outer }, [outer], [[outer]]] }, again: inner },
+      { a: [[[[inner]]]], b: { c: { d: { e: inner } } }, f: [{ g: [inner] }] },
+      { empty: [], list: [], map: {}, other: {} },
+    ];
+    const shared: unknown[] = [];
+    documents.push({ one: shared, two: { three: shared }, four: [shared] });
+    for (const document of documents) {
+      const aliased = stringify(document, { lineWidth: 0 });
+      const unaliased = stringify(document, { lineWidth: 0, aliasDuplicateObjects: false });
+      assert.ok(
+        estimateUnaliasedYamlBytes(aliased) >= Buffer.byteLength(unaliased),
+        `under-counted:\n${aliased}`,
+      );
+      assert.equal(renderCatalogSpec(document, 'application/yaml'), unaliased);
+    }
   });
 });
 

@@ -44,8 +44,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   document with more than about 100 of them was past the alias limit of 100
   that the viewer (and the server's own parse) applies. Served YAML carries no
   anchors or aliases unless written out in full it would exceed
-  `MAX_SPEC_EXPANDED_BYTES` (then it is served aliased, as before), so the
-  documents accepted at upload and served are unchanged.
+  `MAX_SPEC_EXPANDED_BYTES` (then it is served aliased, as before), so every
+  document accepted before is still accepted.
   The viewer also refused catalog documents over the 2 MiB upload limit
   although the catalog serves renderings up to `MAX_SPEC_EXPANDED_BYTES`
   (4 MiB); it now accepts those, and reads YAML with the server's options
