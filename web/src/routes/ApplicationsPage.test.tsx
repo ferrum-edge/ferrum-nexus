@@ -53,6 +53,17 @@ describe('applications', () => {
     expect(screen.getByText(/separate identity/)).toBeInTheDocument();
   });
 
+  it("lists only the caller's own, even for an administrator", async () => {
+    // Without `mine` the route answers an administrator with every account's
+    // applications, which this page would then offer to disable and delete.
+    await renderPage(<ApplicationsPage />);
+    await screen.findByText('Billing worker');
+    expect(applicationsApi.list).toHaveBeenCalled();
+    for (const [query] of vi.mocked(applicationsApi.list).mock.calls) {
+      expect(query).toMatchObject({ mine: true });
+    }
+  });
+
   it('creates one', async () => {
     await renderPage(<ApplicationsPage />);
     await screen.findByText('Billing worker');
@@ -109,12 +120,17 @@ describe('applications', () => {
     });
     await renderPage(<ApplicationsPage />);
     expect(await screen.findByText('Integration 0')).toBeInTheDocument();
-    expect(applicationsApi.list).toHaveBeenCalledWith({ limit: DEFAULT_PAGE_SIZE, offset: 0 });
+    expect(applicationsApi.list).toHaveBeenCalledWith({
+      mine: true,
+      limit: DEFAULT_PAGE_SIZE,
+      offset: 0,
+    });
     expect(screen.queryByText(`Integration ${DEFAULT_PAGE_SIZE}`)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
     expect(await screen.findByText(`Integration ${DEFAULT_PAGE_SIZE}`)).toBeInTheDocument();
     expect(applicationsApi.list).toHaveBeenLastCalledWith({
+      mine: true,
       limit: DEFAULT_PAGE_SIZE,
       offset: DEFAULT_PAGE_SIZE,
     });

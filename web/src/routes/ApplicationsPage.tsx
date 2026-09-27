@@ -48,7 +48,9 @@ function ApplicationsList(): ReactElement {
   // disabled or deleted (issue #310).
   const [offset, setOffset] = useState(0);
   const limit = DEFAULT_PAGE_SIZE;
-  const query = useApplications({ limit, offset }, true, true);
+  // `mine`: for an administrator the list route otherwise answers with every
+  // account's applications, and this page is "Your applications".
+  const query = useApplications({ mine: true, limit, offset }, true, true);
   const create = useCreateApplication();
   const update = useUpdateApplication();
   const remove = useDeleteApplication();
