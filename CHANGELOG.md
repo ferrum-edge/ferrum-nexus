@@ -26,15 +26,23 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
-- Specs whose YAML aliases expand beyond 4 MiB are refused (#421). An
-  OpenAPI document is now bounded by the UTF-8 size of its keys and scalars
-  once aliases are resolved — `MAX_SPEC_EXPANDED_BYTES`, twice
-  `MAX_SPEC_BYTES` — as well as by its upload size, and publishing or
-  revising past it answers `400 SPEC_INVALID` with
-  `details.reason = "expanded_too_large"`. The catalog applies the same check
-  to stored revisions, and refuses to cache or serve a re-serialized document
-  larger than the limit, so a revision accepted before this change fails
-  closed instead of being written out in full at every alias.
+- OpenAPI documents are bounded by what they expand to, not only by their
+  upload size (#421). The UTF-8 size of a document's keys and scalars once
+  YAML aliases are resolved, and the size of the document as the catalog
+  serves it, may not exceed `MAX_SPEC_EXPANDED_BYTES` (4 MiB, twice
+  `MAX_SPEC_BYTES`); publishing, revising, rolling back or diffing past it
+  answers `400 SPEC_INVALID` with `details.reason = "expanded_too_large"`, so
+  minified JSON that pretty-prints past the limit is refused at upload rather
+  than accepted and then not served. YAML is now read with the YAML 1.2 core
+  schema even when it declares `%YAML 1.1`: `<<` merge keys are ordinary keys,
+  and `!!omap`, `!!set`, `!!binary` and `!!timestamp` tags are ignored, so the
+  node reads as the plain mapping, sequence or string it is written as. A
+  mapping or sequence used as a mapping key answers
+  `details.reason = "non_scalar_key"`, and a parsed value that is not a plain
+  object, array or scalar `details.reason = "unsupported_node"`. The catalog
+  applies the same checks to stored revisions and refuses to cache or serve a
+  rendering larger than the limit, so a revision accepted before this change
+  fails closed instead of being written out in full.
 - Opening a thread or replying no longer answers `500` for a message that was
   already stored and audited when working out who to notify fails (#393).
   Recipient discovery — the other seat of a direct thread, the owner of a

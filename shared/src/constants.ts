@@ -378,8 +378,9 @@ export const MAX_SPEC_DEPTH = 200;
  * `\L`/`\P` line separators), so twice {@link MAX_SPEC_BYTES} leaves every
  * document that merely reuses small fragments as much again of headroom, while
  * capping the expansion at a small multiple of the upload rather than about a
- * hundred. The catalog also refuses to serve a re-serialized document larger
- * than this.
+ * hundred. The document as the catalog serves it — pretty-printed JSON or
+ * re-serialized YAML — is bounded by this too: an upload whose rendering is
+ * larger is refused, and the catalog refuses to serve one.
  */
 export const MAX_SPEC_EXPANDED_BYTES = 2 * MAX_SPEC_BYTES;
 

@@ -66,8 +66,6 @@
 
 import { createHash } from 'node:crypto';
 
-import { stringify as stringifyYaml } from 'yaml';
-
 import {
   MAX_SPEC_EXPANDED_BYTES,
   clampPageSize,
@@ -97,7 +95,7 @@ import type {
 } from '../db/store.js';
 import { notFound, specInvalid } from '../lib/errors.js';
 import { LruCache } from '../lib/lru-cache.js';
-import { parseOpenApiSpec, type ParsedSpec } from '../publishing/oas.js';
+import { parseOpenApiSpec, renderCatalogSpec, type ParsedSpec } from '../publishing/oas.js';
 import { canListApi, canViewApi, resolveReadAccess, type ApiReadAccess } from './read-access.js';
 import { presentApi, type GatewayUrlSource } from '../publishing/present.js';
 import { rewriteSpecServers } from '../publishing/spec-document.js';
@@ -223,13 +221,11 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       return null;
     }
     const document = rewriteSpecServers(parsed.document, serverUrl, 'catalog');
-    const serialized =
-      parsed.contentType === 'application/json'
-        ? JSON.stringify(document, null, 2)
-        : stringifyYaml(document);
+    const serialized = renderCatalogSpec(document, parsed.contentType);
     // Serialization adds indentation and quoting the parse-time count does not
-    // see, so the output is bounded as well: a document too large to serve is
-    // refused and remembered like one that does not parse; its text is never cached.
+    // see, so the output is bounded as well. An upload is measured by the same
+    // rendering, so this refuses only a row stored before that check existed:
+    // it is remembered like one that does not parse, and its text is never cached.
     const bytes = Buffer.byteLength(serialized);
     if (bytes > MAX_SPEC_EXPANDED_BYTES) {
       specCache.set(key, null, key.length);

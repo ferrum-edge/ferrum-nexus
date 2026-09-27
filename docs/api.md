@@ -1900,11 +1900,23 @@ Uploads accept at most 200 nested object/array levels, counting the root as leve
 one, in either enforcement mode. Deeper documents return `400 SPEC_INVALID` with
 `details: { reason: "nesting_too_deep", limit: 200 }` before a gateway call.
 
+YAML is read with the YAML 1.2 core schema, including a document that declares
+`%YAML 1.1`: `<<` is an ordinary key rather than a merge, and `!!omap`, `!!set`,
+`!!binary` and `!!timestamp` tags are ignored, so the tagged node reads as the
+plain mapping, sequence or string it is written as. Every mapping key must be a
+scalar (or an alias of one); a mapping or sequence used as a key returns
+`400 SPEC_INVALID` with `details: { reason: "non_scalar_key" }`. A parsed value
+that is not a plain object, array or scalar returns
+`details: { reason: "unsupported_node" }`.
+
 The document's text once YAML aliases are resolved — the UTF-8 bytes of every
 mapping key and scalar, counted at every place each occurs — may not exceed
-**4 MiB** (4,194,304 bytes, twice the upload limit). A document whose aliases
-expand past it returns `400 SPEC_INVALID` with
+**4 MiB** (4,194,304 bytes, twice the upload limit). Neither may the document as
+[the catalog serves it](#get-apicatalogslugspec) — JSON indented by two spaces,
+or YAML as the server writes it — so minified JSON or flow-style YAML that
+formats past the limit is refused too. Either returns `400 SPEC_INVALID` with
 `details: { reason: "expanded_too_large", limit: 4194304 }` before a gateway call.
+The same rules apply to a spec revision, a rollback and an upload diff.
 
 A document must also stay inside what the built-in documentation viewer can
 render. Bytes, paths and operations do not bound that: one declared operation

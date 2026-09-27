@@ -11,7 +11,11 @@
  * Nexus is a portal, not a spec linter. It checks only what publishing actually
  * depends on:
  *
- * - the document parses as JSON or YAML and is a JSON object;
+ * - the document parses as JSON or YAML and is a JSON object. YAML is read
+ *   with the YAML 1.2 core schema whatever `%YAML` directive it carries — no
+ *   merge keys, no `!!omap`/`!!set`/`!!binary`/`!!timestamp` types — and every
+ *   mapping key must be a scalar, so the parse yields only plain objects,
+ *   arrays and scalars, which is all an OpenAPI document is;
  * - its keys and scalars add up to no more than {@link MAX_SPEC_EXPANDED_BYTES}
  *   once YAML aliases are resolved. `MAX_SPEC_BYTES` bounds the upload, but an
  *   alias repeats its anchor at every use, and everything downstream — the
@@ -65,7 +69,14 @@
 import { Resolver } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
-import { parse as parseYaml } from 'yaml';
+import {
+  isAlias,
+  isScalar,
+  parseDocument as parseYamlDocument,
+  stringify as stringifyYaml,
+  visit,
+  type Node as YamlNode,
+} from 'yaml';
 
 import {
   MAX_SPEC_BYTES,
@@ -84,7 +95,7 @@ import {
 
 export { slugify } from '@ferrum-nexus/shared';
 
-import { specInvalid, type NexusError } from '../lib/errors.js';
+import { isNexusError, specInvalid, type NexusError } from '../lib/errors.js';
 
 /** Upstream a proxy should forward to, decomposed into Edge's proxy fields. */
 export interface SpecUpstream {
@@ -546,12 +557,68 @@ function parseDocument(text: string): { value: unknown; contentType: ParsedSpec[
     }
   }
   try {
-    return { value: parseYaml(text) as unknown, contentType: 'application/yaml' };
+    return { value: parseYamlSpec(text), contentType: 'application/yaml' };
   } catch (cause) {
+    if (isNexusError(cause)) throw cause;
     throw specInvalid('The document is not valid YAML or JSON', {
       reason: cause instanceof Error ? cause.message : String(cause),
     });
   }
+}
+
+/**
+ * How every OpenAPI document is read as YAML.
+ *
+ * Explicit options win over a `%YAML 1.1` directive, which would otherwise
+ * switch the document to the YAML 1.1 schema: merge keys (`<<: *a`) copy an
+ * anchor's entries without counting against the alias limit, and `!!omap`,
+ * `!!set`, `!!binary` and `!!timestamp` decode to a `Map`, `Set`,
+ * `Uint8Array` or `Date` whose contents a walk over plain objects cannot see.
+ * `resolveKnownTags: false` keeps those tags from resolving under the core
+ * schema too, where they are otherwise honoured when written explicitly. An
+ * unknown tag is only a warning, and its node is read as the plain mapping,
+ * sequence or string it is written as.
+ */
+const YAML_SPEC_OPTIONS = { schema: 'core', merge: false, resolveKnownTags: false } as const;
+
+/** The alias limit yaml applies when converting a document, pinned rather than inherited. */
+const YAML_MAX_ALIAS_COUNT = 100;
+
+/**
+ * Parse one YAML document into plain data.
+ *
+ * Parsed in two steps so every mapping key can be checked before anything is
+ * converted: a key that is a mapping or a sequence becomes a JavaScript
+ * property name only by being stringified, which the parser does once per
+ * occurrence and at a cost that grows with the document's anchors. OpenAPI
+ * keys are strings, so refusing anything but a scalar key loses no valid
+ * document.
+ *
+ * @throws NexusError `SPEC_INVALID` with `reason: 'non_scalar_key'`; any other
+ * throw is a parse failure the caller reports
+ */
+function parseYamlSpec(text: string): unknown {
+  const doc = parseYamlDocument(text, YAML_SPEC_OPTIONS);
+  if (doc.errors.length > 0) throw doc.errors[0];
+
+  // An alias names the latest anchor of that name before it, and the visit is
+  // in document order, so an anchor is always recorded before an alias of it.
+  const anchors = new Map<string, YamlNode>();
+  visit(doc, {
+    Node(_key, node) {
+      if (!isAlias(node) && node.anchor) anchors.set(node.anchor, node);
+    },
+    Pair(_key, pair) {
+      const key = isAlias(pair.key) ? anchors.get(pair.key.source) : pair.key;
+      if (!isScalar(key)) {
+        throw specInvalid('Every mapping key in the OpenAPI document must be a string', {
+          reason: 'non_scalar_key',
+        });
+      }
+    },
+  });
+
+  return doc.toJS({ maxAliasCount: YAML_MAX_ALIAS_COUNT }) as unknown;
 }
 
 /** `SPEC_INVALID` for resolved text past {@link MAX_SPEC_EXPANDED_BYTES}. */
@@ -561,6 +628,13 @@ function expandedTooLarge(): NexusError {
       'once its YAML aliases are resolved',
     { reason: 'expanded_too_large', limit: MAX_SPEC_EXPANDED_BYTES },
   );
+}
+
+/** An array, or an object whose prototype is `Object.prototype` or `null`. */
+function isPlainContainer(value: object): boolean {
+  const prototype: unknown = Object.getPrototypeOf(value);
+  if (Array.isArray(value)) return prototype === Array.prototype;
+  return prototype === Object.prototype || prototype === null;
 }
 
 /** UTF-8 bytes one scalar contributes to the resolved document's text. */
@@ -610,6 +684,14 @@ function assertSpecShape(value: unknown): void {
   };
 
   const push = (entryValue: object, depth: number): void => {
+    // Defence in depth behind the parse options: a `Map`, `Set`, `Date` or
+    // typed array has no own enumerable properties, so it would be charged
+    // nothing here and still be written out in full by the serializer.
+    if (!isPlainContainer(entryValue)) {
+      throw specInvalid('The OpenAPI document contains a value that is not JSON data', {
+        reason: 'unsupported_node',
+      });
+    }
     if (depth > MAX_SPEC_DEPTH) {
       throw specInvalid(`The document exceeds the ${MAX_SPEC_DEPTH} level nesting limit`, {
         reason: 'nesting_too_deep',
@@ -987,6 +1069,52 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
     raw,
     document: value,
   };
+}
+
+/**
+ * The text the catalog serves for a parsed document: JSON pretty-printed with
+ * two-space indentation, or YAML as the `yaml` library writes it.
+ *
+ * Shared by the catalog and by {@link parseUploadedOpenApiSpec}, so a document
+ * is measured at upload by exactly the serialization it will be served as.
+ */
+export function renderCatalogSpec(
+  document: Record<string, unknown>,
+  contentType: ParsedSpec['contentType'],
+): string {
+  return contentType === 'application/json'
+    ? JSON.stringify(document, null, 2)
+    : stringifyYaml(document);
+}
+
+/**
+ * {@link parseOpenApiSpec} for a document being *uploaded* — a publish, a spec
+ * revision, a rollback or a diff preview — which must also be one the catalog
+ * will serve.
+ *
+ * The parse-time count sees keys and scalars, not the indentation, quoting and
+ * line breaks serialization adds, so minified JSON or flow-style YAML inside
+ * `MAX_SPEC_BYTES` can still pretty-print past
+ * {@link MAX_SPEC_EXPANDED_BYTES}. The catalog refuses to serve such a
+ * rendering; refusing the upload here keeps the two in agreement. The document
+ * is measured before the catalog rewrites its `servers`, which replaces lists
+ * of URLs with one URL and does not materially change the size; the catalog
+ * still checks its own output for rows stored before this check existed.
+ *
+ * @throws NexusError `SPEC_INVALID` with `reason: 'expanded_too_large'` for a
+ * rendering past the limit, and everything {@link parseOpenApiSpec} throws
+ */
+export function parseUploadedOpenApiSpec(text: string): ParsedSpec {
+  const parsed = parseOpenApiSpec(text);
+  const rendered = renderCatalogSpec(parsed.document, parsed.contentType);
+  if (byteLength(rendered) > MAX_SPEC_EXPANDED_BYTES) {
+    throw specInvalid(
+      `The document is larger than the ${Math.floor(MAX_SPEC_EXPANDED_BYTES / 1024)} KiB limit ` +
+        'once formatted for the catalog',
+      { reason: 'expanded_too_large', limit: MAX_SPEC_EXPANDED_BYTES },
+    );
+  }
+  return parsed;
 }
 
 /**

@@ -27,7 +27,7 @@ import {
 import type { UserRecord } from '../db/store.js';
 import { isNexusError, type NexusError } from '../lib/errors.js';
 import { LruCache } from '../lib/lru-cache.js';
-import { parseOpenApiSpec } from '../publishing/oas.js';
+import { parseOpenApiSpec, parseUploadedOpenApiSpec } from '../publishing/oas.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 /** Size of the anchored scalar the alias fixtures repeat. */
@@ -55,19 +55,39 @@ function aliasedSpec(aliases: number, shape: 'scalar' | 'mapping' = 'scalar'): s
 /** Enough aliases of the anchor to resolve past the limit, within yaml's own alias count. */
 const OVER_LIMIT_ALIASES = Math.ceil(MAX_SPEC_EXPANDED_BYTES / ANCHOR_BYTES) + 4;
 
-function expectExpandedTooLarge(fn: () => unknown): NexusError {
+function expectSpecInvalid(fn: () => unknown, details: unknown): NexusError {
   try {
     fn();
   } catch (error) {
     assert.ok(isNexusError(error), `expected a NexusError, got ${String(error)}`);
     assert.equal(error.code, 'SPEC_INVALID');
-    assert.deepEqual(error.details, {
-      reason: 'expanded_too_large',
-      limit: MAX_SPEC_EXPANDED_BYTES,
-    });
+    assert.deepEqual(error.details, details);
     return error;
   }
   assert.fail('expected SPEC_INVALID');
+}
+
+function expectExpandedTooLarge(fn: () => unknown): NexusError {
+  return expectSpecInvalid(fn, { reason: 'expanded_too_large', limit: MAX_SPEC_EXPANDED_BYTES });
+}
+
+/** {@link SAMPLE_SPEC_YAML} under a `%YAML 1.1` directive, followed by `extra` lines. */
+function yaml11Spec(extra: string[]): string {
+  return ['%YAML 1.1', '---', SAMPLE_SPEC_YAML.trimEnd(), ...extra, ''].join('\n');
+}
+
+/**
+ * Minified JSON within `MAX_SPEC_BYTES` whose keys and scalars are well inside
+ * the resolved-text limit, but whose pretty-printed form — one indented line
+ * per array element — is not.
+ */
+function minifiedFillerSpec(): string {
+  return JSON.stringify({
+    openapi: '3.1.0',
+    info: { title: 'Filler', version: '1' },
+    paths: {},
+    'x-filler': new Array<number>(700_000).fill(0),
+  });
 }
 
 describe('resolved OpenAPI document size', () => {
@@ -108,6 +128,100 @@ describe('resolved OpenAPI document size', () => {
       'x-text': 'y'.repeat(MAX_SPEC_BYTES - 1024),
     });
     assert.equal(parseOpenApiSpec(json).contentType, 'application/json');
+  });
+});
+
+describe('YAML read as plain data whatever its directive', () => {
+  it('reads !!omap under %YAML 1.1 as a sequence, so its aliases are counted', () => {
+    const omap = (entries: number): string[] => [
+      `x-anchor: &big ${'x'.repeat(ANCHOR_BYTES)}`,
+      'x-omap: !!omap',
+      ...Array.from({ length: entries }, (_, i) => `  - k${i}: *big`),
+    ];
+    const flood = yaml11Spec(omap(OVER_LIMIT_ALIASES));
+    assert.ok(Buffer.byteLength(flood) < MAX_SPEC_BYTES, 'the upload itself is within limits');
+    expectExpandedTooLarge(() => parseOpenApiSpec(flood));
+
+    const parsed = parseOpenApiSpec(yaml11Spec(omap(2)));
+    const entries = parsed.document['x-omap'];
+    assert.ok(Array.isArray(entries), 'an ordered map is a plain sequence, not a Map');
+    assert.deepEqual(Object.keys(entries[1] as object), ['k1']);
+  });
+
+  it('reads !!set under %YAML 1.1 as a plain mapping', () => {
+    const parsed = parseOpenApiSpec(yaml11Spec(['x-set: !!set { a, b }']));
+    assert.deepEqual(parsed.document['x-set'], { a: null, b: null });
+  });
+
+  it('does not apply merge keys under %YAML 1.1', () => {
+    const parsed = parseOpenApiSpec(
+      yaml11Spec([
+        'x-base: &a0 { k0: v }',
+        'x-m1: &a1 { <<: *a0, k1: v }',
+        'x-m2: { <<: *a1, k2: v }',
+      ]),
+    );
+    // `<<` is an ordinary key whose value is the aliased mapping, counted like
+    // any other alias, rather than an instruction to copy that mapping's entries.
+    assert.deepEqual(parsed.document['x-m2'], {
+      '<<': { '<<': { k0: 'v' }, k1: 'v' },
+      k2: 'v',
+    });
+  });
+
+  it('accepts an ordinary document under a %YAML 1.1 directive', () => {
+    const parsed = parseOpenApiSpec(
+      yaml11Spec(['x-shared: &shared { description: Reused }', 'x-uses: [*shared, *shared]']),
+    );
+    assert.equal(parsed.title, 'Billing API');
+    assert.equal(parsed.version, '2.4.0');
+    assert.equal(parsed.contentType, 'application/yaml');
+    assert.deepEqual(parsed.paths, [
+      { path: '/invoices', methods: ['GET'] },
+      { path: '/invoices/{id}', methods: ['GET'] },
+    ]);
+    assert.deepEqual(parsed.document['x-uses'], [
+      { description: 'Reused' },
+      { description: 'Reused' },
+    ]);
+  });
+
+  it('refuses a mapping key that is not a scalar', () => {
+    const cases = [
+      ['x-complex:', '  ? [a, b]', '  : value'],
+      ['x-complex:', '  ? { a: 1 }', '  : value'],
+      ['x-anchor: &m { a: 1 }', 'x-complex: { *m : value }'],
+    ];
+    for (const extra of cases) {
+      const spec = [SAMPLE_SPEC_YAML.trimEnd(), ...extra, ''].join('\n');
+      expectSpecInvalid(() => parseOpenApiSpec(spec), { reason: 'non_scalar_key' });
+    }
+  });
+
+  it('accepts an alias key that names a scalar', () => {
+    const spec = [
+      SAMPLE_SPEC_YAML.trimEnd(),
+      'x-name: &n name',
+      'x-keyed: { *n : value }',
+      '',
+    ].join('\n');
+    assert.deepEqual(parseOpenApiSpec(spec).document['x-keyed'], { name: 'value' });
+  });
+});
+
+describe('an upload measured as the catalog will serve it', () => {
+  it('refuses minified JSON whose formatted form outgrows the limit', () => {
+    const minified = minifiedFillerSpec();
+    assert.ok(Buffer.byteLength(minified) < MAX_SPEC_BYTES);
+    assert.doesNotThrow(() => parseOpenApiSpec(minified));
+    expectSpecInvalid(() => parseUploadedOpenApiSpec(minified), {
+      reason: 'expanded_too_large',
+      limit: MAX_SPEC_EXPANDED_BYTES,
+    });
+  });
+
+  it('accepts a document whose formatted form fits', () => {
+    assert.equal(parseUploadedOpenApiSpec(SAMPLE_SPEC_YAML).title, 'Billing API');
   });
 });
 
@@ -175,6 +289,37 @@ describe('publishing and serving an alias-expanded document', () => {
     assert.equal(await harness.store.apis.findBySlug('alias-flood'), null);
   });
 
+  it('refuses to publish or revise minified JSON that formats past the limit', async () => {
+    const minified = minifiedFillerSpec();
+    const response = await publish('filler-json', minified);
+    assert.equal(response.statusCode, 400, response.body);
+    const body = JSON.parse(response.body) as ApiErrorBody;
+    assert.equal(body.error.code, 'SPEC_INVALID');
+    assert.deepEqual(body.error.details, {
+      reason: 'expanded_too_large',
+      limit: MAX_SPEC_EXPANDED_BYTES,
+    });
+    assert.equal(await harness.store.apis.findBySlug('filler-json'), null);
+
+    const published = await publish('filler-revise', SAMPLE_SPEC_YAML);
+    assert.equal(published.statusCode, 201, published.body);
+    const apiId = published.json<PublishApiResponse>().api.id;
+    const revised = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${apiId}/spec`,
+      payload: { spec: minified },
+    });
+    assert.equal(revised.statusCode, 400, revised.body);
+    const revisedBody = JSON.parse(revised.body) as ApiErrorBody;
+    assert.equal(revisedBody.error.code, 'SPEC_INVALID');
+    assert.deepEqual(revisedBody.error.details, {
+      reason: 'expanded_too_large',
+      limit: MAX_SPEC_EXPANDED_BYTES,
+    });
+    const current = await harness.store.apiSpecs.findCurrentByApi(apiId);
+    assert.equal(current?.raw_spec, SAMPLE_SPEC_YAML.trim());
+  });
+
   it('publishes and serves a spec that reuses small fragments through aliases', async () => {
     const spec = [
       SAMPLE_SPEC_YAML.trimEnd(),
@@ -225,16 +370,8 @@ describe('publishing and serving an alias-expanded document', () => {
     const record = await harness.store.apiSpecs.findCurrentByApi(api.id);
     assert.ok(record);
 
-    // Minified JSON within `MAX_SPEC_BYTES` whose keys and scalars are well
-    // inside the resolved-text limit, but whose pretty-printed form — one
-    // indented line per array element — is not.
-    const filler = 700_000;
-    const minified = JSON.stringify({
-      openapi: '3.1.0',
-      info: { title: 'Filler', version: '1' },
-      paths: {},
-      'x-filler': new Array<number>(filler).fill(0),
-    });
+    // Stored before uploads were measured by their formatted form.
+    const minified = minifiedFillerSpec();
     assert.ok(Buffer.byteLength(minified) < MAX_SPEC_BYTES);
     assert.doesNotThrow(() => parseOpenApiSpec(minified));
 

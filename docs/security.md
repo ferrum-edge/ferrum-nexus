@@ -1241,6 +1241,41 @@ configuration error naming the variable rather than a crash inside Fastify, and
 a `/0` block, which Fastify refuses too, cannot bring "trust everything" back
 under another spelling.
 
+### Parsed documents are bounded by what they decode to
+
+`MAX_SPEC_BYTES` bounds the upload, not what it decodes to, and so not the
+server memory a parse — or the catalog's re-serialization of the result — takes.
+A YAML alias repeats its anchor at every use and the parsed document does not
+remember that it was an alias, so the re-serialization writes out every copy. Nexus therefore adds up
+the UTF-8 bytes of every mapping key and scalar, at every place each occurs, in
+the same iterative walk that bounds nesting, and refuses a document past
+`MAX_SPEC_EXPANDED_BYTES` (4 MiB, twice `MAX_SPEC_BYTES`) with
+`400 SPEC_INVALID` and `details.reason = "expanded_too_large"`. Without aliases
+a document's keys and scalars never outgrow its source, so the second 2 MiB is
+headroom for legitimate reuse, while one large anchored scalar aliased a
+hundred times — about a hundredfold expansion under the YAML parser's own
+per-anchor alias count — is refused. JSON cannot alias but is counted the same
+way. Two YAML features would bypass that count, and neither is honoured:
+the YAML 1.1 schema a `%YAML 1.1` directive selects decodes `!!omap` and
+`!!set` into a `Map` or `Set` whose contents a walk over plain objects cannot
+see, and applies merge keys (`<<: *a`) without charging them against the
+parser's alias count. Every document is read with the YAML 1.2 core schema,
+merge keys off and those tags unresolved, whatever directive it carries; the
+walk refuses any value that is not a plain object, array or scalar
+(`reason = "unsupported_node"`); and a mapping key must be a scalar
+(`reason = "non_scalar_key"`), since a collection key is stringified once per
+occurrence at a cost that grows with the document's anchors.
+The keys and scalars are not the whole of the served text — indentation,
+quoting and line breaks are added when it is written — so an upload (a publish,
+a spec revision, a rollback or a diff) is also rendered exactly as the catalog
+will serve it and refused with the same reason when that is larger than
+`MAX_SPEC_EXPANDED_BYTES`; minified JSON or flow-style YAML inside
+`MAX_SPEC_BYTES` can otherwise pretty-print past it. The catalog parses every
+stored revision with the same checks before rendering it and refuses — and
+caches only the refusal of — a rendering larger than `MAX_SPEC_EXPANDED_BYTES`,
+so a revision accepted before these limits existed fails closed rather than
+being written out in full.
+
 ### Publishing is bounded per account
 
 Provider registration is open by default, and one `POST /api/apis` stores an
@@ -1300,7 +1335,7 @@ rendering it therefore has to be bounded on both sides, and neither `MAX_SPEC_BY
 nor the path and operation counts does it: those bound the transfer and the
 number of cards, not the work behind one card.
 
-Two bounds, at the two places the cost appears:
+Bounds at each place the cost appears:
 
 - **At publish.** Nexus counts what the viewer walks — the nodes of every
   `components.schemas` entry, and the parameter entries, response entries,
@@ -1323,22 +1358,6 @@ Two bounds, at the two places the cost appears:
   then.
   One declared operation can carry thousands of parameters and dozens of media
   types per body; counting paths and operations sees none of that.
-- **Once aliases are resolved.** `MAX_SPEC_BYTES` bounds the upload, not what
-  it decodes to: a YAML alias repeats its anchor at every use, and the parsed
-  document does not remember that it was an alias, so the catalog's
-  re-serialization writes out every copy. Nexus therefore adds up the UTF-8
-  bytes of every mapping key and scalar, at every place each occurs, in the
-  same iterative walk that bounds nesting, and refuses a document past
-  `MAX_SPEC_EXPANDED_BYTES` (4 MiB, twice `MAX_SPEC_BYTES`) with
-  `400 SPEC_INVALID` and `details.reason = "expanded_too_large"`. Without
-  aliases a document's keys and scalars never outgrow its source, so the
-  second 2 MiB is headroom for legitimate reuse, while one large anchored
-  scalar aliased a hundred times — about a hundredfold expansion under the
-  YAML parser's own per-anchor alias count — is refused. JSON cannot alias
-  but is counted the same way. The catalog parses every stored revision with
-  the same check before rendering it, so a revision accepted before the limit
-  existed fails closed, and it also refuses — and caches only the refusal
-  of — a re-serialized document larger than `MAX_SPEC_EXPANDED_BYTES`.
 - **While following references.** Parameter, request-body and response
   `$ref`s are followed — by the viewer, the publish-time counter and the
   revision comparison alike — through one resolver per document that memoises
