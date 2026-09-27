@@ -4,8 +4,8 @@
 
 Please **do not** open public GitHub issues for security problems.
 
-Report vulnerabilities privately via GitHub Security Advisories on this
-repository ("Report a vulnerability"). Include:
+Report vulnerabilities privately through GitHub Security Advisories on this
+repository (**Security → Report a vulnerability**). Include:
 
 - A description of the issue and its impact.
 - Steps to reproduce (a minimal proof of concept helps).
@@ -34,4 +34,5 @@ guide.
 
 ## Supported versions
 
-Security fixes land on `main`. Pin releases and track `main` for advisories.
+Security fixes land on `main`. Run a pinned release, and watch `main` and this
+repository's advisories for fixes.

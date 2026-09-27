@@ -1,37 +1,39 @@
 # Getting started
 
-A complete walkthrough: from an empty machine to a client calling a published
-API through the gateway with a credential the portal issued.
+This walkthrough takes you from an empty machine to a client calling a
+published API through the gateway, with a credential the portal issued.
 
-**Release:** this walkthrough targets Ferrum Nexus `v0.1.0` with Ferrum Edge
-`v0.9.7`, the supported pair in the [release notes](release-notes.md). Deployments
-that keep their data follow [schema versioning and upgrades](operations.md#schema-versioning-and-upgrades);
-a development database created before `v0.1.0` needs the
+It targets Ferrum Nexus `v0.1.0` with Ferrum Edge `v0.9.7`, the supported pair
+in the [release notes](release-notes.md). To upgrade a deployment that keeps
+its data, see [schema versioning and upgrades](operations.md#schema-versioning-and-upgrades).
+A development database created before `v0.1.0` needs the
 [development reset](operations.md#buildout-schema-policy).
 
-You will play three roles in sequence — the operator who runs the stack, a
-**provider** who publishes an API, and a **client** who requests access and
-calls it. Allow about twenty minutes.
+You play three roles in turn: the operator who runs the stack, a **provider**
+who publishes an API, and a **client** who requests access and calls it. Allow
+about twenty minutes.
 
-Everything here uses `curl` against the real routes, so you can follow along
-without the SPA; the corresponding UI steps are noted as you go.
+Every step uses `curl` against the real API routes, so you can follow along
+without the web UI. The matching UI steps are noted as you go.
 
 > **Started the [Compose stack](../README.md#docker) instead?** Skip steps 2
-> and 3 — it is your gateway and portal, on the same ports — and step 5's echo
-> server. Two things differ from here on. The Compose portal generates its
-> bootstrap token, so step 4's `bootstrap_token` is the one
-> `docker compose logs nexus` prints. And it publishes only public upstreams
-> (it does not set `NEXUS_ALLOW_PRIVATE_UPSTREAMS`), so step 5's
-> `servers[0].url` must be a public HTTPS backend. Every release's
-> [verbatim quickstart gate](release-notes.md#release-step) follows exactly
-> this path.
+> and 3 and step 5's echo server. Three things differ:
+>
+> - The portal is at <http://127.0.0.1:8787>, not `:5173`.
+> - The bootstrap token in step 4 is the one `docker compose logs nexus` prints.
+> - The Compose portal publishes only public upstreams (it does not set
+>   `NEXUS_ALLOW_PRIVATE_UPSTREAMS`), so step 5's `servers[0].url` must be a
+>   public HTTPS backend.
+>
+> Every release's [verbatim quickstart gate](release-notes.md#release-step)
+> follows this path.
 
 ---
 
 ## 1. Prerequisites
 
-- **Node.js 22.14+** — see [`.nvmrc`](../.nvmrc). SQLite requires Node-API 10;
-  upgrade older Node 22 installations before installing dependencies.
+- **Node.js 22.14+** (see [`.nvmrc`](../.nvmrc)). The SQLite driver needs
+  Node-API 10, which older Node 22 releases lack.
 - **Docker**, for the Ferrum Edge gateway.
 - `curl` and `jq` for the examples.
 
@@ -41,46 +43,12 @@ No database server is needed: Nexus defaults to SQLite.
 
 ## 2. Start a Ferrum Edge gateway
 
-Nexus is a front end for a gateway, so the gateway comes first. Two things have
-to match on both sides: the **admin JWT secret**, and **`FERRUM_NAMESPACE`**.
+Nexus is a front end for a gateway, so the gateway comes first.
 
-> **`FERRUM_NAMESPACE` must be identical on the gateway and on the portal.**
-> The gateway's Admin API accepts a write into _any_ namespace, but a single
-> gateway process's data plane routes exactly one — the one its own
-> `FERRUM_NAMESPACE` names (`ferrum` when unset). Point Nexus at a different
-> namespace and every publish still succeeds, the catalog still shows an
-> `invoke_url`, and that URL answers `404` forever. This walkthrough sets
-> `nexus` on both sides; [step 3](#3-set-up-ferrum-nexus) shows how the portal
-> reports a mismatch.
-
-The gateway image is distroless `nonroot` and runs as **UID 65532**. The
-published release image (v0.9.5 onwards) pre-creates `/data` owned by
-`65532:65532`, and Docker copies that ownership into a **fresh** named or
-anonymous volume mounted there — so a brand-new volume works as-is, and you can
-even skip the create step and let the `docker run` below make `ferrum-data` on
-first use:
-
-```bash
-docker volume create ferrum-data
-```
-
-You only need the chown repair for a volume or **bind mount** whose ownership is
-already wrong: a host directory you bind-mount never inherits image ownership,
-and an existing volume created against an older image that lacked `/data` keeps
-whatever owner it was made with. Fix those before starting SQLite:
-
-```bash
-docker run --rm -v ferrum-data:/data alpine chown 65532:65532 /data
-```
-
-See the Edge [Docker guide](https://github.com/ferrum-edge/ferrum-edge/blob/main/docs/docker.md#volume-mounts)
-for the same fresh-volume behaviour.
-
-Clone Nexus first so this walkthrough and the
-[Compose example](operations.md#compose) use the same published Edge image
-from the [compatibility record](../release/compatibility.env). Check out the
-supported Nexus release tag before sourcing the record, so the portal you build
-and the gateway image it names are the pair the release was validated with:
+Clone Nexus, check out the release tag, and load the
+[compatibility record](../release/compatibility.env). The record names the
+exact Edge image this release was tested with, the same one the
+[Compose example](operations.md#compose) uses:
 
 ```bash
 git clone https://github.com/ferrum-edge/ferrum-nexus.git
@@ -91,7 +59,26 @@ set -a
 set +a
 ```
 
-Then start the gateway:
+The gateway image runs as **UID 65532** and ships `/data` owned by that user.
+Docker copies that ownership into a **new** named volume, so a fresh volume
+works as-is (the `docker run` below creates `ferrum-data` if it does not
+exist):
+
+```bash
+docker volume create ferrum-data
+```
+
+A bind mount, or a volume created against an older image, keeps its existing
+owner. Fix it before starting the gateway, or SQLite cannot write:
+
+```bash
+docker run --rm -v ferrum-data:/data alpine chown 65532:65532 /data
+```
+
+See the Edge [Docker guide](https://github.com/ferrum-edge/ferrum-edge/blob/main/docs/docker.md#volume-mounts)
+for details.
+
+Start the gateway:
 
 ```bash
 export FERRUM_ADMIN_JWT_SECRET="$(openssl rand -hex 32)"
@@ -105,49 +92,55 @@ docker run -d --name ferrum-edge \
   -e FERRUM_DB_TYPE=sqlite \
   -e FERRUM_DB_URL='sqlite:///data/ferrum.db?mode=rwc' \
   -e FERRUM_NAMESPACE=nexus \
-  -e FERRUM_ADMIN_JWT_SECRET="$FERRUM_ADMIN_JWT_SECRET" \
-  -e FERRUM_BASIC_AUTH_HMAC_SECRET="$FERRUM_BASIC_AUTH_HMAC_SECRET" \
+  -e FERRUM_ADMIN_JWT_SECRET \
+  -e FERRUM_BASIC_AUTH_HMAC_SECRET \
   -e FERRUM_ADMIN_BIND_ADDRESS=0.0.0.0 \
   -e FERRUM_ALLOW_INSECURE_ADMIN_HTTP=true \
   -v ferrum-data:/data \
   "${FERRUM_EDGE_IMAGE:?set FERRUM_EDGE_IMAGE to a published version or digest}" run -m database
 ```
 
-Two additions worth explaining before you move on:
+`-e NAME` with no value passes the exported variable through, so the secrets
+never appear on the command line.
 
-- `--add-host=host.docker.internal:host-gateway` makes the hostname the
-  walkthrough uses for the upstream resolve inside the container. Docker
-  Desktop provides it anyway, so this is harmless there and **required** on
-  plain Linux, where it does not exist by default.
-- `FERRUM_BASIC_AUTH_HMAC_SECRET` (at least 32 bytes) is what the gateway hashes
-  Basic-auth passwords with. Set it now: without it the gateway refuses to build
-  the `basic_auth` plugin at all, so publishing a `basic_auth` API fails with a
-  `400` from Edge. Nexus passes the gateway's own message through in
-  `EDGE_ERROR.details.gateway_message`, which is where you will see it.
+Three settings need explaining:
 
-Two ports, and confusing them is the most common first-run mistake:
+- **`FERRUM_NAMESPACE` must be the same on the gateway and the portal.** The
+  Admin API accepts writes into any namespace, but a gateway's proxy listener
+  routes only its own (`ferrum` when unset). If the two differ, publishing
+  still succeeds and the catalog still shows an invoke URL, but every call
+  answers `404`. This walkthrough uses `nexus` on both sides;
+  [step 3](#3-set-up-ferrum-nexus) shows how the portal reports a mismatch.
+- **`--add-host=host.docker.internal:host-gateway`** lets the container reach
+  services on your host by that name. Docker Desktop provides it anyway; plain
+  Linux needs the flag.
+- **`FERRUM_BASIC_AUTH_HMAC_SECRET`** (at least 32 bytes) is how the gateway
+  hashes Basic-auth passwords. Without it the gateway refuses the `basic_auth`
+  plugin, and publishing a `basic_auth` API fails with `EDGE_ERROR`. The
+  gateway's reason is in `details.gateway_message`.
 
-| Port   | What it is         | Who talks to it                         |
-| ------ | ------------------ | --------------------------------------- |
-| `9000` | **Admin API**      | the Nexus server only — never a browser |
-| `8000` | **Proxy listener** | API clients calling published APIs      |
+The gateway has two ports. Confusing them is the most common first-run mistake:
+
+| Port   | What it is         | Who talks to it                        |
+| ------ | ------------------ | -------------------------------------- |
+| `9000` | **Admin API**      | the Nexus server only, never a browser |
+| `8000` | **Proxy listener** | API clients calling published APIs     |
 
 `FERRUM_ALLOW_INSECURE_ADMIN_HTTP=true` is acceptable here because the Admin
-API is bound to loopback on your machine. In production, put it behind TLS or
-on a private network — see [`security.md`](security.md#9-ferrum-edge-admin-jwt-hygiene).
+API is published on loopback only. In production, put it behind TLS or on a
+private network; see [`security.md`](security.md#9-ferrum-edge-admin-jwt-hygiene).
 
-Check it is alive:
+Check that the proxy listener is up:
 
 ```bash
-# The proxy listener has no route published yet, so a bare `/` answers 404.
-# `curl` without `-f` still returns success on a 4xx and fails only when nothing
-# is listening, so this passes on a healthy, freshly-started gateway.
+# No route is published yet, so `/` answers 404. Without -f, curl still
+# succeeds on a 404 and fails only when nothing is listening.
 curl -s -o /dev/null http://127.0.0.1:8000/ && echo "proxy listener up"
 ```
 
-> **If your gateway uses a different issuer**, note it now: Nexus stamps
-> `iss: ferrum-edge` by default and the gateway rejects a mismatch. Set
-> `FERRUM_ADMIN_JWT_ISSUER` in the next step to match.
+> **If your gateway uses a different JWT issuer**, note it now. Nexus signs
+> Admin API tokens with `iss: ferrum-edge` by default and the gateway rejects a
+> mismatch. Set `FERRUM_ADMIN_JWT_ISSUER` in the next step to match.
 
 ---
 
@@ -155,58 +148,53 @@ curl -s -o /dev/null http://127.0.0.1:8000/ && echo "proxy listener up"
 
 ```bash
 npm install
-
 cp .env.example .env
 ```
 
-Edit `.env`:
+Set these values in `.env`. Most of the keys already exist in the file; change
+them in place:
 
 ```bash
 NEXUS_SECRET_KEY=<paste `openssl rand -hex 32`>
 FERRUM_ADMIN_URL=http://127.0.0.1:9000
-FERRUM_ADMIN_JWT_SECRET=<the same value you exported in step 2>
-# Must be the SAME value the gateway was started with in step 2. The gateway's
-# data plane routes exactly one namespace; publishing into any other one
-# succeeds on the Admin API and 404s on the listener.
+FERRUM_ADMIN_JWT_SECRET=<the value you exported in step 2>
+# Must match the gateway's FERRUM_NAMESPACE from step 2.
 FERRUM_NAMESPACE=nexus
 NEXUS_PUBLIC_URL=http://127.0.0.1:5173
 
-# Where the gateway's PROXY listener answers — not the Admin API, not the
-# portal. The catalog shows each API's full invoke URL from this, so a client
-# never has to guess the port. An admin can change it later in
-# Settings → Gateway.
+# The gateway's PROXY listener (not the Admin API, not the portal). The catalog
+# builds each API's invoke URL from it. Admins can change it later in
+# Administration → Settings → Gateway.
 FERRUM_GATEWAY_PUBLIC_URL=http://127.0.0.1:8000
 
-# Session cookies are `Secure` by default, which a browser will not store over
-# plain http. This walkthrough is http-only, so say so; production keeps the
-# default and serves the portal over https.
+# This walkthrough runs over plain http. The session cookies are Secure unless
+# NEXUS_COOKIE_SECURE=false; production keeps them Secure and serves https.
 NEXUS_ENV=development
+NEXUS_COOKIE_SECURE=false
 
-# Publishing refuses loopback, private-range and `.internal` upstreams unless
-# this is set — the walkthrough's `host.docker.internal` upstream is one of
-# them. Leave it unset (the default) anywhere the catalog is not fully trusted.
+# Publishing refuses loopback, private-range and .internal upstreams unless
+# this is true, and the walkthrough's host.docker.internal upstream is one of
+# them. Leave it false wherever providers are not fully trusted.
 NEXUS_ALLOW_PRIVATE_UPSTREAMS=true
 
-# Secret the very first registration must present to claim `super_admin`.
-# Pinning it here means the walkthrough can paste one known value; leave it
-# unset and the server generates one per process and prints it at startup.
+# The secret the first registration must present to become super_admin
+# (at least 16 characters). Leave it blank and the server generates one per
+# process and prints it at startup.
 NEXUS_BOOTSTRAP_TOKEN=walkthrough-bootstrap-token
 ```
 
-Then:
+Then start it:
 
 ```bash
 npm run migrate   # also runs automatically at startup
 npm run dev       # backend :8787, web :5173 (NEXUS_PORT / NEXUS_WEB_PORT)
 ```
 
-> Run `npm run migrate` from the repo root, not
-> `npm run migrate --workspace server`: the server imports
-> `@ferrum-nexus/shared` from its build output, and only the root script builds
-> that workspace first. On a clean clone the workspace-level script fails until
-> you have run `npm run build --workspace shared` yourself.
+Run `npm run migrate` from the repo root. The root script builds the `shared`
+workspace first; `npm run migrate --workspace server` fails on a clean clone
+until `npm run build --workspace shared` has run.
 
-Confirm both halves are talking:
+Confirm that Nexus can reach its database and the gateway:
 
 ```bash
 curl -s http://127.0.0.1:8787/api/health | jq '{status, db: .database.status, edge: .edge.status}'
@@ -216,67 +204,60 @@ curl -s http://127.0.0.1:8787/api/health | jq '{status, db: .database.status, ed
 { "status": "ok", "db": "ok", "edge": "ok" }
 ```
 
-`edge: "down"` (and an overall `degraded`) means Nexus cannot reach the Admin
-API. Check `FERRUM_ADMIN_URL`, that the secret matches on both sides, and that
-`FERRUM_ADMIN_JWT_ISSUER` matches the gateway's issuer.
+If `edge` is not `ok`, the overall `status` is `degraded`:
 
-`edge: "degraded"` means the gateway is up and healthy but does **not route the
-namespace this portal publishes into**. An anonymous `GET /api/health` only
-reveals the verdict — `edge.status: "degraded"`,
-`edge.reason: "namespace_unserved"` and `edge.namespace_routing.unserved: true`.
-The portal's side (`configured`) is public, but the gateway's side (`active`)
-is admin-only, so the walkthrough compares them in
-[step 4](#4-first-run-register-the-founding-super-admin), once the founding
-admin's session exists.
+- **`edge: "down"`**: Nexus cannot reach or authenticate to the Admin API.
+  Check `FERRUM_ADMIN_URL`, that the JWT secret matches on both sides, and that
+  `FERRUM_ADMIN_JWT_ISSUER` matches the gateway's issuer.
+- **`edge: "degraded"`** with `edge.reason: "namespace_unserved"`: the gateway
+  is healthy but does not route the namespace this portal publishes into. An
+  anonymous request sees only that verdict. The gateway's own namespace is
+  shown to admins only, so [step 4](#4-first-run-register-the-founding-super-admin)
+  reads it once you have an admin session.
 
-While they disagree, publishing is refused with `409 EDGE_NAMESPACE_UNSERVED`
-rather than creating an API that cannot answer. Fix it by setting the portal's
-`FERRUM_NAMESPACE` to the gateway's `active`, or by restarting the gateway with
-the portal's value — then restart the portal. Reads and `DELETE` keep working
-either way, so anything already published into the wrong namespace can be
-removed.
+While the namespaces disagree, publishing is refused with
+`409 EDGE_NAMESPACE_UNSERVED`. To fix it, set the portal's `FERRUM_NAMESPACE`
+to the gateway's, or restart the gateway with the portal's value, then restart
+the portal. Reads and `DELETE` keep working, so anything already published into
+the wrong namespace can be removed.
 
 > **Watch out for a leftover `export`.** An exported `FERRUM_NAMESPACE` or
-> `FERRUM_ADMIN_URL` beats the value in `.env` — that is how environment
-> variables work, and Nexus does not change it. It does now say so: a
-> disagreement between the two prints a startup banner naming both values and
-> which one won, and outside `NEXUS_ENV=production` the server **refuses to
-> start** until you either `unset` the variable, change `.env` to agree, or set
-> `NEXUS_ALLOW_ENV_OVERRIDE=true` to say the override is deliberate.
+> `FERRUM_ADMIN_URL` beats the value in `.env`. When they disagree, the server
+> prints a banner naming both values. Outside `NEXUS_ENV=production` it also
+> **refuses to start** until you `unset` the variable, make `.env` agree, or
+> set `NEXUS_ALLOW_ENV_OVERRIDE=true`.
 
 ---
 
 ## 4. First run: register the founding super admin
 
-**The first account ever registered becomes `super_admin`**, regardless of the
-role it asks for, and is automatically email-verified. That is how the platform
-bootstraps — and why that one registration has to prove it comes from whoever
-runs the server: it must carry the **bootstrap token**.
+**The first account registered becomes `super_admin`**, whatever role it asks
+for, and its email is marked verified. Because of that, the registration must
+carry the **bootstrap token** to prove it comes from whoever runs the server.
 
-Where the token comes from:
+The token is:
 
-- `NEXUS_BOOTSTRAP_TOKEN`, if you set it — as the step above does.
-- Otherwise the server generates one per process and prints it at startup,
-  but only while the user table is empty:
+- `NEXUS_BOOTSTRAP_TOKEN`, if set (as in step 3), or
+- a token the server generates and prints at startup while the portal has no
+  active super admin:
 
   ```
-  FIRST-RUN BOOTSTRAP: this portal has no accounts yet.
+  FIRST-RUN BOOTSTRAP: this portal has no super_admin yet.
   …
-      2f6c1b0e…      ← the token
+      2f6c1b0e…
   ```
 
-  It changes on every restart, and each instance prints its own, so pin
-  `NEXUS_BOOTSTRAP_TOKEN` for anything running more than one process.
+  It changes on every restart and differs per instance, so set
+  `NEXUS_BOOTSTRAP_TOKEN` when you run more than one instance.
 
-A registration against an empty portal without the right token is refused with
-`403 FORBIDDEN` and creates nothing, so the token cannot be worn down by
-guessing at it. Once any account exists the field is ignored entirely: replaying
-it later just produces an ordinary `client`.
+While the portal has no active super admin, a registration without the right
+token is refused with `403 FORBIDDEN` and creates nothing. Once a super admin
+exists, the field is ignored and registrations create ordinary accounts.
 
-In the browser: open <http://127.0.0.1:5173>, click **Register**, fill the form
-— it asks for the bootstrap token while the portal is empty.
+In the browser: open <http://127.0.0.1:5173>, click **Register** and fill in
+the form. It asks for the bootstrap token while the portal has no super admin.
 
-Or with curl:
+With curl:
 
 ```bash
 curl -sS -c admin.txt -X POST http://127.0.0.1:8787/api/auth/register \
@@ -290,8 +271,8 @@ curl -sS -c admin.txt -X POST http://127.0.0.1:8787/api/auth/register \
 "super_admin"
 ```
 
-The response set the session cookies into `admin.txt`. Grab the CSRF token —
-every mutation needs it echoed in a header:
+The response stored the session cookies in `admin.txt`. Every mutation also
+needs the CSRF token in a header, so save it:
 
 ```bash
 ADMIN_CSRF=$(curl -sS -b admin.txt http://127.0.0.1:8787/api/auth/me | jq -r .csrf_token)
@@ -299,9 +280,8 @@ ADMIN_CSRF=$(curl -sS -b admin.txt http://127.0.0.1:8787/api/auth/me | jq -r .cs
 
 ### If `edge.status` reported `degraded`: read the namespace detail
 
-You now hold an admin session, which is what the health route requires before it
-fills in the gateway's side of the namespace story. Re-read it with the
-**`admin.txt`** cookie jar the founder login just created:
+With an admin session, the health route includes the gateway's side of the
+namespace check:
 
 ```bash
 curl -s http://127.0.0.1:8787/api/health -b admin.txt | jq '.edge | {status, reason, namespace_routing}'
@@ -323,20 +303,15 @@ curl -s http://127.0.0.1:8787/api/health -b admin.txt | jq '.edge | {status, rea
 }
 ```
 
-`configured` is the portal's `FERRUM_NAMESPACE`; `active` is the gateway's. The
-authenticated Nexus health response above already includes the gateway's
-namespace detail, so no direct Edge Admin API call or manually minted admin JWT
-is needed. Keep `FERRUM_ADMIN_JWT_SECRET` out of command-line arguments: it is a
-long-lived signing key with full gateway authority. If you previously ran a
-command that exposed it on an untrusted multi-user host, rotate the secret.
+`configured` is the portal's `FERRUM_NAMESPACE` and `active` is the gateway's.
+Make them match as described in [step 3](#3-set-up-ferrum-nexus).
 
-> Create a **second** `super_admin` before you go to production. The last active
-> one cannot be demoted or disabled, which is a safety net, not a lock you want
-> to be standing behind alone.
+> Create a **second** `super_admin` before you go to production. The last
+> active super admin cannot be demoted or disabled, so with only one you have
+> no fallback.
 
-Now create the two accounts you will use for the rest of the walkthrough.
-Register them the same way (`role: "provider"` and `role: "client"`), and keep
-each one's cookie jar:
+Now register the provider and client accounts used in the rest of the
+walkthrough, keeping each one's cookie jar and CSRF token:
 
 ```bash
 # provider
@@ -358,24 +333,21 @@ CLIENT_CSRF=$(curl -sS -b client.txt http://127.0.0.1:8787/api/auth/me | jq -r .
 
 ## 5. Publish an API (as the provider)
 
-You need a backend for the gateway to forward to. Any HTTP service will do —
-for the walkthrough, run a throwaway echo server:
+The gateway needs a backend to forward to. Any HTTP service works; here, run a
+throwaway echo server:
 
 ```bash
 docker run -d --name echo -p 8081:80 ealen/echo-server
 ```
 
-Note the missing `127.0.0.1:` — the echo server is published on **all**
-interfaces on purpose. The gateway reaches it from inside its own container via
-the host's docker0/bridge address, which is not loopback, so a port published
-only on `127.0.0.1` would be unreachable and every proxied call would fail to
-connect. This opens port 8081 to your LAN for the length of the walkthrough;
-step 11 removes the container.
+This publishes port 8081 on **all** interfaces on purpose. The gateway reaches
+it from inside its container through the host's bridge address, not loopback,
+so a port published only on `127.0.0.1` would be unreachable. Port 8081 is open
+to your network until step 11 removes the container.
 
-Write a minimal OpenAPI 3.1 document. Nexus requires only `openapi` (3.x),
-`info.title`, `info.version` and a `paths` object; it is a portal, not a spec
-linter. The first **absolute** `servers[].url` becomes the upstream, so you do
-not have to type it twice.
+Write a minimal OpenAPI 3 document. Nexus requires only `openapi` (3.x),
+`info.title`, `info.version` and a `paths` object. The first absolute
+`servers[].url` becomes the upstream, so you don't have to enter it twice.
 
 ```bash
 cat > billing-openapi.yaml <<'YAML'
@@ -409,19 +381,16 @@ paths:
 YAML
 ```
 
-> `host.docker.internal` is how the gateway container reaches a service running
-> on your host. Docker Desktop defines it for you; on plain Linux it only exists
-> because of the `--add-host=host.docker.internal:host-gateway` flag in step 2.
-> If you started the gateway without that flag, add it and recreate the
-> container — or put both containers on one user-defined network
-> (`docker network create demo`, `--network demo` on each) and use `http://echo`
-> as the upstream instead.
+> `host.docker.internal` resolves inside the gateway container only because of
+> Docker Desktop or the `--add-host` flag from step 2. If you started the
+> gateway without it, recreate the container with the flag. Alternatively, put
+> both containers on one user-defined network (`docker network create demo`,
+> then `--network demo` on each) and use `http://echo` as the upstream.
 
-In the browser: **My APIs → Publish an API**, paste the document, choose the
-auth plugin, visibility and rate limit. The **Advanced** section is optional:
-it restricts the HTTP methods the gateway accepts (the button fills it in from
-the document you just pasted), sets backend timeouts, and turns on a circuit
-breaker.
+In the browser: **My APIs → Publish an API**. Paste the document and choose the
+auth plugin, visibility and rate limit. The optional **Advanced** section
+restricts the HTTP methods the gateway accepts, sets backend timeouts and turns
+on a circuit breaker.
 
 With curl:
 
@@ -444,38 +413,37 @@ curl -sS -b provider.txt -X POST http://127.0.0.1:8787/api/apis \
 { "id": "2b1c…", "slug": "billing", "ferrum_proxy_id": "9d4f…" }
 ```
 
-Four things just happened on the gateway, in one atomic-ish sequence that rolls
-itself back if any step fails:
+That call created four objects on the gateway. If any step fails, Nexus
+deletes what it already created:
 
-1. a proxy named `nexus-billing`, listening on **`/nexus/billing`**, forwarding
-   to `http://host.docker.internal:8081`;
-2. a `key_auth` plugin config;
-3. an `access_control` plugin config allowing only
-   `nexus:api:2b1c…:approved`, because `requestable: true`;
-4. a `rate_limiting` plugin config, 1000 requests per 60 seconds **per
-   consumer**.
+1. a proxy named `nexus-billing` on the listen path **`/nexus/billing`**,
+   forwarding to `http://host.docker.internal:8081`;
+2. a `key_auth` plugin;
+3. an `access_control` plugin that allows only `nexus:api:2b1c…:approved`,
+   because `requestable` is `true`;
+4. a `rate_limiting` plugin: 1000 requests per 60 seconds **per consumer**.
 
-> ⚠️ That quota is enforced **per gateway process**. One data-plane replica
-> makes it exactly 1000/minute; N replicas make it N × 1000/minute, because
-> Edge keeps the counters in memory unless the plugin config names a Redis
-> endpoint. Set `FERRUM_RATE_LIMIT_SYNC_MODE=redis` and
-> `FERRUM_RATE_LIMIT_REDIS_URL` on Nexus to share one counter across replicas;
-> the change applies to rate limits saved after it. See
+The listen path is always `/<namespace>/<slug>`.
+
+> **The rate limit is counted per gateway process.** With N data-plane replicas
+> a client gets N × 1000 requests a minute, because Edge keeps the counters in
+> memory by default. To share one counter, set `FERRUM_RATE_LIMIT_SYNC_MODE=redis`
+> and `FERRUM_RATE_LIMIT_REDIS_URL` on Nexus. The setting applies to rate
+> limits saved after the change. See
 > [operations.md](operations.md#ferrum-edge-integration).
 
-Save the id:
+Save the API id:
 
 ```bash
 API_ID=$(curl -sS -b provider.txt 'http://127.0.0.1:8787/api/apis?mine=true' | jq -r '.items[0].id')
 ```
 
-The listen path is always `/<namespace>/<slug>` — here `/nexus/billing`.
-
 ---
 
 ## 6. Request access (as the client)
 
-The client browses the catalog and asks for access with a justification.
+The client finds the API in the catalog and asks for access with a
+justification.
 
 In the browser: **API catalog → Billing API → Request access**.
 
@@ -488,9 +456,9 @@ curl -sS -b client.txt 'http://127.0.0.1:8787/api/catalog?q=billing' \
 { "name": "Billing API", "slug": "billing", "requestable": true, "access_state": "none" }
 ```
 
-A published API with `requestable: false` reports `access_state: "open"`
-instead — any portal account may call it, and the catalog must not label that
-as "No access".
+An API published with `requestable: false` has no `access_control` plugin and
+reports `access_state: "open"`: any portal account with a credential can call
+it.
 
 ```bash
 curl -sS -b client.txt -X POST http://127.0.0.1:8787/api/access-requests \
@@ -504,7 +472,7 @@ curl -sS -b client.txt -X POST http://127.0.0.1:8787/api/access-requests \
 { "id": "7ae3…", "status": "pending" }
 ```
 
-The provider gets an in-app notification immediately.
+The provider gets an in-app notification.
 
 ---
 
@@ -526,22 +494,22 @@ curl -sS -b provider.txt -X POST "http://127.0.0.1:8787/api/access-requests/$REQ
 { "status": "approved", "acl_group": "nexus:api:2b1c…:approved" }
 ```
 
-Under the hood: Cleo's Ferrum consumer (`nexus-user-<her id>`) is created if it
-did not exist, the ACL group is added to it, and only then are the grant row and
-the request status committed. If the gateway had failed, nothing would have been
-committed and the request would still be `pending`, safe to approve again.
+Behind the scenes, Nexus creates Cleo's Ferrum consumer (`nexus-user-<her id>`)
+if it does not exist yet, adds the ACL group to it, and only then records the
+grant. If the gateway write fails, the request goes back to `pending` and can
+be approved again.
 
-The client gets a notification and an `access_approved` email (queued in the
-outbox — it stays `pending` until SMTP is configured, which is fine for now).
+The client gets a notification and an `access_approved` email. The email waits
+in the outbox as `pending` until SMTP is configured, which is fine for now.
 
 ---
 
 ## 8. Issue a credential (as the client)
 
-Approval grants _authorisation_. The client still needs a credential to
-_authenticate_. The API uses `key_auth`, so the matching credential type is
-`keyauth` — note the missing underscore; that asymmetry is Ferrum Edge's, and
-the portal picks the right one for you in the UI.
+Approval **authorizes** the client. The client still needs a credential to
+**authenticate**. The API uses the `key_auth` plugin, whose credential type is
+`keyauth` (no underscore; the naming comes from Ferrum Edge). The UI picks the
+right type for you.
 
 In the browser: **Credentials → Issue credential → API key**.
 
@@ -562,10 +530,9 @@ curl -sS -b client.txt -X POST http://127.0.0.1:8787/api/credentials \
 
 > ### Save that key now
 >
-> This is the only time it is ever shown. Nexus stores a SHA-256 fingerprint
-> and the last four characters; Ferrum Edge redacts credential material on
-> every read. Nobody — not you, not an admin, not the database — can recover
-> it. If it is lost, rotate.
+> It is shown only once. Nexus stores a SHA-256 fingerprint and the last four
+> characters, and Ferrum Edge redacts credential material on every read, so
+> nobody can recover it. If you lose it, rotate the credential.
 
 ```bash
 export API_KEY='nxs_pQ7v3H2s…'
@@ -575,45 +542,43 @@ export API_KEY='nxs_pQ7v3H2s…'
 
 ## 9. Call the API through the gateway
 
-The catalog page for the API shows the exact URL under **Call this API** —
-that is what `FERRUM_GATEWAY_PUBLIC_URL` is for, and it is the same value the
-`invoke_url` field carries on every API the API returns. For this walkthrough
-it is `http://127.0.0.1:8000/nexus/billing`: the **proxy listener** (`:8000`)
-followed by the listen path `/<namespace>/<slug>`.
+The API's catalog page shows its full URL under **Call this API**, built from
+`FERRUM_GATEWAY_PUBLIC_URL`. The API responses carry the same value as
+`invoke_url`. Here it is `http://127.0.0.1:8000/nexus/billing`: the proxy
+listener (`:8000`) plus the listen path.
 
-Copy it from the portal, and call it with the key:
+Call it with the key:
 
 ```bash
 curl -sS -i http://127.0.0.1:8000/nexus/billing/invoices \
   -H "X-API-Key: $API_KEY"
 ```
 
-A `200` means all four layers agreed: the proxy routed it, `key_auth`
-authenticated the consumer, `access_control` found
-`nexus:api:2b1c…:approved` in that consumer's groups, and `rate_limiting`
-let it through.
+A `200` means every layer passed: the proxy routed the request, `key_auth`
+identified the consumer, `access_control` found `nexus:api:2b1c…:approved` in
+its groups, and `rate_limiting` let it through.
 
-Prove that the authorisation is real — drop the key:
+Without the key, the gateway refuses the call:
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/nexus/billing/invoices
 # 401
 ```
 
-The header depends on the API's auth plugin:
+How to send the credential depends on the API's auth plugin:
 
 | API `auth_plugin` | Credential type | How to call                                                                                                                 |
 | ----------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `key_auth`        | `keyauth`       | `-H "X-API-Key: $KEY"`                                                                                                      |
-| `basic_auth`      | `basicauth`     | `-u "$CONSUMER_USERNAME:$PASSWORD"` — the username is the **consumer** username, `nexus-user-<id>`                          |
+| `basic_auth`      | `basicauth`     | `-u "$CONSUMER_USERNAME:$PASSWORD"`; the username is the **consumer** username, `nexus-user-<id>`                           |
 | `jwt_auth`        | `jwt`           | `-H "Authorization: Bearer $JWT"`, an HS256 token signed with `jwt_secret` whose `sub` is `jwt_key` (the consumer username) |
 
-See [`guides/client-guide.md`](guides/client-guide.md#calling-an-api) for the
-Basic and JWT recipes in full.
+The [client guide](guides/client-guide.md#calling-an-api) has full Basic and
+JWT examples.
 
 ### Watch a revocation take effect
 
-As the provider (or an admin), revoke the grant and try again:
+As the provider (or an admin), revoke the grant and call again:
 
 ```bash
 GRANT_ID=$(curl -sS -b provider.txt 'http://127.0.0.1:8787/api/grants?status=active' \
@@ -625,17 +590,17 @@ curl -sS -b provider.txt -X POST "http://127.0.0.1:8787/api/grants/$GRANT_ID/rev
 
 curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/nexus/billing/invoices \
   -H "X-API-Key: $API_KEY"
-# 403 — the credential still authenticates; the ACL group is gone
+# 403: the key still authenticates, but the ACL group is gone
 ```
 
-That `401` vs `403` distinction is the whole model in one line:
-**credentials authenticate, grants authorise.**
+`401` versus `403` is the whole model: **credentials authenticate, grants
+authorize.**
 
 ---
 
 ## 10. Check the audit trail (as the super admin)
 
-Every state change you just made left a row.
+Every change you just made wrote an audit row.
 
 In the browser: **Administration → Audit log**.
 
@@ -653,7 +618,7 @@ curl -sS -b admin.txt 'http://127.0.0.1:8787/api/admin/audit-logs?limit=10' \
 …
 ```
 
-The full catalog is in [`security.md`](security.md#10-audit-event-catalog).
+The full list of actions is in [`security.md`](security.md#10-audit-event-catalog).
 
 ---
 
@@ -663,24 +628,24 @@ The full catalog is in [`security.md`](security.md#10-audit-event-catalog).
 docker rm -f ferrum-edge echo
 docker volume rm ferrum-data
 rm -f admin.txt provider.txt client.txt billing-openapi.yaml
-# and, for a clean Nexus slate:
-rm -rf data/
+# for a clean Nexus database (the default SQLite file is server/data/nexus.sqlite):
+rm -rf server/data/
 ```
 
 ---
 
 ## Where to go next
 
-**Finish the setup** (Administration → Settings, as a super admin):
+**Finish the setup** in **Administration → Settings**, as a super admin:
 
-- **SMTP** — until a host is set, every email sits in the outbox as `pending`.
-  Configure it and hit **Send test email**. See
+- **SMTP.** Until it is configured, every email waits in the outbox as
+  `pending`. Configure it and use **Send test email**. See
   [`operations.md`](operations.md#6-the-email-outbox).
-- **Registration policy** — close self-service registration, restrict
+- **Registration policy.** Close self-service registration, restrict
   `allowed_roles`, or require email verification.
-- **CAPTCHA** — Turnstile, hCaptcha or reCAPTCHA, if registration is open to
+- **CAPTCHA.** Turnstile, hCaptcha or reCAPTCHA, if registration is open to
   the internet.
-- **Branding** — portal name, logo, colours, default theme.
+- **Branding.** Portal name, logo, colors and default theme.
 - **A second `super_admin`.**
 
 **Go deeper:**
@@ -695,7 +660,7 @@ rm -rf data/
 | [`operations.md`](operations.md)                       | Production deployment, backups, scaling, key rotation                     |
 | [`security.md`](security.md)                           | Threat model, RBAC matrix, audit catalog                                  |
 
-**For production**, do not stop here: work through the hardening checklist in
-[`security.md`](security.md#11-hardening-checklist), and read the
-single-writer caveat in [`operations.md`](operations.md#8-scaling) before you
-plan a multi-instance deployment.
+**Before production**, work through the
+[hardening checklist](security.md#11-hardening-checklist) and read
+[scaling](operations.md#8-scaling) for the single-writer limit before planning
+more than one instance.

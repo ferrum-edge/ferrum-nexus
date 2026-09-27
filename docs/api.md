@@ -1,22 +1,21 @@
 # Nexus REST API reference
 
 Every endpoint the Ferrum Nexus backend exposes. All of them live under `/api`,
-speak JSON, and authenticate with cookies. This is the contract the SPA in
-`web/src/lib/api.ts` is written against; the wire types are in
+speak JSON and authenticate with cookies. The SPA's client is
+`web/src/lib/api.ts`; the wire types are in
 [`shared/src/api-contract.ts`](../shared/src/api-contract.ts) and
-[`shared/src/entities.ts`](../shared/src/entities.ts).
-
-Endpoints are grouped in the order their plugins are registered in
-[`server/src/index.ts`](../server/src/index.ts).
+[`shared/src/entities.ts`](../shared/src/entities.ts). Route plugins are
+registered in [`server/src/index.ts`](../server/src/index.ts) and live in
+`server/src/routes/`.
 
 - [Conventions](#conventions)
 - [Error envelope and codes](#error-envelope-and-codes)
 - [Health](#health) · [Auth](#auth) · [Branding](#branding) ·
   [Users](#users) · [Organizations](#organizations) · [Threads](#threads) ·
   [Notifications](#notifications) · [Admin](#admin) · [Catalog](#catalog) ·
-  [APIs (publishing)](#apis-publishing) ·
+  [APIs (publishing)](#apis-publishing) · [Plugin palette](#plugin-palette) ·
   [Access requests](#access-requests) · [Grants](#grants) ·
-  [Credentials](#credentials)
+  [Credentials](#credentials) · [Applications](#applications)
 
 ---
 
@@ -32,27 +31,28 @@ Sign in with `POST /api/auth/login`. The response sets two cookies:
 | `nexus_csrf`    | same, but **not** `HttpOnly`                                                                                   | the CSRF token       |
 
 Send cookies on every request (`credentials: 'include'` in the browser).
-Sessions slide: any request extends the expiry.
+Sessions last `NEXUS_SESSION_TTL` (default 12 hours) and slide: a request made
+when less than half the TTL remains extends the session and re-stamps both
+cookies with the same values.
 
 ### CSRF
 
-Every mutating request (anything that is not `GET`/`HEAD`/`OPTIONS`) under
-`/api` that carries a session must send:
+Every mutating request (not `GET`/`HEAD`/`OPTIONS`) under `/api` that carries a
+session must send:
 
 ```
 X-Nexus-CSRF: <value of the nexus_csrf cookie>
 ```
 
 The header must equal both the cookie **and** the token stored on the session
-row. A mismatch is `403 CSRF_MISMATCH`.
+row, otherwise `403 CSRF_MISMATCH`.
 
-Exempt (they are reached before a session exists): `POST /api/auth/login`,
-`POST /api/auth/register`, `POST /api/auth/verify-email`,
-`POST /api/auth/resend-verification`, `POST /api/auth/forgot-password`,
-`POST /api/auth/reset-password`, `GET /api/auth/captcha`.
-**`POST /api/auth/logout` is not exempt.**
+Exempt, because they run before a session exists: `POST /api/auth/login`,
+`/register`, `/verify-email`, `/resend-verification`, `/forgot-password`,
+`/reset-password` and `GET /api/auth/captcha`. **`POST /api/auth/logout` is not
+exempt.**
 
-### Auth requirement column
+### Auth requirement markers
 
 | Marker        | Meaning                                                          |
 | ------------- | ---------------------------------------------------------------- |
@@ -62,39 +62,61 @@ Exempt (they are reached before a session exists): `POST /api/auth/login`,
 | _admin_       | role `admin` or higher                                           |
 | _super_admin_ | role `super_admin` only                                          |
 
-Roles are strictly ordered, so a higher role satisfies a lower requirement.
-Route guards check the role; **row-level ownership** (`is this your API?`) is
-checked one level down, in the service, and answers `403 FORBIDDEN` — except in
-the catalog, which answers `404 NOT_FOUND` so it never confirms that an API you
-may not see exists.
+A higher role satisfies a lower requirement. Route guards check the role;
+row-level ownership ("is this your API?") is checked in the service and answers
+`403 FORBIDDEN` — except where noted (the catalog, applications, revisions),
+which answer `404 NOT_FOUND` so they never confirm that something you may not
+see exists.
 
 ### Pagination
 
-Every list endpoint accepts:
-
-| Query    | Type                           | Default |
-| -------- | ------------------------------ | ------- |
-| `limit`  | integer, clamped to `[1, 200]` | `25`    |
-| `offset` | integer ≥ 0                    | `0`     |
-
-and answers with the same envelope:
+Every list endpoint accepts `limit` (integer, `1`–`200`, default `25`) and
+`offset` (integer ≥ 0, default `0`) and answers:
 
 ```json
 { "items": [ … ], "total": 137 }
 ```
 
-`total` is the count matching the filters, ignoring `limit`/`offset`. Query
+`total` counts every row matching the filters, ignoring `limit`/`offset`. Query
 booleans accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`.
+
+### Rate limits
+
+Every limiter below is installed only when `NEXUS_RATE_LIMIT_ENABLED=true` (the
+default; always off under `NEXUS_ENV=test`) and answers `429 RATE_LIMITED`.
+Counters are per process, so N instances allow N × the limit; enforce
+aggregate limits at the proxy. Client IPs come from Fastify's configured proxy
+trust, not from an untrusted forwarded header.
+
+| Scope                                                       | Limit per minute | Keyed by |
+| ----------------------------------------------------------- | ---------------- | -------- |
+| `/api/health*`                                              | 120              | IP       |
+| `/api/branding`                                             | 120              | IP       |
+| Every `POST /api/auth/*` route                              | 20, shared       | IP       |
+| `GET /api/auth/me`, `GET /api/auth/captcha`                 | 120, shared      | IP       |
+| `PATCH /api/users/me`                                       | 10               | account  |
+| `POST /api/threads`                                         | 10               | account  |
+| `POST /api/threads/:id/messages`                            | 30               | account  |
+| `GET /api/catalog/:slug/spec`                               | 60               | account  |
+| `/api/apis` mutations and the two spec diffs, per route     | 30               | account  |
+| `GET /api/apis/:id/usage`                                   | 30               | IP       |
+| `POST /api/access-requests`                                 | 10               | account  |
+| `POST /api/access-requests/:id/cancel`                      | 30               | account  |
+| `POST`, `PATCH`, `DELETE` on `/api/applications`, per route | 30               | account  |
+
+"Account" falls back to the IP for a request without a session. Every other
+route is unlimited.
 
 ### Other conventions
 
-- Every id is a string UUID; every timestamp is an ISO-8601 string.
-- Absent optional values are `null`, not omitted.
-- Request bodies are `application/json`. The body limit is 4 MiB; an uploaded
-  OpenAPI document is additionally capped at 2 MiB, and by structural limits on
-  paths, operations, nesting depth and render cost (see
+- Ids are opaque strings (UUIDs); timestamps are ISO-8601 strings.
+- Optional values are `null` rather than omitted, except where a field is
+  marked as present only in some cases.
+- Request bodies are `application/json`, at most 4 MiB. An OpenAPI document is
+  additionally capped at 2 MiB and by structural limits (see
   [`POST /api/apis`](#post-apiapis)).
-- All `/api` responses carry `cache-control: no-store`.
+- All `/api` responses carry `cache-control: no-store` unless stated otherwise.
+  An unmatched `/api/*` path answers a JSON `404 NOT_FOUND`.
 
 ---
 
@@ -110,106 +132,101 @@ booleans accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`.
 }
 ```
 
-`code` is stable and safe to branch on; `message` is human-facing and may
-change; `details` is present only when there is structured context (per-field
-validation issues, a conflicting slug, an Edge status).
+`code` is stable and safe to branch on
+([`shared/src/error-codes.ts`](../shared/src/error-codes.ts)); `message` is for
+humans and may change; `details` appears only when there is structured context.
 
-| Code                                      | HTTP | When                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ----------------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VALIDATION_FAILED`                       | 400  | Body, query or params failed schema validation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `UNAUTHORIZED`                            | 401  | No valid session, or it expired.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `FORBIDDEN`                               | 403  | Authenticated, but the role or ownership check failed.                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `NOT_FOUND`                               | 404  | Target does not exist, or is not visible to the caller.                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `CONFLICT`                                | 409  | Uniqueness or state conflict (duplicate email/slug, active grant, already decided).                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `CSRF_MISMATCH`                           | 403  | `X-Nexus-CSRF` missing or not matching the cookie/session.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `CAPTCHA_FAILED`                          | 400  | CAPTCHA token missing, expired, or rejected by the vendor.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `CAPTCHA_SELF_TEST_FAILED`                | 400  | A `captcha` settings change did not prove the configuration it describes. Distinct from `CAPTCHA_FAILED`, which is a visitor failing a challenge the portal already demands: this is the administrator's own activation self-test, and **nothing is stored** when it fails. `details.reason` is `token_required`, `rejected` or `provider_unreachable`.                                                                                                                                                             |
-| `RATE_LIMITED`                            | 429  | Too many requests from this identity/IP.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `QUOTA_EXCEEDED`                          | 429  | A configured per-account allowance is already fully used. `details` is `{ limit, setting, … }` naming the environment variable an operator would raise — `{ limit, current, setting }` for a standing ceiling such as the API quota, `{ limit, window, setting }` for a period budget such as the daily message budget. Distinct from `RATE_LIMITED`, which is about request frequency and clears on its own.                                                                                                       |
-| `EMAIL_NOT_VERIFIED`                      | 403  | Account exists but its email is unverified and verification is required.                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `USER_DISABLED`                           | 403  | Account has been disabled by an admin.                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `LAST_SUPER_ADMIN`                        | 409  | Refused: would remove, demote or disable the last active `super_admin`.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` | 409  | Refused: the change would cut live callers off from the resource and the request did not say it accepts that. Today only a `PATCH /api/apis/:id` that moves `auth_plugin`. `details` is `{ field, current_auth_plugin, requested_auth_plugin, credential_type, affected_grantees, confirm_field }`; resending with `confirm_access_disruption: true` makes the change. No grantee credential is revoked — `affected_grantees` counts the accounts that must issue one of the new flavour to go on calling that API. |
-| `SHOW_ONCE_ALREADY`                       | 410  | Show-once material was already retrieved and cannot be shown again.                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `EDGE_UNAVAILABLE`                        | 502  | Ferrum Edge Admin API unreachable (network error / timeout).                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `EDGE_ERROR`                              | 502  | Ferrum Edge Admin API returned an error response. On a gateway **validation** refusal (`400`, `409`, `422`) `details` is `{ status, gateway_message }`, where `gateway_message` is Edge's own text about the request, trimmed to 500 characters, and the top-level `message` repeats it. A `401`, `403` or `5xx` from the gateway stays opaque — that text is about the gateway's own configuration and only reaches the log.                                                                                       |
-| `SPEC_INVALID`                            | 400  | Uploaded OpenAPI document could not be parsed or failed validation.                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `OUTBOX_FAILURE`                          | 500  | Email could not be enqueued, or exhausted its outbox retries.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `INTERNAL`                                | 500  | Unexpected server-side failure.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Code                                      | HTTP | When                                                                                                                                                        |
+| ----------------------------------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VALIDATION_FAILED`                       | 400  | Body, query or params failed validation (also an oversized or malformed body).                                                                              |
+| `UNAUTHORIZED`                            | 401  | No valid session, or it expired.                                                                                                                            |
+| `FORBIDDEN`                               | 403  | Authenticated, but the role or ownership check failed.                                                                                                      |
+| `NOT_FOUND`                               | 404  | Target does not exist, or is not visible to the caller.                                                                                                     |
+| `CONFLICT`                                | 409  | Uniqueness or state conflict (duplicate email/slug, active grant, already decided), or contention — see below.                                              |
+| `CSRF_MISMATCH`                           | 403  | `X-Nexus-CSRF` missing or not matching the cookie/session.                                                                                                  |
+| `CAPTCHA_FAILED`                          | 400  | CAPTCHA token missing, expired, or rejected by the vendor.                                                                                                  |
+| `CAPTCHA_SELF_TEST_FAILED`                | 400  | A CAPTCHA settings change could not prove its own configuration; nothing is stored. `details.reason`: `token_required`, `rejected`, `provider_unreachable`. |
+| `RATE_LIMITED`                            | 429  | Too many requests; clears on its own.                                                                                                                       |
+| `QUOTA_EXCEEDED`                          | 429  | A configured allowance is used up. `details` names the limit and the `setting` (environment variable) an operator would raise.                              |
+| `EMAIL_NOT_VERIFIED`                      | 403  | The account's email is unverified and verification is required.                                                                                             |
+| `USER_DISABLED`                           | 403  | The account has been disabled.                                                                                                                              |
+| `LAST_SUPER_ADMIN`                        | 409  | Would demote or disable the last active `super_admin`.                                                                                                      |
+| `ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` | 409  | The change would cut live callers off and was not confirmed. Only an `auth_plugin` change on `PATCH /api/apis/:id` — see there.                             |
+| `SHOW_ONCE_ALREADY`                       | 410  | Reserved for show-once material already retrieved. No current endpoint returns it.                                                                          |
+| `EDGE_UNAVAILABLE`                        | 502  | Ferrum Edge Admin API unreachable (network error, timeout).                                                                                                 |
+| `EDGE_ERROR`                              | 502  | The Admin API returned an error response.                                                                                                                   |
+| `EDGE_REJECTED_SPEC`                      | 400  | Edge refused an API spec as unparseable or invalid.                                                                                                         |
+| `EDGE_PROTOCOL_ERROR`                     | 502  | The Admin API sent an invalid HTTP/JSON response.                                                                                                           |
+| `EDGE_NAMESPACE_UNSERVED`                 | 409  | The gateway's data plane does not route `FERRUM_NAMESPACE`.                                                                                                 |
+| `SPEC_INVALID`                            | 400  | The uploaded OpenAPI document could not be parsed or failed validation.                                                                                     |
+| `OUTBOX_FAILURE`                          | 500  | Email could not be enqueued, or exhausted its outbox retries.                                                                                               |
+| `INTERNAL`                                | 500  | Unexpected server-side failure.                                                                                                                             |
 
-An Edge API-spec write rejected with a 4xx `Spec parse failed` or
-`Spec validation failed` category returns `400 EDGE_REJECTED_SPEC` (except
-401/403, which remain gateway credential errors). Its `details` contains the
-upstream `status`, a `gateway_message` capped at 500 characters, and
-`gateway_code` when Edge supplies a string `code` (also capped at 500 characters).
-The message includes string `details` and a summary of each failure's
-`resource_type` and first error, within the same cap. The complete response is
-logged server-side within the Edge client's response-size bound; it is not
-reflected into the public error details. Other categories remain `502 EDGE_ERROR`,
-and gateway 5xx diagnostics remain opaque. This applies to publish, spec revision,
-and enforcement conversion.
+**Gateway errors.** These can come from any endpoint that calls Edge and are not
+repeated per endpoint:
 
-A publish or spec revision aimed at a namespace the gateway's **data plane does
-not route** returns `409 EDGE_NAMESPACE_UNSERVED` with
-`details: { configured_namespace, active_namespace, serving_scope, setting }`.
-The Admin API would accept the write and the resulting `invoke_url` would answer
-`404`, so the portal refuses it instead; only `POST /api/apis` and
-`PUT /api/apis/:id/spec` are gated, because reads, runtime `PATCH`es and
-`DELETE` are how the mismatch gets cleaned up. Nothing is refused against a
-gateway that does not report its namespace. See
-[`edge.namespace_routing`](#is-the-published-api-actually-reachable) below and
-[`operations.md`](operations.md#namespace-routability).
+- `EDGE_ERROR` on a gateway validation refusal (`400`, `409`, `422`) carries
+  `details: { status, gateway_message }`: Edge's own text, trimmed to 500
+  characters, also repeated in `message`. A `401`, `403` or `5xx` from the
+  gateway stays opaque; its text only reaches the server log.
+- `EDGE_REJECTED_SPEC` covers an API-spec write (publish, spec revision,
+  enforcement conversion) that Edge rejects with a 4xx `Spec parse failed` or
+  `Spec validation failed` (401/403 remain `EDGE_ERROR`). `details` carries the
+  upstream `status`, `gateway_message` and, when Edge supplies one,
+  `gateway_code`, each capped at 500 characters. The full response is logged,
+  not reflected.
+- `EDGE_PROTOCOL_ERROR` carries `details` with `status`,
+  `kind: "protocol_error"` and a fixed `reason` such as `invalid_utf8`.
+  Response bytes and parser exceptions are never included. See
+  [Edge response contracts](edge-response-contracts.md).
+- `EDGE_NAMESPACE_UNSERVED` carries `details` with `configured_namespace`,
+  `active_namespace`, `serving_scope` and `setting: "FERRUM_NAMESPACE"`. The
+  Admin API would accept the write, but the resulting `invoke_url` would answer
+  `404`.
+  Only operations that create or move a proxy onto a public path are refused —
+  `POST /api/apis`, `PUT /api/apis/:id/spec`, spec rollback and
+  `POST /api/apis/:id/restore-gateway`; reads, runtime `PATCH`es and `DELETE`
+  keep working so the mismatch can be cleaned up. A gateway that does not
+  report its namespace is never refused. See
+  [`edge.namespace_routing`](#is-the-published-api-actually-reachable) and
+  [`operations.md`](operations.md#namespace-routability).
 
-An invalid Edge HTTP/JSON response returns `502 EDGE_PROTOCOL_ERROR` with
-`details: { status, kind: "protocol_error", reason }`. The fixed reason identifies
-the contract violation (for example `invalid_utf8`); response bytes and parser
-exceptions are never included. This can occur on any endpoint calling Edge and
-is not repeated in the per-endpoint notes. See [Edge response contracts](edge-response-contracts.md).
-
-A write the database rolled back because another one touched the same rows —
-an InnoDB deadlock, a PostgreSQL serialization failure, a MongoDB write
-conflict — is retried by the server (bounded, with backoff). If it still cannot
-commit, the endpoint answers `409 CONFLICT` with
-`details: { reason: "transaction_contention", driver, attempts }`. Nothing was
-applied, and the same request may simply be sent again. Like the above, this
-can happen on any state-changing endpoint and is not repeated in the
-per-endpoint notes.
+**Contention.** A write rolled back because another touched the same rows
+(InnoDB deadlock, PostgreSQL serialization failure, MongoDB write conflict) is
+retried by the server with backoff. If it still cannot commit, the answer is
+`409 CONFLICT` with `details.reason: "transaction_contention"` (plus `driver`
+and `attempts`); nothing was applied and the request can be resent. Operations
+that
+serialize on a per-resource lease (a proxy, a consumer, a sender) answer
+`409 CONFLICT` after waiting 30 seconds for it; retry.
 
 `UNAUTHORIZED`, `FORBIDDEN`, `CSRF_MISMATCH`, `USER_DISABLED` and
-`VALIDATION_FAILED` can come back from any endpoint and are not repeated in the
-per-endpoint notes below.
+`VALIDATION_FAILED` can come from any endpoint and are not repeated below.
 
 ---
 
 ## Health
 
-Public. Registered under `/api/health`. **Rate-limited** to 120 requests per
-minute per IP across the prefix when `NEXUS_RATE_LIMIT_ENABLED=true` (the
-default; always off under `NEXUS_ENV=test`) — `429 RATE_LIMITED` beyond that.
+Registered under `/api/health`; _public_.
 
-The database and gateway probes behind these routes are **cached for
-`NEXUS_HEALTH_CACHE_MS`** (default 5 s) and concurrent callers share one
-in-flight probe, so a burst produces a single database query and a single Admin
-API call. A failing probe is cached for the same window. `checked_at` reports
-when the probes ran, not when the request arrived. See
-[`operations.md`](operations.md#9-health-checks).
+Database and gateway probes are **cached for `NEXUS_HEALTH_CACHE_MS`** (default
+5 s, `0` disables) and concurrent callers share one in-flight probe, so a burst
+costs one database query and one Admin API call. A failing probe is cached for
+the same window. `checked_at` is when the (older) probe ran, not when the
+request arrived. See [`operations.md`](operations.md#9-health-checks).
 
 ### `GET /api/health`
 
 _public_ — aggregate liveness/readiness.
 
-**Status code contract:** `200` for `ok` and `degraded`, `503` for `down`.
-Container and load-balancer probes key on the code, so a gateway outage alone
-must never take the portal out of rotation — only a broken database does.
+**Status codes:** `200` for `ok` and `degraded`, `503` for `down`. Only a broken
+database makes the portal `down`. Any gateway problem — `edge.status` of
+`"down"` (unreachable), `"not_ready"` (answering but unready) or `"degraded"`
+(not routing the portal's namespace) — leaves the portal `degraded` on a `200`, so a load
+balancer keeps it in rotation. Orphaned gateway references also degrade it (see
+below).
 
-The Edge probe therefore never fails the endpoint. An unreachable gateway is
-`edge.status = "down"`, a gateway that answered but reports itself unready is
-`edge.status = "not_ready"`, and a healthy gateway that does not route the
-portal's namespace is `edge.status = "degraded"`; all three leave the overall
-status `degraded` on a `200`.
-
-_Authenticated admin session_ — the same healthy stack; admin-only fields are
-filled in:
+Example for an admin session:
 
 ```json
 {
@@ -242,158 +259,81 @@ filled in:
       "checked_at": "2026-08-31T09:05:00.004Z",
       "orphaned_consumers": 0,
       "orphaned_proxies": 0,
+      "awaiting_restore": 0,
       "complete": true
     }
   }
 }
 ```
 
-_Anonymous request_ — the same response with admin-only fields nulled:
+**Admin-only fields.** For anyone who is not a signed-in admin these are `null`:
+`edge.mode`, `edge.admin_writes_enabled`, `edge.namespace_routing.active`,
+`.serving_scope`, `.data_plane_single_namespace`, and the
+`edge.reconciliation` counts (`orphaned_consumers`, `orphaned_proxies`,
+`awaiting_restore`, `complete`). `database.error` is always the constant
+`"unreachable"` (the driver's message goes to the server log); `edge.error` is
+the real probe failure for an admin and `"unreachable"` for everyone else.
 
-```json
-{
-  "status": "ok",
-  "version": "0.1.0",
-  "uptime_seconds": 1284,
-  "checked_at": "2026-08-31T09:12:44.117Z",
-  "database": { "status": "ok", "latency_ms": 1, "error": null, "driver": "postgres" },
-  "edge": {
-    "status": "ok",
-    "reason": null,
-    "latency_ms": 7,
-    "error": null,
-    "ready": true,
-    "mode": null,
-    "admin_writes_enabled": null,
-    "edge_version": null,
-    "namespace": "nexus",
-    "namespace_routing": {
-      "configured": "nexus",
-      "active": null,
-      "serving_scope": null,
-      "data_plane_single_namespace": null,
-      "unserved": false,
-      "unserved_mutation_observed": false,
-      "checked_at": "2026-08-31T09:12:44.117Z"
-    },
-    "reconciliation": {
-      "status": "ok",
-      "checked_at": "2026-08-31T09:05:00.004Z",
-      "orphaned_consumers": null,
-      "orphaned_proxies": null,
-      "complete": null
-    }
-  }
-}
-```
-
-The two examples differ only in `edge.mode`, `edge.admin_writes_enabled`,
-`edge.namespace_routing.active`, `edge.namespace_routing.serving_scope`,
-`edge.namespace_routing.data_plane_single_namespace`, and the three
-`edge.reconciliation` count fields — all `null` for anonymous callers.
-
-Overall `status` is `ok` | `degraded` | `down`; `edge.status` is `ok` |
-`degraded` | `not_ready` | `down`. `edge.reason` says _why_ a `degraded`
-gateway is degraded and is `null` otherwise; its only value today is
-`"namespace_unserved"`.
+| Field               | Values and meaning                                                                                                                                                                                   |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`            | `ok` \| `degraded` \| `down`                                                                                                                                                                         |
+| `version`           | the server package version                                                                                                                                                                           |
+| `edge.status`       | `ok` \| `degraded` \| `not_ready` \| `down`                                                                                                                                                          |
+| `edge.reason`       | why a `degraded` gateway is degraded; only value `"namespace_unserved"`; `null` otherwise                                                                                                            |
+| `edge.ready`        | Edge's own readiness from its health payload; `null` when nothing answered. Edge answers `503` with a full payload while `starting`, `draining` or `unavailable`, which Nexus reports as `not_ready` |
+| `edge.edge_version` | always `null` against a stock gateway — Edge has no version endpoint                                                                                                                                 |
+| `edge.namespace`    | `FERRUM_NAMESPACE` on the portal                                                                                                                                                                     |
 
 #### Is the published API actually reachable?
 
-The Ferrum Edge **Admin API is multi-namespace**; one gateway process's **data
-plane serves exactly one namespace**. Publish into any other namespace and the
-Admin API answers `201`, `GET /proxies` lists the proxy, and the gateway's
-listener answers `404` forever. `edge.namespace_routing` is how the portal says
-so:
+The Edge Admin API is multi-namespace, but one gateway process's data plane
+serves exactly one namespace. Publish into any other and the Admin API answers
+`201`, the proxy is listed, and the listener answers `404` forever.
+`edge.namespace_routing` reports this:
 
 - `configured` — `FERRUM_NAMESPACE` on the portal; where Nexus publishes.
 - `active` — the one namespace the gateway's data plane routes.
 - `serving_scope` — `single-namespace-data-plane`, `control-plane` or
-  `no-data-plane`, straight from the gateway.
+  `no-data-plane`, from the gateway.
 - `data_plane_single_namespace` — `true` when everything outside `active` is
   unrouted by that process.
-- `unserved` — the verdict. `true` means APIs published here answer `404`.
-- `unserved_mutation_observed` — a write came back carrying
-  `X-Ferrum-Namespace-Unserved: true`, the gateway's per-write marker for the
-  same condition.
-- `checked_at` — when the gateway last reported its namespace, or `null` if it
-  never has.
+- `unserved` — the verdict: `true` means APIs published here answer `404`.
+- `unserved_mutation_observed` — a gateway write came back with
+  `X-Ferrum-Namespace-Unserved: true`.
+- `checked_at` — when the gateway last reported its namespace, or `null`.
 
-`active`, `serving_scope` and `data_plane_single_namespace` follow the same
-admin-only rule as `mode` — Edge itself publishes them only to an authenticated
-caller — and are `null` for everyone else. `unserved` and `edge.reason` stay
-public so an anonymous monitor can alert on them, and the `409` a publish gets
-names both namespaces.
+`unserved` and `edge.reason` stay public so an anonymous monitor can alert on
+them. A gateway that reports no namespace leaves `active` `null`, `unserved`
+`false` and `checked_at` `null`: an unknown topology never degrades anything.
 
-A gateway that reports no namespace of its own — every release before the field
-existed — leaves `active` `null`, `unserved` `false` and `checked_at` `null`.
-Nothing degrades and nothing is refused: an unknown topology is never a verdict.
+`edge.reconciliation` reports whether Edge still holds the consumer and proxy
+ids Nexus stored — the failure after `FERRUM_ADMIN_URL` is retargeted at a fresh
+gateway, or the gateway is rebuilt, when every probe stays green. `status` is:
 
-`edge.reconciliation` is another reason for `degraded`, and one a perfectly
-reachable gateway can cause. It reports whether Edge still holds
-the consumer and proxy ids Nexus stored: retarget `FERRUM_ADMIN_URL` at a fresh
-gateway, or rebuild the one it names, and every probe above stays green while
-every account and API that predates the change is broken. Its `status` is `ok`
-| `orphaned` | `unknown`, and `orphaned` degrades the portal.
+- `ok` — every checked reference exists.
+- `orphaned` — at least one reference is gone, or at least one API is still
+  flagged `repair_required` (`awaiting_restore`). Degrades the portal.
+- `unknown` — no pass has finished (`checked_at: null`), or the last one could
+  not read the gateway. Degrades nothing on its own.
 
-`unknown` means no pass has finished yet, or the last one could not read the
-gateway — neither is evidence about the references either way, so neither
-degrades anything on its own. `checked_at` is `null` in the first of those
-cases.
-
-`orphaned_consumers`, `orphaned_proxies` and `complete` are admin-only and read
-`null` for everyone else, the same rule `error` follows; `status` and
-`checked_at` stay public so an anonymous monitor can act on them. `complete` is
-`false` when the pass stopped at `NEXUS_GATEWAY_RECONCILE_SAMPLE` rather than at
-the end of the stored references.
-
-**These endpoints never run a pass.** They render the cached result of the
-background one (`NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`, 15 minutes by default,
-plus one at startup), so `edge.reconciliation.checked_at` is usually older than
-the payload's own `checked_at`. Repair is
-[`POST /api/admin/gateway/repair`](#post-apiadmingatewayrepair).
-
-`not_ready` exists because Edge answers `GET /health` with **`503` and a
-complete health payload** while it is `starting`, `draining` or `unavailable`.
-That is a reachable gateway reporting its own state, so Nexus parses the body
-and reports `ready: false` rather than calling the gateway unreachable.
-`ready` comes straight from that payload and is `null` when nothing answered.
-`mode` and `admin_writes_enabled` are gateway detail: they are filled in only
-for an authenticated admin, and are `null` for everyone else — the same rule
-`error` follows.
-
-`edge_version` is **always `null` against a stock gateway**: Ferrum Edge
-exposes no version endpoint at all. Take the real version from your deployment
-metadata.
-
-Because this endpoint is unauthenticated, `database.error` is never the
-driver's own message — a failing database reports the constant `"unreachable"`
-and the real text (`connect ECONNREFUSED 10.0.3.14:5432`, authentication
-failures, and so on) is written to the server log at `error` level instead.
-`edge.error` is treated the same way: an admin sees the probe's real failure,
-everyone else sees `"unreachable"`.
+`complete` is `false` when the pass stopped at
+`NEXUS_GATEWAY_RECONCILE_SAMPLE` references. **These endpoints never run a
+pass**: they show the cached result of the background one (at startup, then
+every `NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`, default 15 minutes). Run one with
+[`POST /api/admin/gateway/reconcile`](#post-apiadmingatewayreconcile); repair
+with [`POST /api/admin/gateway/repair`](#post-apiadmingatewayrepair).
 
 ### `GET /api/health/edge`
 
-_public_ — the Edge half on its own, same `edge` object as above. Always `200`;
-the gateway's state is in the body, because the portal itself is fine either
-way.
+_public_ — the `edge` object above on its own. Always `200`; the gateway's state
+is in the body.
 
 ---
 
 ## Auth
 
-Registered under `/api/auth`. The sensitive POST routes (register, login,
-logout, forgot-password, reset-password, verify-email and resend-verification)
-share **20 requests per minute per client IP**. The read-only bootstrap routes,
-`GET /api/auth/me` and `GET /api/auth/captcha`, share a separate **120 requests
-per minute per client IP**; reading either never spends the sensitive-route
-budget, and exhausting either budget does not block the other group.
-
-Both limits apply when `NEXUS_RATE_LIMIT_ENABLED=true` (the default; always off
-under `NEXUS_ENV=test`). Exceeding either is `429 RATE_LIMITED`. Client IPs come
-from Fastify's configured proxy trust, not an untrusted forwarded header. These
-budgets are per process; enforce aggregate limits at the proxy for multiple
-Nexus instances.
+Registered under `/api/auth`. See [Rate limits](#rate-limits) for the two
+per-IP budgets.
 
 ### `POST /api/auth/register`
 
@@ -402,12 +342,12 @@ _public_ → `201`
 | Field             | Type                       | Notes                                                                     |
 | ----------------- | -------------------------- | ------------------------------------------------------------------------- |
 | `email`           | string                     | Valid address, ≤ 320 chars. Stored lowercased; unique case-insensitively. |
-| `password`        | string                     | ≥ 12 characters (`MIN_PASSWORD_LENGTH`), ≤ 1024.                          |
+| `password`        | string                     | 12–1024 characters (`MIN_PASSWORD_LENGTH` = 12).                          |
 | `display_name`    | string                     | 1–200 chars.                                                              |
-| `role`            | `"client"` \| `"provider"` | Ignored for the very first account.                                       |
+| `role`            | `"client"` \| `"provider"` | Ignored for the founding account.                                         |
 | `company`         | string \| null             | optional, ≤ 200                                                           |
 | `phone`           | string \| null             | optional, ≤ 64                                                            |
-| `captcha_token`   | string                     | optional, required when CAPTCHA is enabled                                |
+| `captcha_token`   | string                     | required when CAPTCHA is enabled                                          |
 | `bootstrap_token` | string                     | **Required while the portal has no active `super_admin`**; ignored after. |
 
 ```json
@@ -415,27 +355,20 @@ _public_ → `201`
 ```
 
 - **While the portal has no active `super_admin`, the registration becomes
-  one** and is auto-verified, whatever `role` it asked for; the registration
-  policy (`open_registration`, `allowed_roles`) is bypassed for it. The account
-  and its role are written in one transaction, so a registration either
-  produces a seated super admin or nothing at all.
-- **That registration must carry `bootstrap_token`** — the server's
-  `NEXUS_BOOTSTRAP_TOKEN`, or the per-process token printed in its startup log.
-  Without a matching value the request is refused with `403 FORBIDDEN` and
-  nothing is created. `GET /api/branding` reports `bootstrap_required` so a
-  client knows when to ask for it. Once an active super admin exists the field
-  is ignored.
+  one**, auto-verified, whatever `role` it asked for, and the registration
+  policy is bypassed. It must carry `bootstrap_token` — `NEXUS_BOOTSTRAP_TOKEN`,
+  or the per-process token printed in the startup log — or it is refused with
+  `403 FORBIDDEN` and nothing is created. `GET /api/branding` reports
+  `bootstrap_required` so a client knows when to ask for it.
 - When verification is not required, the response also sets the session
   cookies and the user is signed in.
 - Errors: `409 CONFLICT` (email taken), `403 FORBIDDEN` (missing or wrong
-  `bootstrap_token` on an empty portal, registration closed, or that role is
-  not in `allowed_roles`), `400 CAPTCHA_FAILED`.
-- Unlike the recovery routes below, this one **does** say whether an address
-  is taken — a registration that signs the new account in cannot answer a
-  duplicate the way it answers a success. The `409` comes back only after the
-  password has been hashed, so it takes as long as a registration and says
-  nothing its status does not. [`security.md`](security.md#2-session-security)
-  explains why this is accepted and what bounds it.
+  `bootstrap_token`, registration closed, or `role` not in `allowed_roles`),
+  `400 CAPTCHA_FAILED`.
+- Unlike the recovery routes, this one reveals that an address is taken. The
+  `409` is returned only after the password has been hashed, so it costs as
+  long as a real registration; see
+  [`security.md`](security.md#2-session-security).
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8787/api/auth/register \
@@ -446,20 +379,18 @@ curl -sS -X POST http://127.0.0.1:8787/api/auth/register \
 
 ### `POST /api/auth/login`
 
-_public_
-
-Body: `email`, `password`, optional `captcha_token`.
+_public_ — body: `email`, `password`, optional `captcha_token`.
 
 ```json
 { "user": { … }, "csrf_token": "…", "expires_at": "2026-08-31T21:12:44.117Z" }
 ```
 
-Sets `nexus_session` and `nexus_csrf`. `csrf_token` is echoed in the body so a
-non-browser client does not have to parse cookies.
+Sets `nexus_session` and `nexus_csrf`; `csrf_token` is echoed so a non-browser
+client need not parse cookies.
 
-Errors: `401 UNAUTHORIZED` (wrong email _or_ password — the two are
-indistinguishable by design and cost the same time), `403 USER_DISABLED`,
-`403 EMAIL_NOT_VERIFIED`, `400 CAPTCHA_FAILED`, `429 RATE_LIMITED`.
+Errors: `401 UNAUTHORIZED` (wrong email _or_ password — indistinguishable by
+design), `403 USER_DISABLED`, `403 EMAIL_NOT_VERIFIED`, `400 CAPTCHA_FAILED`,
+`429 RATE_LIMITED`.
 
 ```bash
 curl -sS -c cookies.txt -X POST http://127.0.0.1:8787/api/auth/login \
@@ -469,8 +400,8 @@ curl -sS -c cookies.txt -X POST http://127.0.0.1:8787/api/auth/login \
 
 ### `POST /api/auth/logout`
 
-_session_ — **CSRF required.** Destroys the session row and clears both
-cookies. Returns `{ "ok": true }`.
+_session_, **CSRF required** — destroys the session and clears both cookies.
+Returns `{ "ok": true }`.
 
 ### `GET /api/auth/me`
 
@@ -492,110 +423,70 @@ _session_ — the SPA's bootstrap payload.
 }
 ```
 
-`capabilities` is derived from the role (`provider+`, `provider+`, `admin+`,
-`admin+`, `admin+`, `super_admin`) so the SPA does not re-derive it.
+`capabilities` is derived from the role: the first two need `provider`, the next
+three `admin`, and `can_use_god_mode` needs `super_admin`.
 
 ### `POST /api/auth/verify-email`
 
-_public_, CSRF-exempt. Body `{ "token": string }` (8–512 chars).
+_public_ — body `{ "token": string }` (8–512 chars) → `{ "verified": true, "user": { … } }`.
 
-```json
-{ "verified": true, "user": { … } }
-```
-
-Tokens are single-use and expire after 24 hours. Errors:
-`400 VALIDATION_FAILED` (unknown or expired link), `409 CONFLICT` (already
-used).
+Tokens are single-use and expire after 24 hours. Errors: `400 VALIDATION_FAILED`
+(unknown or expired link), `409 CONFLICT` (already used).
 
 ### The anti-enumeration contract
 
-The next three routes exist so a visitor can recover an account without help,
-which means they take an email address from anyone who asks. All three answer
-
-```json
-{ "ok": true }
-```
-
-with status `200` **in every case** — the address has an account, it has none,
-the account is disabled, it is already verified, or a link was already sent
-inside the throttle window. They also pay the same scrypt-sized cost whatever
-they decide, so latency does not separate the cases either. Treat the response
-as an acknowledgement that the request was accepted, never as confirmation that
-an account exists; the portal's own pages word their confirmations as
-conditionals for the same reason.
-
-What actually happened is recorded in the audit log
-(`auth.verification_resend`, `auth.password_reset_request`), which is only
-written when a link was really issued.
-
-The only errors these routes return are `400 VALIDATION_FAILED` for a malformed
-body and `429 RATE_LIMITED` from the shared sensitive-auth limiter.
+`resend-verification`, `forgot-password` and `reset-password` accept input from
+anyone, so they never reveal whether an account exists. The first two answer
+`200 { "ok": true }` **in every case** — account or not, disabled, already
+verified, or throttled — and cost the same time whatever they decide. What
+really happened is in the audit log (`auth.verification_resend`,
+`auth.password_reset_request`), written only when a link was issued. Their only
+errors are `400 VALIDATION_FAILED` (malformed body) and `429 RATE_LIMITED`.
 
 ### `POST /api/auth/resend-verification`
 
-_public_, CSRF-exempt. Body `{ "email": string }` (valid address, ≤ 320 chars).
+_public_ — body `{ "email": string }` (≤ 320 chars).
 
 Queues a fresh 24-hour verification link when the address belongs to an active,
-unverified account and no verification link was issued for it in the last 10
-minutes. A new link supersedes the previous one, which stops working
-immediately.
+unverified account and none was issued in the last 10 minutes. The new link
+replaces the previous one.
 
 ### `POST /api/auth/forgot-password`
 
-_public_, CSRF-exempt. Body `{ "email": string }` (valid address, ≤ 320 chars).
+_public_ — body `{ "email": string }` (≤ 320 chars).
 
-Queues a password-reset link when the address belongs to an active account and
-no reset link was issued for it in the last 10 minutes. The link points at
-`<public URL>/reset-password?token=…` and expires after one hour
-(`PASSWORD_RESET_TTL_SECONDS`).
+Queues a password-reset link to `<public URL>/reset-password?token=…` when the
+address belongs to an active account and none was issued in the last 10
+minutes. The link expires after one hour (`PASSWORD_RESET_TTL_SECONDS`).
 
 ### `POST /api/auth/reset-password`
 
-_public_, CSRF-exempt.
+_public_ — body `token` (8–512 chars, from the link) and `new_password`
+(12–1024 characters) → `{ "ok": true }`.
 
-| Field          | Type   | Notes                                            |
-| -------------- | ------ | ------------------------------------------------ |
-| `token`        | string | 8–512 chars, from the emailed link.              |
-| `new_password` | string | ≥ 12 characters (`MIN_PASSWORD_LENGTH`), ≤ 1024. |
+Burns the link, sets the password, marks the address verified, invalidates
+other reset links, and **ends every session of the account** — including the
+caller's, whose cookies are cleared. Sign in again afterwards.
 
-```json
-{ "ok": true }
-```
-
-Redeeming a link burns it, sets the new password, marks the address verified
-(reading the mailbox is what verification ever proved), invalidates any other
-outstanding reset link for the account, and **terminates every session the
-account has** — including the caller's, whose cookies are cleared on the
-response. Sign in again afterwards.
-
-Errors: `400 VALIDATION_FAILED` for a token that is unknown, expired or already
-spent — deliberately one code and one message for all three, so a caller
-holding a guessed token learns nothing — and for a password below the minimum
-length (checked before the token is spent, so a rejected password does not
-waste the link). `403 USER_DISABLED` when the account has been disabled.
+Errors: `400 VALIDATION_FAILED` for a token that is unknown, expired or spent
+(one message for all three) or a password below the minimum (checked before the
+token is spent); `403 USER_DISABLED`.
 
 ### `GET /api/auth/captcha`
 
-_public_ — widget configuration. Never carries the vendor secret.
+_public_ — widget configuration; never the vendor secret.
 
 ```json
 { "enabled": true, "provider": "turnstile", "site_key": "0x4AAA…" }
 ```
 
-`enabled` is `false` — with a `null` `site_key` — whenever there is no widget to
-render: CAPTCHA switched off, no provider, no site key, no stored secret, or a
-server running with `NEXUS_CAPTCHA_ENFORCEMENT=disabled`.
-
-It answers "what should I render", not "what will login accept", and those come
-apart on a portal that is configured only half way. An enabled configuration
-with no `site_key` reports `enabled: false` **and** refuses every sign-in with
-`400 CAPTCHA_FAILED`; an enabled one whose encrypted secret no longer decrypts
-(after a `NEXUS_SECRET_KEY` rotation, say) reports a widget whose every answer
-is then refused the same way. Verification fails closed in both directions —
-see the fail-closed paragraph under
-[`PUT /api/admin/settings`](#put-apiadminsettings). So no widget here means no
-`captcha_token` is worth sending, never that an incomplete portal will let the
-request through.
+`enabled` is `false` (with `site_key: null`) whenever there is no widget to
+render: CAPTCHA off, no provider, no site key, no stored secret, or the server
+runs with `NEXUS_CAPTCHA_ENFORCEMENT=disabled`. This answers "what should I
+render", not "what will login accept": a half-configured portal can report
+`enabled: false` and still refuse sign-in with `400 CAPTCHA_FAILED`, because
+verification fails closed (see
+[`PUT /api/admin/settings`](#put-apiadminsettings)).
 
 ---
 
@@ -603,26 +494,14 @@ request through.
 
 ### `GET /api/branding`
 
-_public_ — the one unauthenticated read besides health. Drives the login page
-before a session exists. **Rate-limited** to 120 requests per minute per IP when
-`NEXUS_RATE_LIMIT_ENABLED=true` (always off under `NEXUS_ENV=test`).
+_public_ — drives the sign-in page before a session exists.
 
-The payload is **cached for `NEXUS_BRANDING_CACHE_MS`** (default 5 s) and served
-with `Cache-Control: public, max-age=…` and an `ETag`. Send `If-None-Match` with
-the prior `ETag` to receive `304 Not Modified`. Concurrent callers share one
-in-flight assembly. `0` disables the cache.
-
-Committed settings writes invalidate the server memo on the instance handling
-the mutation before it responds. The next GET reaching that instance reflects
-the change; an old ETag returns `200` with the new body when the payload
-changes. An **open** founder seat (`bootstrap_required: true`) is never
-memoised: it is read live, so a founder seated on any instance is reflected
-everywhere at once. Concurrent anonymous requests coalesce onto one in-flight
-count query per instance, which bounds the database work a burst can cause
-without retaining the answer. A **taken** seat (`false`) cannot reopen, so it is
-held for 1 s to bound sustained sequential anonymous traffic. The TTL bounds
-cross-instance server staleness of the remaining fields only; browser/CDN copies
-retain their advertised `max-age`.
+The payload is cached for `NEXUS_BRANDING_CACHE_MS` (default 5 s; `0` disables)
+and, when the cache is on, served with `Cache-Control: public, max-age=…` and an
+`ETag`; send `If-None-Match` to get `304 Not Modified`. A settings write clears
+the cache on the instance that handled it; other instances catch up within the
+TTL. `bootstrap_required: true` is never cached, so a founder seated on any
+instance is reflected at once.
 
 ```json
 {
@@ -645,39 +524,17 @@ retain their advertised `max-age`.
 }
 ```
 
-`primary_color` and `accent_color` are opaque CSS hex (`#rgb` or `#rrggbb`);
-writes are stored as lowercase `#rrggbb`. Four-, five-, seven- and eight-digit
-values are `400 VALIDATION_FAILED` — 4/8-digit CSS hex carries alpha the native
-colour swatch and derived palette cannot render, and 5/7-digit strings are not
-CSS colours.
-
-The SPA derives its whole accent scale — hover and active shades, a readable
-foreground, tints and the focus ring — from `primary_color`, and its secondary
-(`info`) tokens from `accent_color`, per theme. Informational badge text is
-adjusted independently from its tint to reach at least 4.5:1 contrast on the
-portal's surfaces, including light-theme API Key and GET method badges.
-`radius` (`none`|`sm`|`md`|`lg`) scales every corner, `font_preset`
-(`system`|`inter`|`manrope`) picks a bundled
-typeface, `sidebar_style` (`surface`|`contrast`) chooses between a rail that
-matches the page surfaces and an always-dark rail, and `login_layout`
-(`split`|`centered`) decides whether the sign-in page shows the branded hero
-panel. `footer_text` and `footer_links` (at most 5, `http(s)` only) render in
-the shell footer and on the sign-in page.
-
-`registration` is the public slice of the registration policy, so the sign-up
-form does not offer a role the server will refuse. `allowed_roles` is the stored
-policy narrowed to the self-selectable roles — an elevated role left in the
-setting never appears here, because `POST /api/auth/register` accepts only
-`client` and `provider` in the first place. Both fields are already observable
-by attempting a registration, and the server re-checks the policy on every one;
-this only saves the visitor a `403`.
-
-`bootstrap_required` is `true` only while the portal has no active
-`super_admin`: the next registration is seated as one and must therefore send
-`bootstrap_token`. Normally that is an empty portal; it is also a portal whose
-founding registration failed part-way and left accounts with nobody to run
-them, which the same flow recovers. The flag says that the seat is open and
-nothing else — the token is never public.
+- The branding fields are described under
+  [`PUT /api/admin/settings`](#put-apiadminsettings). The SPA derives its
+  accent scale from `primary_color` and its secondary (`info`) tokens from
+  `accent_color`.
+- `captcha` is the same object as [`GET /api/auth/captcha`](#get-apiauthcaptcha).
+- `registration` is the public slice of the registration policy;
+  `allowed_roles` is narrowed to `client` and `provider`, the only roles
+  `POST /api/auth/register` accepts.
+- `bootstrap_required` is `true` only while the portal has no active
+  `super_admin`: the next registration becomes one and must send
+  `bootstrap_token`. The token itself is never public.
 
 ---
 
@@ -691,7 +548,7 @@ _session_ → `{ "user": User }`.
 
 ### `PATCH /api/users/me`
 
-_session_ — profile self-service. **Cannot** change role, status, email or
+_session_ — profile self-service. Cannot change role, status, email or
 organization.
 
 | Field              | Type           | Notes                                   |
@@ -700,27 +557,28 @@ organization.
 | `company`          | string \| null | ≤ 200                                   |
 | `phone`            | string \| null | ≤ 64                                    |
 | `current_password` | string         | required when `new_password` is present |
-| `new_password`     | string         | ≥ 12 chars                              |
+| `new_password`     | string         | 12–1024 characters                      |
 
-→ `{ "user": User }`. `403 FORBIDDEN` when `current_password` is wrong.
-`429 RATE_LIMITED` beyond 10 requests per minute from one account — the route
-checks a password, so it is bounded like the sign-in routes — when
-`NEXUS_RATE_LIMIT_ENABLED=true` (the default; always off under
-`NEXUS_ENV=test`).
+→ `{ "user": User }`. A password change ends every session of the account and
+invalidates outstanding reset links, then signs the caller back in: the
+response sets **new** session cookies, so read the new `nexus_csrf` value
+before the next mutation.
+
+Errors: `400 VALIDATION_FAILED` (`new_password` without `current_password`),
+`403 FORBIDDEN` (wrong `current_password`), `429 RATE_LIMITED` (10 a minute per
+account).
 
 ### `GET /api/users`
 
 _admin_ — `Paginated<User>` plus `pending_gateway_teardowns`: the portal-wide
-count of disabled accounts whose gateway credentials have **not** been revoked
-yet. Includes both `pending` jobs (queued or waiting for retry backoff) and
-`sending` jobs (in progress or awaiting stale-claim recovery); excludes `done`.
-The count is independent of user-list filtering and pagination.
+count of disabled accounts whose gateway credentials are not revoked yet
+(queued, retrying or in progress). Independent of the filters and pagination.
 
 | Query             | Type                                                        |
 | ----------------- | ----------------------------------------------------------- |
 | `role`            | `client` \| `provider` \| `admin` \| `super_admin`          |
 | `status`          | `active` \| `disabled`                                      |
-| `org_id`          | uuid                                                        |
+| `org_id`          | organization id                                             |
 | `q`               | substring match on email or display name (case-insensitive) |
 | `limit`, `offset` | pagination                                                  |
 
@@ -728,8 +586,8 @@ The count is independent of user-list filtering and pagination.
 
 _admin_ → `{ "user": User, "gateway_teardown": GatewayTeardownState | null }`.
 
-`gateway_teardown` is the account's outstanding (or completed) gateway
-revocation, and is `null` for an account that never had one:
+`gateway_teardown` is the account's gateway revocation job, or `null` if it
+never had one:
 
 ```json
 {
@@ -744,218 +602,160 @@ revocation, and is `null` for an account that never had one:
 
 ### `PATCH /api/users/:id`
 
-_admin_ — role, status, organization and display name.
-
-| Field          | Type                   |
-| -------------- | ---------------------- |
-| `role`         | any of the four roles  |
-| `status`       | `active` \| `disabled` |
-| `org_id`       | uuid \| null           |
-| `display_name` | string, 1–200          |
+_admin_ — body: any of `role` (any role), `status` (`active` \| `disabled`),
+`org_id` (id \| null), `display_name` (1–200).
 
 → `{ "user": User, "gateway_teardown"?: "ok" | "no_consumer" | "pending" }`.
+`gateway_teardown` is present only when this request disabled the account.
+`pending` means the portal account is off but its Edge credentials are still
+live and the teardown worker is retrying. There is no `failed` value.
 
-`gateway_teardown` is present **only when this request disabled the account**.
-`pending` means the portal account is off but its Ferrum Edge credentials are
-still live and the teardown worker is retrying — the security operation is not
-complete. There is no `failed` value: a failure is a retry, not an outcome.
+Rules:
 
-Guards enforced in the service:
-
-- **Only a `super_admin` may confer or remove admin power.** A plain `admin`
-  can move accounts between `client` and `provider` and nothing else — neither
-  promoting to `admin` nor demoting an existing one → `403 FORBIDDEN`.
-- Only a `super_admin` may disable or re-enable an `admin` or `super_admin` →
-  `403 FORBIDDEN`.
-- Demoting or disabling the **last active `super_admin`** →
-  `409 LAST_SUPER_ADMIN`. This is checked before the self-disable rule, so it is
-  also what you get for disabling yourself while you are the last one.
-- Disabling **your own** account in any other case → `409 CONFLICT`.
-- Disabling an account deletes every session it holds, and queues the gateway
-  revocation as durable work inside the same transaction.
-- Re-enabling an account (`status: "active"`) cancels any queued revocation, so
-  a retry can never strip a live account's credentials. It then restores retained
-  active-grant ACL groups without restoring revoked credentials or test
-  consumers: each identity's `nexus:api:<id>:approved` groups are rebuilt from
-  its active grants alone, so one left behind by a revocation the gateway never
-  applied is dropped, while groups outside that namespace are kept. A gateway
-  failure returns `502 EDGE_ERROR` after the portal status
-  commit; repeat the same `status: "active"` PATCH to retry restoration.
-- `404 NOT_FOUND` when `org_id` names an organization that does not exist.
+- Only a `super_admin` may promote to or demote from `admin`/`super_admin`, or
+  disable/re-enable an administrator → otherwise `403 FORBIDDEN`. A plain
+  `admin` can move accounts between `client` and `provider`.
+- Demoting or disabling the last active `super_admin` → `409 LAST_SUPER_ADMIN`
+  (this wins over the self-disable rule).
+- Disabling your own account otherwise → `409 CONFLICT`.
+- `org_id` naming an unknown organization → `404 NOT_FOUND`.
+- Disabling deletes every session the account holds and queues the gateway
+  revocation in the same transaction.
+- Re-enabling cancels any queued revocation and rebuilds each identity's
+  `nexus:api:<id>:approved` ACL groups from its active grants (revoked
+  credentials and test consumers are not restored; groups outside that
+  namespace are kept). If the gateway fails, the status change has already
+  committed and the response is `502 EDGE_ERROR`; repeat the same PATCH to
+  retry.
 
 ### `POST /api/users/:id/gateway-teardown/retry`
 
-_admin_ — re-run a disabled account's gateway revocation immediately, instead of
-waiting for the worker's backoff. Idempotent; audited as
-`user.gateway_teardown_retry`.
+_admin_ — re-run a disabled account's gateway revocation now instead of waiting
+for the worker's backoff. Idempotent; audited as `user.gateway_teardown_retry`.
 
 → `{ "gateway_teardown": "ok" | "no_consumer" | "pending", "job": GatewayTeardownState | null }`
 
-- `409 CONFLICT` when the account is not `disabled` — an active account's
-  consumer is supposed to work.
-- `404 NOT_FOUND` when the account does not exist.
+Errors: `409 CONFLICT` (account is not `disabled`), `404 NOT_FOUND`.
 
 ---
 
 ## Organizations
 
-Registered under `/api/organizations`. The **entire** plugin requires _admin_.
+Registered under `/api/organizations`; every route is _admin_.
 
 ### `GET /api/organizations`
 
-_admin_ — `Paginated<Organization>`, ordered by name. Accepts `limit`/`offset` and
-`q` (case-insensitive substring search on the organization name, up to 200 characters).
+_admin_ — `Paginated<Organization>`, ordered by name. Query: `q`
+(case-insensitive substring of the name, ≤ 200), `limit`, `offset`.
 
 ### `GET /api/organizations/:id`
 
-_admin_ → `{ "organization": Organization }`. Returns `404 NOT_FOUND` when the id does not
-exist.
+_admin_ → `{ "organization": Organization }`; `404 NOT_FOUND` if unknown.
 
 ### `POST /api/organizations`
 
-_admin_ → `201 { "organization": Organization }`.
-Body: `name` (1–200), `description` (≤ 2000, optional/nullable).
+_admin_ → `201 { "organization": Organization }`. Body: `name` (1–200),
+optional `description` (≤ 2000, nullable).
 
 ### `PATCH /api/organizations/:id`
 
 _admin_ → `{ "organization": Organization }`. Body: optional `name`,
-`description`. Returns the row unchanged when nothing was supplied.
+`description`. An empty body returns the row unchanged.
 
 ---
 
 ## Threads
 
-Portal messaging. Registered under `/api/threads`; every endpoint needs a
-_session_. Who may read or post in a given thread is decided by the messaging
-service.
+Portal messaging, registered under `/api/threads`; every route needs a
+_session_.
 
-**The two write routes are bounded.** Reads are not limited; `POST /api/threads`
-takes 10 requests per minute and `POST /api/threads/:id/messages` takes 30, both
-counted **per account** (not per IP) and both active only when
-`NEXUS_RATE_LIMIT_ENABLED=true` (the default; always off under
-`NEXUS_ENV=test`). Exceeding either is `429 RATE_LIMITED`. Independently, one
+A thread has two seats. A **1:1 thread** seats two accounts (the
+lower-privileged one in `participant_a`), optionally about one API. A
+**platform thread** has `participant_b: null`: it is addressed to the platform,
+and **any admin may read and reply**. Threads are deduplicated on
+`(participants, api_id)`, so asking the same person about the same API again
+continues the existing conversation. Admins may read any thread.
+
+**Limits on writing.** Besides the [per-minute limits](#rate-limits), one
 account may post `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` messages (default 200,
-`0` disables) in a rolling 24 hours across _every_ thread, direct and platform
-alike; exceeding that is `429 QUOTA_EXCEEDED`. A refusal from either bound
-writes no message, audit, notification or email row.
+`0` disables) in a rolling 24 hours across every thread; beyond that is
+`429 QUOTA_EXCEEDED` with `details: { limit, window: "24h", setting }`. The
+budget check and the insert are one transaction under a per-sender lease, so a
+send still in flight elsewhere for more than 30 seconds answers
+`409 CONFLICT` (retry). A refused send writes nothing. Messages written by a
+god-mode broadcast carry `broadcast: true` and are not counted.
 
-The budget's count and the message's insert are one step — one transaction, and
-one per-sender lease so it holds across instances too. If a send from the same
-account is still in flight elsewhere for more than 30 seconds, the request is
-answered `409 CONFLICT` asking you to retry rather than being let through.
-Messages a god-mode broadcast wrote carry `broadcast: true` and are not counted
-against the administrator who sent them; the broadcast has ceilings of its own.
-
-Recipients get at most one `message_received` email per thread per 10 minutes
-however many messages arrive, so the mail announces new activity and links to
-the thread rather than quoting one message. In-app notifications stay one per
-message.
-
-A thread has two seats. A **1:1 thread** pairs a client (`participant_a`) with a
-provider (`participant_b`), optionally about one API. A **platform thread** has
-`participant_b: null` — the empty seat is "the platform", and **any admin may
-read and reply**. Threads are deduplicated on `(participants, api_id)`, so
-asking the same provider about the same API twice continues the existing
-conversation.
+Recipients get at most one `message_received` email per thread per 10 minutes;
+in-app notifications stay one per message.
 
 ### `GET /api/threads`
 
-_session_ — `Paginated<MessageThread>`, newest activity first, each row
-carrying `participants`, optional `api`, and `last_message_preview`
-(≤ 160 chars).
+_session_ — `Paginated<MessageThread>`, newest activity first; each row carries
+`participants`, optional `api`, and `last_message_preview` (≤ 160 chars).
+Query: `api_id`, `q` (substring of the subject), `limit`, `offset`.
 
-| Query             | Type                       |
-| ----------------- | -------------------------- |
-| `api_id`          | uuid                       |
-| `q`               | substring match on subject |
-| `limit`, `offset` | pagination                 |
-
-Non-admins see threads they participate in. Admins additionally see every
-platform thread.
+Non-admins see threads they sit in; admins also see every platform thread.
 
 ### `POST /api/threads`
 
-_session_ → `201`
+_session_ → `201 { "thread": { … }, "message": { … } }`
 
-| Field               | Type         | Notes                                         |
-| ------------------- | ------------ | --------------------------------------------- |
-| `subject`           | string       | 1–200                                         |
-| `body`              | string       | 1–10 000, the opening message                 |
-| `recipient_user_id` | uuid \| null | omit or `null` to address the platform admins |
-| `api_id`            | uuid \| null | optional API the conversation is about        |
-
-```json
-{ "thread": { … }, "message": { … } }
-```
+| Field               | Type       | Notes                                  |
+| ------------------- | ---------- | -------------------------------------- |
+| `subject`           | string     | 1–200                                  |
+| `body`              | string     | 1–10 000, the opening message          |
+| `recipient_user_id` | id \| null | omit or `null` to address the platform |
+| `api_id`            | id \| null | optional API the conversation is about |
 
 Errors: `400 VALIDATION_FAILED` (empty subject/body, or messaging yourself),
 `404 NOT_FOUND` (unknown or disabled recipient, unknown API, or a `private` API
-the sender may not read — the same rule as the catalog, so a thread cannot be
-used to learn a private API's name, owner or gateway address),
-`429 RATE_LIMITED` (more than 10 a minute from this account),
-`429 QUOTA_EXCEEDED` (the account's rolling 24-hour message budget is spent —
-`details` carries `{ limit, window: "24h", setting: "NEXUS_MAX_MESSAGES_PER_USER_PER_DAY" }`),
-`409 CONFLICT` (another send from this account has held the budget section for
-more than 30 seconds — retry).
+the sender may not read — the catalog's rule), plus the write limits above.
 
 ### `GET /api/threads/:id`
 
-_session_ — the thread plus its **most recent** window of messages
-(`MessageThreadDetail`), each message carrying a `sender` summary. Participants
-always; admins for oversight. `403 FORBIDDEN` otherwise.
+_session_, participant or admin — the thread (`MessageThreadDetail`) plus the
+**most recent** window of its messages, each with a `sender` summary.
 
 | Query    | Type | Notes                                                  |
 | -------- | ---- | ------------------------------------------------------ |
-| `limit`  | int  | window size, 1–`MAX_PAGE_SIZE` (200), default 25       |
-| `before` | uuid | a message id: return only messages older than that one |
+| `limit`  | int  | window size, 1–200, default 25                         |
+| `before` | id   | a message id: return only messages older than that one |
 
 ```json
 {
   "id": "…", "subject": "…", "participants": [ … ],
-  "messages": {
-    "items": [ … ],
-    "total": 208,
-    "has_more": true,
-    "next_before": "5e933aed-…"
-  }
+  "messages": { "items": [ … ], "total": 208, "has_more": true, "next_before": "5e933aed-…" }
 }
 ```
 
-`messages.items` is ordered **oldest-first**, ready to render top to bottom, but
-the window itself is taken from the newest end of the conversation — which is
-what keeps a freshly posted reply visible however long the history behind it.
-`total` counts the whole thread; `has_more` says whether anything precedes
-`items[0]`, and `next_before` is the cursor that fetches it. There is no
-`offset`: a conversation grows at the end the reader is anchored to, so an
-offset into it slides under every reply.
+`messages.items` is oldest-first, but the window is taken from the newest end,
+so a fresh reply is always visible. `total` counts the whole thread; `has_more`
+says whether anything precedes `items[0]`, and `next_before` is the cursor that
+fetches it. There is no `offset`.
+
+Errors: `403 FORBIDDEN` (not a participant or admin), `404 NOT_FOUND`,
+`400 VALIDATION_FAILED` (a `before` id from another thread).
 
 ### `GET /api/threads/:id/messages`
 
-_session_ — one window of the same transcript, without re-sending the thread:
-the "load older messages" call. Same `limit`/`before` query and the same
-`MessagePage` body as `messages` above; the same read rule and `403 FORBIDDEN`.
-
-Errors: `400 VALIDATION_FAILED` (a `before` id that is not part of this thread),
-`403 FORBIDDEN` (not a participant), `404 NOT_FOUND` (unknown thread).
+_session_ — one window of the transcript without the thread: the "load older
+messages" call. Same query, body (`MessagePage`), access rule and errors as
+`messages` above.
 
 ### `POST /api/threads/:id/messages`
 
 _session_ → `201 { "message": Message }`. Body `{ "body": string }` (1–10 000).
-Participants may post; an admin may post into any _platform_ thread.
+Participants may post; an admin may post into any platform thread.
 
-Errors: `400 VALIDATION_FAILED` (empty body), `403 FORBIDDEN` (not a
-participant), `404 NOT_FOUND` (unknown thread), `429 RATE_LIMITED` (more than 30
-a minute from this account), `429 QUOTA_EXCEEDED` (the account's rolling
-24-hour message budget is spent — it is the same budget `POST /api/threads`
-draws on), `409 CONFLICT` (another send from this account still holds the budget
-section — retry).
+Errors: `400 VALIDATION_FAILED`, `403 FORBIDDEN`, `404 NOT_FOUND`, plus the write
+limits above.
 
 ---
 
 ## Notifications
 
-Registered under `/api/notifications`; _session_ throughout. A user only ever
-sees their own — the id comes from the session, never the request.
+Registered under `/api/notifications`; _session_. A user only ever sees their
+own.
 
 ### `GET /api/notifications`
 
@@ -973,9 +773,8 @@ _session_
 
 ### `POST /api/notifications/read`
 
-_session_ — body must supply **either** `ids` (≤ 500 uuids) **or**
-`all: true`; supplying neither is `400 VALIDATION_FAILED`. Ids belonging to
-another user are ignored.
+_session_ — body **either** `ids` (≤ 500 ids) **or** `all: true`; neither is
+`400 VALIDATION_FAILED`. Ids belonging to another user are ignored.
 
 ```json
 { "updated": 3, "unread_count": 0 }
@@ -985,21 +784,22 @@ another user are ignored.
 
 ## Admin
 
-Registered under `/api/admin`. The **entire** plugin requires _admin_; the four
-`god/*` endpoints additionally require _super_admin_, and so do the `smtp` and
-`captcha` sections of `PUT /settings`.
+Registered under `/api/admin`; every route needs _admin_. These additionally
+need **_super_admin_**: the `smtp`, `captcha` and `gateway` sections of
+`PUT /settings`, `POST /gateway/reconcile`, `POST /gateway/repair` and the four
+`god/*` routes.
 
 ### `POST /api/admin/credentials/reconcile`
 
 _admin_ — empty one credential type on one Edge consumer and settle the portal's
-rows to match. The repair for a consumer whose live rows cannot be positioned
-(two or more without an `edge_ordinal`; see the operations guide, "Legacy
-credential rows"). Destructive by design: every live credential of that type on
-that consumer stops working, and the account holders are notified.
+rows to match. This repairs a consumer whose live rows cannot be positioned
+(see [`operations.md`](operations.md#12-the-credential-mirror)). **Destructive**:
+every live credential of that type on that consumer stops working, and the
+holders are notified.
 
-Body: `consumer_id` (the Edge consumer id carried on
-`CredentialMetadata.ferrum_consumer_id`, ≤ 128), `credential_type` ∈ `keyauth`
-\| `basicauth` \| `jwt`, optional `reason` (≤ 500, nullable; recorded on the
+Body: `consumer_id` (the Edge consumer id from
+`CredentialMetadata.ferrum_consumer_id`, ≤ 128), `credential_type` (`keyauth` \|
+`basicauth` \| `jwt`), optional `reason` (≤ 500, recorded on the
 `credential.reconcile` audit row).
 
 ```json
@@ -1011,30 +811,23 @@ Body: `consumer_id` (the Edge consumer id carried on
 }
 ```
 
-`gateway_cleared` is `false` when the gateway consumer no longer existed, in
-which case only the portal rows changed. Idempotent: a second call revokes
-nothing and clears an already-empty type. Only a consumer the portal owns can be
-reconciled — one with a recorded mapping whose username still matches the live
-consumer, a registered gateway identity bound to it, or portal credential rows
-against it whose live username is still the one Nexus derives for their owner
-(`nexus-user-<user_id>`, `nexus-app-<application_id>`, or `nexus-test-<api_id>`
-for an API the portal still has); anything else, such as a consumer an operator
-created on the gateway, is refused before any gateway write (the consumer is
-only read). A `consumer_id` that is not consumer-id shaped
-(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`) is refused before even that read.
+`gateway_cleared` is `false` when the consumer no longer existed on the
+gateway. Idempotent. Only a consumer the portal owns can be reconciled — one
+with a recorded mapping whose username still matches, a registered gateway
+identity, or portal credential rows whose live username is the one Nexus
+derives (`nexus-user-<user_id>`, `nexus-app-<application_id>`,
+`nexus-test-<api_id>`). Anything else is refused before any gateway write.
 
-Errors: `400 VALIDATION_FAILED`, `403 FORBIDDEN` (not a portal-owned consumer),
-`502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE` (nothing is revoked when the gateway
-call fails).
+Errors: `400 VALIDATION_FAILED` (including a `consumer_id` not matching
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`), `403 FORBIDDEN` (not a portal-owned
+consumer), `502 EDGE_ERROR` / `EDGE_UNAVAILABLE` (nothing is revoked).
 
 ### `POST /api/admin/gateway/reconcile`
 
-_super admin_ — check whether the gateway still holds the consumer and proxy
-ids the portal stored, and cache the answer for the health endpoints. Reads
-only; `POST` because it costs one Admin API read per stored reference and is
-not something to poll. Writes a `gateway.reconcile` audit row.
-
-No body.
+_super_admin_ — check whether the gateway still holds every consumer and proxy
+id the portal stored, and cache the result for the health endpoints. Reads only;
+a `POST` because it costs one Admin API read per stored reference. No body.
+Audited as `gateway.reconcile`.
 
 ```json
 {
@@ -1044,37 +837,43 @@ No body.
   "consumers": { "checked": 42, "orphaned": 14, "complete": true },
   "proxies": { "checked": 9, "orphaned": 3, "complete": true },
   "orphaned_consumers": [
-    { "user_id": "…", "ferrum_consumer_id": "…", "ferrum_username": "nexus-user-…" }
+    {
+      "user_id": "…",
+      "application_id": null,
+      "ferrum_consumer_id": "…",
+      "ferrum_username": "nexus-user-…"
+    }
   ],
   "orphaned_proxies": [{ "api_id": "…", "slug": "billing", "ferrum_proxy_id": "…" }],
+  "awaiting_restore": 0,
   "error": null
 }
 ```
 
-`status` is `ok` | `orphaned` | `unknown`. A reference is counted as orphaned
-only when Edge answers `404` for it; any other failure abandons the pass and
-answers `unknown` with the message in `error` and both orphan lists empty — a
-gateway that cannot be read is not a gateway full of orphans. `complete` is
-`false` when the pass stopped at `NEXUS_GATEWAY_RECONCILE_SAMPLE`.
+`status` is `ok` \| `orphaned` \| `unknown`. A reference is orphaned only when
+Edge answers `404` for it; any other failure abandons the pass as `unknown`,
+with the message in `error` and empty orphan lists. `awaiting_restore` counts
+APIs still flagged `repair_required` (from the portal's own rows, so it is
+filled even when the gateway is unreachable). `complete` is `false` when the
+pass stopped at `NEXUS_GATEWAY_RECONCILE_SAMPLE`.
 
 ### `POST /api/admin/gateway/repair`
 
-_super admin_ — recreate the gateway consumers a pass found missing and clear
-the dead proxy ids. Always takes a fresh pass first. See the operations guide,
-"Retargeting or rebuilding Ferrum Edge".
+_super_admin_ — recreate missing gateway consumers and clear dead proxy ids.
+Always takes a fresh pass first. See
+[`operations.md`](operations.md#13-retargeting-or-rebuilding-ferrum-edge).
 
-Body: `user_ids` (≤ 1000 account ids), `api_ids` (≤ 1000 API ids), `all`
-(repair every orphan found), optional `reason` (≤ 500, nullable; recorded on
-every audit row). **At least one of `user_ids`, `api_ids` and `all` is
-required** — an empty body would otherwise read as either "everything" or
-"nothing".
+Body: `user_ids` (≤ 1000), `api_ids` (≤ 1000), `all` (repair every orphan
+found), optional `reason` (≤ 500, recorded on every audit row). **At least one
+of `user_ids`, `api_ids` or `all: true` is required.**
 
 ```json
 {
-  "report": { "status": "orphaned", "namespace": "nexus", "error": null },
+  "report": { "status": "orphaned", "namespace": "nexus", "…": "…" },
   "consumers": [
     {
       "user_id": "…",
+      "application_id": null,
       "previous_ferrum_consumer_id": "…",
       "ferrum_consumer_id": "…",
       "credentials_requiring_reissue": 1,
@@ -1086,34 +885,33 @@ required** — an empty body would otherwise read as either "everything" or
 }
 ```
 
-A consumer is recreated under the **same identity** — username
-`nexus-user-<user_id>`, `custom_id` back to the Nexus user id, and the derived
-consumer id — and its `nexus:api:<api_id>:approved` ACL groups are replayed
-from the portal's own `active` grants, so approvals granted before the change
-work again (`restored_groups`).
+- `report` is the fresh pass, in the shape of `POST /gateway/reconcile`.
+- **Consumers** are recreated under the same identity (the account's
+  `nexus-user-<user_id>` consumer, or an application's own), and their
+  `nexus:api:<api_id>:approved` ACL groups are replayed from the identity's
+  `active` grants (`restored_groups`). One account can have several rows — one
+  per identity.
+- **No credential material is minted.** Show-once secrets cannot be recovered,
+  so live `credential_metadata` rows move to `revoked`
+  (`credentials_requiring_reissue`) and each holder issues new credentials. Each
+  repaired account gets a `gateway.consumer_repair` audit row and a
+  notification.
+- **APIs** are not rebuilt here: the dead `ferrum_proxy_id` is cleared, the API
+  is flagged `gateway_state: "repair_required"`, an
+  `api.gateway_repair_required` audit row (`phase: "orphaned_proxy"`) is
+  written, and the owner is notified to rebuild it with
+  [`POST /api/apis/:id/restore-gateway`](#post-apiapisidrestore-gateway).
+  Catalog entry, grants and requests are untouched.
 
-**No credential material is ever minted.** Show-once secrets cannot be
-recovered from either side, so the portal moves its live
-`credential_metadata` rows to `revoked` and reports the count as
-`credentials_requiring_reissue`; each account holder issues new credentials
-themselves. Each repaired account gets a `gateway.consumer_repair` audit row
-and an in-app notification.
-
-An orphaned API is **not** republished: its dead `ferrum_proxy_id` is cleared,
-an `api.gateway_repair_required` audit row with `phase: "orphaned_proxy"` is
-written, and the owner is asked to publish it again through the ordinary flow.
-Its catalog entry, grants and access requests are untouched.
-
-Per-target failures are reported in `error` rather than failing the request; a
-named target that is not actually orphaned comes back with an `error` saying
-so. Errors: `400 VALIDATION_FAILED` (no target named), `403 FORBIDDEN` (below
-`super_admin`), `502 EDGE_UNAVAILABLE` (the fresh pass could not read the
-gateway, so there is nothing to act on).
+Per-target failures (including a named target that is not orphaned) come back
+in that target's `error` rather than failing the request. Errors:
+`400 VALIDATION_FAILED` (no target), `403 FORBIDDEN`, `502 EDGE_UNAVAILABLE`
+(the fresh pass could not read the gateway, so nothing is repaired).
 
 ### `GET /api/admin/settings`
 
-_admin_ — the whole settings snapshot. Secrets are never returned; booleans
-report whether one is stored.
+_admin_ — the whole settings snapshot. Secrets are never returned; booleans say
+whether one is stored.
 
 ```json
 {
@@ -1156,108 +954,77 @@ report whether one is stored.
 }
 ```
 
-`gateway.public_url` is the stored override when one is set, otherwise the
-`FERRUM_GATEWAY_PUBLIC_URL` environment default, otherwise `null`.
-
-`captcha.enforcement` is `enforced` or `disabled`, read from the server's
-`NEXUS_CAPTCHA_ENFORCEMENT` and **not settable through this API**. `disabled` is
-the operator's break-glass switch for a portal whose stored CAPTCHA
-configuration refuses every sign-in: register and login skip verification and
-the widget is hidden, whatever `captcha.enabled` says. It is reported here so an
-administrator can tell an inert configuration from a portal ignoring its own
-settings — see
-[`operations.md`](operations.md#recovering-a-portal-locked-out-by-captcha).
+- `gateway.public_url` is the stored override, else `FERRUM_GATEWAY_PUBLIC_URL`,
+  else `null`.
+- `captcha.enforcement` (`enforced` \| `disabled`) mirrors the server's
+  `NEXUS_CAPTCHA_ENFORCEMENT` and cannot be set through the API. `disabled` is
+  the operator's break-glass switch: register and login skip verification and
+  the widget is hidden, whatever `captcha.enabled` says. See
+  [`operations.md`](operations.md#recovering-a-portal-locked-out-by-captcha).
 
 ### `PUT /api/admin/settings`
 
-_admin_, except `smtp`, `captcha` and `gateway` which are **_super_admin_** — partial
-update; **omitted sections are untouched**, and omitted fields inside a supplied
-section keep their current value.
+_admin_; the `smtp`, `captcha` and `gateway` sections need **_super_admin_**.
+Partial update: omitted sections and omitted fields keep their values. Returns
+the same shape as `GET`. The `admin.settings_update` audit row records the
+**names** of changed keys, never their values.
 
-Unknown top-level sections and unknown keys inside any supplied section are
-rejected with `400 VALIDATION_FAILED`, including extra keys in
-`branding.footer_links` objects. Each `error.details` entry names the full
-field path (for example `branding.portal_nam` or
-`branding.footer_links.0.target`). Response-only fields such as
-`captcha.secret_set`, `captcha.enforcement` and `smtp.password_set` are not
-accepted in an update. A schema rejection applies none of the patch, performs no
-CAPTCHA activation self-test and writes no `admin.settings_update` audit row.
+A body with an `smtp`, `captcha` or `gateway` section from a plain `admin` is
+refused with `403 FORBIDDEN` and nothing is written. Unknown sections and
+unknown keys (including inside `footer_links` entries) are
+`400 VALIDATION_FAILED`, with each `details` entry naming the full path (for
+example `branding.footer_links.0.target`); response-only fields such as
+`secret_set`, `enforcement` and `password_set` are rejected too. A rejected
+patch applies nothing.
 
-A body carrying an `smtp`, `captcha` or `gateway` section from an ordinary
-`admin` is refused with `403 FORBIDDEN` and nothing is written — not even the
-sections that would have been allowed. Mail, CAPTCHA and the gateway origin are
-escalation surfaces, not preferences: repointing SMTP delivers every
-verification and password-reset link to the operator, CAPTCHA is the
-registration brake, and the gateway origin is where every client is told to
-send its gateway credentials.
+| Section        | Fields                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `branding`     | `portal_name` (1–120); `logo_data_url` (base64 `data:image/…` URL, ≤ 512 KiB, nullable); `primary_color`, `accent_color` (`#rgb` or `#rrggbb`, stored lowercase `#rrggbb`; alpha and 5/7-digit forms are refused); `default_theme` (`dark`\|`light`\|`system`); `tagline` (≤ 280, nullable); `support_email` (email, nullable); `radius` (`none`\|`sm`\|`md`\|`lg`); `font_preset` (`system`\|`inter`\|`manrope`); `sidebar_style` (`surface`\|`contrast`); `login_layout` (`split`\|`centered`); `footer_text` (≤ 200, nullable); `footer_links` (≤ 5 × `{ label (1–60), url }`, `http(s)` only) |
+| `captcha`      | `enabled`; `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`); `site_key` (nullable); `secret_key` — **write-only**, stored AES-256-GCM encrypted, `null`/`""` clears; `captcha_token` — the activation self-test's proof (below)                                                                                                                                                                                                                                                                                                                                                          |
+| `smtp`         | `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted, `null`/`""` clears — and `from_address`                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `gateway`      | `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, with no path, query or credentials; a trailing slash is stripped; `null`/`""` falls back to `FERRUM_GATEWAY_PUBLIC_URL`                                                                                                                                                                                                                                                                                                                                                                                             |
 
-| Section        | Fields                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `branding`     | `portal_name` (1–120), `logo_data_url` (base64 image data URL, ≤ 512 KiB, nullable), `primary_color` / `accent_color` (opaque CSS hex `#rgb` or `#rrggbb`, stored as lowercase `#rrggbb`; 4/5/7/8-digit values are `400`), `default_theme` (`dark`\|`light`\|`system`), `tagline` (≤ 280, nullable), `support_email` (nullable), `radius` (`none`\|`sm`\|`md`\|`lg`), `font_preset` (`system`\|`inter`\|`manrope`), `sidebar_style` (`surface`\|`contrast`), `login_layout` (`split`\|`centered`), `footer_text` (≤ 200, nullable), `footer_links` (≤ 5 × `{ label (1–60), url }`, `http(s)` URLs only — anything else is `400`) |
-| `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear — and `captcha_token`, the activation self-test's proof (below). Changing `provider` while CAPTCHA is (or becomes) enabled requires a `secret_key` in the same request                                                                                                                                                                                                                                                    |
-| `smtp`         | _super_admin_ — `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`. Changing `host`, `port`, `secure` or `username` while a password is stored (or set by env) requires sending a fresh `password` in the same request (`400 VALIDATION_FAILED` otherwise), so a stored credential can never be replayed against a different server                                                                                                                                                                                                                     |
-| `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `gateway`      | _super_admin_ — `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Whoever controls it directs clients to send their gateway credentials to that origin, so it needs `super_admin` like `smtp` and `captcha`.                                                                                                                                                                                                                                          |
+**SMTP rules.** Changing `host`, `port`, `secure` or `username` while a password
+is stored (or set by the environment) requires a fresh `password` in the same
+request, so a stored credential is never replayed against a different server.
+Connection fields are compared after merging overrides over the environment
+defaults. Clearing the password override restores the environment password,
+and is allowed only when the effective connection matches the environment's;
+otherwise the whole patch is `400 VALIDATION_FAILED`. The audit row records
+`smtp_password_source_change: { from, to }` when the source moves between
+`override` and `environment`.
 
-SMTP connection changes are compared after merging stored overrides over the
-environment defaults. Clearing the SMTP password with `null` or `""` restores
-the environment password and is allowed only when the effective `host`, `port`,
-`secure`, and `username` all match the environment connection. Otherwise the
-entire patch fails with `400 VALIDATION_FAILED`, even when no connection field
-is included in that patch. Restore the environment connection with a fresh
-password before clearing the override. The `admin.settings_update` audit details
-include `smtp_password_source_change: { from, to }` when the source changes
-between `override` and `environment`; no credential or connection values are logged.
+**CAPTCHA rules.** All of these reject the whole patch with
+`400 VALIDATION_FAILED`:
 
-An enabled CAPTCHA configuration requires a provider other than `none`, a
-non-empty site key, and a usable secret (supplied now or already stored).
-`400 VALIDATION_FAILED` rejects the entire patch if any is missing; disable
-CAPTCHA in the same patch before clearing a required key. An unreadable stored
-secret must be replaced or re-encrypted before activation can be saved.
+- An enabled configuration needs a provider other than `none`, a non-empty site
+  key and a usable secret (sent now or already stored). Disable CAPTCHA in the
+  same patch before clearing a required key; an unreadable stored secret must
+  be replaced first.
+- Changing `provider` while CAPTCHA is (or becomes) enabled needs a
+  `secret_key` in the same request, so a stored secret is never sent to another
+  vendor.
 
-Moving `provider` while CAPTCHA is (or becomes) enabled also requires a
-`secret_key` in the same request, or the whole patch is refused with
-`400 VALIDATION_FAILED`. A vendor secret is issued by one vendor: replaying the
-stored one against another's `siteverify` would disclose a write-only
-credential to a third party the operator never chose, and could not have worked
-anyway. This is the rule `smtp` applies to a connection change, for the same
-reason.
+**Activation self-test.** A patch that turns CAPTCHA on, or changes `provider`,
+`site_key` or `secret_key` while it is on, must carry a `captcha_token` solved
+against the configuration the patch describes. The server verifies it with the
+vendor before writing anything (for hCaptcha, together with the site key). If
+it cannot be proven, the answer is `400 CAPTCHA_SELF_TEST_FAILED`
+(`details.reason`: `token_required`, `rejected`, `provider_unreachable`) and
+nothing changes. Re-saving an unchanged configuration, and turning CAPTCHA
+**off**, never need a token. A proven change is audited with
+`captcha_self_test: "passed"`. The caller's address is forwarded to the vendor
+as `remoteip`, so solve the token from the same address that sends the request.
 
-**The activation self-test.** A patch that turns CAPTCHA on, or that changes
-`provider`, `site_key` or `secret_key` while it is on, must also carry a
-`captcha_token` minted by the **configuration the patch describes**. The server
-verifies it with the vendor — the same call a login makes — before it writes
-anything. For hCaptcha the site key goes with it as `sitekey`, because an
-hCaptcha secret is account-scoped and may cover many sites; Turnstile and
-reCAPTCHA pair a secret with a single site key, so verifying the token there
-already proves which site key minted it. A patch that cannot be proven is
-refused with `400 CAPTCHA_SELF_TEST_FAILED` (`details.reason`: `token_required`,
-`rejected`, `provider_unreachable`) leaving every setting exactly as it was.
-Without this a mistaken save made register **and login** demand a challenge the
-portal could not verify, locking out every account including the super admin who
-saved it (ferrum-nexus#252). The admin settings page renders the widget from the
-pending values, which is where the token comes from.
+The CAPTCHA write is a compare-and-swap on the rows the proof was made against:
+if another super admin changed them meanwhile, the patch is `409 CONFLICT` and
+nothing is written. Re-read, solve a fresh challenge and resend.
 
-Nothing else needs a token: re-saving an unchanged configuration does not, and
-turning CAPTCHA **off** never does — that is the in-portal way back for whoever
-can still authenticate. When the change is proven, the `admin.settings_update`
-audit row records `captcha_self_test: "passed"`. For a portal where nobody can
-authenticate any more, see
+Verification fails closed: incomplete settings or an undecryptable secret
+refuse sign-in and registration rather than exempting them. For a portal where
+nobody can sign in any more, see
 [`operations.md`](operations.md#recovering-a-portal-locked-out-by-captcha).
-
-The public CAPTCHA configuration advertises an active widget only with a site
-key and a stored secret. Incomplete legacy settings and unreadable secrets
-still fail verification closed; missing configuration never silently exempts
-sign-in or registration from a configured challenge.
-
-→ the same shape as `GET /api/admin/settings`. The audit row records the
-**names** of the changed keys and never their values.
-
-Two super admins editing CAPTCHA at once do not merge. The vendor round-trip
-cannot happen inside the transaction, so the write is a compare-and-swap on the
-`captcha` rows the proof was made against: if either has moved in between, the
-patch is refused with `409 CONFLICT` and nothing is written. Re-read
-`GET /api/admin/settings`, solve a fresh challenge and send it again.
 
 ```bash
 curl -sS -b cookies.txt -X PUT http://127.0.0.1:8787/api/admin/settings \
@@ -1268,34 +1035,28 @@ curl -sS -b cookies.txt -X PUT http://127.0.0.1:8787/api/admin/settings \
         "captcha_token":"<token solved with those values>"}}'
 ```
 
-Solve that token from the same address this request is sent from: the caller's
-address is forwarded to the vendor as `remoteip`, exactly as a login forwards
-the visitor's, and Turnstile and hCaptcha may reject a token that was solved
-somewhere else.
-
 ### `POST /api/admin/settings/smtp-test`
 
-_admin_ — sends a probe message **straight through SMTP, bypassing the
-outbox**, so a misconfiguration is reported immediately.
-
-Body: `{ "to_email"?: string }` — defaults to the calling admin's address.
+_admin_ — sends a probe message **straight through SMTP, bypassing the outbox**.
+Body `{ "to_email"?: string }`, defaulting to the caller's address. Audited as
+`admin.smtp_test`.
 
 ```json
 { "ok": false, "error": "getaddrinfo ENOTFOUND smtp.example.com" }
 ```
 
-Note this is a `200` with `ok: false`, not an error response.
+A delivery failure is a `200` with `ok: false`, not an error response.
 
 ### `GET /api/admin/email-templates`
 
 _admin_ → `{ "templates": EmailTemplate[], "keys": EmailTemplateKey[] }`.
-`templates` lists only the keys an admin has **overridden**; `keys` is the full
-set.
+`templates` lists only overridden keys; `keys` is the full set.
 
 ### `GET /api/admin/email-templates/:key`
 
-_admin_ — `key` ∈ `verification`, `password_reset`, `access_approved`, `access_denied`,
-`access_revoked`, `message_received`, `mass`, `credential_rotated`.
+_admin_ — `key` ∈ `verification`, `password_reset`, `access_approved`,
+`access_denied`, `access_revoked`, `message_received`, `mass`,
+`credential_rotated`.
 
 ```json
 {
@@ -1323,64 +1084,56 @@ _admin_ — `key` ∈ `verification`, `password_reset`, `access_approved`, `acce
 }
 ```
 
-When no override exists, the built-in default is returned with a synthetic id.
-
-`available_variables` lists supported placeholder names. Every template includes
-`portal_name`, `portal_url`, `recipient_name`, `recipient_email`, and `year`.
-`password_reset` adds only `reset_url`; `verification` adds only `verification_url`.
-Neither `reset_token` nor `verification_token` is advertised or interpolated.
-Existing stored references to those retired placeholders render as empty strings.
-See the [admin guide](guides/admin-guide.md#placeholders) for the other keys.
+Without an override, the built-in default is returned with a synthetic id.
+Every template has `portal_name`, `portal_url`, `recipient_name`,
+`recipient_email` and `year`; `password_reset` adds `reset_url` and
+`verification` adds `verification_url`. See the
+[admin guide](guides/admin-guide.md#placeholders) for the other keys.
 
 ### `PUT /api/admin/email-templates/:key`
 
 _admin_ — body `subject` (1–300), `body_html` (1–100 000), `body_text`
-(1–100 000). All three are required. → `{ "template": EmailTemplate }`.
+(1–100 000), all required → `{ "template": EmailTemplate }`. The
+`admin.template_update` audit row records `body_html_sha256` and
+`body_text_sha256`.
 
-Referencing `{{reset_token}}` or `{{verification_token}}` in any of these fields
-returns `400 VALIDATION_FAILED`, including whitespace-padded placeholders. The
-error message names the retired variable and `details` contains `field` and
-`variable`. No template is saved. Use `{{reset_url}}` / `{{verification_url}}`
-for the server-generated action links; other unknown placeholders still render
-empty. A successful save records `body_html_sha256` and `body_text_sha256` in
-`admin.template_update` audit details, as SHA-256 hex digests of each saved UTF-8
-body string.
+Each rule below is a `400 VALIDATION_FAILED` and nothing is saved:
 
-All three fields also enforce the email link policy. Absolute HTTP(S) URLs,
-protocol-relative URLs, URL attributes (`href`, `src`, `action`, `srcset`,
-`data`, `poster`, `formaction`, `background`, `xlink:href`) and CSS `url(...)`
-must resolve to the `NEXUS_PUBLIC_URL` origin or an exact host in the
-operator-only `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` setting. The default
-allowlist is empty. HTML entities and scheme/host case are normalized;
-`javascript:` and `data:` are always refused. Ambiguous or active HTML/CSS is
-also refused; see the [template authoring rules](guides/admin-guide.md#placeholders).
+- `{{reset_token}}` or `{{verification_token}}` anywhere (retired;
+  `details: { field, variable }`). Use `{{reset_url}}` / `{{verification_url}}`.
+  Other unknown placeholders render empty.
+- **Link policy.** Absolute and protocol-relative URLs, URL attributes (`href`,
+  `src`, `action`, `srcset`, `data`, `poster`, `formaction`, `background`,
+  `xlink:href`) and CSS `url(...)` must point at the `NEXUS_PUBLIC_URL` origin
+  or an exact host in `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` (empty by
+  default). `javascript:` and `data:` are always refused, as is ambiguous or
+  active HTML/CSS.
+- `{{reset_url}}` and `{{verification_url}}` may only be the whole `href` of an
+  anchor, or a whitespace-delimited URL in `body_text`. Any placeholder inside a
+  URL or attribute must be the entire value and name a `*_url` variable.
 
-`{{reset_url}}` and `{{verification_url}}` may only be the entire `href` value
-of an HTML anchor or a whitespace-delimited URL in `body_text`. Other attributes,
-HTML text, subjects and concatenation into another URL are refused, including
-URLs on approved hosts. Any placeholder in a URL or attribute must supply the
-entire value and name a `*_url` variable. A violation returns `400 VALIDATION_FAILED` before saving or
-auditing; the message names the field, offending host or construct, and setting.
-`details` contains `field`, `construct`, and `setting`. URL paths, query strings
-and token values are not included in these errors. Stored templates and their
-rendered destinations are revalidated before enqueueing; refusal logs a warning
-and creates no outbox entry.
+A policy error's `details` carries `field`, `construct` and `setting`, never URL
+paths, query strings or tokens. Stored templates are revalidated before each
+send; a refused one logs a warning and queues nothing. See the
+[template authoring rules](guides/admin-guide.md#placeholders).
 
 ### `POST /api/admin/mass-email`
 
 _admin_ — enqueues **one outbox row per recipient**, never a BCC blast.
 
-| Field               | Type                              | Notes                                                             |
-| ------------------- | --------------------------------- | ----------------------------------------------------------------- |
-| `subject`           | string                            | 1–300                                                             |
-| `body_html`         | string                            | ≤ 100 000; at least one of html/text must be non-empty            |
-| `body_text`         | string                            | ≤ 100 000                                                         |
-| `audience.scope`    | `all` \| `filtered` \| `explicit` | `all` ignores the other filters and never mails disabled accounts |
-| `audience.roles`    | Role[]                            | `filtered` only                                                   |
-| `audience.status`   | `active` \| `disabled`            | `filtered` only, defaults to `active`                             |
-| `audience.org_id`   | uuid                              | `filtered` only                                                   |
-| `audience.user_ids` | uuid[] (≤ 5000)                   | required when scope is `explicit`                                 |
-| `idempotency_key`   | string, 8–128                     | reuse makes the send at-most-once                                 |
+| Field               | Type                              | Notes                                                            |
+| ------------------- | --------------------------------- | ---------------------------------------------------------------- |
+| `subject`           | string                            | 1–300                                                            |
+| `body_html`         | string                            | optional, ≤ 100 000; at least one of html/text must be non-empty |
+| `body_text`         | string                            | optional, ≤ 100 000                                              |
+| `audience.scope`    | `all` \| `filtered` \| `explicit` | `all` ignores the filters below                                  |
+| `audience.roles`    | Role[]                            | `filtered` only                                                  |
+| `audience.status`   | `active` \| `disabled`            | `filtered` only; default `active`                                |
+| `audience.org_id`   | id                                | `filtered` only                                                  |
+| `audience.user_ids` | id[] (≤ 5000)                     | required and non-empty for `explicit`                            |
+| `idempotency_key`   | string, 8–128                     | reuse makes the send at-most-once                                |
+
+`all` and `explicit` only ever reach **active** accounts.
 
 ```json
 { "enqueued": 240, "recipients": 251, "batch_id": "c3f0…" }
@@ -1388,31 +1141,20 @@ _admin_ — enqueues **one outbox row per recipient**, never a BCC blast.
 
 Rows are keyed `mass:<batch>:<user_id>`, where `<batch>` is your
 `idempotency_key` or a fresh UUID. `recipients` is who matched; `enqueued`
-excludes duplicates suppressed by the key — reposting the same request with the
-same key enqueues nothing new.
+excludes rows the key already produced, so resending with the same key queues
+nothing new.
 
-**The fan-out is atomic.** Every outbox row and the `admin.mass_email` audit row
-commit together, so a campaign either went out whole or not at all; there is no
-state in which part of your audience was mailed and nothing recorded it.
+The fan-out is atomic: every outbox row and the `admin.mass_email` audit row
+commit together. `batch_id` is returned on success **and** in the failure
+`details`; retry with it as `idempotency_key` and nobody is mailed twice.
 
-`batch_id` is echoed on success **and** carried in the failure body, because a
-lost response to a campaign that did commit looks exactly like one that did not.
-Either way, retry with that value as `idempotency_key` and nobody is mailed
-twice. A failure is `500 OUTBOX_FAILURE` with
-`details: { batch_id, recipients, enqueued: 0 }`. Contention that outlives the
-adapter's retry budget is `409 CONFLICT` instead, with `batch_id` in `details`
-and nothing queued — retry it with that key.
+The audience is capped by `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5 000, `0`
+disables), checked before anything is written.
 
-**The audience is capped** by `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5 000,
-`0` disables), checked before anything is rendered or written, because the
-fan-out is what one transaction has to hold. Exceeding it is
-`429 QUOTA_EXCEEDED` with
-`details: { limit, recipients, setting: "NEXUS_MAX_MASS_EMAIL_RECIPIENTS" }`.
-
-Errors: `400 VALIDATION_FAILED` (empty subject/body, or an empty explicit
-recipient list), `429 QUOTA_EXCEEDED` (audience past the ceiling),
-`409 CONFLICT` (database contention — retry with the same `idempotency_key`),
-`500 OUTBOX_FAILURE` (nothing queued; retry with the same key).
+Errors: `400 VALIDATION_FAILED` (empty subject/body, empty explicit list),
+`429 QUOTA_EXCEEDED` (`details: { limit, recipients, setting }`),
+`409 CONFLICT` (contention; `batch_id` in `details`),
+`500 OUTBOX_FAILURE` (`details: { batch_id, recipients, enqueued: 0 }`).
 
 ### `GET /api/admin/audit-logs`
 
@@ -1420,7 +1162,7 @@ _admin_ — `Paginated<AuditLog>`, newest first.
 
 | Query             | Type                                       |
 | ----------------- | ------------------------------------------ |
-| `actor_user_id`   | uuid                                       |
+| `actor_user_id`   | id                                         |
 | `action`          | exact action string, e.g. `access.approve` |
 | `target_type`     | e.g. `api`, `grant`, `user`, `credential`  |
 | `target_id`       | string                                     |
@@ -1428,14 +1170,12 @@ _admin_ — `Paginated<AuditLog>`, newest first.
 | `to`              | ISO-8601 datetime, exclusive upper bound   |
 | `limit`, `offset` | pagination                                 |
 
-Bounds are normalized to UTC millisecond precision: `2026-09-08T01:46:15Z`
-means `2026-09-08T01:46:15.000Z` for both comparisons.
-Each row includes `actor` with the current user's `id`, `email`, `display_name`
-and `role`, or `null` when no user can be resolved. `actor_user_id` remains
-present; a non-null id with a null summary denotes an unknown user, while a
-null id denotes system or anonymous activity. `actor_role` is the historical role.
-
-The full action catalog is in [`security.md`](security.md#10-audit-event-catalog).
+`from`/`to` are normalized to UTC milliseconds (`…:15Z` means `…:15.000Z`).
+Each row carries `actor` — the current `id`, `email`, `display_name` and `role`
+of the actor, or `null` when it cannot be resolved — alongside the stored
+`actor_user_id` and the historical `actor_role`. A `null` `actor_user_id` is
+system or anonymous activity. The action catalog is in
+[`security.md`](security.md#10-audit-event-catalog).
 
 ```bash
 curl -sS -b cookies.txt \
@@ -1444,189 +1184,121 @@ curl -sS -b cookies.txt \
 
 ### God mode
 
-Four endpoints, all _super_admin_, all requiring a non-empty `reason` (1–2000
-chars) that lands in a `god.*` audit row **in addition to** the ordinary audit
-row the underlying operation writes.
+Four routes, all _super_admin_, all requiring a `reason` (1–2000 chars) that is
+written to a `god.*` audit row **in addition to** the audit row of the
+underlying operation.
 
 #### `POST /api/admin/god/revoke-grant`
 
-Body `{ "grant_id": uuid, "reason": string }` → `{ "grant": Grant }`.
-Revokes any grant regardless of who owns the API; removes the ACL group from
-the consumer.
+Body `{ "grant_id", "reason" }` → `{ "grant": Grant }`. Revokes any grant,
+whoever owns the API, and removes the ACL group from the consumer.
 
 #### `POST /api/admin/god/delete-api`
 
-Body `{ "api_id": uuid, "reason": string, "revoke_grants"?: boolean }`
+Body `{ "api_id", "reason", "revoke_grants"?: boolean }` →
+`{ "deleted_api_id": "…", "revoked_grants": 7 }`.
 
-```json
-{ "deleted_api_id": "…", "revoked_grants": 7 }
-```
-
-Deletes the API and its Edge proxy + plugins whoever owns it. Deletion always
-strips ACL groups and removes grant rows; `revoke_grants: true` additionally
-records each one as an individual `access.revoke` first, which is what an audit
-reviewer wants.
+Deletes the API with its Edge proxy and plugins, whoever owns it. Deletion
+always strips ACL groups and removes grant rows; `revoke_grants: true` also
+records each as an individual `access.revoke` first.
 
 #### `POST /api/admin/god/disable-user`
 
-Body `{ "user_id": uuid, "reason": string, "revoke_grants"?: boolean }`
+Body `{ "user_id", "reason", "revoke_grants"?: boolean }`
 
 ```json
-{
-  "user": { … },
-  "revoked_grants": 3,
-  "terminated_sessions": 2,
-  "gateway_teardown": "ok"
-}
+{ "user": { … }, "revoked_grants": 3, "terminated_sessions": 2, "gateway_teardown": "ok" }
 ```
 
-Disables the account and destroys every session it holds. `gateway_teardown`
-carries the same `"ok" | "no_consumer" | "pending"` values as
-`PATCH /api/users/:id`, and `pending` means the same thing here: the gateway
-credentials are still live and the revocation is queued for retry. Errors:
-`409 LAST_SUPER_ADMIN` when the target is the last active super admin —
-**including when that is you**, because "promote someone else first" is the
-useful message; `409 CONFLICT` for any other attempt to disable your own
-account. `revoke_grants: true` revokes the account's grants only after the
-disable has committed, so a refused disable leaves every grant in place.
+Disables the account and ends its sessions. `gateway_teardown` has the same
+values and meaning as on [`PATCH /api/users/:id`](#patch-apiusersid). The
+disable, the session purge, the queued revocation and the `user.disable` and
+`god.disable_user` audit rows commit in one transaction;
+`god.disable_user_complete` records what followed.
 
-The disable, the end of its sessions, its queued gateway revocation and its
-`user.disable` and `god.disable_user` audit rows commit in one transaction, so a
-failed audit write leaves the account as it was. What followed is recorded as
-`god.disable_user_complete`.
-
-The sweep never reports a partial result as success. When any grant cannot be
-fully revoked, `god.disable_user_complete` records
-`failed_steps: ["revoke_grants"]` and the grants that failed, and the request
-answers with the error — `502 EDGE_ERROR` when a gateway step failed — whose
-`details.failed_grants` lists each one's `grant_id`, `api_id`,
+`revoke_grants: true` revokes the account's grants after the disable commits.
+If any grant cannot be fully revoked, the request fails (`502 EDGE_ERROR` for a
+gateway step) with `details.failed_grants` listing each `grant_id`, `api_id`,
 `application_id` and the `stage` it stopped at (`claim`, `lookup` or
-`gateway`). Each grant's `access.revoke` row commits with its claim, so a grant
-whose row cannot be written is never claimed and stops at `claim`, still active
-for a repeat of the disable. When the inline gateway revocation succeeded but
-its `user.gateway_teardown_complete` row could not be written,
-`god.disable_user_complete` is still written, with `record_gateway_teardown` in
-`failed_steps`, and the request answers with that error. A grant stopped at `lookup` or `gateway` stays `revoked` in the
-portal, so a later re-enable does not restore it; the account teardown in the
-same request strips its ACL group, and when that fails too it stays queued for
-the teardown worker. Should the account be re-enabled before the worker gets
-to it, the re-enable — which cancels the queued teardown — rebuilds each
-identity's `nexus:api:<id>:approved` groups from its active grants alone, so the
-group is dropped then (groups outside that namespace are left alone). Only a
-`claim` failure leaves a grant active; repeating the request retries it, and
-re-runs the teardown. A consumer already gone from the gateway counts as its
-group removed. Each swept grant's originating access request moves to
-`revoked`, as with a targeted revocation.
+`gateway`), and `god.disable_user_complete` records
+`failed_steps: ["revoke_grants"]`. Only a `claim` failure leaves the grant
+active; repeat the request to retry it. A grant stopped at `lookup` or `gateway`
+is already `revoked` in the portal, and its ACL group is removed by the account
+teardown (or dropped when a re-enable rebuilds the groups). A failure to record
+`user.gateway_teardown_complete` is reported the same way, as
+`record_gateway_teardown`. Each swept grant's originating access request moves
+to `revoked`.
+
+Errors: `409 LAST_SUPER_ADMIN` (the target is the last active super admin,
+including yourself), `409 CONFLICT` (disabling yourself otherwise).
 
 #### `POST /api/admin/god/broadcast`
 
-Body `{ "subject": string (1–300), "body": string (1–20 000), "audience": MassEmailAudience, "send_email"?: boolean }`
-
-Optional `idempotency_key` (8–128 characters) identifies an email campaign.
-Reuse it when retrying; use a new key to deliberately resend identical content.
-Email deduplication is scoped to the actor, normalized subject/body, audience and
-recipient. Without a key, identical content and audience retain stable email
-retry behavior. Different content or a new key queues a new email. Replays report
-only newly created outbox rows in `emails_enqueued`. Notifications and inbox
-messages are still created for each call; this key deduplicates email only.
+Body: `subject` (1–300), `body` (1–20 000), `audience` (the `MassEmailAudience`
+of [mass email](#post-apiadminmass-email)), optional `send_email` (boolean),
+optional `idempotency_key` (8–128).
 
 ```json
 { "notified": 251, "emails_enqueued": 251, "threads_created": 88, "delivered": 251, "failed": 0 }
 ```
 
-Sends a bell notification to every recipient, drops the message into each
-recipient's **platform inbox thread** (so it survives being dismissed from the
-bell and any admin can follow up in the same thread), and optionally enqueues
-an email. The acting super admin is excluded from their own broadcast.
+Sends a bell notification to every recipient, posts the message into each
+recipient's **platform thread** (so any admin can follow up there), and
+optionally queues an email. The sender is excluded from their own broadcast.
+`delivered` and `failed` count recipients whose inbox message was or was not
+written; a per-recipient failure is logged and skipped, not fatal.
 
-**Two ceilings bound it, both checked before the first row is written.**
-`NEXUS_MAX_BROADCAST_RECIPIENTS` (default 5 000, `0` disables) caps one
-announcement's audience; `NEXUS_MAX_BROADCASTS_PER_DAY` (default 20, `0`
-disables) caps how many one administrator may send in a rolling 24 hours,
-counted from their own `god.broadcast` audit rows. Exceeding either is
-`429 QUOTA_EXCEEDED` naming the limit, the audience size and the variable an
-operator would raise — a refused announcement has to say how to send it anyway.
+`idempotency_key` deduplicates **email only** (scoped to the sender, normalized
+subject/body, audience and recipient); notifications and inbox messages are
+created on every call. Reuse the key when retrying; replays count only new
+outbox rows in `emails_enqueued`.
 
-The message rows a broadcast writes carry `broadcast: true` and are deliberately
-**not** charged to the acting administrator's daily message budget. They used to
-be: one broadcast to a portal larger than that budget refused every ordinary
-message that administrator sent for the next 24 hours, while further broadcasts,
-checked against nothing, stayed available.
+Two ceilings are checked before anything is written:
+`NEXUS_MAX_BROADCAST_RECIPIENTS` (default 5 000, `0` disables) per broadcast,
+and `NEXUS_MAX_BROADCASTS_PER_DAY` (default 20, `0` disables) per administrator
+per rolling 24 hours, counted from their `god.broadcast` audit rows. That row
+is written before the first recipient (`details.phase: "started"`), so a failed
+attempt still counts; `god.broadcast_complete` follows with the counts.
+Broadcast messages carry `broadcast: true` and do not count against the
+sender's daily message budget.
 
-`delivered` counts the recipients whose inbox message was actually written and
-`failed` the ones the fan-out could not reach. A per-recipient failure is logged
-and skipped rather than fatal — one bad account must not stop an emergency
-announcement — so these two are how a partial broadcast says so; the same pair
-lands in the audit trail.
-
-**The trail is two rows.** `god.broadcast` is written _before_ the first
-recipient is touched, with `details.phase: "started"` and the audience size: it
-is what `NEXUS_MAX_BROADCASTS_PER_DAY` counts, so an attempt is charged whether
-or not it goes on to succeed. `god.broadcast_complete` follows the fan-out with
-`delivered`, `failed` and the notification/thread/email counts.
-
-Errors: `400 VALIDATION_FAILED` (empty subject/body, or an audience that matches
-nobody), `429 QUOTA_EXCEEDED` (either ceiling — `details` names the limit, the
-audience size and the setting), `409 CONFLICT` (another send from this account
-has held the per-administrator section for more than 30 seconds — retry).
+Errors: `400 VALIDATION_FAILED` (empty subject/body, or an audience matching
+nobody), `429 QUOTA_EXCEEDED` (either ceiling; `details` names the limit,
+audience size and setting), `409 CONFLICT` (another broadcast from this
+account has held its lease for more than 30 seconds — retry).
 
 ---
 
 ## Catalog
 
-Registered under `/api/catalog`; every endpoint needs a _session_. All reads —
-there is no mutation here and therefore no CSRF concern.
+Registered under `/api/catalog`; _session_, reads only.
 
-Visibility is decided by the catalog service, which answers `404` rather than
-`403` for an API you may not see, so the catalog never confirms that an
-internal API exists.
+| API state                | unrelated account: listed | unrelated account: can open | viewer, grantee, owner, admin |
+| ------------------------ | ------------------------- | --------------------------- | ----------------------------- |
+| `published` + `public`   | yes                       | yes                         | listed and openable           |
+| `published` + `internal` | no                        | **yes** (with the link)     | listed and openable           |
+| `published` + `private`  | no                        | **no** (`404`)              | listed and openable           |
+| `retired`                | no                        | no (`404`)                  | listed and openable           |
 
-| API state                           | unrelated client | viewer | grantee | owner | admin |
-| ----------------------------------- | ---------------- | ------ | ------- | ----- | ----- |
-| `published` + `public` — **list**   | yes              | yes    | yes     | yes   | yes   |
-| `published` + `internal` — **list** | no               | yes    | yes     | yes   | yes   |
-| `published` + `private` — **list**  | **no**           | yes    | yes     | yes   | yes   |
-| `retired` — **list**                | no               | yes    | yes     | yes   | yes   |
-| `published` + `public` — **open**   | yes              | yes    | yes     | yes   | yes   |
-| `published` + `internal` — **open** | **yes**          | yes    | yes     | yes   | yes   |
-| `published` + `private` — **open**  | **no**           | yes    | yes     | yes   | yes   |
-| `retired` — **open**                | no               | yes    | yes     | yes   | yes   |
-
-Every catalog route requires a session, so a signed-out caller sees nothing at
-all; that column is omitted rather than repeated as "no" fourteen times.
-
-"Viewer" means an `api_viewers` row — somebody the provider explicitly
-authorized to read this API's documentation. **It is not a grant**: it confers
-no ACL group, touches no Ferrum consumer and reaches no gateway. An authorized
-viewer reads the docs and, if the API is `requestable`, asks for access like
-anybody else. See
-[`POST /api/apis/:id/viewers`](#post-apiapisidviewers).
-
-The three visibilities answer two different questions:
-
-- **`internal` means _unlisted_, not secret**, and still does. A provider hands
-  out the link and the recipient can read the docs and raise an access request.
-  Adding `private` changed nothing about it — the two are separate values
-  precisely so that APIs already published as `internal` keep the semantics
-  they were published under.
-- **`private` is the permission-enforced one.** Neither listed nor openable
-  unless the caller is on one of the lists above. Knowing or guessing the slug
-  is not access, and an unauthorized caller gets `404` rather than `403`, so
-  the endpoint does not confirm that the slug names anything. Search results
-  and their `total` apply the same clause in the database, so a private API
-  cannot be found by paging or counting either. An account that cannot see a
-  private API cannot request access to it, for the same reason: the request
-  would confirm the API exists.
+- A **grantee** holds an active grant through any of its identities (the
+  account or one of its applications).
+- A **viewer** has an `api_viewers` row: the provider authorized them to read
+  the documentation. It is **not a grant** — no ACL group, no consumer, no
+  gateway call. See [`POST /api/apis/:id/viewers`](#post-apiapisidviewers).
+- **`internal` means unlisted, not secret.** Anyone with the link can read the
+  docs and request access.
+- **`private` is enforced.** A caller who is not on one of the lists gets
+  `404`, never `403`, and search results and `total` exclude it too. Such a
+  caller also cannot request access to it or attach a thread to it.
 
 **None of this is data-plane authorization.** What stops an unapproved caller
-reaching the API is the `access_control` plugin and its ACL group on the
-gateway. Visibility governs the _documentation_, and a `private` API published
-with `requestable: false` and no access control in front of it is still
-callable by anyone who knows the URL.
+reaching the API is the `access_control` plugin on the gateway. A `private` API
+published with `requestable: false` is callable by anyone with a portal
+credential who knows the URL.
 
 ### `GET /api/catalog`
 
-_session_ — `Paginated<CatalogApi>`. Each row is an `Api` plus `owner`
+_session_ — `Paginated<CatalogApi>`: each row is an `Api` plus `owner`
 (`UserSummary` \| null) and `access_state`.
 
 | Query             | Type                                         |
@@ -1634,13 +1306,13 @@ _session_ — `Paginated<CatalogApi>`. Each row is an `Api` plus `owner`
 | `q`               | substring match on name, slug or description |
 | `requestable`     | boolean                                      |
 | `visibility`      | `public` \| `internal` \| `private`          |
-| `owner_user_id`   | uuid                                         |
+| `owner_user_id`   | id                                           |
 | `limit`, `offset` | pagination                                   |
 
 `access_state` ∈ `none` \| `open` \| `pending` \| `granted` \| `denied` \|
-`revoked` \| `owner`. `open` means the API does not require an access request
-(`requestable: false`) and any portal account may call it. `none` is reserved
-for requestable APIs the caller has not asked for and does not hold a grant on.
+`revoked` \| `owner`. `open` means the API takes no access requests
+(`requestable: false`) and any portal account may call it; `none` means a
+requestable API the caller has neither requested nor been granted.
 
 ### `GET /api/catalog/:slug`
 
@@ -1651,29 +1323,24 @@ _session_
   "api": { …, "owner": { … }, "access_state": "pending" },
   "spec": { "id": "…", "api_id": "…", "version": "2.4.0", "parsed_title": "Billing API",
             "parsed_version": "2.4.0", "is_current": true, "created_at": "…", "updated_at": "…" },
-  "my_request": { … } ,
+  "my_request": { … },
   "my_grant": null
 }
 ```
 
-`spec` carries metadata only, never the document. `my_request` is the caller's
-latest request for this API; `my_grant` their active grant. Both may be `null`.
-`404 NOT_FOUND` when the API does not exist or is not viewable.
-
-Both are **account-wide representatives**, not the state of any one identity:
-`my_request` is the newest request by any of the caller's identities, and
-`my_grant` the account's own active grant or else one held by one of its
-applications — the grant that admits the caller to a `private` API's
-documentation. Whether a particular identity may ask for access is answered by
+`spec` is metadata only, never the document. `my_request` is the newest request
+by any of the caller's identities; `my_grant` is the account's own active grant,
+or else one held by one of its applications. Both may be `null`. For one
+identity's standing, use
 [`GET /api/catalog/:slug/access`](#get-apicatalogslugaccess).
+
+`404 NOT_FOUND` when the API does not exist or is not viewable.
 
 ### `GET /api/catalog/:slug/access`
 
-_session_ — one identity's standing on one API.
-
-| Query            | Type                                                                                    |
-| ---------------- | --------------------------------------------------------------------------------------- |
-| `application_id` | one of the caller's own applications, or `account` (the default) for the account itself |
+_session_ — one identity's standing on one API. Query `application_id`: one of
+the caller's own applications, or `account` (the default) for the account
+itself.
 
 ```json
 {
@@ -1683,25 +1350,20 @@ _session_ — one identity's standing on one API.
 }
 ```
 
-`application` is `null` for the account itself. `request` is that identity's
-newest request for the API (any status) and `grant` its active grant; both are
-scoped to exactly that identity — a grant or pending request held by another of
-the account's identities is never reported here. Grants and pending requests are
-unique per `(api, account, application)`, the same key
-[`POST /api/access-requests`](#post-apiaccess-requests) uses to refuse a
-duplicate, so an identity with neither may request access even while another of
-the account's identities is pending or approved.
+`application` is `null` for the account. `request` is that identity's newest
+request (any status) and `grant` its active grant — never another identity's.
+Grants and pending requests are unique per `(api, account, application)`, so an
+identity with neither may request access even while another identity of the
+same account is pending or approved.
 
-Authorization is the detail read's, checked first: `404 NOT_FOUND` when the API
-does not exist or is not viewable, whatever identity is named. The application
-must then be the caller's own — **not even an administrator** reads another
-account's application here — and anything else answers `404 NOT_FOUND`. A
-disabled application is still answered, since it keeps the access it already
-holds.
+`404 NOT_FOUND` when the API is not viewable, or the application is not the
+caller's own (not even an admin may read another account's here). A disabled
+application is still answered.
 
 ### `GET /api/catalog/:slug/spec`
 
-_session_ — the normalized current document for consumers.
+_session_ — the current document, normalized for consumers. `60/min` per
+account (see [Rate limits](#rate-limits)).
 
 ```json
 {
@@ -1714,228 +1376,156 @@ _session_ — the normalized current document for consumers.
 }
 ```
 
-`content_type` is `application/json` or `application/yaml`, matching
-`raw_spec`. JSON uploads remain JSON; YAML uploads remain YAML. Formatting and
-YAML comments are not preserved. OpenAPI root, path-item and operation `servers`
-are replaced with the API's `invoke_url`, including those in webhooks, reusable
-path items and callbacks. Link Object `server` entries in components and response
-links are also replaced. Schemas, examples and extensions remain untouched.
-When the public gateway origin is unset, only `listen_path` is
-used; neither the upstream nor the Admin API origin is a fallback. The
-Documentation tab renders this same normalized document.
+`content_type` (`application/json` or `application/yaml`) matches the upload's
+format; formatting and YAML comments are not preserved. Every structural
+`servers` entry — root, path item, operation, webhooks, reusable path items,
+callbacks, and Link Object `server` — is replaced with the API's `invoke_url`
+(or just `listen_path` when no public gateway origin is set). Schemas, examples
+and extensions are untouched. The Documentation tab renders this same
+document; the provider's original is only at `GET /api/apis/:id/spec`.
 
-`404 NOT_FOUND` when the API is not viewable or has no spec. A stored document
-that cannot be normalized returns `400 SPEC_INVALID` without its contents or
-parser diagnostics. `internal` APIs remain unlisted but readable by signed-in
-users holding the link; a `private` API's specification is served only to the
-accounts its detail page is served to, and answers `404` to everyone else. The
-provider's original is available only through `GET /api/apis/:id/spec`.
+The result is cached in process per revision and gateway address (at most 64
+documents / 32 MiB), after the visibility check.
 
-The normalized text is cached in process, per revision and server address (so
-per gateway origin and listen path), bounded at 64 documents and 32 MiB; a new
-revision, a rollback or a changed gateway origin is a different key, so the
-cache is never stale. It is consulted only after the visibility check above, so
-an account that may not open the API gets the same `404` whether or not the
-document is cached. `429 RATE_LIMITED` past **60 requests per minute** from one
-account (the IP for a request with no session), installed when
-`NEXUS_RATE_LIMIT_ENABLED=true`; it is the only catalog route with a limit.
+Errors: `404 NOT_FOUND` (not viewable, or no spec), `400 SPEC_INVALID` (the
+stored document cannot be normalized; no contents or parser output are
+returned).
 
 ---
 
 ## APIs (publishing)
 
-Registered under `/api/apis`. The **whole plugin** requires _provider_ or
-higher. Ownership ("your API, or you are an admin") is checked in the service
-and answers `403 FORBIDDEN`.
+Registered under `/api/apis`; every route needs _provider_. Ownership ("your
+API, or you are an admin") is checked in the service and answers
+`403 FORBIDDEN`.
 
-Spec documents arrive as a JSON string field, not a multipart upload — the SPA
-reads the file client-side, which keeps the CSRF story and the error shape
-identical to every other route.
+Spec documents are sent as a JSON string field, not a multipart upload.
 
-**Two `429`s apply here.**
-
-- `429 RATE_LIMITED` — more than **30 requests per minute** from one account
-  (falling back to the IP for an anonymous caller) to any one of these routes;
-  each route counts separately:
-  - the mutations — `POST /`, `PATCH /:id`, `DELETE /:id`, `PUT /:id/spec`,
-    `PUT|DELETE /:id/plugins/:name`, `POST /:id/viewers`,
-    `DELETE /:id/viewers/:userId`, `POST /:id/revisions/:revisionId/rollback`,
-    `POST /:id/restore-gateway` and `POST /:id/test-consumer`;
-  - the two spec diffs — `GET /:id/revisions/:revisionId/diff` and
-    `POST /:id/spec/diff` — which change nothing but parse and compare two
-    whole documents on every call.
-
-  Installed when `NEXUS_RATE_LIMIT_ENABLED=true`, which is the default outside
-  `NEXUS_ENV=test`. Other reads are not limited, apart from `GET /:id/usage`,
-  which keeps its own 30/min limit because it scrapes the gateway.
-
-- `429 QUOTA_EXCEEDED` — on `POST /` only, when the account already owns
-  `NEXUS_MAX_APIS_PER_OWNER` APIs (default 50; `0` disables the ceiling). The
-  body carries `details: { limit, current, setting }`. The check runs before the
-  first gateway write, so a refused publish creates nothing. Deleting an API
-  frees a slot immediately; retiring one does not, because a retired API keeps
-  its proxy and plugins on the gateway.
+**Limits.** Mutations and the two spec diffs are rate-limited per account (see
+[Rate limits](#rate-limits)). `POST /api/apis` also enforces
+`NEXUS_MAX_APIS_PER_OWNER` (default 50, `0` disables): `429 QUOTA_EXCEEDED` with
+`details: { limit, current, setting }`, checked before any gateway write. A
+retired API still counts; a deleted one does not.
 
 **A new proxy is never briefly open.** Every proxy is created on an unguessable
-staging listen path, gets its auth, ACL, rate-limit and CORS plugins attached
-and associated there, and is moved to `listen_path` as the last gateway write of
-the request. Until then `listen_path` answers `404` — never an unauthenticated
-`200`. The same is true while `spec_enforcement` is being switched, which
-rebuilds the proxy.
+staging path, gets its auth, ACL, rate-limit and CORS plugins there, and moves
+to `listen_path` as the last gateway write. Until then `listen_path` answers
+`404`, never an unauthenticated `200`.
 
-Several fields of the returned `Api` object describe the gateway side of a
-publication. `listen_path` and `invoke_url` are **derived, not stored**: they
-are recomputed on every read from the namespace, the slug and the operator's
-gateway origin, so moving the gateway never leaves a stale row behind. Both are
-also present on the compact `ApiSummary` embedded in access requests, grants and
-message threads.
+### The `Api` object's gateway fields
 
-| Field              | Type                                             | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ------------------ | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `listen_path`      | string                                           | always `/<namespace>/<slug>`, the path the gateway listens on                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `invoke_url`       | string \| null                                   | absolute URL a client calls: the configured gateway origin followed by `listen_path`, e.g. `https://api.example.com/nexus/billing`. `null` when neither `gateway.public_url` nor `FERRUM_GATEWAY_PUBLIC_URL` is set — Nexus never guesses an origin                                                                                                                                                                                                           |
-| `upstream_url`     | string \| null                                   | the upstream Nexus last wrote to the gateway, normalized to `scheme://host:port[/basePath]` (the port always explicit, IPv6 hosts bracketed). `null` on older rows                                                                                                                                                                                                                                                                                            |
-| `cors`             | `{ allowed_origins, allow_credentials }` \| null | the browser CORS policy. `null` means **no `cors` plugin at all** — the gateway adds no CORS headers, which is not the same as an empty allow-list                                                                                                                                                                                                                                                                                                            |
-| `allowed_methods`  | `HttpMethod[]` \| null                           | methods the gateway accepts; `null` accepts every one. This is the **provider's** list: the copy on the proxy additionally carries `OPTIONS` whenever `cors` is set, because a method outside the list is `405`ed **before any plugin runs** and the browser preflight would never reach the `cors` plugin                                                                                                                                                    |
-| `timeouts`         | `{ connect_ms, read_ms, write_ms }` \| null      | backend timeouts in milliseconds; `null` keeps the gateway defaults (5000 / 30000 / 30000). All three move together                                                                                                                                                                                                                                                                                                                                           |
-| `circuit_breaker`  | boolean                                          | when true the proxy carries Edge's default `CircuitBreakerConfig` (5 failures to open, 3 successes to close, 30 s open, tripping on 500/502/503/504 and on connection errors); when false it carries none                                                                                                                                                                                                                                                     |
-| `spec_enforcement` | `docs_only` \| `routes`                          | how much of the current OpenAPI revision the gateway enforces. `docs_only` (the default, and what every API published before this field existed reads back as) means the document is catalog metadata only; `routes` makes the proxy **spec-owned** — Edge imports the document and generates an `openapi_validator` that answers `400` for a path or method the document does not declare. **Request and response bodies are not validated at either level** |
-| `gateway_state`    | `deployed` \| `repair_required`                  | whether the gateway is believed to be serving this API. `repair_required` means the portal has _established_ that it is not — a reconciliation pass answered `404` for the stored proxy, or a restore failed partway — and it stays until `POST /api/apis/:id/restore-gateway` succeeds. It is deliberately separate from `ferrum_proxy_id`, which a repair clears and a restore refills                                                                      |
+`listen_path` and `invoke_url` are **derived on every read** from the
+namespace, slug and gateway origin, so moving the gateway never leaves stale
+rows. Both also appear on the `ApiSummary` embedded in access requests, grants
+and threads.
+
+| Field              | Type                                        | Notes                                                                                                                                                                                                                                                    |
+| ------------------ | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `listen_path`      | string                                      | always `/<namespace>/<slug>`                                                                                                                                                                                                                             |
+| `invoke_url`       | string \| null                              | gateway origin + `listen_path`, e.g. `https://api.example.com/nexus/billing`; `null` when neither `gateway.public_url` nor `FERRUM_GATEWAY_PUBLIC_URL` is set                                                                                            |
+| `upstream_url`     | string \| null                              | the backend last written to the gateway, normalized to `scheme://host:port[/basePath]` (explicit port, IPv6 bracketed); `null` on older rows                                                                                                             |
+| `cors`             | `CorsConfig` \| null                        | `null` means **no `cors` plugin** — no CORS headers at all, which differs from an empty allow-list                                                                                                                                                       |
+| `allowed_methods`  | `HttpMethod[]` \| null                      | methods the gateway accepts; `null` accepts all. The proxy's copy also carries `OPTIONS` whenever `cors` is set, because a method outside the list is refused with `405` before any plugin runs                                                          |
+| `timeouts`         | `{ connect_ms, read_ms, write_ms }` \| null | backend timeouts; `null` keeps the gateway defaults (5000 / 30000 / 30000 ms)                                                                                                                                                                            |
+| `circuit_breaker`  | boolean                                     | `true` attaches Edge's default breaker (5 failures to open, 3 successes to close, 30 s open, trips on 500/502/503/504 and connection errors)                                                                                                             |
+| `spec_enforcement` | `docs_only` \| `routes`                     | `docs_only` (default): the document is catalog metadata only. `routes`: the proxy is **spec-owned** — Edge imports the document and generates an `openapi_validator` that answers `400` for an undeclared path or method. **Bodies are never validated** |
+| `gateway_state`    | `deployed` \| `repair_required`             | `repair_required` means the portal established that the gateway does not serve this API (a reconciliation repair, or a failed restore). It stays until `POST /api/apis/:id/restore-gateway` succeeds                                                     |
 
 `HttpMethod` is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`,
-`TRACE` or `CONNECT` — Edge's own enum.
+`TRACE` or `CONNECT`.
 
-`CorsConfig` contains `allowed_origins` and `allow_credentials`, plus optional
-`allowed_headers` (up to 64 HTTP header-name tokens, each 1–128 characters) and
-`enforce_websocket_origins` (boolean, defaults to `true`). Nexus includes
-`Accept`, `Authorization`, `Content-Type`, `Origin`, and `X-Requested-With`, plus
-`X-API-Key` for `key_auth`, in the gateway's allowed request headers. Extra
-operator headers survive changes; removing a previously supplied portal header
-removes that addition. The CORS method list follows `allowed_methods`, including
-implicit `OPTIONS`; unrestricted APIs use Edge's seven standard CORS methods.
-Auth-only and method-only updates also update the CORS plugin.
+**`CorsConfig`** is `allowed_origins` (1–64 whitespace-free entries of ≤ 255
+chars), `allow_credentials` (default `false`), optional `allowed_headers` (≤ 64
+header-name tokens of 1–128 chars) and optional `enforce_websocket_origins`
+(default `true`).
 
-On **input** (`POST /api/apis` and `PATCH /api/apis/:id`), `origins` is accepted
-as an alias for `allowed_origins` and is normalized to `allowed_origins` before
-anything is stored. Sending both keys with different values is
-`400 VALIDATION_FAILED` with `details` naming `cors.allowed_origins` and
-`cors.origins`. Other CORS shape errors name those accepted keys. Responses and
-the stored `Api.cors` object always emit `allowed_origins` only.
+- On input, `origins` is accepted as an alias for `allowed_origins`; sending
+  both with different values is `400 VALIDATION_FAILED` naming both paths.
+  Responses always use `allowed_origins`.
+- Nexus adds `Accept`, `Authorization`, `Content-Type`, `Origin` and
+  `X-Requested-With` (plus `X-API-Key` for `key_auth`) to the gateway's allowed
+  request headers. The CORS method list follows `allowed_methods` (with
+  implicit `OPTIONS`), or Edge's seven standard methods when unrestricted.
+- Unless `enforce_websocket_origins` is `false`, the exact origins are mirrored
+  onto the proxy's `allowed_ws_origins`, so Edge rejects WebSocket upgrades
+  from unlisted origins or without an `Origin` header. A `*` origin leaves the
+  gate empty, and sending `enforce_websocket_origins: true` with a wildcard is
+  `400 VALIDATION_FAILED`. `false` removes the gate (authentication and ACLs
+  still apply); removing CORS clears it. Older APIs pick this up the next time
+  their CORS policy is saved.
 
-By default, Nexus mirrors exact HTTP(S) CORS origins onto the
-proxy's `allowed_ws_origins`. Wildcards are refused with this option. Edge then
-rejects both unlisted origins and upgrades **without an Origin header**. When
-explicitly false, the proxy has no WebSocket origin gate; authentication and ACLs
-still apply, but browser CSWSH protection has been opted out. Removing
-CORS clears the gate. Existing gateway lists are not changed at startup: save
-the CORS policy to apply this choice to an older API.
-
-**`routes` mode rewrites the document Edge receives, and only that copy.** The
-submitted document has its root `servers` replaced with `/`, because Edge adds
-the proxy's listen prefix itself when generating operation matchers —
-and every `servers` **below** the root is stripped along with it: on a path
-item, on an operation, and on every Path Item a `$ref`'d path can resolve to,
-which means `components.pathItems`, `webhooks` and `components.callbacks`
-entries too. OpenAPI resolves `servers` nearest-first, so a nested one left in
-place would override the rewrite and generate a matcher for a path no client can
-reach, which `fail_on_unknown_operation` turns into a `400` on every declared
-operation. `servers` inside the `callbacks` of an operation is left alone — it
-describes a request the provider's own service makes outbound, not one this
-proxy serves.
-
-Because Edge resolves a Path Item `$ref` as an unrestricted same-document JSON
-pointer, a `routes` document whose `paths` reference a Path Item **outside**
-`#/paths/`, `#/components/pathItems/` or `#/webhooks/` is refused with
-`400 SPEC_INVALID` on upload, naming the path. Chasing an arbitrary pointer
-would mean re-implementing Edge's resolver in the portal; refusing leaves the
-provider a document they can act on instead of an API that answers `201` and
-then rejects every request. `docs_only` documents are not checked — Edge
-generates no matchers from them.
-
-The provider's stored revision is never modified by any of this. Catalog and
-docs-viewer copies still rewrite structural servers to the API's invoke URL,
-leaving examples and schema data unchanged. See the
-[supported Edge importer contract](architecture.md#spec-owned-proxies).
+**`routes` mode and the document Edge receives.** Nexus sends Edge a copy with
+root `servers` set to `/` and every nested `servers` removed (path items,
+operations, and path items reached through `$ref` in `components.pathItems`,
+`webhooks` and `components.callbacks`); `servers` inside an operation's
+`callbacks` is kept. A `routes` document whose `paths` reference a Path Item
+outside `#/paths/`, `#/components/pathItems/` or `#/webhooks/` is refused with
+`400 SPEC_INVALID` (`details.reason: "unresolvable_path_item_ref"`). The stored
+revision is never modified. See
+[spec-owned proxies](architecture.md#spec-owned-proxies).
 
 ### `GET /api/apis`
 
 _provider_ — `Paginated<Api>`.
 
-| Query             | Type                     | Notes                                                                                    |
-| ----------------- | ------------------------ | ---------------------------------------------------------------------------------------- |
-| `mine`            | boolean                  | an admin's opt-in to "only my APIs"; a provider is always scoped to their own regardless |
-| `owner_user_id`   | uuid                     | admin only in effect                                                                     |
-| `status`          | `published` \| `retired` |                                                                                          |
-| `q`               | substring match          |                                                                                          |
-| `limit`, `offset` | pagination               |                                                                                          |
+| Query             | Type                     | Notes                                                                      |
+| ----------------- | ------------------------ | -------------------------------------------------------------------------- |
+| `mine`            | boolean                  | an admin's opt-in to "only my APIs"; a provider always sees only their own |
+| `owner_user_id`   | id                       | effective for admins only                                                  |
+| `status`          | `published` \| `retired` |                                                                            |
+| `q`               | substring match          |                                                                            |
+| `limit`, `offset` | pagination               |                                                                            |
 
 ### `POST /api/apis`
 
-_provider_ → `201` — validates the spec, builds the Edge proxy and its plugins,
-then persists.
+_provider_ → `201 { "api": { … }, "spec": { … } }` — validates the spec, builds
+the Edge proxy and plugins, then stores the API.
 
-| Field              | Type                                             | Notes                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ------------------ | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`             | string                                           | 1–200, required                                                                                                                                                                                                                                                                                                                                                                                                |
-| `slug`             | string                                           | ≤ 60, **optional** — normalized to lowercase letters, numbers and single hyphens (the same `slugify` the portal uses); derived from `name` when omitted; the listen path becomes `/<namespace>/<slug>`                                                                                                                                                                                                         |
-| `description`      | string \| null                                   | ≤ 4000; falls back to `info.description` from the spec                                                                                                                                                                                                                                                                                                                                                         |
-| `version`          | string                                           | ≤ 60, optional — defaults to the spec's `info.version`                                                                                                                                                                                                                                                                                                                                                         |
-| `upstream_url`     | string                                           | ≤ 2000, **optional** when the document has a usable absolute `servers[].url`; overrides the document when provided                                                                                                                                                                                                                                                                                             |
-| `spec`             | string                                           | the OpenAPI 3.x document as JSON or YAML text, ≤ 2 MiB — required                                                                                                                                                                                                                                                                                                                                              |
-| `auth_plugin`      | `key_auth` \| `basic_auth` \| `jwt_auth`         | required                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `requestable`      | boolean                                          | required — attaches `access_control` when true                                                                                                                                                                                                                                                                                                                                                                 |
-| `visibility`       | `public` \| `internal` \| `private`              | required                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `rate_limit`       | `{ limit, window_seconds }` \| null              | optional; `limit` 1–1 000 000, `window_seconds` 1–86 400 — both are Edge's own ceilings                                                                                                                                                                                                                                                                                                                        |
-| `cors`             | `{ allowed_origins, allow_credentials }` \| null | optional; `allowed_origins` (alias `origins`) is 1–64 whitespace-free strings of ≤ 255 characters, `allow_credentials` defaults to `false`. Sending both `allowed_origins` and `origins` with different values is `400`. Omit it (or send `null`) and the API gets no `cors` plugin, so the gateway adds no CORS headers                                                                                       |
-| `allowed_methods`  | `HttpMethod[]` \| null                           | optional; 1–9 entries from Edge's enum, duplicates collapsed. Omit it (or send `null`) to accept every method — an **empty array is rejected**, because a proxy whose `allowed_methods` is `[]` accepts nothing at all                                                                                                                                                                                         |
-| `timeouts`         | `{ connect_ms, read_ms, write_ms }` \| null      | optional; each an integer 100–300 000 ms. All three are required together — the proxy `PUT` is a whole-resource replace, so a partial set would silently reset the rest. Omit it (or send `null`) for the gateway defaults                                                                                                                                                                                     |
-| `circuit_breaker`  | boolean                                          | optional, defaults to `false`                                                                                                                                                                                                                                                                                                                                                                                  |
-| `spec_enforcement` | `docs_only` \| `routes`                          | optional, defaults to `docs_only`. `routes` creates the proxy through Edge's API-spec importer instead of `POST /proxies`, so the gateway generates and attaches the `openapi_validator` itself — see [the provider guide](guides/provider-guide.md#enforcement-level). `400 SPEC_INVALID` with `details.reason = "no_operations"` when `routes` is asked for and the document declares no operations to allow |
+| Field              | Type                                        | Notes                                                                                                                                                  |
+| ------------------ | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`             | string                                      | 1–200, required                                                                                                                                        |
+| `slug`             | string                                      | optional, ≤ 60; normalized to lowercase letters, digits and single hyphens; derived from `name` when omitted                                           |
+| `description`      | string \| null                              | ≤ 4000; defaults to the spec's `info.description`                                                                                                      |
+| `version`          | string                                      | ≤ 60; defaults to the spec's `info.version`                                                                                                            |
+| `upstream_url`     | string                                      | ≤ 2000; optional when the document has a usable absolute `servers[].url`, and overrides it when given                                                  |
+| `spec`             | string                                      | required — OpenAPI 3.x as JSON or YAML text, ≤ 2 MiB                                                                                                   |
+| `auth_plugin`      | `key_auth` \| `basic_auth` \| `jwt_auth`    | required                                                                                                                                               |
+| `requestable`      | boolean                                     | required — `true` attaches `access_control`                                                                                                            |
+| `visibility`       | `public` \| `internal` \| `private`         | required                                                                                                                                               |
+| `rate_limit`       | `{ limit, window_seconds }` \| null         | `limit` 1–1 000 000, `window_seconds` 1–86 400                                                                                                         |
+| `cors`             | `CorsConfig` \| null                        | omit or `null` for no `cors` plugin                                                                                                                    |
+| `allowed_methods`  | `HttpMethod[]` \| null                      | 1–9 entries, duplicates collapsed; omit or `null` for all methods. `[]` is rejected (it would accept nothing)                                          |
+| `timeouts`         | `{ connect_ms, read_ms, write_ms }` \| null | each 100–300 000 ms; all three required together                                                                                                       |
+| `circuit_breaker`  | boolean                                     | default `false`                                                                                                                                        |
+| `spec_enforcement` | `docs_only` \| `routes`                     | default `docs_only`; `routes` creates the proxy through Edge's API-spec importer. See [the provider guide](guides/provider-guide.md#enforcement-level) |
 
-```json
-{ "api": { … }, "spec": { … } }
-```
+**Document limits** (also applied to spec revisions), each `400 SPEC_INVALID`:
 
-Uploads accept at most 200 nested object/array levels, counting the root as level
-one, in either enforcement mode. Deeper documents return `400 SPEC_INVALID` with
-`details: { reason: "nesting_too_deep", limit: 200 }` before a gateway call.
+- 2 MiB; at most 2 000 paths and 3 000 operations.
+- At most 200 levels of object/array nesting
+  (`details.reason: "nesting_too_deep"`).
+- At most 100 000 render units — schema nodes (including
+  `components.schemas`), parameters, media types and responses together
+  (`details.reason: "too_much_to_render"`, with the counts reached). A local
+  `$ref` is counted once per distinct target.
+- A derived upstream URL, after server-variable expansion, must fit 2 000
+  characters (`details.limit: 2000`, naming the server).
+- `routes` with no declared operation (`details.reason: "no_operations"`).
 
-A document must also stay inside what the built-in documentation viewer can
-render. Bytes, paths and operations do not bound that: one declared operation
-can carry any number of parameters, media types and schema nodes, and every
-signed-in viewer of the catalog entry walks them. Nexus therefore counts the
-schema nodes (including reusable `components.schemas`), the parameter entries,
-the media types and the response entries across the document and refuses more
-than **100,000** of them together with `400 SPEC_INVALID` and
-`details: { reason: "too_much_to_render", schema_nodes, parameters, media_types, responses, units, limit }`.
-Every response entry counts, including one that declares no `content`.
-A parameter, request body or response written as a local `$ref` is charged for
-the object it names, each distinct object once however many places reference it;
-the count stops at the first charge past the ceiling, so the reported totals are
-those reached by then.
-The viewer bounds what it renders as well, and truncates a branch it cannot
-afford rather than freezing the tab.
-The derived upstream URL, after server-variable expansion, must fit the same
-2,000-character limit as typed `upstream_url`. An oversized derived URL returns
-`400 SPEC_INVALID` naming `servers[0].url` (or the selected server's index) and
-`details.limit: 2000`. These limits also apply to spec revisions.
+Errors:
 
-Errors: `400 SPEC_INVALID` (unparseable, Swagger 2.0, missing
-`openapi`/`info.title`/`info.version`/`paths`, oversized, no upstream
-determinable, or — unless `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` — an upstream
-that is a loopback, private, link-local or `.internal`/`.local` destination,
-reported with `details.reason = "private_upstream"`. The host is **resolved**
-as well as pattern-matched, so a name whose A/AAAA records point at a private
-address is refused the same way, with the answers in `details.resolved`; a name
-that cannot be resolved at all is refused with
-`details.reason = "unresolvable_upstream"`), `409 CONFLICT` (slug taken),
-`429 QUOTA_EXCEEDED` (the account already owns `NEXUS_MAX_APIS_PER_OWNER` APIs;
-`details` is `{ limit, current, setting }`), `429 RATE_LIMITED`, `502 EDGE_ERROR` /
-`502 EDGE_UNAVAILABLE`. The quota is checked before the first gateway call. A
-failed Edge step is rolled back — the plugin configs and proxy are deleted — and
-nothing is written to the Nexus store; because the proxy is still on its staging
-path when anything before the final cutover fails, `listen_path` was never
-served at all.
+- `400 SPEC_INVALID` — unparseable, Swagger 2.0, missing
+  `openapi`/`info.title`/`info.version`/`paths`, over a limit above, no
+  upstream determinable, or — unless `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` — an
+  upstream that is loopback, private, link-local or `.internal`/`.local`
+  (`details.reason: "private_upstream"`). The host is also resolved: private
+  A/AAAA answers are refused the same way (answers in `details.resolved`), and a
+  name that does not resolve is `details.reason: "unresolvable_upstream"`.
+- `409 CONFLICT` — slug taken. `409 EDGE_NAMESPACE_UNSERVED`.
+- `429 QUOTA_EXCEEDED`, `429 RATE_LIMITED`.
+- `502 EDGE_ERROR` / `EDGE_UNAVAILABLE` — a failed gateway step is rolled back
+  (plugins and proxy deleted) and nothing is stored; since the proxy never left
+  its staging path, `listen_path` was never served.
 
 ```bash
 SPEC=$(jq -Rs . < billing-openapi.yaml)
@@ -1948,32 +1538,26 @@ curl -sS -b cookies.txt -X POST http://127.0.0.1:8787/api/apis \
 
 ### `GET /api/apis/:id`
 
-_provider_, owner-or-admin
+_provider_, owner or admin
 
 ```json
 {
   "api": { … },
-  "spec": { … } ,
+  "spec": { … },
   "stats": { "pending_requests": 2, "active_grants": 17, "total_requests": 31 }
 }
 ```
 
-Every `stats` counter is about **access requests**, not traffic:
-`total_requests` is how many access requests this API has ever received. For
-calls through the gateway, see `GET /api/apis/:id/usage` below.
+`stats` counts **access requests**, not traffic. For gateway traffic use
+`GET /api/apis/:id/usage`.
 
 ### `GET /api/apis/:id/usage`
 
-_provider_, owner-or-admin — a cached read-through of what Ferrum Edge already
-reports for this API's proxy. Nexus runs no metrics pipeline and stores no
-history.
-
-Two gateway endpoints back this route, both authenticated with the Nexus admin
-JWT: `GET /metrics` (Prometheus exposition — `ferrum_requests_total` and the
-`ferrum_request_duration_ms` histogram, filtered to this proxy and namespace)
-and `GET /admin/metrics` (`circuit_breakers[]` and
-`health_check.unhealthy_targets[]`). Nexus memoises both **per proxy for 10
-seconds**; Edge caches its own rendering for 5.
+_provider_, owner or admin — a read-through of what Ferrum Edge reports for this
+API's proxy. Nexus stores no metrics history. Backed by Edge's `GET /metrics`
+(`ferrum_requests_total`, `ferrum_request_duration_ms`) and
+`GET /admin/metrics` (circuit breakers, unhealthy targets), each cached per
+proxy for 10 seconds. 30 requests per minute per IP.
 
 ```json
 {
@@ -1997,625 +1581,315 @@ seconds**; Edge caches its own rendering for 5.
 }
 ```
 
-`backend.since` is present only when Edge reports one (an ejected target); it is
-omitted, not `null`, otherwise. So is `gateway_uptime_seconds`.
+| Field                    | Meaning                                                                                                                                                                                  |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `available`              | `false` when the request metrics could not be read, the API has no proxy, or no series belongs to it. Counters are then zeros that mean "unmeasured" — hide them; `latency_ms` is `null` |
+| `unavailable_reason`     | optional, display-ready explanation                                                                                                                                                      |
+| `requests.*`             | **cumulative since the gateway process started**; a restart resets them. There is no time window                                                                                         |
+| `gateway_uptime_seconds` | how far back the counters reach; omitted when not reported                                                                                                                               |
+| `latency_ms`             | percentiles interpolated from histogram buckets (like `histogram_quantile`); a quantile in the top bucket reports the highest finite bound; `null` when empty                            |
+| `backend.status`         | `healthy` (closed breaker), `failing` (open breaker or ejected target), `recovering` (half-open), `unknown`                                                                              |
+| `backend.since`          | present only for an ejected target                                                                                                                                                       |
 
-What the numbers do and do not mean:
+`unknown` does not mean the backend is down: Edge lists a breaker only for a
+proxy that has one and has been called; `detail` says which. Backend state is
+read independently — it may be filled while `available` is `false`, and
+`unknown` when only it failed. There is no per-consumer breakdown, because
+`ferrum_requests_total` has no consumer label.
 
-| Field                    | Meaning                                                                                                                                                                                                                                                                            |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `available`              | `false` when the gateway could not be read, or the API has no proxy. The route still answers `200` — see below                                                                                                                                                                     |
-| `requests.*`             | **cumulative since the gateway process started**. Edge exposes no per-proxy time window, so there is no "last 24h" here; a gateway restart resets every count to zero                                                                                                              |
-| `latency_ms`             | percentiles interpolated from the gateway's histogram buckets, the same way `histogram_quantile` does — accurate only to the width of the bucket a quantile lands in. A quantile in the open-ended top bucket reports the highest finite bound. `null` when the histogram is empty |
-| `gateway_uptime_seconds` | how far back the cumulative counters reach. Omitted when the gateway did not report it                                                                                                                                                                                             |
-| `backend.status`         | `healthy` (closed breaker), `failing` (open breaker, or an ejected target), `recovering` (half-open breaker), `unknown`                                                                                                                                                            |
-| `backend.since`          | when the backend started failing, present only for an ejected target — Edge attaches no timestamp to a breaker                                                                                                                                                                     |
-
-`unknown` is **not** a claim that the backend is down. Edge lists a circuit
-breaker only for a proxy that has one configured _and_ has been called, so
-`unknown` is the ordinary state for an API with no `circuit_breaker` and for one
-nothing has called yet; `detail` says which.
-
-There is deliberately **no per-consumer breakdown and no unique-consumer
-count**: `ferrum_requests_total` carries no consumer label, so neither can be
-answered honestly from the gateway.
-
-Errors: `403 FORBIDDEN` (not the owner and not an admin), `404 NOT_FOUND`. A
-gateway request-metrics scrape that is unreachable, erroring or unparseable is
-**not** a portal error: the route answers `200` with `available: false`, zeroed
-counters and `latency_ms: null`. Those zeros represent missing measurements.
-The same applies when no valid `ferrum_requests_total` series belongs to this
-API's proxy, even if the scrape contains other metrics. `unavailable_reason`
-is an optional explanation suitable for display. Clients must hide unmeasured
-counters when `available` is false; an explicit zero request series still
-reports `available: true`.
-A successful independent backend-state read may still populate `backend` and
-`gateway_uptime_seconds`; it cannot make `available` true. Conversely, if only
-backend state is unavailable, request counters remain valid and `backend.status`
-is `unknown`. A provider's overview page must not break because Edge is restarting.
-
-```bash
-curl -sS -b cookies.txt http://127.0.0.1:8787/api/apis/$API_ID/usage | jq .
-```
+A gateway that is unreachable or unparseable is **not** an error here: the route
+still answers `200`. Errors: `403 FORBIDDEN`, `404 NOT_FOUND`.
 
 ### `PATCH /api/apis/:id`
 
-_provider_, owner-or-admin — safe runtime settings only; the spec has its own
-route. Every field optional; nothing supplied returns the row unchanged.
+_provider_, owner or admin — runtime settings (the spec has its own route).
+Every field is optional; an empty body returns the row unchanged. For the
+proxy fields, omitting a field leaves it alone and `null` removes it (or
+restores the gateway default).
 
-| Field                            | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`, `description`, `version` | metadata only                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `visibility`                     | `public` ⇄ `internal` ⇄ `private`; documentation visibility only — never the gateway's access control. Switching **to** `private` starts enforcing the API's existing viewer list; switching away from it stops enforcing but keeps the list                                                                                                                                                                                                                                                                                                                                     |
-| `status`                         | `published` ⇄ `retired` — **catalog state only**, the proxy and every live grant keep working                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `upstream_url`                   | re-points the Edge proxy's backend and records the normalized form on the row; everything else on the proxy is left as it was found                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `auth_plugin`                    | attaches and associates the new auth plugin config before detaching and deleting the old one. **Refused with `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` while anyone holding access has a live credential of the outgoing flavour**; send `confirm_access_disruption: true` to make the change anyway. Grantee credentials are never revoked — the API's own `nexus-test-<api_id>` credentials are. Every grantee is notified either way                                                                                                                                      |
-| `requestable`                    | attaches or deletes `access_control`. Turning it **off** opens the API to every authenticated consumer; existing grants stay on the consumers and become inert                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `rate_limit`                     | attaches, replaces, or (with `null`) deletes `rate_limiting`; `limit` 1–1 000 000                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `cors`                           | attaches, replaces, or (with `null`) deletes `cors`. Omitting the field leaves the existing policy alone — only an explicit `null` removes it. `origins` is accepted as an alias for `allowed_origins`; sending both with different values is `400`. Also re-derives the proxy's `allowed_ws_origins` and the `OPTIONS` entry of its `allowed_methods`. It does **not** touch a `routes` API's operation table: `cors` runs at priority 100 and `openapi_validator` at 2960, so a browser preflight is answered and short-circuited before the unknown-operation check ever runs |
-| `allowed_methods`                | replaces the method allow-list, or (with `null`) accepts every method again. Omitting it leaves the list alone                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `timeouts`                       | replaces all three backend timeouts, or (with `null`) writes the gateway defaults back explicitly. Omitting it leaves whatever is on the proxy alone, including values an operator set by hand                                                                                                                                                                                                                                                                                                                                                                                   |
-| `circuit_breaker`                | attaches Edge's default breaker config to the proxy, or removes it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `spec_enforcement`               | **rebuilds the proxy.** `routes` recreates it through the API-spec importer from the API's **current** spec revision; `docs_only` recreates it as a plain proxy. Omitting the field leaves the level alone. See the note below — the API is briefly unreachable                                                                                                                                                                                                                                                                                                                  |
-| `confirm_access_disruption`      | acknowledgement, not a setting: it only means anything alongside an `auth_plugin` change, and only as `true`. See that row                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Field                            | Effect                                                                                                                                                                                           |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`, `description`, `version` | metadata only                                                                                                                                                                                    |
+| `visibility`                     | documentation visibility only, never gateway access. Switching to `private` starts enforcing the existing viewer list; switching away keeps the list                                             |
+| `status`                         | `published` ⇄ `retired` — **catalog state only**; the proxy and live grants keep working                                                                                                         |
+| `upstream_url`                   | re-points the proxy's backend (same validation as `POST`)                                                                                                                                        |
+| `auth_plugin`                    | swaps the auth plugin (new one attached before the old is removed). May need confirmation — see below                                                                                            |
+| `requestable`                    | attaches or removes `access_control`. Turning it **off** opens the API to every authenticated consumer; existing grants become inert                                                             |
+| `rate_limit`                     | attaches, replaces or removes `rate_limiting`                                                                                                                                                    |
+| `cors`                           | attaches, replaces or removes `cors`; also re-derives `allowed_ws_origins` and the implicit `OPTIONS`. It does not change a `routes` API's operation table: the CORS preflight is answered first |
+| `allowed_methods`                | replaces the method list, or `null` for all methods                                                                                                                                              |
+| `timeouts`                       | replaces all three timeouts; `null` writes the gateway defaults explicitly                                                                                                                       |
+| `circuit_breaker`                | attaches or removes Edge's default breaker                                                                                                                                                       |
+| `spec_enforcement`               | **rebuilds the proxy** from the current revision (see below)                                                                                                                                     |
+| `confirm_access_disruption`      | `true` confirms an `auth_plugin` change that would lock grantees out                                                                                                                             |
 
-→ `{ "api": Api, "outgoing_auth_configs_remaining"?: string[] }`. The second
-field appears only after an `auth_plugin` change that left enabled configs of
-the outgoing plugin associated with the proxy — an operator's, which the portal
-never replaces or deletes (a disabled or unassociated one is not listed). They
-still accept the outgoing flavour's credentials on this API, so the change did
-not invalidate those here; the ids name the Edge plugin configs to remove.
-Errors: `400 SPEC_INVALID` (bad or, by default, private `upstream_url` — see
-`POST /api/apis`; or `details.reason = "no_operations"` when `routes` is asked
-for and the current revision declares nothing to allow),
-`409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` (an `auth_plugin` change that
-would take grantees' credentials off the portal's authentication for the API,
-without `confirm_access_disruption: true`; `details.outgoing_auth_configs_remaining`
-names any config outside the portal that would go on accepting them),
-`409 CONFLICT` (a gateway setting — `upstream_url`, `auth_plugin`, `requestable`,
-`rate_limit`, `cors`, `allowed_methods`, `timeouts`, `circuit_breaker` or
-`spec_enforcement` — on an API with no gateway deployment; `details.fields`
-names them; or a change to `auth_plugin`, `requestable`, `rate_limit` or `cors`
-on an API published before plugin ownership was recorded, whose proxy carries
-two configs the portal could have created for that setting, or — for
-`auth_plugin`, `requestable` and `cors` — only an auth, `access_control` or
-`cors` config that no longer matches the API's settings (for auth, one with any
-setting of its own, which a swap would leave accepting the outgoing
-credentials); `details.plugin_names` names the plugins and, in the second case,
-`details.plugin_config_ids` the configs), `502 EDGE_ERROR`.
+→ `{ "api": Api, "outgoing_auth_configs_remaining"?: string[] }` — the second
+field only after an `auth_plugin` change that left an operator's enabled,
+associated config of the outgoing plugin on the proxy (it still accepts the old
+credentials; the ids say which configs to remove).
 
-**Only the plugin configs the portal created are touched.** Nexus records the
-Edge config id of the auth, `access_control`, `rate_limiting` and `cors` configs
-it creates, and `auth_plugin`, `requestable`, `rate_limit` and `cors` act on
-those alone. A config of the same plugin name that a gateway operator attached
-to the proxy is never rewritten, re-associated or deleted: setting `rate_limit`
-beside an operator's limiter creates the portal's own config next to it (both
-apply), and `null` removes only the portal's.
+**Only the portal's own plugin configs are touched.** Nexus records the Edge
+config ids of the auth, `access_control`, `rate_limiting` and `cors` configs it
+creates, and changes only those. An operator's config of the same plugin name
+is never rewritten or deleted: setting `rate_limit` beside an operator's
+limiter adds the portal's own (both apply), and `null` removes only the
+portal's.
 
-**An API the gateway no longer serves takes catalog edits only.** While
-`ferrum_proxy_id` is `null` (after a reconciliation repair, or a restore that
-failed) there is no proxy to apply a gateway setting to, and several of them
-carry their own gateway side effects and confirmations. Rather than store a
-value the gateway never saw, the whole `PATCH` is refused; name, description,
-tags, visibility and the other catalog fields still save. Restore the deployment
-with [`POST /api/apis/:id/restore-gateway`](#post-apiapisidrestore-gateway),
-then change the setting.
+**Changing `auth_plugin`.** Edge runs one authentication plugin per proxy, so
+every credential of the outgoing flavour stops working on this API the moment
+the swap lands.
 
-> **Changing `auth_plugin` locks every credential of the old flavour out of
-> this API.** Edge runs one authentication plugin per proxy, so the moment the
-> swap lands every key of the outgoing flavour is a `401` here — a break the
-> client sees before the portal does. Nexus therefore refuses the change while
-> anyone holding access is carrying such a key, and `details.affected_grantees`
-> says how many accounts that is; the provider re-sends with
-> `"confirm_access_disruption": true` to go ahead.
->
-> **That path revokes nothing of theirs.** A credential hangs off its holder's
-> _consumer_, not off an API, and the same key goes on authenticating every other
-> API of that flavour they have access to — so taking it away to settle a change
-> on this one API would break integrations this API has no standing over. What
-> each grantee loses is this API, until they issue a credential of the new
-> flavour, which is what the notification asks them to do. The credentials the
-> API owns outright are a different matter: the keys on its
-> `nexus-test-<api_id>` consumer exist to call this one proxy, the swap really
-> has made them useless, and they are revoked — each with its own
-> `credential.revoke` row — whether or not the change needed confirming. One
-> `api.auth_plugin_changed` row summarises both halves.
->
-> An operator's own config of the outgoing plugin on the proxy is not the
-> portal's to delete, so it stays attached and, while enabled and associated
-> with the proxy, keeps accepting those credentials here. When one does, the
-> change is not reported as invalidating them: the refusal still asks for
-> confirmation but names the configs under
-> `details.outgoing_auth_configs_remaining` instead of claiming a lockout, the
-> `api.update` row records `existing_credentials_invalidated: false` with the
-> configs under `outgoing_auth_configs_remaining`, the response carries the same
-> list, and grantees are told a gateway configuration outside the portal still
-> accepts their existing credentials for now.
->
-> The refusal counts grantees, so an API published with `requestable: false`
-> gates nobody, has no enumerable callers, and is never refused: its holders get
-> the notification and nothing else. Announce such a change yourself.
+- While any grantee holds a live credential of the outgoing flavour, the change
+  is refused with `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED`. `details`
+  carries `field`, `current_auth_plugin`, `requested_auth_plugin`,
+  `credential_type`, `affected_grantees` (accounts that would be locked out)
+  and `confirm_field`, plus `outgoing_auth_configs_remaining` when an operator
+  config would keep accepting the old credentials. Resend with
+  `confirm_access_disruption: true` to proceed. An API with
+  `requestable: false` has no grantees and is never refused.
+- Grantee credentials are **not** revoked — they still work on their other APIs
+  of that flavour; each grantee is notified to issue a credential of the new
+  flavour. The API's own `nexus-test-<api_id>` credentials are revoked. One
+  `api.auth_plugin_changed` audit row summarizes both.
 
-> **Changing `spec_enforcement` interrupts the API for a moment.** Edge attaches
-> an `api_spec` to a proxy only at import, detaches one only by deleting the
-> proxy, and refuses a spec naming a proxy id that already exists — so the only
-> way to move between the two modes is to delete the proxy and build it back.
-> Nexus does that under the **same proxy id**, and carries the whole proxy
-> document and every plugin config across with their original ids, so nothing
-> that holds one of those ids breaks. For the handful of round trips in between,
-> the listen path answers `404`. The audit row carries `proxy_rebuilt: true`.
->
-> Nothing else does this: a spec revision, a CORS change and every runtime
-> setting are all in-place writes.
+**Changing `spec_enforcement`** briefly interrupts the API. Edge only attaches
+or detaches an `api_spec` by creating or deleting the proxy, so Nexus deletes
+and rebuilds it under the **same proxy id**, carrying the proxy document and
+every plugin config across with their ids. For those few round trips
+`listen_path` answers `404`; the audit row has `proxy_rebuilt: true`. Every
+other setting, and every spec revision, is an in-place write.
 
-Enforcement conversion, runtime PATCH, spec revision **and deletion** use the
-same per-proxy database lease. The conversion holds it across the fresh
-proxy/spec reads, rebuild, compensation, and catalog update; the delete holds it
-across the gateway teardown _and_ the row delete, so a conversion cannot
-re-create the proxy against rows that are on their way out. A waiting mutation
-re-reads catalog state after acquiring the lease so it uses the current
-enforcement mode and backend. If the API's proxy identity changed while waiting,
-the request returns `409 CONFLICT`; reload the API before retrying, and a
-conversion whose API has been deleted rebuilds nothing.
+**An API without a gateway deployment takes catalog edits only.** While
+`ferrum_proxy_id` is `null` (after a reconciliation repair or a failed
+restore), a PATCH that sets any gateway field is refused; name, description,
+version, visibility and status still save. Restore it first with
+[`POST /api/apis/:id/restore-gateway`](#post-apiapisidrestore-gateway).
+
+Enforcement conversion, runtime PATCH, spec revision and deletion serialize on
+one per-proxy lease, and a waiting request re-reads the API afterwards.
+
+Errors:
+
+- `400 SPEC_INVALID` — bad or private `upstream_url` (see `POST /api/apis`), or
+  `routes` requested while the current revision declares no operations.
+- `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` — see above.
+- `409 CONFLICT` —
+  - a gateway field on an API with no deployment (`details.fields`);
+  - a change to `auth_plugin`, `requestable`, `rate_limit` or `cors` on an API
+    published before plugin ownership was recorded, whose proxy has two configs
+    the portal could have created, or (for `auth_plugin`, `requestable`,
+    `cors`) one that no longer matches the API's settings (`details.plugin_names`,
+    and `details.plugin_config_ids` in the second case);
+  - the proxy changed while the request waited for the lease (reload and
+    retry).
+- `502 EDGE_ERROR`.
 
 ### `DELETE /api/apis/:id`
 
-_provider_, owner-or-admin → `{ "ok": true }`.
+_provider_, owner or admin → `{ "ok": true }`.
 
-Destructive and ordered deliberately: the Edge proxy is deleted **first** (so
-nothing stays reachable-but-untracked, and so the API never spends the teardown
-live with its auth plugin already gone), which cascades its plugin associations
-and proxy-scoped plugin configs; any config the cascade missed is swept up
-after. Next the API's own gateway identity — the disposable
-`nexus-test-<api_id>` consumer, its credential and the `nexus:api:<id>:approved`
-group it carries — is torn down, because nothing else ever could: it is named
-after an API that is about to stop existing. Then the grants, requests, spec
-revisions and the API row are deleted in one store transaction — still under
-the identity's name key, which test-consumer creation takes and then re-reads the
-API inside, so a creation either finished before the teardown and was collected
-by it or starts after the rows are gone and answers `404`. Only then is the ACL
-group stripped from every grantee's consumer — the group is inert the moment
-the proxy is gone — and grantees get a notification. If the row delete fails
-after the teardown, the request fails, the API stays in the catalog, and a retry
-names the already-collected consumer in its audit row. A deletion that finds
-the API row already removed by a concurrent one answers `404` rather than a
-second `200`.
+In order:
 
-A test consumer that is already gone — or an API that never had one — is not an
-error. With nothing registered and nothing on the gateway, the `api.delete`
-audit row names no `test_consumer_id` at all rather than claiming a teardown
-that was never needed; a registration still bound to a consumer that is already
-gone names that consumer, since the registration is what was collected. A
-teardown the gateway refuses fails the request with `502 EDGE_ERROR`, leaving
-the API in the catalog so the delete can be retried; the identity stays
-registered, which is what makes it findable.
+1. The Edge proxy is deleted first, cascading its plugin associations and
+   proxy-scoped configs; any config the cascade missed is removed after.
+2. The API's test identity (`nexus-test-<api_id>` consumer, its credentials and
+   ACL group) is torn down.
+3. Grants, requests, spec revisions and the API row are deleted in one
+   transaction, with the `api.delete` audit row.
+4. The ACL group is stripped from each grantee's consumer (outside the proxy
+   lease; a failure is logged, not retried — the group has nothing left to
+   authorize), and grantees are notified.
 
-The gateway teardown and the row delete run under the API's per-proxy lease. An
-`api.delete_start` audit row is committed before the first gateway call, and the
-`api.delete` row commits in the same transaction as the row delete, once the
-teardown has held; if that transaction fails, the API stays in the catalog for
-the delete to be retried, and the gateway steps are safe to repeat. The start
-row names the test identity as it stood before the teardown
-(`test_consumer_id`, `test_consumer_credentials`); a retry that finds that
-identity already collected copies them into its `api.delete` row, with
-`resumed: true`, rather than reporting nothing revoked. A
-`spec_enforcement` conversion is a delete-and-recreate, so an unserialised teardown could commit in
-the middle of one and leave the conversion's rebuild serving an API with no
-portal record — reachable, un-removable, and holding the slug against every
-future publish. Returns `409 CONFLICT` if the API's proxy identity changed while
-the delete waited for the lease.
+An `api.delete_start` audit row is committed before the first gateway call. A
+failure after the gateway steps leaves the API in the catalog; the gateway
+steps are safe to repeat, and a retry's `api.delete` row carries
+`resumed: true` with the test identity recorded by the start row. A gateway
+refusal is `502 EDGE_ERROR` with the API left in place.
 
-The ACL strip is deliberately **outside** that lease. Each grantee's consumer
-has a lease of its own, so a strip can wait on a credential write for that
-account; holding the proxy lease across all of them would answer `409` to every
-concurrent write on the API for as long as the slowest grantee took, for a step
-that cannot change what the gateway serves. A strip that fails is logged rather
-than retried — there is nothing left for the group to authorise.
+Errors: `404 NOT_FOUND` (including an API already deleted by a concurrent
+request), `409 CONFLICT` (the proxy changed while waiting for the lease),
+`502 EDGE_ERROR`.
 
 ### `GET /api/apis/:id/spec`
 
-_provider_, owner-or-admin — the original current stored upload, without the
-catalog's server rewriting. Returns the same metadata fields as the catalog
-spec endpoint, with `raw_spec` containing the original JSON or YAML text
-(outer whitespace is trimmed at upload) and a matching `content_type`.
-The provider's Specification editor reads this endpoint. `403 FORBIDDEN` for
-another provider's API; `404 NOT_FOUND` when the API or current spec is absent.
+_provider_, owner or admin — the **original** current upload, without the
+catalog's server rewriting: the same fields as
+[`GET /api/catalog/:slug/spec`](#get-apicatalogslugspec), with `raw_spec`
+holding the uploaded JSON or YAML text (outer whitespace trimmed).
+`404 NOT_FOUND` when the API or its current spec is absent.
 
 ### `PUT /api/apis/:id/spec`
 
-_provider_, owner-or-admin — publish a new spec revision.
+_provider_, owner or admin — publish a new spec revision. Body: `spec`
+(required), `version` (optional; defaults to the parsed `info.version`).
 
-Body: `spec` (required, the document text), `version` (optional; defaults to
-the parsed `info.version`).
+→ `{ "api": { … }, "spec": { … } }`
 
-```json
-{ "api": { … }, "spec": { … } }
-```
+- The new revision becomes current. Revisions older than the
+  `NEXUS_SPEC_HISTORY_LIMIT` newest (default 10, besides the current one) are
+  pruned in the same transaction.
+- **Backend following.** The proxy is re-pointed at the new document's
+  `servers[0]` only when the API's `upstream_url` still equals the normalized
+  `servers[0]` of the previous revision (scheme, host, port and base path).
+  Otherwise `upstream_url` is treated as a pin and left alone.
+- A `routes` API has its document re-submitted to Edge, which regenerates the
+  operation table (and applies any backend move) in one call. Portal plugin
+  configs are untouched, so the API is never unauthenticated.
+- If the revision cannot be stored after the gateway moved, the gateway is put
+  back. Audit rows: `api.spec_revision_start` (for a revision that rewrites a
+  live proxy; if it cannot be written nothing reaches the gateway),
+  `api.spec_update` with the revision, and `api.spec_revision_failed`
+  (`restored` says whether the gateway was put back).
 
-The new revision becomes current, and the API's oldest revisions past
-`NEXUS_SPEC_HISTORY_LIMIT` (default 10, on top of the current one) are pruned in
-the same transaction.
-
-The proxy backend is re-pointed at the document's `servers[0]` **only** when the
-row's `upstream_url` still equals the normalized `servers[0]` of the _previous_
-current revision. Both sides are normalized the same way — explicit port, no
-trailing slash — and the comparison covers scheme, host, port **and base path**,
-so a document moving `/v2` to `/v3` on the same host moves the backend, while an
-`upstream_url` that differs from the previous document in any of those four is a
-pin the upload leaves alone. When the backend does move, `upstream_url` on the
-row moves with it, in the same store transaction as the revision; when it does
-not, `upstream_url` is left alone.
-
-An API in `routes` mode has its document re-submitted to the gateway, which
-regenerates the operation table from it. That single call also carries the
-backend move, because Edge re-inserts the proxy from the submitted document — a
-separate proxy write would only be overwritten by it. The same compensation
-applies: the gateway moves first, and if the revision cannot be persisted the
-previous document is put back. Plugin configs Nexus owns are untouched by the
-re-submission, so the API is never unauthenticated across it.
-
-The `api.spec_update` audit row commits in the transaction that makes the
-revision current, so a failed insert rolls the revision back and compensates
-the gateway like any other failed write. A revision that rewrites a live proxy
-— every `routes` revision, and a `docs_only` one that moves the backend — first
-commits an `api.spec_revision_start` row under the proxy lease; if that insert
-fails, nothing is written to the gateway. A revision that fails after its start
-row records `api.spec_revision_failed`, with `restored` saying whether the
-compensation put the gateway back.
-
-`400 SPEC_INVALID` with `details.reason = "no_operations"` when the new document
-declares nothing to allow — switch the enforcement level back to `docs_only`
-first if that is really the intent.
-
-## Applications
-
-An **application** is a separate gateway identity owned by a portal account,
-with its own approved APIs and its own credentials. Because ACL groups live on
-the Ferrum consumer and each application has its own
-(`nexus-app-<application_id>`), two applications of one owner approved for
-different APIs genuinely cannot call each other's.
-
-**This is not a credential label.** `label` is a note to the credential's
-holder and changes nothing about what a secret can reach; `application_id`
-decides which identity the material is appended to, and therefore what it can
-call.
-
-**Account-scoped access is unchanged and is the default.** Every scoped row —
-access requests, grants, credentials, consumer mappings — carries a nullable
-`application_id`, and `null` means "the account itself", which is what every
-row written before applications existed is. Nothing migrates on its own; an
-operator who wants an existing integration moved creates an application,
-requests access for it and issues it a credential, which is a deliberate act
-with a new secret rather than a silent re-pointing of the one already deployed.
-
-Acting _as_ an application is a field on two existing routes —
-`application_id` on `POST /api/access-requests` and on `POST /api/credentials` —
-and the application must be the caller's own and `active`. **Not even an
-administrator** can act as somebody else's: doing so would acquire access, or a
-secret that authenticates as them, which is a different thing from
-administering their account.
-
-### `GET /api/applications`
-
-_session_ — `Paginated<Application>`, newest first. A client always sees their
-own; an admin sees every account's unless they pass `owner_user_id`, or
-`mine=true` to list only their own (what an identity picker wants, since
-nobody may act as somebody else's application). `status` and `q` narrow
-further.
-
-| Query             | Type                                                                      |
-| ----------------- | ------------------------------------------------------------------------- |
-| `mine`            | boolean — only the caller's own, even for an admin                        |
-| `owner_user_id`   | uuid, admin-only                                                          |
-| `status`          | `active` \| `disabled`                                                    |
-| `q`               | case-insensitive substring match on name or description, ≤ 200 characters |
-| `limit`, `offset` | pagination                                                                |
-
-`q` runs inside the owner scope, which is indexed (`owner_user_id`,
-`created_at`), so a picker's search stays bounded by one account's
-applications.
-
-Each item carries `active_grants` and `active_credentials`, so a list view
-needs no second call.
-
-### `GET /api/applications/:id`
-
-_session_, owner-or-admin. Somebody else's reads `404`, not `403`.
-
-### `POST /api/applications`
-
-_session_ → `201`. Body: `name` (required, ≤ 120, unique per owner
-case-insensitively), `description` (optional, ≤ 500).
-
-No gateway identity is created here: an application with no approved APIs and
-no credentials has nothing for a consumer to carry, so it is provisioned by the
-first approval or the first credential, exactly as an account's is.
-
-`429 QUOTA_EXCEEDED` when the account already owns
-`NEXUS_MAX_APPLICATIONS_PER_OWNER` (default 20; `0` disables the ceiling) —
-each application is a gateway consumer, so this bounds the Edge resources one
-semi-trusted account can create. The count and the insert run under one
-per-owner lock, so concurrent creates cannot overshoot the ceiling.
-
-`429 RATE_LIMITED` beyond 30 requests per minute from one account, counted
-separately for this route, `PATCH /:id` and `DELETE /:id`, when
-`NEXUS_RATE_LIMIT_ENABLED=true` (the default outside `NEXUS_ENV=test`).
-
-### `PATCH /api/applications/:id`
-
-_session_, owner-or-admin. Body: any of `name`, `description`, `status`.
-
-**`status: "disabled"` revokes nothing.** It refuses _new_ access requests,
-approvals and credentials; everything already issued goes on working. An
-integration that must stop working is deleted, or has its grants revoked. The
-audit row says so explicitly (`details.revoked_existing_access: false`) rather
-than leaving an operator to infer it. Rotating one of its credentials counts as
-issuing a new one and is refused (`409`); revoking stays allowed. An access
-request already pending for it cannot be approved until it is re-enabled.
-
-Re-enabling checks the gateway identity before it reports success: if the
-application holds active grants but the portal has no consumer mapping for it,
-the call fails `502 EDGE_ERROR` (`details.identities`) rather than re-enabling
-an identity whose grants reach nothing.
-
-### `DELETE /api/applications/:id`
-
-_session_, owner-or-admin — **destructive**.
-
-```json
-{ "revoked_grants": 2, "revoked_credentials": 1 }
-```
-
-The Ferrum consumer is deleted **first**, then the row, whose cascade removes
-its grants, access requests, credential rows and consumer mapping. Gateway
-first because a row deleted before its consumer leaves a live identity — with
-its ACL groups and its credential material — that nothing in the portal can
-find any more.
-
-The whole delete holds the identity's provisioning name key — the one a first
-credential or approval provisions its consumer under — and provisioning
-re-checks the application under the same key, so a delete racing a first issue
-never leaves a consumer the portal does not track. With no consumer mapping, the
-consumer is looked for at the id Nexus derives from `nexus-app-<id>` and deleted
-only when it still carries that username. Filing an access request for the
-application holds the same key until the request commits, so a request either
-lands first and is removed by the cascade, or finds the application gone
-(`404`).
-
-The local delete — the counts in the response, the row with its cascade and the
-`application.delete` audit row — is one transaction on every backend, MongoDB
-included, so a failure part-way leaves every row in place. An
-`application.delete_start` audit row is committed before the consumer is
-touched, so a delete that took the consumer down and then failed to record its
-completion still names who started it. A retry after the consumer was already
-deleted finishes the rows without recreating anything on the gateway; when that
-consumer could only be found by its derived id, the retry's `application.delete`
-row copies `consumer_id` and `unmapped_consumer` from the earlier attempt's
-start row, with `resumed: true`.
-
-Its credentials stop working immediately. The reversible option is `PATCH` with
-`status: "disabled"`.
+Errors: the document limits and `SPEC_INVALID` cases of `POST /api/apis`
+(including `no_operations` in `routes` mode — switch to `docs_only` first),
+`409 EDGE_NAMESPACE_UNSERVED`, `502 EDGE_ERROR`.
 
 ### `GET /api/apis/:id/viewers`
 
-_provider_, owner-or-admin — `Paginated<ApiViewer>`, newest first. Each item
-carries `user_id`, an embedded `user` (`UserSummary` \| null), `granted_by`,
-`note` and timestamps.
-
-The list is kept whatever the API's visibility and only _enforces_ while the
-API is `private`, so switching visibility back and forth does not discard it.
+_provider_, owner or admin — `Paginated<ApiViewer>`, newest first. Each item has
+`user_id`, `user` (`UserSummary` \| null), `granted_by`, `note` and timestamps.
+The list is kept whatever the visibility and only enforced while the API is
+`private`.
 
 ### `POST /api/apis/:id/viewers`
 
-_provider_, owner-or-admin → `201` — authorize one account to **read** this
-API's documentation.
+_provider_, owner or admin → `201 { "viewer": ApiViewer }` — authorize one
+account to **read** this API's documentation.
 
-Body: exactly one of `email` or `user_id`, plus an optional `note` (≤ 500).
-Sending both, or neither, is a `400`.
+Body: exactly one of `email` or `user_id`, plus optional `note` (≤ 500).
 
-```json
-{ "viewer": { "user_id": "…", "user": { … }, "note": "Design partner", "…": "…" } }
-```
+**This is not a grant**: no ACL group, no consumer, no gateway call. The viewer
+can find the API and read its spec; to call it they still request access. Audit
+rows record `details.grants_invocation: false`. The account is notified.
 
-**This is not a grant.** It confers no ACL group, touches no Ferrum consumer
-and makes no call to Ferrum Edge. An authorized viewer can find the API in the
-catalog and read its specification; to _call_ it they still request access and
-the provider still approves it. Every audit row spells this out
-(`details.grants_invocation: false`) rather than leaving it to be inferred.
-
-The account is notified in the portal, in those terms.
-
-| Status                  | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `201`                   | authorized. Re-authorizing an account that already is refreshes the note rather than conflicting — the route describes a state                                                                                                                                                                                                                                                                                                                                                                                      |
-| `400 VALIDATION_FAILED` | no portal account uses that address or id, it belongs to an administrator, or both/neither identifier was sent. An address with no account is **refused rather than stored as a pending invitation**: an authorization is attached to an account, not to an address, and re-pointing an address later would silently move it. An administrator — who can already read every API — gets exactly the answer an unknown account gets, and nothing is written, so the endpoint does not reveal who holds the admin role |
-| `403 FORBIDDEN`         | not the owner and not an admin                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `409 CONFLICT`          | the account is the API's owner, who can already read it                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Status                  | Meaning                                                                                                                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `201`                   | authorized; re-authorizing an existing viewer refreshes the note                                                                                                                                 |
+| `400 VALIDATION_FAILED` | no account matches (addresses are not stored as pending invitations), the account is an administrator (same answer as unknown, so admin roles are not revealed), or both/neither identifier sent |
+| `403 FORBIDDEN`         | not the owner or an admin                                                                                                                                                                        |
+| `409 CONFLICT`          | the account is the API's owner                                                                                                                                                                   |
 
 ### `DELETE /api/apis/:id/viewers/:userId`
 
-_provider_, owner-or-admin — withdraw a read authorization. `404 NOT_FOUND`
-when that account was not authorized.
+_provider_, owner or admin → `{ "ok": true }` — withdraw a read authorization.
+`404 NOT_FOUND` when the account was not a viewer.
 
-Read access and invocation access are separate, so this leaves any grant the
-account holds untouched (`details.revoked_grant: false`); revoke that through
-`DELETE /api/grants/:id`. An account that still holds a grant goes on being
-able to read the API, because somebody who may call it may certainly read its
-documentation.
+Any grant the account holds is untouched (`details.revoked_grant: false`), and a
+grantee can still read the API. Revoke a grant with
+[`POST /api/grants/:id/revoke`](#post-apigrantsidrevoke).
 
 ### `GET /api/apis/:id/revisions`
 
-_provider_, owner-or-admin — one page of the API's retained specification
-history. Standard `limit`/`offset`; the current revision leads, then the rest
-newest-first by publication order.
+_provider_, owner or admin — the retained spec history, paginated: the current
+revision first, then newest first.
 
 Each item is an `ApiSpecSummary`: `id`, `api_id`, `version`, `parsed_title`,
-`parsed_version`, `is_current`, `created_by`, `rolled_back_from_id`,
-`created_at`, `updated_at`. `created_by` is `null` when the author is not
-recorded — a revision published before the column existed, or one whose
-author's account has since been deleted — and the UI renders that as an unknown
-author rather than attributing it to somebody. `rolled_back_from_id` names the
-revision a rollback restored, and is `null` for an ordinary upload.
-
-Retention still applies: `NEXUS_SPEC_HISTORY_LIMIT` (default 10, on top of the
-current revision) bounds what is listed here.
+`parsed_version`, `is_current`, `created_by` (`null` when unknown),
+`rolled_back_from_id` (the revision a rollback restored, else `null`),
+`created_at`, `updated_at`.
 
 ### `GET /api/apis/:id/revisions/:revisionId`
 
-_provider_, owner-or-admin — one retained revision's document, in the same
-shape as `GET /api/apis/:id/spec` (`raw_spec` plus a matching `content_type`).
-
-`404 NOT_FOUND` when the revision is not retained **or belongs to another
-API** — the API scope is part of the lookup rather than a check after it, so
-the endpoint cannot be used to confirm that an id exists elsewhere.
+_provider_, owner or admin — one retained revision's document, shaped like
+`GET /api/apis/:id/spec`. `404 NOT_FOUND` when the revision is not retained or
+belongs to another API.
 
 ### `GET /api/apis/:id/revisions/:revisionId/diff`
 
-_provider_, owner-or-admin — what rolling back to this revision would change.
-
-```json
-{ "diff": { "from": { … }, "to": { … }, "…": "…" } }
-```
-
-`from` is the current revision (what the API serves today) and `to` is the
-target (what it would serve), so the comparison reads in the direction the
-change would go.
+_provider_, owner or admin — what rolling back to this revision would change →
+`{ "diff": SpecDiff }`, with `from` = the current revision and `to` = the
+target.
 
 ### `POST /api/apis/:id/spec/diff`
 
-_provider_, owner-or-admin — what uploading a document _would_ change, without
-uploading it. Body: `{ "spec": "…" }`, the same field `PUT /api/apis/:id/spec`
-takes. Read-only despite the verb: nothing is stored and nothing reaches the
-gateway. `to` is `null`, because the proposed document is not a stored
-revision. `400 SPEC_INVALID` for a document the portal would refuse to publish
-— a review must not describe a change that cannot be made.
+_provider_, owner or admin — what uploading a document would change, without
+storing anything. Body `{ "spec": "…" }` → `{ "diff": SpecDiff }`, with `from`
+= the current revision and `to: null`. `400 SPEC_INVALID` for a document the
+portal would refuse to publish.
 
-#### The `SpecDiff` shape, and what it does not claim
+#### The `SpecDiff` shape
 
-| Field                                     | Meaning                                                                                                                                                                                                                                                                                             |
-| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `added_operations` / `removed_operations` | operations (`{ path, method }`) the target declares and the source does not, and the other way round                                                                                                                                                                                                |
-| `changed_operations`                      | operations both declare whose definitions differ, with `changes`: the Operation Object members that differ (`parameters`, `requestBody`, `responses`, `security`, `summary`, `description`, `deprecated`, `tags`, `servers`, `operationId`, `callbacks`), or `other` for anything outside that list |
-| `added_paths` / `removed_paths`           | path templates added or dropped outright                                                                                                                                                                                                                                                            |
-| `info_changes`                            | `title`, `version` or `description` differences, as `{ field, from, to }`                                                                                                                                                                                                                           |
-| `servers_changed`                         | whether the `servers` block differs                                                                                                                                                                                                                                                                 |
-| `potentially_breaking`                    | every removed operation — the changes worth reading twice                                                                                                                                                                                                                                           |
-| `changed`                                 | whether the documents differ at all                                                                                                                                                                                                                                                                 |
+| Field                                     | Meaning                                                                                                                                                                                                                                     |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `from`, `to`                              | `ApiSpecSummary` \| null                                                                                                                                                                                                                    |
+| `added_operations` / `removed_operations` | operations (`{ path, method }`) only in the target / only in the source                                                                                                                                                                     |
+| `changed_operations`                      | operations in both whose definitions differ, with `changes`: the differing members (`parameters`, `requestBody`, `responses`, `security`, `summary`, `description`, `deprecated`, `tags`, `servers`, `operationId`, `callbacks`) or `other` |
+| `added_paths` / `removed_paths`           | path templates added or dropped outright                                                                                                                                                                                                    |
+| `info_changes`                            | `title`, `version` or `description` differences as `{ field, from, to }`                                                                                                                                                                    |
+| `servers_changed`                         | whether the `servers` block differs                                                                                                                                                                                                         |
+| `potentially_breaking`                    | every removed operation                                                                                                                                                                                                                     |
+| `changed`                                 | whether the documents differ at all                                                                                                                                                                                                         |
 
-The comparison is **structural**. It reads paths, methods and the shape of each
-operation; it does not resolve `$ref`s, walk schemas, or reason about
-semantics. A response schema can drop a required field, or a parameter narrow
-its type, with every path and method identical — that shows up as
-`changed_operations` at best, and never in `potentially_breaking`. An empty
-`potentially_breaking` therefore means _this comparison found nothing_, not
-that the change is backward compatible, and the UI says so alongside the
-counts. Path-item-level `parameters` are folded into each operation before
-comparison using OpenAPI's inheritance rule — an operation parameter replaces
-the path-level one with the same `name` and `in` — and compared in a canonical
-order, so moving a shared parameter onto an operation, reordering parameters,
-or removing a path-level definition an operation already overrides is
-correctly no change at all, and so is replacing an empty `parameters` list with
-none. A `$ref`'d parameter is followed only to learn that identity; one whose
-reference cannot be followed is kept as written and never treated as
-overridden. The documentation viewer applies the same rule.
+The comparison is **structural**: it does not resolve `$ref`s, walk schemas or
+reason about semantics. A response schema can lose a required field with every
+path and method unchanged, so an empty `potentially_breaking` means this
+comparison found nothing, not that the change is compatible. Path-level
+`parameters` are folded into each operation (an operation parameter with the
+same `name` and `in` overrides) and compared in canonical order, so moving or
+reordering parameters is not a change.
 
 ### `POST /api/apis/:id/revisions/:revisionId/rollback`
 
-_provider_, owner-or-admin — redeploy a retained revision. Empty body.
+_provider_, owner or admin — redeploy a retained revision. Empty body →
+`{ "api": { … }, "spec": { … } }`.
 
-```json
-{ "api": { … }, "spec": { … } }
-```
+A rollback is a **new revision carrying the old document**: the returned `spec`
+is the new revision, with `rolled_back_from_id` naming the target. The API
+keeps its id, slug, owner, grants, proxy and gateway URL. It runs through the
+same path as `PUT /api/apis/:id/spec` — validation, gateway-first ordering,
+compensation, retention.
 
-**A rollback is a new revision carrying an old document.** History is appended
-to, never rewritten: the restored revision's own row is untouched, the returned
-`spec` is the newly created revision, and its `rolled_back_from_id` names the
-target. There is no delete-and-republish — the API keeps its id, slug,
-ownership, access grants, gateway proxy and configured gateway URL.
+| Status           | Meaning                                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------- |
+| `200`            | the restored document is current and the gateway agrees                                                 |
+| `403 FORBIDDEN`  | not the owner or an admin                                                                               |
+| `404 NOT_FOUND`  | the revision is not retained (retention may have dropped it) or belongs to another API; nothing written |
+| `409 CONFLICT`   | the target is already current; also `409 EDGE_NAMESPACE_UNSERVED`                                       |
+| `502 EDGE_ERROR` | the gateway refused or was unreachable; the catalog is unchanged                                        |
 
-It runs through the same path `PUT /api/apis/:id/spec` runs through, and
-therefore inherits all of it: the same validation, the same gateway-first
-ordering, the same compensation when the gateway moves and the revision cannot
-be persisted, and the same bounded retention. A `routes` API has its restored
-document re-submitted to Edge, which regenerates the operation table from it.
-
-| Status           | Meaning                                                                                                                                                                    |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `200`            | the restored document is the current revision and the gateway agrees                                                                                                       |
-| `403 FORBIDDEN`  | not the owner and not an admin                                                                                                                                             |
-| `404 NOT_FOUND`  | the revision is not retained, or belongs to another API. Retention can drop a revision between listing it and rolling it back; this is that answer, and nothing is written |
-| `409 CONFLICT`   | the target is already the current revision                                                                                                                                 |
-| `502 EDGE_ERROR` | the gateway refused or could not be reached. The catalog is left exactly as it was — a failed rollback never claims it happened                                            |
-
-Audited as `api.spec_rollback` rather than `api.spec_update`, with
-`restored_from_spec_id`, `restored_from_version` and `restored_from_created_at`
-naming the revision that was put back. The row commits with the new revision,
-and the start and failure rows are the same `api.spec_revision_start` and
-`api.spec_revision_failed` a revision writes, with `operation: "rollback"`.
+Audited as `api.spec_rollback` (with `restored_from_spec_id`,
+`restored_from_version`, `restored_from_created_at`); start and failure rows are
+`api.spec_revision_start` / `api.spec_revision_failed` with
+`operation: "rollback"`.
 
 ### `POST /api/apis/:id/restore-gateway`
 
-_provider_, owner-or-admin — rebuild the gateway deployment of an API the
-gateway no longer serves. Empty body.
+_provider_, owner or admin — rebuild the gateway deployment of an API the
+gateway no longer serves. Empty body →
+`{ "api": { … }, "spec": { … }, "proxy_id": "…" }`.
 
-```json
-{ "api": { … }, "spec": { … }, "proxy_id": "…" }
-```
+**Non-destructive.** The API keeps its id, slug, owner, spec history, gateway
+URL and grants; only the Edge objects are recreated, from what the portal
+stores. Approved clients keep their credentials: the ACL group is derived from
+the API id, so their existing consumer groups match again. Anything configured
+directly on the gateway (an operator's plugin config, a hand edit such as
+`hide_credentials: false`) was deleted with the proxy and is not restored.
 
-**Non-destructive by contract.** The API keeps its id, slug, owner, provider,
-specification history, configured gateway URL and every access grant; the
-restore recreates only the Edge objects, from what the portal already stores.
-Approved clients keep the credentials they were issued — the ACL group is
-derived from the API id, so the moment the rebuilt proxy's `access_control`
-plugin is associated, the groups already on their consumers match again.
+What is rebuilt, in publish order: the proxy (through the API-spec importer in
+`routes` mode), the auth plugin, `access_control` when `requestable`, the rate
+limit, CORS, and the [plugin palette](#plugin-palette); then the move onto
+`/<namespace>/<slug>` as the last write. The current revision is deployed; no
+new revision is written (you can `PUT /api/apis/:id/spec` first to correct it).
 
-What the portal does not store does not come back. Edge deleted the proxy's
-plugin configs with the proxy, so anything made or changed directly on the
-gateway — an operator's own plugin config, or a hand-edit such as
-`hide_credentials: false` on the portal's authentication plugin — is gone
-before the restore starts; re-apply it afterwards. A `spec_enforcement`
-conversion is different: the proxy is still live when it begins, and it
-carries those configs across as they are.
+| Status           | Meaning                                                                                                                                                                                        |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `200`            | rebuilt — or the stored proxy was live after all and the flag was simply cleared (`rebuilt: false` in the audit row)                                                                           |
+| `403 FORBIDDEN`  | not the owner or an admin                                                                                                                                                                      |
+| `404 NOT_FOUND`  | no such API                                                                                                                                                                                    |
+| `409 CONFLICT`   | a live proxy already exists; no stored spec revision; another restore is in flight; or the API's settings or current spec changed during the build (retry). Also `409 EDGE_NAMESPACE_UNSERVED` |
+| `502 EDGE_ERROR` | the gateway refused or was unreachable. An unreachable gateway is never read as a deleted proxy; the row is unchanged                                                                          |
 
-What is rebuilt, in the order a publish builds it: the proxy (through the
-API-spec importer in `routes` mode, so the `openapi_validator` is regenerated),
-the authentication plugin, `access_control` when the API is `requestable`, the
-rate limit, the CORS policy, and the provider's plugin palette — then a single
-association, and the move onto `/<namespace>/<slug>` as the **last** gateway
-write. There is no window in which the public path serves an ungated proxy.
-`api_plugins.ferrum_plugin_config_id` is repointed at the rebuilt configs in the
-same store transaction that records the new proxy id.
-
-The current specification revision is what gets deployed; no new revision is
-written. A provider who wants to correct the document first can `PUT
-/api/apis/:id/spec` — that keeps working on an undeployed API — and then
-restore.
-
-| Status           | Meaning                                                                                                                                                                                                                                                                                   |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `200`            | rebuilt, or (`rebuilt: false` in the audit row) the stored proxy turned out to be live after all and the flag was simply cleared                                                                                                                                                          |
-| `403 FORBIDDEN`  | not the owner and not an admin                                                                                                                                                                                                                                                            |
-| `404 NOT_FOUND`  | no such API                                                                                                                                                                                                                                                                               |
-| `409 CONFLICT`   | the API already has a live gateway proxy, or has no stored specification revision to redeploy, or another restore of the same API is in flight, or the API's deployment settings or current specification changed while the proxy was being built (the build is withdrawn; restore again) |
-| `502 EDGE_ERROR` | the gateway could not be reached or refused a write. **Nothing is inferred from this** — an unreachable gateway is never read as a deleted proxy, and the row is left exactly as it was                                                                                                   |
-
-A restore commits an `api.gateway_restore_start` row, naming the proxy id it is
-about to create, before the first gateway call — if that insert fails, nothing
-is built — and its `api.gateway_restore` row in the transaction that records the
-new proxy id. A restore that reaches the gateway and then fails, including when
-that row cannot be written, deletes what it created, records
-`api.gateway_restore_failed` (with `stranded_proxy_id` when the compensating
-delete could not be confirmed), and leaves the API `repair_required` with no
-proxy reference. Retrying starts from the same place.
-
-Concurrent restores of one API are serialized; the loser gets `409 CONFLICT`
-rather than building a second proxy for the same listen path.
+Audit rows: `api.gateway_restore_start` (before the first gateway call; if it
+fails, nothing is built), `api.gateway_restore` with the new proxy id, and on
+failure `api.gateway_restore_failed` (with `stranded_proxy_id` when the cleanup
+delete could not be confirmed). A failed restore removes what it created and
+leaves the API `repair_required`, ready to retry.
 
 ### `POST /api/apis/:id/test-consumer`
 
-_provider_, owner-or-admin → `201` — **show-once.**
-
-Body: `{ "label"?: string | null }` (≤ 120).
+_provider_, owner or admin → `201` — **show-once.** Body
+`{ "label"?: string | null }` (≤ 120).
 
 ```json
 {
@@ -2625,103 +1899,75 @@ Body: `{ "label"?: string | null }` (≤ 120).
 }
 ```
 
-Creates (or **replaces**, deleting the old one) the disposable consumer
-`nexus-test-<api_id>`, carrying this API's ACL group and one credential of the
-API's auth type. The secret appears in this response and nowhere else, ever.
+Creates — or **replaces** with a new, distinct consumer — the disposable
+consumer `nexus-test-<api_id>`, carrying this API's ACL group and one
+credential of the API's auth type. The replaced consumer's credential rows move
+to `revoked`. The secret appears in this response only.
 
-The consumer belongs to whoever created it last: recreating it — an
-administrator recreating a provider's, say — moves its registration and the
-attribution of its credential to the caller, and it is the caller's disabling
-that takes it down. `403 USER_DISABLED` when the caller was disabled while the
-request was in flight; nothing is created.
+The consumer belongs to whoever created it last (an admin recreating a
+provider's takes it over), and that account being disabled takes it down.
+Deleting the API deletes it.
 
-A create the gateway applied but failed to acknowledge answers `502 EDGE_ERROR`
-and leaves nothing behind: Nexus names the consumer it asks Edge to create, so
-the compensation re-reads the gateway by that exact id and deletes the consumer
-it finds before releasing the registration. Only if that compensating delete
-cannot run does the registration survive — deliberately, because it is the one
-thing that leads back to the consumer, and deleting the API later collects both.
-
-Recreating a test consumer replaces it with a **distinct** consumer: the
-replacement carries a new id, and the replaced consumer's credential rows move
-to `revoked`. The two are never the same resource, because everything the
-portal records about a credential is keyed on the consumer id.
-
-Deleting the API deletes this consumer with it; see `DELETE /api/apis/:id`.
-The API is re-read once the creation holds the identity's lock, so a creation
-racing a deletion either completes first and is collected by it, or answers
-`404 NOT_FOUND` with nothing created. The lock does not pin the API's
-`auth_plugin`, which an update may change while the credential is being issued;
-the update re-lists the old-flavour test-consumer credentials after saving its
-row, while creation re-reads the API after issuing its credential. Either side
-therefore catches an overlapping issuance: the new credential is revoked and
-the consumer removed, or the completed swap revokes it before returning. A
-creation that detects the changed flavour answers `409 CONFLICT`, to be retried
-against the API's current plugin.
+Errors: `403 USER_DISABLED` (caller disabled mid-request; nothing created),
+`404 NOT_FOUND` (including an API deleted concurrently), `409 CONFLICT`
+(`auth_plugin` changed while the credential was issued — retry),
+`502 EDGE_ERROR` (nothing is left behind; the compensation finds and deletes
+the consumer by its id).
 
 ---
 
 ## Plugin palette
 
-Three routes under `/api/apis/:id/plugins`, _provider_ and owner-or-admin like
-the rest of the publishing plugin. They carry **state only**: which curated
-Edge plugins this API has switched on, and how each is configured.
+Three routes under `/api/apis/:id/plugins`, _provider_, owner or admin. They
+hold **state only**: which curated Edge plugins this API has switched on and
+how each is configured.
 
-The palette itself — which plugins exist, what fields each takes, and within
-what bounds — is the static `PROVIDER_PLUGINS` catalog exported from
-`@ferrum-nexus/shared`, which both the server and the SPA import. There is no
-route to fetch it, because there is nothing per-deployment about it.
+The palette itself — which plugins exist and what each accepts — is the static
+`PROVIDER_PLUGINS` catalog exported from `@ferrum-nexus/shared`
+(`shared/src/plugins.ts`); there is no route for it. It offers
+`security_headers`, `request_size_limiting`, `response_size_limiting`,
+`ip_restriction`, `bot_detection`, `correlation_id`, `compression`,
+`request_deduplication` and `request_termination`.
 
-`compression` and `request_deduplication` receive default `priority_override`
-values of 3005 and 4060, respectively: compression must finish request-header
-mutation before deduplication fingerprints it. This also composes with a legacy
-sibling at Edge's native priority (4050 or 3010). Operator overrides survive
-saves; an incompatible pair returns `400 VALIDATION_FAILED` naming both plugins
-and the priority adjustment needed. Concurrent palette saves are serialized per
-proxy before that check.
-
-`response_caching` is no longer offered. Edge requires an authenticated response
-to carry backend shared-cache permission (`Cache-Control: public`,
-`must-revalidate`, or `s-maxage`); consumer key partitioning and `vary_by_headers`
-cannot grant it. Nexus does not override that policy. The old descriptor remains
-available only for validating disabled saves and removing existing installations.
-An enabled save returns `400 VALIDATION_FAILED`; GET still lists existing rows
-and DELETE removes only the recorded Nexus-owned gateway config.
+- `compression` and `request_deduplication` get default `priority_override`
+  values of 3005 and 4060, so compression finishes before deduplication
+  fingerprints the request. An operator's overrides survive saves; an
+  incompatible pair is `400 VALIDATION_FAILED` naming both plugins.
+- `response_caching` is **retired**: Edge only caches an authenticated
+  response when the backend opts in with `Cache-Control: public`,
+  `must-revalidate` or `s-maxage`, which consumer settings cannot provide.
+  Existing rows are still listed and can be disabled or deleted; enabling it
+  is `400 VALIDATION_FAILED`.
 
 ### The `ApiPlugin` object
 
-| Field         | Type                       | Notes                                                                                                                                                                                                                       |
-| ------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `plugin_name` | string                     | the exact Ferrum Edge plugin name, including retired installations                                                                                                                                                          |
-| `enabled`     | boolean                    | `false` keeps the gateway config **and its association with the proxy**, but Edge does not run it — a pause, not a removal, so the settings survive                                                                         |
-| `config`      | object                     | exactly the keys that plugin's descriptor declares. Edge's config key sets are closed, so an extra key is a `400` from the gateway rather than a silently ignored field; Nexus rejects it first, as `400 VALIDATION_FAILED` |
-| `trigger`     | `ApiPluginTrigger` \| null | restrict the plugin to some methods and/or a path prefix; `null` means it runs on every request                                                                                                                             |
-| `created_at`  | ISO-8601                   | when the plugin was first switched on; survives a replace                                                                                                                                                                   |
-| `updated_at`  | ISO-8601                   | last save                                                                                                                                                                                                                   |
+| Field         | Type                       | Notes                                                                                                          |
+| ------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `plugin_name` | string                     | the exact Edge plugin name                                                                                     |
+| `enabled`     | boolean                    | `false` keeps the config and its proxy association, but Edge does not run it — a pause that keeps the settings |
+| `config`      | object                     | exactly the keys the plugin's descriptor declares; any other key is `400 VALIDATION_FAILED`                    |
+| `trigger`     | `ApiPluginTrigger` \| null | restrict the plugin to some methods and/or a path prefix; `null` runs it on every request                      |
+| `created_at`  | ISO-8601                   | when the plugin was first switched on; survives a replace                                                      |
+| `updated_at`  | ISO-8601                   | last save                                                                                                      |
 
-`ApiPluginTrigger` is `{ methods?: HttpMethod[], path_prefix?: string }` — the
-portal's slice of Edge's predicate tree. At least one of the two must be
-present; both together are an AND. `path_prefix` is matched against the
-**canonical request path**, which includes the API's `listen_path`, and must
-start with `/` and contain no whitespace, percent escape, backslash or `.`/`..`
-segment — the canonical path never contains any of those, so such a prefix
-could only ever fail to match.
+`ApiPluginTrigger` is `{ methods?: HttpMethod[], path_prefix?: string }`; at
+least one is required, and both together are ANDed. `path_prefix` matches the
+canonical request path, which **includes the `listen_path`**. It must start
+with `/` and contain no whitespace, percent escape, backslash or `.`/`..`
+segment.
 
-**Not every plugin accepts a trigger.** Edge refuses one on a plugin that
-publishes contextless initial-response-header policy (`security_headers`), a
-fixed per-proxy body ceiling (`request_size_limiting`,
-`response_size_limiting`) or contextless response-trailer ownership
-(`compression`, `correlation_id`, and `response_caching` at its default
-`add_cache_status_header`). Each descriptor records this as `supports_trigger`;
-sending a trigger for one of them is `400 VALIDATION_FAILED`.
+Plugins whose descriptor has `supports_trigger: false` — `security_headers`,
+`request_size_limiting`, `response_size_limiting`, `compression`,
+`correlation_id` (and the retired `response_caching`) — refuse a trigger with
+`400 VALIDATION_FAILED`.
 
 ### `GET /api/apis/:id/plugins`
 
-_provider_, owner-or-admin → `{ "plugins": ApiPlugin[] }`, oldest first.
+_provider_, owner or admin → `{ "plugins": ApiPlugin[] }`, oldest first.
 
 ### `PUT /api/apis/:id/plugins/:name`
 
-_provider_, owner-or-admin → `{ "plugin": ApiPlugin }`. Creates or replaces.
+_provider_, owner or admin → `{ "plugin": ApiPlugin }`. Creates or replaces.
 
 ```json
 {
@@ -2732,125 +1978,96 @@ _provider_, owner-or-admin → `{ "plugin": ApiPlugin }`. Creates or replaces.
 ```
 
 `enabled` defaults to `true`; `trigger` may be omitted or `null`. `config` is
-validated against the named plugin's descriptor **before any gateway write**,
-so an unknown key, an out-of-range value or a broken per-plugin invariant is a
-`400 VALIDATION_FAILED` with field-level `details` rather than a partly
-attached plugin.
+validated against the descriptor **before any gateway write**, with field-level
+`details`.
 
 The gateway side is a proxy-scoped plugin config plus its entry in the proxy's
-`plugins[]` — the same mechanism as `rate_limiting` and `cors`. A replace keeps
-the config id, so the association is never touched and there is no window in
-which the plugin is missing. The `api_plugins` row and its `api.plugin_set` audit
-row are written last, in one transaction, inside the same compensated block, so
-a store or audit failure rolls the gateway back rather than leaving a plugin
-running that the portal has no row — or no record — for.
+`plugins[]`. A replace keeps the config id, so the plugin is never briefly
+missing. The `api_plugins` row and `api.plugin_set` audit row are written last,
+and a store failure rolls the gateway back. Only the config the portal created
+(by recorded id) is touched; an operator's config of the same name, and fields
+the portal does not model such as `priority_override`, are left alone.
 
-The save touches **only the config the portal created**, identified by the id
-recorded on the row. Ferrum Edge allows several configs of one plugin name on a
-proxy — with distinct triggers or execution priorities — so a second config an
-operator made by hand is left exactly where it is, and fields the portal does
-not model (`priority_override`) survive the replace.
-
-| Status | Code                | When                                                                                                                                                                                                                                                                                                                                                                          |
-| ------ | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400`  | `VALIDATION_FAILED` | a config key, value or invariant the plugin does not accept; a trigger on a plugin Edge cannot gate; or a plugin Nexus manages from a first-class API field (`key_auth`/`basic_auth`/`jwt_auth` → `auth_plugin`, `access_control` → `requestable`, `rate_limiting` → `rate_limit`, `cors` → `cors`, `openapi_validator` → `spec_enforcement`), whose message names that field |
-| `403`  | `FORBIDDEN`         | not the owner and not an admin                                                                                                                                                                                                                                                                                                                                                |
-| `404`  | `NOT_FOUND`         | the API, or an Edge plugin outside the palette                                                                                                                                                                                                                                                                                                                                |
-| `409`  | `CONFLICT`          | the API has no gateway proxy to attach anything to                                                                                                                                                                                                                                                                                                                            |
+| Status | Code                | When                                                                                                                                                                                                                                                                                |
+| ------ | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400`  | `VALIDATION_FAILED` | invalid config, a trigger on a plugin that cannot take one, or a plugin managed from an API field (`key_auth`/`basic_auth`/`jwt_auth` → `auth_plugin`, `access_control` → `requestable`, `rate_limiting` → `rate_limit`, `cors` → `cors`, `openapi_validator` → `spec_enforcement`) |
+| `403`  | `FORBIDDEN`         | not the owner or an admin                                                                                                                                                                                                                                                           |
+| `404`  | `NOT_FOUND`         | the API, or a plugin outside the palette                                                                                                                                                                                                                                            |
+| `409`  | `CONFLICT`          | the API has no gateway proxy                                                                                                                                                                                                                                                        |
 
 ### `DELETE /api/apis/:id/plugins/:name`
 
-_provider_, owner-or-admin → `{ "ok": true }`.
+_provider_, owner or admin → `{ "ok": true }`. Disassociates and deletes the
+portal's config, then removes the row. `404 NOT_FOUND` when the API never had
+that plugin. An operator's config of the same name stays; a portal config
+already removed by hand is tolerated.
 
-Disassociates the config from the proxy, deletes it, then removes the row —
-`404 NOT_FOUND` when the API never had that plugin. Only the config the portal
-created is deleted; another config of the same plugin name is an operator's and
-stays. A gateway config an operator already removed by hand is tolerated: the
-row still goes.
+Audit rows: `api.plugin_remove_start` before the gateway write, then
+`api.plugin_remove` with the row delete. If that final transaction fails, the
+config is put back under its recorded id (`api.plugin_rollback`) and the
+request can be repeated.
 
-An `api.plugin_remove_start` audit row is committed before the gateway is
-touched, and the row delete commits with its `api.plugin_remove` row. If that
-last transaction fails, the row stays and the config is put back under the id
-the row records (`api.plugin_rollback`), so the removal can simply be repeated.
-Should that undo fail as well, the repeat finds the config already gone,
-recognises its own earlier attempt by the start row naming the config, and
-records `was_attached: true` with `resumed: true`.
-
-Deleting the API removes every palette row with it; the gateway objects need no
-separate step, because they are proxy-scoped and the proxy delete cascades them.
+Deleting the API removes its palette rows; the proxy delete cascades the
+gateway configs.
 
 ### What the palette does not cover
 
-The auth family (`hmac_auth`, `jwks_auth`, `oauth2_introspection`, `mtls_auth`)
-and `spec_expose` are **not** in the palette. The first four change the
-credential model — Nexus would need credential types, issue/rotate flows and
-show-once material for each — and `spec_expose` needs a canonical public spec
-endpoint. Operator plugins (logging sinks, telemetry, mesh, chaos, load
-testing) are deliberately out of scope: they are how you run the gateway, not
-how you sell an API. See [the provider guide](guides/provider-guide.md#plugins).
+The other auth plugins (`hmac_auth`, `jwks_auth`, `oauth2_introspection`,
+`mtls_auth`) change the credential model and are not offered; nor is
+`spec_expose`. Operator plugins (log sinks, telemetry, mesh, chaos, load
+testing) are out of scope by design. See
+[the provider guide](guides/provider-guide.md#plugins).
 
 ---
 
 ## Access requests
 
-Registered under `/api/access-requests`; _session_ throughout. The service checks
-both role and ownership: a client raises and cancels their own requests, an API
-owner must retain at least the `provider` role to approve, deny or revoke, and
-an admin may decide on any API. A demoted owner receives `403 FORBIDDEN` for
-these decisions; ownership alone does not preserve provider powers.
+Registered under `/api/access-requests`; _session_. A client raises and cancels
+their own requests. An API's owner must still hold at least the `provider` role
+to approve, deny or revoke (a demoted owner gets `403 FORBIDDEN`); an admin may
+decide on any API.
 
 ### `GET /api/access-requests`
 
-_session_ — `Paginated<AccessRequest>`, each row carrying `api` and `requester`
+_session_ — `Paginated<AccessRequest>`, each row with `api` and `requester`
 summaries.
 
 | Query             | Type                                                            |
 | ----------------- | --------------------------------------------------------------- |
 | `mine`            | boolean — only the caller's own requests                        |
-| `api_id`          | uuid                                                            |
+| `api_id`          | id                                                              |
 | `status`          | `pending` \| `approved` \| `denied` \| `revoked` \| `cancelled` |
 | `limit`, `offset` | pagination                                                      |
 
-Scoping: a `client` (or anyone passing `mine=true`) sees only their own; a
-`provider` sees the inbox for the APIs they own; an `admin` sees everything.
-A provider filtering by an `api_id` they do not own gets `403 FORBIDDEN`.
+A `client` (or anyone with `mine=true`) sees their own; a `provider` sees
+requests for APIs they own; an `admin` sees all. A provider filtering by an
+`api_id` they do not own gets `403 FORBIDDEN`.
 
 ### `POST /api/access-requests`
 
 _session_ → `201 { "access_request": AccessRequest }`
 
-Body: `api_id` (uuid), `justification` (1–2000 chars).
+Body: `api_id`, `justification` (1–2000 chars), optional `application_id` (one
+of the caller's own active applications; absent or `null` means the account
+itself).
 
-**Rate-limited** to 10 requests per minute per account when
-`NEXUS_RATE_LIMIT_ENABLED=true` (always off under `NEXUS_ENV=test`). Independently,
-one account may create `NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY` access
-requests (default 20, `0` = unlimited) in a rolling 24 hours. The budget counts
-the account's `access.request` audit rows, written in the same transaction as
-the request, so **cancelled requests, and requests of a since-deleted
-application, still count** until they age out: neither create→cancel→create nor
-create application→request→delete reopens the allowance. Exceeding either bound
-is `429` (`RATE_LIMITED` or `QUOTA_EXCEEDED` with
-`details: { limit, window, setting }`).
+**Limits.** 10 a minute per account, and
+`NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY` (default 20, `0` disables) in a
+rolling 24 hours — `429 QUOTA_EXCEEDED` with `limit`, `window` and `setting`
+in `details`. The daily budget counts `access.request` audit rows, so cancelled
+requests and requests of since-deleted applications still count.
 
-With `application_id`, the application is re-checked (exists, yours, `active`)
-under the key its deletion holds, and that key is held until the request has
-committed: a request racing the application's deletion answers `404 NOT_FOUND`
-— charging nothing and notifying nobody — or is removed by the deletion that
-follows it.
+Errors:
 
-Errors, all `409 CONFLICT`: you own this API; the API is retired; the API does
-not accept access requests (`requestable: false`); you already have access; you
-already have a pending request. `404 NOT_FOUND` for an unknown API, and for a
-`private` API the caller may not read.
+- `404 NOT_FOUND` — unknown API, a `private` API the caller may not read
+  (checked first, so a hidden API always looks absent), or unknown application.
+- `403 FORBIDDEN` — the application belongs to someone else (not even an admin
+  may act as another account's application).
+- `409 CONFLICT` — you own the API; it is retired; it is not requestable; this
+  identity already has access or a pending request; the application is
+  disabled.
 
-The `private` check comes **first**, before any of the `409`s, so a probe for
-an API the caller cannot see gets the same `404` whether the id exists, is
-retired or is not requestable — the answers would otherwise confirm it exists.
-"May read" is the catalog's rule: the owner, an admin, an authorized viewer, or
-an account holding an active grant through any of its identities.
-`internal` is deliberately **not** gated — it is unlisted, not private, and
-gating requests on it would make `internal` + `requestable` a combination
-nobody could act on.
+`internal` APIs are not gated: they are unlisted, not private.
 
 ```bash
 curl -sS -b cookies.txt -X POST http://127.0.0.1:8787/api/access-requests \
@@ -2860,119 +2077,99 @@ curl -sS -b cookies.txt -X POST http://127.0.0.1:8787/api/access-requests \
 
 ### `POST /api/access-requests/:id/cancel`
 
-_session_, **requester only** → `{ "access_request": AccessRequest }`.
-No body. **Rate-limited** to 30 requests per minute per account when
-`NEXUS_RATE_LIMIT_ENABLED=true`. `403 FORBIDDEN` for anyone else; `409 CONFLICT` when the request is no
-longer `pending`.
+_session_, **requester only** → `{ "access_request": AccessRequest }`. No body.
+`403 FORBIDDEN` for anyone else; `409 CONFLICT` when no longer `pending`.
 
 ### `POST /api/access-requests/:id/approve`
 
-_session_, **API owner with at least the provider role, or admin** →
+_session_, **API owner with the provider role, or admin**. Body
+`{ "decision_note"?: string | null }` (≤ 2000), or no body.
 
 ```json
 { "access_request": { …, "status": "approved" }, "grant": { …, "acl_group": "nexus:api:2b1c…:approved" } }
 ```
 
-Body: `{ "decision_note"?: string | null }` (≤ 2000). The body may be omitted
-entirely.
+The request is claimed as approved (compare-and-set), the requesting identity's
+Edge consumer is created if needed and gets the ACL group
+`nexus:api:<api_id>:approved`, then the grant row commits. The requester gets a
+notification and an `access_approved` email. Approval holds the API's proxy
+lease, so it cannot interleave with retirement or a revocation.
 
-Admission is rechecked under the same proxy lease used by catalog updates. A
-retired or non-requestable API refuses approval before claiming the pending
-request or touching gateway access. The lease remains held through grant/ACL
-commit or compensation: approval completed before retirement creates an existing
-grant that retirement preserves; retirement completed first refuses new access.
-
-What happens: a compare-and-set claims the pending request as approved before
-touching the gateway. The requester's Edge consumer is created if needed and the
-ACL group `nexus:api:<api_id>:approved` is added (serialised per consumer), then
-the grant row is committed. The requester gets a notification and an
-`access_approved` email.
-
-Errors: `403 FORBIDDEN` (neither a provider owner nor an admin), `409 CONFLICT`
-(already decided, the user already holds an active grant, the API is retired
-or no longer requestable, or the request was made for an application that has
-since been disabled or deleted — the request stays `pending` until the
-application is re-enabled or the request is denied),
-`502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE` — failed approval attempts compensate
-unowned ACL additions and return the request to `pending` where possible.
-Compensation also removes additions whose gateway write was not acknowledged.
-The rollback audit's `acl_group_possibly_applied: true` marks that uncertain
-write outcome; the removal or orphan field records the compensation outcome.
-Incomplete compensation is recorded in `access.approve_rollback` audit details
-and logs; inspect the current request/grant before retrying an ambiguous failure.
+Errors: `403 FORBIDDEN`; `409 CONFLICT` (already decided, the identity already
+holds an active grant, the API is retired or no longer requestable, or the
+request's application is disabled or deleted — the request stays `pending`);
+`502 EDGE_ERROR` / `EDGE_UNAVAILABLE`. A failed approval removes the ACL
+addition and returns the request to `pending` where possible; the
+`access.approve_rollback` audit row records the outcome (with
+`acl_group_possibly_applied: true` when the gateway write was not
+acknowledged). Check the request and grant before retrying an ambiguous
+failure.
 
 ### `POST /api/access-requests/:id/deny`
 
-_session_, **API owner with at least the provider role, or admin** →
-`{ "access_request": AccessRequest }`.
-Body `{ "decision_note"?: string | null }`, optional. Nothing changes on the
-gateway. `409 CONFLICT` when already decided.
+_session_, **API owner with the provider role, or admin** →
+`{ "access_request": AccessRequest }`. Body `{ "decision_note"?: string | null }`,
+optional. Nothing changes on the gateway. `409 CONFLICT` when already decided.
 
 ---
 
 ## Grants
 
-Registered under `/api/grants`; _session_ throughout.
+Registered under `/api/grants`; _session_.
 
 ### `GET /api/grants`
 
-_session_ — `Paginated<Grant>`, each row carrying `api` and `user` summaries.
-
-| Query             | Type                       |
-| ----------------- | -------------------------- |
-| `mine`            | boolean                    |
-| `api_id`          | uuid                       |
-| `user_id`         | uuid — honoured for admins |
-| `status`          | `active` \| `revoked`      |
-| `limit`, `offset` | pagination                 |
-
-Same scoping as access requests: own / owned-APIs / everything.
+_session_ — `Paginated<Grant>`, each row with `api` and `user` summaries. Query:
+`mine` (boolean), `api_id`, `user_id` (admins only), `status` (`active` \|
+`revoked`), `limit`, `offset`. Scoped like access requests: own, owned APIs,
+or everything.
 
 ### `POST /api/grants/:id/revoke`
 
-_session_, **API owner with at least the provider role, or admin** → `{ "grant": Grant }`.
+_session_, **API owner with the provider role, or admin** →
+`{ "grant": Grant }`. Body `{ "reason"?: string | null }` (≤ 2000), optional.
 
-Body: `{ "reason"?: string | null }` (≤ 2000), optional.
-
-Removes the ACL group from the grantee's consumer, flips the grant to
-`revoked`, and drags the originating access request to `revoked` too so the
-requester's history reads "approved, then revoked". The grantee is notified and
-emailed. `409 CONFLICT` when the grant is already revoked.
-The claim and the ACL removal hold the API's `proxy:<id>` lease, the one an
-approval holds, so an approval of a fresh request for the same API waits for an
-in-flight revocation rather than having its group stripped by it.
+Removes the ACL group from the grantee's consumer, marks the grant `revoked`,
+and moves the originating access request to `revoked`. The grantee is notified
+and emailed. `409 CONFLICT` when already revoked. Revocation holds the API's
+proxy lease, like approval.
 
 ---
 
 ## Credentials
 
-Registered under `/api/credentials`; _session_ throughout.
+Registered under `/api/credentials`; _session_.
 
-**`POST /api/credentials` and `POST /api/credentials/:id/rotate` are the only
-two responses in the entire API that carry plaintext credential material, and
-each carries it exactly once.** Nexus stores a SHA-256 fingerprint and the last
-four characters; Ferrum Edge redacts credential material on every read. There
-is no path back to the plaintext on either side.
+**Plaintext credential material appears in exactly three responses —
+`POST /api/credentials`, `POST /api/credentials/:id/rotate` and
+`POST /api/apis/:id/test-consumer` — and only once.** Nexus stores a SHA-256
+fingerprint and the last four characters; Edge redacts material on every
+read.
+
+A credential belongs to an **identity**: the account itself, or one of its
+[applications](#applications). Each identity has its own Edge consumer
+(`nexus-user-<user_id>` or `nexus-app-<application_id>`).
 
 ### `GET /api/credentials`
 
-_session_ — `Paginated<CredentialMetadata>`. Never contains a secret.
-`edge_ordinal` is the row's durable append position within its consumer and
-type (`null` when the gateway position is unknown); the portal derives an entry's gateway array index from
-it.
+_session_ — `Paginated<CredentialMetadata>`; never contains a secret.
+`edge_ordinal` is the row's append position within its consumer and type
+(`null` when unknown).
 
-| Query             | Type                                | Notes                                                                                     |
-| ----------------- | ----------------------------------- | ----------------------------------------------------------------------------------------- |
-| `status`          | `active` \| `retiring` \| `revoked` |                                                                                           |
-| `user_id`         | uuid                                | **admin only** — inspect another account's credential metadata; `403 FORBIDDEN` otherwise |
-| `limit`, `offset` | pagination                          |                                                                                           |
+| Query             | Type                                | Notes                                                                     |
+| ----------------- | ----------------------------------- | ------------------------------------------------------------------------- |
+| `status`          | `active` \| `retiring` \| `revoked` |                                                                           |
+| `application_id`  | id \| `account`                     | one application's credentials, or `account` for the account's own         |
+| `user_id`         | id                                  | **admin only** — another account's credentials; `403 FORBIDDEN` otherwise |
+| `limit`, `offset` | pagination                          |                                                                           |
 
 ### `POST /api/credentials`
 
 _session_ → `201` — **show-once.**
 
-Body: `credential_type` ∈ `keyauth` \| `basicauth` \| `jwt`,
-optional `label` (≤ 120, nullable).
+Body: `credential_type` (`keyauth` \| `basicauth` \| `jwt`), optional `label`
+(≤ 120, nullable), optional `application_id` (one of the caller's own active
+applications; absent or `null` issues for the account).
 
 ```json
 {
@@ -2984,42 +2181,17 @@ optional `label` (≤ 120, nullable).
 }
 ```
 
-The `secret` shape depends on the type:
-
 | `credential_type` | `secret` fields                                   | How the client authenticates                                                           |
 | ----------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | `keyauth`         | `key`                                             | `X-API-Key: <key>`                                                                     |
 | `basicauth`       | `username` (= the consumer username), `password`  | HTTP Basic `<consumer username>:<password>`                                            |
 | `jwt`             | `jwt_secret`, `jwt_key` (= the consumer username) | HS256 JWT signed with `jwt_secret`, `sub` = `jwt_key`, sent as `Authorization: Bearer` |
 
-#### What the provider's upstream sees
-
-The gateway removes a key or a Basic password before it proxies the request,
-but it **forwards a bearer token**:
-
-| `credential_type` | Does the credential reach the provider's backend?                                         |
-| ----------------- | ----------------------------------------------------------------------------------------- |
-| `keyauth`         | **No** — Edge's `key_auth` runs with `hide_credentials: true`, so `X-API-Key` is stripped |
-| `basicauth`       | **No** — `basic_auth` likewise strips the `Authorization: Basic` field                    |
-| `jwt`             | **Yes** — `Authorization: Bearer <token>` is forwarded unchanged                          |
-
-This is not a Nexus setting. Of the three authentication plugins, Edge offers
-`hide_credentials` on `key_auth` and `basic_auth`; `jwt_auth` has no
-credential-hiding option, and its config is a closed key set that refuses one.
-A backend offered JWT commonly wants the claims, so Edge forwards the token.
-
-The practical consequence for a caller holding a `jwt` credential: the
-provider's server sees the tokens you sign. Your **signing secret is never
-forwarded**, so a provider cannot mint tokens as you — but it can replay a token
-you sent it until that token's `exp` — which Edge requires by default but does
-not cap, so the lifetime is whatever you sign. Keep `exp` short, and put nothing
-in a custom claim you would not show the provider. Which
-method an API uses is the provider's choice, published on the catalog entry; see
-the [client guide](guides/client-guide.md).
-
-Errors: `409 CONFLICT` when you already hold
-`FERRUM_MAX_CREDENTIALS_PER_TYPE` (default 2) live credentials of that type —
-revoke or rotate one first; `502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE`.
+Errors: `409 CONFLICT` when this identity already holds
+`FERRUM_MAX_CREDENTIALS_PER_TYPE` (default 2) live credentials of that type
+(revoke or rotate one first), or the application is disabled;
+`403 FORBIDDEN` (someone else's application); `404 NOT_FOUND` (unknown
+application); `502 EDGE_ERROR` / `EDGE_UNAVAILABLE`.
 
 ```bash
 curl -sS -b cookies.txt -X POST http://127.0.0.1:8787/api/credentials \
@@ -3027,12 +2199,28 @@ curl -sS -b cookies.txt -X POST http://127.0.0.1:8787/api/credentials \
   -d '{"credential_type":"keyauth","label":"laptop"}'
 ```
 
+#### What the provider's upstream sees
+
+The gateway strips a key or a Basic password before proxying, but **forwards a
+bearer token**:
+
+| `credential_type` | Reaches the provider's backend?                                                             |
+| ----------------- | ------------------------------------------------------------------------------------------- |
+| `keyauth`         | **No** — Edge's `key_auth` defaults to `hide_credentials: true`, so `X-API-Key` is stripped |
+| `basicauth`       | **No** — `basic_auth` likewise strips `Authorization: Basic`                                |
+| `jwt`             | **Yes** — `Authorization: Bearer <token>` is forwarded unchanged                            |
+
+This is Edge's behaviour, not a Nexus setting: `jwt_auth` has no
+credential-hiding option. The signing secret is never forwarded, so a provider
+cannot mint tokens as the client, but it can replay a token it received until
+its `exp` — which Edge requires by default but does not cap. Keep `exp` short
+and put nothing in a claim you would not show the provider. See the
+[client guide](guides/client-guide.md).
+
 ### `POST /api/credentials/:id/rotate`
 
-_session_, owner (or an admin) → **show-once.**
-
-Body: `{ "label"?: string | null }`, optional — defaults to the previous
-credential's label.
+_session_, owner or admin → **show-once.** Body `{ "label"?: string | null }`,
+optional; defaults to the previous label.
 
 ```json
 {
@@ -3043,73 +2231,129 @@ credential's label.
 }
 ```
 
-Append-then-delete: the replacement is created on Edge first so both secrets
-are briefly live **during the server operation**, then the old entry is deleted
-before the response returns. Callers therefore have no user-controlled overlap
-window; a successful rotate always returns `previous.status="revoked"`, and
-callers using the old secret start receiving 401 as soon as gateway
-configuration propagates. **When the account is already at the per-type cap
-there is no room to append**, so the old entry is deleted first — and marked
-`revoked` the moment Edge confirms it — leaving a brief window with no working
-credential of that type. That delete cannot be undone, so its move to `retiring`
-commits with a `credential.revoke_start` audit row (`operation: "rotate"`)
-before it is attempted, as a revocation's does; if that row cannot be written
-the rotation stops with nothing changed. If the append then fails, the response
-says so plainly (`502 EDGE_ERROR`, _the previous credential was removed … issue
-a new credential_); everything still live stays revocable.
-
-For a caller-visible cutover, issue a new credential, deploy it, then revoke
-the old one — provided the account is below `FERRUM_MAX_CREDENTIALS_PER_TYPE`.
-
-Either way the credential being replaced passes through the `retiring` status
-before it settles at `revoked`: the retirement is written down _before_ the
-gateway delete, so an acknowledgement lost in flight leaves a row the next
-rotate, revoke or issue can settle rather than a mirror that silently disagrees
-with the gateway for good. A `previous` you read back from a **successful**
-rotation is always `revoked`.
-
-If it is instead the **delete** that fails below the cap, the replacement that
-was already appended is taken back — its show-once secret was never returned,
-so leaving it would spend a cap slot on a credential nobody holds — and the
-original error is reported unchanged, leaving the account as the rotation found
-it. Should that compensating delete fail too, the response says which state the
-gateway array proved and always carries `details.stranded_credential_id` and
-`details.retired_credential_id`: _the gateway did not acknowledge removing the
-previous credential and no longer holds it_ (the delete landed after all; the
-portal settles the pending row on the next call), _both … the portal holds a
-live row for each_ (the two views agree, so revoking the named credential is
-ordinary self-service), or _an administrator must reconcile this consumer_ when
-the array could not be read back at all. Only the last needs an administrator;
-see [`operations.md`](operations.md#12-the-credential-mirror) §12.
-
-An **admin may rotate another account's credential**, and doing so does not
-transfer it: the replacement keeps the original `user_id` and consumer, the
-owner keeps seeing and revoking it, and the admin appears only as the actor on
-the audit row and as the subject of the Edge write. The notification and email
-go to the owner.
+- **Below the cap**, the replacement is appended on Edge first, then the old
+  entry is deleted before the response returns. Both work only for the
+  duration of the call — there is no caller-controlled overlap. For a
+  zero-downtime cutover, issue a new credential, deploy it, then revoke the old
+  one.
+- **At the cap** there is no room to append, so the old entry is deleted first,
+  leaving a brief window with no working credential of that type. If the append
+  then fails, the response is `502 EDGE_ERROR` saying the previous credential
+  was removed; issue a new one.
+- The old credential passes through `retiring` (recorded before the gateway
+  delete, with a `credential.revoke_start` audit row) and settles at
+  `revoked`. After a successful rotation `previous.status` is always
+  `revoked`.
+- If the delete fails below the cap, the appended replacement is removed again
+  and the original error returned. If that also fails, `details` carries
+  `stranded_credential_id` and `retired_credential_id`, and the message says
+  whether the gateway still holds both (revoke the named one yourself) or
+  neither could be confirmed (an administrator must reconcile — see
+  [`operations.md`](operations.md#12-the-credential-mirror)).
+- An admin rotating someone else's credential does not take it over: the
+  replacement keeps the owner and consumer, and the notification goes to the
+  owner.
 
 Errors: `403 FORBIDDEN` (someone else's credential), `403 USER_DISABLED` (the
-owner's account was disabled), `409 CONFLICT` (already revoked, or the
-credential belongs to a disabled application — re-enable it to rotate, or
-revoke the credential, which stays allowed), `502
-EDGE_ERROR` — including the case where the gateway's credential list no longer
-matches the portal's view, which is refused rather than guessed at.
+owner is disabled), `409 CONFLICT` (already revoked, or the credential's
+application is disabled — revoking stays allowed), `502 EDGE_ERROR` (including
+a gateway credential list that no longer matches the portal's, which is refused
+rather than guessed at).
 
 ### `DELETE /api/credentials/:id`
 
-_session_, owner (or an admin) → `{ "ok": true }`. Deletes the entry from Edge
-and marks the row `revoked`. Idempotent: a credential already `revoked` returns
-success without touching the gateway.
+_session_, owner or admin → `{ "ok": true }`. Deletes the entry from Edge and
+marks the row `revoked`. Idempotent: an already-revoked credential succeeds
+without a gateway call.
 
-The row's move to `retiring` commits with a `credential.revoke_start` audit row
-before the gateway delete, and the move to `revoked` with the
-`credential.revoke` row. If that last transaction fails, the row is left
-`retiring` over an entry that is gone, which is the state a lost gateway
-acknowledgement leaves too, and repeating the request completes the revocation
-and records it. A delete that fails while the gateway array proves it never
-applied puts the row back to `active` instead, with a
-`credential.revoke_rollback` row completing the start — as it does for a
-rotation at the cap — and the request can simply be repeated.
+The row moves to `retiring` (with `credential.revoke_start`) before the gateway
+delete and to `revoked` (with `credential.revoke`) after. If the last step
+fails, repeating the request completes it. If the gateway proves the delete
+never happened, the row returns to `active` with a
+`credential.revoke_rollback` row, and the request can be repeated.
+
+---
+
+## Applications
+
+Registered under `/api/applications`; _session_. An **application** is a
+separate gateway identity owned by an account, with its own Edge consumer
+(`nexus-app-<application_id>`), its own approved APIs and its own credentials.
+ACL groups live on the consumer, so two applications of one owner approved for
+different APIs cannot call each other's.
+
+- Access requests, grants, credentials and consumer mappings carry a nullable
+  `application_id`; `null` means the account itself, which is the default.
+- To act as an application, pass `application_id` on
+  [`POST /api/access-requests`](#post-apiaccess-requests) or
+  [`POST /api/credentials`](#post-apicredentials). It must be the caller's own
+  (`403 FORBIDDEN` otherwise — not even an admin may act as another account's)
+  and `active` (`409 CONFLICT` otherwise).
+- A credential's `label` is only a note; `application_id` decides what the
+  credential can call.
+
+Reads and writes of someone else's application answer `404 NOT_FOUND`, except
+for admins.
+
+### `GET /api/applications`
+
+_session_ — `Paginated<Application>`, newest first; each item carries
+`active_grants` and `active_credentials`. A client sees their own; an admin
+sees everyone's unless narrowed.
+
+| Query             | Type                                                                |
+| ----------------- | ------------------------------------------------------------------- |
+| `mine`            | boolean — only the caller's own, even for an admin                  |
+| `owner_user_id`   | id, admin only                                                      |
+| `status`          | `active` \| `disabled`                                              |
+| `q`               | case-insensitive substring of name or description, ≤ 200 characters |
+| `limit`, `offset` | pagination                                                          |
+
+### `GET /api/applications/:id`
+
+_session_, owner or admin → `{ "application": Application }`.
+
+### `POST /api/applications`
+
+_session_ → `201 { "application": Application }`. Body: `name` (1–120, unique
+per owner case-insensitively), `description` (optional, ≤ 500).
+
+No gateway consumer is created yet; the first approval or credential provisions
+it. Errors: `409 CONFLICT` (name taken), `429 QUOTA_EXCEEDED` when the account
+already owns `NEXUS_MAX_APPLICATIONS_PER_OWNER` (default 20, `0` disables;
+`details: { limit, current, setting }`).
+
+### `PATCH /api/applications/:id`
+
+_session_, owner or admin → `{ "application": Application }`. Body: any of
+`name`, `description`, `status` (`active` \| `disabled`).
+
+**`status: "disabled"` revokes nothing.** It refuses new access requests,
+approvals, credentials and rotations; everything already issued keeps working,
+and revoking stays allowed. The audit row records
+`details.revoked_existing_access: false`. To stop an integration, delete the
+application or revoke its grants.
+
+Re-enabling fails with `502 EDGE_ERROR` (`details.identities`) when the
+application holds active grants but has no consumer mapping.
+
+### `DELETE /api/applications/:id`
+
+_session_, owner or admin — **destructive**.
+
+```json
+{ "revoked_grants": 2, "revoked_credentials": 1 }
+```
+
+The Edge consumer is deleted **first** (so no live identity is left that the
+portal cannot find), then the row, whose cascade removes its grants, access
+requests, credential rows and consumer mapping. Its credentials stop working
+immediately. The reversible option is `PATCH` with `status: "disabled"`.
+
+The local delete and its `application.delete` audit row are one transaction; an
+`application.delete_start` row is written before the consumer is touched. A
+retry after the consumer is gone finishes the rows without recreating anything,
+and records `resumed: true`.
 
 ---
 

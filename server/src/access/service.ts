@@ -291,10 +291,7 @@ export interface BulkRevocationResult {
  * `restore_skipped_reason` on `access.revoke_rollback`.
  */
 type RevocationRestoreSkip =
-  | 'grantee_disabled'
-  | 'grantee_missing'
-  | 'application_missing'
-  | 'group_absent';
+  'grantee_disabled' | 'grantee_missing' | 'application_missing' | 'group_absent';
 
 /** The log line a rollback that left its grant `revoked` writes, by reason. */
 const RESTORE_SKIP_MESSAGES: Record<RevocationRestoreSkip, string> = {

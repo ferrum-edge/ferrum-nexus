@@ -17,8 +17,8 @@ do not duplicate them in this directory.
   --effort <medium|high|xhigh|max>
 ```
 
-The shared launcher pins `alibaba-token-plan/deepseek-v4-pro-0813`; `--effort` is accepted for
-parity with the sibling skills and `--model` only re-states the pinned model.
+The shared launcher pins `alibaba-token-plan/deepseek-v4.1-flash`; `--effort` is accepted for
+parity with the sibling skills but ignored, and `--model` only re-states the pinned model.
 
 Read the canonical skill before dispatch for remote CI validation, effort selection, preflight,
 isolation, failure handling, and verification. For implementer mode, read

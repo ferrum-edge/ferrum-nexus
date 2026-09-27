@@ -17,9 +17,9 @@ do not duplicate them in this directory.
   --effort <low|medium|high|xhigh|max>
 ```
 
-`--effort` selects the `cursor-grok-4.6-*` SKU (the launcher defaults to `high`). Append
-`--fast` only when the user explicitly requests fast mode for that dispatch or fleet, and
-`--name NAME` only to label a worker.
+`--effort` selects the `cursor-grok-4.6-*` SKU (the launcher defaults to `high` and clamps `max`
+to `xhigh`). Append `--fast` only when the user explicitly requests fast mode for that dispatch or
+fleet, and `--name NAME` only to label a worker.
 
 Read the canonical skill before dispatch for remote CI validation, effort selection, preflight,
 isolation, failure handling, and verification. For implementer mode, read
