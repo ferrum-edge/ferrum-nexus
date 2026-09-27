@@ -129,6 +129,12 @@ describe('gateway revocation visibility', () => {
         status === 'sending' ? 'Gateway revocation in progress' : 'Gateway revocation pending',
       ),
     ).toBeInTheDocument();
+    // The tooltip explaining the badge needs a focusable DOM trigger: `Badge`
+    // passes none of the trigger's props through, so it never opened.
+    const badge = screen.getByText(
+      status === 'sending' ? 'Gateway revocation in progress' : 'Gateway revocation pending',
+    );
+    expect(badge.parentElement).toHaveAttribute('tabindex', '0');
     const button = screen.getByRole('button', { name: 'Retry' });
     expect(button).toBeEnabled();
     fireEvent.click(button);

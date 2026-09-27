@@ -85,6 +85,30 @@ function statusLockReason(
 }
 
 /**
+ * A badge a tooltip explains. The tooltip needs a DOM element to attach to —
+ * `Badge` renders none of the trigger's props — and a keyboard user needs to
+ * reach it, so the badge sits in a focusable span.
+ */
+function ExplainedBadge({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactElement;
+}): ReactElement {
+  return (
+    <Tooltip label={label}>
+      <span
+        tabIndex={0}
+        className="inline-flex rounded-full focus-visible:ring-2 focus-visible:ring-accent-ring focus-visible:outline-none"
+      >
+        {children}
+      </span>
+    </Tooltip>
+  );
+}
+
+/**
  * "The account is off but its gateway credentials are not."
  *
  * A disabled account whose Ferrum consumer could not be stripped keeps a
@@ -102,7 +126,7 @@ function GatewayTeardownBadge({ userId }: { userId: string }): ReactElement | nu
 
   return (
     <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
-      <Tooltip
+      <ExplainedBadge
         label={
           teardown.status === 'sending'
             ? 'Revocation is in progress. Interrupted attempts are recovered automatically; Retry re-drives it now.'
@@ -116,7 +140,7 @@ function GatewayTeardownBadge({ userId }: { userId: string }): ReactElement | nu
             ? 'Gateway revocation in progress'
             : 'Gateway revocation pending'}
         </Badge>
-      </Tooltip>
+      </ExplainedBadge>
       <Button
         size="sm"
         variant="ghost"
@@ -322,14 +346,9 @@ function UsersTable(): ReactElement {
           const locked = roleLockReason(actor, row.original, lastSuperAdmin);
           if (locked) {
             return (
-              <Tooltip label={locked}>
-                <span
-                  tabIndex={0}
-                  className="inline-flex rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-ring"
-                >
-                  <RoleBadge role={row.original.role} />
-                </span>
-              </Tooltip>
+              <ExplainedBadge label={locked}>
+                <RoleBadge role={row.original.role} />
+              </ExplainedBadge>
             );
           }
           return (
