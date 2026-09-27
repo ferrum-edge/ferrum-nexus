@@ -76,7 +76,7 @@ import { Checkbox, LabeledInput, LabeledTextarea } from '../components/ui/Input'
 import { LabeledSelect } from '../components/ui/Select';
 import { SpecEnforcementSelect } from '../components/publishing/SpecEnforcementSelect';
 import { LoadingPanel } from '../components/ui/Spinner';
-import { StatusPill } from '../components/ui/StatusPill';
+import { AccessModeBadge, StatusPill, VisibilityBadge } from '../components/ui/StatusPill';
 import { Tabs } from '../components/ui/Tabs';
 
 const WINDOW_OPTIONS = [
@@ -1475,22 +1475,8 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
             <Badge mono>v{api.version}</Badge>
             <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge>
             <StatusPill status={api.status} />
-            <Badge
-              tone={
-                api.visibility === 'public'
-                  ? 'neutral'
-                  : api.visibility === 'internal'
-                    ? 'warning'
-                    : 'danger'
-              }
-            >
-              {api.visibility === 'public'
-                ? 'Public'
-                : api.visibility === 'internal'
-                  ? 'Unlisted'
-                  : 'Private'}
-            </Badge>
-            {api.requestable ? <Badge tone="accent">Requestable</Badge> : <Badge>Open</Badge>}
+            <VisibilityBadge visibility={api.visibility} />
+            <AccessModeBadge requestable={api.requestable} />
             {api.gateway_state === 'repair_required' ? (
               <Badge tone="danger" dot>
                 Not deployed

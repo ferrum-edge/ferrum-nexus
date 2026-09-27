@@ -1,6 +1,7 @@
 import { auditActorLabel } from '../lib/audit';
 import { Link } from '@tanstack/react-router';
 import type { ReactElement, ReactNode } from 'react';
+import { CREDENTIAL_TYPE_LABELS } from '../lib/credential-labels';
 import { formatRelative, humanize } from '../lib/format';
 import { useAccessRequests } from '../hooks/useAccessRequests';
 import { useAuditLogs } from '../hooks/useAuditLogs';
@@ -309,7 +310,7 @@ export function DashboardPage(): ReactElement {
                   <Row key={credential.id}>
                     <span className="min-w-0">
                       <span className="block truncate text-sm font-medium text-fg">
-                        {credential.label ?? credential.credential_type}
+                        {credential.label ?? CREDENTIAL_TYPE_LABELS[credential.credential_type]}
                       </span>
                       <span className="block font-mono text-xs text-fg-subtle">
                         ••••{credential.last4}

@@ -28,7 +28,7 @@ import { EmptyState } from '../components/ui/EmptyState';
 import { Icon, type IconName } from '../components/ui/Icon';
 import { LabeledTextarea } from '../components/ui/Input';
 import { LoadingPanel } from '../components/ui/Spinner';
-import { StatusPill } from '../components/ui/StatusPill';
+import { StatusPill, visibilityLabel } from '../components/ui/StatusPill';
 import { Tabs } from '../components/ui/Tabs';
 
 /** One tile in the strip of runtime facts under the page header. */
@@ -132,7 +132,7 @@ function Overview({ detail }: { detail: CatalogDetailResponse }): ReactElement {
         {/* Version, authentication, rate limit and access already sit in the
             at-a-glance strip above, so the record below holds the rest. */}
         <dl>
-          <DetailRow label="Visibility">{api.visibility}</DetailRow>
+          <DetailRow label="Visibility">{visibilityLabel(api.visibility)}</DetailRow>
           <DetailRow label="Owner">{api.owner?.display_name ?? '—'}</DetailRow>
           <DetailRow label="Specification">
             {spec

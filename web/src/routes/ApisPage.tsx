@@ -10,7 +10,7 @@ import { PageHeader } from '../components/ui/Card';
 import { DataTable, type Columns } from '../components/ui/DataTable';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Icon } from '../components/ui/Icon';
-import { StatusPill } from '../components/ui/StatusPill';
+import { AccessModeBadge, StatusPill } from '../components/ui/StatusPill';
 
 function MyApisTable(): ReactElement {
   const [offset, setOffset] = useState(0);
@@ -47,8 +47,7 @@ function MyApisTable(): ReactElement {
       {
         id: 'access',
         header: 'Access',
-        cell: ({ row }) =>
-          row.original.requestable ? <Badge tone="accent">Requestable</Badge> : <Badge>Open</Badge>,
+        cell: ({ row }) => <AccessModeBadge requestable={row.original.requestable} />,
       },
       {
         id: 'status',

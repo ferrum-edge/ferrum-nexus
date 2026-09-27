@@ -15,7 +15,7 @@ import { DataTable, type Columns } from '../../components/ui/DataTable';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { SearchInput } from '../../components/ui/Input';
 import { Select } from '../../components/ui/Select';
-import { StatusPill } from '../../components/ui/StatusPill';
+import { AccessModeBadge, StatusPill, VisibilityBadge } from '../../components/ui/StatusPill';
 
 function AllApisTable(): ReactElement {
   const [offset, setOffset] = useState(0);
@@ -61,24 +61,12 @@ function AllApisTable(): ReactElement {
       {
         id: 'visibility',
         header: 'Visibility',
-        cell: ({ row }) =>
-          row.original.visibility === 'private' ? (
-            <Badge tone="danger">Private</Badge>
-          ) : row.original.visibility === 'internal' ? (
-            <Badge tone="warning">Unlisted</Badge>
-          ) : (
-            <Badge>Public</Badge>
-          ),
+        cell: ({ row }) => <VisibilityBadge visibility={row.original.visibility} />,
       },
       {
         id: 'access',
         header: 'Access',
-        cell: ({ row }) =>
-          row.original.requestable ? (
-            <Badge tone="accent">Requestable</Badge>
-          ) : (
-            <span className="text-xs text-fg-subtle">Open</span>
-          ),
+        cell: ({ row }) => <AccessModeBadge requestable={row.original.requestable} />,
       },
       {
         id: 'status',

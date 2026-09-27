@@ -3,6 +3,7 @@ import {
   ROLE_LABELS,
   type AccessRequestStatus,
   type ApiStatus,
+  type ApiVisibility,
   type CatalogAccessState,
   type CredentialStatus,
   type EmailOutboxStatus,
@@ -92,5 +93,54 @@ export function RoleBadge({ role, className }: { role: Role; className?: string 
     <Badge tone={ROLE_TONES[role]} className={className}>
       {ROLE_LABELS[role]}
     </Badge>
+  );
+}
+
+const VISIBILITIES: Readonly<Record<ApiVisibility, StatusDescriptor>> = {
+  public: { label: 'Public', tone: 'neutral' },
+  // `internal` is unlisted, not secret; calling it "Internal" is what made
+  // providers pick it for a confidential API (issue #288).
+  internal: { label: 'Unlisted', tone: 'warning' },
+  private: { label: 'Private', tone: 'danger' },
+};
+
+/** Human label for an API's visibility, for use outside a badge. */
+export function visibilityLabel(visibility: ApiVisibility): string {
+  return VISIBILITIES[visibility].label;
+}
+
+/** An API's catalog visibility, labelled and coloured the same everywhere. */
+export function VisibilityBadge({
+  visibility,
+  className,
+}: {
+  visibility: ApiVisibility;
+  className?: string;
+}): ReactElement {
+  const descriptor = VISIBILITIES[visibility];
+  return (
+    <Badge tone={descriptor.tone} className={className}>
+      {descriptor.label}
+    </Badge>
+  );
+}
+
+/**
+ * Whether callers need an approved access request: "Requestable", or "Open"
+ * in the neutral tone, so an access column reads as one set of badges.
+ */
+export function AccessModeBadge({
+  requestable,
+  className,
+}: {
+  requestable: boolean;
+  className?: string;
+}): ReactElement {
+  return requestable ? (
+    <Badge tone="accent" className={className}>
+      Requestable
+    </Badge>
+  ) : (
+    <Badge className={className}>Open</Badge>
   );
 }
