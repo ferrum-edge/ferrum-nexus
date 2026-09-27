@@ -6,7 +6,7 @@ import { useAuth } from '../../stores/auth';
 import { useTheme } from '../../stores/theme';
 import { Icon } from '../ui/Icon';
 import { Tooltip } from '../ui/Tooltip';
-import { NAV_ITEMS, NAV_SECTIONS } from './nav';
+import { locationForPath } from './nav';
 import { NotificationsBell } from './NotificationsBell';
 import { initials } from './Sidebar';
 
@@ -90,19 +90,6 @@ function UserMenu({ user }: { user: User }): ReactElement {
   );
 }
 
-/** "Section › Page" for the current route, from the nav catalog. */
-function useLocationCrumbs(): { section: string; page: string } | null {
-  const { pathname } = useLocation();
-  const item =
-    NAV_ITEMS.find((entry) => entry.to === pathname) ??
-    [...NAV_ITEMS]
-      .filter((entry) => entry.to !== '/' && pathname.startsWith(`${entry.to}/`))
-      .sort((a, b) => b.to.length - a.to.length)[0];
-  if (!item) return null;
-  const section = NAV_SECTIONS.find((entry) => entry.id === item.section);
-  return { section: section?.label ?? '', page: item.label };
-}
-
 export interface HeaderProps {
   portalName: string;
   sidebarId: string;
@@ -121,7 +108,8 @@ export function Header({
   onToggleSidebar,
   user,
 }: HeaderProps): ReactElement {
-  const crumbs = useLocationCrumbs();
+  const { pathname } = useLocation();
+  const crumbs = locationForPath(pathname);
   return (
     <header className="fx-glass sticky top-0 z-30 flex h-16 items-center justify-between gap-3 border-b border-border px-4 sm:px-6">
       <div className="flex min-w-0 items-center gap-2">

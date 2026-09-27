@@ -99,6 +99,47 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { to: '/admin/god', label: 'God mode', icon: 'shield', minRole: 'super_admin', section: 'admin' },
 ];
 
+/** A page the header's location bar can name ("Section › Page"). */
+interface LocationEntry {
+  to: string;
+  label: string;
+  section: NavSection;
+}
+
+/**
+ * Pages reached from somewhere other than the sidebar — the header's
+ * notification bell — that the location bar still has to name. They are not
+ * nav items, so they neither appear in the sidebar nor gate a route.
+ */
+const OFF_SIDEBAR_LOCATIONS: readonly LocationEntry[] = [
+  { to: '/notifications', label: 'Notifications', section: 'main' },
+];
+
+/** "Section › Page" for the header's location bar. */
+export interface LocationCrumbs {
+  section: string;
+  page: string;
+}
+
+/**
+ * Where `pathname` sits in the portal, for the header's location bar.
+ *
+ * An exact match wins; otherwise the deepest entry the path lives under does,
+ * so a detail page (`/catalog/$slug`, `/messages/$threadId`, `/apis/new`)
+ * reads as the section it was opened from. `null` for a path no page owns.
+ */
+export function locationForPath(pathname: string): LocationCrumbs | null {
+  const entries: readonly LocationEntry[] = [...NAV_ITEMS, ...OFF_SIDEBAR_LOCATIONS];
+  const item =
+    entries.find((entry) => entry.to === pathname) ??
+    entries
+      .filter((entry) => entry.to !== '/' && pathname.startsWith(`${entry.to}/`))
+      .sort((a, b) => b.to.length - a.to.length)[0];
+  if (!item) return null;
+  const section = NAV_SECTIONS.find((entry) => entry.id === item.section);
+  return { section: section?.label ?? '', page: item.label };
+}
+
 /** Nav entries a given role may see; `null` (signed out) sees nothing. */
 export function visibleNavItems(role: Role | null): NavItem[] {
   if (role === null) return [];

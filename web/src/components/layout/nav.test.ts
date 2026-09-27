@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { ROLE_ORDER, type Role } from '@ferrum-nexus/shared';
-import { NAV_ITEMS, navItemsForSection, requiredRoleForPath, visibleNavItems } from './nav';
+import {
+  NAV_ITEMS,
+  locationForPath,
+  navItemsForSection,
+  requiredRoleForPath,
+  visibleNavItems,
+} from './nav';
 
 function pathsFor(role: Role | null): string[] {
   return visibleNavItems(role).map((item) => item.to);
@@ -68,5 +74,42 @@ describe('nav config', () => {
     expect(requiredRoleForPath('/apis')).toBe('provider');
     expect(requiredRoleForPath('/catalog')).toBe('client');
     expect(requiredRoleForPath('/not-a-nav-path')).toBeNull();
+  });
+
+  it('keeps off-sidebar pages out of the sidebar and the route guards', () => {
+    expect(pathsFor('super_admin')).not.toContain('/notifications');
+    expect(requiredRoleForPath('/notifications')).toBeNull();
+  });
+});
+
+describe('location bar', () => {
+  it.each([
+    ['/', 'Portal', 'Dashboard'],
+    ['/catalog', 'Portal', 'API catalog'],
+    ['/catalog/billing', 'Portal', 'API catalog'],
+    ['/applications', 'Portal', 'Applications'],
+    ['/credentials', 'Portal', 'Credentials'],
+    ['/messages', 'Portal', 'Messages'],
+    ['/messages/thread-1', 'Portal', 'Messages'],
+    ['/notifications', 'Portal', 'Notifications'],
+    ['/profile', 'Portal', 'Profile'],
+    ['/apis', 'Publishing', 'My APIs'],
+    ['/apis/new', 'Publishing', 'My APIs'],
+    ['/apis/api-1', 'Publishing', 'My APIs'],
+    ['/admin/users', 'Administration', 'Users'],
+    ['/admin/orgs', 'Administration', 'Organizations'],
+    ['/admin/apis', 'Administration', 'All APIs'],
+    ['/admin/audit', 'Administration', 'Audit log'],
+    ['/admin/settings', 'Administration', 'Settings'],
+    ['/admin/mass-email', 'Administration', 'Mass email'],
+    ['/admin/god', 'Administration', 'God mode'],
+  ])('names %s as %s › %s', (path, section, page) => {
+    expect(locationForPath(path)).toEqual({ section, page });
+  });
+
+  it('names nothing for a path no page owns', () => {
+    expect(locationForPath('/nope')).toBeNull();
+    // A prefix of a nav path is not that page.
+    expect(locationForPath('/catalogue')).toBeNull();
   });
 });
