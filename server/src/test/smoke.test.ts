@@ -2791,12 +2791,43 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         body: 'Newest timestamp',
         created_at: isoInSeconds(-10),
       });
+      // Ids ascend against time here, so a lookup ordered by id instead of
+      // `created_at` would surface an older message.
+      const historyThread = await store.threads.create({
+        subject: `History ${newId().slice(0, 6)}`,
+        created_by: client.id,
+        participant_a: client.id,
+        participant_b: provider.id,
+      });
+      const [lowId, midId, highId] = [newId(), newId(), newId()].sort();
+      await store.messages.create({
+        id: highId,
+        thread_id: historyThread.id,
+        sender_user_id: client.id,
+        body: 'Oldest, largest id',
+        created_at: isoInSeconds(-50),
+      });
+      await store.messages.create({
+        id: midId,
+        thread_id: historyThread.id,
+        sender_user_id: provider.id,
+        body: 'Middle',
+        created_at: isoInSeconds(-40),
+      });
+      const historyNewest = await store.messages.create({
+        id: lowId,
+        thread_id: historyThread.id,
+        sender_user_id: client.id,
+        body: 'Newest, smallest id',
+        created_at: isoInSeconds(-5),
+      });
 
       const latest = await store.messages.findLatestByThreads([
         emptyThread.id,
         tiedThread.id,
         emptyPlatformThread.id,
         laterThread.id,
+        historyThread.id,
         platformThread.id,
       ]);
       assert.deepEqual(
@@ -2807,11 +2838,12 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
             tiedFirst.id.localeCompare(tiedSecond.id) > 0 ? tiedFirst.id : tiedSecond.id,
           ],
           [laterThread.id, later.id],
+          [historyThread.id, historyNewest.id],
           [platformThread.id, platformMessage.id],
         ]),
       );
-      assert.equal(latest.length, 3);
-      for (const threadId of [tiedThread.id, laterThread.id, platformThread.id]) {
+      assert.equal(latest.length, 4);
+      for (const threadId of [tiedThread.id, laterThread.id, historyThread.id, platformThread.id]) {
         assert.equal(
           latest.find((message) => message.thread_id === threadId)?.id,
           (await store.messages.findLatestByThread(threadId))?.id,
