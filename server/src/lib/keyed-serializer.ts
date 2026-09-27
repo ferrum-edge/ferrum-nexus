@@ -42,6 +42,24 @@ export const LEASE_POLL_MS = 100;
 export const LEASE_CONFLICT_MESSAGE =
   'Another portal instance is updating this gateway resource right now — please retry';
 
+/** Every `CONFLICT` a caller that waited out `waitMs` was given, for {@link isLockTimeout}. */
+const timeouts = new WeakSet<object>();
+
+/**
+ * Whether `error` is a serializer giving up on a key another owner held for
+ * the whole of its wait.
+ *
+ * Nothing ran under the key, so the caller may simply try again. A caller
+ * whose work must land — a compensation — can tell it apart from every other
+ * `CONFLICT` this way, and keep trying until any abandoned lease has expired:
+ * one taken by an instance that crashed mid-section is gone {@link LEASE_TTL_MS}
+ * after it was last written, and so before an attempt started that long after
+ * the first one.
+ */
+export function isLockTimeout(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && timeouts.has(error);
+}
+
 /**
  * The one key every transition that can shrink the active `super_admin` set is
  * taken under: a role change away from `super_admin`, a `status: 'disabled'`,
@@ -77,8 +95,9 @@ export const SUPER_ADMIN_LOCK_CONFLICT_MESSAGE =
  * Per account rather than portal-wide: the invariant is a property of one
  * account, and two different accounts never need to wait for each other. It is
  * always taken **inside** {@link SUPER_ADMIN_LOCK_KEY} when both are needed,
- * and a caller that holds a gateway consumer key may take it — never the
- * reverse — which is what keeps the three keys free of lock-order inversion.
+ * and a caller that holds a gateway consumer key or a proxy lease may take it
+ * — never the reverse — which is what keeps the keys free of lock-order
+ * inversion.
  */
 export function userLifecycleLockKey(userId: string): string {
   return `users:lifecycle:${userId}`;
@@ -273,7 +292,9 @@ export function createKeyedSerializer(options: KeyedSerializerOptions = {}): Key
       if (Date.now() >= deadline) {
         // Deliberately vague about which instance and which key: this reaches a
         // browser, and "retry" is the whole of the useful advice.
-        throw conflict(conflictMessage);
+        const error = conflict(conflictMessage);
+        timeouts.add(error);
+        throw error;
       }
       // Jitter, so several waiters do not retry in lockstep for ever.
       await sleep(pollMs + Math.floor(Math.random() * pollMs));
