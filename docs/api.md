@@ -2205,9 +2205,17 @@ applications; absent or `null` issues for the account).
 
 Errors: `409 CONFLICT` when this identity already holds
 `FERRUM_MAX_CREDENTIALS_PER_TYPE` (default 2) live credentials of that type
-(revoke or rotate one first), or the application is disabled;
+(revoke or rotate one first), the application is disabled, or an earlier
+`basicauth` change on this identity was never confirmed by the gateway
+(`details.unconfirmed_credentials`; see
+[`DELETE /api/credentials/:id`](#delete-apicredentialsid));
 `403 FORBIDDEN` (someone else's application); `404 NOT_FOUND` (unknown
 application); `502 EDGE_ERROR` / `EDGE_UNAVAILABLE`.
+
+A `basicauth` row is written as `retiring` before the gateway append and
+becomes `active` once Edge acknowledges it. If the append's outcome cannot be
+confirmed, the request fails and the row stays `retiring`: it names the entry
+that may exist on the gateway, and no secret is returned.
 
 ```bash
 curl -sS -b cookies.txt -X POST http://127.0.0.1:8787/api/credentials \
@@ -2271,10 +2279,11 @@ optional; defaults to the previous label.
   owner.
 
 Errors: `403 FORBIDDEN` (someone else's credential), `403 USER_DISABLED` (the
-owner is disabled), `409 CONFLICT` (already revoked, or the credential's
-application is disabled — revoking stays allowed), `502 EDGE_ERROR` (including
-a gateway credential list that no longer matches the portal's, which is refused
-rather than guessed at).
+owner is disabled), `409 CONFLICT` (already revoked, the credential's
+application is disabled — revoking stays allowed — or, for `basicauth`, an
+unconfirmed change on the same identity), `502 EDGE_ERROR` (including a gateway
+credential list that no longer matches the portal's, which is refused rather
+than guessed at).
 
 ### `DELETE /api/credentials/:id`
 
@@ -2287,6 +2296,19 @@ delete and to `revoked` (with `credential.revoke`) after. If the last step
 fails, repeating the request completes it. If the gateway proves the delete
 never happened, the row returns to `active` with a
 `credential.revoke_rollback` row, and the request can be repeated.
+
+**`basicauth` is located by the portal's rows alone**, because Edge never lists
+it. So:
+
+- Revoking a `basicauth` credential when no other `basicauth` credential of the
+  identity is `active` deletes the whole type on the gateway, and every
+  `retiring` row of that identity and type settles to `revoked` with it
+  (listed in the `credential.revoke` row's `swept_credential_ids`).
+- While any `basicauth` row of the identity is `retiring` — an append or delete
+  whose outcome the gateway never confirmed — revoking any other one, rotating,
+  and issuing are `409 CONFLICT` with `details.unconfirmed_credentials`. Revoke
+  the last `active` one to clear the type, or have an administrator
+  [reconcile](#post-apiadmincredentialsreconcile) the consumer.
 
 ---
 

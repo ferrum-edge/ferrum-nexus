@@ -910,7 +910,17 @@ marks its row `retiring` **before** the gateway `DELETE` and `revoked` after, so
 a delete whose acknowledgement was lost leaves an intent record. When the
 mirror is exactly one row longer than the array and exactly one live row is
 `retiring`, the next rotate, revoke or issue settles it (`credential.settle`).
-Every other shape is refused. See
+Every other shape is refused.
+
+`basicauth` never appears in a read, so the length check cannot apply and the
+mirror is the only record of its positions. It is kept provable instead: a
+`basicauth` row is written as `retiring` before its append and activated only
+once Edge acknowledges it, so no entry reaches the gateway without a row. A
+`retiring` `basicauth` row means an outcome the gateway never confirmed, and
+while one exists, issuing, rotating and revoking any other `basicauth`
+credential of that consumer is refused with `409 CONFLICT`. A revoke with no
+other `active` row of the type deletes the whole type instead of an index, and
+settles the `retiring` rows with it. See
 [`security.md` §5](security.md#5-show-once-credentials) and
 [`operations.md` §12](operations.md#12-the-credential-mirror).
 

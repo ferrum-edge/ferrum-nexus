@@ -25,6 +25,27 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   Administration › All APIs — in the header's location bar, the sidebar and the
   page's breadcrumb — instead of Publishing › My APIs.
 
+### Security
+
+- **Revoking an HTTP Basic (`basicauth`) credential removes that credential's
+  password** (GHSA-5526-6x2h-9hjw). Edge never lists `basicauth` entries, so
+  the portal locates one only by the position its own rows give it. An append
+  the gateway accepted but the portal could not record — or a delete whose
+  outcome was never confirmed — shifted those positions, and a later revoke
+  could delete a different entry and mark the requested credential revoked
+  while its password kept authenticating. Now a `basicauth` row is written
+  before its append and activated only once Edge acknowledges it, so no entry
+  reaches the gateway without a row; an unconfirmed outcome leaves the row
+  `retiring`, and while one exists issuing, rotating and revoking any other
+  `basicauth` credential of that identity fails closed with `409 CONFLICT`
+  instead of deleting by position. Revoking an identity's last `active`
+  `basicauth` credential deletes the whole type on the gateway and settles
+  those rows with it (recorded as `swept_credential_ids` on the
+  `credential.revoke` audit row); otherwise an administrator reconciles the
+  consumer. That whole-type revoke also removes a row-less entry left by an
+  earlier release. `docs/operations.md` §12 describes how to find consumers
+  that may still hold one.
+
 ## [0.2.0] - 2026-09-27
 
 Paired with Ferrum Edge `v0.9.8`. Upgrades a `v0.1.0` database in place with

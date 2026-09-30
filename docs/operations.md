@@ -1760,8 +1760,52 @@ Shape 2 only remains when that could not be proved (the array could not be read,
 its length changed for another reason, or the restore itself failed).
 
 `basicauth` is never settled automatically: Edge omits it from reads, so its
-array length is unknown. A `retiring` `basicauth` row is always shape 2; retry
-the revoke.
+array length is unknown and neither shape can be told apart. See the next
+section.
+
+### `basicauth`: an unconfirmed outcome blocks positions
+
+For `basicauth` the portal's rows are the only record of where each entry
+sits. A `basicauth` row is therefore written as `retiring` **before** its
+append and becomes `active` only once Edge acknowledges it; an append whose
+outcome cannot be confirmed (a lost acknowledgement, or a row that could not
+be activated) fails the request and leaves the row `retiring`, with a
+`credential.append_rollback` row (`withdrawn: false`,
+`stranded_credential_id`). A delete whose outcome cannot be proved also stays
+`retiring`.
+
+While any `basicauth` row of a consumer is `retiring`, every position after it
+is unknown, so issuing, rotating, and revoking any other `basicauth`
+credential of that consumer return `409 CONFLICT`:
+
+> An earlier HTTP Basic credential change on this consumer was never confirmed
+> by the gateway …
+
+with `details: { consumer_id, credential_type, unconfirmed_credentials }`.
+Nothing is deleted. To clear it, either:
+
+- **the owner revokes the consumer's last `active` `basicauth` credential.**
+  With no other `active` row of the type, a revoke deletes the whole type on
+  the gateway and settles every `retiring` row with it (named in the
+  `credential.revoke` row's `swept_credential_ids`); or
+- **an administrator [reconciles](#reconciling-one) the consumer** for
+  `basicauth`.
+
+Then issue new credentials. To find affected consumers:
+
+```sql
+SELECT ferrum_consumer_id, COUNT(*) AS unconfirmed
+  FROM credential_metadata
+  WHERE credential_type = 'basicauth' AND status = 'retiring'
+  GROUP BY ferrum_consumer_id;
+```
+
+**After upgrading from `v0.2.0` or earlier**, a consumer whose audit log has a
+`credential.append_rollback` row with `credential_type: "basicauth"` and
+`withdrawn: false` may hold a `basicauth` entry with no row at all, which no
+read can reveal. Revoking the only live `basicauth` credential of such a
+consumer now removes it with the whole type; where the consumer holds more than
+one, reconcile it for `basicauth`.
 
 ### Consumer identity recovery
 
@@ -1815,7 +1859,9 @@ SELECT ferrum_consumer_id, credential_type, COUNT(*) AS retiring
 For one such row, compare the pair's live-row count with the array in
 `GET /consumers/{id}`: one longer settles by itself (shape 1); equal means retry
 the operation (shape 2). More than one row, or none while lengths still differ,
-needs [reconciliation](#reconciling-one).
+needs [reconciliation](#reconciling-one). A `retiring` `basicauth` row has no
+array to compare against; see
+[the `basicauth` section](#basicauth-an-unconfirmed-outcome-blocks-positions).
 
 ### What an unresolved credential position looks like
 
