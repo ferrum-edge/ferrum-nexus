@@ -297,6 +297,19 @@ describe('basicauth revocation removes the selected password', () => {
     assert.equal((await liveRowsOf(user)).length, 0);
   });
 
+  it('clears the pending row when Edge definitely rejects a Basic Auth append', async () => {
+    const user = await client();
+    harness.edge.queueFailure(400, { error: 'credential cap reached' }, '/credentials/basicauth', 'POST');
+    const rejected = await tryIssue(user);
+    assert.equal(rejected.statusCode, 502, rejected.body);
+    assert.equal(livePasswords(user).length, 0);
+    assert.equal((await liveRowsOf(user)).length, 0);
+
+    const next = await issue(user);
+    assert.equal(livePasswords(user).length, 1);
+    assert.equal(await statusOf(next.credential.id), 'active');
+  });
+
   /* ── Deletes whose outcome was never confirmed ───────────────────────── */
 
   it('never moves a retried revoke onto another password after a lost delete', async () => {
@@ -339,6 +352,35 @@ describe('basicauth revocation removes the selected password', () => {
     );
     assert.ok(trail, 'the clearing revoke is audited');
     assert.deepEqual(trail.details.swept_credential_ids, [first.credential.id]);
+    assert.equal(trail.details.scope, 'whole-type');
+    const sweptAudit = (await harness.auditRows('credential.revoke')).find(
+      (row) => row.target_id === first.credential.id,
+    );
+    assert.equal(sweptAudit?.details.swept_by, second.credential.id);
+    assert.equal(sweptAudit?.details.owner_user_id, user.user.id);
+  });
+
+  it('retries a whole-type delete after its acknowledgement is lost', async () => {
+    const user = await client();
+    const first = await issue(user);
+    const second = await issue(user);
+    harness.edge.queueLostAck(503, { error: 'timeout' }, '/credentials/basicauth', 'DELETE');
+
+    const lost = await harness.authed(user, {
+      method: 'DELETE',
+      url: `/api/credentials/${first.credential.id}?clear_type=true`,
+    });
+    assert.equal(lost.statusCode, 502, lost.body);
+    assert.equal(livePasswords(user).length, 0, 'the delete reached Edge');
+    assert.equal(await statusOf(first.credential.id), 'retiring');
+
+    const retried = await harness.authed(user, {
+      method: 'DELETE',
+      url: `/api/credentials/${first.credential.id}?clear_type=true`,
+    });
+    assert.equal(retried.statusCode, 200, retried.body);
+    assert.equal(await statusOf(first.credential.id), 'revoked');
+    assert.equal(await statusOf(second.credential.id), 'revoked');
   });
 
   it('leaves a failed settlement for reconciliation instead of guessing', async () => {
@@ -408,5 +450,69 @@ describe('basicauth revocation removes the selected password', () => {
     assert.equal(authenticates(user, third), true);
     assert.equal((await revoke(user, third.credential.id)).statusCode, 200);
     assert.equal(livePasswords(user).length, 0);
+  });
+
+  it('serializes a concurrent issue and revoke without losing the new password', async () => {
+    const user = await client();
+    const original = await issue(user);
+    const [replacement, revoked] = await Promise.all([
+      issue(user),
+      revoke(user, original.credential.id),
+    ]);
+    assert.equal(revoked.statusCode, 200, revoked.body);
+    assert.equal(await statusOf(original.credential.id), 'revoked');
+    assert.equal(await statusOf(replacement.credential.id), 'active');
+    assert.equal(authenticates(user, replacement), true);
+    assert.equal(livePasswords(user).length, 1);
+  });
+});
+
+describe('basicauth recovery above the default credential cap', () => {
+  it('lets the owner clear the whole type at cap three', async () => {
+    const harness = await buildTestApp({ env: { FERRUM_MAX_CREDENTIALS_PER_TYPE: '3' } });
+    try {
+      const user = await harness.registerUser({ email: 'basic-revoke-cap-three@example.test' });
+      const issued: IssueCredentialResponse['credential'][] = [];
+      for (let index = 0; index < 3; index += 1) {
+        const response = await harness.authed(user, {
+          method: 'POST',
+          url: '/api/credentials',
+          payload: { credential_type: 'basicauth' },
+        });
+        assert.equal(response.statusCode, 201, response.body);
+        issued.push(response.json<IssueCredentialResponse>().credential);
+      }
+      await harness.store.auditLogs.create({
+        actor_user_id: user.user.id,
+        actor_role: user.user.role,
+        action: 'credential.append_rollback',
+        target_type: 'consumer',
+        target_id: issued[0]!.ferrum_consumer_id,
+        details: {
+          credential_type: 'basicauth',
+          consumer_id: issued[0]!.ferrum_consumer_id,
+          operation: 'issue',
+          withdrawn: false,
+          stranded_credential_id: 'legacy-orphan',
+          last4: 'test',
+          owner_user_id: user.user.id,
+        },
+        ip: null,
+      });
+      await harness.services.credentials.initializeLegacyBasicAuthPositions();
+      const cleared = await harness.authed(user, {
+        method: 'DELETE',
+        url: `/api/credentials/${issued[1]!.id}?clear_type=true`,
+      });
+      assert.equal(cleared.statusCode, 200, cleared.body);
+      for (const credential of issued) {
+        assert.equal(
+          (await harness.store.credentials.findById(credential.id))?.status,
+          'revoked',
+        );
+      }
+    } finally {
+      await harness.close();
+    }
   });
 });

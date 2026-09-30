@@ -2308,10 +2308,18 @@ it. So:
   `retiring` row of that identity and type settles to `revoked` with it
   (listed in the `credential.revoke` row's `swept_credential_ids`).
 - While any `basicauth` row of the identity is `retiring` — an append or delete
-  whose outcome the gateway never confirmed — revoking any other one, rotating,
-  and issuing are `409 CONFLICT` with `details.unconfirmed_credentials`. Revoke
-  the last `active` one to clear the type, or have an administrator
-  [reconcile](#post-apiadmincredentialsreconcile) the consumer.
+  whose outcome the gateway never confirmed — issuing or rotating is `409
+  CONFLICT`. A revoke without the query parameter can revoke a retiring row
+  only when no active row remains; otherwise it returns `409 CONFLICT`.
+- `DELETE /api/credentials/:id?clear_type=true` explicitly deletes every Basic
+  Auth credential for that consumer identity, settles every live row, and
+  writes `scope: "whole-type"` in the target's `credential.revoke` audit row.
+  This is the owner recovery path at any credential cap. Each additional row
+  swept by the deletion also receives its own `credential.revoke` audit row.
+- At startup, Nexus marks historical unwithdrawn Basic Auth append outcomes as
+  retiring placeholders unless a later reconcile or whole-type revoke cleared
+  that consumer. After restoring only Nexus, reconcile Basic Auth for every
+  consumer before relying on positional revocation.
 
 ---
 

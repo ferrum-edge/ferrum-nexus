@@ -434,6 +434,7 @@ export async function buildServer(
     locks,
     log: warn,
   });
+  await credentials.initializeLegacyBasicAuthPositions();
   // Users is composed after credentials: disabling an account has to strip the
   // gateway identity, not merely the browser session.
   const users = createUsersService({

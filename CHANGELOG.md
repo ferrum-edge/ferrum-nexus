@@ -6,12 +6,6 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
-### Security
-
-- Nodemailer 10.0.12 hardens SMTP message-body line endings by converting bare
-  carriage returns to CRLF, and makes `requireTLS` fail instead of silently
-  downgrading the connection.
-
 ### Changed
 
 - Upgrade Nodemailer to 10.0.13. This also includes the 10.0.11 CommonJS and
@@ -39,6 +33,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Security
 
+- Nodemailer 10.0.12 hardens SMTP message-body line endings by converting bare
+  carriage returns to CRLF, and makes `requireTLS` fail instead of silently
+  downgrading the connection.
+
 - **Responses that set session cookies are never cacheable**
   (GHSA-pr4m-gv4h-3x72). `GET /api/branding` is served with
   `Cache-Control: public` so it can be cached in front of the server, but a
@@ -59,15 +57,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   while its password kept authenticating. Now a `basicauth` row is written
   before its append and activated only once Edge acknowledges it, so no entry
   reaches the gateway without a row; an unconfirmed outcome leaves the row
-  `retiring`, and while one exists issuing, rotating and revoking any other
-  `basicauth` credential of that identity fails closed with `409 CONFLICT`
-  instead of deleting by position. Revoking an identity's last `active`
-  `basicauth` credential deletes the whole type on the gateway and settles
-  those rows with it (recorded as `swept_credential_ids` on the
-  `credential.revoke` audit row); otherwise an administrator reconciles the
-  consumer. That whole-type revoke also removes a row-less entry left by an
-  earlier release. `docs/operations.md` §12 describes how to find consumers
-  that may still hold one.
+  `retiring`, and while one exists issuing, rotating and a positional revoke of
+  another `basicauth` credential fails closed with `409 CONFLICT` instead of
+  deleting by position. An owner can pass `clear_type=true` to
+  explicitly delete every Basic Auth credential for the identity, including
+  when several active credentials remain. A startup upgrade step marks
+  historical unwithdrawn Basic Auth appends as retiring placeholders unless a
+  later reconcile or whole-type revoke cleared them, so old releases and
+  Nexus-only restores cannot trust an unproven position. Whole-type sweeps have
+  per-row audit events. See `docs/operations.md` §12.
 
 ## [0.2.0] - 2026-09-27
 

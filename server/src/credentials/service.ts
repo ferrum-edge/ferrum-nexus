@@ -223,6 +223,7 @@ import type {
   CreateInput,
   CredentialFilter,
   CredentialRecord,
+  AuditLogRecord,
   GatewayIdentityRecord,
   GatewayTeardownJobRecord,
   ListOptions,
@@ -335,7 +336,7 @@ const AMBIGUOUS_MESSAGE =
  * {@link CredentialsService.reconcile}. See `operations.md` §12.
  */
 const UNCONFIRMED_MESSAGE =
-  'An earlier HTTP Basic credential change on this consumer was never confirmed by the gateway, which does not list HTTP Basic credentials, so no single one of them can be located safely. Revoke its only remaining active HTTP Basic credential, which clears the type on the gateway, or have an administrator reconcile this consumer; then issue a new one';
+  'An earlier HTTP Basic credential change on this consumer was never confirmed by the gateway, which does not list HTTP Basic credentials, so no single one of them can be located safely. Revoke the retiring credential when no active HTTP Basic credentials remain, or revoke with clear_type=true to clear every HTTP Basic credential; an administrator can also reconcile this consumer';
 
 /** Outcome of taking back an entry an append had already created on Edge. */
 interface AppendWithdrawal {
@@ -432,6 +433,8 @@ const ACCOUNT_IDENTITY = 'account';
 export interface CredentialsService {
   /** Consumer provisioning, shared with the access service. */
   readonly provisioner: ConsumerProvisioner;
+  /** Idempotently marks pre-fix Basic Auth append orphans as unconfirmed. */
+  initializeLegacyBasicAuthPositions(): Promise<void>;
   /** The caller's credentials, or another user's when an admin asks. */
   list(
     actor: UserRecord,
@@ -475,7 +478,12 @@ export interface CredentialsService {
     ip?: string | null,
   ): Promise<RotateCredentialResponse>;
   /** Delete the entry from Edge and mark the row revoked. */
-  revoke(user: UserRecord, credentialId: Uuid, ip?: string | null): Promise<void>;
+  revoke(
+    user: UserRecord,
+    credentialId: Uuid,
+    ip?: string | null,
+    clearType?: boolean,
+  ): Promise<void>;
   /**
    * Revoke a credential an administrative change to an API has already made
    * unusable, on behalf of whoever made that change.
@@ -1089,11 +1097,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     rows: CredentialRecord[],
     target: CredentialRecord,
     edgeLength: number,
+    clearType = false,
   ): number | 'whole-type' | 'not-live' {
     if (target.credential_type !== 'basicauth') {
       return resolveCredentialIndex(rows, target, edgeLength);
     }
     if (!rows.some((row) => row.id === target.id)) return 'not-live';
+    if (clearType) return 'whole-type';
     if (rows.every((row) => row.id === target.id || row.status !== 'active')) {
       return 'whole-type';
     }
@@ -1123,10 +1133,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * genuine drift — a consumer edited by hand — and still refuses, because
    * acting on a stale index is how somebody else's live key dies.
    *
-   * `basicauth` never reaches this: Edge omits it from every read, so
+   * `basicauth` must not use this shape: Edge omits it from every read, so
    * {@link edgeArrayLength} answers with the mirror's own count and the
-   * lengths can never differ. Its positions are the mirror's word alone, as
-   * everywhere else in this module.
+   * lengths can never differ. Its positions are checked separately against
+   * retiring rows and legacy placeholders.
    */
   async function settleLostRetirement(input: {
     consumerId: string;
@@ -1533,6 +1543,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     actor: { id: Uuid; role: Role },
     ip: string | null,
     details: Record<string, unknown> = {},
+    clearType = false,
   ): Promise<boolean> {
     const type = target.credential_type;
     const consumerId = target.ferrum_consumer_id;
@@ -1549,6 +1560,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // ever `retiring` ones: {@link revokePosition} empties a type only when
       // nothing else of it is `active`.
       let swept: CredentialRecord[] = [];
+      let wholeType = false;
       // A consumer deleted out from under us means the entry is already gone;
       // the row still has to be marked so the UI stops offering it.
       if (consumer) {
@@ -1565,7 +1577,8 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           actor: { id: actor.id, role: actor.role },
           ip,
         });
-        const position = revokePosition(rows, current, length);
+        const position = revokePosition(rows, current, length, clearType);
+        wholeType = position === 'whole-type';
         if (position === 'whole-type') swept = rows.filter((row) => row.id !== current.id);
         // `not-live` follows the status check above whenever the settlement
         // was this very row — its entry is already gone. Either way, treat it
@@ -1620,13 +1633,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // settles before it records the revocation.
       await store.transaction(async (tx) => {
         await tx.credentials.update(current.id, { status: 'revoked' });
-        // The whole-type delete removed whatever the swept rows stood for, so
-        // they settle with the target and are named in its row. Conditional on
-        // still being `retiring`, and collected inside the body so a re-run
-        // starts from nothing.
+        // The whole-type delete removed every swept entry, so every remaining
+        // live mirror row settles with the target and is named in its row.
+        // Conditional on each observed status, and collected inside the body
+        // so a re-run starts from nothing.
         const sweptIds: Uuid[] = [];
         for (const row of swept) {
-          const settled = await tx.credentials.updateIfStatus(row.id, 'retiring', {
+          const settled = await tx.credentials.updateIfStatus(row.id, row.status, {
             status: 'revoked',
           });
           if (settled) sweptIds.push(row.id);
@@ -1639,11 +1652,30 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             credential_type: type,
             consumer_id: consumerId,
             last4: target.last4,
+            ...(wholeType ? { scope: 'whole-type' } : {}),
             ...(sweptIds.length > 0 ? { swept_credential_ids: sweptIds } : {}),
             ...details,
           },
           ip,
         );
+        for (const sweptId of sweptIds) {
+          const sweptRow = swept.find((row) => row.id === sweptId);
+          if (!sweptRow) continue;
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            AuditAction.CREDENTIAL_REVOKE,
+            { type: 'credential', id: sweptRow.id },
+            {
+              credential_type: type,
+              consumer_id: consumerId,
+              last4: sweptRow.last4,
+              swept_by: target.id,
+              owner_user_id: sweptRow.user_id,
+              scope: 'whole-type',
+            },
+            ip,
+          );
+        }
       });
       return true;
     });
@@ -1783,8 +1815,37 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           input.actorId,
         );
       } catch (error) {
+        const errorDetails =
+          error instanceof NexusError && typeof error.details === 'object' && error.details !== null
+            ? (error.details as { status?: unknown })
+            : {};
+        const status = typeof errorDetails.status === 'number' ? errorDetails.status : null;
+        if (status !== null && status >= 400 && status < 500) {
+          await store.transaction(async (tx) => {
+            await tx.credentials.updateIfStatus(pending.id, 'retiring', { status: 'revoked' });
+            await audit.forStore(tx).record(
+              { id: input.actorId, role: input.actorRole },
+              AuditAction.CREDENTIAL_APPEND_ROLLBACK,
+              { type: 'consumer', id: input.consumerId },
+              {
+                credential_type: input.type,
+                consumer_id: input.consumerId,
+                operation: input.operation ?? 'issue',
+                withdrawn: true,
+                last4: pending.last4,
+                owner_user_id: input.ownerId,
+                cause: error instanceof Error ? error.message : String(error),
+                stranded_credential_id: pending.id,
+                definite_rejection: true,
+              },
+              input.ip ?? null,
+            );
+          });
+          throw error;
+        }
         // A refusal and a lost acknowledgement read the same on the wire,
-        // and for this type no read can tell them apart.
+        // except a definite 4xx: it proves Edge did not append. A 5xx, timeout,
+        // or connection error after send remains an unknown outcome.
         await recordStranded(error, true);
         throw error;
       }
@@ -1801,6 +1862,19 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         });
         return { credential, secret: generated.secret };
       } catch (error) {
+        // A concurrent whole-type revoke may have marked the pending row
+        // revoked while the append was in flight. Its secret was never
+        // delivered, so restore the durable uncertainty marker. If the lease
+        // fence itself was lost, the retrying transaction is refused too; the
+        // repository CAS is the narrow recovery write needed to avoid calling
+        // an unconfirmed row safely revoked.
+        try {
+          await store.transaction((tx) =>
+            tx.credentials.updateIfStatus(pending.id, 'revoked', { status: 'retiring' }),
+          );
+        } catch {
+          await store.credentials.updateIfStatus(pending.id, 'revoked', { status: 'retiring' });
+        }
         await recordStranded(error, false);
         throw error;
       }
@@ -1951,6 +2025,88 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   return {
     provisioner,
     issueForConsumer,
+
+    async initializeLegacyBasicAuthPositions(): Promise<void> {
+      let offset = 0;
+      const candidates: { consumerId: string; event: AuditLogRecord }[] = [];
+      while (true) {
+        const page = await store.auditLogs.list(
+          { action: AuditAction.CREDENTIAL_APPEND_ROLLBACK },
+          { limit: MAX_PAGE_SIZE, offset },
+        );
+        for (const event of page.items) {
+          const details = event.details;
+          if (
+            details.credential_type === 'basicauth' &&
+            details.withdrawn === false &&
+            typeof details.stranded_credential_id === 'string' &&
+            typeof details.consumer_id === 'string'
+          ) {
+            candidates.push({ consumerId: details.consumer_id, event });
+          }
+        }
+        if (page.items.length < MAX_PAGE_SIZE) break;
+        offset += page.items.length;
+      }
+      const byConsumer = new Map<string, typeof candidates>();
+      for (const candidate of candidates) {
+        const group = byConsumer.get(candidate.consumerId) ?? [];
+        group.push(candidate);
+        byConsumer.set(candidate.consumerId, group);
+      }
+      for (const [consumerId, events] of byConsumer) {
+        await edge.serializePerKey(consumerId, async () => {
+          const live = await store.credentials.listByConsumer(
+            consumerId,
+            'basicauth',
+            LIVE_CREDENTIAL_STATUSES,
+          );
+          if (live.some((row) => row.label === 'legacy-unconfirmed-basicauth')) return;
+          const latest = events.sort((a, b) =>
+            b.event.created_at.localeCompare(a.event.created_at),
+          )[0];
+          if (!latest) return;
+          const event = latest.event;
+          const ownerId =
+            (typeof event.details.owner_user_id === 'string' && event.details.owner_user_id) ||
+            event.actor_user_id;
+          if (!ownerId || !(await store.users.findById(ownerId))) return;
+          let changeOffset = 0;
+          let alreadyCleared = false;
+          while (!alreadyCleared) {
+            const changes = await store.auditLogs.list(
+              {
+                actions: [AuditAction.CREDENTIAL_RECONCILE, AuditAction.CREDENTIAL_REVOKE],
+                from: event.created_at,
+              },
+              { limit: MAX_PAGE_SIZE, offset: changeOffset },
+            );
+            alreadyCleared = changes.items.some(
+              (row) =>
+                row.created_at > event.created_at &&
+                ((row.target_id === consumerId &&
+                  row.action === AuditAction.CREDENTIAL_RECONCILE) ||
+                  (row.details.consumer_id === consumerId && row.details.scope === 'whole-type')),
+            );
+            if (alreadyCleared || changes.items.length < MAX_PAGE_SIZE) break;
+            changeOffset += changes.items.length;
+          }
+          if (alreadyCleared) return;
+          await store.credentials.create({
+            user_id: ownerId,
+            application_id: null,
+            ferrum_consumer_id: consumerId,
+            credential_type: 'basicauth',
+            ferrum_credential_id: `${consumerId}/credentials/basicauth`,
+            fingerprint: crypto.fingerprint(`legacy-unconfirmed:${event.id}`),
+            last4: typeof event.details.last4 === 'string' ? event.details.last4 : '????',
+            label: 'legacy-unconfirmed-basicauth',
+            status: 'retiring',
+            rotated_from_id: null,
+          });
+        });
+      }
+    },
 
     async teardownGatewayIdentity(
       username,
@@ -2738,10 +2894,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       };
     },
 
-    async revoke(user, credentialId, ip = null): Promise<void> {
+    async revoke(user, credentialId, ip = null, clearType = false): Promise<void> {
       const target = await loadOwned(user, credentialId);
       if (target.status === 'revoked') return;
-      await revokeCredentialRow(target, { id: user.id, role: user.role }, ip);
+      await revokeCredentialRow(target, { id: user.id, role: user.role }, ip, {}, clearType);
     },
 
     async revokeInvalidated(actor, credentialId, details, ip = null): Promise<boolean> {

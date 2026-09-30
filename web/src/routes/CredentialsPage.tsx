@@ -458,18 +458,27 @@ export function CredentialsPage(): ReactElement {
           if (!open) setRevoking(null);
         }}
         title="Revoke credential"
-        description="Any caller still using this secret will start receiving 401 responses immediately."
-        confirmLabel="Revoke"
+        description={
+          revoking?.credential_type === 'basicauth'
+            ? 'This clears every HTTP Basic credential for this identity. Any caller using one of them will start receiving 401 responses immediately.'
+            : 'Any caller still using this secret will start receiving 401 responses immediately.'
+        }
+        confirmLabel={
+          revoking?.credential_type === 'basicauth' ? 'Revoke all HTTP Basic credentials' : 'Revoke'
+        }
         danger
         loading={remove.isPending}
         onConfirm={() => {
           if (!revoking) return;
-          remove.mutate(revoking.id, {
-            onSuccess: () => {
-              setRevoking(null);
-              toast.success('Credential revoked');
+          remove.mutate(
+            { id: revoking.id, clearType: revoking.credential_type === 'basicauth' },
+            {
+              onSuccess: () => {
+                setRevoking(null);
+                toast.success('Credential revoked');
+              },
             },
-          });
+          );
         }}
       />
 

@@ -72,10 +72,15 @@ export function useRotateCredential(): UseMutationResult<
 }
 
 /** Revoke and delete a credential. */
-export function useDeleteCredential(): UseMutationResult<DeleteCredentialResponse, Error, string> {
+export function useDeleteCredential(): UseMutationResult<
+  DeleteCredentialResponse,
+  Error,
+  { id: string; clearType?: boolean }
+> {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => credentialsApi.remove(id),
+    mutationFn: ({ id, clearType }: { id: string; clearType?: boolean }) =>
+      credentialsApi.remove(id, clearType),
     onSuccess: () => invalidateCredentialViews(queryClient),
   });
 }
