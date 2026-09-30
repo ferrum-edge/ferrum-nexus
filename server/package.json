@@ -32,7 +32,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.20.4",
     "@types/nodemailer": "^8.0.2",
     "@types/pg": "^8.11.11",
