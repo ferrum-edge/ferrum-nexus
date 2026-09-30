@@ -51,23 +51,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **Revoking an HTTP Basic (`basicauth`) credential removes that credential's
   password** (GHSA-5526-6x2h-9hjw). Edge never lists `basicauth` entries, so
   the portal locates one only by the position its own rows give it. An append
-  the gateway accepted but the portal could not record — or a delete whose
-  outcome was never confirmed — shifted those positions, and a later revoke
-  could delete a different entry and mark the requested credential revoked
-  while its password kept authenticating. Now a `basicauth` row is written
-  before its append and activated only once Edge acknowledges it, so no entry
-  reaches the gateway without a row; an unconfirmed outcome leaves the row
-  `retiring`, and while one exists issuing, rotating and a positional revoke of
-  another `basicauth` credential fails closed with `409 CONFLICT` instead of
-  deleting by position. An owner can pass `clear_type=true` to
-  explicitly delete every Basic Auth credential for the identity, including
-  when several active credentials remain. A startup upgrade step marks
-  historical unwithdrawn Basic Auth appends as retiring placeholders unless a
-  later reconcile or whole-type revoke cleared them, so old releases and
-  Nexus-only restores cannot trust an unproven position. The startup scan
-  filters the indexed rollback action to Basic Auth events, paginates through
-  matches, and records completion so later starts skip it. Whole-type sweeps
-  have per-row audit events. See `docs/operations.md` §12.
+  the gateway accepted but the portal could not record, or a delete whose
+  outcome was never confirmed, shifted those positions, and a later revoke
+  could delete a different password and report the requested one revoked while
+  it kept working. The portal now records every `basicauth` append before
+  making it, and while any `basicauth` change on an identity is unconfirmed it
+  refuses to issue, rotate or revoke a single one (`409 CONFLICT`) instead of
+  guessing. The owner can then revoke all of the identity's HTTP Basic
+  credentials at once, which the credentials page offers as a second
+  confirmation, or an administrator can reconcile the consumer. On upgrade,
+  Nexus also holds appends that earlier releases recorded as not taken back.
+  This does not cover a Nexus database restored on its own: reconcile
+  `basicauth` for every consumer afterwards. See `docs/operations.md` §12.
 - Queued mail carrying a single-use link is no longer readable from the
   database (GHSA-cx8j-q289-8w35). Verification, re-sent verification and
   password-reset messages are sealed with AES-256-GCM before they reach

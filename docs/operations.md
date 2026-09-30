@@ -1819,33 +1819,32 @@ section.
 
 For `basicauth` the portal's rows are the only record of where each entry
 sits. A `basicauth` row is therefore written as `retiring` **before** its
-append and becomes `active` only once Edge acknowledges it; an append whose
-outcome cannot be confirmed (a lost acknowledgement, or a row that could not
-be activated) fails the request and leaves the row `retiring`, with a
-`credential.append_rollback` row (`withdrawn: false`,
+append and becomes `active` only once Edge acknowledges it. An append whose
+outcome cannot be confirmed (a lost acknowledgement, a `408` or `5xx`, or a row
+that could not be activated) fails the request and leaves the row `retiring`,
+with a `credential.append_rollback` row (`withdrawn: false`,
 `stranded_credential_id`). A delete whose outcome cannot be proved also stays
 `retiring`.
 
 While any `basicauth` row of a consumer is `retiring`, positions are unknown,
-so issuing or rotating returns `409 CONFLICT`. A revoke without `clear_type`
-can still revoke a retiring row when no active rows remain; when active rows
-remain it returns `409 CONFLICT` and directs the owner to clear the type:
+so issuing, rotating and revoking a single credential by position return
+`409 CONFLICT` with
+`details: { consumer_id, credential_type, unconfirmed_credentials, active_credentials }`.
+Nothing is deleted. The message names the repair that applies:
 
-> An earlier HTTP Basic credential change on this consumer was never confirmed
-> by the gateway …
-
-with `details: { consumer_id, credential_type, unconfirmed_credentials }`.
-Nothing is deleted. The owner can explicitly clear all Basic Auth credentials
-with `DELETE /api/credentials/:id?clear_type=true`; the confirmation names that
-scope. This is available even when the identity has three or more active rows.
-Otherwise:
-
-- **the owner revokes a credential when no other `active` `basicauth` row remains.**
-  With no other `active` row of the type, a revoke deletes the whole type on
-  the gateway and settles every `retiring` row with it (named in the
-  `credential.revoke` row's `swept_credential_ids`); or
-- **an administrator [reconciles](#reconciling-one) the consumer** for
-  `basicauth`.
+- **No `active` row left:** revoke the retiring credential. With no other
+  `active` row of the type, a revoke deletes the whole type on the gateway and
+  settles every `retiring` row with it (named in the `credential.revoke` row's
+  `swept_credential_ids`).
+- **`active` rows remain:** revoke with
+  `DELETE /api/credentials/:id?clear_type=true`, which deletes every HTTP Basic
+  credential of that consumer, active ones included. The credentials page
+  offers this as a second confirmation, "Revoke all HTTP Basic credentials",
+  only after a plain revoke was refused this way. `clear_type` is refused for
+  other types (`400`), and for a non-admin when the consumer holds a row
+  attributed to another account (`403`).
+- Either way, **an administrator can [reconcile](#reconciling-one) the
+  consumer** for `basicauth`.
 
 Then issue new credentials. To find affected consumers:
 
@@ -1856,16 +1855,29 @@ SELECT ferrum_consumer_id, COUNT(*) AS unconfirmed
   GROUP BY ferrum_consumer_id;
 ```
 
-Once, at startup, Nexus scans paginated historical
-`credential.append_rollback` rows with `credential_type: "basicauth"` and
-`withdrawn: false`. The query uses the existing audit action/time index and
-filters the details in the store; it does not load unrelated audit events or
-hold the full match set in memory. After the scan completes, a setting records
-completion so later startups skip the history. If no later reconcile or
-whole-type revoke cleared that consumer, Nexus adds an idempotent retiring
-placeholder row. Thus pre-upgrade row-less appends and restores that contain
-only Nexus cannot be used as positional evidence. Clear the type with the
-owner's `clear_type=true` revoke or reconcile it as an administrator.
+**Upgrading from `v0.2.0` or earlier.** On the first start after the upgrade,
+Nexus scans the audit log for `credential.append_rollback` rows with
+`credential_type: "basicauth"` and `withdrawn: false` that no live row
+accounts for: those without `stranded_credential_id` (what earlier releases
+wrote for a lost acknowledgement or a failed row write) and those whose
+stranded row is no longer live. For each one that no later `basicauth`
+reconcile or whole-type revoke of the consumer has cleared, it writes a
+`retiring` placeholder row, audited as `credential.legacy_placeholder` with
+`source_event_id`. The placeholder holds that consumer's positions closed, as
+above, until the type is cleared. Completion is recorded in `app_settings`
+(`credentials.legacy_basicauth_scan_v1`), and later starts skip the scan.
+
+If the scan fails, startup continues and logs `Could not scan for HTTP Basic
+credentials left unconfirmed by an earlier release`; nothing is recorded, so
+the next start runs it again. Until it completes, reconcile `basicauth` for any
+consumer with such a rollback row.
+
+**The scan does not cover restores.** It runs once, and a backup taken after
+the upgrade carries its completion marker. A Nexus database restored on its own
+can be older than the gateway's HTTP Basic entries, which no read can reveal.
+After restoring only Nexus, reconcile `basicauth` for every consumer before
+relying on revoking a single HTTP Basic credential
+([§5](#5-backup-and-restore)).
 
 If an append is in flight while a whole-type revoke runs and the lease fence
 prevents the append holder from activating its row, the issue response fails

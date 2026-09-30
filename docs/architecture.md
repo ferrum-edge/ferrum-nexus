@@ -920,7 +920,8 @@ once Edge acknowledges it, so no entry reaches the gateway without a row. A
 while one exists, issuing, rotating and revoking any other `basicauth`
 credential of that consumer is refused with `409 CONFLICT`. A revoke with no
 other `active` row of the type deletes the whole type instead of an index, and
-settles the `retiring` rows with it. See
+settles the `retiring` rows with it; an explicit `clear_type=true` revoke does
+the same while active rows remain. See
 [`security.md` §5](security.md#5-show-once-credentials) and
 [`operations.md` §12](operations.md#12-the-credential-mirror).
 

@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import {
   DEFAULT_PAGE_SIZE,
+  ERROR_CODES,
   type CredentialMetadata,
   type CredentialType,
   type ShowOnceSecret,
 } from '@ferrum-nexus/shared';
+import { ApiError } from '../lib/api';
 import { formatDateTime } from '../lib/format';
 import { CREDENTIAL_TYPES, CREDENTIAL_TYPE_LABELS } from '../lib/credential-labels';
 import {
@@ -50,6 +52,21 @@ const CREDENTIAL_TYPE_HINTS: Readonly<Record<CredentialType, string>> = {
   basicauth: 'The password half of HTTP Basic; the username is your consumer username.',
   jwt: 'A signing secret for the short-lived HS256 tokens you mint yourself.',
 };
+
+/**
+ * Whether a revoke was refused because an HTTP Basic change on the identity
+ * was never confirmed by the gateway, so the credential cannot be removed on
+ * its own. The server says so with `details.unconfirmed_credentials`.
+ */
+function isUnconfirmedBasicAuthConflict(error: unknown): boolean {
+  if (!ApiError.hasCode(error, ERROR_CODES.CONFLICT)) return false;
+  const details = (error as ApiError).details;
+  return (
+    typeof details === 'object' &&
+    details !== null &&
+    typeof (details as { unconfirmed_credentials?: unknown }).unconfirmed_credentials === 'number'
+  );
+}
 
 /** Read-only value with a copy affordance, sized for a list row. */
 function CopyableValue({ label, value }: { label: string; value: string }): ReactElement {
@@ -186,6 +203,9 @@ export function CredentialsPage(): ReactElement {
   const [showOnce, setShowOnce] = useState<ShowOnceState | null>(null);
   const [rotating, setRotating] = useState<CredentialMetadata | null>(null);
   const [revoking, setRevoking] = useState<CredentialMetadata | null>(null);
+  // Set when a revoke of `revoking` came back asking to clear the whole HTTP
+  // Basic type instead: the second, broader confirmation.
+  const [clearingType, setClearingType] = useState<CredentialMetadata | null>(null);
 
   // The applications this page of credentials authenticates as, fetched by
   // id. Loading one page of applications and looking names up in it left any
@@ -202,6 +222,11 @@ export function CredentialsPage(): ReactElement {
   const rotate = useRotateCredential();
   const remove = useDeleteCredential();
   const toast = useToast();
+  // The delete hook leaves `CONFLICT` to this page (see useDeleteCredential);
+  // every other failure is already toasted globally.
+  const toastHandledConflict = (error: Error): void => {
+    if (ApiError.hasCode(error, ERROR_CODES.CONFLICT)) toast.error('Request failed', error.message);
+  };
 
   const columns = useMemo<Columns<CredentialMetadata>>(
     () => [
@@ -458,28 +483,61 @@ export function CredentialsPage(): ReactElement {
           if (!open) setRevoking(null);
         }}
         title="Revoke credential"
-        description={
-          revoking?.credential_type === 'basicauth'
-            ? 'This clears every HTTP Basic credential for this identity. Any caller using one of them will start receiving 401 responses immediately.'
-            : 'Any caller still using this secret will start receiving 401 responses immediately.'
-        }
-        confirmLabel={
-          revoking?.credential_type === 'basicauth' ? 'Revoke all HTTP Basic credentials' : 'Revoke'
-        }
+        description="Any caller still using this secret will start receiving 401 responses immediately."
+        confirmLabel="Revoke"
         danger
         loading={remove.isPending}
         onConfirm={() => {
           if (!revoking) return;
+          const target = revoking;
           remove.mutate(
-            {
-              id: revoking.id,
-              ...(revoking.credential_type === 'basicauth' ? { clearType: true } : {}),
-            },
+            { id: target.id },
             {
               onSuccess: () => {
                 setRevoking(null);
                 toast.success('Credential revoked');
               },
+              onError: (error) => {
+                // Only this refusal widens the choice; every other failure
+                // leaves the dialog open for a retry.
+                const unconfirmed = isUnconfirmedBasicAuthConflict(error);
+                if (target.credential_type === 'basicauth' && unconfirmed) {
+                  setRevoking(null);
+                  setClearingType(target);
+                  return;
+                }
+                toastHandledConflict(error);
+              },
+            },
+          );
+        }}
+      />
+
+      <ConfirmDialog
+        open={clearingType !== null}
+        onOpenChange={(open) => {
+          if (!open) setClearingType(null);
+        }}
+        title="Revoke all HTTP Basic credentials?"
+        description={
+          'An earlier HTTP Basic change on this identity was never confirmed by the gateway, ' +
+          'so this credential cannot be removed on its own. Revoking all HTTP Basic ' +
+          'credentials for this identity removes every HTTP Basic password it holds; any ' +
+          'caller using one of them will start receiving 401 responses immediately.'
+        }
+        confirmLabel="Revoke all HTTP Basic credentials"
+        danger
+        loading={remove.isPending}
+        onConfirm={() => {
+          if (!clearingType) return;
+          remove.mutate(
+            { id: clearingType.id, clearType: true },
+            {
+              onSuccess: () => {
+                setClearingType(null);
+                toast.success('HTTP Basic credentials revoked');
+              },
+              onError: toastHandledConflict,
             },
           );
         }}

@@ -2308,18 +2308,25 @@ it. So:
   `retiring` row of that identity and type settles to `revoked` with it
   (listed in the `credential.revoke` row's `swept_credential_ids`).
 - While any `basicauth` row of the identity is `retiring` — an append or delete
-  whose outcome the gateway never confirmed — issuing or rotating is `409
-CONFLICT`. A revoke without the query parameter can revoke a retiring row
-  only when no active row remains; otherwise it returns `409 CONFLICT`.
-- `DELETE /api/credentials/:id?clear_type=true` explicitly deletes every Basic
-  Auth credential for that consumer identity, settles every live row, and
-  writes `scope: "whole-type"` in the target's `credential.revoke` audit row.
-  This is the owner recovery path at any credential cap. Each additional row
-  swept by the deletion also receives its own `credential.revoke` audit row.
-- At startup, Nexus marks historical unwithdrawn Basic Auth append outcomes as
-  retiring placeholders unless a later reconcile or whole-type revoke cleared
-  that consumer. After restoring only Nexus, reconcile Basic Auth for every
-  consumer before relying on positional revocation.
+  whose outcome the gateway never confirmed — issuing, rotating and revoking a
+  single credential by position are `409 CONFLICT` with
+  `details.unconfirmed_credentials` and `details.active_credentials`. With no
+  `active` row left, revoking the retiring one clears the type; otherwise the
+  message points to `clear_type=true`.
+- `DELETE /api/credentials/:id?clear_type=true` explicitly deletes every HTTP
+  Basic credential of that consumer identity, settles every live row, and
+  writes `scope: "whole-type"` in the target's `credential.revoke` audit row;
+  each other row it settles gets its own `credential.revoke` row. It answers
+  `400 VALIDATION_FAILED` on a credential that is not `basicauth`, and
+  `403 FORBIDDEN` for a non-admin caller when the consumer holds a live row
+  attributed to another account.
+- On the first start after upgrading, Nexus writes a `retiring` placeholder for
+  each earlier-release `basicauth` append recorded as not taken back that no
+  live row accounts for, unless a later reconcile or whole-type revoke cleared
+  that consumer ([`operations.md` §12](operations.md#12-the-credential-mirror)).
+  This does not cover restores: after restoring only Nexus, reconcile
+  `basicauth` for every consumer before relying on revoking a single HTTP Basic
+  credential.
 
 ---
 

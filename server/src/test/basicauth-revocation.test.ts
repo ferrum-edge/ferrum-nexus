@@ -209,6 +209,9 @@ describe('basicauth revocation removes the selected password', () => {
     assert.equal(later.statusCode, 409, later.body);
     assert.equal(errorOf(later.body).code, 'CONFLICT');
     assert.match(errorOf(later.body).message, /reconcile this consumer/);
+    // No active row is left, so the repair on offer is revoking the retiring one.
+    assert.match(errorOf(later.body).message, /revoke the retiring credential/);
+    assert.doesNotMatch(errorOf(later.body).message, /clear_type/);
     assert.equal(livePasswords(user).length, 1, 'nothing was appended');
 
     // Revoking the only row clears the type, the unrecorded entry with it.
@@ -297,6 +300,56 @@ describe('basicauth revocation removes the selected password', () => {
     assert.equal((await liveRowsOf(user)).length, 0);
   });
 
+  it('holds an append answered 408, which does not prove it never landed', async () => {
+    const user = await client();
+    harness.edge.queueLostAck(408, { error: 'request timeout' }, '/credentials/basicauth', 'POST');
+    const timedOut = await tryIssue(user);
+    assert.equal(timedOut.statusCode, 502, timedOut.body);
+    assert.equal(livePasswords(user).length, 1, 'the append landed');
+
+    const rows = await liveRowsOf(user);
+    assert.equal(rows.length, 1, 'the entry keeps a row');
+    assert.equal(rows[0]?.status, 'retiring');
+    const rollback = await rowsFor('credential.append_rollback', rows[0]!.ferrum_consumer_id);
+    assert.equal(rollback.length, 1);
+    assert.equal(rollback[0]?.details.suspected, true);
+
+    const cleared = await revoke(user, rows[0]!.id);
+    assert.equal(cleared.statusCode, 200, cleared.body);
+    assert.equal(livePasswords(user).length, 0);
+  });
+
+  it('records the stranded append even when its row cannot be restored either', async () => {
+    const user = await client();
+    // Every conditional write after the append fails: the activation, the
+    // transactional restore and the fallback outside the transaction.
+    const repo = harness.store.credentials;
+    const updateIfStatus = repo.updateIfStatus.bind(repo);
+    const appends = (): number => harness.edge.callsTo('POST', '/credentials/basicauth').length;
+    const before = appends();
+    repo.updateIfStatus = async (id, expected, patch) => {
+      if (appends() === before) return updateIfStatus(id, expected, patch);
+      throw new Error('injected metadata write failure');
+    };
+    const failed = await (async () => {
+      try {
+        return await tryIssue(user);
+      } finally {
+        repo.updateIfStatus = updateIfStatus;
+      }
+    })();
+    assert.ok(failed.statusCode >= 500, failed.body);
+    assert.equal(livePasswords(user).length, 1, 'the append reached the gateway');
+
+    const rows = await liveRowsOf(user);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.status, 'retiring', 'the row was never activated');
+    const rollback = await rowsFor('credential.append_rollback', rows[0]!.ferrum_consumer_id);
+    assert.equal(rollback.length, 1, 'the orphan is still recorded');
+    assert.equal(rollback[0]?.details.withdrawn, false);
+    assert.equal(rollback[0]?.details.stranded_credential_id, rows[0]!.id);
+  });
+
   it('clears the pending row when Edge definitely rejects a Basic Auth append', async () => {
     const user = await client();
     harness.edge.queueFailure(
@@ -336,6 +389,14 @@ describe('basicauth revocation removes the selected password', () => {
     const retried = await revoke(user, first.credential.id);
     assert.equal(retried.statusCode, 409, retried.body);
     assert.equal(errorOf(retried.body).code, 'CONFLICT');
+    // An active credential remains beside it, so only an explicit clear helps.
+    assert.match(errorOf(retried.body).message, /clear_type=true/);
+    assert.deepEqual(errorOf(retried.body).details, {
+      consumer_id: consumerId,
+      credential_type: 'basicauth',
+      unconfirmed_credentials: 1,
+      active_credentials: 1,
+    });
     assert.equal(authenticates(user, second), true, 'the other password was not deleted');
 
     // Nor is the survivor rotated by position, or another credential issued.
@@ -519,56 +580,305 @@ describe('basicauth revocation removes the selected password', () => {
     assert.equal(authenticates(user, replacement), true);
     assert.equal(livePasswords(user).length, 1);
   });
+
+  /* ── clear_type is bounded ───────────────────────────────────────────── */
+
+  it('refuses clear_type on a type that is not HTTP Basic', async () => {
+    const user = await client();
+    const response = await harness.authed(user, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    const key = response.json<IssueCredentialResponse>().credential;
+
+    const refused = await harness.authed(user, {
+      method: 'DELETE',
+      url: `/api/credentials/${key.id}?clear_type=true`,
+    });
+    assert.equal(refused.statusCode, 400, refused.body);
+    assert.equal(errorOf(refused.body).code, 'VALIDATION_FAILED');
+    assert.equal(await statusOf(key.id), 'active', 'nothing was revoked');
+  });
+
+  it('keeps clear_type from revoking rows that belong to another account', async () => {
+    const user = await client();
+    const other = await client();
+    const own = await issue(user);
+    const consumerId = own.credential.ferrum_consumer_id;
+    // A row on this consumer the portal attributes to somebody else.
+    const foreign = await harness.store.credentials.create({
+      user_id: other.user.id,
+      application_id: null,
+      ferrum_consumer_id: consumerId,
+      credential_type: 'basicauth',
+      ferrum_credential_id: `${consumerId}/credentials/basicauth`,
+      fingerprint: `test-foreign-row-${nonce}`,
+      last4: 'frgn',
+      label: null,
+      status: 'active',
+      rotated_from_id: null,
+    });
+
+    const refused = await harness.authed(user, {
+      method: 'DELETE',
+      url: `/api/credentials/${own.credential.id}?clear_type=true`,
+    });
+    assert.equal(refused.statusCode, 403, refused.body);
+    assert.equal(authenticates(user, own), true, 'nothing was deleted');
+    assert.equal(await statusOf(foreign.id), 'active');
+
+    // An administrator may clear it.
+    const cleared = await harness.authed(founder, {
+      method: 'DELETE',
+      url: `/api/credentials/${own.credential.id}?clear_type=true`,
+    });
+    assert.equal(cleared.statusCode, 200, cleared.body);
+    assert.equal(livePasswords(user).length, 0);
+    assert.equal(await statusOf(own.credential.id), 'revoked');
+    assert.equal(await statusOf(foreign.id), 'revoked');
+  });
 });
 
-describe('basicauth recovery above the default credential cap', () => {
-  it('lets the owner clear the whole type at cap three', async () => {
-    const harness = await buildTestApp({ env: { FERRUM_MAX_CREDENTIALS_PER_TYPE: '3' } });
-    try {
-      const user = await harness.registerUser({ email: 'basic-revoke-cap-three@example.test' });
-      const issued: IssueCredentialResponse['credential'][] = [];
-      for (let index = 0; index < 3; index += 1) {
-        const response = await harness.authed(user, {
-          method: 'POST',
-          url: '/api/credentials',
-          payload: { credential_type: 'basicauth' },
-        });
-        assert.equal(response.statusCode, 201, response.body);
-        issued.push(response.json<IssueCredentialResponse>().credential);
-      }
-      await harness.store.auditLogs.create({
-        actor_user_id: user.user.id,
-        actor_role: user.user.role,
-        action: 'credential.append_rollback',
-        target_type: 'consumer',
-        target_id: issued[0]!.ferrum_consumer_id,
-        details: {
-          credential_type: 'basicauth',
-          consumer_id: issued[0]!.ferrum_consumer_id,
-          operation: 'issue',
-          withdrawn: false,
-          stranded_credential_id: 'legacy-orphan',
-          last4: 'test',
-          owner_user_id: user.user.id,
-        },
-        ip: null,
-      });
-      await harness.store.settings.delete('credentials.legacy_basicauth_scan_v1');
-      await harness.services.credentials.initializeLegacyBasicAuthPositions();
-      assert.deepEqual(
-        (await harness.store.settings.get('credentials.legacy_basicauth_scan_v1'))?.value,
-        { completed: true },
-      );
-      const cleared = await harness.authed(user, {
-        method: 'DELETE',
-        url: `/api/credentials/${issued[1]!.id}?clear_type=true`,
-      });
-      assert.equal(cleared.statusCode, 200, cleared.body);
-      for (const credential of issued) {
-        assert.equal((await harness.store.credentials.findById(credential.id))?.status, 'revoked');
-      }
-    } finally {
-      await harness.close();
-    }
+/* ── The upgrade scan: appends an earlier release left without a row ───── */
+
+describe('legacy basicauth append scan', () => {
+  const SCAN_SETTING = 'credentials.legacy_basicauth_scan_v1';
+  let harness: TestApp;
+  let founder: TestSession;
+  let nonce = 0;
+
+  before(async () => {
+    // Room for three rows, so a v0.2.0 orphan fits beside two tracked ones.
+    harness = await buildTestApp({ env: { FERRUM_MAX_CREDENTIALS_PER_TYPE: '3' } });
+    founder = await harness.registerUser({ email: 'basic-legacy-founder@example.test' });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  async function client(): Promise<TestSession> {
+    nonce += 1;
+    return harness.registerUser({ email: `basic-legacy-${nonce}@example.test`, role: 'client' });
+  }
+
+  async function issue(actor: TestSession): Promise<IssueCredentialResponse['credential']> {
+    const response = await harness.authed(actor, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'basicauth' },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    return response.json<IssueCredentialResponse>().credential;
+  }
+
+  function revoke(actor: TestSession, credentialId: string, clearType = false) {
+    return harness.authed(actor, {
+      method: 'DELETE',
+      url: `/api/credentials/${credentialId}${clearType ? '?clear_type=true' : ''}`,
+    });
+  }
+
+  function gatewayEntries(actor: TestSession): Record<string, unknown>[] {
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(actor.user.id));
+    return consumer?.credentials.basicauth ?? [];
+  }
+
+  async function rowsOf(actor: TestSession): Promise<CredentialRecord[]> {
+    const page = await harness.store.credentials.list(
+      { user_id: actor.user.id, credential_type: 'basicauth' },
+      { limit: 50 },
+    );
+    return page.items;
+  }
+
+  async function statusOf(credentialId: string): Promise<string | undefined> {
+    return (await harness.store.credentials.findById(credentialId))?.status;
+  }
+
+  /**
+   * What `v0.2.0` wrote for a `basicauth` append it could not record: the
+   * lost-acknowledgement path, which names no row, so `stranded_credential_id`
+   * is absent. Dated in the past so any real audit row written afterwards
+   * sorts strictly later.
+   */
+  async function seedLegacyOrphan(
+    actor: TestSession,
+    consumerId: string,
+    extra: Record<string, unknown> = {},
+  ) {
+    return harness.store.auditLogs.create({
+      actor_user_id: actor.user.id,
+      actor_role: actor.user.role,
+      action: 'credential.append_rollback',
+      target_type: 'consumer',
+      target_id: consumerId,
+      details: {
+        credential_type: 'basicauth',
+        consumer_id: consumerId,
+        operation: 'issue',
+        withdrawn: false,
+        last4: 'lgcy',
+        append_index: 0,
+        owner_user_id: actor.user.id,
+        suspected: true,
+        cause: 'The gateway rejected the request',
+        ...extra,
+      },
+      ip: null,
+      created_at: new Date(Date.now() - 60_000).toISOString(),
+    });
+  }
+
+  async function rescan(): Promise<void> {
+    await harness.store.settings.delete(SCAN_SETTING);
+    await harness.services.credentials.initializeLegacyBasicAuthPositions();
+  }
+
+  async function placeholdersFor(eventId: string) {
+    const rows = await harness.auditRows('credential.legacy_placeholder');
+    return rows.filter((row) => row.details.source_event_id === eventId);
+  }
+
+  it('holds an orphan v0.2.0 recorded without a row until the type is cleared', async () => {
+    const user = await client();
+    const first = await issue(user);
+    const second = await issue(user);
+    const consumerId = first.ferrum_consumer_id;
+    // The orphan itself: an entry on the gateway that no row accounts for.
+    gatewayEntries(user).unshift({ password: 'an-entry-v0.2.0-appended-without-a-row' });
+    const event = await seedLegacyOrphan(user, consumerId);
+
+    await rescan();
+    assert.deepEqual((await harness.store.settings.get(SCAN_SETTING))?.value, {
+      completed: true,
+    });
+    assert.equal(harness.services.credentials.legacyBasicAuthScanState(), 'completed');
+
+    const placeholder = (await rowsOf(user)).find(
+      (row) => row.id !== first.id && row.id !== second.id,
+    );
+    assert.ok(placeholder, 'the orphan now has a row');
+    assert.equal(placeholder.status, 'retiring');
+    assert.equal(placeholder.ferrum_consumer_id, consumerId);
+    assert.equal(placeholder.application_id, null, 'the account identity, from its mapping');
+    assert.equal(placeholder.last4, 'lgcy');
+    const [audited, ...more] = await placeholdersFor(event.id);
+    assert.ok(audited, 'the placeholder is audited');
+    assert.equal(more.length, 0);
+    assert.equal(audited.target_id, placeholder.id);
+    assert.equal(audited.details.consumer_id, consumerId);
+
+    // The report's positional revoke would now delete the orphan instead.
+    const refused = await revoke(user, first.id);
+    assert.equal(refused.statusCode, 409, refused.body);
+    assert.equal(errorOf(refused.body).code, 'CONFLICT');
+    assert.match(errorOf(refused.body).message, /clear_type=true/);
+    assert.equal(gatewayEntries(user).length, 3, 'nothing was deleted');
+    assert.equal(await statusOf(first.id), 'active');
+
+    // A repeated scan writes nothing new.
+    await rescan();
+    assert.equal((await placeholdersFor(event.id)).length, 1);
+    assert.equal((await rowsOf(user)).length, 3);
+
+    // The owner's explicit clear removes the orphan with everything else.
+    const cleared = await revoke(user, second.id, true);
+    assert.equal(cleared.statusCode, 200, cleared.body);
+    assert.equal(gatewayEntries(user).length, 0);
+    for (const row of await rowsOf(user)) assert.equal(row.status, 'revoked');
+
+    // A scan after the clear leaves the settled placeholder alone.
+    await rescan();
+    assert.equal((await placeholdersFor(event.id)).length, 1);
+    assert.equal(await statusOf(placeholder.id), 'revoked');
+  });
+
+  it('also holds an orphan whose stranded row is no longer live', async () => {
+    const user = await client();
+    const kept = await issue(user);
+    const gone = await issue(user);
+    await harness.store.credentials.update(gone.id, { status: 'revoked' });
+    const event = await seedLegacyOrphan(user, kept.ferrum_consumer_id, {
+      operation: 'rotate',
+      stranded_credential_id: gone.id,
+    });
+
+    await rescan();
+    assert.equal((await placeholdersFor(event.id)).length, 1);
+    const refused = await harness.authed(user, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'basicauth' },
+    });
+    assert.equal(refused.statusCode, 409, refused.body);
+  });
+
+  it('leaves an orphan alone while the row that names it is still live', async () => {
+    const user = await client();
+    const live = await issue(user);
+    const event = await seedLegacyOrphan(user, live.ferrum_consumer_id, {
+      operation: 'rotate',
+      stranded_credential_id: live.id,
+    });
+
+    await rescan();
+    assert.equal((await placeholdersFor(event.id)).length, 0);
+    assert.equal((await rowsOf(user)).length, 1);
+  });
+
+  it('skips an orphan a later reconcile already cleared', async () => {
+    const user = await client();
+    const credential = await issue(user);
+    const consumerId = credential.ferrum_consumer_id;
+    const event = await seedLegacyOrphan(user, consumerId);
+
+    const reconciled = await harness.authed(founder, {
+      method: 'POST',
+      url: '/api/admin/credentials/reconcile',
+      payload: { consumer_id: consumerId, credential_type: 'basicauth', reason: 'legacy orphan' },
+    });
+    assert.equal(reconciled.statusCode, 200, reconciled.body);
+
+    await rescan();
+    assert.equal((await placeholdersFor(event.id)).length, 0);
+    assert.equal((await rowsOf(user)).filter((row) => row.status !== 'revoked').length, 0);
+  });
+
+  it('skips an orphan a later whole-type revoke already cleared', async () => {
+    const user = await client();
+    const only = await issue(user);
+    const event = await seedLegacyOrphan(user, only.ferrum_consumer_id);
+
+    // The only active credential: its revoke empties the type.
+    const revoked = await revoke(user, only.id);
+    assert.equal(revoked.statusCode, 200, revoked.body);
+
+    await rescan();
+    assert.equal((await placeholdersFor(event.id)).length, 0);
+    const fresh = await issue(user);
+    assert.equal(fresh.status, 'active', 'issuing is not held');
+  });
+
+  it('keeps no completion marker when the scan fails, and completes on a retry', async () => {
+    const user = await client();
+    const credential = await issue(user);
+    const event = await seedLegacyOrphan(user, credential.ferrum_consumer_id);
+    await harness.store.settings.delete(SCAN_SETTING);
+
+    const list = harness.store.auditLogs.list;
+    harness.store.auditLogs.list = async () => {
+      harness.store.auditLogs.list = list;
+      throw new Error('injected audit read failure');
+    };
+    await assert.rejects(harness.services.credentials.initializeLegacyBasicAuthPositions());
+    assert.equal(harness.services.credentials.legacyBasicAuthScanState(), 'failed');
+    assert.equal(await harness.store.settings.get(SCAN_SETTING), null);
+
+    await harness.services.credentials.initializeLegacyBasicAuthPositions();
+    assert.equal(harness.services.credentials.legacyBasicAuthScanState(), 'completed');
+    assert.equal((await placeholdersFor(event.id)).length, 1);
   });
 });
