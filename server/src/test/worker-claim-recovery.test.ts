@@ -108,6 +108,7 @@ describe('outbox claims are recovered without a restart', () => {
   function worker(): OutboxWorker {
     return createOutboxWorker({
       store: harness.store,
+      crypto: harness.app.nexus.crypto,
       transportFactory: mail.factory,
       now: () => clock.now(),
     });

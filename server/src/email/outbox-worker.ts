@@ -43,6 +43,15 @@
  * new owner's outcome — it loses the write, counts it in `lost` and logs it,
  * rather than resurrecting a row that has already been settled.
  *
+ * ## Sealed messages are opened here, and only here
+ *
+ * A message carrying a single-use link is stored sealed (`sealed-outbox.ts`).
+ * The worker opens it immediately before `transport.send`; a sealed row that
+ * does not open is failed with {@link OUTBOX_SEALED_UNREADABLE} and never
+ * retried, because no later attempt could open it either. Each tick also seals
+ * a bounded batch of bearer rows written before sealing existed, until a tick
+ * finds none left.
+ *
  * Two operational rules:
  *
  * 1. **It never crashes the process.** Every tick is wrapped; a transport or
@@ -59,6 +68,8 @@
 import { OUTBOX_MAX_ATTEMPTS, OUTBOX_POLL_INTERVAL_MS } from '@ferrum-nexus/shared';
 
 import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
+import type { NexusCrypto } from '../lib/crypto.js';
+import { openOutboxRecord, sealLegacyBearerRows, type MailContent } from './sealed-outbox.js';
 import {
   isDeliveredUnacknowledged,
   SMTP_SEND_BUDGET_MS,
@@ -117,6 +128,14 @@ export const OUTBOX_SEND_BUDGET_MS = SMTP_SEND_BUDGET_MS;
  */
 export const OUTBOX_DELIVERED_UNACKNOWLEDGED = 'delivered-unacknowledged';
 
+/**
+ * Prefix written to `last_error` when a sealed row does not open — it was
+ * altered, copied from another row, or sealed under a `NEXUS_SECRET_KEY` that
+ * has since been rotated (which invalidated the link it carried anyway). The
+ * row is failed without an attempt at delivery.
+ */
+export const OUTBOX_SEALED_UNREADABLE = 'sealed-unreadable';
+
 /** What one {@link OutboxWorker.tick} did. */
 export interface OutboxTickResult {
   /** `sending` rows older than the stale threshold returned to `pending`. */
@@ -132,11 +151,13 @@ export interface OutboxTickResult {
   lost: number;
   /** Rows whose handling threw; recovered by a later tick's stale sweep. */
   abandoned: number;
+  /** Bearer rows written before sealing existed, sealed in place by this tick. */
+  sealedLegacy: number;
   /** True when the tick delivered nothing because SMTP is not configured. */
   skipped: boolean;
 }
 
-const EMPTY_TICK: Omit<OutboxTickResult, 'released'> = {
+const EMPTY_TICK: Omit<OutboxTickResult, 'released' | 'sealedLegacy'> = {
   claimed: 0,
   sent: 0,
   rescheduled: 0,
@@ -165,6 +186,8 @@ export interface OutboxWorker {
 /** Dependencies of {@link createOutboxWorker}. */
 export interface OutboxWorkerDeps {
   store: NexusStore;
+  /** Opens sealed rows before delivery, and seals legacy bearer rows. */
+  crypto: NexusCrypto;
   /** Builds the transport for a tick, or returns `null` when unconfigured. */
   transportFactory: MailTransportFactory;
   log?: (obj: Record<string, unknown>, message: string) => void;
@@ -191,7 +214,7 @@ export function backoffDelayMs(attempts: number, random: () => number = Math.ran
 
 /** Build the outbox worker. The caller owns `start()`/`stop()`. */
 export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
-  const { store, transportFactory } = deps;
+  const { store, crypto, transportFactory } = deps;
   const log = deps.log ?? ((): void => {});
   const pollIntervalMs = deps.pollIntervalMs ?? OUTBOX_POLL_INTERVAL_MS;
   const batchSize = deps.batchSize ?? OUTBOX_BATCH_SIZE;
@@ -203,18 +226,28 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
   // Set by `stop()` so an in-flight batch ends after the delivery it is on
   // instead of claiming the rest of its batch while shutdown waits (#334).
   let stopping = false;
+  // Cleared once a sweep finds no unsealed bearer row left, after which no
+  // tick looks again: every row written since is sealed at enqueue.
+  let legacyRowsMayRemain = true;
 
   async function deliver(
     transport: MailTransport,
     result: OutboxTickResult,
     entry: EmailOutboxRecord,
   ): Promise<void> {
+    let content: MailContent;
+    try {
+      content = openOutboxRecord(crypto, entry);
+    } catch (error) {
+      await failUnreadable(result, entry, error);
+      return;
+    }
     try {
       await transport.send({
         to: entry.to_email,
-        subject: entry.subject,
-        html: entry.body_html,
-        text: entry.body_text,
+        subject: content.subject,
+        html: content.html,
+        text: content.text,
       });
     } catch (error) {
       if (isDeliveredUnacknowledged(error)) {
@@ -261,6 +294,49 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
       }
     } catch (error) {
       await parkUnacknowledged(result, entry, error);
+    }
+  }
+
+  /**
+   * Fail a sealed row that does not open, without attempting delivery.
+   *
+   * Retrying cannot help — the same bytes will not open next time either — and
+   * sending the envelope as it stands would mail ciphertext. Neither the
+   * `last_error` nor the log line carries anything from the row's content.
+   */
+  async function failUnreadable(
+    result: OutboxTickResult,
+    entry: EmailOutboxRecord,
+    cause: unknown,
+  ): Promise<void> {
+    const reason = cause instanceof Error ? cause.message : 'sealed message could not be opened';
+    if (!(await store.emailOutbox.markFailed(entry, `${OUTBOX_SEALED_UNREADABLE}: ${reason}`))) {
+      lostClaim(result, entry, 'markFailed');
+      return;
+    }
+    result.failed += 1;
+    log({ id: entry.id, attempts: entry.attempts }, 'Sealed outbox message could not be opened');
+  }
+
+  /**
+   * Seal a bounded batch of bearer rows written before sealing existed.
+   *
+   * Like the stale sweep it runs before the SMTP check, so a portal with no
+   * relay configured still stops holding readable links. A failure is logged
+   * and retried next tick; it never stops this one from delivering.
+   */
+  async function sealLegacy(result: OutboxTickResult): Promise<void> {
+    if (!legacyRowsMayRemain) return;
+    try {
+      const swept = await sealLegacyBearerRows(store, crypto);
+      result.sealedLegacy = swept.sealed;
+      legacyRowsMayRemain = swept.more;
+      if (swept.sealed > 0) log({ sealed: swept.sealed }, 'Sealed legacy outbox messages');
+    } catch (error) {
+      log(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Could not seal legacy outbox messages',
+      );
     }
   }
 
@@ -351,6 +427,7 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
       unacknowledged: 0,
       lost: 0,
       abandoned: 0,
+      sealedLegacy: 0,
       skipped: false,
     };
     try {
@@ -362,11 +439,14 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
         'Could not release stale outbox claims',
       );
     }
+    await sealLegacy(result);
 
     let transport: MailTransport | null = null;
     try {
       transport = await transportFactory();
-      if (!transport) return { ...EMPTY_TICK, released: result.released };
+      if (!transport) {
+        return { ...EMPTY_TICK, released: result.released, sealedLegacy: result.sealedLegacy };
+      }
 
       // Claimed one at a time rather than as a batch: the last row of a batch
       // sits `sending` for as long as every row before it takes, which would

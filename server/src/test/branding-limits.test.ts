@@ -8,10 +8,20 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 
-import type { ApiErrorBody, BrandingResponse } from '@ferrum-nexus/shared';
+import { SESSION_COOKIE, type ApiErrorBody, type BrandingResponse } from '@ferrum-nexus/shared';
 
+import { createCrypto } from '../lib/crypto.js';
+import { isoInSeconds } from '../lib/ids.js';
+import { COOKIE_RESPONSE_CACHE_CONTROL } from '../middleware/session-cookies.js';
 import { brandingEtag } from '../routes/branding.js';
-import { buildTestApp, TEST_CAPTCHA_TOKEN, type TestApp } from './helpers.js';
+import {
+  buildTestApp,
+  cookieValue,
+  TEST_CAPTCHA_TOKEN,
+  TEST_SECRET_KEY,
+  type TestApp,
+  type TestSession,
+} from './helpers.js';
 
 describe('branding rate limiting', () => {
   let harness: TestApp;
@@ -342,5 +352,84 @@ describe('branding response cache', () => {
     } finally {
       await uncached.close();
     }
+  });
+});
+
+describe('branding and session cookies', () => {
+  let harness: TestApp;
+
+  before(async () => {
+    harness = await buildTestApp({
+      env: { NEXUS_BRANDING_CACHE_MS: '60000', NEXUS_LOG_LEVEL: 'silent' },
+      deps: { startOutboxWorker: false },
+    });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  async function sessionExpiry(session: TestSession): Promise<number> {
+    const hash = createCrypto(TEST_SECRET_KEY).hashToken(session.sessionToken);
+    const row = await harness.store.sessions.findByTokenHash(hash);
+    assert.ok(row, 'the session row exists');
+    return Date.parse(row.expires_at);
+  }
+
+  /** A session with under half its TTL left, which any sliding request renews. */
+  async function agedSession(email: string): Promise<{ session: TestSession; expiresAt: number }> {
+    const session = await harness.registerUser({ email });
+    const hash = createCrypto(TEST_SECRET_KEY).hashToken(session.sessionToken);
+    const row = await harness.store.sessions.findByTokenHash(hash);
+    assert.ok(row, 'the session row exists');
+    await harness.store.sessions.touch(row.id, isoInSeconds(harness.config.sessionTtlSeconds / 4));
+    return { session, expiresAt: await sessionExpiry(session) };
+  }
+
+  it('never puts session cookies on a public branding response, 200 or 304', async () => {
+    const { session, expiresAt } = await agedSession('aged-branding@example.test');
+
+    const first = await harness.app.inject({
+      method: 'GET',
+      url: '/api/branding',
+      headers: { cookie: session.cookieHeader },
+    });
+    assert.equal(first.statusCode, 200, first.body);
+    assert.equal(first.headers['set-cookie'], undefined, 'a public response sets no cookies');
+    assert.match(first.headers['cache-control'] ?? '', /^public, max-age=\d+$/);
+    const etag = first.headers.etag;
+    assert.ok(etag, 'expected an ETag');
+
+    const revalidated = await harness.app.inject({
+      method: 'GET',
+      url: '/api/branding',
+      headers: { cookie: session.cookieHeader, 'if-none-match': etag },
+    });
+    assert.equal(revalidated.statusCode, 304, revalidated.body);
+    assert.equal(revalidated.headers['set-cookie'], undefined, 'a public 304 sets no cookies');
+    assert.equal(revalidated.headers['cache-control'], first.headers['cache-control']);
+
+    assert.equal(await sessionExpiry(session), expiresAt, 'branding does not slide the session');
+  });
+
+  it('still slides the session on other API routes, with an uncacheable response', async () => {
+    const { session, expiresAt } = await agedSession('aged-me@example.test');
+    // Branding first: it must leave the renewal to the next ordinary request.
+    await harness.app.inject({
+      method: 'GET',
+      url: '/api/branding',
+      headers: { cookie: session.cookieHeader },
+    });
+
+    const me = await harness.app.inject({
+      method: 'GET',
+      url: '/api/auth/me',
+      headers: { cookie: session.cookieHeader },
+    });
+    assert.equal(me.statusCode, 200, me.body);
+    assert.ok(cookieValue(me, SESSION_COOKIE) !== undefined, 'the slide re-issues the cookie');
+    assert.equal(me.headers['cache-control'], COOKIE_RESPONSE_CACHE_CONTROL);
+    assert.match(String(me.headers.vary ?? ''), /(^|,\s*)Cookie$/);
+    assert.ok((await sessionExpiry(session)) > expiresAt, 'the row was extended');
   });
 });

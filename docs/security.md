@@ -19,22 +19,23 @@ Related: [`architecture.md`](architecture.md) · [`operations.md`](operations.md
 | Portal sessions                                              | `sessions` table (HMAC of the token) + browser cookie                          | Impersonation of a portal user, including admins.                       |
 | Password hashes                                              | `users.password_hash` (scrypt)                                                 | Credential stuffing elsewhere if cracked.                               |
 | Encrypted settings                                           | `app_settings` (`smtp.password`, `captcha.secret_key`)                         | Relay abuse; disabling bot protection.                                  |
-| Master secret                                                | `NEXUS_SECRET_KEY`                                                             | Derives the settings-encryption key and the session-HMAC key.           |
+| Single-use links in queued mail                              | `email_outbox` (sealed: AES-256-GCM)                                           | Account takeover through a password-reset link.                         |
+| Master secret                                                | `NEXUS_SECRET_KEY`                                                             | Derives the settings-encryption, outbox-sealing and session-HMAC keys.  |
 | Audit log                                                    | `audit_logs`                                                                   | The record of who did what.                                             |
 | Access decisions                                             | `access_requests`, `grants`                                                    | Who may call which API.                                                 |
 | Unpublished API documentation                                | `api_specs`                                                                    | Business-sensitive interface detail.                                    |
 
 ### Adversaries
 
-| Adversary                  | Assumed capability                         | Primary controls                                                                                                              |
-| -------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| Anonymous internet         | Reach the portal; register if open         | Rate limiting, CAPTCHA, registration policy, bootstrap token, nothing readable beyond branding/health                         |
-| Registered `client`        | A valid session                            | RBAC, row-level ownership checks, catalog visibility, credentials scoped to their own consumer, per-account budgets           |
-| Registered `provider`      | A valid session; owns some APIs            | Ownership checks on every API mutation, public-upstream check, publishing quotas                                              |
-| Malicious/careless `admin` | Broad portal authority                     | Audit log; only a `super_admin` may confer or remove admin power or change SMTP/CAPTCHA/gateway settings                      |
-| Cross-site attacker        | Can make a victim's browser issue requests | Session-bound CSRF double-submit; `SameSite=Lax`; `frame-ancestors 'none'`                                                    |
-| Network attacker           | Sees or modifies traffic                   | TLS at the proxy; `Secure` cookies; HSTS; Admin API over TLS or a private network                                             |
-| Compromised database       | Reads every row                            | Passwords scrypt-hashed; session tokens stored as HMAC; settings secrets AES-256-GCM under a key held only in the environment |
+| Adversary                  | Assumed capability                         | Primary controls                                                                                                                                                        |
+| -------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Anonymous internet         | Reach the portal; register if open         | Rate limiting, CAPTCHA, registration policy, bootstrap token, nothing readable beyond branding/health                                                                   |
+| Registered `client`        | A valid session                            | RBAC, row-level ownership checks, catalog visibility, credentials scoped to their own consumer, per-account budgets                                                     |
+| Registered `provider`      | A valid session; owns some APIs            | Ownership checks on every API mutation, public-upstream check, publishing quotas                                                                                        |
+| Malicious/careless `admin` | Broad portal authority                     | Audit log; only a `super_admin` may confer or remove admin power or change SMTP/CAPTCHA/gateway settings                                                                |
+| Cross-site attacker        | Can make a victim's browser issue requests | Session-bound CSRF double-submit; `SameSite=Lax`; `frame-ancestors 'none'`                                                                                              |
+| Network attacker           | Sees or modifies traffic                   | TLS at the proxy; `Secure` cookies; HSTS; Admin API over TLS or a private network                                                                                       |
+| Compromised database       | Reads every row                            | Passwords scrypt-hashed; session and email-link tokens stored as HMAC; settings secrets and queued single-use links AES-256-GCM under keys held only in the environment |
 
 ### Boundaries
 
@@ -115,11 +116,20 @@ mode holds when the record changes later.
   resolves to development (`NEXUS_ENV`, else `NODE_ENV` of `production`/`test`,
   else development). The Docker image sets `NODE_ENV=production`. All cookie
   writes go through `server/src/middleware/session-cookies.ts`.
+- **Cookie responses are never cacheable.** The pair is a bearer credential,
+  so a shared cache that kept one response and replayed it would hand its
+  cookies to another client. Every response that sets or clears a cookie
+  carries `Cache-Control: private, no-store` and `Vary: Cookie`, whatever its
+  route set: a root `onSend` hook enforces it on `200`, `304` and error
+  responses alike, after the cookies are serialized.
 - **Sliding expiry.** Default idle lifetime 12 hours (`NEXUS_SESSION_TTL`,
   seconds). Every API request extends the session, but the row is only written
   when less than half the TTL remains. That write also re-issues both cookies
   with their existing values and a fresh full `Max-Age`, so the browser's
-  expiry tracks `sessions.expires_at`.
+  expiry tracks `sessions.expires_at`. The one exception is
+  `GET /api/branding`: its response is publicly cacheable, so it never slides
+  the session or sets a cookie, and the next request to any other API route
+  does the renewal.
 - **Revocation is immediate.** An `onRequest` hook re-reads the user on every
   request Fastify routes under `/api` (static SPA assets are skipped; they embed
   no auth state). An expired session is deleted. If the account is deleted or
@@ -170,6 +180,12 @@ built to reveal nothing:
   `password_reset` tokens, session invalidation and the audit row in one
   transaction, under a per-user lease so concurrent changes across instances
   are ordered. `email_verification` tokens are left alone.
+- **The link is unreadable in the outbox.** The token is stored only as an
+  HMAC, and the queued message that carries it is sealed (AES-256-GCM under a
+  key derived from `NEXUS_SECRET_KEY`, bound to the row id and recipient), so
+  read access to the database does not yield a live reset or verification
+  link. Only the outbox worker opens it, just before delivery. See
+  [Queued single-use links are sealed](#queued-single-use-links-are-sealed).
 - **A failed mint does not spend the throttle window.** The throttle claim
   (`email_token_issue_claims`), the token, the audit row and the outbox message
   (idempotency key `reset:<token id>` or `verify:<token id>`) commit in one
@@ -640,6 +656,32 @@ settings unreadable, and both fail closed: CAPTCHA refuses and SMTP sends no
 password. See
 [`operations.md`](operations.md#7-rotating-nexus_secret_key).
 
+### Queued single-use links are sealed
+
+Verification, re-sent verification and password-reset messages are sealed
+before they are written to `email_outbox`, because the rendered message is a
+second copy of a token `verification_tokens` stores only as an HMAC:
+
+| Property  | Value                                                                          |
+| --------- | ------------------------------------------------------------------------------ |
+| Cipher    | AES-256-GCM over `{ subject, html, text }`                                     |
+| Key       | HKDF-SHA-256 from `NEXUS_SECRET_KEY`, info `nexus-outbox-v1`, 32 bytes         |
+| Binding   | Additional authenticated data is the row `id` and `to_email`                   |
+| At rest   | `subject` is `nexus:sealed:v1`, `body_html` is empty, `body_text` the envelope |
+| Opened by | The outbox worker only, immediately before `transport.send`                    |
+
+- **It fails closed.** An envelope that does not open (altered, copied onto
+  another row or recipient, or sealed under a previous key) is failed with
+  `last_error` `sealed-unreadable: …`. It is never sent, and never retried.
+- **Rows from earlier versions are sealed in place.** The worker seals legacy
+  verification and reset rows in every status, since a `sent` row's link can
+  still be live, a bounded batch per tick until none remain.
+- **Other mail is stored as rendered.** Access decisions, messaging
+  notifications and mass email carry no bearer link.
+- **Rotating `NEXUS_SECRET_KEY` does not re-seal.** The rotation already
+  invalidates every unused link, so queued sealed mail fails instead of
+  delivering a dead link.
+
 ### The environment SMTP password stays with the environment relay
 
 `NEXUS_SMTP_PASSWORD` belongs to the relay described by `NEXUS_SMTP_HOST`,
@@ -859,7 +901,10 @@ The per-minute limits are per process; the daily budgets are not.
 120/min per-IP limit and a response cache, `NEXUS_BRANDING_CACHE_MS` (default
 5 s, `0` disables): within the window settings are read once, concurrent
 callers share one assembly, and the response carries
-`Cache-Control: public, max-age=…` and an `ETag`.
+`Cache-Control: public, max-age=…` and an `ETag`. Because a shared cache may
+keep it, the route never slides a session, so neither the `200` nor the `304`
+carries `Set-Cookie`; see
+[Cookie responses are never cacheable](#2-session-security).
 
 Settings writes invalidate the cache before responding. An open founder seat
 (`bootstrap_required: true`) is read live (concurrent requests share one count
@@ -918,6 +963,10 @@ hCaptcha, reCAPTCHA. When enabled, register and login require `captcha_token`.
   secret is encrypted and never returned.
 - Verification is a server-side POST to the vendor with a 5-second timeout,
   forwarding the client IP as `remoteip`.
+- For hCaptcha, whose secret can cover every site of an account, each
+  verification also sends the configured `site_key` as `sitekey`, so a token
+  solved on another site of the same account is refused. Turnstile and
+  reCAPTCHA secrets already belong to one site and are sent no `sitekey`.
 - **It fails closed.** No secret, an unreachable vendor or a rejected token is
   `400 CAPTCHA_FAILED`. Vendor error codes are logged, never returned.
 
@@ -967,7 +1016,7 @@ helmet is configured in `server/src/index.ts`:
 | `X-Frame-Options`           | `DENY`                                                                                                                                                                                            |
 | `Referrer-Policy`           | `no-referrer`                                                                                                                                                                                     |
 | `Strict-Transport-Security` | `max-age=31536000; includeSubDomains`, only when `NEXUS_COOKIE_SECURE` is on                                                                                                                      |
-| `Cache-Control`             | `no-store` on every `/api` response that does not set its own (only `/api/branding` does)                                                                                                         |
+| `Cache-Control`             | `private, no-store` plus `Vary: Cookie` on every response that sets a cookie; else `no-store` on every `/api` response that does not set its own (only `/api/branding` does)                      |
 
 Deliberate loosenings:
 

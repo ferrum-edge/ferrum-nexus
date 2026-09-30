@@ -24,7 +24,9 @@ import { OUTBOX_MAX_ATTEMPTS } from '@ferrum-nexus/shared';
 import type { NexusStore } from '../db/store.js';
 import { createOutboxWorker, type OutboxTickResult } from '../email/outbox-worker.js';
 import type { MailTransport } from '../email/service.js';
+import { createCrypto } from '../lib/crypto.js';
 import { isoInSeconds, nowIso } from '../lib/ids.js';
+import { TEST_SECRET_KEY } from './helpers.js';
 
 function barrier(): { reached: Promise<void>; release: () => void } {
   let release!: () => void;
@@ -79,6 +81,7 @@ export function runOutboxFencingContract(
           };
           const slow = createOutboxWorker({
             store,
+            crypto: createCrypto(TEST_SECRET_KEY),
             transportFactory: async () => stalledTransport,
             batchSize: 1,
           });
@@ -100,6 +103,7 @@ export function runOutboxFencingContract(
           };
           const fast = createOutboxWorker({
             store,
+            crypto: createCrypto(TEST_SECRET_KEY),
             transportFactory: async () => promptTransport,
             batchSize: 1,
           });

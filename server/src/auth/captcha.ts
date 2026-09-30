@@ -143,7 +143,9 @@ export interface CaptchaService {
   /**
    * Verify a vendor token. A no-op when CAPTCHA is disabled or enforcement is
    * off; otherwise throws `CAPTCHA_FAILED` for a missing, rejected, or
-   * unverifiable token. The outcome says which of those happened.
+   * unverifiable token. For hCaptcha the configured site key is sent with it,
+   * so a token solved on another site of the same account is rejected. The
+   * outcome says which of those happened.
    */
   verify(token: string | undefined, remoteIp?: string | null): Promise<CaptchaVerifyOutcome>;
   /**
@@ -235,7 +237,8 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
   /**
    * Run the vendor call both {@link CaptchaService.verify} and the self-test share.
    *
-   * `sitekey` is hCaptcha-only, and deliberately so. Turnstile and reCAPTCHA
+   * Both pass the site key they are verifying against. `sitekey` is
+   * hCaptcha-only, and deliberately so. Turnstile and reCAPTCHA
    * issue a secret per site, so verifying the token already proves which site
    * key minted it; hCaptcha's secret is account-scoped and may cover many site
    * keys, and its `siteverify` takes the optional `sitekey` parameter precisely
@@ -247,11 +250,11 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
     secret: string,
     token: string,
     remoteIp: string | null,
-    siteKey: string | null = null,
+    siteKey: string,
   ): Promise<CaptchaVerifyResult> {
     const params = new URLSearchParams({ secret, response: token });
     if (remoteIp) params.set('remoteip', remoteIp);
-    if (provider === 'hcaptcha' && siteKey) params.set('sitekey', siteKey);
+    if (provider === 'hcaptcha') params.set('sitekey', siteKey);
     return transport(CAPTCHA_VERIFY_URLS[provider], params);
   }
 
@@ -306,12 +309,14 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
       const provider = settings.provider as Exclude<CaptchaProvider, 'none'>;
       let result: CaptchaVerifyResult;
       try {
-        // No `sitekey` here: this token came from the widget the portal itself
-        // rendered from `settings.site_key`, and the write path already proved
-        // that pair against the vendor. Binding it again could only turn a
-        // proven configuration into a login failure — the lockout this whole
-        // module exists to prevent.
-        result = await askVendor(provider, secret, token, remoteIp);
+        // The token is whatever the request body carried, not necessarily
+        // something the portal's own widget minted. For hCaptcha, whose secret
+        // may cover every site of the account, the configured site key is what
+        // makes the vendor refuse a token solved on another of those sites —
+        // one with a weaker challenge policy, say. It cannot lock a proven
+        // configuration out: the activation self-test already verified a
+        // token bound to this very site key before it was stored.
+        result = await askVendor(provider, secret, token, remoteIp, settings.site_key);
       } catch (error) {
         deps.log?.(
           { provider, error: error instanceof Error ? error.message : null },

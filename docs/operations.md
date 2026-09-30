@@ -363,7 +363,8 @@ Each message writes a message row and an audit row. A **platform thread** (no
 `GET /api/branding` is unauthenticated. Its payload is cached for
 `NEXUS_BRANDING_CACHE_MS` (5 s) with `Cache-Control: public, max-age=…` and an
 `ETag`, and concurrent callers share one assembly. It is also rate limited
-(120/min per IP).
+(120/min per IP). It never sets cookies, so a CDN or reverse proxy may cache it;
+every response that does set one is `Cache-Control: private, no-store`.
 
 - Any committed settings write invalidates the cache on the instance that made
   it. Other instances catch up within the TTL; browser and CDN copies within
@@ -1073,7 +1074,7 @@ Mail is never sent inline. `EmailService.enqueue` renders a template into an
 
 Retries back off `30 s × 2^attempts`, capped at one hour, plus up to 10% jitter.
 
-### `failed` has two meanings — read `last_error`
+### `failed` has three meanings — read `last_error`
 
 - **Not delivered:** attempts were exhausted or the relay refused permanently.
   `last_error` is the relay's message.
@@ -1083,6 +1084,48 @@ Retries back off `30 s × 2^attempts`, capped at one hour, plus up to 10% jitter
   after end-of-data, or the send deadline hit at that point). These rows are
   parked instead of retried to avoid a duplicate. **Re-driving one sends a
   second copy.**
+- **Sealed and unreadable:** `last_error` starts with `sealed-unreadable:`. The
+  row is a sealed message (see below) that did not open: it was altered, copied
+  from another row, or sealed under a previous `NEXUS_SECRET_KEY`. Nothing was
+  sent, and re-driving it fails the same way. The recipient requests a new
+  link instead.
+
+### Messages carrying a link are sealed
+
+Verification, re-sent verification and password-reset messages carry a
+single-use link, so they are never stored in plaintext. Their row has `subject`
+`nexus:sealed:v1`, an empty `body_html`, and a `body_text` of
+`nexus-sealed-v1:` followed by an AES-256-GCM envelope of the real subject and
+bodies. The key is derived from `NEXUS_SECRET_KEY` (HKDF info
+`nexus-outbox-v1`), and the envelope is bound to the row's `id` and `to_email`.
+The worker opens it immediately before handing the message to SMTP. Other mail
+(access decisions, messaging notifications, mass email) is stored as rendered.
+
+After an upgrade, the worker seals rows queued by an earlier version in place,
+in every status, up to 200 per tick, and stops looking once none are left. It
+logs `Sealed legacy outbox messages` with a `sealed` count while it does. An
+earlier version cannot open a sealed row. If a pre-fix instance claims one, it
+emails ciphertext and burns the link. Before downgrading, fail every queued
+sealed row so an older worker cannot claim it:
+
+```sql
+UPDATE email_outbox
+SET status = 'failed', last_error = 'sealed-unreadable: downgrade'
+WHERE subject = 'nexus:sealed:v1' AND status IN ('pending', 'sending');
+```
+
+For MongoDB, run the equivalent update on the `email_outbox` collection:
+
+```javascript
+db.email_outbox.updateMany(
+  { subject: 'nexus:sealed:v1', status: { $in: ['pending', 'sending'] } },
+  { $set: { status: 'failed', last_error: 'sealed-unreadable: downgrade' } },
+);
+```
+
+An older instance still writing during a mixed-version deployment can leave
+plaintext bearer rows; the next restart's legacy sweep seals them. Stop every
+instance before starting the replacement release to avoid both cases.
 
 A `sending` row untouched for five minutes is assumed abandoned and returned to
 `pending`. This sweep runs at the start of every worker tick, on any instance.
@@ -1167,6 +1210,9 @@ The worker logs these at `warn`:
   (a steady trickle means deliveries take close to the stale threshold)
 - `Outbox message was abandoned mid-flight; it is recovered by the stale sweep`
 - `Could not release stale outbox claims`
+- `Sealed outbox message could not be opened` (the row is failed as
+  `sealed-unreadable:`)
+- `Could not seal legacy outbox messages` (retried on the next tick)
 - `Outbox tick failed`
 
 **Re-driving `failed` rows.** First exclude delivered-unacknowledged ones:
@@ -1177,7 +1223,8 @@ SELECT to_email, attempts, last_error, updated_at
  WHERE status = 'failed' AND last_error LIKE 'delivered-unacknowledged:%';
 ```
 
-Re-drive the others by setting `status = 'pending'`, `attempts = 0` and
+Also leave out `sealed-unreadable:` rows; they cannot be delivered. Re-drive
+the others by setting `status = 'pending'`, `attempts = 0` and
 `next_attempt_at = NULL`. The row keeps its `idempotency_key`. Confirm a
 delivered-unacknowledged row with the recipient or relay logs before re-sending
 it.
@@ -1222,7 +1269,10 @@ nothing if any row fails to decrypt with the previous key. Both keys come from
 the environment, never from arguments. It prints only counts and setting names.
 
 A rotation still invalidates every session and every unused email-verification
-and password-reset token, because their hashes used the old HMAC key.
+and password-reset token, because their hashes used the old HMAC key. For the
+same reason the rotation does not re-seal queued mail: a verification or reset
+message still in the outbox was sealed under the old key, so the worker fails
+it as `sealed-unreadable:` instead of sending a link that no longer works.
 
 ### Procedure
 
