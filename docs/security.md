@@ -116,11 +116,20 @@ mode holds when the record changes later.
   resolves to development (`NEXUS_ENV`, else `NODE_ENV` of `production`/`test`,
   else development). The Docker image sets `NODE_ENV=production`. All cookie
   writes go through `server/src/middleware/session-cookies.ts`.
+- **Cookie responses are never cacheable.** The pair is a bearer credential,
+  so a shared cache that kept one response and replayed it would hand its
+  cookies to another client. Every response that sets or clears a cookie
+  carries `Cache-Control: private, no-store` and `Vary: Cookie`, whatever its
+  route set: a root `onSend` hook enforces it on `200`, `304` and error
+  responses alike, after the cookies are serialized.
 - **Sliding expiry.** Default idle lifetime 12 hours (`NEXUS_SESSION_TTL`,
   seconds). Every API request extends the session, but the row is only written
   when less than half the TTL remains. That write also re-issues both cookies
   with their existing values and a fresh full `Max-Age`, so the browser's
-  expiry tracks `sessions.expires_at`.
+  expiry tracks `sessions.expires_at`. The one exception is
+  `GET /api/branding`: its response is publicly cacheable, so it never slides
+  the session or sets a cookie, and the next request to any other API route
+  does the renewal.
 - **Revocation is immediate.** An `onRequest` hook re-reads the user on every
   request Fastify routes under `/api` (static SPA assets are skipped; they embed
   no auth state). An expired session is deleted. If the account is deleted or
@@ -888,7 +897,10 @@ The per-minute limits are per process; the daily budgets are not.
 120/min per-IP limit and a response cache, `NEXUS_BRANDING_CACHE_MS` (default
 5 s, `0` disables): within the window settings are read once, concurrent
 callers share one assembly, and the response carries
-`Cache-Control: public, max-age=…` and an `ETag`.
+`Cache-Control: public, max-age=…` and an `ETag`. Because a shared cache may
+keep it, the route never slides a session, so neither the `200` nor the `304`
+carries `Set-Cookie`; see
+[Cookie responses are never cacheable](#2-session-security).
 
 Settings writes invalidate the cache before responding. An open founder seat
 (`bootstrap_required: true`) is read live (concurrent requests share one count
@@ -1000,7 +1012,7 @@ helmet is configured in `server/src/index.ts`:
 | `X-Frame-Options`           | `DENY`                                                                                                                                                                                            |
 | `Referrer-Policy`           | `no-referrer`                                                                                                                                                                                     |
 | `Strict-Transport-Security` | `max-age=31536000; includeSubDomains`, only when `NEXUS_COOKIE_SECURE` is on                                                                                                                      |
-| `Cache-Control`             | `no-store` on every `/api` response that does not set its own (only `/api/branding` does)                                                                                                         |
+| `Cache-Control`             | `private, no-store` plus `Vary: Cookie` on every response that sets a cookie; else `no-store` on every `/api` response that does not set its own (only `/api/branding` does)                      |
 
 Deliberate loosenings:
 

@@ -71,13 +71,13 @@ import {
 import { buildLoggerOptions, type LoggerOptions } from './lib/logger.js';
 import { createMessagingService, type MessagingService } from './messaging/service.js';
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
-import { isApiRequest } from './middleware/api-route.js';
 import { userOrIpKey } from './middleware/rate-limit-keys.js';
 import {
   handleFrameworkError,
   registerApiNotFoundRoutes,
   registerErrorHandler,
 } from './middleware/error-handler.js';
+import { responseCachingHook } from './middleware/session-cookies.js';
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
 import { createApiViewersService, type ApiViewersService } from './publishing/viewers.js';
@@ -625,11 +625,12 @@ export async function buildServer(
     referrerPolicy: { policy: 'no-referrer' },
   });
 
+  // After `@fastify/cookie` above, whose own `onSend` hook turns queued cookies
+  // into `Set-Cookie` first: a response that carries one is forced uncacheable,
+  // overriding a handler's `public` directive; other `/api` responses default
+  // to `no-store`.
   app.addHook('onSend', async (request, reply, payload) => {
-    if (isApiRequest(request) && !reply.hasHeader('cache-control')) {
-      reply.header('cache-control', 'no-store');
-    }
-    return payload;
+    return responseCachingHook(request, reply, payload);
   });
 
   await registerAuthPlugin(app, { config, store: deps.store, crypto });

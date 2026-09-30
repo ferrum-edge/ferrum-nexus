@@ -1048,7 +1048,10 @@ commit ahead of the revocation.
 - The `nexus_session` cookie is `HttpOnly`, `SameSite=Lax`, `Path=/`, and
   `Secure` unless `NEXUS_COOKIE_SECURE=false`.
 - **Sliding expiry.** The row is rewritten only when less than half the TTL
-  remains, and both cookies are then re-issued with a fresh `Max-Age`.
+  remains, and both cookies are then re-issued with a fresh `Max-Age`. Routes
+  marked `sharedCacheable` (`GET /api/branding`) never slide, and any response
+  that sets a cookie is forced to `Cache-Control: private, no-store` with
+  `Vary: Cookie`.
 - A session whose account is no longer active is deleted on the next request,
   along with every other session of that user.
 - **Expired rows are purged** by `auth/expiry-sweep.ts`: expired sessions and

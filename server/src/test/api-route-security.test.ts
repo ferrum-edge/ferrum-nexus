@@ -375,7 +375,9 @@ describe('API route security over a listening socket', () => {
         },
       );
       assert.equal(login.statusCode, 200, login.body);
-      assert.equal(login.headers['cache-control'], 'no-store');
+      // It sets the session cookies, so it must not be storable by any cache.
+      assert.equal(login.headers['cache-control'], 'private, no-store');
+      assert.equal(login.headers.vary, 'Cookie');
     }
   });
 
