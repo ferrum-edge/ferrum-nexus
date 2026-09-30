@@ -1,3 +1,4 @@
+import { MAX_OPENAPI_ENUM_CHIPS, MAX_OPENAPI_SCHEMA_RENDER_DEPTH } from '@ferrum-nexus/shared';
 import type { ReactElement, ReactNode } from 'react';
 import { cn } from '../../lib/cn';
 import { Badge } from '../ui/Badge';
@@ -14,9 +15,6 @@ import {
   UNRESOLVED_REF,
   type SpecNode,
 } from './parse';
-
-/** Hard stop for pathological documents that nest without a `$ref` cycle. */
-const MAX_DEPTH = 12;
 
 /**
  * Hard stop on total rendered nodes for one page of documentation.
@@ -106,7 +104,13 @@ interface RenderArgs {
   seen: readonly string[];
 }
 
-function TypeLine({ schema }: { schema: SpecNode }): ReactElement | null {
+function renderTypeLine({
+  schema,
+  budget,
+}: {
+  schema: SpecNode;
+  budget: RenderBudget;
+}): ReactElement | null {
   const type = asString(schema.type);
   const format = asString(schema.format);
   const enumValues = asArray(schema.enum);
@@ -119,6 +123,31 @@ function TypeLine({ schema }: { schema: SpecNode }): ReactElement | null {
 
   // Every `$ref` to this schema repeats these strings, so each is cut per occurrence.
   const typeText = displayText(parts.join(' '), MAX_DISPLAYED_NAME_LENGTH);
+  const enumChips: ReactElement[] = [];
+  for (const [index, value] of (enumValues ?? []).slice(0, MAX_OPENAPI_ENUM_CHIPS).entries()) {
+    if (!chargeNode(budget)) {
+      enumChips.push(<TruncationNotice key="__truncated" />);
+      break;
+    }
+    const printable =
+      typeof value === 'string'
+        ? value
+        : Array.isArray(value)
+          ? '[…]'
+          : value !== null && typeof value === 'object'
+            ? '{…}'
+            : String(value);
+    const valueText = displayText(printable, MAX_DISPLAYED_NAME_LENGTH);
+    enumChips.push(
+      <code
+        key={index}
+        className="rounded-xs bg-neutral-soft px-1 font-mono text-[0.7rem] text-fg-muted"
+        title={valueText?.title}
+      >
+        {valueText?.text ?? ''}
+      </code>,
+    );
+  }
   return (
     <span className="flex flex-wrap items-center gap-1.5">
       {typeText ? (
@@ -128,28 +157,26 @@ function TypeLine({ schema }: { schema: SpecNode }): ReactElement | null {
       ) : null}
       {enumValues ? (
         <span className="flex flex-wrap gap-1">
-          {enumValues.slice(0, 12).map((value, index) => {
-            const valueText = displayText(
-              typeof value === 'string' ? value : JSON.stringify(value),
-              MAX_DISPLAYED_NAME_LENGTH,
-            );
-            return (
-              <code
-                key={index}
-                className="rounded-xs bg-neutral-soft px-1 font-mono text-[0.7rem] text-fg-muted"
-                title={valueText?.title}
-              >
-                {valueText?.text ?? ''}
-              </code>
-            );
-          })}
-          {enumValues.length > 12 ? (
-            <span className="text-xs text-fg-subtle">+{enumValues.length - 12} more</span>
+          {enumChips}
+          {enumValues.length > MAX_OPENAPI_ENUM_CHIPS ? (
+            <span className="text-xs text-fg-subtle">
+              +{enumValues.length - MAX_OPENAPI_ENUM_CHIPS} more
+            </span>
           ) : null}
         </span>
       ) : null}
     </span>
   );
+}
+
+const requiredNameCache = new WeakMap<unknown[], Set<string>>();
+
+function requiredNames(values: unknown[]): Set<string> {
+  const cached = requiredNameCache.get(values);
+  if (cached) return cached;
+  const names = new Set(values.filter((value): value is string => typeof value === 'string'));
+  requiredNameCache.set(values, names);
+  return names;
 }
 
 /**
@@ -191,16 +218,15 @@ function renderNode(
   { schema, doc, name, required = false, depth, seen }: RenderArgs,
   budget: RenderBudget,
 ): ReactElement {
+  if (!chargeNode(budget)) {
+    return <TruncationNotice />;
+  }
+
   const node = asRecord(schema);
 
   if (!node) {
     return <p className="text-xs text-fg-subtle">No schema.</p>;
   }
-
-  if (budget.remaining <= 0) {
-    return <TruncationNotice />;
-  }
-  budget.remaining -= 1;
 
   const ref = asString(node.$ref);
   if (ref) {
@@ -211,7 +237,7 @@ function renderNode(
         </SchemaRow>
       );
     }
-    if (depth > MAX_DEPTH) {
+    if (depth > MAX_OPENAPI_SCHEMA_RENDER_DEPTH) {
       return (
         <SchemaRow name={name} required={required} depth={depth}>
           <span className="text-xs text-fg-subtle">…nested further</span>
@@ -238,7 +264,7 @@ function renderNode(
     );
   }
 
-  if (depth > MAX_DEPTH) {
+  if (depth > MAX_OPENAPI_SCHEMA_RENDER_DEPTH) {
     return (
       <SchemaRow name={name} required={required} depth={depth}>
         <span className="text-xs text-fg-subtle">…nested further</span>
@@ -250,9 +276,7 @@ function renderNode(
   // charges each occurrence as one node whatever its length.
   const description = displayText(asString(node.description), MAX_DISPLAYED_DESCRIPTION_LENGTH);
   const properties = asRecord(node.properties);
-  const requiredNames = new Set(
-    (asArray(node.required) ?? []).map(asString).filter((entry): entry is string => entry !== null),
-  );
+  const requiredProperties = requiredNames(asArray(node.required) ?? []);
   const items = node.items;
   const composition =
     (asArray(node.oneOf) && { key: 'oneOf', entries: asArray(node.oneOf) }) ??
@@ -260,13 +284,14 @@ function renderNode(
     (asArray(node.allOf) && { key: 'allOf', entries: asArray(node.allOf) }) ??
     null;
 
-  // Children are built before the tree is returned, and each loop abandons its
-  // remaining siblings the moment the budget is gone: exhaustion has to stop
-  // *mounting*, not merely stop recursing, or a wide document still costs one
-  // rendered row per entry.
+  // Built in the order it is displayed: the type line and its enum chips first,
+  // then the children. Each loop abandons its remaining siblings the moment the
+  // budget is gone: exhaustion has to stop *mounting*, not merely stop
+  // recursing, or a wide document still costs one rendered row per entry.
+  const typeLine = renderTypeLine({ schema: node, budget });
   const compositionRows: ReactElement[] = [];
   for (const entry of composition?.entries ?? []) {
-    if (budget.remaining <= 0) {
+    if (budget.remaining < 2 || !chargeNode(budget)) {
       compositionRows.push(<TruncationNotice key="__truncated" />);
       break;
     }
@@ -277,23 +302,27 @@ function renderNode(
     );
   }
 
-  const itemsRow =
-    items !== undefined ? renderNode({ schema: items, doc, depth: depth + 1, seen }, budget) : null;
+  const canRenderItems = items !== undefined && budget.remaining >= 2 && chargeNode(budget);
+  const itemsRow = canRenderItems
+    ? renderNode({ schema: items, doc, depth: depth + 1, seen }, budget)
+    : null;
+  const itemsTruncated = items !== undefined && !canRenderItems;
 
   const propertyRows: ReactElement[] = [];
-  for (const [propertyName, propertySchema] of Object.entries(properties ?? {})) {
-    if (budget.remaining <= 0) {
+  for (const propertyName in properties ?? {}) {
+    if (!properties || !Object.prototype.hasOwnProperty.call(properties, propertyName)) continue;
+    if (budget.remaining < 2 || !chargeNode(budget)) {
       propertyRows.push(<TruncationNotice key="__truncated" />);
       break;
     }
     propertyRows.push(
-      <div key={propertyName}>
+      <div key={`p:${propertyName}`}>
         {renderNode(
           {
-            schema: propertySchema,
+            schema: properties[propertyName],
             doc,
             name: propertyName,
-            required: requiredNames.has(propertyName),
+            required: requiredProperties.has(propertyName),
             depth: depth + 1,
             seen,
           },
@@ -306,7 +335,7 @@ function renderNode(
   return (
     <div>
       <SchemaRow name={name} required={required} depth={depth}>
-        <TypeLine schema={node} />
+        {typeLine}
       </SchemaRow>
       {description ? (
         <p className={cn('text-xs text-fg-muted', depth > 0 && 'pl-3')} title={description.title}>
@@ -327,6 +356,7 @@ function renderNode(
           {itemsRow}
         </div>
       ) : null}
+      {itemsTruncated ? <TruncationNotice /> : null}
 
       {propertyRows.length > 0 ? (
         <div className="mt-1 ml-3 flex flex-col gap-2 border-l border-border pl-3">

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
+  MAX_OPENAPI_REF_LENGTH,
   MAX_SPEC_BYTES,
   MAX_SPEC_DEPTH,
   MAX_SPEC_OPERATIONS,
@@ -19,6 +22,7 @@ import {
   parseOpenApiSpec,
   parseUpstreamUrl,
   resolveUpstream,
+  schemaRenderUnits,
   slugify,
   type ResolvedAddress,
   type UpstreamResolver,
@@ -40,14 +44,16 @@ function specWithPaths(count: number): string {
 
 /**
  * A document with one operation whose render cost comes from all four counted
- * dimensions: `schemaCount` empty schema properties, six parameters, one
- * response and its six media types. Its total is `schemaCount + 15` render units.
+ * dimensions: six parameters, one response, its six media types, and a schema
+ * of `schemaCount` empty properties in the first of them. Its total is
+ * `schemaCount * 2 + 14` render units.
  */
 function renderCostSpec(schemaCount: number): string {
   const properties: Record<string, unknown> = {};
   for (let index = 0; index < schemaCount; index += 1) properties[`p${index}`] = {};
   const content: Record<string, unknown> = {};
   for (let index = 0; index < 6; index += 1) content[`application/vnd.x${index}+json`] = {};
+  content['application/vnd.x0+json'] = { schema: { type: 'object', properties } };
   return JSON.stringify({
     openapi: '3.1.0',
     info: { title: 'Wide', version: '1.0.0' },
@@ -62,9 +68,44 @@ function renderCostSpec(schemaCount: number): string {
         },
       },
     },
-    components: { schemas: { Wide: { type: 'object', properties } } },
   });
 }
+
+/**
+ * A document whose one operation responds with `schema`, next to `schemas` as
+ * its components. The response entry and its media type cost two units.
+ */
+function respondingWith(
+  schema: unknown,
+  schemas: Record<string, unknown> = {},
+): { document: Record<string, unknown>; paths: Record<string, unknown> } {
+  const paths = {
+    '/a': {
+      get: {
+        responses: { '200': { description: 'OK', content: { 'application/json': { schema } } } },
+      },
+    },
+  };
+  return { document: { paths, components: { schemas } }, paths };
+}
+
+/** A response whose one media type is `schema`. */
+function jsonResponse(schema: unknown): Record<string, unknown> {
+  return { description: 'OK', content: { 'application/json': { schema } } };
+}
+
+/** The table `web/src/components/openapi/SchemaView.test.tsx` renders. */
+interface RenderUnitsFixture {
+  document: Record<string, unknown>;
+  cases: Array<{ name: string; schema: unknown; units: number }>;
+  divergences: Array<{ name: string; schema: unknown; server: number; viewer: number }>;
+}
+
+const fixturePath = join(
+  import.meta.dirname,
+  '../../../shared/test-fixtures/openapi-schema-render-units.json',
+);
+const renderUnits = JSON.parse(readFileSync(fixturePath, 'utf8')) as RenderUnitsFixture;
 
 /** A document declaring exactly `count` operations, packed 8 to a path item. */
 function specWithOperations(count: number): string {
@@ -400,24 +441,380 @@ describe('OpenAPI parsing', () => {
 
   it('accepts a document at the render ceiling and rejects one just over it', () => {
     // Everything the viewer walks and neither the path nor the operation count
-    // sees: one operation, one path, and a components section whose expansion
-    // is what a reader actually pays for.
-    const atLimit = renderCostSpec(MAX_SPEC_RENDER_UNITS - 15);
+    // sees: one operation, one path, and a response schema whose expansion is
+    // what a reader actually pays for.
+    const atLimit = renderCostSpec((MAX_SPEC_RENDER_UNITS - 14) / 2);
     assert.ok(Buffer.byteLength(atLimit, 'utf8') < MAX_SPEC_BYTES);
     assert.equal(parseOpenApiSpec(atLimit).operationCount, 1);
 
-    const overLimit = renderCostSpec(MAX_SPEC_RENDER_UNITS - 14);
+    const overLimit = renderCostSpec((MAX_SPEC_RENDER_UNITS - 14) / 2 + 1);
     assert.ok(Buffer.byteLength(overLimit, 'utf8') < MAX_SPEC_BYTES);
     const failure = expectSpecInvalid(() => parseOpenApiSpec(overLimit));
-    assert.match(failure.message, /schema nodes, 6 parameters, 6 media types and 1 responses/);
+    assert.match(
+      failure.message,
+      /99989 schema nodes, 6 parameters, 5 media types and 1 responses/,
+    );
     assert.match(failure.message, /more than the 100000 the documentation viewer can render/);
     assert.deepEqual(failure.details, {
       field: 'paths',
       reason: 'too_much_to_render',
-      schema_nodes: MAX_SPEC_RENDER_UNITS - 12,
+      schema_nodes: MAX_SPEC_RENDER_UNITS - 11,
       parameters: 6,
-      media_types: 6,
+      media_types: 5,
       responses: 1,
+      units: MAX_SPEC_RENDER_UNITS + 1,
+      limit: MAX_SPEC_RENDER_UNITS,
+    });
+  });
+
+  it('charges primitive schema entries to the render ceiling', () => {
+    // The response entry and its media type, the schema node, and a wrapper and
+    // a primitive schema per entry: 3 + 2N.
+    const booleans = (count: number): unknown[] => Array.from({ length: count }, () => true);
+    const atLimit = respondingWith({ oneOf: booleans(49_998) });
+    assertRenderCost(atLimit.document, atLimit.paths);
+
+    const overLimit = respondingWith({ oneOf: booleans(49_999) });
+    const failure = expectSpecInvalid(() => assertRenderCost(overLimit.document, overLimit.paths));
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: MAX_SPEC_RENDER_UNITS - 1,
+      parameters: 0,
+      media_types: 1,
+      responses: 1,
+      units: MAX_SPEC_RENDER_UNITS + 1,
+      limit: MAX_SPEC_RENDER_UNITS,
+    });
+
+    // A component no operation reaches is never rendered, so it costs nothing.
+    const unreached = { components: { schemas: { Wide: { oneOf: booleans(60_000) } } } };
+    assertRenderCost(unreached, {});
+  });
+
+  it('charges anyOf and allOf entries when no earlier composition keyword is declared', () => {
+    const document = { components: { schemas: {} } };
+    assert.equal(schemaRenderUnits({ anyOf: [{ type: 'string' }, false] }, document), 5);
+    assert.equal(schemaRenderUnits({ allOf: [{ type: 'object' }, true, {}] }, document), 7);
+    assert.equal(schemaRenderUnits({ oneOf: [{}], anyOf: [{}, {}], allOf: [{}] }, document), 3);
+
+    // The same ceiling as oneOf: 3 + 2N units.
+    for (const keyword of ['anyOf', 'allOf']) {
+      const entries = (count: number): unknown[] => Array.from({ length: count }, () => true);
+      const atLimit = respondingWith({ [keyword]: entries(49_998) });
+      assertRenderCost(atLimit.document, atLimit.paths);
+      const overLimit = respondingWith({ [keyword]: entries(49_999) });
+      expectSpecInvalid(() => assertRenderCost(overLimit.document, overLimit.paths));
+    }
+  });
+
+  it('charges a schema reference, its resolved schema and enum chips', () => {
+    // Each reference costs its row and its target's, and each target the rest
+    // of itself once: the response entry and media type (2), the schema node
+    // (1), the wrapper and the reference (3), `Referenced` resolving `Target`
+    // (1), `Target`'s enum chip (1), and a wrapper and a primitive per entry.
+    const schemas = {
+      Referenced: { $ref: '#/components/schemas/Target' },
+      Target: { type: 'string', enum: ['active'] },
+    };
+    const oneOf = (entryCount: number): unknown[] => [
+      { $ref: '#/components/schemas/Referenced' },
+      ...Array.from({ length: entryCount }, () => true),
+    ];
+
+    const atLimit = respondingWith({ oneOf: oneOf(49_996) }, schemas);
+    assertRenderCost(atLimit.document, atLimit.paths);
+    const overLimit = respondingWith({ oneOf: oneOf(49_997) }, schemas);
+    const failure = expectSpecInvalid(() => assertRenderCost(overLimit.document, overLimit.paths));
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: MAX_SPEC_RENDER_UNITS - 1,
+      parameters: 0,
+      media_types: 1,
+      responses: 1,
+      units: MAX_SPEC_RENDER_UNITS + 1,
+      limit: MAX_SPEC_RENDER_UNITS,
+    });
+  });
+
+  it('counts primitive property, item, parameter and media schemas', () => {
+    // A parameter row and its primitive schema (2), the response entry (1),
+    // two media types (2), a primitive media schema (1), and a composition
+    // whose first entry has a primitive property and a null `items` (7) ahead
+    // of N primitive entries (2N): 13 + 2N.
+    const paths = (wideCount: number): Record<string, unknown> => ({
+      '/a': {
+        get: {
+          parameters: [{ name: 'filter', in: 'query', schema: false }],
+          responses: {
+            '200': {
+              description: 'OK',
+              content: {
+                'application/json': {
+                  schema: {
+                    oneOf: [
+                      { properties: { primitive: false }, items: null },
+                      ...Array.from({ length: wideCount }, () => false),
+                    ],
+                  },
+                },
+                'text/plain': { schema: true },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const atLimit = paths(49_993);
+    assertRenderCost({ paths: atLimit }, atLimit);
+    const overLimit = paths(49_994);
+    const failure = expectSpecInvalid(() => assertRenderCost({ paths: overLimit }, overLimit));
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: MAX_SPEC_RENDER_UNITS - 3,
+      parameters: 1,
+      media_types: 2,
+      responses: 1,
+      units: MAX_SPEC_RENDER_UNITS + 1,
+      limit: MAX_SPEC_RENDER_UNITS,
+    });
+  });
+
+  it('stops reading schema siblings as soon as their cost exceeds the ceiling', () => {
+    const propertyCount = MAX_SPEC_RENDER_UNITS + 10;
+    const properties = Object.fromEntries(
+      Array.from({ length: propertyCount }, (_, index) => [`p${index}`, {}]),
+    );
+    let reads = 0;
+    const guardedProperties = new Proxy(properties, {
+      get(target, property, receiver) {
+        if (typeof property === 'string') reads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const { document, paths } = respondingWith({ properties: guardedProperties });
+
+    expectSpecInvalid(() => assertRenderCost(document, paths));
+    // The response entry, its media type and the schema node leave room for
+    // 49,998 properties at two units each; the next one is the last read.
+    assert.equal(reads, 49_999);
+    assert.ok(reads < propertyCount);
+  });
+
+  it('accepts hundreds of operations with ordinary schemas under the render ceiling', () => {
+    const properties: Record<string, unknown> = {};
+    for (let index = 0; index < 12; index += 1) {
+      properties[`field${index}`] = {
+        type: index % 2 === 0 ? 'string' : 'integer',
+        description: `A typical field ${index}`,
+        enum: index % 2 === 0 ? ['open', 'closed'] : undefined,
+      };
+    }
+    const paths: Record<string, unknown> = {};
+    for (let index = 0; index < 300; index += 1) {
+      paths[`/records/${index}`] = {
+        get: {
+          parameters: [{ name: 'limit', in: 'query', schema: { type: 'integer' } }],
+          responses: {
+            '200': {
+              description: 'OK',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Record' } } },
+            },
+          },
+        },
+      };
+    }
+    const spec = {
+      openapi: '3.1.0',
+      info: { title: 'Records', version: '1.0.0' },
+      paths,
+      components: { schemas: { Record: { type: 'object', properties } } },
+    };
+
+    assert.equal(parseOpenApiSpec(JSON.stringify(spec)).operationCount, 300);
+  });
+
+  it('accepts a connected component graph that five hundred operations reference', () => {
+    // Every component names others, several of them in both directions, so the
+    // viewer expands the graph under every operation that reaches it. Charged
+    // in full at every reference, to the viewer's depth limit, this document
+    // would be many times over the ceiling; each schema object is walked once
+    // instead, and each target charged once.
+    const ref = (name: string): Record<string, unknown> => ({
+      $ref: `#/components/schemas/${name}`,
+    });
+    const list = (name: string): Record<string, unknown> => ({ type: 'array', items: ref(name) });
+    const object = (properties: Record<string, unknown>): Record<string, unknown> => ({
+      type: 'object',
+      required: ['id'],
+      properties: {
+        id: { type: 'integer', format: 'int64', description: 'Unique identifier' },
+        created_at: { type: 'string', format: 'date-time' },
+        ...properties,
+      },
+    });
+    const text = { type: 'string', description: 'Free text' };
+    const schemas = {
+      User: object({
+        login: text,
+        email: { type: 'string', format: 'email' },
+        role: { type: 'string', enum: ['admin', 'member', 'guest'] },
+        organization: ref('Organization'),
+        repositories: list('Repository'),
+      }),
+      Organization: object({
+        name: text,
+        owner: ref('User'),
+        members: list('User'),
+        repositories: list('Repository'),
+      }),
+      Repository: object({
+        name: text,
+        visibility: { type: 'string', enum: ['public', 'private', 'internal'] },
+        owner: ref('User'),
+        organization: ref('Organization'),
+        issues: list('Issue'),
+        milestones: list('Milestone'),
+      }),
+      Issue: object({
+        title: text,
+        state: { type: 'string', enum: ['open', 'closed'] },
+        repository: ref('Repository'),
+        author: ref('User'),
+        assignees: list('User'),
+        milestone: ref('Milestone'),
+        labels: list('Label'),
+        comments: list('Comment'),
+      }),
+      Milestone: object({ title: text, creator: ref('User'), issues: list('Issue') }),
+      Label: object({ name: text, color: { type: 'string', pattern: '^[0-9a-f]{6}$' } }),
+      Comment: object({ body: text, author: ref('User'), issue: ref('Issue') }),
+      Error: {
+        type: 'object',
+        properties: { code: { type: 'string' }, message: text },
+      },
+    };
+    const names = ['User', 'Organization', 'Repository', 'Issue', 'Milestone'];
+    const page = [
+      { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1 } },
+      { name: 'per_page', in: 'query', schema: { type: 'integer', maximum: 100 } },
+    ];
+    const paths: Record<string, unknown> = {};
+    for (let version = 0; version < 25; version += 1) {
+      for (const name of names) {
+        const collection = `/v${version}/${name.toLowerCase()}s`;
+        paths[collection] = {
+          get: {
+            parameters: page,
+            responses: { '200': jsonResponse(list(name)), default: jsonResponse(ref('Error')) },
+          },
+          post: {
+            requestBody: { content: { 'application/json': { schema: ref(name) } } },
+            responses: { '201': jsonResponse(ref(name)), default: jsonResponse(ref('Error')) },
+          },
+        };
+        paths[`${collection}/{id}`] = {
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer' } }],
+          get: {
+            responses: { '200': jsonResponse(ref(name)), '404': jsonResponse(ref('Error')) },
+          },
+          patch: {
+            requestBody: { content: { 'application/json': { schema: ref(name) } } },
+            responses: { '200': jsonResponse(ref(name)), '404': jsonResponse(ref('Error')) },
+          },
+        };
+      }
+    }
+    const spec = {
+      openapi: '3.1.0',
+      info: { title: 'Connected', version: '1.0.0' },
+      paths,
+      components: { schemas },
+    };
+
+    assert.equal(parseOpenApiSpec(JSON.stringify(spec)).operationCount, 500);
+    const stats = { contentWalks: 0, schemaWalks: 0, schemaRefLookups: 0 };
+    assertRenderCost(spec, paths, stats);
+    // One lookup per distinct reference string, whichever operation uses it.
+    assert.equal(stats.schemaRefLookups, Object.keys(schemas).length);
+  });
+
+  it('resolves each schema reference string once, however many schemas use it', () => {
+    const properties: Record<string, unknown> = {};
+    for (let index = 0; index < 5_000; index += 1) {
+      properties[`p${index}`] = { $ref: '#/components/schemas/Target' };
+    }
+    const target = { Target: { type: 'object', properties: { id: { type: 'string' } } } };
+    const { document, paths } = respondingWith({ type: 'object', properties }, target);
+
+    const stats = { contentWalks: 0, schemaWalks: 0, schemaRefLookups: 0 };
+    assertRenderCost(document, paths, stats);
+    assert.equal(stats.schemaRefLookups, 1);
+    // The root, five thousand references, and the target and its property:
+    // each walked once, the target's subtree not at every reference to it.
+    assert.equal(stats.schemaWalks, 5_003);
+  });
+
+  it('refuses a $ref longer than the reference length limit before resolving it', () => {
+    const prefix = '#/components/schemas/';
+    const key = 'k'.repeat(MAX_OPENAPI_REF_LENGTH - prefix.length);
+    const schemas = { [key]: { type: 'string' }, [`${key}k`]: { type: 'string' } };
+    const longest = `${prefix}${key}`;
+    assert.equal(longest.length, MAX_OPENAPI_REF_LENGTH);
+    assert.equal(schemaRenderUnits({ $ref: longest }, { components: { schemas } }), 2);
+
+    const tooLong = `${longest}k`;
+    const expected = {
+      field: 'paths',
+      reason: 'ref_too_long',
+      length: MAX_OPENAPI_REF_LENGTH + 1,
+      limit: MAX_OPENAPI_REF_LENGTH,
+    };
+    const inSchema = respondingWith({ $ref: tooLong }, schemas);
+    const failure = expectSpecInvalid(() => assertRenderCost(inSchema.document, inSchema.paths));
+    assert.match(failure.message, /2049 characters long, more than the 2048/);
+    assert.deepEqual(failure.details, expected);
+
+    const inParameter = { '/a': { get: { parameters: [{ $ref: tooLong }], responses: {} } } };
+    assert.deepEqual(
+      expectSpecInvalid(() => assertRenderCost({ paths: inParameter }, inParameter)).details,
+      expected,
+    );
+  });
+
+  it('charges path-item parameter rows under every operation and their schemas once', () => {
+    // Three operations list the one path-item parameter: three rows, and its
+    // schema of N empty properties (1 + 2N) charged once: 4 + 2N.
+    const paths = (propertyCount: number): Record<string, unknown> => {
+      const properties: Record<string, unknown> = {};
+      for (let index = 0; index < propertyCount; index += 1) properties[`p${index}`] = {};
+      const schema = { type: 'object', properties };
+      return {
+        '/a': {
+          parameters: [{ name: 'filter', in: 'query', schema }],
+          get: { responses: {} },
+          put: { responses: {} },
+          delete: { responses: {} },
+        },
+      };
+    };
+
+    const atLimit = paths(49_998);
+    assertRenderCost({ paths: atLimit }, atLimit);
+    // The schema is charged under the first operation, which fills the
+    // allowance; the second operation's row is the unit past it.
+    const overLimit = paths(49_999);
+    const failure = expectSpecInvalid(() => assertRenderCost({ paths: overLimit }, overLimit));
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: MAX_SPEC_RENDER_UNITS - 1,
+      parameters: 2,
+      media_types: 0,
+      responses: 0,
       units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
@@ -452,22 +849,22 @@ describe('OpenAPI parsing', () => {
       });
     };
 
-    // The schema object, its `properties` and each property: N + 2 nodes, plus
-    // twenty parameters and the one response.
-    const atLimit = referencing(MAX_SPEC_RENDER_UNITS - 23);
+    // The schema object and each property wrapper/value: 2N + 1, plus twenty
+    // parameters and the one response.
+    const atLimit = referencing((MAX_SPEC_RENDER_UNITS - 22) / 2);
     assert.ok(Buffer.byteLength(atLimit, 'utf8') < MAX_SPEC_BYTES);
     assert.equal(parseOpenApiSpec(atLimit).operationCount, 1);
 
     const failure = expectSpecInvalid(() =>
-      parseOpenApiSpec(referencing(MAX_SPEC_RENDER_UNITS - 22)),
+      parseOpenApiSpec(referencing((MAX_SPEC_RENDER_UNITS - 22) / 2 + 1)),
     );
     assert.deepEqual(failure.details, {
       field: 'paths',
       reason: 'too_much_to_render',
-      schema_nodes: MAX_SPEC_RENDER_UNITS - 20,
+      schema_nodes: MAX_SPEC_RENDER_UNITS - 19,
       parameters: 20,
       media_types: 0,
-      responses: 1,
+      responses: 0,
       units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
@@ -496,7 +893,7 @@ describe('OpenAPI parsing', () => {
       components: { responses: { Wide: { description: 'Wide', content } } },
     };
 
-    const stats = { contentWalks: 0 };
+    const stats = { contentWalks: 0, schemaWalks: 0, schemaRefLookups: 0 };
     assertRenderCost(document, document.paths, stats);
     assert.equal(stats.contentWalks, 1);
 
@@ -518,7 +915,7 @@ describe('OpenAPI parsing', () => {
     }
     const document = { openapi: '3.1.0', info: { title: 'Wide', version: '1.0.0' }, paths };
 
-    const stats = { contentWalks: 0 };
+    const stats = { contentWalks: 0, schemaWalks: 0, schemaRefLookups: 0 };
     const failure = expectSpecInvalid(() => assertRenderCost(document, paths, stats));
     assert.deepEqual(failure.details, {
       field: 'paths',
@@ -580,6 +977,22 @@ describe('OpenAPI parsing', () => {
     const flood = specWithOperations(30_000);
     assert.ok(Buffer.byteLength(flood, 'utf8') < MAX_SPEC_BYTES);
     assert.match(expectSpecInvalid(() => parseOpenApiSpec(flood)).message, /more than the/);
+  });
+});
+
+describe('schema render units', () => {
+  // The same table SchemaView.test.tsx renders, so the server's count and the
+  // viewer's spend are checked against one set of numbers.
+  it('counts every shared fixture schema as the viewer spends on it', () => {
+    for (const { name, schema, units } of renderUnits.cases) {
+      assert.equal(schemaRenderUnits(schema, renderUnits.document), units, name);
+    }
+  });
+
+  it('counts what the shared fixture records where the viewer spends differently', () => {
+    for (const { name, schema, server } of renderUnits.divergences) {
+      assert.equal(schemaRenderUnits(schema, renderUnits.document), server, name);
+    }
   });
 });
 
