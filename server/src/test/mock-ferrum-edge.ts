@@ -2728,11 +2728,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     const verified = await verifyToken(req);
     const claims = verified instanceof Error ? null : verified;
+    const provisionedBy = req.headers[FERRUM_PROVISIONED_BY_HEADER.toLowerCase()];
     requests.push({
-      provisionedBy:
-        typeof req.headers[FERRUM_PROVISIONED_BY_HEADER.toLowerCase()] === 'string'
-          ? req.headers[FERRUM_PROVISIONED_BY_HEADER.toLowerCase()]
-          : undefined,
+      provisionedBy: typeof provisionedBy === 'string' ? provisionedBy : undefined,
       method,
       path: url.pathname,
       query: Object.fromEntries(url.searchParams),
