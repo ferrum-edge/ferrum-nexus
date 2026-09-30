@@ -676,6 +676,15 @@ has no foreign key to `api_specs` and so outlives retention. The catalog serves
 it under the detail page's visibility rule
 ([`api.md`](api.md#get-apicatalogslugchanges)).
 
+**Spec change notices.** Once the revision has committed and the proxy lease is
+released, `publishing/spec-change-notices.ts` tells the API's grantees what
+changed: an in-app notice and an outbox email per account, as each account's
+`user_notification_preferences` allow. It is best-effort by construction (it
+never throws into the publish) and coalesced two ways: no second notice while
+one for the API is unread, and one email per API per account per hour through
+the outbox idempotency key. Each batch of 200 accounts commits its notices,
+emails and `api.spec_notify` audit row together.
+
 ### Spec-owned proxies
 
 Nexus composes and attaches every plugin above except `openapi_validator`.

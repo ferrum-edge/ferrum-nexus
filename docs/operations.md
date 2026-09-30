@@ -342,14 +342,16 @@ Each message writes a message row and an audit row. A **platform thread** (no
 `recipient_user_id`) also notifies and emails every active `admin` and
 `super_admin`. Broadcasts and mass email fan out further. The bounds:
 
-| Bound                    | Value                                     | Where                                 |
-| ------------------------ | ----------------------------------------- | ------------------------------------- |
-| New threads / replies    | 10 / 30 per minute per account            | Rate limiter                          |
-| Messages per account     | 200 per rolling 24 h (`0` = unlimited)    | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` |
-| Broadcast recipients     | 5 000 per broadcast (`0` = unlimited)     | `NEXUS_MAX_BROADCAST_RECIPIENTS`      |
-| Broadcasts per admin     | 20 per rolling 24 h (`0` = unlimited)     | `NEXUS_MAX_BROADCASTS_PER_DAY`        |
-| Mass-email recipients    | 5 000 per campaign (`0` = unlimited)      | `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`     |
-| `message_received` email | 1 per recipient per thread per 10 minutes | Outbox idempotency key; fixed         |
+| Bound                     | Value                                     | Where                                 |
+| ------------------------- | ----------------------------------------- | ------------------------------------- |
+| New threads / replies     | 10 / 30 per minute per account            | Rate limiter                          |
+| Messages per account      | 200 per rolling 24 h (`0` = unlimited)    | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` |
+| Broadcast recipients      | 5 000 per broadcast (`0` = unlimited)     | `NEXUS_MAX_BROADCAST_RECIPIENTS`      |
+| Broadcasts per admin      | 20 per rolling 24 h (`0` = unlimited)     | `NEXUS_MAX_BROADCASTS_PER_DAY`        |
+| Mass-email recipients     | 5 000 per campaign (`0` = unlimited)      | `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`     |
+| `message_received` email  | 1 per recipient per thread per 10 minutes | Outbox idempotency key; fixed         |
+| `spec_updated` email      | 1 per recipient per API per clock hour    | Outbox idempotency key; fixed         |
+| `api_spec_updated` notice | none while one for the API is unread      | Checked per recipient; fixed          |
 
 - **The daily budgets are exact across instances.** The count and the insert run
   under a per-sender lease in `edge_leases`. A sender whose lease is held
@@ -370,6 +372,16 @@ Each message writes a message row and an audit row. A **platform thread** (no
 - **The `message_received` email does not quote the message** by default,
   because only the first message in each 10-minute window sends one. In-app
   notifications are still one per message.
+- **A spec change reaches each grantee account once.** When a revision that
+  changes something is published, every account holding an active grant on the
+  API (once, whatever its identities hold) except the publisher gets an
+  `api_spec_updated` notice and a `spec_updated` email, as its notification
+  preferences allow. A provider publishing many revisions sends each account
+  one email per API per hour and one notice until it is read; both link to the
+  API's Changes tab, which lists every revision. The fan-out runs after the
+  revision commits, in transactions of 200 accounts, each with an
+  `api.spec_notify` audit row counting who was notified, emailed, coalesced or
+  opted out. A failure is logged at `warn` and never fails the publish.
 
 #### Branding
 
@@ -552,6 +564,12 @@ owns. It copies no data:
   creates its own next to it.
 - A leftover auth config beside the portal's stays attached after an
   `auth_plugin` change and is listed under `outgoing_auth_configs_remaining`.
+
+`005_notification_preferences` (pending; ships in the next release) adds the
+`user_notification_preferences` table: one row per account that changed a
+notification preference, keyed by the account. It copies no data, so every
+existing account keeps receiving every notice until it opts out. On MongoDB
+the collection is keyed by `_id` and the step declares no index.
 
 `004_api_spec_changes` (pending; ships in the next release) adds the
 `api_spec_changes` table: one consumer-facing change summary per published

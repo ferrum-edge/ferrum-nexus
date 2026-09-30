@@ -3462,11 +3462,10 @@ class MongoStore implements NexusStore {
 
     findManyByUsers: async (userIds) => {
       if (userIds.length === 0) return [];
-      return (
-        await this.col(COLLECTIONS.notificationPreferences)
-          .find({ _id: { $in: [...userIds] } } as Filter<NexusDoc>, this.opts)
-          .toArray()
-      ).map((doc) => mapNotificationPreferences(doc as Row));
+      const docs = await this.col(COLLECTIONS.notificationPreferences)
+        .find({ _id: { $in: [...userIds] } } as Filter<NexusDoc>, this.opts)
+        .toArray();
+      return docs.map((doc) => mapNotificationPreferences(doc as Row));
     },
 
     upsert: async (userId, preferences) => {

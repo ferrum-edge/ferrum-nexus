@@ -25,6 +25,21 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   rollback.
 - Forward migration `004_api_spec_changes` adds the `api_spec_changes` table on
   every backend. It copies no data.
+- **Grantees are told when an API's specification changes** (#447). When a
+  revision that changes something is published, or rolled back, every account
+  holding an active grant on the API gets an in-app notice (new type
+  `api_spec_updated`) and a `spec_updated` email through the outbox. Each names
+  up to five changes, removed operations first, and links to the Changes tab.
+  An account is told once however many of its identities hold a grant, and the
+  publisher is not told. A burst of revisions sends one email per API per hour
+  and no second notice while the first is unread. The fan-out is audited as
+  `api.spec_notify` and never fails the publish. Notifications now show an
+  icon for their type.
+- **Notification preferences.** `GET` and `PATCH /api/users/me/notification-preferences`,
+  and a **Notifications** card on the profile page, turn the spec-change notice
+  off per channel. Changes are audited as `user.notification_preferences_update`.
+- Forward migration `005_notification_preferences` adds the
+  `user_notification_preferences` table on every backend. It copies no data.
 
 ### Changed
 
