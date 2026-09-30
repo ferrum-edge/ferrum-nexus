@@ -571,6 +571,24 @@ Errors: `400 VALIDATION_FAILED` (`new_password` without `current_password`),
 `403 FORBIDDEN` (wrong `current_password`), `429 RATE_LIMITED` (10 a minute per
 account).
 
+### `GET /api/users/me/notification-preferences`
+
+_session_ → `{ "preferences": NotificationPreferences }`. An account that never
+changed one has every notice on.
+
+| Field                     | Default | Controls                                                                                     |
+| ------------------------- | ------- | -------------------------------------------------------------------------------------------- |
+| `api_spec_updated_in_app` | `true`  | the in-app notice when an API the account holds a grant on publishes a changed spec revision |
+| `api_spec_updated_email`  | `true`  | the same notice by email                                                                     |
+
+### `PATCH /api/users/me/notification-preferences`
+
+_session_ — change the fields sent, and only those. Body: any of the fields
+above as booleans; an unknown field is `400 VALIDATION_FAILED`. →
+`{ "preferences": NotificationPreferences }`. A change is audited as
+`user.notification_preferences_update` with `details.changed`; a request that
+changes nothing writes nothing.
+
 ### `GET /api/users`
 
 _admin_ — `Paginated<User>` plus `pending_gateway_teardowns`: the portal-wide
@@ -764,15 +782,23 @@ own.
 
 _session_
 
-| Query             | Type                                                                                                                                                                       |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `unread`          | boolean — only unread                                                                                                                                                      |
-| `type`            | one of `access_request_created`, `access_request_approved`, `access_request_denied`, `access_revoked`, `message_received`, `credential_rotated`, `api_published`, `system` |
-| `limit`, `offset` | pagination                                                                                                                                                                 |
+| Query             | Type                                                                                                                                                                                           |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unread`          | boolean — only unread                                                                                                                                                                          |
+| `type`            | one of `access_request_created`, `access_request_approved`, `access_request_denied`, `access_revoked`, `message_received`, `credential_rotated`, `api_published`, `api_spec_updated`, `system` |
+| `limit`, `offset` | pagination                                                                                                                                                                                     |
 
 ```json
 { "items": [ … ], "total": 42, "unread_count": 3 }
 ```
+
+**`api_spec_updated`** is sent when an API the account holds an active grant on
+publishes a revision that changes something (see
+[`PUT /api/apis/:id/spec`](#put-apiapisidspec)). Its title is
+`<API name> spec updated to <version>` (or `rolled back to`), its body counts
+the changes and names up to five, removed operations first, and its `link` is
+`/catalog/<slug>?tab=changes`. An account that still has an unread one for the
+API gets no second one; it links to every revision since.
 
 ### `POST /api/notifications/read`
 
@@ -1059,7 +1085,7 @@ _admin_ → `{ "templates": EmailTemplate[], "keys": EmailTemplateKey[] }`.
 
 _admin_ — `key` ∈ `verification`, `password_reset`, `access_approved`,
 `access_denied`, `access_revoked`, `message_received`, `mass`,
-`credential_rotated`.
+`credential_rotated`, `spec_updated`.
 
 ```json
 {
@@ -1887,6 +1913,17 @@ _provider_, owner or admin — publish a new spec revision. Body: `spec`
   [`GET /api/catalog/:slug/changes`](#get-apicatalogslugchanges). The
   `api.spec_update` (or `api.spec_rollback`) row carries
   `spec_changes: { breaking, non_breaking, complete }`.
+- **Grantees are told.** Once the revision has committed, when the comparison
+  found a change, every account holding an active grant on the API gets an
+  `api_spec_updated` notification and a `spec_updated` email, once per account
+  however many of its identities hold a grant, and never the account that
+  published. Each channel follows the account's
+  [notification preferences](#get-apiusersmenotification-preferences). A
+  second notice waits until the first is read, and at most one email per API
+  per account goes out per hour (the outbox idempotency key
+  `spec-updated:<api>:<user>:<hour>`). The fan-out commits in batches of 200
+  accounts, each with an `api.spec_notify` audit row. It is best-effort: a
+  failure is logged and never fails the publish.
 - **Backend following.** The proxy is re-pointed at the new document's
   `servers[0]` only when the API's `upstream_url` still equals the normalized
   `servers[0]` of the previous revision (scheme, host, port and base path).

@@ -139,7 +139,7 @@ export function summarizeSpecChange(apiName: string, entry: ApiSpecChangeEntry):
  * a URL into a link, and a provider-written name is not a destination this
  * portal vouches for, so the scheme separator is broken up.
  */
-function emailLine(line: string): string {
+export function specChangeEmailLine(line: string): string {
   return `- ${line.replace(/:\/\//g, '[:]//')}`;
 }
 
@@ -190,7 +190,7 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
 
     const link = `/catalog/${encodeURIComponent(api.slug)}?tab=changes`;
     const notice = summarizeSpecChange(api.name, change);
-    const changes = notice.lines.map(emailLine).join('\n');
+    const changes = notice.lines.map(specChangeEmailLine).join('\n');
     const render = await email.prepareRenderer('spec_updated');
     const window = Math.floor(now() / SPEC_CHANGE_EMAIL_WINDOW_MS);
     const batches = Math.ceil(recipients.length / SPEC_CHANGE_NOTICE_BATCH);

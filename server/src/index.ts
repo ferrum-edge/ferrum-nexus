@@ -212,6 +212,13 @@ export interface BuildServerDeps {
    */
   sendLockWaitMs?: number;
   /**
+   * The clock the spec-change email window is read from. A seam for the tests
+   * that assert what the next window sends, which would otherwise wait an
+   * hour, or pass or fail depending on when in the hour they ran. Nothing in
+   * production sets it.
+   */
+  specChangeClock?: () => number;
+  /**
    * The same seam for the store-level locks — the last-super-admin key and
    * each account's lifecycle key. Defaults to `LEASE_WAIT_MS` (30 s).
    *
@@ -461,6 +468,7 @@ export async function buildServer(
       audit,
       config,
       log: warn,
+      ...(deps.specChangeClock ? { now: deps.specChangeClock } : {}),
     }),
   });
   const usage = createUsageService({ store: deps.store, edge: deps.edge, publishing });

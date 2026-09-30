@@ -249,18 +249,19 @@ operator to check the outbox ([`../operations.md`](../operations.md#6-the-email-
 
 ### Email templates
 
-**Settings → Templates** holds eight templates, each with a built-in default:
+**Settings → Templates** holds nine templates, each with a built-in default:
 
-| Key                  | Sent when                                         |
-| -------------------- | ------------------------------------------------- |
-| `verification`       | A new account must verify its email address.      |
-| `password_reset`     | Someone asks to reset a password.                 |
-| `access_approved`    | An access request is approved.                    |
-| `access_denied`      | An access request is declined.                    |
-| `access_revoked`     | A grant is revoked.                               |
-| `message_received`   | New activity in a message thread.                 |
-| `mass`               | The frame around a mass email or broadcast email. |
-| `credential_rotated` | A user's gateway credential is rotated.           |
+| Key                  | Sent when                                                      |
+| -------------------- | -------------------------------------------------------------- |
+| `verification`       | A new account must verify its email address.                   |
+| `password_reset`     | Someone asks to reset a password.                              |
+| `access_approved`    | An access request is approved.                                 |
+| `access_denied`      | An access request is declined.                                 |
+| `access_revoked`     | A grant is revoked.                                            |
+| `message_received`   | New activity in a message thread.                              |
+| `mass`               | The frame around a mass email or broadcast email.              |
+| `credential_rotated` | A user's gateway credential is rotated.                        |
+| `spec_updated`       | An API a user has access to publishes a changed spec revision. |
 
 Each has a **Subject**, **HTML body** and **Plain-text body**; all three are
 required to save. Saving stores an override. The portal uses your override if
@@ -270,6 +271,11 @@ there is one, otherwise the default, never a mix.
 minutes**, however many messages arrive. The default wording therefore
 announces activity and links to the thread. `{{message_preview}}` quotes only
 the message that opened the window. In-app notifications are not batched.
+
+`spec_updated` is sent at most once per API, per recipient, per **hour**, for
+the first revision in that hour; it links to the API's Changes tab, which lists
+every revision. `{{summary}}` and `{{changes}}` quote names from the provider's
+document as plain text. Users can turn it off on their profile page.
 
 Handle three templates with care:
 
@@ -290,16 +296,17 @@ template.
 **Every template:** `portal_name` · `portal_url` · `recipient_name` ·
 `recipient_email` · `year`
 
-| Template             | Also available                                                        |
-| -------------------- | --------------------------------------------------------------------- |
-| `verification`       | `verification_url`                                                    |
-| `password_reset`     | `reset_url`                                                           |
-| `access_approved`    | `api_name`, `api_slug`, `api_url`, `decided_by_name`, `decision_note` |
-| `access_denied`      | `api_name`, `api_slug`, `decided_by_name`, `decision_note`            |
-| `access_revoked`     | `api_name`, `api_slug`, `revoked_by_name`, `reason`                   |
-| `message_received`   | `sender_name`, `thread_subject`, `message_preview`, `thread_url`      |
-| `mass`               | `subject`, `body_html`, `body_text`                                   |
-| `credential_rotated` | `credential_label`, `credential_last4`, `credentials_url`             |
+| Template             | Also available                                                                     |
+| -------------------- | ---------------------------------------------------------------------------------- |
+| `verification`       | `verification_url`                                                                 |
+| `password_reset`     | `reset_url`                                                                        |
+| `access_approved`    | `api_name`, `api_slug`, `api_url`, `decided_by_name`, `decision_note`              |
+| `access_denied`      | `api_name`, `api_slug`, `decided_by_name`, `decision_note`                         |
+| `access_revoked`     | `api_name`, `api_slug`, `revoked_by_name`, `reason`                                |
+| `message_received`   | `sender_name`, `thread_subject`, `message_preview`, `thread_url`                   |
+| `mass`               | `subject`, `body_html`, `body_text`                                                |
+| `credential_rotated` | `credential_label`, `credential_last4`, `credentials_url`                          |
+| `spec_updated`       | `api_name`, `api_slug`, `version`, `headline`, `summary`, `changes`, `changes_url` |
 
 The retired `reset_token` and `verification_token` placeholders render empty,
 and saving a template that contains either is refused. Use `{{reset_url}}` and
