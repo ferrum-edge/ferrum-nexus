@@ -274,7 +274,7 @@ function renderNode(
   // charges each occurrence as one node whatever its length.
   const description = displayText(asString(node.description), MAX_DISPLAYED_DESCRIPTION_LENGTH);
   const properties = asRecord(node.properties);
-  const required = requiredNames(asArray(node.required) ?? []);
+  const requiredProperties = requiredNames(asArray(node.required) ?? []);
   const items = node.items;
   const composition =
     (asArray(node.oneOf) && { key: 'oneOf', entries: asArray(node.oneOf) }) ??
@@ -319,7 +319,7 @@ function renderNode(
             schema: properties[propertyName],
             doc,
             name: propertyName,
-            required: required.has(propertyName),
+            required: requiredProperties.has(propertyName),
             depth: depth + 1,
             seen,
           },
