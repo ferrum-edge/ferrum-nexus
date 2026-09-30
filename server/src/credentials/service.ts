@@ -1821,26 +1821,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             : {};
         const status = typeof errorDetails.status === 'number' ? errorDetails.status : null;
         if (status !== null && status >= 400 && status < 500) {
-          await store.transaction(async (tx) => {
-            await tx.credentials.updateIfStatus(pending.id, 'retiring', { status: 'revoked' });
-            await audit.forStore(tx).record(
-              { id: input.actorId, role: input.actorRole },
-              AuditAction.CREDENTIAL_APPEND_ROLLBACK,
-              { type: 'consumer', id: input.consumerId },
-              {
-                credential_type: input.type,
-                consumer_id: input.consumerId,
-                operation: input.operation ?? 'issue',
-                withdrawn: true,
-                last4: pending.last4,
-                owner_user_id: input.ownerId,
-                cause: error instanceof Error ? error.message : String(error),
-                stranded_credential_id: pending.id,
-                definite_rejection: true,
-              },
-              input.ip ?? null,
-            );
-          });
+          await store.transaction((tx) => tx.credentials.delete(pending.id));
           throw error;
         }
         // A refusal and a lost acknowledgement read the same on the wire,
