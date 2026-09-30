@@ -366,6 +366,9 @@ export const MAX_SPEC_DEPTH = 200;
 /** Maximum schema nesting depth the OpenAPI documentation viewer expands. */
 export const MAX_OPENAPI_SCHEMA_RENDER_DEPTH = 12;
 
+/** Enum values the OpenAPI documentation viewer shows per schema occurrence. */
+export const MAX_OPENAPI_ENUM_CHIPS = 12;
+
 /**
  * Maximum size in UTF-8 bytes of an OpenAPI document's text once its YAML
  * aliases are resolved: every mapping key and scalar, counted at every place it
@@ -429,13 +432,34 @@ export const MAX_SPEC_OPERATIONS = 3_000;
  * viewer additionally bounds what it renders, so this is the outer fence rather
  * than the only one.
  *
- * Server and SchemaView use the same unit contract: each schema occurrence costs one,
- * including primitive and `$ref` nodes; a followed `$ref` also costs its
- * resolved schema occurrence. Each displayed enum chip costs one (up to 12),
- * as do property wrappers, `items` entries, and composition entries. Parameter
- * rows, response rows, and media-type entries cost one each; each parameter,
- * request-body, or response media schema then uses the same schema rules.
- * Counting stops at the first unit over this ceiling.
+ * What a unit is, and how the server's count relates to what the viewer
+ * spends, is one contract. The table in
+ * `shared/test-fixtures/openapi-schema-render-units.json` is checked against
+ * both the server and SchemaView.
+ *
+ * - One schema occurrence costs what SchemaView charges for it: one per schema
+ *   node, primitive or not; one per property, `items` and composition entry
+ *   (of the first of `oneOf`, `anyOf` and `allOf` the schema declares); and
+ *   one per enum chip, up to {@link MAX_OPENAPI_ENUM_CHIPS}. Nothing else a
+ *   schema declares is charged, as nothing else renders as a row or a chip.
+ * - A `$ref` to an object in the document (`#/…`) costs two at every
+ *   occurrence, its own row and its target's, and the rest of the target is
+ *   charged once per document. Any other `$ref`, which the viewer shows as
+ *   unresolved, costs one.
+ * - Parameter rows and response entries cost one at every occurrence, and a
+ *   path-item parameter one under every operation beneath it. Media types cost
+ *   one each. The schemas and media types of a referenced parameter, request
+ *   body or response, and the schemas of path-item parameters, are charged
+ *   once.
+ *
+ * The count is therefore what rendering each part of the document once costs.
+ * It is not an upper bound on what the viewer spends across all of a
+ * document's pages: the viewer renders a target again at every reference to it
+ * and bounds that repetition with its own per-page allowance
+ * (`MAX_PAGE_NODES`). Everywhere else the server counts at least as much: it
+ * neither stops at {@link MAX_OPENAPI_SCHEMA_RENDER_DEPTH} nor collapses a
+ * circular reference to one marker. Counting stops at the first unit over this
+ * ceiling.
  */
 export const MAX_SPEC_RENDER_UNITS = 100_000;
 

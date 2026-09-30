@@ -1,0 +1,374 @@
+{
+  "description": "One schema occurrence per entry, rendered against `document`. For each case the server's schemaRenderUnits and SchemaView's page budget spend the same units; each divergence records both numbers and why they differ. See MAX_SPEC_RENDER_UNITS in shared/src/constants.ts.",
+  "document": {
+    "components": {
+      "schemas": {
+        "String": {
+          "type": "string"
+        },
+        "Status": {
+          "type": "string",
+          "enum": ["open", "closed", "merged"]
+        },
+        "Alias": {
+          "$ref": "#/components/schemas/String"
+        },
+        "Organization": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            }
+          }
+        },
+        "User": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer"
+            },
+            "status": {
+              "$ref": "#/components/schemas/Status"
+            },
+            "organization": {
+              "$ref": "#/components/schemas/Organization"
+            }
+          }
+        },
+        "Node": {
+          "type": "object",
+          "properties": {
+            "children": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/Node"
+              }
+            }
+          }
+        },
+        "Primitive": false
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "a boolean schema",
+      "schema": true,
+      "units": 1
+    },
+    {
+      "name": "a null schema",
+      "schema": null,
+      "units": 1
+    },
+    {
+      "name": "an array in a schema position",
+      "schema": [
+        {
+          "type": "string"
+        }
+      ],
+      "units": 1
+    },
+    {
+      "name": "an empty schema",
+      "schema": {},
+      "units": 1
+    },
+    {
+      "name": "a typed scalar and the text the viewer cuts",
+      "schema": {
+        "type": "string",
+        "format": "date-time",
+        "description": "When it happened",
+        "example": "2026-01-01T00:00:00Z"
+      },
+      "units": 1
+    },
+    {
+      "name": "enum chips",
+      "schema": {
+        "type": "string",
+        "enum": ["a", "b", "c"]
+      },
+      "units": 4
+    },
+    {
+      "name": "enum chips, twelve at most",
+      "schema": {
+        "type": "integer",
+        "enum": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+      },
+      "units": 13
+    },
+    {
+      "name": "properties, primitive or not",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "flag": false
+        }
+      },
+      "units": 5
+    },
+    {
+      "name": "items",
+      "schema": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "units": 3
+    },
+    {
+      "name": "null items",
+      "schema": {
+        "type": "array",
+        "items": null
+      },
+      "units": 3
+    },
+    {
+      "name": "oneOf entries",
+      "schema": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          true
+        ]
+      },
+      "units": 5
+    },
+    {
+      "name": "anyOf entries, with no oneOf",
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          },
+          false
+        ]
+      },
+      "units": 7
+    },
+    {
+      "name": "allOf entries, with no oneOf or anyOf",
+      "schema": {
+        "allOf": [
+          {
+            "type": "object",
+            "properties": {
+              "id": {}
+            }
+          },
+          {}
+        ]
+      },
+      "units": 7
+    },
+    {
+      "name": "only the first composition keyword",
+      "schema": {
+        "oneOf": [{}],
+        "anyOf": [{}, {}],
+        "allOf": [{}]
+      },
+      "units": 3
+    },
+    {
+      "name": "an empty oneOf still hides anyOf",
+      "schema": {
+        "oneOf": [],
+        "anyOf": [{}]
+      },
+      "units": 1
+    },
+    {
+      "name": "keywords the viewer does not render",
+      "schema": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": {
+          "type": "string"
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "not": {},
+        "prefixItems": [{}],
+        "examples": [
+          {
+            "id": 1
+          }
+        ],
+        "x-extension": {
+          "list": [1, 2]
+        }
+      },
+      "units": 1
+    },
+    {
+      "name": "every rendered position at once",
+      "schema": {
+        "type": "object",
+        "enum": ["x"],
+        "oneOf": [{}],
+        "items": {},
+        "properties": {
+          "a": {}
+        }
+      },
+      "units": 8
+    },
+    {
+      "name": "a reference",
+      "schema": {
+        "$ref": "#/components/schemas/String"
+      },
+      "units": 2
+    },
+    {
+      "name": "a reference to an enum",
+      "schema": {
+        "$ref": "#/components/schemas/Status"
+      },
+      "units": 5
+    },
+    {
+      "name": "a chain of references",
+      "schema": {
+        "$ref": "#/components/schemas/Alias"
+      },
+      "units": 3
+    },
+    {
+      "name": "the siblings of a reference",
+      "schema": {
+        "$ref": "#/components/schemas/String",
+        "properties": {
+          "a": {}
+        },
+        "enum": ["x"]
+      },
+      "units": 2
+    },
+    {
+      "name": "connected components",
+      "schema": {
+        "$ref": "#/components/schemas/User"
+      },
+      "units": 17
+    },
+    {
+      "name": "an unresolved reference",
+      "schema": {
+        "$ref": "#/components/schemas/Missing"
+      },
+      "units": 1
+    },
+    {
+      "name": "an external reference",
+      "schema": {
+        "$ref": "common.yaml#/components/schemas/String"
+      },
+      "units": 1
+    },
+    {
+      "name": "a reference to the document root",
+      "schema": {
+        "$ref": "#"
+      },
+      "units": 1
+    },
+    {
+      "name": "a reference to a non-object",
+      "schema": {
+        "$ref": "#/components/schemas/Primitive"
+      },
+      "units": 1
+    },
+    {
+      "name": "an empty $ref, which is not a reference",
+      "schema": {
+        "$ref": "",
+        "type": "string",
+        "enum": ["x"]
+      },
+      "units": 2
+    }
+  ],
+  "divergences": [
+    {
+      "name": "a circular reference",
+      "schema": {
+        "$ref": "#/components/schemas/Node"
+      },
+      "server": 7,
+      "viewer": 6,
+      "why": "The viewer shows the reference that closes a cycle as one circular marker; the server charges it as it charges any other reference."
+    },
+    {
+      "name": "the same target referenced twice",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "a": {
+            "$ref": "#/components/schemas/Organization"
+          },
+          "b": {
+            "$ref": "#/components/schemas/Organization"
+          }
+        }
+      },
+      "server": 11,
+      "viewer": 15,
+      "why": "The viewer renders a target again at every reference to it, within its page allowance; the server charges the target once per document."
+    },
+    {
+      "name": "nesting past the depth limit",
+      "schema": {
+        "items": {
+          "items": {
+            "items": {
+              "items": {
+                "items": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "items": {
+                          "items": {
+                            "items": {
+                              "items": {
+                                "items": {
+                                  "items": {}
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "server": 29,
+      "viewer": 27,
+      "why": "The viewer stops expanding past MAX_OPENAPI_SCHEMA_RENDER_DEPTH; the server counts the whole schema."
+    }
+  ]
+}

@@ -80,7 +80,8 @@ import {
 } from 'yaml';
 
 import {
-  MAX_OPENAPI_SCHEMA_RENDER_DEPTH,
+  MAX_OPENAPI_ENUM_CHIPS,
+  MAX_OPENAPI_REF_LENGTH,
   MAX_SPEC_BYTES,
   MAX_SPEC_DEPTH,
   MAX_SPEC_EXPANDED_BYTES,
@@ -816,63 +817,150 @@ function* objectValues(value: object): Generator<unknown> {
   }
 }
 
-/** Count the schema nodes, wrappers, enum chips and ref expansions SchemaView renders. */
-function countNodes(
-  root: unknown,
+/** Refuse a `$ref` too long to follow; see {@link MAX_OPENAPI_REF_LENGTH}. */
+function refTooLong(ref: string): NexusError {
+  return specInvalid(
+    `A $ref is ${ref.length} characters long, more than the ${MAX_OPENAPI_REF_LENGTH} a ` +
+      'reference may be',
+    { field: 'paths', reason: 'ref_too_long', length: ref.length, limit: MAX_OPENAPI_REF_LENGTH },
+  );
+}
+
+/** Unwinds a schema walk whose cost has passed the caller's limit. */
+class RenderLimitReached {}
+
+/**
+ * The render cost of one document's schemas, as {@link MAX_SPEC_RENDER_UNITS}
+ * defines it.
+ *
+ * Every schema object is walked once: its cost is memoised by identity, so an
+ * object a YAML alias repeats costs what it costs at every occurrence without
+ * being walked again. A `$ref` is never expanded where it occurs. It costs its
+ * own row and its target's, and its target is queued, once per document, for
+ * {@link SchemaCostCounter.targets} to charge the rest of. Each distinct `$ref`
+ * string is resolved once.
+ */
+interface SchemaCostCounter {
+  /** What one occurrence of `schema` costs, or `limit + 1` once that is past `limit`. */
+  occurrence(schema: unknown, limit: number): number;
+  /**
+   * What the queued `$ref` targets cost beyond the row their references
+   * already paid for, or `limit + 1` once that is past `limit`.
+   */
+  targets(limit: number): number;
+}
+
+function createSchemaCostCounter(
   document: Record<string, unknown>,
-  limit: number,
-  seen: readonly string[] = [],
-  depth = 0,
-): number {
-  let total = 0;
-  const add = (value: number): boolean => {
-    if (total + value > limit) {
-      total = limit + 1;
-      return true;
-    }
-    total += value;
-    return false;
+  stats: RenderCostStats | undefined,
+): SchemaCostCounter {
+  const costs = new WeakMap<object, number>();
+  const targetsByRef = new Map<string, Record<string, unknown> | null>();
+  const queued = new WeakSet<object>();
+  const pending: Record<string, unknown>[] = [];
+  let spent = 0;
+  let allowance = 0;
+
+  const spend = (units: number): void => {
+    spent += units;
+    if (spent > allowance) throw new RenderLimitReached();
   };
-  const visit = (schema: unknown, refs: readonly string[], currentDepth: number): boolean => {
-    if (schema === undefined) return false;
-    if (add(1)) return true;
-    if (!isRecord(schema) || currentDepth > MAX_OPENAPI_SCHEMA_RENDER_DEPTH) return false;
 
-    const ref = typeof schema.$ref === 'string' ? schema.$ref : null;
-    if (ref) {
-      if (refs.includes(ref)) return false;
-      const resolved = resolveOpenApiPointer(document, ref);
-      return isRecord(resolved) ? visit(resolved, [...refs, ref], currentDepth + 1) : false;
-    }
+  // The object a `$ref` renders, or `null` where the viewer shows the reference
+  // as unresolved: anything but a local pointer that names an object.
+  const targetOf = (ref: string): Record<string, unknown> | null => {
+    if (ref.length > MAX_OPENAPI_REF_LENGTH) throw refTooLong(ref);
+    const known = targetsByRef.get(ref);
+    if (known !== undefined) return known;
+    if (stats) stats.schemaRefLookups += 1;
+    const value = ref.startsWith('#/') ? resolveOpenApiPointer(document, ref) : undefined;
+    const target = isRecord(value) ? value : null;
+    targetsByRef.set(ref, target);
+    return target;
+  };
 
-    const enumValues = Array.isArray(schema.enum) ? Math.min(schema.enum.length, 12) : 0;
-    if (add(enumValues)) return true;
+  const walk = (schema: unknown): void => {
+    if (schema === undefined) return;
+    if (!isRecord(schema)) return spend(1);
+    const known = costs.get(schema);
+    if (known !== undefined) return spend(known);
+    if (stats) stats.schemaWalks += 1;
+    const start = spent;
+    spend(1);
 
-    const properties = isRecord(schema.properties) ? schema.properties : null;
-    if (properties) {
-      for (const property of objectValues(properties)) {
-        if (add(1) || visit(property, refs, currentDepth + 1)) return true;
+    const ref = typeof schema.$ref === 'string' ? schema.$ref : '';
+    if (ref !== '') {
+      const target = targetOf(ref);
+      if (target) {
+        spend(1);
+        if (!queued.has(target)) {
+          queued.add(target);
+          pending.push(target);
+        }
       }
-    }
-    if (schema.items !== undefined && (add(1) || visit(schema.items, refs, currentDepth + 1))) {
-      return true;
-    }
-
-    const composition =
-      (Array.isArray(schema.oneOf) && schema.oneOf) ??
-      (Array.isArray(schema.anyOf) && schema.anyOf) ??
-      (Array.isArray(schema.allOf) && schema.allOf) ??
-      null;
-    if (composition) {
+    } else {
+      if (Array.isArray(schema.enum)) spend(Math.min(schema.enum.length, MAX_OPENAPI_ENUM_CHIPS));
+      const composition = Array.isArray(schema.oneOf)
+        ? schema.oneOf
+        : Array.isArray(schema.anyOf)
+          ? schema.anyOf
+          : Array.isArray(schema.allOf)
+            ? schema.allOf
+            : [];
       for (const entry of composition) {
-        if (add(1) || visit(entry, refs, currentDepth + 1)) return true;
+        spend(1);
+        walk(entry);
+      }
+      if (schema.items !== undefined) {
+        spend(1);
+        walk(schema.items);
+      }
+      if (isRecord(schema.properties)) {
+        for (const property of objectValues(schema.properties)) {
+          spend(1);
+          walk(property);
+        }
       }
     }
-    return false;
+    costs.set(schema, spent - start);
   };
 
-  visit(root, seen, depth);
-  return total;
+  // Iterative, so a chain of references as long as the document allows cannot
+  // exhaust the stack; each target queues the ones it names.
+  const drain = (): void => {
+    for (let target = pending.pop(); target !== undefined; target = pending.pop()) {
+      // The row its reference already paid for.
+      spent -= 1;
+      walk(target);
+    }
+  };
+
+  const measure = (limit: number, body: () => void): number => {
+    spent = 0;
+    allowance = limit;
+    try {
+      body();
+    } catch (error) {
+      if (error instanceof RenderLimitReached) return limit + 1;
+      throw error;
+    }
+    return spent;
+  };
+
+  return {
+    occurrence: (schema, limit) => measure(limit, () => walk(schema)),
+    targets: (limit) => measure(limit, drain),
+  };
+}
+
+/**
+ * What rendering one occurrence of `schema` costs under
+ * {@link MAX_SPEC_RENDER_UNITS}: the occurrence itself, and each object its
+ * references reach charged once.
+ */
+export function schemaRenderUnits(schema: unknown, document: Record<string, unknown>): number {
+  const counter = createSchemaCostCounter(document, undefined);
+  return counter.occurrence(schema, Infinity) + counter.targets(Infinity);
 }
 
 /** The four things the documentation viewer walks, counted separately. */
@@ -890,6 +978,10 @@ interface RenderUnits {
 export interface RenderCostStats {
   /** `content` maps of request bodies and responses enumerated. */
   contentWalks: number;
+  /** Schema objects walked. */
+  schemaWalks: number;
+  /** Schema `$ref` strings resolved against the document. */
+  schemaRefLookups: number;
 }
 
 /** What one `content` map costs to render. */
@@ -901,26 +993,32 @@ interface ContentCost {
 /**
  * Refuse a document that costs more to render than {@link MAX_SPEC_RENDER_UNITS}.
  *
- * Counted over the parts the viewer actually renders — reusable schemas, the
- * schema children and enum chips it displays, and the parameters, media types
- * and responses of every declared operation — rather than over the document as
- * a whole. Every response entry costs one unit, as it costs the viewer a card,
- * whether or not it declares any `content`: an entry that cost nothing could
- * be repeated without bound, and a YAML alias repeats the whole `responses`
- * map at every operation that names it.
+ * Counted over the parts the viewer renders from each declared operation — its
+ * parameters, request body and responses, their media types, and the schemas
+ * those hold — rather than over the document as a whole, so a component no
+ * operation reaches costs nothing. What each part costs, and how that relates
+ * to what the viewer spends, is the contract {@link MAX_SPEC_RENDER_UNITS}
+ * describes. Every response entry costs one unit, as it costs the viewer a
+ * card, whether or not it declares any `content`: an entry that cost nothing
+ * could be repeated without bound, and a YAML alias repeats the whole
+ * `responses` map at every operation that names it.
  *
  * A parameter, request body or response written as a `$ref` is followed the way
  * the viewer follows it — one memoised resolver for the document — and each
- * distinct object so named is charged once, at its first reference; every later
- * reference to it costs only its own parameter or response entry. Path-item
- * parameters are charged once per path item, and schema `$ref`s are not
- * expanded. Those repetitions are what the viewer's own page budget absorbs;
- * charging them here would refuse documents that merely reuse their components.
+ * distinct object so named has its schemas and media types charged once, at its
+ * first reference; every later reference to it costs only its own parameter or
+ * response entry. Path-item parameters cost a row under every operation and
+ * their schemas once per path item. A schema `$ref` costs two units at every
+ * occurrence and its target's own cost once per document. Those repetitions are
+ * what the viewer's own page budget absorbs; charging them in full here would
+ * refuse documents that merely reuse their components.
  *
  * Each `content` map's cost is computed once and cached, as each schema's is,
- * so neither is enumerated twice however often it is referenced or aliased. The
- * running total is checked after every charge: counting stops at the first one
- * past the ceiling, and the error reports the totals reached by then.
+ * so neither is enumerated twice however often it is referenced or aliased, and
+ * each `$ref` string is resolved once. The running total is checked after every
+ * charge, and within every schema walk: counting stops at the first unit past
+ * the ceiling, and the error reports the totals reached by then. A `$ref`
+ * longer than {@link MAX_OPENAPI_REF_LENGTH} is refused before it is resolved.
  */
 export function assertRenderCost(
   document: Record<string, unknown>,
@@ -932,6 +1030,7 @@ export function assertRenderCost(
   const chargedContent = new WeakSet<object>();
   const units: RenderUnits = { schemaNodes: 0, parameters: 0, mediaTypes: 0, responses: 0 };
   const resolver = createOpenApiRefResolver(document);
+  const schemas = createSchemaCostCounter(document, stats);
 
   const charge = (
     schemaNodes: number,
@@ -969,11 +1068,23 @@ export function assertRenderCost(
     units.mediaTypes -
     units.responses;
 
+  // Called after every charge that may have queued `$ref` targets, so each is
+  // charged before the count moves on.
+  const chargeTargets = (): void => charge(schemas.targets(availableUnits()), 0, 0);
+
+  const chargeSchema = (schema: unknown): void => {
+    charge(schemas.occurrence(schema, availableUnits()), 0, 0);
+    chargeTargets();
+  };
+
   // The object an entry names, or `null` when there is nothing further to
   // charge: an entry that cannot be followed renders as a single placeholder,
   // and a `$ref`'d object already charged costs nothing more.
   const chargeable = (value: unknown, charged: WeakSet<object>): Record<string, unknown> | null => {
     if (!isRecord(value)) return null;
+    if (typeof value.$ref === 'string' && value.$ref.length > MAX_OPENAPI_REF_LENGTH) {
+      throw refTooLong(value.$ref);
+    }
     const resolution = resolver.resolve(value);
     if (!resolution.ok) return null;
     const target = resolution.value;
@@ -983,21 +1094,17 @@ export function assertRenderCost(
     return target;
   };
 
-  const components = isRecord(document.components) ? document.components : null;
-  const schemas = components && isRecord(components.schemas) ? components.schemas : null;
-  if (schemas) {
-    for (const schema of objectValues(schemas)) {
-      charge(countNodes(schema, document, availableUnits()), 0, 0);
+  const addParameterSchemas = (list: unknown[]): void => {
+    for (const entry of list) {
+      const parameter = chargeable(entry, chargedParameters);
+      if (parameter) chargeSchema(parameter.schema);
     }
-  }
+  };
 
   const addParameters = (list: unknown): void => {
     if (!Array.isArray(list)) return;
     charge(0, list.length, 0);
-    for (const entry of list) {
-      const parameter = chargeable(entry, chargedParameters);
-      if (parameter) charge(countNodes(parameter.schema, document, availableUnits()), 0, 0);
-    }
+    addParameterSchemas(list);
   };
 
   // Keyed on the `content` map rather than the object holding it, so a map
@@ -1013,9 +1120,8 @@ export function assertRenderCost(
         charge(cost.schemaNodes, 0, cost.mediaTypes);
       }
       if (isRecord(media)) {
-        cost.schemaNodes += countNodes(
+        cost.schemaNodes += schemas.occurrence(
           media.schema,
-          document,
           availableUnits() - cost.mediaTypes - cost.schemaNodes,
         );
       }
@@ -1032,20 +1138,29 @@ export function assertRenderCost(
     if (!body || !isRecord(body.content)) return;
     const cost = contentCost(body.content);
     charge(cost.schemaNodes, 0, cost.mediaTypes);
+    chargeTargets();
   };
 
-  for (const item of Object.values(paths)) {
+  for (const item of objectValues(paths)) {
     if (!isRecord(item)) continue;
-    addParameters(item.parameters);
+    const inherited = Array.isArray(item.parameters) ? item.parameters : [];
+    let inheritedSchemasCharged = false;
     for (const method of OPENAPI_OPERATION_METHODS) {
       const operation = item[method];
       if (!isRecord(operation)) continue;
+      // The viewer lists path-item parameters under every operation beneath
+      // them; the schemas they carry are the same objects each time.
+      charge(0, inherited.length, 0);
+      if (!inheritedSchemasCharged) {
+        inheritedSchemasCharged = true;
+        addParameterSchemas(inherited);
+      }
       addParameters(operation.parameters);
       addContent(operation.requestBody);
       if (!isRecord(operation.responses)) continue;
       // Charged per entry before its content, so a map of entries that declare
       // nothing still reaches the ceiling and stops the loop there.
-      for (const response of Object.values(operation.responses)) {
+      for (const response of objectValues(operation.responses)) {
         charge(0, 0, 0, 1);
         addContent(response);
       }

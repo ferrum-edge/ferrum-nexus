@@ -1512,16 +1512,19 @@ the Edge proxy and plugins, then stores the API.
 - YAML values must be plain objects, arrays or scalars
   (`details.reason: "unsupported_node"`).
 - At most 100 000 render units (`details.reason: "too_much_to_render"`, with the
-  counts reached): top-level component schemas; schema nodes, including
-  primitives, reached through parameter and media schemas; each rendered
-  property, `items`, and `oneOf`/`anyOf`/`allOf` entry; up to 12 enum chips per
-  schema occurrence; parameters, media types and responses. A local `$ref` and
-  its resolved schema node are both counted at each rendered occurrence.
-  Descriptions, type/format strings, `required` names, `not`, additional or
-  pattern properties, `prefixItems`, examples and `x-*` extensions are not
-  counted because the viewer does not render them as schema rows or chips.
-  Schema branches stop expanding after 12 nested levels, so deeper descendants
-  are not rendered or counted.
+  counts reached), counted over what the viewer renders for each declared
+  operation: parameter rows (a path-item parameter under every operation beneath
+  it), response entries, media types, and the schemas they hold. A schema costs
+  one unit per node, primitive or not, one per rendered property, `items` and
+  `oneOf`/`anyOf`/`allOf` entry, and one per enum chip, up to 12. A local
+  `$ref` to an object costs two units wherever it appears, and the rest of its
+  target is counted once per document; so are the schemas and media types of a
+  referenced parameter, request body or response. Components no operation
+  reaches, descriptions, type/format strings, `required` names, `not`,
+  additional or pattern properties, `prefixItems`, examples and `x-*`
+  extensions are not counted.
+- A `$ref` in a parameter, request body, response or schema longer than 2 048
+  characters (`details.reason: "ref_too_long"`, `details.limit: 2048`).
 - A derived upstream URL, after server-variable expansion, must fit 2 000
   characters (`details.limit: 2000`, naming the server).
 - `routes` with no declared operation (`details.reason: "no_operations"`).

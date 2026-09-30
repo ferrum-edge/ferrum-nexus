@@ -27,6 +27,15 @@ export const MAX_OPENAPI_REF_HOPS = 32;
  */
 export const MAX_OPENAPI_POINTER_SEGMENTS = MAX_SPEC_DEPTH;
 
+/**
+ * Longest `$ref` string followed, in UTF-16 code units. A pointer is compared
+ * and scanned in full at every lookup, and a document can spell one out as
+ * long as its largest key, so an unbounded one makes every reference to it
+ * cost that key's length. Real pointers are a few hundred characters at most;
+ * a longer one names nothing, and the server refuses a document that uses one.
+ */
+export const MAX_OPENAPI_REF_LENGTH = 2_048;
+
 /** Why a Reference Object could not be followed. */
 export type OpenApiRefFailure = 'external' | 'missing' | 'cycle' | 'depth';
 
@@ -68,8 +77,8 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  * Segments are percent-decoded (a pointer in a URI fragment may be) and then
  * unescaped per RFC 6901 — `~1` before `~0`. Only own members are followed, so a
  * pointer can never walk into `__proto__` or other inherited properties. A
- * pointer with more than {@link MAX_OPENAPI_POINTER_SEGMENTS} segments names
- * nothing.
+ * pointer longer than {@link MAX_OPENAPI_REF_LENGTH} or with more than
+ * {@link MAX_OPENAPI_POINTER_SEGMENTS} segments names nothing.
  */
 export function resolveOpenApiPointer(document: unknown, ref: string): unknown {
   return walkPointer(document, ref, undefined);
@@ -81,6 +90,7 @@ function walkPointer(
   stats: OpenApiResolveStats | undefined,
 ): unknown {
   if (stats) stats.pointerLookups += 1;
+  if (ref.length > MAX_OPENAPI_REF_LENGTH) return undefined;
   if (ref === '#') return document;
   if (!ref.startsWith('#/')) return undefined;
   // Counted before splitting, so an overlong pointer costs one scan and no
@@ -189,7 +199,8 @@ function mergeOverrides(
  * memoised, and a later chain that reaches it stops there. Resolving a document
  * therefore costs one pointer walk per distinct reference string, however many
  * places use each one and however long the chains between them are; each walk
- * is bounded by {@link MAX_OPENAPI_POINTER_SEGMENTS}.
+ * is bounded by {@link MAX_OPENAPI_REF_LENGTH} and
+ * {@link MAX_OPENAPI_POINTER_SEGMENTS}.
  *
  * When `siblingsApply` is set (OpenAPI 3.1+), a `summary` or `description`
  * written next to a `$ref` replaces the target's; the outermost one wins. The

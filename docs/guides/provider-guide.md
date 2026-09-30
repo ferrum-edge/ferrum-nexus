@@ -60,16 +60,15 @@ Schema correctness and `$ref` resolution are not checked. Size limits:
 | Schema nodes + parameters + media types + responses | 100,000 |
 
 The last limit protects catalog readers, whose browsers render the document.
-It counts top-level component schemas; schema nodes (including primitives) in
-parameter and media schemas; each rendered property, `items`, and
-`oneOf`/`anyOf`/`allOf` entry; up to 12 enum chips per schema occurrence; and
-parameters, media types and responses. A local `$ref` and its resolved schema
-node count at each rendered occurrence. Descriptions, type/format strings,
-`required` names, `not`, additional or pattern properties, `prefixItems`,
-examples and `x-*` extensions do not count because the viewer does not render
-them as schema rows or chips. Schema branches stop expanding after 12 nested
-levels, so deeper descendants are not rendered or counted. A document past any
-limit is refused with `SPEC_INVALID` naming the limit.
+It counts what the documentation page shows for each operation: parameter
+rows, responses, media types, and each schema node (including primitives),
+property, `items` and `oneOf`/`anyOf`/`allOf` entry and enum value (up to 12)
+of the schemas they hold. Reuse is cheap: a `$ref` to a component costs two
+units wherever it appears, and the component itself is counted once, however
+many operations use it. Components no operation reaches, descriptions,
+examples and `x-*` extensions do not count. A `$ref` may be at most 2,048
+characters long. A document past any limit is refused with `SPEC_INVALID`
+naming the limit.
 
 A minimal document that publishes cleanly:
 

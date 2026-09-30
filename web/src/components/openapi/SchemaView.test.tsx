@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createRenderBudget, MAX_PAGE_NODES, SchemaView } from './SchemaView';
@@ -10,6 +12,27 @@ import {
 } from './parse';
 
 afterEach(cleanup);
+
+/** The table `server/src/publishing/oas.test.ts` checks the server's count against. */
+interface RenderUnitsFixture {
+  document: SpecNode;
+  cases: Array<{ name: string; schema: unknown; units: number }>;
+  divergences: Array<{ name: string; schema: unknown; server: number; viewer: number }>;
+}
+
+const fixturePath = join(
+  import.meta.dirname,
+  '../../../../shared/test-fixtures/openapi-schema-render-units.json',
+);
+const renderUnits = JSON.parse(readFileSync(fixturePath, 'utf8')) as RenderUnitsFixture;
+
+/** What SchemaView spends rendering one occurrence of `schema` with room to spare. */
+function spentOn(schema: unknown): number {
+  const budget = createRenderBudget(MAX_PAGE_NODES);
+  render(<SchemaView doc={renderUnits.document} budget={budget} schema={schema} />);
+  cleanup();
+  return MAX_PAGE_NODES - budget.remaining;
+}
 
 /**
  * A document that is only a few KB but expands combinatorially: each level has
@@ -117,6 +140,18 @@ describe('SchemaView', () => {
     expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
     expect(container.querySelectorAll('p.text-xs.text-fg-subtle')).toHaveLength(2);
     expect(refBudget.remaining).toBe(0);
+  });
+
+  it('spends on every shared fixture schema what the server counts for it', () => {
+    for (const { name, schema, units } of renderUnits.cases) {
+      expect(spentOn(schema), name).toBe(units);
+    }
+  });
+
+  it('spends what the shared fixture records where the server counts differently', () => {
+    for (const { name, schema, viewer } of renderUnits.divergences) {
+      expect(spentOn(schema), name).toBe(viewer);
+    }
   });
 
   it('marks a self-referential $ref as circular instead of recursing', () => {

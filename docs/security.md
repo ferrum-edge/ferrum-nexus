@@ -834,14 +834,25 @@ strangers allocating gateway resources should remove `provider` from
 A provider's OpenAPI document is rendered in the browser of every account that
 opens the catalog entry. Its rendering cost is bounded in three places:
 
-- **At publish.** Nexus counts what the viewer will walk (every schema value,
-  including primitive and boolean schemas, parameters, responses, media types
-  and inline schemas; each referenced parameter, request body or response
-  target is charged once) and refuses more than `MAX_SPEC_RENDER_UNITS`
+- **At publish.** Nexus counts what the viewer renders for each operation
+  (parameter rows, responses, media types, and every schema value they hold,
+  including primitive and boolean schemas, property, item and composition
+  entries and enum chips) and refuses more than `MAX_SPEC_RENDER_UNITS`
   (100,000) with `400 SPEC_INVALID`, `details.reason = "too_much_to_render"`.
+  The count is what rendering each part of the document once costs: a schema
+  `$ref` costs its row and its target's wherever it appears, and each
+  referenced schema, parameter, request body or response is charged in full
+  once. Each schema object is walked once, memoised by identity, so the count
+  is linear in the document however densely its components reference each
+  other. It does not bound what the viewer would spend expanding every
+  reference everywhere; the per-page budget below does.
 - **While following references.** One memoizing resolver per document follows
-  parameter, request-body and response `$ref`s; chains stop after 32 hops and a
-  pointer deeper than `MAX_SPEC_DEPTH` resolves to nothing.
+  parameter, request-body and response `$ref`s, and the render count resolves
+  each distinct schema `$ref` string once; chains stop after 32 hops and a
+  pointer deeper than `MAX_SPEC_DEPTH` resolves to nothing. A `$ref` longer
+  than `MAX_OPENAPI_REF_LENGTH` (2,048 characters) is refused at publish
+  (`details.reason = "ref_too_long"`) and resolves to nothing in the viewer, so
+  no lookup scans an attacker-sized key.
 - **At render.** The viewer spends one node budget across the whole page,
   charging primitive schema placeholders and the wrappers around schema
   properties, items and composition entries before constructing them. A branch

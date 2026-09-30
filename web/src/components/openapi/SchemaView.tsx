@@ -1,4 +1,4 @@
-import { MAX_OPENAPI_SCHEMA_RENDER_DEPTH } from '@ferrum-nexus/shared';
+import { MAX_OPENAPI_ENUM_CHIPS, MAX_OPENAPI_SCHEMA_RENDER_DEPTH } from '@ferrum-nexus/shared';
 import type { ReactElement, ReactNode } from 'react';
 import { cn } from '../../lib/cn';
 import { Badge } from '../ui/Badge';
@@ -124,7 +124,7 @@ function renderTypeLine({
   // Every `$ref` to this schema repeats these strings, so each is cut per occurrence.
   const typeText = displayText(parts.join(' '), MAX_DISPLAYED_NAME_LENGTH);
   const enumChips: ReactElement[] = [];
-  for (const [index, value] of (enumValues ?? []).slice(0, 12).entries()) {
+  for (const [index, value] of (enumValues ?? []).slice(0, MAX_OPENAPI_ENUM_CHIPS).entries()) {
     if (!chargeNode(budget)) {
       enumChips.push(<TruncationNotice key="__truncated" />);
       break;
@@ -158,8 +158,10 @@ function renderTypeLine({
       {enumValues ? (
         <span className="flex flex-wrap gap-1">
           {enumChips}
-          {enumValues.length > 12 ? (
-            <span className="text-xs text-fg-subtle">+{enumValues.length - 12} more</span>
+          {enumValues.length > MAX_OPENAPI_ENUM_CHIPS ? (
+            <span className="text-xs text-fg-subtle">
+              +{enumValues.length - MAX_OPENAPI_ENUM_CHIPS} more
+            </span>
           ) : null}
         </span>
       ) : null}
@@ -282,10 +284,11 @@ function renderNode(
     (asArray(node.allOf) && { key: 'allOf', entries: asArray(node.allOf) }) ??
     null;
 
-  // Children are built before the tree is returned, and each loop abandons its
-  // remaining siblings the moment the budget is gone: exhaustion has to stop
-  // *mounting*, not merely stop recursing, or a wide document still costs one
-  // rendered row per entry.
+  // Built in the order it is displayed: the type line and its enum chips first,
+  // then the children. Each loop abandons its remaining siblings the moment the
+  // budget is gone: exhaustion has to stop *mounting*, not merely stop
+  // recursing, or a wide document still costs one rendered row per entry.
+  const typeLine = renderTypeLine({ schema: node, budget });
   const compositionRows: ReactElement[] = [];
   for (const entry of composition?.entries ?? []) {
     if (budget.remaining < 2 || !chargeNode(budget)) {
@@ -332,7 +335,7 @@ function renderNode(
   return (
     <div>
       <SchemaRow name={name} required={required} depth={depth}>
-        {renderTypeLine({ schema: node, budget })}
+        {typeLine}
       </SchemaRow>
       {description ? (
         <p className={cn('text-xs text-fg-muted', depth > 0 && 'pl-3')} title={description.title}>

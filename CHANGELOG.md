@@ -11,7 +11,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - GHSA-r4wm-2vch-9jxm: OpenAPI rendering accounts for primitive schema values during
   publication checks and charges the page budget before rendering their
   placeholders or schema wrappers. Exhausted schema branches stop before
-  walking the remaining siblings.
+  walking the remaining siblings. The publication check walks each schema
+  object once and resolves each `$ref` string once, and refuses a `$ref` longer
+  than 2,048 characters, which the viewer now shows as unresolved.
 
 - Nodemailer 10.0.12 hardens SMTP message-body line endings by converting bare
   carriage returns to CRLF, and makes `requireTLS` fail instead of silently
@@ -19,10 +21,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
-- **OpenAPI render cost now matches the catalog viewer** (GHSA-r4wm-2vch-9jxm): the 100,000-unit
-  limit charges schema nodes and rendered property, item and composition entries, plus up to 12
-  enum chips per schema occurrence. It excludes schema keywords and values the viewer does not
-  render, such as descriptions, required names, examples, extensions and unsupported keywords.
+- **OpenAPI render cost is counted the way the catalog viewer renders**
+  (GHSA-r4wm-2vch-9jxm): the 100,000-unit limit charges every schema node,
+  primitive or not, each rendered property, item and composition entry, and up
+  to 12 enum chips per schema. A schema `$ref` costs two units wherever it
+  appears and its target once per document, and path-item parameters cost a row
+  under every operation. Components no operation reaches, descriptions,
+  required names, examples, extensions and other keywords the viewer does not
+  render are no longer counted. **Some documents that were accepted before are
+  now refused**, chiefly ones with many primitive schemas, wide `oneOf`, `anyOf`
+  or `allOf` lists or long enums, and ones using a `$ref` longer than 2,048
+  characters. The limit applies to revisions, revision comparisons and catalog
+  reads too, so an already published document over it can no longer be read
+  from the catalog until a revision within the limit replaces it.
 - Upgrade Nodemailer to 10.0.13. This also includes the 10.0.11 CommonJS and
   type compatibility fixes, the 10.0.12 fix that settles sends after connection
   errors, and 10.0.13 address-parsing fixes.

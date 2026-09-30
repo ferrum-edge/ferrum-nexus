@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import {
   MAX_OPENAPI_POINTER_SEGMENTS,
   MAX_OPENAPI_REF_HOPS,
+  MAX_OPENAPI_REF_LENGTH,
   createOpenApiRefResolver,
   keyOpenApiParameters,
   mergeOpenApiParameters,
@@ -56,6 +57,24 @@ describe('OpenAPI JSON pointers', () => {
 
     const stats: OpenApiResolveStats = { pointerLookups: 0, pointerSegments: 0 };
     const resolver = createOpenApiRefResolver(deep, { stats });
+    assert.deepEqual(resolver.resolve({ $ref: beyond }), {
+      ok: false,
+      ref: beyond,
+      reason: 'missing',
+    });
+    assert.equal(stats.pointerSegments, 0);
+  });
+
+  it('refuses a pointer longer than the length limit without walking it', () => {
+    // `#/` and a key: the longest pointer that is followed, and one character more.
+    const key = 'k'.repeat(MAX_OPENAPI_REF_LENGTH - 2);
+    const document = { [key]: { type: 'string' }, [`${key}k`]: { type: 'string' } };
+    const beyond = `#/${key}k`;
+    assert.deepEqual(resolveOpenApiPointer(document, `#/${key}`), { type: 'string' });
+    assert.equal(resolveOpenApiPointer(document, beyond), undefined);
+
+    const stats: OpenApiResolveStats = { pointerLookups: 0, pointerSegments: 0 };
+    const resolver = createOpenApiRefResolver(document, { stats });
     assert.deepEqual(resolver.resolve({ $ref: beyond }), {
       ok: false,
       ref: beyond,
