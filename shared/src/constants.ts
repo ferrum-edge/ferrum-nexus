@@ -236,6 +236,10 @@ export const CSRF_HEADER = 'X-Nexus-CSRF';
 /** Lowercased {@link CSRF_HEADER}, matching Node's normalized header keys. */
 export const CSRF_HEADER_LOWER = 'x-nexus-csrf';
 
+/** Ferrum Edge attribution header and value for resources created by Nexus. */
+export const FERRUM_PROVISIONED_BY_HEADER = 'X-Ferrum-Provisioned-By';
+export const FERRUM_PROVISIONED_BY_VALUE = 'ferrum-nexus';
+
 /** localStorage key persisting the user's light/dark theme choice. */
 export const THEME_STORAGE_KEY = 'nexus:theme';
 

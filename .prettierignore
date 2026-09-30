@@ -13,3 +13,6 @@ NOTICE
 # Agent tooling ported from ferrum-edge; kept byte-identical to ease re-syncing
 .claude/
 .agents/
+
+# Pinned external contract files must remain byte-identical to their release.
+contracts/ferrum-contracts/

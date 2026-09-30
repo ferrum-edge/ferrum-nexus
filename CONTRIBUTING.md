@@ -89,6 +89,13 @@ The full list of architecture rules is in [CLAUDE.md](CLAUDE.md).
 - Small, focused PRs with a clear description of behavior changes.
 - Add or update tests for anything you change.
 - Update `CHANGELOG.md` under `[Unreleased]` for user-visible changes.
+- Ferrum Edge vocabularies adopted by Nexus are vendored under
+  [`contracts/ferrum-contracts/`](contracts/ferrum-contracts/) and pinned in its `PIN` file. To
+  bump the pin, download the adopted vocabulary files from the new immutable
+  `contracts-edge-*` tag, update the tag, peeled commit SHA and each file's SHA-256 in `PIN`, then
+  run CI. The shared contract test verifies the recorded digests and checks Nexus's local entries
+  against the vendored vocabularies. Keep the vendored files out of formatting so their bytes stay
+  identical to the tagged release.
 - A new audit event must be:
   - added to the catalog in [docs/security.md](docs/security.md#10-audit-event-catalog);
   - classified in `AUDIT_COMMIT_CLASSES` (`server/src/audit/service.ts`). A `transactional` or

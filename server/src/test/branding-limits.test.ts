@@ -412,6 +412,20 @@ describe('branding and session cookies', () => {
     assert.equal(await sessionExpiry(session), expiresAt, 'branding does not slide the session');
   });
 
+  it('does not slide an aged session on HEAD /api/branding', async () => {
+    const { session, expiresAt } = await agedSession('aged-head-branding@example.test');
+
+    const response = await harness.app.inject({
+      method: 'HEAD',
+      url: '/api/branding',
+      headers: { cookie: session.cookieHeader },
+    });
+
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(response.headers['set-cookie'], undefined, 'HEAD does not set cookies');
+    assert.equal(await sessionExpiry(session), expiresAt, 'HEAD does not slide the session');
+  });
+
   it('still slides the session on other API routes, with an uncacheable response', async () => {
     const { session, expiresAt } = await agedSession('aged-me@example.test');
     // Branding first: it must leave the renewal to the next ordinary request.

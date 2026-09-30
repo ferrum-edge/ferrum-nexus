@@ -121,7 +121,10 @@ mode holds when the record changes later.
   cookies to another client. Every response that sets or clears a cookie
   carries `Cache-Control: private, no-store` and `Vary: Cookie`, whatever its
   route set: a root `onSend` hook enforces it on `200`, `304` and error
-  responses alike, after the cookies are serialized.
+  responses alike, after the cookies are serialized. This covers cookies set
+  through Fastify's reply API; raw `reply.raw.setHeader` or `writeHead` calls
+  and hijacked replies bypass the hook, so those paths must not set cookies.
+  No such path exists today.
 - **Sliding expiry.** Default idle lifetime 12 hours (`NEXUS_SESSION_TTL`,
   seconds). Every API request extends the session, but the row is only written
   when less than half the TTL remains. That write also re-issues both cookies
