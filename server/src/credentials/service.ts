@@ -2190,11 +2190,11 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     issueForConsumer,
 
     async initializeLegacyBasicAuthPositions(): Promise<void> {
-      if (await store.settings.get(LEGACY_BASICAUTH_SCAN_SETTING)) {
-        legacyScanState = 'completed';
-        return;
-      }
       try {
+        if (await store.settings.get(LEGACY_BASICAUTH_SCAN_SETTING)) {
+          legacyScanState = 'completed';
+          return;
+        }
         await scanLegacyBasicAuthAppends();
         // Only a scan that reached the end is recorded: one that failed part
         // way through runs again from the start on the next boot, and every
