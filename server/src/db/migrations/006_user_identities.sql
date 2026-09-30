@@ -1,4 +1,4 @@
--- Ferrum Nexus 006 — identity-provider links and address proofs (SQLite dialect).
+-- Ferrum Nexus 006 — identity-provider links, address proofs and password locks (SQLite dialect).
 --
 -- `user_identities`: one row per portal account linked to one subject (`sub`)
 -- at one OpenID Connect provider. A returning single sign-on is matched on
@@ -14,6 +14,11 @@
 -- evidence: with verification off a registration is marked verified without
 -- any. Only a proof for the account's current address allows single sign-on
 -- to link to it; accounts that predate this table have none.
+--
+-- `user_password_locks`: accounts that may never use a local password, because
+-- an identity provider created them. Kept apart from the links on purpose:
+-- removing the provider or unlinking the identity must not hand the account a
+-- password (through a reset) that outlives the provider's offboarding.
 --
 -- A forward migration that only adds tables, so an upgraded database keeps
 -- every row as it was (docs/operations.md, "Schema versioning and upgrades").
@@ -40,4 +45,10 @@ CREATE TABLE IF NOT EXISTS user_email_proofs (
   proven_at  TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_password_locks (
+  user_id     TEXT PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+  provider_id TEXT NOT NULL,
+  created_at  TEXT NOT NULL
 );

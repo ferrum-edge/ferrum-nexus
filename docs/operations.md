@@ -2306,7 +2306,8 @@ environment cannot also be saved in settings. At most 10 providers in all.
 
 A saved provider's `issuer` cannot change while accounts are linked through it:
 the links belong to the old issuer's subjects. Remove the provider, which
-deletes its links, and add it again. If an environment provider is later
+deletes its links, and add it again. Accounts it provisioned keep their
+password lock (see "How accounts are matched"). If an environment provider is later
 declared with the id of a saved one, the environment provider is in force. The
 settings page then lists the saved one as shadowed
 (`shadowed_provider_ids`), and saving the providers removes it. The
@@ -2354,7 +2355,9 @@ Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
   has linked their own account to an enabled provider.
 - **Allowed email domains.** When set, every single sign-on must present an
   address the provider verified in one of these domains. That includes
-  returning users. Domains match exactly: `example.com` does not admit
+  returning users, so once a list is set, a provider that never sends
+  `email_verified` (Entra ID, for one) is refused for everyone
+  (`email_not_verified`). Domains match exactly: `example.com` does not admit
   `sub.example.com`. A provider's own `allowed_email_domains` applies as well
   when it links or provisions.
 - **Deprovision on access loss.** Off by default. When on, a sign-in whose
@@ -2390,7 +2393,11 @@ Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
 3. Otherwise a new account is created (`jit_provisioning`) with the mapped role
    and organization. It has no usable password: password sign-in fails,
    **Forgot password** sends nothing, and a reset link is refused. The account
-   signs in through its provider only.
+   signs in through its provider only. This lock is kept apart from the link
+   and cannot be cleared. Unlinking the identity or removing the provider
+   leaves the account active but with no way to sign in until a provider
+   links it again by its proven address. To end such an account's access,
+   disable it.
 
 **Explicit linking.** A signed-in user links their own account from **Profile →
 Linked sign-in**, whatever address the provider holds. The provider's domain
@@ -2402,7 +2409,8 @@ when it is linked, so the provider's offboarding and MFA do not bind it: it
 can still sign in with the password. Set `disable_local_password_for_linked`
 on the provider, or use `sso_only`, where that matters. With the flag on,
 password sign-in and reset are refused for every account linked at that
-provider while the link exists.
+provider while the link exists. A `super_admin` is exempt from all of this, so
+break-glass sign-in and password reset always work for one.
 
 Administrators see and remove an account's links with
 `GET /api/users/:id/identities` and

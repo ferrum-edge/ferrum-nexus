@@ -147,6 +147,8 @@ import type {
   EmailProofMethod,
   EmailProofRecord,
   EmailProofRepo,
+  PasswordLockRecord,
+  PasswordLockRepo,
   EmailTemplateRecord,
   EmailTemplateRepo,
   GatewayIdentityRecord,
@@ -205,6 +207,7 @@ const COLLECTIONS = {
   users: 'users',
   userIdentities: 'user_identities',
   emailProofs: 'user_email_proofs',
+  passwordLocks: 'user_password_locks',
   sessions: 'sessions',
   applications: 'applications',
   apis: 'apis',
@@ -479,6 +482,14 @@ function mapEmailProof(row: Row): EmailProofRecord {
     proven_at: str(row.proven_at),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
+  };
+}
+
+function mapPasswordLock(row: Row): PasswordLockRecord {
+  return {
+    user_id: str(row._id),
+    provider_id: str(row.provider_id),
+    created_at: str(row.created_at),
   };
 }
 
@@ -1340,8 +1351,9 @@ export const MESSAGE_THREAD_LATEST_INDEXES: readonly IndexDefinition[] = [
  * SQL dialects declare as unique constraints. `(provider_id, issuer, subject)`
  * decides whose account a returning sign-in opens; `(user_id, provider_id)`
  * keeps an account to one identity per provider and serves the per-account
- * listing. `user_email_proofs` is keyed by `_id` (the account id) and needs no
- * index. Neither collection needs a creation step; the first insert makes it.
+ * listing. `user_email_proofs` and `user_password_locks` are keyed by `_id`
+ * (the account id) and need no index. No collection needs a creation step;
+ * the first insert makes it.
  */
 export const USER_IDENTITY_INDEXES: readonly IndexDefinition[] = [
   {
@@ -1961,6 +1973,25 @@ class MongoStore implements NexusStore {
         await this.col(COLLECTIONS.emailProofs).findOne({ _id: userId }, this.opts),
       );
       return row ? mapEmailProof(row) : null;
+    },
+  };
+
+  /* ── passwordLocks ────────────────────────────────────────────────────── */
+
+  readonly passwordLocks: PasswordLockRepo = {
+    create: async (userId, providerId, at) => {
+      await this.col(COLLECTIONS.passwordLocks).updateOne(
+        { _id: userId },
+        { $setOnInsert: { provider_id: providerId, created_at: at } },
+        { ...this.opts, upsert: true },
+      );
+    },
+
+    findByUser: async (userId) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.passwordLocks).findOne({ _id: userId }, this.opts),
+      );
+      return row ? mapPasswordLock(row) : null;
     },
   };
 

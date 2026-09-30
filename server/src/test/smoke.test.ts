@@ -3665,6 +3665,18 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.emailProofs.findByUser(newId()), null);
     });
 
+    it('passwordLocks: one lock per account, kept by a second one', async () => {
+      const account = await makeUser();
+      assert.equal(await store.passwordLocks.findByUser(account.id), null);
+      const first = nowIso();
+      await store.passwordLocks.create(account.id, 'corp', first);
+      const lock = await store.passwordLocks.findByUser(account.id);
+      assert.deepEqual(lock, { user_id: account.id, provider_id: 'corp', created_at: first });
+      await store.passwordLocks.create(account.id, 'partner', isoInSeconds(60));
+      assert.deepEqual(await store.passwordLocks.findByUser(account.id), lock);
+      assert.equal(await store.passwordLocks.findByUser(newId()), null);
+    });
+
     /* ── gateway identities ───────────────────────────────────────────── */
 
     it('gatewayIdentities: one registration per name, moved by a later claim', async () => {

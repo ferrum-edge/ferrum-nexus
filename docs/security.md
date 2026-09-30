@@ -12,19 +12,19 @@ Related: [`architecture.md`](architecture.md) · [`operations.md`](operations.md
 
 ### Assets
 
-| Asset                                                        | Where it lives                                                                   | Why it matters                                                                                               |
-| ------------------------------------------------------------ | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Ferrum Edge admin authority                                  | `FERRUM_ADMIN_JWT_SECRET` in the Nexus process                                   | Full control of the gateway: any proxy, any consumer, any credential.                                        |
-| Gateway credentials (API keys, basic passwords, JWT secrets) | Generated in Nexus, stored **only** on Edge; Nexus keeps a fingerprint + last4   | Impersonation of a portal user against every API they are approved for.                                      |
-| Portal sessions                                              | `sessions` table (HMAC of the token) + browser cookie                            | Impersonation of a portal user, including admins.                                                            |
-| Identity-provider links                                      | `user_identities` (provider id + issuer + `sub`), `user_email_proofs`            | Which account a single sign-on opens: a wrong link, or a forged proof of an address, is an account takeover. |
-| Password hashes                                              | `users.password_hash` (scrypt)                                                   | Credential stuffing elsewhere if cracked.                                                                    |
-| Encrypted settings                                           | `app_settings` (`smtp.password`, `captcha.secret_key`, `sso.client_secret.<id>`) | Relay abuse; disabling bot protection; posing as the portal to an IdP.                                       |
-| Single-use links in queued mail                              | `email_outbox` (sealed: AES-256-GCM)                                             | Account takeover through a password-reset link.                                                              |
-| Master secret                                                | `NEXUS_SECRET_KEY`                                                               | Derives the settings-encryption, outbox-sealing and session-HMAC keys.                                       |
-| Audit log                                                    | `audit_logs`                                                                     | The record of who did what.                                                                                  |
-| Access decisions                                             | `access_requests`, `grants`                                                      | Who may call which API.                                                                                      |
-| Unpublished API documentation                                | `api_specs`                                                                      | Business-sensitive interface detail.                                                                         |
+| Asset                                                        | Where it lives                                                                               | Why it matters                                                                                                                                            |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ferrum Edge admin authority                                  | `FERRUM_ADMIN_JWT_SECRET` in the Nexus process                                               | Full control of the gateway: any proxy, any consumer, any credential.                                                                                     |
+| Gateway credentials (API keys, basic passwords, JWT secrets) | Generated in Nexus, stored **only** on Edge; Nexus keeps a fingerprint + last4               | Impersonation of a portal user against every API they are approved for.                                                                                   |
+| Portal sessions                                              | `sessions` table (HMAC of the token) + browser cookie                                        | Impersonation of a portal user, including admins.                                                                                                         |
+| Identity-provider links                                      | `user_identities` (provider id + issuer + `sub`), `user_email_proofs`, `user_password_locks` | Which account a single sign-on opens: a wrong link, or a forged proof of an address, is an account takeover; a lost lock hands an SSO account a password. |
+| Password hashes                                              | `users.password_hash` (scrypt)                                                               | Credential stuffing elsewhere if cracked.                                                                                                                 |
+| Encrypted settings                                           | `app_settings` (`smtp.password`, `captcha.secret_key`, `sso.client_secret.<id>`)             | Relay abuse; disabling bot protection; posing as the portal to an IdP.                                                                                    |
+| Single-use links in queued mail                              | `email_outbox` (sealed: AES-256-GCM)                                                         | Account takeover through a password-reset link.                                                                                                           |
+| Master secret                                                | `NEXUS_SECRET_KEY`                                                                           | Derives the settings-encryption, outbox-sealing and session-HMAC keys.                                                                                    |
+| Audit log                                                    | `audit_logs`                                                                                 | The record of who did what.                                                                                                                               |
+| Access decisions                                             | `access_requests`, `grants`                                                                  | Who may call which API.                                                                                                                                   |
+| Unpublished API documentation                                | `api_specs`                                                                                  | Business-sensitive interface detail.                                                                                                                      |
 
 ### Adversaries
 
@@ -378,13 +378,24 @@ settings. Every change is written as `auth.sso_claims_sync` by the system actor
 in the sign-in's transaction.
 
 **Passwords after single sign-on.** An account that an identity provider
-provisioned has no password to use: password sign-in fails like a wrong
-password, and a forgotten-password request sends nothing and a reset link is
+provisioned has no password to use. Password sign-in fails like a wrong
+password, a forgotten-password request sends nothing, and a reset link is
 refused. Otherwise a reset would give the holder a password that outlives the
-provider's offboarding. A pre-existing account that was **linked** keeps its
-password unless that provider sets `disable_local_password_for_linked` (off by
-default). With the flag on, password sign-in and reset are refused the same way
-while the link exists.
+provider's offboarding. Provisioning records this in `user_password_locks`,
+apart from the links, so it survives an administrator unlinking the identity
+and the provider's removal. Nothing clears it: there is no API or setting for
+that. Such an account stays active after its provider is removed, but can come
+back only through another provider that links it (its address was proven when
+it was provisioned).
+
+A pre-existing account that was **linked** keeps its password unless that
+provider sets `disable_local_password_for_linked` (off by default). With the
+flag on, password sign-in and reset are refused the same way, while the link
+exists and the provider is configured.
+
+**A `super_admin` is never refused a password**, whatever its links. That keeps
+break-glass sign-in (`NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN`) and a reset available
+to one, including when the provider it is linked to is down.
 
 **Losing access.** Claims that map to no role refuse the sign-in
 (`access_denied`). With `deprovision_on_access_loss`, the account is also
@@ -408,8 +419,8 @@ password**:
 - for a provisioned account;
 - for an account linked to a provider with `disable_local_password_for_linked`.
 
-Any other linked account can still sign in with its password, which the
-provider knows nothing about.
+None of these binds a `super_admin` (above). Any other linked account can still
+sign in with its password, which the provider knows nothing about.
 
 **Login policy.** `local_only`, `sso_only` or `local_and_sso`. The default is
 `local_and_sso`, which with no provider is `local_only` in effect. `sso_only`

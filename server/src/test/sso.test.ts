@@ -179,6 +179,24 @@ async function signIn(
   return finish(h, providerId, await begin(h, idp, providerId, claims, returnTo));
 }
 
+/** The account can neither sign in with a password nor get a reset link. */
+async function assertNoLocalPassword(h: TestApp, email: string): Promise<void> {
+  const login = await h.app.inject({
+    method: 'POST',
+    url: '/api/auth/login',
+    payload: { email, password: TEST_PASSWORD },
+  });
+  assert.equal(login.statusCode, 401, login.body);
+  const forgot = await h.app.inject({
+    method: 'POST',
+    url: '/api/auth/forgot-password',
+    payload: { email },
+  });
+  assert.equal(forgot.statusCode, 200, forgot.body);
+  const mailed = (await h.outbox()).filter((message) => message.to_email === email);
+  assert.deepEqual(mailed, [], 'no reset link is issued');
+}
+
 function providersEnv(corp: MockOidcProvider, partner: MockOidcProvider): string {
   return JSON.stringify([
     {
@@ -1010,6 +1028,14 @@ describe('single sign-on', () => {
       (row) => row.target_id === SSO_SETTINGS_KEY,
     );
     assert.deepEqual(removal?.details.links_removed, { lifecycle: 1 });
+    // The account it provisioned stays active, and still has no password: a
+    // reset must not keep a user the provider offboarded.
+    assert.equal((await h.store.users.findById(account.user.id))?.status, 'active');
+    assert.equal(
+      (await h.store.passwordLocks.findByUser(account.user.id))?.provider_id,
+      'lifecycle',
+    );
+    await assertNoLocalPassword(h, who.email);
     assert.equal((await put([provider])).statusCode, 200);
     // The same subject, now asserting another address, is a stranger: the
     // old link did not survive to open the old account.
@@ -1086,6 +1112,8 @@ describe('single sign-on', () => {
       (row) => row.target_id === session.user.id,
     );
     assert.equal(unlink?.details.subject, who.sub);
+    // Unlinking the identity that provisioned the account gives it no password.
+    await assertNoLocalPassword(h, who.email);
     // The client itself cannot.
     const forbidden = await h.authed(session, {
       method: 'GET',
@@ -1352,6 +1380,32 @@ describe('single sign-on login policies', () => {
         payload: { email: client.user.email, password: TEST_PASSWORD },
       });
       assert.equal(refused.statusCode, 401, refused.body);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('keeps break-glass open to a super admin linked to a strict provider', async () => {
+    const h = await app(true);
+    try {
+      const founder = await h.registerUser({ email: 'strict-founder@corp.example.test' });
+      // partner sets disable_local_password_for_linked, which binds everyone
+      // linked there but a super admin.
+      const linked = await link(h, partner, 'partner', founder, {
+        sub: 'strict-founder-subject',
+        groups: ['partners'],
+      });
+      assert.equal(ssoError(linked), null);
+      assert.equal((await h.loginUser(founder.user.email)).user.id, founder.user.id);
+      const put = await h.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/sso',
+        payload: { policy: 'sso_only' },
+      });
+      assert.equal(put.statusCode, 200, put.body);
+      // Were the provider down, break-glass would still let the super admin in.
+      const admitted = await h.loginUser(founder.user.email);
+      assert.equal(admitted.user.role, 'super_admin');
     } finally {
       await h.close();
     }

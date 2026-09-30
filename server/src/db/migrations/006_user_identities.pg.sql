@@ -1,4 +1,4 @@
--- Ferrum Nexus 006 — identity-provider links and address proofs (PostgreSQL dialect).
+-- Ferrum Nexus 006 — identity-provider links, address proofs and password locks (PostgreSQL dialect).
 --
 -- Mirrors 006_user_identities.sql; see there for what the tables record.
 CREATE TABLE IF NOT EXISTS user_identities (
@@ -24,4 +24,10 @@ CREATE TABLE IF NOT EXISTS user_email_proofs (
   proven_at  TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_password_locks (
+  user_id     TEXT PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+  provider_id TEXT NOT NULL,
+  created_at  TEXT NOT NULL
 );

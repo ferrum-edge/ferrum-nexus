@@ -230,7 +230,7 @@ describe('buildout schema baseline', () => {
     }
   });
 
-  it('adds identity-provider links and address proofs as a replayable forward migration', () => {
+  it('adds identity-provider links, proofs and password locks as a replayable migration', () => {
     for (const dialect of ['sqlite', 'pg', 'mysql'] as const) {
       const forward = loadMigrations(dialect).find((file) => file.id === '006_user_identities');
       assert.ok(forward, `${dialect} ships 006_user_identities`);
@@ -238,7 +238,7 @@ describe('buildout schema baseline', () => {
       const statements = splitSqlStatements(forward.sql);
       assert.deepEqual(
         statements.map((statement) => /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement)?.[1]),
-        ['user_identities', 'user_email_proofs'],
+        ['user_identities', 'user_email_proofs', 'user_password_locks'],
       );
     }
 
@@ -288,11 +288,16 @@ describe('buildout schema baseline', () => {
       `),
         /CHECK constraint failed/,
       );
-      // Deleting the account takes its links and its proof with it.
+      db.exec(`
+        INSERT INTO user_password_locks (user_id, provider_id, created_at)
+          VALUES ('u', 'corp', 'now');
+      `);
+      // Deleting the account takes its links, its proof and its lock with it.
       db.exec("DELETE FROM users WHERE id = 'u'");
       const remaining = db.prepare('SELECT id FROM user_identities ORDER BY id').all();
       assert.deepEqual(remaining, [{ id: 'l' }, { id: 'm' }]);
       assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM user_email_proofs').get(), { n: 0 });
+      assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM user_password_locks').get(), { n: 0 });
     } finally {
       db.close();
     }

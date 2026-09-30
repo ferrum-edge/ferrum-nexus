@@ -93,6 +93,8 @@ import type {
   EmailProofMethod,
   EmailProofRecord,
   EmailProofRepo,
+  PasswordLockRecord,
+  PasswordLockRepo,
   EmailTemplateRecord,
   EmailTemplateRepo,
   GatewayIdentityRecord,
@@ -257,6 +259,14 @@ function mapEmailProof(row: Row): EmailProofRecord {
     proven_at: text(row.proven_at),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
+  };
+}
+
+function mapPasswordLock(row: Row): PasswordLockRecord {
+  return {
+    user_id: text(row.user_id),
+    provider_id: text(row.provider_id),
+    created_at: text(row.created_at),
   };
 }
 
@@ -800,6 +810,7 @@ export interface SqlRepos {
   users: UserRepo;
   userIdentities: UserIdentityRepo;
   emailProofs: EmailProofRepo;
+  passwordLocks: PasswordLockRepo;
   organizations: OrganizationRepo;
   sessions: SessionRepo;
   apis: ApiRepo;
@@ -1087,6 +1098,30 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         userId,
       ]);
       return row ? mapEmailProof(row) : null;
+    },
+  };
+
+  /* ── passwordLocks ──────────────────────────────────────────────────── */
+
+  // Idempotent: a second lock of the same account rewrites its key only.
+  const PASSWORD_LOCK_INSERT = upsertSql(
+    dialect,
+    'user_password_locks',
+    ['user_id', 'provider_id', 'created_at'],
+    'user_id',
+    ['user_id'],
+  );
+
+  const passwordLocks: PasswordLockRepo = {
+    create: async (userId, providerId, at) => {
+      await execute(exec, PASSWORD_LOCK_INSERT, [userId, providerId, at]);
+    },
+
+    findByUser: async (userId) => {
+      const row = await queryOne(exec, 'SELECT * FROM user_password_locks WHERE user_id = ?', [
+        userId,
+      ]);
+      return row ? mapPasswordLock(row) : null;
     },
   };
 
@@ -3499,6 +3534,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     users,
     userIdentities,
     emailProofs,
+    passwordLocks,
     organizations,
     sessions,
     apis,
@@ -3593,6 +3629,7 @@ class SqlStore implements NexusStore {
   readonly users: UserRepo;
   readonly userIdentities: UserIdentityRepo;
   readonly emailProofs: EmailProofRepo;
+  readonly passwordLocks: PasswordLockRepo;
   readonly organizations: OrganizationRepo;
   readonly sessions: SessionRepo;
   readonly apis: ApiRepo;
@@ -3640,6 +3677,7 @@ class SqlStore implements NexusStore {
     this.users = repos.users;
     this.userIdentities = repos.userIdentities;
     this.emailProofs = repos.emailProofs;
+    this.passwordLocks = repos.passwordLocks;
     this.organizations = repos.organizations;
     this.sessions = repos.sessions;
     this.apis = repos.apis;

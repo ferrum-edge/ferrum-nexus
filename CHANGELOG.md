@@ -68,10 +68,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     linking and provisioning; both apply when both are set, and either
     requires a provider-verified address.
   - **Passwords.** An account created by single sign-on cannot use password
-    sign-in or password reset. A linked pre-existing account keeps its password
-    unless its provider sets `disable_local_password_for_linked`. The
-    provider's offboarding and MFA bind an account only under `sso_only`, for
-    a provisioned account, or with that flag.
+    sign-in or password reset. The lock is kept apart from the link, so
+    unlinking the identity or removing the provider does not lift it, and
+    nothing clears it. A linked pre-existing account keeps its password unless
+    its provider sets `disable_local_password_for_linked`. A `super_admin` is
+    exempt from both, so break-glass sign-in always works for one. The
+    provider's offboarding and MFA bind an account only under `sso_only`, for a
+    provisioned account, or with that flag.
   - **Groups and claims map to roles and organizations.** Mappings can grant
     `client`, `provider` or `admin`, never `super_admin`. An account that is a
     `super_admin` is never changed by claims, and is never refused for claims
@@ -95,10 +98,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     change. `auth.login` records `break_glass: true`. No token, code or secret
     is written to the audit log or the server log.
   - **Migration.** Forward migration `006_user_identities` on all four backends
-    adds two tables:
+    adds three tables:
     - `user_identities`, unique on provider, issuer and subject, and on account
       and provider;
-    - `user_email_proofs`.
+    - `user_email_proofs`;
+    - `user_password_locks`.
 
     It only adds tables. Upgraded databases keep every row, and existing
     accounts start with no recorded proof.

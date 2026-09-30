@@ -1261,6 +1261,7 @@ describe('sqlite store', () => {
         users: true,
         userIdentities: true,
         emailProofs: true,
+        passwordLocks: true,
         organizations: true,
         sessions: true,
         applications: true,

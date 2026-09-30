@@ -747,8 +747,9 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       }
       // An account an identity provider provisioned, or one linked to a
       // provider that forbids it, signs in there: a password set through a
-      // reset must not outlive the provider's offboarding.
-      if (await localPasswordBlocked(config, store, record.id)) {
+      // reset must not outlive the provider's offboarding. Never a super
+      // admin's, so break-glass keeps working.
+      if (await localPasswordBlocked(config, store, record)) {
         throw unauthorized('Email address or password is incorrect');
       }
       if (record.status !== 'active') {
@@ -958,7 +959,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         const record = await store.users.findByEmail(email);
         if (!record || record.status !== 'active') return;
         // No password to reset: such an account signs in with its provider.
-        if (await localPasswordBlocked(config, store, record.id)) return;
+        if (await localPasswordBlocked(config, store, record)) return;
         const existing = await store.verificationTokens.findLatestLiveForUser(
           record.id,
           'password_reset',
@@ -1036,7 +1037,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       const record = await store.users.findById(row.user_id);
       if (!record) throw invalidResetLink();
       if (record.status !== 'active') throw userDisabled();
-      if (await localPasswordBlocked(config, store, record.id)) throw invalidResetLink();
+      if (await localPasswordBlocked(config, store, record)) throw invalidResetLink();
 
       // Hash outside the transaction: scrypt takes ~100 ms and holding a write
       // transaction open across it would serialise unrelated work behind it.

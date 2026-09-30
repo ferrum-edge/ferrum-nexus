@@ -1079,8 +1079,9 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
             assert.equal(found?.user_id, ID.client);
             assert.equal(await store.userIdentities.delete(identity.id), true);
             // No account upgraded from an earlier release holds an address
-            // proof, whatever its `email_verified` says.
+            // proof, whatever its `email_verified` says, or a password lock.
             assert.equal(await store.emailProofs.findByUser(ID.client), null);
+            assert.equal(await store.passwordLocks.findByUser(ID.client), null);
 
             // Re-running in the same process changes nothing.
             await store.migrate();

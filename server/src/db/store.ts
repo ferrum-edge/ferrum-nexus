@@ -220,6 +220,18 @@ export interface EmailProofRecord {
   updated_at: IsoTimestamp;
 }
 
+/**
+ * A `user_password_locks` row: the account has no local password, because an
+ * identity provider created it (`provider_id`). It is independent of the
+ * account's links, so removing the provider or unlinking the identity does not
+ * hand the account a password it never had. Nothing clears it.
+ */
+export interface PasswordLockRecord {
+  user_id: Uuid;
+  provider_id: string;
+  created_at: IsoTimestamp;
+}
+
 /** A `sessions` row. The plaintext token exists only in the browser cookie. */
 export interface SessionRecord {
   id: Uuid;
@@ -822,6 +834,13 @@ export interface EmailProofRepo {
   /** Record (or replace) the account's proof. */
   upsert(userId: Uuid, email: string, method: EmailProofMethod, at: IsoTimestamp): Promise<void>;
   findByUser(userId: Uuid): Promise<EmailProofRecord | null>;
+}
+
+/** Accounts that may never use a local password. */
+export interface PasswordLockRepo {
+  /** Record the lock. Idempotent: an account already locked keeps its row. */
+  create(userId: Uuid, providerId: string, at: IsoTimestamp): Promise<void>;
+  findByUser(userId: Uuid): Promise<PasswordLockRecord | null>;
 }
 
 /** Browser sessions. */
@@ -1824,6 +1843,7 @@ export interface NexusStore {
   readonly users: UserRepo;
   readonly userIdentities: UserIdentityRepo;
   readonly emailProofs: EmailProofRepo;
+  readonly passwordLocks: PasswordLockRepo;
   readonly organizations: OrganizationRepo;
   readonly sessions: SessionRepo;
   readonly applications: ApplicationRepo;

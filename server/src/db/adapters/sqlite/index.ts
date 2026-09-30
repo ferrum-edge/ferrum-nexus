@@ -138,6 +138,8 @@ import type {
   EmailProofMethod,
   EmailProofRecord,
   EmailProofRepo,
+  PasswordLockRecord,
+  PasswordLockRepo,
   EmailTemplateRecord,
   EmailTemplateRepo,
   EnqueueEmailInput,
@@ -310,6 +312,14 @@ function mapEmailProof(row: Row): EmailProofRecord {
     proven_at: text(row.proven_at),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
+  };
+}
+
+function mapPasswordLock(row: Row): PasswordLockRecord {
+  return {
+    user_id: text(row.user_id),
+    provider_id: text(row.provider_id),
+    created_at: text(row.created_at),
   };
 }
 
@@ -808,6 +818,7 @@ class SqliteStore implements NexusStore {
     this.users = guardRepo(this.users, mediate);
     this.userIdentities = guardRepo(this.userIdentities, mediate);
     this.emailProofs = guardRepo(this.emailProofs, mediate);
+    this.passwordLocks = guardRepo(this.passwordLocks, mediate);
     this.organizations = guardRepo(this.organizations, mediate);
     this.sessions = guardRepo(this.sessions, mediate);
     this.applications = guardRepo(this.applications, mediate);
@@ -1195,6 +1206,26 @@ class SqliteStore implements NexusStore {
     findByUser: async (userId) => {
       const row = queryOne(this.db, 'SELECT * FROM user_email_proofs WHERE user_id = ?', [userId]);
       return row ? mapEmailProof(row) : null;
+    },
+  };
+
+  /* ── passwordLocks ────────────────────────────────────────────────────── */
+
+  readonly passwordLocks: PasswordLockRepo = {
+    create: async (userId, providerId, at) => {
+      execute(
+        this.db,
+        `INSERT INTO user_password_locks (user_id, provider_id, created_at) VALUES (?, ?, ?)
+         ON CONFLICT (user_id) DO NOTHING`,
+        [userId, providerId, at],
+      );
+    },
+
+    findByUser: async (userId) => {
+      const row = queryOne(this.db, 'SELECT * FROM user_password_locks WHERE user_id = ?', [
+        userId,
+      ]);
+      return row ? mapPasswordLock(row) : null;
     },
   };
 

@@ -18,6 +18,7 @@ import {
   DEFAULT_LOGIN_POLICY,
   isLoginPolicy,
   type LoginPolicy,
+  type Role,
   type SsoProviderSettings,
   type SsoProviderSource,
 } from '@ferrum-nexus/shared';
@@ -125,20 +126,25 @@ export function shadowedProviderIds(config: NexusConfig, stored: StoredSsoSettin
 /**
  * Whether an account may no longer use a password — sign-in or reset.
  *
- * True for an account an identity provider provisioned: it never had a
- * password, and one set later through a reset would let its holder keep
- * access after the provider offboarded them. True as well for an account
- * linked to a provider that sets `disable_local_password_for_linked`. A link
- * removed by an administrator no longer counts.
+ * - Never for a `super_admin`, so break-glass sign-in
+ *   (`NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN`) and a reset always work for one,
+ *   whatever its links.
+ * - Always for an account an identity provider provisioned
+ *   (`user_password_locks`): it never had a password, and one set later
+ *   through a reset would let its holder keep access after the provider
+ *   offboarded them. The lock outlives the link and the provider.
+ * - For an account linked to a provider in force that sets
+ *   `disable_local_password_for_linked`, while the link exists.
  */
 export async function localPasswordBlocked(
   config: NexusConfig,
   store: NexusStore,
-  userId: string,
+  account: { id: string; role: Role },
 ): Promise<boolean> {
-  const identities = await store.userIdentities.listByUser(userId);
+  if (account.role === 'super_admin') return false;
+  if (await store.passwordLocks.findByUser(account.id)) return true;
+  const identities = await store.userIdentities.listByUser(account.id);
   if (identities.length === 0) return false;
-  if (identities.some((identity) => identity.provisioned)) return true;
   const strict = new Set(
     providersInForce(config, await readStoredSsoSettings(store))
       .filter(({ settings }) => settings.disable_local_password_for_linked)

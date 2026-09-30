@@ -171,6 +171,7 @@ jobs:
           assert.deepEqual(db.prepare('SELECT spec_id FROM api_spec_changes').all(), []);
           assert.deepEqual(db.prepare('SELECT id FROM user_identities').all(), []);
           assert.deepEqual(db.prepare('SELECT user_id FROM user_email_proofs').all(), []);
+          assert.deepEqual(db.prepare('SELECT user_id FROM user_password_locks').all(), []);
           assert.deepEqual(db.prepare('SELECT name FROM sqlite_master WHERE type = ? AND name LIKE ? ORDER BY name').all('index', 'ix_messages_thread%'), [{ name: 'ix_messages_thread_latest' }]);
           assert.deepEqual(db.prepare('SELECT 1 AS ok').get(), { ok: 1 });
           db.close();"

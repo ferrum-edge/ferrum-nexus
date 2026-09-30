@@ -645,6 +645,9 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
           last_login_at: at,
         });
         identityId = identity.id;
+        // The account never has a local password, whatever later happens to
+        // this link or this provider.
+        await tx.passwordLocks.create(user.id, provider.id, at);
         if (emailVerified) {
           await tx.emailProofs.upsert(user.id, email, 'identity_provider', at);
         }

@@ -1,4 +1,4 @@
--- Ferrum Nexus 006 — identity-provider links and address proofs (MySQL 8 dialect).
+-- Ferrum Nexus 006 — identity-provider links, address proofs and password locks (MySQL 8 dialect).
 --
 -- Mirrors 006_user_identities.sql; see there for what the tables record.
 -- Replayable CREATEs with their keys and constraints inline, the only
@@ -35,4 +35,12 @@ CREATE TABLE IF NOT EXISTS user_email_proofs (
   CONSTRAINT ck_user_email_proofs_method
     CHECK (method IN ('verification_link', 'password_reset', 'identity_provider')),
   CONSTRAINT fk_user_email_proofs_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS user_password_locks (
+  user_id     VARCHAR(64) NOT NULL,
+  provider_id VARCHAR(64) NOT NULL,
+  created_at  VARCHAR(32) NOT NULL,
+  PRIMARY KEY (user_id),
+  CONSTRAINT fk_user_password_locks_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;

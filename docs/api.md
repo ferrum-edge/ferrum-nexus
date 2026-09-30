@@ -754,8 +754,8 @@ _admin_ (a **_super_admin_** for an `admin` or `super_admin` account), **CSRF
 required** — removes one link; audited as `auth.sso_unlink`. The account keeps
 everything else. Its next sign-in through that provider is matched afresh:
 linked again only under the proven-address rule or explicitly, or refused.
-Removing the identity that provisioned an account lifts that account's
-password block. Returns `{ "ok": true }`.
+An account the identity provisioned keeps its password lock, so it gains no
+password. Returns `{ "ok": true }`.
 
 Errors: `403 FORBIDDEN`, `404 NOT_FOUND`.
 
@@ -1212,7 +1212,8 @@ update of `policy`, `allowed_email_domains`, `deprovision_on_access_loss` and
 - `providers`, when present, **replaces** the list of settings providers; a
   provider left out is removed together with its secret and its links
   (`user_identities` rows), except that a shadowed provider's removal leaves
-  the environment provider's links alone. Each entry carries
+  the environment provider's links alone. Accounts it provisioned stay active
+  and keep their password lock. Each entry carries
   every field shown above except `source`, `client_secret_set` and
   `redirect_uri`, plus an optional write-only `client_secret`: omit it to keep
   the stored one, `null` to clear it. Environment providers are never part of
