@@ -64,6 +64,9 @@ services:
   # network namespace (`network_mode: service:dex` below), where `127.0.0.1`
   # is Dex, and Dex listens on the same port inside as it is published on.
   # That is also why the portal's own port is published here.
+  #
+  # Restarting dex requires restarting nexus (it shares dex's network
+  # namespace); `docker compose up -d` recreates both.
   dex:
     # Dex v2.45.1, the current stable release, pinned by its multi-arch index
     # digest like everything else here.
@@ -75,6 +78,8 @@ services:
       DEX_CLIENT_SECRET: ${DEX_CLIENT_SECRET:?set DEX_CLIENT_SECRET}
     volumes:
       - ./dex/config.yaml:/etc/dex/e2e.yaml:ro
+    # Relies on the Alpine-based image's busybox wget; a -distroless tag has
+    # no wget and would never report healthy.
     healthcheck:
       test:
         ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:${DEX_PORT:-5556}/dex/healthz']

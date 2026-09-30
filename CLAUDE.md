@@ -81,8 +81,9 @@ job runs all four.
 
 **The acceptance suite** ([e2e/](e2e/README.md)) runs the **packaged container image** against a
 real, digest-pinned Edge release (pinned in `release/compatibility.env`), PostgreSQL, a
-deterministic upstream, and a real SMTP sink. It asserts through the gateway's data-plane listener,
-not its Admin API, and includes a browser journey. CI runs it as the required `acceptance` job.
+deterministic upstream, a real SMTP sink, and a digest-pinned Dex OpenID Connect provider. It
+asserts through the gateway's data-plane listener, not its Admin API, signs in through Dex
+(`./e2e/run.sh sso`), and includes a browser journey. CI runs it as the required `acceptance` job.
 Run it for anything that changes what Nexus writes to Edge, the auth or credential contract, or the
 container image.
 

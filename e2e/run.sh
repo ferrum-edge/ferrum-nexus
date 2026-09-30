@@ -71,6 +71,8 @@ fi
 # An e2e/.env generated before the Dex service existed has no client secret
 # for it; add one rather than make the developer delete their environment.
 if ! grep -q '^DEX_CLIENT_SECRET=' .env; then
+  # Do not glue the new line onto a last line that has no newline.
+  if [[ -s .env && -n "$(tail -c1 .env)" ]]; then echo >> .env; fi
   echo "DEX_CLIENT_SECRET=$(openssl rand -hex 32)" >> .env
 fi
 # Only an image supplied by the caller is treated as a prebuilt image. The

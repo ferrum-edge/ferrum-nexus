@@ -13,9 +13,10 @@
  * - **PKCE.** The authorization request carries an `S256` challenge, and Dex
  *   redeems a code issued against a challenge only with the matching
  *   verifier, so a completed sign-in means the portal sent the right one.
- * - **Nonce.** Dex copies the request's `nonce` into the ID token, and the
- *   portal accepts the token only when it equals the nonce it sealed for this
- *   attempt.
+ * - **Nonce.** The request's `nonce` round-trips through Dex into the ID
+ *   token the portal accepts. That the portal refuses a token whose nonce does
+ *   not match is covered by `server/src/sso/oidc.test.ts`, not here: a real
+ *   provider always echoes the nonce it was sent.
  * - **State.** A callback whose `state` is not the one sealed in the
  *   attempt's `nexus_sso` cookie is refused before its code is redeemed, and
  *   the attempt is spent either way.

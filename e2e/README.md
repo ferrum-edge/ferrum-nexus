@@ -77,8 +77,9 @@ keeps cookies starts at `GET /api/auth/sso/dex/start`, follows the portal's redi
 Dex's own login form, follows Dex back to the portal's callback, and then reads the session it got:
 
 - The authorization request carries a PKCE `S256` challenge, `state` and `nonce`. Dex redeems the
-  code only with the matching verifier, and the portal accepts the ID token only with the nonce it
-  sealed, so a completed sign-in proves both.
+  code only with the matching verifier, so a completed sign-in proves PKCE end to end. The nonce
+  round-trips through Dex into the ID token; the portal's refusal of a mismatched one is covered by
+  `server/src/sso/oidc.test.ts`.
 - Dex's `groups` claim maps the account to `provider`; a user in no mapped group gets `client`. A
   second sign-in opens the same account, matched by the linked subject.
 - A callback with a tampered `state` is refused (`/login?sso_error=invalid_state`) and opens no

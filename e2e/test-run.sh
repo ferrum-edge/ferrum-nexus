@@ -144,6 +144,11 @@ contains "$FIXTURE/e2e/.env" 'DEX_CLIENT_SECRET=test-secret'
 [[ "$(grep -c '^DEX_CLIENT_SECRET=' "$FIXTURE/e2e/.env")" == 1 ]] || fail 'Dex secret duplicated'
 run_fixture bash ./run.sh
 [[ "$(grep -c '^DEX_CLIENT_SECRET=' "$FIXTURE/e2e/.env")" == 1 ]] || fail 'Dex secret re-added'
+new_fixture dex_secret_no_newline
+printf 'NEXUS_SECRET_KEY=preserved-secret' > "$FIXTURE/e2e/.env"
+run_fixture bash ./run.sh
+grep -qx 'NEXUS_SECRET_KEY=preserved-secret' "$FIXTURE/e2e/.env" || fail 'last line was corrupted'
+grep -qx 'DEX_CLIENT_SECRET=test-secret' "$FIXTURE/e2e/.env" || fail 'Dex secret glued to last line'
 
 # Invalid or extra arguments fail before environment creation or Docker calls.
 for args in 'unknown' 'all extra'; do
