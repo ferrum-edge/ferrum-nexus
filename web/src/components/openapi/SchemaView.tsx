@@ -104,7 +104,7 @@ interface RenderArgs {
   seen: readonly string[];
 }
 
-function TypeLine({
+function renderTypeLine({
   schema,
   budget,
 }: {
@@ -332,7 +332,7 @@ function renderNode(
   return (
     <div>
       <SchemaRow name={name} required={required} depth={depth}>
-        <TypeLine schema={node} budget={budget} />
+        {renderTypeLine({ schema: node, budget })}
       </SchemaRow>
       {description ? (
         <p className={cn('text-xs text-fg-muted', depth > 0 && 'pl-3')} title={description.title}>

@@ -428,6 +428,14 @@ export const MAX_SPEC_OPERATIONS = 3_000;
  * smallest nodes it can hold, which is the shape a hostile upload takes. The
  * viewer additionally bounds what it renders, so this is the outer fence rather
  * than the only one.
+ *
+ * Server and SchemaView use the same unit contract: each schema occurrence costs one,
+ * including primitive and `$ref` nodes; a followed `$ref` also costs its
+ * resolved schema occurrence. Each displayed enum chip costs one (up to 12),
+ * as do property wrappers, `items` entries, and composition entries. Parameter
+ * rows, response rows, and media-type entries cost one each; each parameter,
+ * request-body, or response media schema then uses the same schema rules.
+ * Counting stops at the first unit over this ceiling.
  */
 export const MAX_SPEC_RENDER_UNITS = 100_000;
 

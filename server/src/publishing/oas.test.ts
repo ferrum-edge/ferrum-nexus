@@ -409,16 +409,16 @@ describe('OpenAPI parsing', () => {
     const overLimit = renderCostSpec((MAX_SPEC_RENDER_UNITS - 14) / 2 + 1);
     assert.ok(Buffer.byteLength(overLimit, 'utf8') < MAX_SPEC_BYTES);
     const failure = expectSpecInvalid(() => parseOpenApiSpec(overLimit));
-    assert.match(failure.message, /schema nodes, 6 parameters, 6 media types and 1 responses/);
+    assert.match(failure.message, /99989 schema nodes, 6 parameters, 5 media types and 1 responses/);
     assert.match(failure.message, /more than the 100000 the documentation viewer can render/);
     assert.deepEqual(failure.details, {
       field: 'paths',
       reason: 'too_much_to_render',
       schema_nodes: MAX_SPEC_RENDER_UNITS - 11,
       parameters: 6,
-      media_types: 6,
+      media_types: 5,
       responses: 1,
-      units: MAX_SPEC_RENDER_UNITS + 2,
+      units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
   });
@@ -470,11 +470,11 @@ describe('OpenAPI parsing', () => {
     assert.deepEqual(failure.details, {
       field: 'paths',
       reason: 'too_much_to_render',
-      schema_nodes: MAX_SPEC_RENDER_UNITS + 2,
+      schema_nodes: MAX_SPEC_RENDER_UNITS + 1,
       parameters: 0,
       media_types: 0,
       responses: 0,
-      units: MAX_SPEC_RENDER_UNITS + 2,
+      units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
   });
@@ -616,8 +616,8 @@ describe('OpenAPI parsing', () => {
       schema_nodes: MAX_SPEC_RENDER_UNITS - 19,
       parameters: 20,
       media_types: 0,
-      responses: 1,
-      units: MAX_SPEC_RENDER_UNITS + 2,
+      responses: 0,
+      units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
   });
