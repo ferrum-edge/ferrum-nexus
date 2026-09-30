@@ -8,6 +8,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- Vendor and pin Ferrum contracts `contracts-edge-0.9.8`; shared tests now check the local plugin
+  names and provisioning attribution against the pinned vocabularies.
 - **OpenAPI render cost is counted the way the catalog viewer renders**
   (GHSA-r4wm-2vch-9jxm): the 100,000-unit limit charges every schema node,
   primitive or not, each rendered property, item and composition entry, and up

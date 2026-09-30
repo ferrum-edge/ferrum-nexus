@@ -37,7 +37,11 @@ import { TextDecoder } from 'node:util';
 
 import { Agent, request, type Dispatcher } from 'undici';
 
-import type { EdgeCredentialType } from '@ferrum-nexus/shared';
+import {
+  FERRUM_PROVISIONED_BY_HEADER,
+  FERRUM_PROVISIONED_BY_VALUE,
+  type EdgeCredentialType,
+} from '@ferrum-nexus/shared';
 
 import type { EdgeConfig } from '../config/index.js';
 import type { LeaseRepo } from '../db/store.js';
@@ -924,7 +928,7 @@ export function createFerrumAdminClient(
     const headers: Record<string, string> = {
       authorization: `Bearer ${token}`,
       'x-ferrum-namespace': namespace,
-      'x-ferrum-provisioned-by': 'ferrum-nexus',
+      [FERRUM_PROVISIONED_BY_HEADER.toLowerCase()]: FERRUM_PROVISIONED_BY_VALUE,
       accept: 'application/json',
     };
     const hasBody = options.body !== undefined;
@@ -1199,7 +1203,7 @@ export function createFerrumAdminClient(
         headers: {
           authorization: `Bearer ${token}`,
           'x-ferrum-namespace': namespace,
-          'x-ferrum-provisioned-by': 'ferrum-nexus',
+          [FERRUM_PROVISIONED_BY_HEADER.toLowerCase()]: FERRUM_PROVISIONED_BY_VALUE,
           accept,
         },
         dispatcher,
