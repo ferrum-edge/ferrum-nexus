@@ -139,7 +139,7 @@ describe('health endpoints', () => {
             return new Proxy(settings, {
               get(repo, method, _repoReceiver) {
                 if (method !== 'get') {
-                  const value: unknown = Reflect.get(repo, method, repoReceiver);
+                  const value: unknown = Reflect.get(repo, method, _repoReceiver);
                   return typeof value === 'function' ? value.bind(repo) : value;
                 }
                 return async (key: Parameters<typeof settings.get>[0]) => {
