@@ -68,6 +68,16 @@ async function buildApp(): Promise<FastifyInstance> {
     reply.header('cache-control', PUBLIC);
     return { ok: true };
   });
+  app.get('/api/array-vary-cookie', async (_request, reply) => {
+    reply.setCookie('synthetic', 'value', { path: '/' });
+    reply.header('vary', ['Accept-Encoding', 'cookie']);
+    return { ok: true };
+  });
+  app.get('/api/star-vary-cookie', async (_request, reply) => {
+    reply.setCookie('synthetic', 'value', { path: '/' });
+    reply.header('vary', '*');
+    return { ok: true };
+  });
   app.get('/api/public', async (_request, reply) => {
     reply.header('cache-control', PUBLIC);
     return { ok: true };
@@ -122,6 +132,22 @@ describe('responses that set cookies are never shared-cacheable', () => {
     const other = await app.inject({ method: 'GET', url: '/api/other-cookie' });
     assertUncacheable(other, 'other cookie');
     assert.equal(other.headers.vary, 'Accept-Encoding, Cookie');
+  });
+
+  it('preserves array-valued Vary headers that already include Cookie', async () => {
+    const response = await app.inject({ method: 'GET', url: '/api/array-vary-cookie' });
+
+    assert.ok(response.headers['set-cookie'] !== undefined);
+    assert.equal(response.headers['cache-control'], COOKIE_RESPONSE_CACHE_CONTROL);
+    assert.equal(response.headers.vary, 'Accept-Encoding, cookie');
+  });
+
+  it('preserves Vary: * when making a cookie response uncacheable', async () => {
+    const response = await app.inject({ method: 'GET', url: '/api/star-vary-cookie' });
+
+    assert.ok(response.headers['set-cookie'] !== undefined);
+    assert.equal(response.headers['cache-control'], COOKIE_RESPONSE_CACHE_CONTROL);
+    assert.equal(response.headers.vary, '*');
   });
 
   it('leaves cookie-free responses as their handlers set them', async () => {
