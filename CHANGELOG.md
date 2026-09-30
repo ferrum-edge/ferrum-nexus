@@ -6,6 +6,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- Update Nodemailer to 10.0.9, fast-uri to 3.1.8 and 4.1.5, and brace-expansion to 5.0.12 to
+  resolve Dependabot security alerts GHSA-v53p-9fqp-m79j, GHSA-g57g-f23g-4646,
+  GHSA-8vvx-rff5-p5rq, GHSA-6vj9-mwq6-2f5v, GHSA-58mr-gqgx-xq4g, GHSA-qw65-cvwx-89v3,
+  GHSA-hrr3-gc8f-f4qj, GHSA-jvvf-x445-j334, GHSA-6j4f-fj2g-mc7p, GHSA-qhr7-859c-m2p7,
+  and GHSA-q2hr-2g5m-vwhr.
+
 ### Fixed
 
 - Text now meets WCAG AA contrast (4.5:1) throughout the portal, in both themes
