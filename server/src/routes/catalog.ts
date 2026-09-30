@@ -15,6 +15,8 @@ import {
   type CatalogDetailResponse,
   type CatalogIdentityAccessResponse,
   type CatalogListResponse,
+  type CatalogSpecChangeResponse,
+  type CatalogSpecChangesResponse,
   type CatalogSpecResponse,
 } from '@ferrum-nexus/shared';
 
@@ -51,6 +53,8 @@ const catalogQuery = listQuerySchema.extend({
 export const CATALOG_SPEC_RATE_LIMIT = { max: 60, timeWindow: '1 minute' } as const;
 
 const slugParams = z.object({ slug: z.string().trim().min(1).max(120) });
+
+const revisionParams = slugParams.extend({ revisionId: z.string().trim().min(1).max(64) });
 
 const identityAccessQuery = z.object({
   /**
@@ -102,6 +106,24 @@ export const catalogRoutes: FastifyPluginAsync<CatalogRoutesOptions> = async (ap
         ? null
         : query.application_id;
     return catalog.identityAccess(user, slug, applicationId);
+  });
+
+  /**
+   * What each published revision changed, newest first. Visible exactly as
+   * the detail page is; a stored summary, so nothing is parsed here.
+   */
+  app.get('/:slug/changes', async (request): Promise<CatalogSpecChangesResponse> => {
+    const { user } = requireAuth(request);
+    const { slug } = parseOrThrow(slugParams, request.params);
+    const query = parseOrThrow(listQuerySchema, request.query);
+    return catalog.changes(user, slug, listOptions(query));
+  });
+
+  /** What one revision changed against the revision it replaced. */
+  app.get('/:slug/changes/:revisionId', async (request): Promise<CatalogSpecChangeResponse> => {
+    const { user } = requireAuth(request);
+    const { slug, revisionId } = parseOrThrow(revisionParams, request.params);
+    return catalog.change(user, slug, revisionId);
   });
 
   app.get(

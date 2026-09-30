@@ -162,12 +162,13 @@ jobs:
           import { loadMigrations } from './server/dist/db/migrate.js';
           assert.ok(Number(process.versions.napi) >= 10);
           for (const dialect of ['sqlite', 'pg', 'mysql']) {
-            assert.deepEqual(loadMigrations(dialect).map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest']);
+            assert.deepEqual(loadMigrations(dialect).map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest', '004_api_spec_changes']);
           }
           const db = new Database(':memory:');
           for (const file of loadMigrations('sqlite')) db.exec(file.sql);
           assert.deepEqual(db.prepare('SELECT generation FROM email_outbox').all(), []);
           assert.deepEqual(db.prepare('SELECT role FROM api_gateway_plugins').all(), []);
+          assert.deepEqual(db.prepare('SELECT spec_id FROM api_spec_changes').all(), []);
           assert.deepEqual(db.prepare('SELECT name FROM sqlite_master WHERE type = ? AND name LIKE ? ORDER BY name').all('index', 'ix_messages_thread%'), [{ name: 'ix_messages_thread_latest' }]);
           assert.deepEqual(db.prepare('SELECT 1 AS ok').get(), { ok: 1 });
           db.close();"

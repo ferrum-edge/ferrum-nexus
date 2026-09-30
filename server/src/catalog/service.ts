@@ -61,16 +61,20 @@
  *
  * The normalized spec follows the detail page's visibility exactly: there is no separate
  * "documentation" permission, because a catalog entry whose documentation you
- * cannot read is not a catalog entry, it is a teaser.
+ * cannot read is not a catalog entry, it is a teaser. The change history
+ * (`…/changes`) follows it too, for the same reason: what changed in a
+ * document is part of the document.
  */
 
 import { createHash } from 'node:crypto';
 
 import {
+  MAX_SPEC_CHANGE_PAGE_SIZE,
   MAX_SPEC_EXPANDED_BYTES,
   clampPageSize,
   roleAtLeast,
   type AccessRequest,
+  type ApiSpecChangeEntry,
   type ApiSpecSummary,
   type ApiVisibility,
   type ApplicationSummary,
@@ -78,6 +82,8 @@ import {
   type CatalogApi,
   type CatalogDetailResponse,
   type CatalogIdentityAccessResponse,
+  type CatalogSpecChangeResponse,
+  type CatalogSpecChangesResponse,
   type CatalogSpecResponse,
   type Grant,
   type Paginated,
@@ -88,6 +94,7 @@ import {
 import type {
   ApiFilter,
   ApiRecord,
+  ApiSpecChangeRecord,
   ApiViewerFilter,
   ListOptions,
   NexusStore,
@@ -130,6 +137,17 @@ export interface CatalogService {
   ): Promise<CatalogIdentityAccessResponse>;
   /** The normalized current spec with gateway servers, when the caller may see the API. */
   spec(viewer: UserRecord, slug: string): Promise<CatalogSpecResponse>;
+  /**
+   * What each published revision changed, newest first, when the caller may
+   * see the API. Pages are at most `MAX_SPEC_CHANGE_PAGE_SIZE` entries.
+   */
+  changes(
+    viewer: UserRecord,
+    slug: string,
+    options?: ListOptions,
+  ): Promise<CatalogSpecChangesResponse>;
+  /** What one revision changed against the revision it replaced. */
+  change(viewer: UserRecord, slug: string, revisionId: Uuid): Promise<CatalogSpecChangeResponse>;
   /** Whether `api` appears in `viewer`'s browse list. */
   canList(viewer: UserRecord, api: ApiRecord, access: ApiReadAccess): boolean;
   /** Whether `viewer` may open `api`'s detail page and read its spec. */
@@ -246,6 +264,38 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
   // "may this account read it?" the same way.
   const canList = canListApi;
   const canView = canViewApi;
+
+  /**
+   * The API `slug` names, when `viewer` may open it. Anything else is the
+   * same `404` whether or not the slug exists, as for the detail page, so no
+   * route here confirms that a private API exists.
+   */
+  async function viewableApi(viewer: UserRecord, slug: string): Promise<ApiRecord> {
+    const api = await store.apis.findBySlug(slug);
+    if (!api) throw notFound('API', slug);
+    if (!canView(viewer, api, await resolveReadAccess(store, viewer, api))) {
+      throw notFound('API', slug);
+    }
+    return api;
+  }
+
+  /**
+   * A change summary as the catalog serves it. Named field by field, so a
+   * column the store grows later is never served by accident.
+   */
+  function presentChange(record: ApiSpecChangeRecord): ApiSpecChangeEntry {
+    return {
+      id: record.id,
+      api_id: record.api_id,
+      revision_id: record.revision_id,
+      previous_revision_id: record.previous_revision_id,
+      kind: record.kind,
+      version: record.version,
+      previous_version: record.previous_version,
+      report: record.report,
+      created_at: record.created_at,
+    };
+  }
 
   /** The caller's relationship to an API, for the catalog badge. */
   function accessState(
@@ -478,12 +528,26 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       };
     },
 
+    async changes(viewer, slug, options): Promise<CatalogSpecChangesResponse> {
+      const api = await viewableApi(viewer, slug);
+      const page = await store.apiSpecChanges.listByApi(api.id, {
+        limit: Math.min(clampPageSize(options?.limit), MAX_SPEC_CHANGE_PAGE_SIZE),
+        offset: Math.max(0, options?.offset ?? 0),
+      });
+      return { items: page.items.map(presentChange), total: page.total };
+    },
+
+    async change(viewer, slug, revisionId): Promise<CatalogSpecChangeResponse> {
+      const api = await viewableApi(viewer, slug);
+      // Scoped to the API in the lookup itself, so another API's revision id
+      // reads as absent here rather than as somebody else's summary.
+      const record = await store.apiSpecChanges.findByRevision(api.id, revisionId);
+      if (!record) throw notFound('Change summary for revision', revisionId);
+      return presentChange(record);
+    },
+
     async spec(viewer, slug): Promise<CatalogSpecResponse> {
-      const api = await store.apis.findBySlug(slug);
-      if (!api) throw notFound('API', slug);
-      if (!canView(viewer, api, await resolveReadAccess(store, viewer, api))) {
-        throw notFound('API', slug);
-      }
+      const api = await viewableApi(viewer, slug);
 
       const record = await store.apiSpecs.findCurrentByApi(api.id);
       if (!record) throw notFound('Specification for API', slug);

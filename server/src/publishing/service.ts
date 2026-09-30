@@ -200,7 +200,9 @@ import {
   DEFAULT_SPEC_ENFORCEMENT,
   MAX_PAGE_SIZE,
   RATE_LIMIT_PLUGIN,
+  SPEC_CHANGE_HISTORY_LIMIT,
   aclGroupForApi,
+  emptySpecChangeReport,
   listenPathFor,
   roleAtLeast,
   testConsumerUsername,
@@ -218,6 +220,7 @@ import {
   type Paginated,
   type PublishApiRequest,
   type RateLimitConfig,
+  type SpecChangeReport,
   type SpecDiff,
   type SpecEnforcementLevel,
   type UpdateApiRequest,
@@ -289,6 +292,7 @@ import {
   type UpstreamPolicy,
   type UpstreamResolver,
 } from './oas.js';
+import { compareSpecRevisions } from './spec-changes.js';
 import { diffSpecDocuments } from './spec-diff.js';
 import {
   assertRoutesSubmittable,
@@ -813,6 +817,27 @@ function safeSpecDocument(rawSpec: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/**
+ * What consumers are told a revision changed, against the revision it
+ * replaces (issue #448).
+ *
+ * The stored document is read back through the upload checks, so the
+ * comparison only ever sees a document inside the parse and render budgets. A
+ * previous revision that no longer passes them — one stored before a limit
+ * tightened — is not compared at all, and the summary says it is incomplete
+ * rather than claiming nothing changed.
+ */
+function revisionChanges(previous: ApiSpecRecord, next: ParsedSpec): SpecChangeReport {
+  if (previous.raw_spec === next.raw) return emptySpecChangeReport();
+  let before: Record<string, unknown>;
+  try {
+    before = parseOpenApiSpec(previous.raw_spec).document;
+  } catch {
+    return emptySpecChangeReport(false);
+  }
+  return compareSpecRevisions(before, next.document);
 }
 
 /** A thrown value as a string, for a log line or an audit detail. */
@@ -1438,6 +1463,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       }
       assertRoutesEnforceable(api.spec_enforcement, parsed.paths);
       assertRoutesSubmittable(api.spec_enforcement, parsed.document);
+      // What the revision changes for consumers, against the revision it
+      // replaces as re-read under the lease. Pure and bounded, so it is
+      // computed here, once, rather than in a transaction body that may re-run.
+      const replaced = previous;
+      const changes = replaced ? revisionChanges(replaced, parsed) : null;
       // A revision that rewrites a live proxy commits its intent first, in a
       // transaction of its own under the lease (so the fence covers it): the
       // completion row below commits with the revision, but a gateway write
@@ -1555,6 +1585,22 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // point the revision a rollback would restore is the newest
           // non-current one, which the limit's minimum of 1 always keeps.
           pruned = await tx.apiSpecs.pruneHistory(api.id, config.specHistoryLimit);
+          // The consumer-facing summary commits with the revision it
+          // describes, and is bounded by its own retention: it outlives the
+          // document the prune above may just have dropped.
+          if (replaced && changes) {
+            await tx.apiSpecChanges.create({
+              api_id: api.id,
+              revision_id: revision.id,
+              previous_revision_id: replaced.id,
+              kind: restoredFrom ? 'rollback' : 'update',
+              version: nextVersion,
+              previous_version: replaced.version,
+              revision_seq: revision.revision_seq,
+              report: changes,
+            });
+            await tx.apiSpecChanges.prune(api.id, SPEC_CHANGE_HISTORY_LIMIT);
+          }
           // The row that records where the gateway points moves with the
           // gateway, in the same transaction as the revision: if this rolls
           // back, the compensation below puts the proxy back and the row never
@@ -1585,6 +1631,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               spec_enforcement: api.spec_enforcement,
               backend_updated: backendUpdated,
               pruned_revisions: pruned,
+              spec_changes: changes
+                ? {
+                    breaking: changes.counts.breaking,
+                    non_breaking: changes.counts.non_breaking,
+                    complete: changes.complete,
+                  }
+                : null,
               ...(restoredFrom
                 ? {
                     restored_from_spec_id: restoredFrom.id,
@@ -3567,6 +3620,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               await tx.apiPlugins.deleteByApi(api.id);
               await tx.apiGatewayPlugins.deleteByApi(api.id);
               await tx.apiViewers.deleteByApi(api.id);
+              await tx.apiSpecChanges.deleteByApi(api.id);
               await tx.apiSpecs.deleteByApi(api.id);
               // Nothing matched: a concurrent deletion got here first — the
               // lease above does not serialise an API with no proxy, and an

@@ -88,13 +88,16 @@ import type {
   NotificationType,
   RateLimitConfig,
   Role,
+  SpecChangeReport,
   SpecEnforcementLevel,
+  SpecRevisionKind,
   UserStatus,
   Uuid,
 } from '@ferrum-nexus/shared';
 import {
   clampPageSize,
   DEFAULT_SPEC_ENFORCEMENT,
+  emptySpecChangeReport,
   isSpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
 
@@ -125,6 +128,8 @@ import type {
   ApiPluginRepo,
   ApiRecord,
   ApiRepo,
+  ApiSpecChangeRecord,
+  ApiSpecChangeRepo,
   ApiSpecRecord,
   ApiSpecRepo,
   ApiViewerFilter,
@@ -197,6 +202,7 @@ const COLLECTIONS = {
   applications: 'applications',
   apis: 'apis',
   apiSpecs: 'api_specs',
+  apiSpecChanges: 'api_spec_changes',
   apiPlugins: 'api_plugins',
   apiGatewayPlugins: 'api_gateway_plugins',
   apiViewers: 'api_viewers',
@@ -519,6 +525,24 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     revision_seq: num(row.revision_seq),
     created_by: strOrNull(row.created_by),
     rolled_back_from_id: strOrNull(row.rolled_back_from_id),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
+function mapApiSpecChange(row: Row): ApiSpecChangeRecord {
+  return {
+    id: str(row._id),
+    api_id: str(row.api_id),
+    revision_id: str(row.spec_id),
+    previous_revision_id: strOrNull(row.previous_spec_id),
+    kind: str(row.kind) as SpecRevisionKind,
+    version: str(row.version),
+    previous_version: strOrNull(row.previous_version),
+    revision_seq: num(row.revision_seq),
+    // Stored as a subdocument; one that is missing reads as a summary that
+    // could not be made, never as "nothing changed".
+    report: (row.report ?? emptySpecChangeReport(false)) as SpecChangeReport,
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -1242,6 +1266,26 @@ export const API_GATEWAY_PLUGIN_INDEXES: readonly IndexDefinition[] = [
 ];
 
 /**
+ * `004_api_spec_changes`: one change summary per revision, and an API's
+ * summaries in publication order, as the SQL dialects' two unique indexes.
+ * The collection needs no creation step; the first insert makes it.
+ */
+export const API_SPEC_CHANGE_INDEXES: readonly IndexDefinition[] = [
+  {
+    collection: 'api_spec_changes',
+    name: 'ux_api_spec_changes_spec',
+    key: { spec_id: 1 },
+    unique: true,
+  },
+  {
+    collection: 'api_spec_changes',
+    name: 'ux_api_spec_changes_seq',
+    key: { api_id: 1, revision_seq: 1 },
+    unique: true,
+  },
+];
+
+/**
  * `003_messages_thread_latest`: the newest message of a thread is the first in
  * {@link NEWEST_FIRST} order, `(created_at desc, _id desc)`. The baseline's
  * `ix_messages_thread` key `(thread_id, created_at)` leaves the `_id`
@@ -1323,6 +1367,11 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
     id: '003_messages_thread_latest',
     indexes: MESSAGE_THREAD_LATEST_INDEXES,
     apply: applyMessageThreadLatest,
+  },
+  {
+    id: '004_api_spec_changes',
+    indexes: API_SPEC_CHANGE_INDEXES,
+    apply: (db: Db): Promise<void> => createIndexes(db, API_SPEC_CHANGE_INDEXES),
   },
 ];
 
@@ -2292,6 +2341,78 @@ class MongoStore implements NexusStore {
       this.opts,
     );
   }
+
+  /* ── apiSpecChanges ───────────────────────────────────────────────────── */
+
+  readonly apiSpecChanges: ApiSpecChangeRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapConflict('That revision already has a change summary', () =>
+        this.col(COLLECTIONS.apiSpecChanges).insertOne(
+          {
+            _id: meta.id,
+            api_id: input.api_id,
+            spec_id: input.revision_id,
+            previous_spec_id: input.previous_revision_id ?? null,
+            kind: input.kind,
+            version: input.version,
+            previous_version: input.previous_version ?? null,
+            revision_seq: input.revision_seq,
+            report: normalizeJson(input.report),
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
+          } as NexusDoc,
+          this.opts,
+        ),
+      );
+      const row = asRow(
+        await this.col(COLLECTIONS.apiSpecChanges).findOne({ _id: meta.id }, this.opts),
+      );
+      if (!row) throw new Error('apiSpecChanges.create: row vanished immediately after insert');
+      return mapApiSpecChange(row);
+    },
+
+    findByRevision: async (apiId, revisionId) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.apiSpecChanges).findOne(
+          { api_id: apiId, spec_id: revisionId } as Filter<NexusDoc>,
+          this.opts,
+        ),
+      );
+      return row ? mapApiSpecChange(row) : null;
+    },
+
+    listByApi: async (apiId, options) =>
+      this.paginate(
+        COLLECTIONS.apiSpecChanges,
+        { api_id: apiId } as Filter<NexusDoc>,
+        SPEC_HISTORY_ORDER,
+        options,
+        mapApiSpecChange,
+      ),
+
+    prune: async (apiId, keep) => {
+      const doomed = await this.col(COLLECTIONS.apiSpecChanges)
+        .find({ api_id: apiId } as Filter<NexusDoc>, this.opts)
+        .sort(SPEC_HISTORY_ORDER)
+        .skip(Math.max(0, keep))
+        .limit(SPEC_HISTORY_PRUNE_BATCH)
+        .project({ _id: 1 })
+        .toArray();
+      if (doomed.length === 0) return 0;
+      const ids = doomed.map((row) => String(row._id));
+      return (
+        await this.col(COLLECTIONS.apiSpecChanges).deleteMany(
+          { _id: { $in: ids } } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount;
+    },
+
+    deleteByApi: async (apiId) =>
+      (await this.col(COLLECTIONS.apiSpecChanges).deleteMany({ api_id: apiId }, this.opts))
+        .deletedCount,
+  };
 
   /* ── apiPlugins ───────────────────────────────────────────────────────── */
 

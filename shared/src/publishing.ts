@@ -1,4 +1,5 @@
 import { MAX_UPSTREAM_URL_LENGTH } from './constants.js';
+import type { SpecChangeReport } from './entities.js';
 
 /** Maximum length of the slug used in an API's listen path. */
 export const MAX_API_SLUG_LENGTH = 60;
@@ -99,4 +100,27 @@ export function firstUsableSpecServerUrl(servers: unknown): SpecServerUrlResult 
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A change report that lists nothing. `complete` is `false` for one standing
+ * in for a comparison that could not be made at all, such as a previous
+ * revision whose stored document no longer parses.
+ */
+export function emptySpecChangeReport(complete = true): SpecChangeReport {
+  return {
+    changed: false,
+    complete,
+    changes: [],
+    counts: {
+      breaking: 0,
+      non_breaking: 0,
+      operations_added: 0,
+      operations_removed: 0,
+      operations_deprecated: 0,
+      operations_changed: 0,
+    },
+    truncated: false,
+    info_changes: [],
+  };
 }

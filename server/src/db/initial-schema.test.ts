@@ -10,7 +10,12 @@ describe('buildout schema baseline', () => {
       const files = loadMigrations(dialect);
       assert.deepEqual(
         files.map((file) => file.id),
-        ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest'],
+        [
+          '001_initial',
+          '002_api_gateway_plugins',
+          '003_messages_thread_latest',
+          '004_api_spec_changes',
+        ],
       );
       const statements = splitSqlStatements(files[0]!.sql);
       assert.ok(statements.length > 0);
@@ -178,6 +183,47 @@ describe('buildout schema baseline', () => {
         false,
         plan.join('\n'),
       );
+    } finally {
+      db.close();
+    }
+  });
+
+  it('adds the revision change history as a replayable forward migration', () => {
+    const mysqlStep = loadMigrations('mysql').find((file) => file.id === '004_api_spec_changes');
+    assert.ok(mysqlStep, 'mysql ships 004_api_spec_changes');
+    // The MySQL runner applies nothing but replayable CREATE TABLEs.
+    assert.deepEqual(
+      splitSqlStatements(mysqlStep.sql).map(
+        (statement) => /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement)?.[1],
+      ),
+      ['api_spec_changes'],
+    );
+
+    const db = openSqliteDatabase(':memory:');
+    try {
+      for (const file of loadMigrations('sqlite')) db.exec(file.sql);
+      const sql =
+        'INSERT INTO api_spec_changes (id, api_id, spec_id, kind, version, revision_seq, ' +
+        'report_json, created_at, updated_at) ' +
+        "VALUES (?, 'a', ?, ?, '2.0.0', ?, '{}', 'now', 'now')";
+      const insert = (id: string, specId: string, seq: number, kind = 'update'): void => {
+        db.prepare(sql).run(id, specId, kind, seq);
+      };
+      db.exec(`
+        INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)
+          VALUES ('u', 'user@example.test', 'unused', 'User', 'provider', 'now', 'now');
+        INSERT INTO apis (id, name, slug, owner_user_id, namespace, version, auth_plugin,
+                          created_at, updated_at)
+          VALUES ('a', 'API', 'api', 'u', 'ferrum', '1.0.0', 'key_auth', 'now', 'now');
+      `);
+      // No foreign key to the revision: the summary outlives its document.
+      insert('c1', 'pruned-revision', 2);
+      assert.throws(() => insert('c2', 'pruned-revision', 3), /UNIQUE constraint failed/);
+      assert.throws(() => insert('c3', 'other-revision', 2), /UNIQUE constraint failed/);
+      assert.throws(() => insert('c4', 'third-revision', 4, 'publish'), /CHECK constraint failed/);
+      // Deleting the API takes its history with it.
+      db.exec("DELETE FROM apis WHERE id = 'a'");
+      assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM api_spec_changes').get(), { n: 0 });
     } finally {
       db.close();
     }

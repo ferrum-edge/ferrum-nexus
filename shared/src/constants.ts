@@ -479,6 +479,43 @@ export const OPENAPI_OPERATION_METHODS = [
 ] as const satisfies readonly string[];
 
 /**
+ * Most work units one comparison of two OpenAPI revisions may spend
+ * (`server/src/publishing/spec-changes.ts`): one per operation, parameter,
+ * response, media type, schema pair and property compared, and one per enum
+ * value read. Both documents already fit {@link MAX_SPEC_RENDER_UNITS}, and the
+ * comparison walks each shared component once rather than at every reference,
+ * so twice that ceiling covers any pair of accepted documents that share
+ * their structure. A comparison that reaches it stops and reports itself as
+ * incomplete rather than running on.
+ */
+export const MAX_SPEC_CHANGE_UNITS = 2 * MAX_SPEC_RENDER_UNITS;
+
+/**
+ * Most changes one comparison lists. Every change is still counted, so the
+ * totals stay accurate past it; breaking changes are listed first, so the ones
+ * a caller most needs to read are the last to be cut.
+ */
+export const MAX_SPEC_CHANGES_LISTED = 100;
+
+/**
+ * Longest provider-written string (a path template, a parameter or property
+ * name, an enum value) a listed change carries, in UTF-16 code units. Longer
+ * ones are cut and end in `…`. It keeps a stored change summary small whatever
+ * the document spells out.
+ */
+export const MAX_SPEC_CHANGE_TEXT = 200;
+
+/**
+ * Change summaries kept per API, newest first. A summary outlives the
+ * revision documents `NEXUS_SPEC_HISTORY_LIMIT` prunes, so it needs a bound of
+ * its own; each one is at most {@link MAX_SPEC_CHANGES_LISTED} entries.
+ */
+export const SPEC_CHANGE_HISTORY_LIMIT = 100;
+
+/** Largest page of change summaries `GET /api/catalog/:slug/changes` returns. */
+export const MAX_SPEC_CHANGE_PAGE_SIZE = 20;
+
+/**
  * Clamp a caller-supplied page size into `[1, MAX_PAGE_SIZE]`, falling back to
  * {@link DEFAULT_PAGE_SIZE} when it is absent or not a finite number.
  */
