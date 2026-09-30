@@ -780,6 +780,12 @@ describe('single sign-on', () => {
   });
 
   it('never grants, removes or changes super_admin from claims', async () => {
+    const superAdmins = async (): Promise<string[]> =>
+      (await h.store.users.list({ role: 'super_admin' }, { limit: 100 })).items
+        .map((user) => user.id)
+        .sort();
+    const before = await superAdmins();
+    assert.ok(before.includes(founder.user.id));
     // A super admin links explicitly, from their own session.
     const linked = await link(h, corp, 'corp', founder, {
       sub: 'founder-subject',
@@ -806,11 +812,7 @@ describe('single sign-on', () => {
     );
     assert.deepEqual(syncs, []);
     // And no claim makes anyone else one.
-    const all = await h.store.users.list({ role: 'super_admin' }, { limit: 100 });
-    assert.deepEqual(
-      all.items.map((user) => user.id),
-      [founder.user.id],
-    );
+    assert.deepEqual(await superAdmins(), before);
   });
 
   it('never locks a super admin out for claims that map to no role', async () => {
