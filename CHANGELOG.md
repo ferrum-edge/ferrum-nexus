@@ -46,6 +46,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Security
 
+- Cookie cache protection applies to cookies set through Fastify's reply API;
+  raw response headers and hijacked replies must not set cookies.
 - GHSA-r4wm-2vch-9jxm: OpenAPI rendering accounts for primitive schema values during
   publication checks and charges the page budget before rendering their
   placeholders or schema wrappers. Exhausted schema branches stop before

@@ -117,7 +117,7 @@ route is unlimited.
   [`POST /api/apis`](#post-apiapis)).
 - All `/api` responses carry `cache-control: no-store` unless stated otherwise.
   Any response that sets or clears a cookie carries
-  `cache-control: private, no-store` and `vary: Cookie`, with no exception.
+  `cache-control: private, no-store` and `vary: Cookie` on every Fastify reply.
   An unmatched `/api/*` path answers a JSON `404 NOT_FOUND`.
 
 ---
