@@ -679,11 +679,15 @@ it under the detail page's visibility rule
 **Spec change notices.** Once the revision has committed and the proxy lease is
 released, `publishing/spec-change-notices.ts` tells the API's grantees what
 changed: an in-app notice and an outbox email per account, as each account's
-`user_notification_preferences` allow. It is best-effort by construction (it
-never throws into the publish) and coalesced two ways: no second notice while
-one for the API is unread, and one email per API per account per hour through
-the outbox idempotency key. Each batch of 200 accounts commits its notices,
-emails and `api.spec_notify` audit row together.
+`user_notification_preferences` allow. The publish starts it and does not wait
+for it; it never rejects, so it can neither slow the publish nor fail it, and
+work in flight at shutdown is lost. It is coalesced two ways: an unread notice
+for the API is rewritten rather than repeated, and one email per API per
+account per clock hour goes out through the outbox idempotency key. One
+fan-out queues at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` emails. Each batch of
+200 accounts re-reads grants and account status, and commits its notices,
+emails and `api.spec_notify` audit row together; a failed batch does not stop
+the next.
 
 ### Spec-owned proxies
 

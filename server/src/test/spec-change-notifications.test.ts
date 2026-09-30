@@ -20,19 +20,22 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
-import type {
-  ApproveAccessRequestResponse,
-  CreateAccessRequestResponse,
-  CreateApplicationResponse,
-  GetNotificationPreferencesResponse,
-  ListApiRevisionsResponse,
-  ListNotificationsResponse,
-  Notification,
-  PublishApiResponse,
+import {
+  emptySpecChangeReport,
+  type ApiSpecChangeEntry,
+  type ApproveAccessRequestResponse,
+  type CreateAccessRequestResponse,
+  type CreateApplicationResponse,
+  type GetNotificationPreferencesResponse,
+  type ListApiRevisionsResponse,
+  type ListNotificationsResponse,
+  type Notification,
+  type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
 import type { EmailOutboxRecord } from '../db/store.js';
+import { createSpecChangeNotifier } from '../publishing/spec-change-notices.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -81,12 +84,14 @@ describe('spec change notifications', () => {
     return response.json<PublishApiResponse>().api.id;
   }
 
+  /** Publish a revision, and wait for the fan-out it started in the background. */
   async function revise(session: TestSession, id: string, document: string): Promise<number> {
     const response = await harness.authed(session, {
       method: 'PUT',
       url: `/api/apis/${id}/spec`,
       payload: { spec: document },
     });
+    await harness.services.specChanges.idle();
     return response.statusCode;
   }
 
@@ -220,7 +225,9 @@ describe('spec change notifications', () => {
   it('coalesces a burst of revisions', async () => {
     // Same hour, and alice and bob have not read their notices yet.
     assert.equal(await revise(provider, apiId, V3), 200);
-    assert.equal((await notices(alice)).length, 1, 'no second notice while the first is unread');
+    const unread = await notices(alice);
+    assert.equal(unread.length, 1, 'no second notice while the first is unread');
+    assert.equal(unread[0]?.title, 'Notify Billing spec updated to 3.0.0', 'rewritten in place');
     assert.equal((await notices(bob)).length, 1);
     assert.equal((await mails(alice)).length, 1, 'no second email inside the hour');
     // The administrator did not publish this one, so it is told now.
@@ -259,12 +266,15 @@ describe('spec change notifications', () => {
       payload: {},
     });
     assert.equal(rolledBack.statusCode, 200, rolledBack.body);
+    await harness.services.specChanges.idle();
 
     const [newest] = await notices(alice);
     assert.equal(newest?.title, 'Notify Billing spec rolled back to 1.0.0');
     assert.equal(newest?.read_at, null);
     assert.equal((await notices(alice)).length, 2);
-    assert.equal((await notices(bob)).length, 1, 'bob has still not read his');
+    const bobs = await notices(bob);
+    assert.equal(bobs.length, 1, 'bob has still not read his');
+    assert.equal(bobs[0]?.title, 'Notify Billing spec rolled back to 1.0.0', 'it says the latest');
     assert.equal((await mails(alice)).length, 2, 'a new hour, a new email');
     const rollback = (await notifyRows()).find((details) => details.kind === 'rollback');
     assert.equal(rollback?.version, '1.0.0');
@@ -299,6 +309,120 @@ describe('spec change notifications', () => {
     assert.ok(mail.body_text.includes(hostile), 'the text body is plain text');
   });
 
+  it('makes a URL in provider-written text inert rather than dropping the email', async () => {
+    const id = await publish(
+      'Docs at https://evil.example or https:\\\\evil.example',
+      'notify-url',
+      spec('1.0.0', { '/items': { get: ok } }),
+    );
+    await grant(carol, id);
+    const next = spec('https://evil.example/v2', { '/items': { get: ok }, '/more': { get: ok } });
+    assert.equal(await revise(provider, id, next), 200);
+
+    const mail = (await mails(carol)).find((row) => row.subject.startsWith('Docs at'));
+    assert.ok(mail, 'the email is sent, not refused');
+    const scheme = /https?:[/\\]{2}/i;
+    for (const part of [mail.subject, mail.body_text, mail.body_html]) {
+      // The portal's own links are the only URLs left.
+      assert.doesNotMatch(part.replaceAll(harness.config.publicUrl, ''), scheme);
+    }
+    assert.ok(mail.subject.includes('https[:]//evil.example'));
+    assert.ok(mail.body_text.includes('https[:]\\\\evil.example'));
+    const carolNotices = await notices(carol);
+    const notice = carolNotices.find((row) => row.link === '/catalog/notify-url?tab=changes');
+    assert.ok(notice, 'and the in-app notice is written');
+    const audited = await notifyRows();
+    const row = audited.find((details) => details.version === 'https://evil.example/v2');
+    assert.equal(row?.email_failed, 0);
+    assert.equal(row?.emailed, 1);
+  });
+
+  it('fans out in batches, honouring preferences, account status, grants and the cap', async () => {
+    const bulkId = await publish('Notify Bulk', 'notify-bulk', V1);
+    const api = await harness.store.apis.findById(bulkId);
+    assert.ok(api);
+    const ids: string[] = [];
+    for (let index = 0; index < 205; index += 1) {
+      const user = await harness.store.users.create({
+        email: `notify-bulk-${index}@example.test`,
+        password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+        display_name: `Bulk ${index}`,
+        role: 'client',
+        // The first account is disabled; its active grant must not reach it.
+        status: index === 0 ? 'disabled' : 'active',
+        email_verified: true,
+      });
+      await harness.store.grants.create({
+        api_id: bulkId,
+        user_id: user.id,
+        access_request_id: null,
+        acl_group: `nexus:api:${bulkId}:approved`,
+        // The second account's grant was revoked.
+        status: index === 1 ? 'revoked' : 'active',
+        granted_by: provider.user.id,
+        revoked_by: null,
+        revoked_at: null,
+      });
+      // The third turned the notice off; five more turned email on.
+      if (index === 2 || (index >= 3 && index < 8)) {
+        await harness.store.notificationPreferences.upsert(user.id, {
+          api_spec_updated_in_app: index !== 2,
+          api_spec_updated_email: index !== 2,
+        });
+      }
+      ids.push(user.id);
+    }
+
+    // At most three emails for this fan-out.
+    const notifier = createSpecChangeNotifier({
+      store: harness.store,
+      email: harness.services.email,
+      audit: harness.services.audit,
+      config: { publicUrl: harness.config.publicUrl, maxMassEmailRecipients: 3 },
+    });
+    const change: ApiSpecChangeEntry = {
+      id: 'bulk-change',
+      api_id: bulkId,
+      revision_id: 'bulk-revision',
+      previous_revision_id: null,
+      kind: 'update',
+      version: '2.0.0',
+      previous_version: '1.0.0',
+      report: { ...emptySpecChangeReport(), changed: true, info_changes: ['version'] },
+      created_at: new Date().toISOString(),
+    };
+    await notifier.notify({ id: provider.user.id, role: provider.user.role }, api, change, null);
+
+    const rows = (await notifyRows()).filter((details) => details.spec_id === 'bulk-revision');
+    assert.equal(rows.length, 2, 'one audit row per batch of 200');
+    const total = (field: string): number =>
+      rows.reduce((sum, details) => sum + Number(details[field] ?? 0), 0);
+    assert.deepEqual(
+      rows.map((details) => details.batches),
+      [2, 2],
+    );
+    assert.equal(total('recipients'), 203, 'not the disabled account nor the revoked grant');
+    assert.equal(total('notified'), 202);
+    assert.equal(total('in_app_off'), 1);
+    assert.equal(total('emailed'), 3);
+    assert.equal(total('email_capped'), 2, 'past the cap, in-app only');
+    assert.equal(total('email_failed'), 0);
+    assert.equal(total('failed_batches'), 0);
+
+    const bulkNotices = async (index: number): Promise<number> => {
+      const page = await harness.store.notifications.list({
+        user_id: ids[index]!,
+        type: 'api_spec_updated',
+      });
+      return page.total;
+    };
+    assert.equal(await bulkNotices(0), 0, 'disabled');
+    assert.equal(await bulkNotices(1), 0, 'revoked');
+    assert.equal(await bulkNotices(2), 0, 'turned off');
+    assert.equal(await bulkNotices(3), 1);
+    assert.equal(await bulkNotices(204), 1, 'the second batch too');
+  });
+
   it('never fails the publish when notifying fails', async () => {
     const before = (await notifyRows()).length;
     const bobNotices = (await notices(bob)).length;
@@ -312,7 +436,12 @@ describe('spec change notifications', () => {
     assert.deepEqual(faults.pending(), [], 'the fault fired');
     const current = await harness.store.apiSpecs.findCurrentByApi(apiId);
     assert.equal(current?.parsed_version, '2.0.0');
-    assert.equal((await notifyRows()).length, before, 'nothing was recorded as sent');
+    const rows = await notifyRows();
+    assert.equal(rows.length, before + 1, 'the failed batch is recorded');
+    const failed = rows.find(
+      (details) => details.failed_batches === 1 && !('recipients' in details),
+    );
+    assert.equal(failed?.batches, 1);
     assert.equal((await notices(bob)).length, bobNotices, 'and nothing was sent');
   });
 

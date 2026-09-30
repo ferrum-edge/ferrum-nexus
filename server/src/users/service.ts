@@ -152,7 +152,6 @@ export interface UserListFilter {
   q?: string;
 }
 
-/** Profile, user administration and organization operations. */
 /** Every preference, in the order an audit row names what changed. */
 const NOTIFICATION_PREFERENCE_KEYS = [
   'api_spec_updated_in_app',
@@ -170,6 +169,7 @@ function preferencesOf(record: NotificationPreferencesRecord | null): Notificati
   };
 }
 
+/** Profile, user administration and organization operations. */
 export interface UsersService {
   /** The caller's own account. */
   getMe(user: UserRecord): User;
@@ -297,13 +297,15 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         const changed = NOTIFICATION_PREFERENCE_KEYS.filter((key) => next[key] !== current[key]);
         if (changed.length === 0) return current;
         await tx.notificationPreferences.upsert(user.id, next);
-        await audit.forStore(tx).record(
-          { id: user.id, role: user.role },
-          AuditAction.USER_NOTIFICATION_PREFERENCES_UPDATE,
-          { type: 'user', id: user.id },
-          { changed, ...next },
-          ip,
-        );
+        await audit
+          .forStore(tx)
+          .record(
+            { id: user.id, role: user.role },
+            AuditAction.USER_NOTIFICATION_PREFERENCES_UPDATE,
+            { type: 'user', id: user.id },
+            { changed, ...next },
+            ip,
+          );
         return next;
       });
     },

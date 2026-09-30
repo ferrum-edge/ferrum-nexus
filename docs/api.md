@@ -95,6 +95,7 @@ trust, not from an untrusted forwarded header.
 | Every `POST /api/auth/*` route                                                 | 20, shared       | IP       |
 | `GET /api/auth/me`, `GET /api/auth/captcha`                                    | 120, shared      | IP       |
 | `PATCH /api/users/me`                                                          | 10               | account  |
+| `PATCH /api/users/me/notification-preferences`                                 | 10               | account  |
 | `POST /api/threads`                                                            | 10               | account  |
 | `POST /api/threads/:id/messages`                                               | 30               | account  |
 | `GET /api/catalog/:slug/spec`, `…/changes`, `…/changes/:revisionId`, per route | 60               | account  |
@@ -798,7 +799,8 @@ publishes a revision that changes something (see
 `<API name> spec updated to <version>` (or `rolled back to`), its body counts
 the changes and names up to five, removed operations first, and its `link` is
 `/catalog/<slug>?tab=changes`. An account that still has an unread one for the
-API gets no second one; it links to every revision since.
+API gets no second one: its unread one is rewritten to describe the newest
+revision, and links to every revision since.
 
 ### `POST /api/notifications/read`
 
@@ -1936,11 +1938,15 @@ _provider_, owner or admin — publish a new spec revision. Body: `spec`
   email on, once per account however many of its identities hold a grant, and
   never the account that published. Each channel follows the account's
   [notification preferences](#get-apiusersmenotification-preferences). A
-  second notice waits until the first is read, and at most one email per API
-  per account goes out per hour (the outbox idempotency key
-  `spec-updated:<api>:<user>:<hour>`). The fan-out commits in batches of 200
-  accounts, each with an `api.spec_notify` audit row. It is best-effort: a
-  failure is logged and never fails the publish.
+  second notice waits until the first is read (the unread one is rewritten
+  instead), and at most one email per API per account goes out per clock hour
+  (the outbox idempotency key `spec-updated:<api>:<user>:<hour>`). One fan-out
+  queues at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` emails; past that, accounts
+  get the in-app notice only. The fan-out commits in batches of 200 accounts,
+  each with an `api.spec_notify` audit row, and a batch that fails does not
+  stop the next. It is **detached and best-effort**: the response does not
+  wait for it, a failure is logged and never fails the publish, and a fan-out
+  still running when the process stops is lost, not retried.
 - **Backend following.** The proxy is re-pointed at the new document's
   `servers[0]` only when the API's `upstream_url` still equals the normalized
   `servers[0]` of the previous revision (scheme, host, port and base path).

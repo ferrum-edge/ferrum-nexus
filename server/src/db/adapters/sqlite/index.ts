@@ -2765,6 +2765,17 @@ class SqliteStore implements NexusStore {
       );
       return rows.map((row) => text(row.user_id));
     },
+
+    updateUnread: async (userIds, type, link, content) => {
+      if (userIds.length === 0) return 0;
+      return execute(
+        this.db,
+        `UPDATE notifications SET title = ?, body = ?, updated_at = ?
+          WHERE type = ? AND link = ? AND read_at IS NULL
+            AND user_id IN (${userIds.map(() => '?').join(', ')})`,
+        [content.title, content.body, nowIso(), type, link, ...userIds],
+      );
+    },
   };
 
   /* ── notificationPreferences ──────────────────────────────────────────── */

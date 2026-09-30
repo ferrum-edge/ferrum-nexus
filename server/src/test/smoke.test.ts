@@ -3258,7 +3258,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.ok(await store.notifications.findById(target));
     });
 
-    it('notifications: finds who already holds an unread notice for one link', async () => {
+    it('notifications: finds and rewrites the unread notices for one link', async () => {
       const [a, b, c] = [await makeUser(), await makeUser(), await makeUser()];
       const link = '/catalog/billing?tab=changes';
       await store.notifications.createMany([
@@ -3280,8 +3280,28 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         await store.notifications.listUsersWithUnread([], 'api_spec_updated', link),
         [],
       );
+
+      // Rewritten in place: only unread notices of that type and link.
+      const type = 'api_spec_updated' as const;
+      const content = { title: 'Billing, newer', body: 'z' };
+      const everyone = [a.id, b.id, c.id];
+      const rewritten = await store.notifications.updateUnread(everyone, type, link, content);
+      assert.equal(rewritten, 2);
+      const mine = await store.notifications.list({ user_id: a.id });
+      assert.deepEqual(
+        mine.items.map((row) => row.title),
+        ['Billing, newer', 'Billing, newer'],
+      );
+      const theirs = await store.notifications.list({ user_id: b.id });
+      assert.equal(theirs.items[0]?.title, 'Other', 'another link is untouched');
+      const system = await store.notifications.list({ user_id: c.id });
+      assert.equal(system.items[0]?.title, 'Same link', 'another type is untouched');
+      assert.equal(await store.notifications.updateUnread([], type, link, content), 0);
+
       await store.notifications.markAllRead(a.id, nowIso());
       assert.deepEqual(await holders(), [], 'a read notice no longer counts');
+      const again = await store.notifications.updateUnread([a.id], type, link, content);
+      assert.equal(again, 0, 'a read notice is left as it was read');
     });
 
     it('notificationPreferences: defaults by absence, upserts and keeps created_at', async () => {

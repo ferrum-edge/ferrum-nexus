@@ -121,9 +121,10 @@ readable by everyone who can read the documentation.
 
 If you have access to an API, you are told when a new revision changes it: a
 notice in the bell that links to the **Changes** tab. You get one until you
-read it, however many revisions the provider publishes. Under **Profile →
-Notifications** you can turn the notice off, or turn on an email as well, sent
-at most once an hour per API.
+read it, however many revisions the provider publishes; until then it is kept
+up to date with the latest. Under **Profile → Notifications** you can turn the
+notice off, or turn on an email as well, sent at most once per API per clock
+hour.
 
 ### "I was sent a link but cannot find the API in the catalog"
 

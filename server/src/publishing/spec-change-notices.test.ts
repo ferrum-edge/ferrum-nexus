@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+  MAX_SPEC_CHANGE_TEXT,
   SPEC_CHANGE_NOTICE_NAMED,
   emptySpecChangeReport,
   type ApiSpecChangeEntry,
@@ -14,7 +15,7 @@ import {
   type SpecChangeReport,
 } from '@ferrum-nexus/shared';
 
-import { specChangeEmailLine, summarizeSpecChange } from './spec-change-notices.js';
+import { inertText, specChangeEmailLine, summarizeSpecChange } from './spec-change-notices.js';
 
 function change(overrides: Partial<SpecChange>): SpecChange {
   return {
@@ -148,5 +149,21 @@ describe('spec change notices', () => {
       specChangeEmailLine('GET /go/https://evil.example/x: Operation added'),
       '- GET /go/https[:]//evil.example/x: Operation added',
     );
+    // The backslash spelling, which mail clients and the portal's own link
+    // check both read as a URL too.
+    assert.equal(inertText('see https:\\\\evil.example'), 'see https[:]\\\\evil.example');
+    assert.equal(inertText('mixed http:/\\evil'), 'mixed http[:]/\\evil');
+    assert.doesNotMatch(inertText('a https://x.example b'), /https?:[/\\]{2}/);
+  });
+
+  it('keeps a title to one bounded line, whatever the version says', () => {
+    const version = `2.0.0\r\n${'9'.repeat(500)}`;
+    const notice = summarizeSpecChange(
+      'Billing\nAPI',
+      entry({ info_changes: ['version'] }, { version }),
+    );
+    assert.doesNotMatch(notice.title, /[\r\n]/);
+    assert.ok(notice.headline.length <= 'updated to '.length + MAX_SPEC_CHANGE_TEXT);
+    assert.ok(notice.title.startsWith('Billing API spec updated to 2.0.0 999'));
   });
 });

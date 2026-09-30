@@ -84,7 +84,10 @@ import { createApiViewersService, type ApiViewersService } from './publishing/vi
 import { createApplicationsService, type ApplicationsService } from './applications/service.js';
 import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
-import { createSpecChangeNotifier } from './publishing/spec-change-notices.js';
+import {
+  createSpecChangeNotifier,
+  type SpecChangeNotifier,
+} from './publishing/spec-change-notices.js';
 import { accessRequestRoutes, grantRoutes } from './routes/access.js';
 import { applicationRoutes } from './routes/applications.js';
 import { adminRoutes } from './routes/admin.js';
@@ -132,6 +135,11 @@ export interface NexusServices {
   applications: ApplicationsService;
   access: AccessService;
   god: GodService;
+  /**
+   * Tells grantees what a spec revision changed. It runs detached from the
+   * publish, so tests await `idle()` before asserting what it sent.
+   */
+  specChanges: SpecChangeNotifier;
   /**
    * Gateway-reference reconciliation: detection, the cached report
    * `/api/health` renders, and the `super_admin` repair. `scan()` runs one
@@ -452,6 +460,14 @@ export async function buildServer(
     locks,
     log: warn,
   });
+  const specChanges = createSpecChangeNotifier({
+    store: deps.store,
+    email,
+    audit,
+    config,
+    log: warn,
+    ...(deps.specChangeClock ? { now: deps.specChangeClock } : {}),
+  });
   const publishing = createPublishingService({
     config,
     store: deps.store,
@@ -462,14 +478,7 @@ export async function buildServer(
     settings,
     log: (obj, message) => app.log.error(obj, message),
     upstreamResolver: deps.upstreamResolver ?? createUpstreamResolver(),
-    specChangeNotifier: createSpecChangeNotifier({
-      store: deps.store,
-      email,
-      audit,
-      config,
-      log: warn,
-      ...(deps.specChangeClock ? { now: deps.specChangeClock } : {}),
-    }),
+    specChangeNotifier: specChanges,
   });
   const usage = createUsageService({ store: deps.store, edge: deps.edge, publishing });
   // Composed after publishing: the palette reuses its owner-or-admin check, so
@@ -594,6 +603,7 @@ export async function buildServer(
     applications,
     access,
     god,
+    specChanges,
     reconciliation,
   };
   const webDist = (deps.serveStatic ?? true) ? resolveWebDist(config) : null;
@@ -833,6 +843,8 @@ export async function buildServer(
   }
 
   app.addHook('onClose', async () => {
+    // A fan-out still running finishes before the store it writes to closes.
+    await specChanges.idle();
     await outbox.stop();
     await teardown.stop();
     await expirySweep.stop();

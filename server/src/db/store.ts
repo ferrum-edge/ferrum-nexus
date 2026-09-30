@@ -1386,6 +1386,19 @@ export interface NotificationRepo {
    * the recipient has not read yet already says what a new one would.
    */
   listUsersWithUnread(userIds: Uuid[], type: NotificationType, link: string): Promise<Uuid[]>;
+  /**
+   * Rewrite the title and body of every **unread** notification of `type`
+   * pointing at `link` held by one of `userIds`, so a coalesced notice says
+   * what the newest event said. Read ones are left as they were read.
+   *
+   * @returns the number of notifications changed
+   */
+  updateUnread(
+    userIds: Uuid[],
+    type: NotificationType,
+    link: string,
+    content: { title: string; body: string },
+  ): Promise<number>;
 }
 
 /**

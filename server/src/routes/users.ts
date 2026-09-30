@@ -125,8 +125,11 @@ export const usersRoutes: FastifyPluginAsync<UsersRoutesOptions> = async (app, o
     },
   );
 
+  // The same per-account limit as `PATCH /me`: each change writes a row and an
+  // audit row, and nothing a person does needs more.
   app.patch(
     '/me/notification-preferences',
+    { config: { rateLimit: { ...UPDATE_ME_RATE_LIMIT } } },
     async (request): Promise<UpdateNotificationPreferencesResponse> => {
       const { user } = requireAuth(request);
       const input = parseOrThrow(updateNotificationPreferencesBody, request.body);

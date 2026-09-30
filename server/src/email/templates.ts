@@ -276,7 +276,7 @@ export const DEFAULT_EMAIL_TEMPLATES: Readonly<Record<EmailTemplateKey, EmailTem
         '<p><a href="{{changes_url}}">See what changed</a></p>' +
         '<p>This compares the structure of the two documents, so a change it does not list ' +
         'can still affect you. You asked for these on your profile page, where you can turn ' +
-        'them off; you get at most one an hour for each API.</p>',
+        'them off; you get at most one per API per clock hour.</p>',
     ),
     body_text:
       'Hello {{recipient_name}},\n\n' +
@@ -286,7 +286,7 @@ export const DEFAULT_EMAIL_TEMPLATES: Readonly<Record<EmailTemplateKey, EmailTem
       'See what changed: {{changes_url}}\n\n' +
       'This compares the structure of the two documents, so a change it does not list can ' +
       'still affect you. You asked for these on your profile page, where you can turn them ' +
-      'off; you get at most one an hour for each API.\n',
+      'off; you get at most one per API per clock hour.\n',
   },
 };
 

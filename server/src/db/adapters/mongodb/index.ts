@@ -3446,6 +3446,16 @@ class MongoStore implements NexusStore {
       );
       return found.map((userId) => str(userId));
     },
+
+    updateUnread: async (userIds, type, link, content) => {
+      if (userIds.length === 0) return 0;
+      const result = await this.col(COLLECTIONS.notifications).updateMany(
+        { type, link, read_at: null, user_id: { $in: [...userIds] } } as Filter<NexusDoc>,
+        { $set: { title: content.title, body: content.body, updated_at: nowIso() } },
+        this.opts,
+      );
+      return result.modifiedCount;
+    },
   };
 
   /* ── notificationPreferences ──────────────────────────────────────────── */

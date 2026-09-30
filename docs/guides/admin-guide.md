@@ -272,8 +272,9 @@ minutes**, however many messages arrive. The default wording therefore
 announces activity and links to the thread. `{{message_preview}}` quotes only
 the message that opened the window. In-app notifications are not batched.
 
-`spec_updated` is sent at most once per API, per recipient, per **hour**, for
-the first revision in that hour; it links to the API's Changes tab, which lists
+`spec_updated` is sent at most once per API, per recipient, per **clock
+hour**, for the first revision in that hour, and one fan-out sends at most
+`NEXUS_MAX_MASS_EMAIL_RECIPIENTS` of them; it links to the API's Changes tab, which lists
 every revision. `{{summary}}` and `{{changes}}` quote names from the provider's
 document as plain text. It is off by default: users turn it on on their
 profile page.

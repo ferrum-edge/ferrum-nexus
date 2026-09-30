@@ -3,9 +3,10 @@
  *
  * When a revision replaces another and the comparison found a difference,
  * every account holding an active grant on the API — once, however many of
- * its identities hold one — gets an in-app notice and an email summarising
- * what changed, linking to the catalog page's Changes tab (#448). The account
- * that published the revision is not told about its own change.
+ * its identities hold one — gets an in-app notice summarising what changed,
+ * linking to the catalog page's Changes tab (#448), and an email if it asked
+ * for one. The account that published the revision is not told about its own
+ * change.
  *
  * ## What keeps it from being noise
  *
@@ -16,23 +17,31 @@
  *   notice and no email: email is opt-in, since #447 asked for the in-app
  *   channel and an email per revision is the noisier one.
  * - **Coalescing.** An account that still has an unread notice for the API's
- *   history is not given a second one: the one it has already links to every
- *   revision since. Email is coalesced by time instead, because a sent email
- *   cannot be marked read: one per API per recipient per
- *   `SPEC_CHANGE_EMAIL_WINDOW_MS`, through the outbox's idempotency key, so a
- *   provider publishing ten revisions in an afternoon sends at most a few.
+ *   history is not given a second one: the one it has is rewritten to say what
+ *   the newest revision changed, and links to every revision since. Email is
+ *   coalesced by time instead, because a sent email cannot be marked read: at
+ *   most one per API per recipient per clock hour, through the outbox's
+ *   idempotency key.
+ * - **A cap.** One fan-out queues at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`
+ *   emails, the ceiling a mass email has, so a large API cannot crowd
+ *   verification and password-reset mail out of the outbox; everyone past it
+ *   still gets the in-app notice.
  *
- * ## Best-effort, after the fact
+ * ## Best-effort, detached, after the fact
  *
- * The revision has committed by the time this runs, and a notification that
- * fails must never fail or undo a publish, so {@link SpecChangeNotifier.notify}
- * never throws: a failure is logged. The notices and emails of one batch
- * commit together with the `api.spec_notify` audit row that counts them, so
- * the fan-out is never half recorded. Each body is plain text built from the
- * stored change summary; the email template escapes it like every other value.
+ * The revision has committed by the time this runs, and the publish does not
+ * wait for it: {@link SpecChangeNotifier.notify} is started and left to run,
+ * and never rejects. A failure is logged, and a batch that fails does not stop
+ * the next. Work in flight when the process stops is lost; nothing retries
+ * it. The notices and emails of one batch commit together with the
+ * `api.spec_notify` audit row that counts them, so a batch is never half
+ * recorded. Each body is plain text built from the stored change summary, with
+ * every provider-written value made inert as a link; the email template escapes
+ * it like every other value.
  */
 
 import {
+  MAX_SPEC_CHANGE_TEXT,
   SPEC_CHANGE_EMAIL_WINDOW_MS,
   SPEC_CHANGE_NOTICE_NAMED,
   describeSpecChange,
@@ -44,8 +53,10 @@ import {
 
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
-import type { ApiRecord, NexusStore } from '../db/store.js';
+import type { ApiRecord, NexusStore, UserRecord } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
+import type { RenderedEmail } from '../email/templates.js';
+import { clipSpecText } from './spec-changes.js';
 
 /** Recipients handled per transaction, so one fan-out never holds a long one. */
 export const SPEC_CHANGE_NOTICE_BATCH = 200;
@@ -62,6 +73,27 @@ export interface SpecChangeNotice {
   lines: string[];
   /** The in-app body: the summary and the named changes. */
   body: string;
+}
+
+/**
+ * Provider-written text made inert as a link. Mail clients turn anything that
+ * looks like `https://host` into one — and so does the portal's own check of a
+ * rendered email, which refuses the whole message for an off-portal URL — so
+ * the colon of every scheme separator, `//` or `\\` alike, is bracketed.
+ */
+export function inertText(text: string): string {
+  return text.replace(/:(?=[/\\]{2})/g, '[:]');
+}
+
+/**
+ * Provider-written text fit for a title or a subject: control characters and
+ * line breaks collapsed to spaces, and cut to `MAX_SPEC_CHANGE_TEXT`.
+ */
+export function oneLine(text: string): string {
+  return clipSpecText(
+    text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').trim(),
+    MAX_SPEC_CHANGE_TEXT,
+  );
 }
 
 function plural(count: number, noun: string): string {
@@ -87,7 +119,9 @@ export function summarizeSpecChange(apiName: string, entry: ApiSpecChangeEntry):
   const { report } = entry;
   const { counts } = report;
   const verb = entry.kind === 'rollback' ? 'rolled back to' : 'updated to';
-  const headline = `${verb} ${entry.version}`;
+  // `version` defaults to the document's own `info.version`, which nothing
+  // bounds, and it becomes a title and a subject: one line, cut.
+  const headline = `${verb} ${oneLine(entry.version)}`;
   const total = counts.breaking + counts.non_breaking;
 
   const sentences: string[] = [];
@@ -133,23 +167,20 @@ export function summarizeSpecChange(apiName: string, entry: ApiSpecChangeEntry):
   const summary = [...sentences, caveat].join(' ');
   const listed = lines.length > 0 ? [`${lines.join('; ')}.`] : [];
   const body = [...sentences, ...listed, caveat].join(' ');
-  return { headline, title: `${apiName} spec ${headline}`, summary, lines, body };
+  return { headline, title: `${oneLine(apiName)} spec ${headline}`, summary, lines, body };
 }
 
-/**
- * A line as the email carries it. Mail clients turn anything that looks like
- * a URL into a link, and a provider-written name is not a destination this
- * portal vouches for, so the scheme separator is broken up.
- */
+/** A line as the email carries it: a list item, inert as a link. */
 export function specChangeEmailLine(line: string): string {
-  return `- ${line.replace(/:\/\//g, '[:]//')}`;
+  return `- ${inertText(line)}`;
 }
 
 /** Tells an API's grantees about a recorded spec change. */
 export interface SpecChangeNotifier {
   /**
-   * Notify the grantees of `api` of `change`, published by `actor`. Never
-   * throws: the revision is already published, and a failure is logged.
+   * Notify the grantees of `api` of `change`, published by `actor`. The
+   * returned promise never rejects — the revision is already published, and a
+   * failure is logged — so a caller may leave it to run.
    */
   notify(
     actor: { id: Uuid; role: Role },
@@ -157,6 +188,8 @@ export interface SpecChangeNotifier {
     change: ApiSpecChangeEntry,
     ip: string | null,
   ): Promise<void>;
+  /** Settles once every fan-out started so far has finished. */
+  idle(): Promise<void>;
 }
 
 /** Dependencies of {@link createSpecChangeNotifier}. */
@@ -164,16 +197,45 @@ export interface SpecChangeNotifierDeps {
   store: NexusStore;
   email: Pick<EmailService, 'prepareRenderer'>;
   audit: AuditService;
-  config: Pick<NexusConfig, 'publicUrl'>;
+  config: Pick<NexusConfig, 'publicUrl' | 'maxMassEmailRecipients'>;
   log?: (obj: Record<string, unknown>, message: string) => void;
   /** Clock for the email window; tests move it. */
   now?: () => number;
 }
 
+/** A prepared `spec_updated` renderer. */
+type Renderer = Awaited<ReturnType<EmailService['prepareRenderer']>>;
+
 /** Build the spec-change notifier. */
 export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChangeNotifier {
   const { store, email, audit, config } = deps;
   const now = deps.now ?? Date.now;
+
+  /** How many recipients one batch told, emailed, or skipped, and why. */
+  interface BatchCounts {
+    recipients: number;
+    notified: number;
+    already_notified: number;
+    in_app_off: number;
+    emailed: number;
+    email_coalesced: number;
+    email_off: number;
+    email_capped: number;
+    email_failed: number;
+  }
+
+  /** What one batch will write, read and rendered before its transaction. */
+  interface BatchPlan {
+    /** `null` when nobody in the batch is still a recipient. */
+    counts: BatchCounts | null;
+    /** Accounts getting a new notice. */
+    inApp: Uuid[];
+    /** Accounts whose unread notice is rewritten instead. */
+    told: Uuid[];
+    mails: { user: UserRecord; rendered: RenderedEmail }[];
+    /** Emails this batch spent of the fan-out's cap. */
+    emailAttempts: number;
+  }
 
   async function fanOut(
     actor: { id: Uuid; role: Role },
@@ -192,21 +254,143 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
 
     const link = `/catalog/${encodeURIComponent(api.slug)}?tab=changes`;
     const notice = summarizeSpecChange(api.name, change);
-    const changes = notice.lines.map(specChangeEmailLine).join('\n');
-    const render = await email.prepareRenderer('spec_updated');
+    const content = { title: notice.title, body: notice.body };
+    const vars = {
+      api_name: inertText(oneLine(api.name)),
+      api_slug: api.slug,
+      version: inertText(oneLine(change.version)),
+      headline: inertText(notice.headline),
+      summary: inertText(notice.summary),
+      changes: notice.lines.map(specChangeEmailLine).join('\n'),
+      changes_url: `${config.publicUrl}${link}`,
+    };
+    // Without a renderer nobody is emailed, and everyone is still told in-app.
+    let prepared: Renderer | null = null;
+    try {
+      prepared = await email.prepareRenderer('spec_updated');
+    } catch (error) {
+      deps.log?.(
+        { api_id: api.id, error: error instanceof Error ? error.message : String(error) },
+        'Could not prepare the spec change email; grantees are told in-app only',
+      );
+    }
+    const render = prepared;
     const window = Math.floor(now() / SPEC_CHANGE_EMAIL_WINDOW_MS);
     const batches = Math.ceil(recipients.length / SPEC_CHANGE_NOTICE_BATCH);
+    // `0` means no ceiling, as it does for a mass email.
+    let emailsLeft =
+      config.maxMassEmailRecipients > 0 ? config.maxMassEmailRecipients : Number.POSITIVE_INFINITY;
+    let failedBatches = 0;
 
     for (let batch = 0; batch < batches; batch += 1) {
       const ids = recipients.slice(
         batch * SPEC_CHANGE_NOTICE_BATCH,
         (batch + 1) * SPEC_CHANGE_NOTICE_BATCH,
       );
-      const found = await store.users.findManyByIds(ids);
-      const users = found.filter((user) => user.status === 'active');
-      if (users.length === 0) continue;
-      const userIds = users.map((user) => user.id);
-      const rows = await store.notificationPreferences.findManyByUsers(userIds);
+      try {
+        const sent = await sendBatch(ids, emailsLeft);
+        emailsLeft -= sent.emailAttempts;
+        if (sent.counts === null) continue;
+        await store.transaction(async (tx) => {
+          const counts = sent.counts!;
+          counts.emailed = 0;
+          for (const { user, rendered } of sent.mails) {
+            // At most once per API, recipient and clock hour: a later revision
+            // in the same hour finds the row and queues nothing.
+            const queued = await tx.emailOutbox.enqueue({
+              to_email: user.email,
+              subject: rendered.subject,
+              body_html: rendered.html,
+              body_text: rendered.text,
+              idempotency_key: `spec-updated:${api.id}:${user.id}:${window}`,
+            });
+            if (queued.created) counts.emailed += 1;
+          }
+          counts.email_coalesced = sent.mails.length - counts.emailed;
+          if (sent.inApp.length > 0) {
+            await tx.notifications.createMany(
+              sent.inApp.map((userId) => ({
+                user_id: userId,
+                type: 'api_spec_updated' as const,
+                title: notice.title,
+                body: notice.body,
+                link,
+              })),
+            );
+          }
+          // A coalesced notice says what the newest revision changed.
+          await tx.notifications.updateUnread(sent.told, 'api_spec_updated', link, content);
+          await audit.forStore(tx).record(
+            actor,
+            AuditAction.API_SPEC_NOTIFY,
+            { type: 'api', id: api.id },
+            {
+              spec_id: change.revision_id,
+              kind: change.kind,
+              version: oneLine(change.version),
+              batch: batch + 1,
+              batches,
+              failed_batches: failedBatches,
+              ...counts,
+            },
+            ip,
+          );
+        });
+      } catch (error) {
+        failedBatches += 1;
+        deps.log?.(
+          {
+            api_id: api.id,
+            spec_id: change.revision_id,
+            batch: batch + 1,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'A batch of spec change notices failed; the next batch is still tried',
+        );
+      }
+    }
+
+    if (failedBatches > 0) {
+      // The failed batches recorded nothing of their own, so one row says so.
+      await store.transaction(async (tx) => {
+        await audit.forStore(tx).record(
+          actor,
+          AuditAction.API_SPEC_NOTIFY,
+          { type: 'api', id: api.id },
+          {
+            spec_id: change.revision_id,
+            kind: change.kind,
+            version: oneLine(change.version),
+            batches,
+            failed_batches: failedBatches,
+          },
+          ip,
+        );
+      });
+    }
+
+    /**
+     * Everything one batch will write, read and rendered outside its
+     * transaction. Grants and account status are read again here, at batch
+     * time, so an account revoked or disabled since the fan-out began is not
+     * told.
+     */
+    async function sendBatch(ids: readonly Uuid[], emailBudget: number): Promise<BatchPlan> {
+      const found = await store.users.findManyByIds([...ids]);
+      const users: UserRecord[] = [];
+      for (const user of found) {
+        if (user.status !== 'active') continue;
+        const active = await store.grants.count({
+          api_id: api.id,
+          user_id: user.id,
+          status: 'active',
+        });
+        if (active > 0) users.push(user);
+      }
+      if (users.length === 0) {
+        return { counts: null, inApp: [], told: [], mails: [], emailAttempts: 0 };
+      }
+      const rows = await store.notificationPreferences.findManyByUsers(users.map((u) => u.id));
       const preferences = new Map(rows.map((row) => [row.user_id, row]));
       const wantsInApp = users.filter(
         (user) => preferences.get(user.id)?.api_spec_updated_in_app !== false,
@@ -215,84 +399,61 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
       const wantsEmail = users.filter(
         (user) => preferences.get(user.id)?.api_spec_updated_email === true,
       );
-      const toldIds = await store.notifications.listUsersWithUnread(
+      const told = await store.notifications.listUsersWithUnread(
         wantsInApp.map((user) => user.id),
         'api_spec_updated',
         link,
       );
-      const alreadyTold = new Set(toldIds);
-      const inApp = wantsInApp.filter((user) => !alreadyTold.has(user.id));
-      // Rendered before the transaction: the renderer is pure, so a body that
-      // is re-run on contention writes exactly the same rows.
-      const mails = wantsEmail.map((user) => ({
-        user,
-        rendered: render({
-          recipient_name: user.display_name,
-          recipient_email: user.email,
-          api_name: api.name,
-          api_slug: api.slug,
-          version: change.version,
-          headline: notice.headline,
-          summary: notice.summary,
-          changes,
-          changes_url: `${config.publicUrl}${link}`,
-        }),
-      }));
+      const alreadyTold = new Set(told);
+      const inApp = wantsInApp.map((user) => user.id).filter((id) => !alreadyTold.has(id));
 
-      await store.transaction(async (tx) => {
-        let emailed = 0;
-        for (const { user, rendered } of mails) {
-          // At most once per API, recipient and window: a later revision in the
-          // same window finds the row and queues nothing.
-          const queued = await tx.emailOutbox.enqueue({
-            to_email: user.email,
-            subject: rendered.subject,
-            body_html: rendered.html,
-            body_text: rendered.text,
-            idempotency_key: `spec-updated:${api.id}:${user.id}:${window}`,
+      const allowed = wantsEmail.slice(0, Math.max(0, emailBudget));
+      // Rendered one at a time, before the transaction: the renderer is pure,
+      // so a body re-run on contention writes the same rows, and one message
+      // it refuses costs that recipient their email and nobody anything else.
+      const mails: { user: UserRecord; rendered: RenderedEmail }[] = [];
+      let failed = 0;
+      for (const user of allowed) {
+        if (render === null) {
+          failed += 1;
+          continue;
+        }
+        try {
+          const rendered = render({
+            ...vars,
+            recipient_name: inertText(oneLine(user.display_name)),
+            recipient_email: user.email,
           });
-          if (queued.created) emailed += 1;
+          mails.push({ user, rendered });
+        } catch {
+          failed += 1;
         }
-        if (inApp.length > 0) {
-          await tx.notifications.createMany(
-            inApp.map((user) => ({
-              user_id: user.id,
-              type: 'api_spec_updated' as const,
-              title: notice.title,
-              body: notice.body,
-              link,
-            })),
-          );
-        }
-        await audit.forStore(tx).record(
-          actor,
-          AuditAction.API_SPEC_NOTIFY,
-          { type: 'api', id: api.id },
-          {
-            spec_id: change.revision_id,
-            kind: change.kind,
-            version: change.version,
-            batch: batch + 1,
-            batches,
-            recipients: users.length,
-            notified: inApp.length,
-            already_notified: alreadyTold.size,
-            in_app_off: users.length - wantsInApp.length,
-            emailed,
-            email_coalesced: mails.length - emailed,
-            email_off: users.length - wantsEmail.length,
-          },
-          ip,
-        );
-      });
+      }
+      return {
+        counts: {
+          recipients: users.length,
+          notified: inApp.length,
+          already_notified: alreadyTold.size,
+          in_app_off: users.length - wantsInApp.length,
+          emailed: 0,
+          email_coalesced: 0,
+          email_off: users.length - wantsEmail.length,
+          email_capped: wantsEmail.length - allowed.length,
+          email_failed: failed,
+        },
+        inApp,
+        told,
+        mails,
+        emailAttempts: allowed.length,
+      };
     }
   }
 
+  const inFlight = new Set<Promise<void>>();
+
   return {
-    async notify(actor, api, change, ip): Promise<void> {
-      try {
-        await fanOut(actor, api, change, ip);
-      } catch (error) {
+    notify(actor, api, change, ip): Promise<void> {
+      const run = fanOut(actor, api, change, ip).catch((error: unknown) => {
         deps.log?.(
           {
             api_id: api.id,
@@ -301,7 +462,14 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
           },
           'Could not notify grantees of a spec change; the revision itself is published',
         );
-      }
+      });
+      inFlight.add(run);
+      void run.finally(() => inFlight.delete(run));
+      return run;
+    },
+
+    async idle(): Promise<void> {
+      while (inFlight.size > 0) await Promise.all([...inFlight]);
     },
   };
 }

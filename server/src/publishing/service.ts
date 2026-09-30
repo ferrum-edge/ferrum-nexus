@@ -485,8 +485,8 @@ export interface PublishingServiceDeps {
   upstreamResolver: UpstreamResolver;
   /**
    * Tells an API's grantees what a published revision changed (issue #447).
-   * Called after the revision has committed, and never able to fail it.
-   * Absent, nobody is told.
+   * Started after the revision has committed and not awaited, so it can
+   * neither slow the publish down nor fail it. Absent, nobody is told.
    */
   specChangeNotifier?: SpecChangeNotifier;
 }
@@ -1748,10 +1748,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     const persisted = proxyId ? await binder.withProxy(proxyId, apply) : await apply();
 
     // Only once the revision has committed, outside the proxy lease, and
-    // best-effort: a notice that cannot be sent never fails the publish, and a
-    // failed or compensated revision never reaches this line.
+    // detached: the response does not wait for a fan-out that can reach every
+    // grantee, and `notify` never rejects, so a notice that cannot be sent
+    // never fails the publish. A failed or compensated revision never reaches
+    // this line.
     if (persisted.change) {
-      await deps.specChangeNotifier?.notify(
+      void deps.specChangeNotifier?.notify(
         { id: actor.id, role: actor.role },
         persisted.api,
         persisted.change,

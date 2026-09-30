@@ -32,14 +32,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   outbox. Email is off by default: #447 asked for the in-app channel. Each names
   up to five changes, removed operations first, and links to the Changes tab.
   An account is told once however many of its identities hold a grant, and the
-  publisher is not told. A burst of revisions sends one email per API per hour
-  and no second notice while the first is unread. The fan-out is audited as
-  `api.spec_notify` and never fails the publish. Notifications now show an
-  icon for their type.
+  publisher is not told. A burst of revisions sends at most one email per API
+  per clock hour and no second notice while the first is unread; the unread
+  one is rewritten with the latest summary. One fan-out queues at most
+  `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` emails, and past that sends in-app only.
+  The fan-out runs detached from the publish, in batches of 200 audited as
+  `api.spec_notify`; it never fails or delays the publish, and work in flight
+  at shutdown is lost. Provider-written text in the email is made inert as a
+  link. Notifications now show an icon for their type.
 - **Notification preferences.** `GET` and `PATCH /api/users/me/notification-preferences`,
   and a **Notifications** card on the profile page, choose the spec-change
   notice per channel: in-app is on and email off until changed. Changes are
-  audited as `user.notification_preferences_update`.
+  audited as `user.notification_preferences_update`, and limited to 10 a minute
+  per account like `PATCH /api/users/me`.
 - Forward migration `005_notification_preferences` adds the
   `user_notification_preferences` table on every backend. It copies no data.
 

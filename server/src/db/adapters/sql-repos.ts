@@ -2683,6 +2683,17 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       );
       return rows.map((row) => text(row.user_id));
     },
+
+    updateUnread: async (userIds, type, link, content) => {
+      if (userIds.length === 0) return 0;
+      return execute(
+        exec,
+        `UPDATE notifications SET title = ?, body = ?, updated_at = ?
+          WHERE type = ? AND link = ? AND read_at IS NULL
+            AND user_id IN (${placeholders(userIds.length)})`,
+        [content.title, content.body, nowIso(), type, link, ...userIds],
+      );
+    },
   };
 
   /* ── notificationPreferences ────────────────────────────────────────── */

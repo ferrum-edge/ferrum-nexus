@@ -39,14 +39,14 @@ export function NotificationPreferencesCard(): ReactElement {
           <div className="flex flex-col gap-4">
             <Checkbox
               label="Notify me in the portal when an API I use changes its specification"
-              description="One notice with what changed, until you read it, however many revisions follow."
+              description="One notice with what the latest revision changed, until you read it."
               checked={preferences.api_spec_updated_in_app}
               disabled={update.isPending}
               onChange={(event) => save({ api_spec_updated_in_app: event.target.checked })}
             />
             <Checkbox
               label="Email me when an API I use changes its specification"
-              description="Off until you turn it on. At most one email an hour for each API."
+              description="Off until you turn it on. At most one per API per clock hour."
               checked={preferences.api_spec_updated_email}
               disabled={update.isPending}
               onChange={(event) => save({ api_spec_updated_email: event.target.checked })}
