@@ -77,14 +77,7 @@ services:
       - ./dex/config.yaml:/etc/dex/e2e.yaml:ro
     healthcheck:
       test:
-        [
-          'CMD',
-          'wget',
-          '-q',
-          '-O',
-          '/dev/null',
-          'http://127.0.0.1:${DEX_PORT:-5556}/dex/healthz',
-        ]
+        ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:${DEX_PORT:-5556}/dex/healthz']
       interval: 2s
       timeout: 3s
       retries: 30
