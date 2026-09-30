@@ -19,6 +19,7 @@ import type {
   AccessRequest,
   AccessRequestStatus,
   Api,
+  ApiSpecChangeEntry,
   ApiSpecSummary,
   ApiStatus,
   ApiTimeouts,
@@ -402,6 +403,21 @@ export interface CatalogSpecResponse {
   parsed_title: string | null;
   parsed_version: string | null;
 }
+
+/**
+ * `GET /api/catalog/:slug/changes` — what each published revision changed,
+ * newest first. `limit` is clamped to `MAX_SPEC_CHANGE_PAGE_SIZE`.
+ */
+export type CatalogSpecChangesQuery = ListQuery;
+
+/** `GET /api/catalog/:slug/changes` */
+export type CatalogSpecChangesResponse = Paginated<ApiSpecChangeEntry>;
+
+/**
+ * `GET /api/catalog/:slug/changes/:revisionId` — what one revision changed
+ * against the revision it replaced.
+ */
+export type CatalogSpecChangeResponse = ApiSpecChangeEntry;
 
 /* ── Publishing (provider) ──────────────────────────────────────────────── */
 

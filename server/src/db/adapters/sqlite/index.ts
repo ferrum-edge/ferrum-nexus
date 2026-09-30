@@ -80,11 +80,17 @@ import type {
   NotificationType,
   RateLimitConfig,
   Role,
+  SpecChangeReport,
   SpecEnforcementLevel,
+  SpecRevisionKind,
   UserStatus,
   Uuid,
 } from '@ferrum-nexus/shared';
-import { DEFAULT_SPEC_ENFORCEMENT, isSpecEnforcementLevel } from '@ferrum-nexus/shared';
+import {
+  DEFAULT_SPEC_ENFORCEMENT,
+  emptySpecChangeReport,
+  isSpecEnforcementLevel,
+} from '@ferrum-nexus/shared';
 
 import type { NexusConfig } from '../../../config/index.js';
 import { newId, nowIso } from '../../../lib/ids.js';
@@ -113,6 +119,8 @@ import type {
   ApiPluginRepo,
   ApiRecord,
   ApiRepo,
+  ApiSpecChangeRecord,
+  ApiSpecChangeRepo,
   ApiSpecRecord,
   ApiSpecRepo,
   ApiViewerFilter,
@@ -340,6 +348,24 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     revision_seq: int(row.revision_seq),
     created_by: textOrNull(row.created_by),
     rolled_back_from_id: textOrNull(row.rolled_back_from_id),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapApiSpecChange(row: Row): ApiSpecChangeRecord {
+  return {
+    id: text(row.id),
+    api_id: text(row.api_id),
+    revision_id: text(row.spec_id),
+    previous_revision_id: textOrNull(row.previous_spec_id),
+    kind: text(row.kind) as SpecRevisionKind,
+    version: text(row.version),
+    previous_version: textOrNull(row.previous_version),
+    revision_seq: int(row.revision_seq),
+    // A summary that no longer decodes reads as one that could not be made,
+    // never as "nothing changed".
+    report: json<SpecChangeReport>(row.report_json, emptySpecChangeReport(false)),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -754,6 +780,7 @@ class SqliteStore implements NexusStore {
     this.applications = guardRepo(this.applications, mediate);
     this.apis = guardRepo(this.apis, mediate);
     this.apiSpecs = guardRepo(this.apiSpecs, mediate);
+    this.apiSpecChanges = guardRepo(this.apiSpecChanges, mediate);
     this.apiPlugins = guardRepo(this.apiPlugins, mediate);
     this.apiGatewayPlugins = guardRepo(this.apiGatewayPlugins, mediate);
     this.apiViewers = guardRepo(this.apiViewers, mediate);
@@ -1533,6 +1560,87 @@ class SqliteStore implements NexusStore {
         ids,
       );
     },
+  };
+
+  /* ── apiSpecChanges ───────────────────────────────────────────────────── */
+
+  readonly apiSpecChanges: ApiSpecChangeRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      mapConflict('That revision already has a change summary', () =>
+        execute(
+          this.db,
+          `INSERT INTO api_spec_changes
+             (id, api_id, spec_id, previous_spec_id, kind, version, previous_version,
+              revision_seq, report_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            meta.id,
+            input.api_id,
+            input.revision_id,
+            input.previous_revision_id ?? null,
+            input.kind,
+            input.version,
+            input.previous_version ?? null,
+            input.revision_seq,
+            JSON.stringify(input.report),
+            meta.created_at,
+            meta.updated_at,
+          ],
+        ),
+      );
+      const row = queryOne(this.db, 'SELECT * FROM api_spec_changes WHERE id = ?', [meta.id]);
+      if (!row) throw new Error('apiSpecChanges.create: row vanished immediately after insert');
+      return mapApiSpecChange(row);
+    },
+
+    findByRevision: async (apiId, revisionId) => {
+      const row = queryOne(
+        this.db,
+        'SELECT * FROM api_spec_changes WHERE api_id = ? AND spec_id = ?',
+        [apiId, revisionId],
+      );
+      return row ? mapApiSpecChange(row) : null;
+    },
+
+    listByApi: async (apiId, options) => {
+      const { limit, offset } = page(options);
+      const total = queryCount(
+        this.db,
+        'SELECT COUNT(*) AS count FROM api_spec_changes WHERE api_id = ?',
+        [apiId],
+      );
+      const rows = queryAll(
+        this.db,
+        `SELECT * FROM api_spec_changes WHERE api_id = ?
+          ORDER BY revision_seq DESC
+          LIMIT ? OFFSET ?`,
+        [apiId, limit, offset],
+      );
+      return { items: rows.map(mapApiSpecChange), total };
+    },
+
+    prune: async (apiId, keep) => {
+      // Selected then deleted by id, as `apiSpecs.pruneHistory` is.
+      const rows = queryAll(
+        this.db,
+        `SELECT id FROM api_spec_changes
+          WHERE api_id = ?
+          ORDER BY revision_seq DESC
+          LIMIT ? OFFSET ?`,
+        [apiId, SPEC_HISTORY_PRUNE_BATCH, Math.max(0, keep)],
+      );
+      if (rows.length === 0) return 0;
+      const ids = rows.map((row) => text(row.id));
+      return execute(
+        this.db,
+        `DELETE FROM api_spec_changes WHERE id IN (${ids.map(() => '?').join(', ')})`,
+        ids,
+      );
+    },
+
+    deleteByApi: async (apiId) =>
+      execute(this.db, 'DELETE FROM api_spec_changes WHERE api_id = ?', [apiId]),
   };
 
   /* ── apiPlugins ───────────────────────────────────────────────────────── */

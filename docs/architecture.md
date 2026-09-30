@@ -665,6 +665,17 @@ released. A revision that rewrites the proxy first commits an
 `api.gateway_repair_required` and the catalog keeps its previous revision. The
 full audit sequence is in [`api.md`](api.md).
 
+**Spec change summaries.** Under the same lease, after the previous revision is
+re-read, `publishing/spec-changes.ts` compares it with the new document for
+consumers: operations, parameters, request bodies, responses and their schemas,
+each change classified as breaking or not. The comparison is pure and bounded
+(each shared component compared once per direction, a fixed work budget, capped
+output), so it runs before the store transaction rather than inside a body that
+may re-run. The summary commits with the revision in `api_spec_changes`, which
+has no foreign key to `api_specs` and so outlives retention. The catalog serves
+it under the detail page's visibility rule
+([`api.md`](api.md#get-apicatalogslugchanges)).
+
 ### Spec-owned proxies
 
 Nexus composes and attaches every plugin above except `openapi_validator`.

@@ -16,6 +16,7 @@ export const queryKeys = {
     list: (params: unknown) => ['catalog', 'list', params] as const,
     detail: (slug: string) => ['catalog', 'detail', slug] as const,
     spec: (slug: string) => ['catalog', 'spec', slug] as const,
+    changes: (slug: string, params: unknown) => ['catalog', 'changes', slug, params] as const,
     identityAccess: (slug: string, applicationId: string | null) =>
       ['catalog', 'identity-access', slug, applicationId] as const,
   },

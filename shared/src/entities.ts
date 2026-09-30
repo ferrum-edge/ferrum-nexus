@@ -1005,6 +1005,156 @@ export interface SpecDiff {
   changed: boolean;
 }
 
+/* ── Consumer-facing change history ─────────────────────────────────────── */
+
+/**
+ * Whether a change can break a caller written against the previous revision.
+ *
+ * Judged from the caller's side: a request schema that accepts less, a
+ * response schema that may send something new, a removed operation, parameter
+ * or response. Where the comparison cannot tell which way a change goes, it
+ * says `breaking`.
+ */
+export type SpecChangeSeverity = 'breaking' | 'non_breaking';
+
+/** What one {@link SpecChange} describes. */
+export type SpecChangeKind =
+  | 'operation_added'
+  | 'operation_removed'
+  | 'operation_deprecated'
+  | 'operation_undeprecated'
+  | 'parameter_added'
+  | 'parameter_removed'
+  | 'parameter_required'
+  | 'parameter_optional'
+  | 'request_body_added'
+  | 'request_body_removed'
+  | 'request_body_required'
+  | 'request_body_optional'
+  | 'response_added'
+  | 'response_removed'
+  | 'media_type_added'
+  | 'media_type_removed'
+  | 'schema_type_changed'
+  | 'schema_property_added'
+  | 'schema_property_removed'
+  | 'schema_property_required'
+  | 'schema_property_optional'
+  | 'schema_enum_values_added'
+  | 'schema_enum_values_removed'
+  | 'schema_composition_changed';
+
+/**
+ * Which part of an operation a change is in. For a schema change it is also
+ * the direction the schema travels in, which decides its severity: a
+ * `parameter` or `request` schema is sent by the caller, a `response` one is
+ * read by it.
+ */
+export type SpecChangeSection = 'operation' | 'parameter' | 'request' | 'response';
+
+/**
+ * One change between two OpenAPI revisions.
+ *
+ * Every string in it is provider-written text the catalog already shows to
+ * whoever may read the API's documentation (a path template, a parameter,
+ * property or media type name, a status code, an enum value), cut to
+ * `MAX_SPEC_CHANGE_TEXT`. Descriptions, examples, servers and extensions are
+ * never carried.
+ */
+export interface SpecChange {
+  kind: SpecChangeKind;
+  severity: SpecChangeSeverity;
+  /**
+   * The operation the change is in, or `null` for a change inside a shared
+   * component schema, which is reported once under {@link SpecChange.location}
+   * rather than again at every operation that references it.
+   */
+  operation: SpecOperationRef | null;
+  section: SpecChangeSection;
+  /**
+   * Where in the section: `query limit` for a parameter, a media type for a
+   * request body, `200` or `200 application/json` for a response, the
+   * `$ref` of a component schema. `null` when the section says it all.
+   */
+  location: string | null;
+  /**
+   * Where inside the schema at {@link SpecChange.location}: `status`,
+   * `items[].id`, `oneOf[1].amount`, or `''` for the schema itself. `null` for
+   * a change that is not inside a schema.
+   */
+  schema_path: string | null;
+  /** The previous value, where one is worth naming: a type, the removed enum values. */
+  from: string | null;
+  /** The new value, likewise. */
+  to: string | null;
+}
+
+/** Totals over every change a comparison found, including any past the list cap. */
+export interface SpecChangeCounts {
+  breaking: number;
+  non_breaking: number;
+  operations_added: number;
+  operations_removed: number;
+  operations_deprecated: number;
+  /** Operations both revisions declare that have at least one change listed against them. */
+  operations_changed: number;
+}
+
+/**
+ * A bounded comparison of two OpenAPI revisions, as consumers of the API are
+ * shown it: operations, parameters, request bodies, responses and the schemas
+ * they carry, each change classified as breaking or not.
+ *
+ * It is a structural comparison. It reads types, properties, `required`,
+ * enums, items and composition lists; it does not compare formats, patterns,
+ * numeric bounds, examples or security requirements, and it cannot know how a
+ * provider's implementation behaves. An empty list means the comparison found
+ * nothing, not that a change is safe.
+ */
+export interface SpecChangeReport {
+  /** Whether anything differs, including {@link SpecChangeReport.info_changes}. */
+  changed: boolean;
+  /**
+   * `false` when the comparison stopped at `MAX_SPEC_CHANGE_UNITS`, or could
+   * not read the previous document: the lists and counts are then only what
+   * it found before stopping.
+   */
+  complete: boolean;
+  /** Breaking changes first, then the rest, each group in document order. */
+  changes: SpecChange[];
+  counts: SpecChangeCounts;
+  /** Whether {@link SpecChangeReport.changes} lists fewer changes than were counted. */
+  truncated: boolean;
+  /** The `info` fields that differ. Their values are not carried. */
+  info_changes: SpecInfoChange['field'][];
+}
+
+/** Whether a revision was an upload or the restoration of an earlier document. */
+export type SpecRevisionKind = 'update' | 'rollback';
+
+/**
+ * What changed when one revision of an API's specification replaced the one
+ * before it, recorded when it was published.
+ *
+ * Kept apart from the revision documents, so it survives
+ * `NEXUS_SPEC_HISTORY_LIMIT` pruning them.
+ */
+export interface ApiSpecChangeEntry {
+  id: Uuid;
+  api_id: Uuid;
+  /** The revision published. It may since have been pruned. */
+  revision_id: Uuid;
+  /** The revision it replaced, or `null` when there was none. */
+  previous_revision_id: Uuid | null;
+  kind: SpecRevisionKind;
+  /** The new revision's version label. */
+  version: string;
+  /** The replaced revision's version label. */
+  previous_version: string | null;
+  report: SpecChangeReport;
+  created_at: IsoTimestamp;
+}
+
 /* ── Applications ───────────────────────────────────────────────────────── */
 
 /** Lifecycle of an application identity. */

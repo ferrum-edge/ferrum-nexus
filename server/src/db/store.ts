@@ -80,6 +80,7 @@ import type {
   ApiPlugin,
   ApiPluginTrigger,
   ApiSpec,
+  ApiSpecChangeEntry,
   ApiStatus,
   ApiGatewayState,
   ApiVisibility,
@@ -949,6 +950,48 @@ export interface ApiSpecRepo {
 export const SPEC_HISTORY_PRUNE_BATCH = 1_000;
 
 /**
+ * An `api_spec_changes` row: what one published revision changed, recorded
+ * when it became current (issue #448).
+ *
+ * Kept apart from `api_specs` so that it outlives the documents
+ * `NEXUS_SPEC_HISTORY_LIMIT` prunes: consumers are still owed the account of
+ * what changed after the revision it describes is gone. `revision_id` is
+ * therefore a plain reference, not a foreign key.
+ */
+export interface ApiSpecChangeRecord extends ApiSpecChangeEntry {
+  /**
+   * The {@link ApiSpecRecord.revision_seq} of the revision described, which
+   * orders the history for the reason it orders revisions. Store-internal,
+   * absent from the wire entry.
+   */
+  revision_seq: number;
+  updated_at: IsoTimestamp;
+}
+
+/** Change summaries of published revisions, one row per revision. */
+export interface ApiSpecChangeRepo {
+  /**
+   * Record one revision's summary. A revision has at most one, and an API one
+   * per `revision_seq`: a second is a `CONFLICT`.
+   */
+  create(input: CreateInput<ApiSpecChangeRecord>): Promise<ApiSpecChangeRecord>;
+  /** The summary of `revisionId`, scoped to `apiId`; `null` when there is none. */
+  findByRevision(apiId: Uuid, revisionId: Uuid): Promise<ApiSpecChangeRecord | null>;
+  /** One page of an API's summaries, newest first by `revision_seq`. */
+  listByApi(apiId: Uuid, options?: ListOptions): Promise<Paginated<ApiSpecChangeRecord>>;
+  /**
+   * Drop every summary of `apiId` beyond the newest `keep`, at most
+   * {@link SPEC_HISTORY_PRUNE_BATCH} per call, for the reason
+   * {@link ApiSpecRepo.pruneHistory} gives.
+   *
+   * @returns the number of summaries removed
+   */
+  prune(apiId: Uuid, keep: number): Promise<number>;
+  /** Cascade helper for API deletion. Returns the number of summaries removed. */
+  deleteByApi(apiId: Uuid): Promise<number>;
+}
+
+/**
  * Palette plugins a provider switched on for their own API.
  *
  * There is no `list`/`count` pair here on purpose: the palette is small and
@@ -1706,6 +1749,7 @@ export interface NexusStore {
   readonly applications: ApplicationRepo;
   readonly apis: ApiRepo;
   readonly apiSpecs: ApiSpecRepo;
+  readonly apiSpecChanges: ApiSpecChangeRepo;
   readonly apiPlugins: ApiPluginRepo;
   readonly apiGatewayPlugins: ApiGatewayPluginRepo;
   readonly apiViewers: ApiViewerRepo;

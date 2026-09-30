@@ -34,7 +34,7 @@ import { MongoClient, type Document } from 'mongodb';
 import mysql from 'mysql2/promise';
 import pg from 'pg';
 
-import type { DbDriver } from '@ferrum-nexus/shared';
+import { emptySpecChangeReport, type DbDriver, type SpecChangeReport } from '@ferrum-nexus/shared';
 
 import { createAuditService } from '../audit/service.js';
 import { createCaptchaService } from '../auth/captcha.js';
@@ -1813,6 +1813,95 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         1,
         'the other API keeps its own row',
       );
+    });
+
+    /* ── api spec changes ─────────────────────────────────────────────── */
+
+    it('apiSpecChanges: lists newest first, outlives its revision, and prunes', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+      const other = await makeApi(owner.id);
+      const empty = emptySpecChangeReport();
+      const report: SpecChangeReport = {
+        ...empty,
+        changed: true,
+        changes: [
+          {
+            kind: 'operation_removed',
+            severity: 'breaking',
+            operation: { method: 'GET', path: '/invoices/{id}' },
+            section: 'operation',
+            location: null,
+            schema_path: null,
+            from: null,
+            to: null,
+          },
+        ],
+        counts: { ...empty.counts, breaking: 1, operations_removed: 1 },
+        info_changes: ['version'],
+      };
+      // The revisions themselves are never written: a summary holds a plain
+      // reference to its revision, so it outlives the document retention drops.
+      for (let n = 2; n <= 5; n += 1) {
+        await store.apiSpecChanges.create({
+          api_id: api.id,
+          revision_id: `revision-${n}`,
+          previous_revision_id: `revision-${n - 1}`,
+          kind: n === 4 ? 'rollback' : 'update',
+          version: `${n}.0.0`,
+          previous_version: `${n - 1}.0.0`,
+          revision_seq: n,
+          report,
+        });
+      }
+      await store.apiSpecChanges.create({
+        api_id: other.id,
+        revision_id: 'other-revision',
+        kind: 'update',
+        version: '2.0.0',
+        revision_seq: 2,
+        report: empty,
+      });
+
+      const page = await store.apiSpecChanges.listByApi(api.id, { limit: 2 });
+      assert.equal(page.total, 4);
+      const listed = page.items.map((row) => [row.revision_id, row.kind]);
+      assert.deepEqual(listed, [
+        ['revision-5', 'update'],
+        ['revision-4', 'rollback'],
+      ]);
+      assert.deepEqual(page.items[0]?.report, report, 'the report round-trips as a value');
+
+      const found = await store.apiSpecChanges.findByRevision(api.id, 'revision-3');
+      assert.equal(found?.previous_revision_id, 'revision-2');
+      assert.equal(found?.previous_version, '2.0.0');
+      assert.equal(found?.revision_seq, 3);
+      assert.equal(await store.apiSpecChanges.findByRevision(other.id, 'revision-3'), null);
+      const bare = await store.apiSpecChanges.findByRevision(other.id, 'other-revision');
+      assert.equal(bare?.previous_revision_id, null);
+      assert.equal(bare?.previous_version, null);
+
+      // One summary per revision.
+      await assert.rejects(
+        store.apiSpecChanges.create({
+          api_id: api.id,
+          revision_id: 'revision-5',
+          kind: 'update',
+          version: '9.0.0',
+          revision_seq: 9,
+          report,
+        }),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+
+      assert.equal(await store.apiSpecChanges.prune(api.id, 2), 2);
+      assert.deepEqual(
+        (await store.apiSpecChanges.listByApi(api.id)).items.map((row) => row.revision_id),
+        ['revision-5', 'revision-4'],
+      );
+      assert.equal(await store.apiSpecChanges.prune(api.id, 2), 0, 'a second pass removes nothing');
+      assert.equal(await store.apiSpecChanges.deleteByApi(api.id), 2);
+      assert.equal((await store.apiSpecChanges.listByApi(other.id)).total, 1);
     });
 
     /* ── api gateway plugins ──────────────────────────────────────────── */

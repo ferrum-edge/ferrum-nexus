@@ -289,7 +289,7 @@ limit what one account can consume.
 | `GET /api/branding`                                                                                                                                                                                                                                                                   | 120/min         | IP       |
 | `/api/apis` writes: `POST /`, `PATCH /:id`, `DELETE /:id`, `PUT /:id/spec`, `PUT`/`DELETE /:id/plugins/:name`, `POST`/`DELETE /:id/viewers…`, `POST /:id/spec/diff`, `GET /:id/revisions/:revisionId/diff`, `POST …/rollback`, `POST /:id/restore-gateway`, `POST /:id/test-consumer` | 30/min          | account  |
 | `GET /api/apis/:id/usage`                                                                                                                                                                                                                                                             | 30/min          | IP       |
-| `GET /api/catalog/:slug/spec`                                                                                                                                                                                                                                                         | 60/min          | account  |
+| `GET /api/catalog/:slug/spec`, `GET /api/catalog/:slug/changes`, `GET /api/catalog/:slug/changes/:revisionId`, per route                                                                                                                                                              | 60/min          | account  |
 | `/api/applications` create, update, delete                                                                                                                                                                                                                                            | 30/min          | account  |
 | `PATCH /api/users/me`                                                                                                                                                                                                                                                                 | 10/min          | account  |
 | `POST /api/threads` / `POST /api/threads/:id/messages`                                                                                                                                                                                                                                | 10 / 30 per min | account  |
@@ -318,10 +318,23 @@ predecessor are always kept. Up to 1000 old rows are pruned per API per upload,
 so a long legacy history shrinks over a few uploads. `api.spec_update` audit
 rows record `pruned_revisions`.
 
-Together the two bound per-account spec storage: each document is at most
+**Spec change history** (`SPEC_CHANGE_HISTORY_LIMIT`, 100). Each revision that
+replaces another also records a change summary for consumers
+(`GET /api/catalog/:slug/changes`) in the same transaction. Summaries are kept
+apart from the documents, so they survive the pruning above, and are bounded on
+their own: the newest 100 per API are kept, and each lists at most 100 changes
+with every name cut to 200 characters, so one summary is at most about 115 KiB
+of ASCII (more when names are escaped or not ASCII). Real summaries are a few
+KiB. Computing one re-reads the previous revision through the upload checks
+and compares the two within a fixed work budget, so an upload costs at most one
+more parse.
+
+Together these bound per-account spec storage: each document is at most
 `MAX_SPEC_BYTES` (2 MiB), so one account stores at most
-`2 MiB × (NEXUS_SPEC_HISTORY_LIMIT + 1) × NEXUS_MAX_APIS_PER_OWNER` — about
-1.1 GiB at the defaults. Size the database for your provider count.
+`2 MiB × (NEXUS_SPEC_HISTORY_LIMIT + 1) × NEXUS_MAX_APIS_PER_OWNER` of
+documents — about 1.1 GiB at the defaults — plus at most
+`115 KiB × 100 × NEXUS_MAX_APIS_PER_OWNER` of change summaries, about 560 MiB
+more in the worst case. Size the database for your provider count.
 
 #### Messaging
 
@@ -539,6 +552,13 @@ owns. It copies no data:
   creates its own next to it.
 - A leftover auth config beside the portal's stays attached after an
   `auth_plugin` change and is listed under `outgoing_auth_configs_remaining`.
+
+`004_api_spec_changes` (pending; ships in the next release) adds the
+`api_spec_changes` table: one consumer-facing change summary per published
+revision, keyed by revision and by publication order, with no foreign key to
+`api_specs` so that it outlives retention. It copies no data. Revisions
+published before the upgrade have no summary, so each API's change history
+starts with its first revision after it.
 
 `003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
 `ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,

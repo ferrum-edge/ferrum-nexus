@@ -353,7 +353,20 @@ host. Messages already in the outbox before an upgrade are not revalidated.
   public gateway origin is configured. The document is re-serialized in its
   original format (comments and formatting are lost); an invalid stored document
   fails closed. URLs a provider writes in prose or examples are not redacted.
-  The original spec is only at `GET /api/apis/:id/spec` (owner or admin).
+  The original spec is only at `GET /api/apis/:id/spec` (owner or admin). The
+  change history (`GET /api/catalog/:slug/changes`) is opened under the same
+  rule and serves only stored summaries: operation, parameter, property, media
+  type and component names, status codes, types and enum values, each cut to
+  200 characters. Never the document, its `servers`, descriptions, examples or
+  extensions. Its comparison reads document keys as own properties into maps,
+  never follows a `$ref` at every occurrence, and stops at a fixed work budget.
+  Summaries are recorded whatever the API's visibility, and served under the
+  visibility it has when they are read: history recorded while an API was
+  `private` or `retired` becomes readable to every signed-in account once the
+  API is `public` or `internal`. It names what a revision removed — operations,
+  parameters and properties — so it can reveal names the current document no
+  longer carries. A provider that must not disclose those should delete and
+  republish the API rather than change its visibility.
 - **Authorizing a private API's viewer** (`POST /api/apis/:id/viewers`) does not
   reveal who administers the portal: an administrator's address or id gets the
   same `400 VALIDATION_FAILED` as an unknown one, and nothing is written.
@@ -751,7 +764,7 @@ share counters. Every group answers `429 RATE_LIMITED`.
 | `GET /api/branding`                                                                                            | 120/min         | IP       |
 | `PATCH /api/users/me`                                                                                          | 10/min          | account  |
 | `POST /api/threads` / `POST /api/threads/:id/messages`                                                         | 10/min / 30/min | account  |
-| `GET /api/catalog/:slug/spec`                                                                                  | 60/min          | account  |
+| `GET /api/catalog/:slug/spec`, `…/changes`, `…/changes/:revisionId`, per route                                 | 60/min          | account  |
 | `/api/apis` mutations and the two spec-diff routes                                                             | 30/min          | account  |
 | `GET /api/apis/:id/usage`                                                                                      | 30/min          | IP       |
 | `POST /api/access-requests` / `POST /api/access-requests/:id/cancel`                                           | 10/min / 30/min | account  |

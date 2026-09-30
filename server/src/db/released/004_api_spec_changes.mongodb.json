@@ -1,0 +1,19 @@
+{
+  "id": "004_api_spec_changes",
+  "backend": "mongodb",
+  "description": "Frozen snapshot of API_SPEC_CHANGE_INDEXES in server/src/db/adapters/mongodb/index.ts",
+  "indexes": [
+    {
+      "collection": "api_spec_changes",
+      "name": "ux_api_spec_changes_spec",
+      "key": { "spec_id": 1 },
+      "unique": true
+    },
+    {
+      "collection": "api_spec_changes",
+      "name": "ux_api_spec_changes_seq",
+      "key": { "api_id": 1, "revision_seq": 1 },
+      "unique": true
+    }
+  ]
+}
