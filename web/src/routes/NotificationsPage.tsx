@@ -4,6 +4,7 @@ import type { Notification } from '@ferrum-nexus/shared';
 import { useMarkNotificationsRead, useNotifications } from '../hooks/useNotifications';
 import { cn } from '../lib/cn';
 import { formatRelative } from '../lib/format';
+import { notificationIcon } from '../lib/notification-icons';
 import { Button } from '../components/ui/Button';
 import { Card, PageHeader } from '../components/ui/Card';
 import { PaginationBar } from '../components/ui/DataTable';
@@ -107,6 +108,10 @@ export function NotificationsPage(): ReactElement {
                         'mt-1.5 h-2 w-2 shrink-0 rounded-full',
                         isUnread ? 'bg-accent' : 'bg-transparent',
                       )}
+                    />
+                    <Icon
+                      name={notificationIcon(notification.type)}
+                      className="mt-0.5 h-4 w-4 text-fg-subtle"
                     />
                     <span className="min-w-0 flex-1">
                       <span

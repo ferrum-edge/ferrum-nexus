@@ -1062,6 +1062,15 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
             );
             assert.equal(await store.apiSpecChanges.deleteByApi(ID.invoices), 1);
 
+            // `005_notification_preferences` records nothing for an existing
+            // account, which therefore keeps receiving every notice.
+            assert.equal(await store.notificationPreferences.find(ID.client), null);
+            const saved = await store.notificationPreferences.upsert(ID.client, {
+              api_spec_updated_in_app: true,
+              api_spec_updated_email: false,
+            });
+            assert.equal(saved.api_spec_updated_email, false);
+
             // Re-running in the same process changes nothing.
             await store.migrate();
             assert.deepEqual(await target.ledger(), upgraded);

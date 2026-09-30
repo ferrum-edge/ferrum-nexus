@@ -103,6 +103,7 @@ import type {
   Message,
   MessageThread,
   Notification,
+  NotificationPreferences,
   NotificationType,
   Organization,
   Paginated,
@@ -1150,6 +1151,11 @@ export interface GrantRepo {
   listActiveByUser(userId: Uuid, applicationId?: Uuid | null): Promise<GrantRecord[]>;
   /** Every active grant on an API — used by god-mode delete and bulk revoke. */
   listActiveByApi(apiId: Uuid): Promise<GrantRecord[]>;
+  /**
+   * Which of `userIds` hold an active grant on `apiId` through any of their
+   * identities, each once: one query for a batch of accounts.
+   */
+  listActiveHolders(apiId: Uuid, userIds: Uuid[]): Promise<Uuid[]>;
   count(filter: GrantFilter): Promise<number>;
   /**
    * Grants in `status` per application, for a whole page of applications in
@@ -1379,6 +1385,48 @@ export interface NotificationRepo {
   markRead(userId: Uuid, ids: Uuid[], at: IsoTimestamp): Promise<number>;
   /** Mark every unread notification of a user read. Returns the number changed. */
   markAllRead(userId: Uuid, at: IsoTimestamp): Promise<number>;
+  /**
+   * The **unread** notifications of `type` pointing at `link` held by any of
+   * `userIds`. How a repeated notice is coalesced: one the recipient has not
+   * read yet is rewritten rather than repeated.
+   */
+  listUnread(userIds: Uuid[], type: NotificationType, link: string): Promise<NotificationRecord[]>;
+  /**
+   * Rewrite the title and body of every **unread** notification of `type`
+   * pointing at `link` held by one of `userIds`, so a coalesced notice says
+   * what the newest event said, and move its `created_at` to now so it lists
+   * as new. Read ones are left as they were read.
+   *
+   * @returns the number of notifications changed
+   */
+  updateUnread(
+    userIds: Uuid[],
+    type: NotificationType,
+    link: string,
+    content: { title: string; body: string },
+  ): Promise<number>;
+}
+
+/**
+ * A `user_notification_preferences` row. An account without one receives
+ * every optional notice; see {@link NotificationPreferences}.
+ */
+export interface NotificationPreferencesRecord extends NotificationPreferences {
+  user_id: Uuid;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
+/** Per-account notification preferences, one row per account that changed one. */
+export interface NotificationPreferenceRepo {
+  find(userId: Uuid): Promise<NotificationPreferencesRecord | null>;
+  /** The rows of those of `userIds` that have one, in no particular order. */
+  findManyByUsers(userIds: Uuid[]): Promise<NotificationPreferencesRecord[]>;
+  /** Write every preference of one account, creating its row on first use. */
+  upsert(
+    userId: Uuid,
+    preferences: NotificationPreferences,
+  ): Promise<NotificationPreferencesRecord>;
 }
 
 /** Payload accepted by {@link EmailOutboxRepo.enqueue}. */
@@ -1761,6 +1809,7 @@ export interface NexusStore {
   readonly threads: ThreadRepo;
   readonly messages: MessageRepo;
   readonly notifications: NotificationRepo;
+  readonly notificationPreferences: NotificationPreferenceRepo;
   readonly emailOutbox: EmailOutboxRepo;
   readonly gatewayTeardownJobs: GatewayTeardownJobRepo;
   readonly auditLogs: AuditLogRepo;

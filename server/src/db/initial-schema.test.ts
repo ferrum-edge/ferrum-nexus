@@ -15,6 +15,7 @@ describe('buildout schema baseline', () => {
           '002_api_gateway_plugins',
           '003_messages_thread_latest',
           '004_api_spec_changes',
+          '005_notification_preferences',
         ],
       );
       const statements = splitSqlStatements(files[0]!.sql);
