@@ -34,7 +34,7 @@ import { MongoClient, type Document } from 'mongodb';
 import mysql from 'mysql2/promise';
 import pg from 'pg';
 
-import type { DbDriver } from '@ferrum-nexus/shared';
+import { emptySpecChangeReport, type DbDriver, type SpecChangeReport } from '@ferrum-nexus/shared';
 
 import { createAuditService } from '../audit/service.js';
 import { createCaptchaService } from '../auth/captcha.js';
@@ -1815,6 +1815,95 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
     });
 
+    /* ── api spec changes ─────────────────────────────────────────────── */
+
+    it('apiSpecChanges: lists newest first, outlives its revision, and prunes', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+      const other = await makeApi(owner.id);
+      const empty = emptySpecChangeReport();
+      const report: SpecChangeReport = {
+        ...empty,
+        changed: true,
+        changes: [
+          {
+            kind: 'operation_removed',
+            severity: 'breaking',
+            operation: { method: 'GET', path: '/invoices/{id}' },
+            section: 'operation',
+            location: null,
+            schema_path: null,
+            from: null,
+            to: null,
+          },
+        ],
+        counts: { ...empty.counts, breaking: 1, operations_removed: 1 },
+        info_changes: ['version'],
+      };
+      // The revisions themselves are never written: a summary holds a plain
+      // reference to its revision, so it outlives the document retention drops.
+      for (let n = 2; n <= 5; n += 1) {
+        await store.apiSpecChanges.create({
+          api_id: api.id,
+          revision_id: `revision-${n}`,
+          previous_revision_id: `revision-${n - 1}`,
+          kind: n === 4 ? 'rollback' : 'update',
+          version: `${n}.0.0`,
+          previous_version: `${n - 1}.0.0`,
+          revision_seq: n,
+          report,
+        });
+      }
+      await store.apiSpecChanges.create({
+        api_id: other.id,
+        revision_id: 'other-revision',
+        kind: 'update',
+        version: '2.0.0',
+        revision_seq: 2,
+        report: empty,
+      });
+
+      const page = await store.apiSpecChanges.listByApi(api.id, { limit: 2 });
+      assert.equal(page.total, 4);
+      const listed = page.items.map((row) => [row.revision_id, row.kind]);
+      assert.deepEqual(listed, [
+        ['revision-5', 'update'],
+        ['revision-4', 'rollback'],
+      ]);
+      assert.deepEqual(page.items[0]?.report, report, 'the report round-trips as a value');
+
+      const found = await store.apiSpecChanges.findByRevision(api.id, 'revision-3');
+      assert.equal(found?.previous_revision_id, 'revision-2');
+      assert.equal(found?.previous_version, '2.0.0');
+      assert.equal(found?.revision_seq, 3);
+      assert.equal(await store.apiSpecChanges.findByRevision(other.id, 'revision-3'), null);
+      const bare = await store.apiSpecChanges.findByRevision(other.id, 'other-revision');
+      assert.equal(bare?.previous_revision_id, null);
+      assert.equal(bare?.previous_version, null);
+
+      // One summary per revision.
+      await assert.rejects(
+        store.apiSpecChanges.create({
+          api_id: api.id,
+          revision_id: 'revision-5',
+          kind: 'update',
+          version: '9.0.0',
+          revision_seq: 9,
+          report,
+        }),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+
+      assert.equal(await store.apiSpecChanges.prune(api.id, 2), 2);
+      assert.deepEqual(
+        (await store.apiSpecChanges.listByApi(api.id)).items.map((row) => row.revision_id),
+        ['revision-5', 'revision-4'],
+      );
+      assert.equal(await store.apiSpecChanges.prune(api.id, 2), 0, 'a second pass removes nothing');
+      assert.equal(await store.apiSpecChanges.deleteByApi(api.id), 2);
+      assert.equal((await store.apiSpecChanges.listByApi(other.id)).total, 1);
+    });
+
     /* ── api gateway plugins ──────────────────────────────────────────── */
 
     it('apiGatewayPlugins: replaces the whole record per API and keeps created_at', async () => {
@@ -3441,28 +3530,49 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const owner = await makeUser();
       const other = await makeUser();
       const provider = `corp-${newId().slice(0, 8)}`;
+      const issuer = 'https://idp.example.com/realms/corp';
       const subject = `subject-${newId()}`;
 
       const linked = await store.userIdentities.create({
         user_id: owner.id,
         provider_id: provider,
+        issuer,
         subject,
         email: owner.email,
+        provisioned: true,
       });
       assert.equal(linked.user_id, owner.id);
       assert.equal(linked.provider_id, provider);
+      assert.equal(linked.issuer, issuer);
       assert.equal(linked.subject, subject);
       assert.equal(linked.email, owner.email);
+      assert.equal(linked.provisioned, true);
       assert.equal(linked.last_login_at, null);
       assert.deepEqual(await store.userIdentities.findById(linked.id), linked);
-      assert.deepEqual(await store.userIdentities.findBySubject(provider, subject), linked);
-      // Subjects are case-sensitive, and scoped to their provider.
-      assert.equal(await store.userIdentities.findBySubject(provider, subject.toUpperCase()), null);
-      assert.equal(await store.userIdentities.findBySubject(`${provider}-x`, subject), null);
+      assert.deepEqual(await store.userIdentities.findBySubject(provider, issuer, subject), linked);
+      // Subjects are case-sensitive, and scoped to their provider and issuer.
+      assert.equal(
+        await store.userIdentities.findBySubject(provider, issuer, subject.toUpperCase()),
+        null,
+      );
+      assert.equal(
+        await store.userIdentities.findBySubject(`${provider}-x`, issuer, subject),
+        null,
+      );
+      assert.equal(
+        await store.userIdentities.findBySubject(provider, 'https://other.example.com', subject),
+        null,
+      );
 
       // The subject cannot be claimed by a second account…
       await assert.rejects(
-        store.userIdentities.create({ user_id: other.id, provider_id: provider, subject }),
+        store.userIdentities.create({
+          user_id: other.id,
+          provider_id: provider,
+          issuer,
+          subject,
+          provisioned: false,
+        }),
         (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
       );
       // …and the account cannot hold a second identity at the same provider.
@@ -3470,7 +3580,9 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         store.userIdentities.create({
           user_id: owner.id,
           provider_id: provider,
+          issuer,
           subject: `${subject}-second`,
+          provisioned: false,
         }),
         (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
       );
@@ -3478,14 +3590,19 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const elsewhere = await store.userIdentities.create({
         user_id: owner.id,
         provider_id: `${provider}-b`,
+        issuer,
         subject,
+        provisioned: false,
       });
       assert.equal(elsewhere.email, null);
+      assert.equal(elsewhere.provisioned, false);
       assert.deepEqual(
         (await store.userIdentities.listByUser(owner.id)).map((row) => row.id).sort(),
         [linked.id, elsewhere.id].sort(),
       );
       assert.deepEqual(await store.userIdentities.listByUser(other.id), []);
+      assert.equal(await store.userIdentities.countByProvider(provider), 1);
+      assert.equal(await store.userIdentities.countByProvider(`${provider}-none`), 0);
 
       const at = nowIso();
       assert.equal(await store.userIdentities.touchLogin(linked.id, 'new@example.test', at), true);
@@ -3501,24 +3618,51 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
           await tx.userIdentities.create({
             user_id: other.id,
             provider_id: provider,
+            issuer,
             subject: rolledBack,
+            provisioned: false,
           });
           throw new Error('roll back');
         }),
         /roll back/,
       );
-      assert.equal(await store.userIdentities.findBySubject(provider, rolledBack), null);
+      assert.equal(await store.userIdentities.findBySubject(provider, issuer, rolledBack), null);
 
       assert.equal(await store.userIdentities.delete(linked.id), true);
       assert.equal(await store.userIdentities.delete(linked.id), false);
-      assert.equal(await store.userIdentities.findBySubject(provider, subject), null);
+      assert.equal(await store.userIdentities.findBySubject(provider, issuer, subject), null);
       // With the link gone the subject can be linked again.
       const relinked = await store.userIdentities.create({
         user_id: other.id,
         provider_id: provider,
+        issuer,
         subject,
+        provisioned: false,
       });
       assert.equal(relinked.user_id, other.id);
+      // Removing a provider removes its links, and only its links.
+      assert.equal(await store.userIdentities.deleteByProvider(provider), 1);
+      assert.equal(await store.userIdentities.countByProvider(provider), 0);
+      assert.equal(await store.userIdentities.countByProvider(`${provider}-b`), 1);
+    });
+
+    it('emailProofs: one proof per account, replaced by the next one', async () => {
+      const account = await makeUser();
+      assert.equal(await store.emailProofs.findByUser(account.id), null);
+      const first = nowIso();
+      await store.emailProofs.upsert(account.id, 'Proven@Example.test', 'verification_link', first);
+      const proof = await store.emailProofs.findByUser(account.id);
+      assert.equal(proof?.email, 'proven@example.test');
+      assert.equal(proof?.method, 'verification_link');
+      assert.equal(proof?.proven_at, first);
+      const later = isoInSeconds(60);
+      await store.emailProofs.upsert(account.id, 'moved@example.test', 'identity_provider', later);
+      const replaced = await store.emailProofs.findByUser(account.id);
+      assert.equal(replaced?.email, 'moved@example.test');
+      assert.equal(replaced?.method, 'identity_provider');
+      assert.equal(replaced?.proven_at, later);
+      assert.equal(replaced?.created_at, proof?.created_at);
+      assert.equal(await store.emailProofs.findByUser(newId()), null);
     });
 
     /* ── gateway identities ───────────────────────────────────────────── */

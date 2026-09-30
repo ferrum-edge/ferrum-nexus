@@ -31,6 +31,8 @@ function provider(overrides: Partial<SsoProviderSettings> = {}): SsoProviderSett
     jit_provisioning: true,
     link_existing_accounts: true,
     require_verified_email: true,
+    allowed_email_domains: [],
+    disable_local_password_for_linked: false,
     sync_roles: true,
     default_role: 'client',
     role_mappings: [

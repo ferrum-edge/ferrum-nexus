@@ -112,6 +112,41 @@ export function providersInForce(
   ];
 }
 
+/**
+ * Stored providers whose id the environment now also declares. The
+ * environment one is in force; reported so an administrator can see why a
+ * stored provider does nothing, and remove it.
+ */
+export function shadowedProviderIds(config: NexusConfig, stored: StoredSsoSettings): string[] {
+  const envIds = new Set(config.sso.providers.map((provider) => provider.settings.id));
+  return stored.providers.filter((provider) => envIds.has(provider.id)).map(({ id }) => id);
+}
+
+/**
+ * Whether an account may no longer use a password — sign-in or reset.
+ *
+ * True for an account an identity provider provisioned: it never had a
+ * password, and one set later through a reset would let its holder keep
+ * access after the provider offboarded them. True as well for an account
+ * linked to a provider that sets `disable_local_password_for_linked`. A link
+ * removed by an administrator no longer counts.
+ */
+export async function localPasswordBlocked(
+  config: NexusConfig,
+  store: NexusStore,
+  userId: string,
+): Promise<boolean> {
+  const identities = await store.userIdentities.listByUser(userId);
+  if (identities.length === 0) return false;
+  if (identities.some((identity) => identity.provisioned)) return true;
+  const strict = new Set(
+    providersInForce(config, await readStoredSsoSettings(store))
+      .filter(({ settings }) => settings.disable_local_password_for_linked)
+      .map(({ settings }) => settings.id),
+  );
+  return identities.some((identity) => strict.has(identity.provider_id));
+}
+
 /** Every provider in force, as {@link providersInForce} orders them, with its secret. */
 export async function resolveSsoProviders(
   config: NexusConfig,

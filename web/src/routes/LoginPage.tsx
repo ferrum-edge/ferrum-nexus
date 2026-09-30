@@ -1,6 +1,6 @@
 import { Link, useNavigate, useSearch } from '@tanstack/react-router';
 import { useCallback, useEffect, useState, type FormEvent, type ReactElement } from 'react';
-import { ERROR_CODES, isSsoErrorReason, type SsoErrorReason } from '@ferrum-nexus/shared';
+import { ERROR_CODES, isSsoErrorReason } from '@ferrum-nexus/shared';
 import { AuthShell, FormNotice } from '../components/auth/AuthShell';
 import { CaptchaWidget } from '../components/auth/CaptchaWidget';
 import { PasswordField } from '../components/auth/PasswordField';
@@ -10,30 +10,8 @@ import { Icon } from '../components/ui/Icon';
 import { LabeledInput } from '../components/ui/Input';
 import { useCaptchaConfig, useSsoConfig } from '../hooks/useBranding';
 import { ApiError, ssoStartUrl } from '../lib/api';
+import { SSO_ERROR_MESSAGES } from '../lib/sso-errors';
 import { useAuth } from '../stores/auth';
-
-/**
- * What to tell the visitor when single sign-on sent them back refused. The
- * server reports a reason from a closed set, never the provider's own text.
- */
-export const SSO_ERROR_MESSAGES: Readonly<Record<SsoErrorReason, string>> = {
-  sso_disabled: 'Single sign-on is not available for that provider.',
-  provider_unavailable:
-    'The identity provider could not be reached or is misconfigured. Try again, or contact an administrator.',
-  invalid_state:
-    'That sign-in attempt expired or did not start in this browser. Please start again.',
-  idp_error: 'The identity provider did not complete the sign-in.',
-  token_invalid: 'The identity provider’s answer could not be verified. Please try again.',
-  email_required: 'The identity provider did not share an email address for your account.',
-  email_domain_not_allowed: 'Your email domain is not allowed to sign in to this portal.',
-  email_not_verified: 'The identity provider has not verified your email address.',
-  account_exists:
-    'An account with this email address already exists and could not be linked automatically. Sign in with your password, or ask an administrator.',
-  access_denied: 'Your account at the identity provider does not grant access to this portal.',
-  account_disabled: 'This account has been disabled.',
-  signup_disabled: 'No portal account is linked to this identity, and sign-up through it is off.',
-  server_error: 'Single sign-on failed. Please try again.',
-};
 
 const BREAK_GLASS_NOTICE =
   'This portal uses single sign-on. Password sign-in is open to super admins only, for recovery.';

@@ -1260,11 +1260,13 @@ describe('sqlite store', () => {
       const repositories: Record<RepoKey, true> = {
         users: true,
         userIdentities: true,
+        emailProofs: true,
         organizations: true,
         sessions: true,
         applications: true,
         apis: true,
         apiSpecs: true,
+        apiSpecChanges: true,
         apiPlugins: true,
         apiGatewayPlugins: true,
         apiViewers: true,

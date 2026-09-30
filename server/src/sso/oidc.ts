@@ -18,14 +18,20 @@
  *   `none` and the HMAC algorithms — which a JWKS public key would otherwise
  *   let an attacker forge — can never verify. `iss`, `aud` (and `azp`), `exp`,
  *   `nbf` and `iat` are checked with {@link CLOCK_TOLERANCE_SECONDS} of
- *   leeway, the `nonce` must equal the one this attempt sent, and `at_hash`
- *   must match the access token when both are present.
+ *   leeway — `iat` may be neither in the future nor older than
+ *   {@link ID_TOKEN_MAX_AGE_SECONDS} — the `nonce` must equal the one this
+ *   attempt sent, and `at_hash` must match the access token when both are
+ *   present.
+ * - **Public destinations only**, unless the operator says otherwise; failed
+ *   fetches are remembered for {@link OIDC_FAILURE_CACHE_MS} and concurrent
+ *   ones share a single request.
  *
  * Nothing here logs, and no error message it produces contains a token, a
  * code, a secret or a claim value.
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { isIP } from 'node:net';
 
 import {
   createLocalJWKSet,
@@ -36,9 +42,15 @@ import {
   type JWTVerifyGetKey,
 } from 'jose';
 
-import type { SsoErrorReason } from '@ferrum-nexus/shared';
+import { SSO_TRANSACTION_TTL_SECONDS, type SsoErrorReason } from '@ferrum-nexus/shared';
 
-import { oidcUrlProblem } from './config.js';
+import {
+  createUpstreamResolver,
+  isPublicResolvedAddress,
+  isPublicUpstreamHost,
+  type UpstreamResolver,
+} from '../publishing/oas.js';
+import { isLoopbackHostname, oidcUrlProblem } from './config.js';
 
 /** ID token signature algorithms the portal accepts. Nothing else ever verifies. */
 export const ID_TOKEN_ALGORITHMS = ['RS256', 'ES256'] as const;
@@ -65,6 +77,18 @@ export const OIDC_HTTP_TIMEOUT_MS = 5_000;
 
 /** Largest response accepted from a provider. */
 export const OIDC_MAX_RESPONSE_BYTES = 512 * 1024;
+
+/**
+ * How long a failed discovery or key-set fetch is remembered. Sign-ins meet
+ * the cached failure instead of each sending the provider another request.
+ */
+export const OIDC_FAILURE_CACHE_MS = 30_000;
+
+/**
+ * Oldest ID token accepted, by `iat`. A token is minted at the end of the
+ * sign-in it belongs to, and a sign-in lasts at most this long.
+ */
+export const ID_TOKEN_MAX_AGE_SECONDS = SSO_TRANSACTION_TTL_SECONDS;
 
 /** Longest `sub` OpenID Connect allows. */
 export const MAX_SUBJECT_LENGTH = 255;
@@ -110,12 +134,18 @@ export type OidcFetch = (input: string, init?: RequestInit) => Promise<Response>
 
 /** Options of {@link createOidcClient}. */
 export interface OidcClientOptions {
-  /** `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK`. */
+  /** `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK`: the literal loopback hosts may be spoken to. */
   allowHttpLoopback: boolean;
+  /** `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES`: any address may be spoken to. */
+  allowPrivateAddresses?: boolean;
+  /** Resolves a provider host before it is contacted. Defaults to real DNS. */
+  resolve?: UpstreamResolver;
   /** Defaults to the global `fetch`. */
   fetch?: OidcFetch;
   /** Clock, in milliseconds; defaults to `Date.now`. */
   now?: () => number;
+  /** Per-request deadline; defaults to {@link OIDC_HTTP_TIMEOUT_MS}. */
+  timeoutMs?: number;
 }
 
 /** Input of {@link OidcClient.exchangeCode}. */
@@ -252,12 +282,52 @@ interface CachedKeySet {
   fetchedAt: number;
 }
 
+interface CachedFailure {
+  error: OidcError;
+  until: number;
+}
+
 /** Build a relying party with its own discovery and key-set caches. */
 export function createOidcClient(options: OidcClientOptions): OidcClient {
   const fetchImpl: OidcFetch = options.fetch ?? ((input, init) => fetch(input, init));
   const now = options.now ?? (() => Date.now());
+  const resolveHost = options.resolve ?? createUpstreamResolver();
+  const timeoutMs = options.timeoutMs ?? OIDC_HTTP_TIMEOUT_MS;
   const discoveries = new Map<string, CachedDiscovery>();
   const keySets = new Map<string, CachedKeySet>();
+  // Single flight: concurrent sign-ins share one fetch per issuer or key set.
+  const pending = new Map<string, Promise<unknown>>();
+  const failures = new Map<string, CachedFailure>();
+
+  /**
+   * Refuse a destination that is not public, unless the operator allowed it.
+   *
+   * The issuer is an administrator's choice, but the endpoints come from the
+   * discovery document, so without this a provider — or whoever controls its
+   * document — could aim the portal's requests at its own network. A name is
+   * resolved and every answer must be public; the literal loopback hosts pass
+   * with `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK`, anything with
+   * `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES`. The check is at request time only:
+   * the connection resolves the name again (see `docs/security.md`).
+   */
+  async function assertPublicDestination(url: string, label: string): Promise<void> {
+    if (options.allowPrivateAddresses === true) return;
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    if (options.allowHttpLoopback && isLoopbackHostname(host)) return;
+    if (!isPublicUpstreamHost(host)) {
+      throw new OidcError('provider_unavailable', `${label} host is not a public address`);
+    }
+    if (isIP(host) !== 0) return;
+    let answers: Awaited<ReturnType<UpstreamResolver>>;
+    try {
+      answers = await resolveHost(host);
+    } catch {
+      throw new OidcError('provider_unavailable', `${label} host could not be resolved`);
+    }
+    if (answers.length === 0 || !answers.every(isPublicResolvedAddress)) {
+      throw new OidcError('provider_unavailable', `${label} host resolves to a non-public address`);
+    }
+  }
 
   /** One JSON request to a provider, under every transport rule above. */
   async function requestJson(
@@ -267,12 +337,13 @@ export function createOidcClient(options: OidcClientOptions): OidcClient {
   ): Promise<{ status: number; body: unknown }> {
     const problem = oidcUrlProblem(url, options.allowHttpLoopback);
     if (problem !== null) throw new OidcError('provider_unavailable', `${label} URL ${problem}`);
+    await assertPublicDestination(url, label);
     let response: Response;
     try {
       response = await fetchImpl(url, {
         ...init,
         redirect: 'error',
-        signal: AbortSignal.timeout(OIDC_HTTP_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
       throw new OidcError('provider_unavailable', `${label} request failed: ${describe(error)}`, {
@@ -293,6 +364,37 @@ export function createOidcClient(options: OidcClientOptions): OidcClient {
         'provider_unavailable',
         `${label} answered ${response.status} without a JSON body`,
       );
+    }
+  }
+
+  /**
+   * Run `fetchOnce` for `key` at most once at a time, and remember a failure
+   * for {@link OIDC_FAILURE_CACHE_MS}.
+   */
+  async function shared<T>(key: string, fetchOnce: () => Promise<T>): Promise<T> {
+    const failure = failures.get(key);
+    if (failure && failure.until > now()) throw failure.error;
+    const inFlight = pending.get(key);
+    if (inFlight) return inFlight as Promise<T>;
+    const attempt = fetchOnce().then(
+      (value) => {
+        failures.delete(key);
+        return value;
+      },
+      (error: unknown) => {
+        const refused =
+          error instanceof OidcError
+            ? error
+            : new OidcError('provider_unavailable', `${key} could not be fetched`);
+        failures.set(key, { error: refused, until: now() + OIDC_FAILURE_CACHE_MS });
+        throw refused;
+      },
+    );
+    pending.set(key, attempt);
+    try {
+      return await attempt;
+    } finally {
+      pending.delete(key);
     }
   }
 
@@ -359,9 +461,11 @@ export function createOidcClient(options: OidcClientOptions): OidcClient {
   async function discover(issuer: string): Promise<DiscoveryDocument> {
     const cached = discoveries.get(issuer);
     if (cached && cached.expiresAt > now()) return cached.document;
-    const document = await fetchDiscovery(issuer);
-    discoveries.set(issuer, { document, expiresAt: now() + DISCOVERY_TTL_MS });
-    return document;
+    return shared(`discovery ${issuer}`, async () => {
+      const document = await fetchDiscovery(issuer);
+      discoveries.set(issuer, { document, expiresAt: now() + DISCOVERY_TTL_MS });
+      return document;
+    });
   }
 
   async function fetchKeySet(uri: string): Promise<CachedKeySet> {
@@ -394,7 +498,7 @@ export function createOidcClient(options: OidcClientOptions): OidcClient {
       if (!refresh && age < JWKS_TTL_MS) return cached;
       if (refresh && age < JWKS_REFRESH_COOLDOWN_MS) return cached;
     }
-    return fetchKeySet(uri);
+    return shared(`jwks ${uri}`, () => fetchKeySet(uri));
   }
 
   async function exchangeCode(input: CodeExchange): Promise<TokenSet> {
@@ -476,6 +580,7 @@ export function createOidcClient(options: OidcClientOptions): OidcClient {
         issuer: input.discovery.issuer,
         audience: input.clientId,
         clockTolerance: CLOCK_TOLERANCE_SECONDS,
+        maxTokenAge: ID_TOKEN_MAX_AGE_SECONDS,
         requiredClaims: ['sub', 'exp', 'iat'],
         currentDate: new Date(now()),
       }));
@@ -485,6 +590,14 @@ export function createOidcClient(options: OidcClientOptions): OidcClient {
       throw new OidcError('token_invalid', `ID token rejected (${code})`, { cause: error });
     }
 
+    // A token issued in the future was not issued for this sign-in, whatever
+    // `maxTokenAge` makes of it.
+    if (
+      typeof payload.iat !== 'number' ||
+      payload.iat > Math.floor(now() / 1000) + CLOCK_TOLERANCE_SECONDS
+    ) {
+      throw new OidcError('token_invalid', 'ID token iat is in the future');
+    }
     const sub = payload.sub;
     if (typeof sub !== 'string' || sub === '' || sub.length > MAX_SUBJECT_LENGTH) {
       throw new OidcError('token_invalid', 'ID token has no usable sub claim');
@@ -516,6 +629,7 @@ export function createOidcClient(options: OidcClientOptions): OidcClient {
     clearCache(): void {
       discoveries.clear();
       keySets.clear();
+      failures.clear();
     },
   };
 }

@@ -19,6 +19,7 @@ import type {
   AccessRequest,
   AccessRequestStatus,
   Api,
+  ApiSpecChangeEntry,
   ApiSpecSummary,
   ApiStatus,
   ApiTimeouts,
@@ -270,6 +271,11 @@ export interface SsoAdminSettingsResponse {
   /** `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN`; environment-only, reported for visibility. */
   break_glass_local_login: boolean;
   providers: SsoProviderAdminView[];
+  /**
+   * Stored providers whose id `NEXUS_OIDC_PROVIDERS` now also declares. The
+   * environment one is in force; the stored one is ignored until it is removed.
+   */
+  shadowed_provider_ids: string[];
 }
 
 /** One provider in {@link UpdateSsoSettingsRequest.providers}. */
@@ -298,9 +304,19 @@ export interface UpdateSsoSettingsRequest {
 /** `PUT /api/admin/sso` */
 export type UpdateSsoSettingsResponse = SsoAdminSettingsResponse;
 
-/** `GET /api/users/:id/identities` */
+/** `GET /api/users/:id/identities` and `GET /api/users/me/identities` */
 export interface ListUserIdentitiesResponse {
   items: UserIdentity[];
+}
+
+/**
+ * `POST /api/auth/sso/:provider/link` (session, CSRF) — begin linking the
+ * signed-in account to a provider. The SPA navigates the browser to
+ * `location`; the callback links whatever identity signs in there to this
+ * account, whatever its email address says.
+ */
+export interface StartSsoLinkResponse {
+  location: string;
 }
 
 /** `DELETE /api/users/:id/identities/:identityId` */
@@ -479,6 +495,21 @@ export interface CatalogSpecResponse {
   parsed_title: string | null;
   parsed_version: string | null;
 }
+
+/**
+ * `GET /api/catalog/:slug/changes` — what each published revision changed,
+ * newest first. `limit` is clamped to `MAX_SPEC_CHANGE_PAGE_SIZE`.
+ */
+export type CatalogSpecChangesQuery = ListQuery;
+
+/** `GET /api/catalog/:slug/changes` */
+export type CatalogSpecChangesResponse = Paginated<ApiSpecChangeEntry>;
+
+/**
+ * `GET /api/catalog/:slug/changes/:revisionId` — what one revision changed
+ * against the revision it replaced.
+ */
+export type CatalogSpecChangeResponse = ApiSpecChangeEntry;
 
 /* ── Publishing (provider) ──────────────────────────────────────────────── */
 

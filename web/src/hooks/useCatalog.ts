@@ -4,6 +4,8 @@ import type {
   CatalogIdentityAccessResponse,
   CatalogListQuery,
   CatalogListResponse,
+  CatalogSpecChangesQuery,
+  CatalogSpecChangesResponse,
   CatalogSpecResponse,
 } from '@ferrum-nexus/shared';
 import { catalogApi } from '../lib/api';
@@ -33,6 +35,18 @@ export function useCatalogSpec(slug: string, enabled = true): UseQueryResult<Cat
     queryFn: () => catalogApi.spec(slug),
     enabled: enabled && slug.length > 0,
     staleTime: 60_000,
+  });
+}
+
+/** One page of a catalog entry's change history, fetched only when rendered. */
+export function useCatalogSpecChanges(
+  slug: string,
+  query: CatalogSpecChangesQuery = {},
+): UseQueryResult<CatalogSpecChangesResponse> {
+  return useQuery({
+    queryKey: queryKeys.catalog.changes(slug, query),
+    queryFn: () => catalogApi.changes(slug, query),
+    enabled: slug.length > 0,
   });
 }
 

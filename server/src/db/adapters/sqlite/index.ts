@@ -80,11 +80,17 @@ import type {
   NotificationType,
   RateLimitConfig,
   Role,
+  SpecChangeReport,
   SpecEnforcementLevel,
+  SpecRevisionKind,
   UserStatus,
   Uuid,
 } from '@ferrum-nexus/shared';
-import { DEFAULT_SPEC_ENFORCEMENT, isSpecEnforcementLevel } from '@ferrum-nexus/shared';
+import {
+  DEFAULT_SPEC_ENFORCEMENT,
+  emptySpecChangeReport,
+  isSpecEnforcementLevel,
+} from '@ferrum-nexus/shared';
 
 import type { NexusConfig } from '../../../config/index.js';
 import { newId, nowIso } from '../../../lib/ids.js';
@@ -113,6 +119,8 @@ import type {
   ApiPluginRepo,
   ApiRecord,
   ApiRepo,
+  ApiSpecChangeRecord,
+  ApiSpecChangeRepo,
   ApiSpecRecord,
   ApiSpecRepo,
   ApiViewerFilter,
@@ -127,6 +135,9 @@ import type {
   CredentialRepo,
   EmailOutboxRecord,
   EmailOutboxRepo,
+  EmailProofMethod,
+  EmailProofRecord,
+  EmailProofRepo,
   EmailTemplateRecord,
   EmailTemplateRepo,
   EnqueueEmailInput,
@@ -281,9 +292,22 @@ function mapUserIdentity(row: Row): UserIdentityRecord {
     id: text(row.id),
     user_id: text(row.user_id),
     provider_id: text(row.provider_id),
+    issuer: text(row.issuer),
     subject: text(row.subject),
     email: textOrNull(row.email),
+    provisioned: bool(row.provisioned),
     last_login_at: textOrNull(row.last_login_at),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapEmailProof(row: Row): EmailProofRecord {
+  return {
+    user_id: text(row.user_id),
+    email: text(row.email),
+    method: text(row.method) as EmailProofMethod,
+    proven_at: text(row.proven_at),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -355,6 +379,24 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     revision_seq: int(row.revision_seq),
     created_by: textOrNull(row.created_by),
     rolled_back_from_id: textOrNull(row.rolled_back_from_id),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapApiSpecChange(row: Row): ApiSpecChangeRecord {
+  return {
+    id: text(row.id),
+    api_id: text(row.api_id),
+    revision_id: text(row.spec_id),
+    previous_revision_id: textOrNull(row.previous_spec_id),
+    kind: text(row.kind) as SpecRevisionKind,
+    version: text(row.version),
+    previous_version: textOrNull(row.previous_version),
+    revision_seq: int(row.revision_seq),
+    // A summary that no longer decodes reads as one that could not be made,
+    // never as "nothing changed".
+    report: json<SpecChangeReport>(row.report_json, emptySpecChangeReport(false)),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -765,11 +807,13 @@ class SqliteStore implements NexusStore {
     const mediate: Mediator = (work) => this.mediate(work);
     this.users = guardRepo(this.users, mediate);
     this.userIdentities = guardRepo(this.userIdentities, mediate);
+    this.emailProofs = guardRepo(this.emailProofs, mediate);
     this.organizations = guardRepo(this.organizations, mediate);
     this.sessions = guardRepo(this.sessions, mediate);
     this.applications = guardRepo(this.applications, mediate);
     this.apis = guardRepo(this.apis, mediate);
     this.apiSpecs = guardRepo(this.apiSpecs, mediate);
+    this.apiSpecChanges = guardRepo(this.apiSpecChanges, mediate);
     this.apiPlugins = guardRepo(this.apiPlugins, mediate);
     this.apiGatewayPlugins = guardRepo(this.apiGatewayPlugins, mediate);
     this.apiViewers = guardRepo(this.apiViewers, mediate);
@@ -1066,14 +1110,17 @@ class SqliteStore implements NexusStore {
         execute(
           this.db,
           `INSERT INTO user_identities
-             (id, user_id, provider_id, subject, email, last_login_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, user_id, provider_id, issuer, subject, email, provisioned, last_login_at,
+              created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.user_id,
             input.provider_id,
+            input.issuer,
             input.subject,
             input.email ?? null,
+            encodeBool(input.provisioned),
             input.last_login_at ?? null,
             meta.created_at,
             meta.updated_at,
@@ -1090,11 +1137,11 @@ class SqliteStore implements NexusStore {
       return row ? mapUserIdentity(row) : null;
     },
 
-    findBySubject: async (providerId, subject) => {
+    findBySubject: async (providerId, issuer, subject) => {
       const row = queryOne(
         this.db,
-        'SELECT * FROM user_identities WHERE provider_id = ? AND subject = ?',
-        [providerId, subject],
+        'SELECT * FROM user_identities WHERE provider_id = ? AND issuer = ? AND subject = ?',
+        [providerId, issuer, subject],
       );
       return row ? mapUserIdentity(row) : null;
     },
@@ -1108,6 +1155,11 @@ class SqliteStore implements NexusStore {
       return rows.map(mapUserIdentity);
     },
 
+    countByProvider: async (providerId) =>
+      queryCount(this.db, 'SELECT COUNT(*) AS count FROM user_identities WHERE provider_id = ?', [
+        providerId,
+      ]),
+
     touchLogin: async (id, email, at) => {
       const changed = execute(
         this.db,
@@ -1118,6 +1170,32 @@ class SqliteStore implements NexusStore {
     },
 
     delete: async (id) => execute(this.db, 'DELETE FROM user_identities WHERE id = ?', [id]) > 0,
+
+    deleteByProvider: async (providerId) =>
+      execute(this.db, 'DELETE FROM user_identities WHERE provider_id = ?', [providerId]),
+  };
+
+  /* ── emailProofs ──────────────────────────────────────────────────────── */
+
+  readonly emailProofs: EmailProofRepo = {
+    upsert: async (userId, email, method, at) => {
+      execute(
+        this.db,
+        `INSERT INTO user_email_proofs (user_id, email, method, proven_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (user_id) DO UPDATE SET
+           email = excluded.email,
+           method = excluded.method,
+           proven_at = excluded.proven_at,
+           updated_at = excluded.updated_at`,
+        [userId, email.trim().toLowerCase(), method, at, at, at],
+      );
+    },
+
+    findByUser: async (userId) => {
+      const row = queryOne(this.db, 'SELECT * FROM user_email_proofs WHERE user_id = ?', [userId]);
+      return row ? mapEmailProof(row) : null;
+    },
   };
 
   /* ── organizations ────────────────────────────────────────────────────── */
@@ -1612,6 +1690,87 @@ class SqliteStore implements NexusStore {
         ids,
       );
     },
+  };
+
+  /* ── apiSpecChanges ───────────────────────────────────────────────────── */
+
+  readonly apiSpecChanges: ApiSpecChangeRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      mapConflict('That revision already has a change summary', () =>
+        execute(
+          this.db,
+          `INSERT INTO api_spec_changes
+             (id, api_id, spec_id, previous_spec_id, kind, version, previous_version,
+              revision_seq, report_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            meta.id,
+            input.api_id,
+            input.revision_id,
+            input.previous_revision_id ?? null,
+            input.kind,
+            input.version,
+            input.previous_version ?? null,
+            input.revision_seq,
+            JSON.stringify(input.report),
+            meta.created_at,
+            meta.updated_at,
+          ],
+        ),
+      );
+      const row = queryOne(this.db, 'SELECT * FROM api_spec_changes WHERE id = ?', [meta.id]);
+      if (!row) throw new Error('apiSpecChanges.create: row vanished immediately after insert');
+      return mapApiSpecChange(row);
+    },
+
+    findByRevision: async (apiId, revisionId) => {
+      const row = queryOne(
+        this.db,
+        'SELECT * FROM api_spec_changes WHERE api_id = ? AND spec_id = ?',
+        [apiId, revisionId],
+      );
+      return row ? mapApiSpecChange(row) : null;
+    },
+
+    listByApi: async (apiId, options) => {
+      const { limit, offset } = page(options);
+      const total = queryCount(
+        this.db,
+        'SELECT COUNT(*) AS count FROM api_spec_changes WHERE api_id = ?',
+        [apiId],
+      );
+      const rows = queryAll(
+        this.db,
+        `SELECT * FROM api_spec_changes WHERE api_id = ?
+          ORDER BY revision_seq DESC
+          LIMIT ? OFFSET ?`,
+        [apiId, limit, offset],
+      );
+      return { items: rows.map(mapApiSpecChange), total };
+    },
+
+    prune: async (apiId, keep) => {
+      // Selected then deleted by id, as `apiSpecs.pruneHistory` is.
+      const rows = queryAll(
+        this.db,
+        `SELECT id FROM api_spec_changes
+          WHERE api_id = ?
+          ORDER BY revision_seq DESC
+          LIMIT ? OFFSET ?`,
+        [apiId, SPEC_HISTORY_PRUNE_BATCH, Math.max(0, keep)],
+      );
+      if (rows.length === 0) return 0;
+      const ids = rows.map((row) => text(row.id));
+      return execute(
+        this.db,
+        `DELETE FROM api_spec_changes WHERE id IN (${ids.map(() => '?').join(', ')})`,
+        ids,
+      );
+    },
+
+    deleteByApi: async (apiId) =>
+      execute(this.db, 'DELETE FROM api_spec_changes WHERE api_id = ?', [apiId]),
   };
 
   /* ── apiPlugins ───────────────────────────────────────────────────────── */

@@ -8,55 +8,107 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
+- **Consumers can see what changed in an API's specification** (#448). Each
+  revision that replaces another, by upload or rollback, records a summary of
+  what it changed: operations added, removed and deprecated, parameters added,
+  removed or made required, request bodies, response status codes and media
+  types, and the properties, types, `required` lists and enums of request and
+  response schemas, each marked breaking or not. The catalog page has a new
+  **Changes** tab listing them newest first, and
+  `GET /api/catalog/:slug/changes` (and `…/changes/:revisionId`) serve them to
+  anyone who may read the API's documentation, under the same visibility rules
+  and the same 60/min per-account limit as `GET /api/catalog/:slug/spec`.
+  Summaries outlive `NEXUS_SPEC_HISTORY_LIMIT` pruning; the newest 100 per API
+  are kept. A first publish records none, and revisions published before the
+  upgrade have none. The comparison works within a fixed budget, and one that
+  fails or runs out is recorded as incomplete; it never blocks a publish or a
+  rollback.
+- Forward migration `004_api_spec_changes` adds the `api_spec_changes` table on
+  every backend. It copies no data.
 - **OpenID Connect single sign-on** (part of #445). Users sign in with any
   standards-compliant provider — Keycloak, Dex, Entra ID, Okta, Auth0 — through
-  the authorization-code flow with PKCE (`S256`), `state` and `nonce`. ID tokens
-  are verified against the provider's JWKS with an explicit `RS256`/`ES256`
-  allow-list, and `iss`, `aud`/`azp`, `exp`, `nbf`, `iat`, `nonce` and
-  `at_hash` are checked (60 s of clock leeway). Discovery and the key set are
-  fetched over HTTPS only and cached for an hour; a plain-HTTP issuer is
-  accepted only on a loopback host with `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`.
+  the authorization-code flow with PKCE (`S256`), `state` and `nonce`.
+  - **ID tokens** are verified against the provider's JWKS with an explicit
+    `RS256`/`ES256` allow-list. `iss`, `aud`/`azp`, `exp`, `nbf`, `nonce` and
+    `at_hash` are checked with 60 s of clock leeway. `iat` may be neither in
+    the future nor older than the 10-minute sign-in window.
+  - **Talking to the provider.** Discovery and the key set are fetched over
+    HTTPS only, without following redirects, within 5 s and 512 KiB, and cached
+    for an hour. Every provider host must resolve to public addresses, unless
+    `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES=true`. Concurrent fetches share one
+    request, and a failed one is not retried for 30 s. A plain-HTTP issuer is
+    accepted only on exactly `localhost`, `127.0.0.1` or `::1`, with
+    `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`.
   - **Providers** come from `NEXUS_OIDC_PROVIDERS` (read-only in the UI; a
     secret may come from `NEXUS_OIDC_CLIENT_SECRET_<ID>`) or from **Admin →
     Settings → Single sign-on** (`GET`/`PUT /api/admin/sso`, `super_admin` to
-    edit), where the client secret is write-only and stored AES-256-GCM
-    encrypted like the SMTP password. The sign-in page shows one button per
-    enabled provider (`GET /api/auth/sso`).
-  - **Accounts** are provisioned on first sign-in and matched afterwards by the
-    provider's `sub`, never by address. An existing account is linked only when
-    the provider asserts `email_verified: true` and the portal has proof the
-    holder controls the address — never on an unverified provider address, and
-    never to an account registered while email verification was not required,
-    which would allow account pre-hijacking. Administrators list and remove
-    links at `/api/users/:id/identities`.
+    edit). There the client secret is write-only and stored AES-256-GCM
+    encrypted like the SMTP password. A saved provider's issuer cannot change
+    while it holds links. Removing a provider deletes its links. A saved
+    provider shadowed by an environment one is reported
+    (`shadowed_provider_ids`). The sign-in page shows one button per enabled
+    provider (`GET /api/auth/sso`).
+  - **Accounts** are provisioned on first sign-in. Afterwards they are matched
+    by the provider, its issuer and `sub`, never by address. An existing
+    account is linked automatically only when all of these hold:
+    - the provider asserts `email_verified: true`;
+    - the portal holds a recorded proof of the address: a redeemed
+      verification link, a completed password reset, or a provider-verified
+      provisioning or link;
+    - the account is not an `admin` or `super_admin`.
+
+    The registration policy in force never counts as proof, which closes
+    account pre-hijacking. Administrators, and anyone else, link explicitly
+    from **Profile → Linked sign-in** (`POST /api/auth/sso/:provider/link`),
+    bound to the session that started it. Users see their links at
+    `GET /api/users/me/identities`. Administrators list and remove links at
+    `/api/users/:id/identities`.
+  - **Allowed email domains**: a deployment-wide list, and one per provider for
+    linking and provisioning; both apply when both are set, and either
+    requires a provider-verified address.
+  - **Passwords.** An account created by single sign-on cannot use password
+    sign-in or password reset. A linked pre-existing account keeps its password
+    unless its provider sets `disable_local_password_for_linked`. The
+    provider's offboarding and MFA bind an account only under `sso_only`, for
+    a provisioned account, or with that flag.
   - **Groups and claims map to roles and organizations.** Mappings can grant
-    `client`, `provider` or `admin` — never `super_admin`, and an account that
-    is one is never changed by claims. Roles and organizations are re-applied
-    on every sign-in and audited as `auth.sso_claims_sync`.
+    `client`, `provider` or `admin`, never `super_admin`. An account that is a
+    `super_admin` is never changed by claims, and is never refused for claims
+    that map to no role. Roles and organizations are re-applied on every
+    sign-in and audited as `auth.sso_claims_sync`.
   - **Login policy per deployment**: `local_and_sso` (default), `local_only` or
-    `sso_only`, which refuses password sign-in and self-registration but never
-    the founding registration with the bootstrap token.
-    `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN=true` keeps password sign-in open to
-    `super_admin` accounts under `sso_only`. An optional allowed-email-domain
-    list restricts every single sign-on.
+    `sso_only`.
+    - `sso_only` refuses password sign-in and self-registration, but never the
+      founding registration with the bootstrap token.
+    - `sso_only` can be saved only once the `super_admin` saving it has linked
+      their own account to an enabled provider.
+    - `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN=true` keeps password sign-in open to
+      `super_admin` accounts under `sso_only`.
   - **Deprovisioning** (opt-in): a sign-in whose claims map to no role
-    disables the account and queues the same durable gateway revocation an
+    disables the account. It queues the same durable gateway revocation an
     administrator's disable does, stripping `nexus-user-<id>` and every
     `nexus-app-<id>` of their ACL groups and credentials.
-  - New audit events `auth.sso_login`, `auth.sso_provision`, `auth.sso_link`,
-    `auth.sso_unlink`, `auth.sso_claims_sync` and `auth.sso_deprovision`, each
-    committed in the transaction that makes its change; `auth.login` records
-    `break_glass: true`. No token, code or secret is written to the audit log
-    or the server log.
-  - Forward migration `004_user_identities` on all four backends adds the
-    `user_identities` table (unique on provider and subject, and on account and
-    provider). It only adds a table; upgraded databases keep every row.
+  - **Audit.** New events `auth.sso_login`, `auth.sso_provision`,
+    `auth.sso_link`, `auth.sso_unlink`, `auth.sso_claims_sync` and
+    `auth.sso_deprovision`, each committed in the transaction that makes its
+    change. `auth.login` records `break_glass: true`. No token, code or secret
+    is written to the audit log or the server log.
+  - **Migration.** Forward migration `006_user_identities` on all four backends
+    adds two tables:
+    - `user_identities`, unique on provider, issuer and subject, and on account
+      and provider;
+    - `user_email_proofs`.
+
+    It only adds tables. Upgraded databases keep every row, and existing
+    accounts start with no recorded proof.
   - Setup: [`docs/operations.md` §14](docs/operations.md#14-single-sign-on-openid-connect);
     threat model:
     [`docs/security.md`](docs/security.md#single-sign-on-openid-connect).
 
 ### Changed
 
+- Vendor and pin Ferrum contracts `contracts-edge-0.9.8`; shared tests now check the local plugin
+  names and provisioning attribution against the pinned vocabularies.
 - **OpenAPI render cost is counted the way the catalog viewer renders**
   (GHSA-r4wm-2vch-9jxm): the 100,000-unit limit charges every schema node,
   primitive or not, each rendered property, item and composition entry, and up
@@ -95,6 +147,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Security
 
+- Basic Auth scan failures now remain visible in administrator health details,
+  and revocation checks ownership under the consumer lock, including retiring
+  rows swept when a plain revoke clears the last active credential.
+- Cookie cache protection applies to cookies set through Fastify's reply API;
+  raw response headers and hijacked replies must not set cookies.
 - GHSA-r4wm-2vch-9jxm: OpenAPI rendering accounts for primitive schema values during
   publication checks and charges the page budget before rendering their
   placeholders or schema wrappers. Exhausted schema branches stop before

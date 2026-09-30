@@ -51,6 +51,12 @@ export interface MockAuthorization {
 /** How the next ID token is signed. */
 export type MockSigning = 'provider' | 'foreign-key' | 'hs256' | 'none';
 
+/**
+ * A misbehaving discovery endpoint: a redirect elsewhere, a response that
+ * never comes, or one larger than the portal accepts.
+ */
+export type MockDiscoveryFault = 'redirect' | 'hang' | 'oversize';
+
 /** One token request the provider received. */
 export interface MockTokenRequest {
   form: URLSearchParams;
@@ -75,6 +81,8 @@ export interface MockOidcProvider {
   nextSigning: MockSigning;
   /** Merged over the discovery document. */
   discoveryOverrides: Record<string, unknown>;
+  /** Makes the discovery endpoint misbehave until reset to `null`. */
+  discoveryFault: MockDiscoveryFault | null;
   /** Sign an arbitrary payload with the provider's key (unit tests). */
   sign(payload: JWTPayload, signing?: MockSigning): Promise<string>;
   /** Replace the signing key, as a rotation at the provider would. */
@@ -159,6 +167,7 @@ export function createMockOidcProvider(options: MockOidcProviderOptions): MockOi
     nextIdToken: null,
     nextSigning: 'provider',
     discoveryOverrides: {},
+    discoveryFault: null,
     tokenRequests: [],
     metadataRequests: [],
     sign,
@@ -185,7 +194,10 @@ export function createMockOidcProvider(options: MockOidcProviderOptions): MockOi
     async stop(): Promise<void> {
       const running = server;
       server = null;
-      if (running) await new Promise<void>((resolve) => running.close(() => resolve()));
+      if (!running) return;
+      // A hanging response would otherwise keep `close()` waiting for ever.
+      running.closeAllConnections();
+      await new Promise<void>((resolve) => running.close(() => resolve()));
     },
 
     authorize(authorizationUrl, claims): MockAuthorization {
@@ -229,6 +241,16 @@ export function createMockOidcProvider(options: MockOidcProviderOptions): MockOi
     const url = new URL(request.url ?? '/', issuer);
     if (request.method === 'GET' && url.pathname === '/.well-known/openid-configuration') {
       provider.metadataRequests.push(url.pathname);
+      if (provider.discoveryFault === 'redirect') {
+        response.writeHead(302, { location: `${issuer}/elsewhere` });
+        response.end();
+        return;
+      }
+      if (provider.discoveryFault === 'hang') return;
+      if (provider.discoveryFault === 'oversize') {
+        sendJson(response, 200, { issuer, padding: 'x'.repeat(600 * 1024) });
+        return;
+      }
       sendJson(response, 200, {
         issuer,
         authorization_endpoint: `${issuer}/authorize`,

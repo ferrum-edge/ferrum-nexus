@@ -86,14 +86,25 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
     },
   },
   {
-    id: '004_user_identities',
+    id: '004_api_spec_changes',
     // Pending: ships with the next release, which sets `release`.
     release: null,
     sha256: {
-      sqlite: 'e3b54cf001bcfccab545257630a89d2c031e512264aa2f00a6a98031f241ff4c',
-      pg: '3892d7ec5cda86369be1d57fb405b947eff1e9a8b4dce18bd647fd34b53b1397',
-      mysql: '337f0e08393f8138c096b3727155d516ef3cf41cebd72427881a218bdafc42cf',
-      mongodb: '9d676babd0f6f6e1633434a8bc5819b8c01673d2ae7df12028bf473a70f7e43e',
+      sqlite: '76dc7de8351ff69555130094a29622fe7f4c1d3b8cc63698e5270e608af2109f',
+      pg: '80b9248fea72c1e0f1f9468bcf76a85ec3050bcffc5ad0f81c4b462cb6274a97',
+      mysql: 'c5d90d665a00a48f6d59ea5cf0a98bdf9650f7d54f720b188d5239c15407482c',
+      mongodb: '42aa5064cff7a2841c149229816fa7137f04eef4da2e418fb188202d948d1d1a',
+    },
+  },
+  {
+    id: '006_user_identities',
+    // Pending: ships with the next release, which sets `release`.
+    release: null,
+    sha256: {
+      sqlite: 'cfadba728f672b8871b572ccf83756cc7e2ffa04e1ad8cea1bc4126b73f50dbf',
+      pg: 'fac422e07db2178510c75e2fcf6231ebd14e3817d5bb8a961a41bf0c44ccc717',
+      mysql: '736a6334ad26db435cbc773e7d51899f0f4514fdbeba20603c0291060041c816',
+      mongodb: '34cadaedbbe3f1ad75e15f20d2e9f36bcd2faa5010887b4e3b2f0b2f279aaa0f',
     },
   },
 ];

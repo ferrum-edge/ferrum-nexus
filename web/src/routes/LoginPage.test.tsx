@@ -10,7 +10,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ERROR_CODES, type SsoPublicConfigResponse } from '@ferrum-nexus/shared';
-import { SSO_ERROR_MESSAGES } from './LoginPage';
+import { SSO_ERROR_MESSAGES } from '../lib/sso-errors';
 
 const CAPTCHA = { enabled: false, provider: 'none', site_key: null };
 

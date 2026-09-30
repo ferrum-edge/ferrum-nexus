@@ -97,8 +97,12 @@ describe('PKCE, state and URLs', () => {
     assert.match(issuerProblem('ftp://idp.example.com', true) ?? '', /https/);
     assert.match(oidcUrlProblem('not a url', false) ?? '', /absolute/);
     assert.equal(isLoopbackHostname('[::1]'), true);
-    assert.equal(isLoopbackHostname('app.localhost'), true);
+    assert.equal(isLoopbackHostname('localhost'), true);
+    // Only the literals: no name a resolver could point elsewhere.
+    assert.equal(isLoopbackHostname('app.localhost'), false);
+    assert.equal(isLoopbackHostname('127.0.0.2'), false);
     assert.equal(isLoopbackHostname('10.0.0.1'), false);
+    assert.match(issuerProblem('http://idp.localhost:5556', true) ?? '', /loopback/);
   });
 
   it('hashes an access token the way at_hash is defined for RS256 and ES256', () => {
@@ -194,11 +198,25 @@ for (const alg of ['RS256', 'ES256'] as const) {
     it('refuses an expired token, allowing a minute of clock skew', async () => {
       const now = Math.floor(Date.now() / 1000);
       await rejectsWith(
-        validate(await idp.sign(claims({ iat: now - 900, exp: now - 120 }))),
+        validate(await idp.sign(claims({ iat: now - 300, exp: now - 120 }))),
         'token_invalid',
       );
-      const skewed = await validate(await idp.sign(claims({ iat: now - 900, exp: now - 30 })));
+      const skewed = await validate(await idp.sign(claims({ iat: now - 300, exp: now - 30 })));
       assert.equal(skewed.sub, 'subject-1', 'thirty seconds past expiry is within the leeway');
+    });
+
+    it('refuses a token issued in the future, or longer ago than a sign-in lasts', async () => {
+      const now = Math.floor(Date.now() / 1000);
+      await rejectsWith(
+        validate(await idp.sign(claims({ iat: now + 600, exp: now + 900 }))),
+        'token_invalid',
+      );
+      await rejectsWith(
+        validate(await idp.sign(claims({ iat: now - 3600, exp: now + 300 }))),
+        'token_invalid',
+      );
+      const recent = await validate(await idp.sign(claims({ iat: now + 30 })));
+      assert.equal(recent.sub, 'subject-1', 'thirty seconds ahead is within the leeway');
     });
 
     it('refuses a token that is not valid yet', async () => {
@@ -264,6 +282,7 @@ describe('discovery', () => {
 
   beforeEach(() => {
     idp.discoveryOverrides = {};
+    idp.discoveryFault = null;
   });
 
   it('refuses a plain-HTTP issuer unless loopback HTTP is explicitly allowed', async () => {
@@ -320,6 +339,98 @@ describe('discovery', () => {
     clock += 2 * 60 * 60 * 1000;
     await client.discover(idp.issuer);
     assert.equal(idp.metadataRequests.length, before + 2, 'an expired entry is fetched again');
+  });
+
+  it('refuses a redirect instead of following it', async () => {
+    idp.discoveryFault = 'redirect';
+    try {
+      await rejectsWith(
+        createOidcClient({ allowHttpLoopback: true }).discover(idp.issuer),
+        'provider_unavailable',
+        /request failed/,
+      );
+    } finally {
+      idp.discoveryFault = null;
+    }
+  });
+
+  it('refuses a response larger than 512 KiB', async () => {
+    idp.discoveryFault = 'oversize';
+    try {
+      await rejectsWith(
+        createOidcClient({ allowHttpLoopback: true }).discover(idp.issuer),
+        'provider_unavailable',
+        /too large/,
+      );
+    } finally {
+      idp.discoveryFault = null;
+    }
+  });
+
+  it('gives up on a provider that does not answer within the deadline', async () => {
+    idp.discoveryFault = 'hang';
+    try {
+      const started = Date.now();
+      await rejectsWith(
+        createOidcClient({ allowHttpLoopback: true, timeoutMs: 200 }).discover(idp.issuer),
+        'provider_unavailable',
+        /timed out/,
+      );
+      assert.ok(Date.now() - started < 5_000, 'the deadline, not the socket, ended it');
+    } finally {
+      idp.discoveryFault = null;
+    }
+  });
+
+  it('remembers a failure briefly, and shares one fetch between concurrent callers', async () => {
+    let clock = Date.now();
+    const client = createOidcClient({ allowHttpLoopback: true, now: () => clock });
+    idp.discoveryFault = 'oversize';
+    const before = idp.metadataRequests.length;
+    try {
+      await rejectsWith(client.discover(idp.issuer), 'provider_unavailable');
+      await rejectsWith(client.discover(idp.issuer), 'provider_unavailable');
+      assert.equal(idp.metadataRequests.length, before + 1, 'the second failure is cached');
+    } finally {
+      idp.discoveryFault = null;
+    }
+    clock += 31_000;
+    const [a, b] = await Promise.all([client.discover(idp.issuer), client.discover(idp.issuer)]);
+    assert.equal(a, b);
+    assert.equal(idp.metadataRequests.length, before + 2, 'one request for both callers');
+  });
+
+  it('refuses a provider host that resolves to a private address', async () => {
+    const client = createOidcClient({
+      allowHttpLoopback: false,
+      resolve: async () => [{ address: '10.0.0.7', family: 4 }],
+    });
+    await rejectsWith(
+      client.discover('https://idp.corp.example'),
+      'provider_unavailable',
+      /non-public/,
+    );
+    const literal = createOidcClient({ allowHttpLoopback: false });
+    await rejectsWith(
+      literal.discover('https://192.168.1.10/realms/corp'),
+      'provider_unavailable',
+      /not a public address/,
+    );
+    // With private addresses allowed the request is made (and here fails on
+    // the network instead).
+    const allowed = createOidcClient({
+      allowHttpLoopback: false,
+      allowPrivateAddresses: true,
+      timeoutMs: 200,
+      fetch: async () => {
+        throw new Error('network unreachable');
+      },
+    });
+    await rejectsWith(
+      allowed.discover('https://idp.corp.example'),
+      'provider_unavailable',
+      /request failed/,
+    );
   });
 
   it('exchanges a code only with the PKCE verifier the challenge was made from', async () => {

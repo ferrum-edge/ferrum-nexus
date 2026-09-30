@@ -51,8 +51,9 @@ Exempt, because they run before a session exists: `POST /api/auth/login`,
 `/register`, `/verify-email`, `/resend-verification`, `/forgot-password`,
 `/reset-password` and `GET /api/auth/captcha`. **`POST /api/auth/logout` is not
 exempt.**
-The single sign-on routes are `GET`s; the sealed `state` is what binds a
-callback to the browser that started it.
+The single sign-on `start` and `callback` routes are `GET`s; the sealed `state`
+is what binds a callback to the browser that started it.
+`POST /api/auth/sso/:provider/link` carries a session and is checked.
 
 ### Auth requirement markers
 
@@ -90,21 +91,21 @@ Counters are per process, so N instances allow N × the limit; enforce
 aggregate limits at the proxy. Client IPs come from Fastify's configured proxy
 trust, not from an untrusted forwarded header.
 
-| Scope                                                              | Limit per minute | Keyed by |
-| ------------------------------------------------------------------ | ---------------- | -------- |
-| `/api/health*`                                                     | 120              | IP       |
-| `/api/branding`                                                    | 120              | IP       |
-| Every `POST /api/auth/*` route, and the SSO `start` and `callback` | 20, shared       | IP       |
-| `GET /api/auth/me`, `GET /api/auth/captcha`, `GET /api/auth/sso`   | 120, shared      | IP       |
-| `PATCH /api/users/me`                                              | 10               | account  |
-| `POST /api/threads`                                                | 10               | account  |
-| `POST /api/threads/:id/messages`                                   | 30               | account  |
-| `GET /api/catalog/:slug/spec`                                      | 60               | account  |
-| `/api/apis` mutations and the two spec diffs, per route            | 30               | account  |
-| `GET /api/apis/:id/usage`                                          | 30               | IP       |
-| `POST /api/access-requests`                                        | 10               | account  |
-| `POST /api/access-requests/:id/cancel`                             | 30               | account  |
-| `POST`, `PATCH`, `DELETE` on `/api/applications`, per route        | 30               | account  |
+| Scope                                                                          | Limit per minute | Keyed by |
+| ------------------------------------------------------------------------------ | ---------------- | -------- |
+| `/api/health*`                                                                 | 120              | IP       |
+| `/api/branding`                                                                | 120              | IP       |
+| Every `POST /api/auth/*` route, and the SSO `start` and `callback`             | 20, shared       | IP       |
+| `GET /api/auth/me`, `GET /api/auth/captcha`, `GET /api/auth/sso`               | 120, shared      | IP       |
+| `PATCH /api/users/me`                                                          | 10               | account  |
+| `POST /api/threads`                                                            | 10               | account  |
+| `POST /api/threads/:id/messages`                                               | 30               | account  |
+| `GET /api/catalog/:slug/spec`, `…/changes`, `…/changes/:revisionId`, per route | 60               | account  |
+| `/api/apis` mutations and the two spec diffs, per route                        | 30               | account  |
+| `GET /api/apis/:id/usage`                                                      | 30               | IP       |
+| `POST /api/access-requests`                                                    | 10               | account  |
+| `POST /api/access-requests/:id/cancel`                                         | 30               | account  |
+| `POST`, `PATCH`, `DELETE` on `/api/applications`, per route                    | 30               | account  |
 
 "Account" falls back to the IP for a request without a session. Every other
 route is unlimited.
@@ -119,7 +120,7 @@ route is unlimited.
   [`POST /api/apis`](#post-apiapis)).
 - All `/api` responses carry `cache-control: no-store` unless stated otherwise.
   Any response that sets or clears a cookie carries
-  `cache-control: private, no-store` and `vary: Cookie`, with no exception.
+  `cache-control: private, no-store` and `vary: Cookie` on every Fastify reply.
   An unmatched `/api/*` path answers a JSON `404 NOT_FOUND`.
 
 ---
@@ -537,14 +538,39 @@ _public_, a browser navigation — where the provider returns the browser
 
 → `302` back into the SPA (the `return_to` path) with the session cookies set,
 exactly as `POST /api/auth/login` sets them; or `302` to
-`/login?sso_error=<reason>` with nothing set. `reason` is one of
-`sso_disabled`, `provider_unavailable`, `invalid_state`, `idp_error`,
+`/login?sso_error=<reason>` with nothing set (`/profile?sso_error=<reason>`
+for a link started with `POST /api/auth/sso/:provider/link`). `reason` is one
+of `sso_disabled`, `provider_unavailable`, `invalid_state`, `idp_error`,
 `token_invalid`, `email_required`, `email_domain_not_allowed`,
-`email_not_verified`, `account_exists`, `access_denied`, `account_disabled`,
-`signup_disabled`, `server_error` — see
+`email_not_verified`, `account_exists`, `privileged_account`,
+`link_session_mismatch`, `already_linked`, `access_denied`,
+`account_disabled`, `signup_disabled`, `server_error` — see
 [`operations.md` §14](operations.md#when-a-sign-in-fails). Provider error text
 is never echoed. Audited as `auth.sso_login`, plus `auth.sso_provision`,
 `auth.sso_link` or `auth.sso_claims_sync` when the sign-in did that too.
+
+### `POST /api/auth/sso/:provider/link`
+
+_authenticated_, **CSRF required** — begins linking the signed-in account to a
+provider. Sets the sealed `nexus_sso` cookie, which also records this account
+and session, and returns where to send the browser:
+
+```json
+{ "location": "https://idp.example.com/realms/corp/protocol/openid-connect/auth?…" }
+```
+
+The SPA navigates to `location`. The callback links whatever identity signs in
+there to this account, whatever its email address, provided it returns to the
+same session (`link_session_mismatch` otherwise). The provider's own
+`allowed_email_domains` still apply, and a subject already linked to another
+account, or a second identity at the same provider, is refused
+(`already_linked`). It then lands on `/profile`. This is the only way an
+`admin` or `super_admin` account is linked. Audited as `auth.sso_link` with
+`explicit: true`.
+
+Errors: `400 VALIDATION_FAILED` with `details.reason` (`sso_disabled`,
+`provider_unavailable`, …) when the link cannot start, `401 UNAUTHORIZED`,
+`403 CSRF_MISMATCH`.
 
 ---
 
@@ -698,7 +724,8 @@ Errors: `409 CONFLICT` (account is not `disabled`), `404 NOT_FOUND`.
 
 ### `GET /api/users/:id/identities`
 
-_admin_ — the account's single sign-on links.
+_admin_ — the account's single sign-on links. `GET /api/users/me/identities`
+(_authenticated_) returns the caller's own, in the same shape.
 
 ```json
 {
@@ -707,7 +734,9 @@ _admin_ — the account's single sign-on links.
       "id": "…",
       "user_id": "…",
       "provider_id": "corp",
+      "issuer": "https://idp.example.com/realms/corp",
       "subject": "248289761001",
+      "provisioned": false,
       "email": "ada@example.com",
       "last_login_at": "2026-09-30T08:12:44.117Z",
       "created_at": "2026-09-01T10:00:00.000Z",
@@ -724,8 +753,9 @@ Errors: `404 NOT_FOUND`.
 _admin_ (a **_super_admin_** for an `admin` or `super_admin` account), **CSRF
 required** — removes one link; audited as `auth.sso_unlink`. The account keeps
 everything else. Its next sign-in through that provider is matched afresh:
-linked again only under the verified-address rule, or refused. Returns
-`{ "ok": true }`.
+linked again only under the proven-address rule or explicitly, or refused.
+Removing the identity that provisioned an account lifts that account's
+password block. Returns `{ "ok": true }`.
 
 Errors: `403 FORBIDDEN`, `404 NOT_FOUND`.
 
@@ -1148,6 +1178,8 @@ _admin_ — single sign-on settings. Client secrets are never returned.
       "jit_provisioning": true,
       "link_existing_accounts": true,
       "require_verified_email": true,
+      "allowed_email_domains": [],
+      "disable_local_password_for_linked": false,
       "sync_roles": true,
       "default_role": "client",
       "role_mappings": [{ "claim": "groups", "value": "nexus-admins", "role": "admin" }],
@@ -1156,7 +1188,8 @@ _admin_ — single sign-on settings. Client secrets are never returned.
       "client_secret_set": true,
       "redirect_uri": "https://portal.example.com/api/auth/sso/corp/callback"
     }
-  ]
+  ],
+  "shadowed_provider_ids": []
 }
 ```
 
@@ -1164,6 +1197,9 @@ _admin_ — single sign-on settings. Client secrets are never returned.
   `settings`.
 - `break_glass_local_login` mirrors `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN`; it
   cannot be set through the API.
+- `shadowed_provider_ids`: settings providers whose id an environment provider
+  now also declares. The environment one is in force and is the one listed;
+  the next `providers` save removes the stored one.
 - The fields are described in
   [`operations.md` §14](operations.md#configure-the-provider-in-nexus).
 
@@ -1174,22 +1210,31 @@ update of `policy`, `allowed_email_domains`, `deprovision_on_access_loss` and
 `providers`; omitted fields keep their values. Returns the same shape as `GET`.
 
 - `providers`, when present, **replaces** the list of settings providers; a
-  provider left out is removed together with its secret. Each entry carries
+  provider left out is removed together with its secret and its links
+  (`user_identities` rows), except that a shadowed provider's removal leaves
+  the environment provider's links alone. Each entry carries
   every field shown above except `source`, `client_secret_set` and
   `redirect_uri`, plus an optional write-only `client_secret`: omit it to keep
   the stored one, `null` to clear it. Environment providers are never part of
   the list.
 - `role` in a mapping is `client`, `provider` or `admin`; `super_admin` is
   refused. `default_role` may be `null` (no match → no access).
-- Allowed domains are normalized (`@Example.COM` → `example.com`).
+- Allowed domains, deployment-wide and per provider, are normalized
+  (`@Example.COM` → `example.com`).
 - Audited as `admin.settings_update` with `target_id: "sso"`, recording key
-  names and provider ids, never a secret.
+  names, provider ids and `links_removed`, never a secret.
 
-Errors: `400 VALIDATION_FAILED` (unknown field, an id declared in
-`NEXUS_OIDC_PROVIDERS`, a duplicate id, a non-HTTPS issuer, more than 10
-providers, an invalid domain, or `sso_only` without an enabled provider),
-`403 FORBIDDEN` (not a `super_admin`), `404 NOT_FOUND` (an `org_id` that does
-not exist).
+Errors: `400 VALIDATION_FAILED` for any of:
+
+- an unknown field, or a provider missing a field;
+- an id declared in `NEXUS_OIDC_PROVIDERS`, or a duplicate id;
+- a non-HTTPS issuer, or an issuer change on a provider that holds links;
+- more than 10 providers, or an invalid domain;
+- `sso_only` without an enabled provider, or before the caller has a link of
+  their own to an enabled provider.
+
+Also `403 FORBIDDEN` (not a `super_admin`) and `404 NOT_FOUND` (an `org_id`
+that does not exist).
 
 ### `POST /api/admin/settings/smtp-test`
 
@@ -1547,6 +1592,148 @@ Errors: `404 NOT_FOUND` (not viewable, or no spec), `400 SPEC_INVALID` (the
 stored document cannot be normalized; no contents or parser output are
 returned).
 
+### `GET /api/catalog/:slug/changes`
+
+_session_ — what each published revision of the API's specification changed,
+newest first → `Paginated<ApiSpecChangeEntry>`. `limit` is capped at 20. The
+same visibility as `GET /api/catalog/:slug`: `404 NOT_FOUND`, with the same
+body as for a slug that names nothing, when the caller may not open the API.
+
+```json
+{
+  "items": [
+    {
+      "id": "…",
+      "api_id": "…",
+      "revision_id": "…",
+      "previous_revision_id": "…",
+      "kind": "update",
+      "version": "2.0.0",
+      "previous_version": "1.0.0",
+      "report": {
+        "changed": true,
+        "complete": true,
+        "changes": [
+          {
+            "kind": "operation_removed",
+            "severity": "breaking",
+            "operation": { "method": "DELETE", "path": "/orders/{id}" },
+            "section": "operation",
+            "location": null,
+            "schema_path": null,
+            "from": null,
+            "to": null
+          }
+        ],
+        "counts": { "breaking": 1, "non_breaking": 0, "operations_added": 0, … },
+        "truncated": false,
+        "info_changes": ["version"]
+      },
+      "created_at": "…"
+    }
+  ],
+  "total": 1
+}
+```
+
+A summary is recorded when a revision replaces another, by
+[`PUT /api/apis/:id/spec`](#put-apiapisidspec) or a
+[rollback](#post-apiapisidrevisionsrevisionidrollback) (`kind: "rollback"`).
+A first publish has nothing to compare against and records none, so an API
+that has not changed since it was published has an empty history. Summaries
+are kept apart from the revision documents and outlive their pruning by
+`NEXUS_SPEC_HISTORY_LIMIT`: `revision_id` may name a revision that is no
+longer retained. The newest 100 per API are kept.
+
+Only the summary crosses this endpoint: never the document, its `servers`,
+descriptions, examples or extensions, and never the upstream or plugin
+configuration. Nothing is parsed on a read.
+
+### `GET /api/catalog/:slug/changes/:revisionId`
+
+_session_ — one revision's `ApiSpecChangeEntry`. `404 NOT_FOUND` when the API is
+not viewable, or the revision has no summary under this API.
+
+#### The `SpecChangeReport` shape
+
+| Field          | Meaning                                                                                                                                                        |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `changed`      | whether anything differs, `info_changes` included                                                                                                              |
+| `complete`     | `false` when the comparison stopped at its budget or could not read the previous revision; the lists and counts are then only what it found                    |
+| `changes`      | at most 100 `SpecChange`s: breaking ones first, then the rest, each group in document order                                                                    |
+| `counts`       | `breaking`, `non_breaking`, `operations_added`, `operations_removed`, `operations_deprecated` and `operations_changed`, over every change found, listed or not |
+| `truncated`    | whether `changes` lists fewer changes than `counts` counts                                                                                                     |
+| `info_changes` | the `info` fields (`title`, `version`, `description`) that differ; their values are not carried                                                                |
+
+Each `SpecChange`:
+
+| Field         | Meaning                                                                                                                                                                |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kind`        | what changed; see the next table                                                                                                                                       |
+| `severity`    | `breaking` \| `non_breaking`                                                                                                                                           |
+| `operation`   | `{ method, path }`, or `null` for a change inside a shared component schema                                                                                            |
+| `section`     | `operation`, `parameter`, `request` or `response`; for a schema change, the direction the schema travels in                                                            |
+| `location`    | `query limit` (a parameter), a media type (a request body), `200` or `200 application/json` (a response), or a component's `$ref`; `null` when the section says it all |
+| `schema_path` | where inside that schema: `status`, `items[].id`, `oneOf[1].amount`, or `""` for the schema itself; `null` outside a schema                                            |
+| `from`, `to`  | the value before and after, where one is worth naming: a type, enum values, `required` or `optional`                                                                   |
+
+A schema is _sent_ when it is a parameter's or a request body's, and _read_
+when it is a response's. A change is `breaking` when a caller written against
+the previous revision may fail against the new one:
+
+| Kind                                                                | Breaking when                                                                                   |
+| ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `operation_added`, `operation_deprecated`, `operation_undeprecated` | never                                                                                           |
+| `operation_removed`                                                 | always: requests to it may now fail                                                             |
+| `parameter_added`                                                   | the parameter is required (every `path` parameter is)                                           |
+| `parameter_removed`, `parameter_required`                           | always                                                                                          |
+| `parameter_optional`                                                | never                                                                                           |
+| `request_body_added`                                                | the body is required                                                                            |
+| `request_body_removed`, `request_body_required`                     | always                                                                                          |
+| `request_body_optional`, `response_added`, `media_type_added`       | never                                                                                           |
+| `response_removed`                                                  | the status is a `2xx` success                                                                   |
+| `media_type_removed`                                                | always                                                                                          |
+| `schema_type_changed`                                               | a sent schema accepts fewer types, or a read one more (`integer` to `number` widens)            |
+| `schema_property_added`                                             | a sent schema gains a required property                                                         |
+| `schema_property_removed`, `schema_property_optional`               | the schema is read                                                                              |
+| `schema_property_required`, `schema_enum_values_removed`            | the schema is sent                                                                              |
+| `schema_enum_values_added`                                          | the schema is read, or an enum now restricts a sent one                                         |
+| `schema_composition_changed`                                        | a sent schema accepts less (fewer `oneOf` or `anyOf` entries, more `allOf`), or a read one more |
+
+The comparison reads types (with `nullable`), properties, `required` (including
+names a schema requires without declaring them, as in
+`allOf: [{ $ref: … }, { required: [id] }]`), enums, `items` and
+`oneOf`/`anyOf`/`allOf` entries. It does not compare formats, patterns, numeric
+bounds, examples or security requirements, and it cannot see how the API
+behaves, so an empty list means it found nothing, not that a change is safe.
+Some of what it does report needs reading with care:
+
+- A change inside a shared component schema is reported once, under the
+  component's `$ref` with `operation: null`, not under each operation that
+  uses it.
+- A subtree the document repeats inline (a YAML alias) is compared once, and
+  its changes are reported under the first operation that reaches it only.
+- `oneOf`, `anyOf` and `allOf` entries are matched by position, so reordering
+  them reads as changes to each.
+- Only the seven JSON Schema type names count in a `type`, and only its first
+  32 entries are read.
+- On an API with no gateway proxy, two revisions published at the same moment
+  can both be compared against the same predecessor, so the history may skip
+  the difference between them.
+
+It is bounded however large the documents are:
+
+- **A `$ref` is never expanded where it occurs.** Where both revisions reference
+  a component at the same place, the two targets are compared once per
+  direction and what differs is reported once under the component's `$ref`,
+  with `operation: null`, rather than again at every operation that uses it.
+- Every other pair of schema objects is compared once, and every step spends
+  from a budget of twice `MAX_SPEC_RENDER_UNITS`. A comparison that runs out
+  stops and reports `complete: false`.
+- Provider-written strings in a change are cut to 200 characters.
+- A previous revision whose stored document no longer passes the upload checks
+  is not compared at all: its summary is empty with `complete: false`.
+
 ---
 
 ## APIs (publishing)
@@ -1876,8 +2063,8 @@ In order:
    proxy-scoped configs; any config the cascade missed is removed after.
 2. The API's test identity (`nexus-test-<api_id>` consumer, its credentials and
    ACL group) is torn down.
-3. Grants, requests, spec revisions and the API row are deleted in one
-   transaction, with the `api.delete` audit row.
+3. Grants, requests, spec revisions, spec change summaries and the API row are
+   deleted in one transaction, with the `api.delete` audit row.
 4. The ACL group is stripped from each grantee's consumer (outside the proxy
    lease; a failure is logged, not retried — the group has nothing left to
    authorize), and grantees are notified.
@@ -1910,6 +2097,11 @@ _provider_, owner or admin — publish a new spec revision. Body: `spec`
 - The new revision becomes current. Revisions older than the
   `NEXUS_SPEC_HISTORY_LIMIT` newest (default 10, besides the current one) are
   pruned in the same transaction.
+- In the same transaction, what the revision changed against the one it
+  replaces is recorded for consumers: see
+  [`GET /api/catalog/:slug/changes`](#get-apicatalogslugchanges). The
+  `api.spec_update` (or `api.spec_rollback`) row carries
+  `spec_changes: { breaking, non_breaking, complete }`.
 - **Backend following.** The proxy is re-pointed at the new document's
   `servers[0]` only when the API's `upstream_url` still equals the normalized
   `servers[0]` of the previous revision (scheme, host, port and base path).

@@ -4,10 +4,12 @@
  *
  * The flow is the authorization-code grant with PKCE:
  *
- * 1. `GET /api/auth/sso/:provider/start` mints a `state`, a `nonce` and a
- *    PKCE verifier, seals them (with the provider id, the page to return to
- *    and an expiry) into the short-lived HttpOnly `nexus_sso` cookie, and
- *    redirects the browser to the provider with the `S256` challenge.
+ * 1. `GET /api/auth/sso/:provider/start` (or, to link the signed-in account,
+ *    `POST /api/auth/sso/:provider/link`) mints a `state`, a `nonce` and a
+ *    PKCE verifier, seals them — with the provider id, the page to return to,
+ *    an expiry and, for a link, the account and session — into the
+ *    short-lived HttpOnly `nexus_sso` cookie, and sends the browser to the
+ *    provider with the `S256` challenge.
  * 2. `GET /api/auth/sso/:provider/callback` opens that cookie (and clears it,
  *    whatever happens next), requires the returned `state` to equal the
  *    sealed one, redeems the code with the verifier, and validates the ID
@@ -16,30 +18,31 @@
  *
  * Which account the sign-in opens is decided by these rules, in order:
  *
- * - **A linked subject** — `(provider, sub)` in `user_identities` — opens
- *   its account. The email address plays no part: a provider that changes it
- *   does not move the sign-in to another account.
+ * - **A linked subject** — `(provider, issuer, sub)` in `user_identities` —
+ *   opens its account. The email address plays no part: a provider that
+ *   changes it does not move the sign-in to another account.
+ * - **An explicit link** — started from the profile of a signed-in account —
+ *   attaches the identity to that account, and only when the callback comes
+ *   back to the same session.
  * - **Otherwise an existing account with the same address is linked only
- *   when both sides have verified it**: the provider asserts
- *   `email_verified: true` (the JSON boolean) *and* the portal account has
- *   proven the address ({@link addressProven}). Anything less is refused as
- *   `account_exists` or `email_not_verified`, and nothing is linked — an
- *   unverified address at a provider is exactly how an attacker would claim
- *   somebody else's account. The same rule applies to a second provider: an
- *   account never gains an identity on weaker evidence than the first one
- *   needed.
+ *   when both sides have proven it**: the provider asserts
+ *   `email_verified: true` (the JSON boolean) *and* the portal holds a proof
+ *   of the address in `user_email_proofs` — a redeemed verification link, a
+ *   completed reset, or a provider that verified it before. `email_verified`
+ *   alone is not proof. An `admin` or `super_admin` is never linked this way;
+ *   its holder links explicitly. Anything less is refused and nothing is
+ *   linked.
  * - **Otherwise, with just-in-time provisioning on, a new account is created**
  *   (by default only for a verified address), with the role and organization
- *   the claims map to. It is never a `super_admin`: the founder's seat stays
- *   with the bootstrap token.
+ *   the claims map to. It is never a `super_admin`, and it has no password.
  *
  * Every sign-in re-reads the claims: the role and organization follow the
  * mappings (`sso/mapping.ts`, and never for a `super_admin`), and claims that
- * map to no role refuse the sign-in — and, when the deployment says so,
- * disable the account through the same durable gateway revocation an
- * administrator's disable queues. The session is the ordinary portal session
- * (`auth/service.ts`), and every change commits in one transaction with its
- * audit row.
+ * map to no role refuse the sign-in — except a `super_admin`'s — and, when
+ * the deployment says so, disable the account through the same durable
+ * gateway revocation an administrator's disable queues. The session is the
+ * ordinary portal session (`auth/service.ts`), and every change commits in
+ * one transaction with its audit row.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -59,12 +62,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { AuditAction, SYSTEM_ACTOR, type AuditActor, type AuditService } from '../audit/service.js';
-import {
-  readRegistrationPolicy,
-  type AuthService,
-  type IssuedSession,
-  type RequestContext,
-} from '../auth/service.js';
+import type { AuthService, IssuedSession, RequestContext } from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
 import { runGatewayTeardown, type CredentialsService } from '../credentials/service.js';
 import type { NexusStore, UserIdentityRecord, UserRecord } from '../db/store.js';
@@ -101,6 +99,7 @@ import {
   providersInForce,
   readStoredSsoSettings,
   resolveSsoProviders,
+  shadowedProviderIds,
   ssoClientSecretKey,
   SSO_SETTINGS_KEY,
   type ResolvedSsoProvider,
@@ -118,6 +117,10 @@ interface SsoTransaction {
   return_to: string;
   /** Epoch milliseconds. */
   expires_at: number;
+  /** For an explicit link: the account that started it, else `null`. */
+  link_user_id: Uuid | null;
+  /** For an explicit link: the session that started it, else `null`. */
+  link_session_id: Uuid | null;
 }
 
 /** Result of {@link SsoService.start}. */
@@ -140,17 +143,32 @@ export interface SsoCallbackQuery {
   error?: string | undefined;
 }
 
+/** The signed-in principal a callback arrives with, if any. */
+export interface SsoCurrentSession {
+  userId: Uuid;
+  sessionId: Uuid;
+}
+
 /** Single sign-on operations. */
 export interface SsoService {
   /** `GET /api/auth/sso`: what the sign-in page offers. */
   publicConfig(): Promise<SsoPublicConfigResponse>;
   /** Begin a sign-in. Never throws; a refusal redirects to the sign-in page. */
   start(providerId: string, returnTo: unknown): Promise<SsoStartResult>;
-  /** Finish a sign-in. Never throws; a refusal redirects to the sign-in page. */
+  /**
+   * Begin linking the signed-in account to a provider. Throws
+   * `VALIDATION_FAILED` (with `details.reason`) when it cannot start.
+   */
+  startLink(
+    providerId: string,
+    current: SsoCurrentSession,
+  ): Promise<{ location: string; transaction: string }>;
+  /** Finish a sign-in or a link. Never throws; a refusal redirects with a reason. */
   callback(
     providerId: string,
     query: SsoCallbackQuery,
     transactionCookie: string | undefined,
+    current: SsoCurrentSession | null,
     context: RequestContext,
   ): Promise<SsoCallbackResult>;
   getAdminSettings(): Promise<SsoAdminSettingsResponse>;
@@ -225,31 +243,54 @@ function toUserIdentity(record: UserIdentityRecord): UserIdentity {
     id: record.id,
     user_id: record.user_id,
     provider_id: record.provider_id,
+    issuer: record.issuer,
     subject: record.subject,
     email: record.email,
+    provisioned: record.provisioned,
     last_login_at: record.last_login_at,
     created_at: record.created_at,
     updated_at: record.updated_at,
   };
 }
 
+/**
+ * Hold an address to a domain list: when the list is set, the provider must
+ * have verified the address, and it must be in one of the domains. An
+ * unverified claim is refused rather than trusted to be in the domain it says.
+ */
+function checkDomains(email: string | null, emailVerified: boolean, domains: string[]): void {
+  if (domains.length === 0) return;
+  if (email === null) throw new OidcError('email_required', 'A domain check needs an email');
+  if (!emailVerified) {
+    throw new OidcError('email_not_verified', 'A domain check needs a verified address');
+  }
+  if (!emailDomainAllowed(email, domains)) {
+    throw new OidcError('email_domain_not_allowed', 'The email domain is not allowed');
+  }
+}
+
 /** How a sign-in reaches its account. */
 type SignInPlan =
   | { kind: 'returning'; user: UserRecord; identity: UserIdentityRecord }
-  | { kind: 'link'; user: UserRecord }
+  | { kind: 'link'; user: UserRecord; explicit: boolean }
   | { kind: 'provision' };
 
 /** Build the single sign-on service. */
 export function createSsoService(deps: SsoServiceDeps): SsoService {
   const { config, store, crypto, audit, auth, credentials, locks } = deps;
-  const oidc = deps.oidc ?? createOidcClient({ allowHttpLoopback: config.sso.allowHttpLoopback });
+  const oidc =
+    deps.oidc ??
+    createOidcClient({
+      allowHttpLoopback: config.sso.allowHttpLoopback,
+      allowPrivateAddresses: config.sso.allowPrivateAddresses,
+    });
 
   function redirectUri(providerId: string): string {
     return `${config.publicUrl}/api/auth/sso/${encodeURIComponent(providerId)}/callback`;
   }
 
-  function loginErrorLocation(reason: SsoErrorReason): string {
-    return `${config.publicUrl}/login?sso_error=${reason}`;
+  function errorLocation(reason: SsoErrorReason, linking: boolean): string {
+    return `${config.publicUrl}${linking ? '/profile' : '/login'}?sso_error=${reason}`;
   }
 
   /** Record why a sign-in was refused — the reason and the provider, nothing else. */
@@ -287,6 +328,38 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     return provider;
   }
 
+  /** Mint and seal one attempt, and build the authorization request for it. */
+  async function begin(
+    provider: ResolvedSsoProvider,
+    returnTo: string,
+    link: SsoCurrentSession | null,
+  ): Promise<{ location: string; transaction: string }> {
+    const discovery = await oidc.discover(provider.settings.issuer);
+    const transaction: SsoTransaction = {
+      v: 1,
+      provider: provider.settings.id,
+      state: randomUrlToken(),
+      nonce: randomUrlToken(),
+      verifier: randomUrlToken(),
+      return_to: returnTo,
+      expires_at: Date.now() + SSO_TRANSACTION_TTL_SECONDS * 1000,
+      link_user_id: link?.userId ?? null,
+      link_session_id: link?.sessionId ?? null,
+    };
+    return {
+      location: authorizationUrl({
+        discovery,
+        clientId: provider.settings.client_id,
+        redirectUri: redirectUri(provider.settings.id),
+        scopes: provider.settings.scopes,
+        state: transaction.state,
+        nonce: transaction.nonce,
+        codeChallenge: pkceChallenge(transaction.verifier),
+      }),
+      transaction: crypto.sealSsoTransaction(transaction),
+    };
+  }
+
   function openTransaction(cookie: string | undefined): SsoTransaction | null {
     if (cookie === undefined || cookie === '') return null;
     let value: unknown;
@@ -297,6 +370,8 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     }
     if (value === null || typeof value !== 'object') return null;
     const record = value as Record<string, unknown>;
+    const optionalId = (field: unknown): field is string | null =>
+      field === null || typeof field === 'string';
     if (
       record.v !== 1 ||
       typeof record.provider !== 'string' ||
@@ -304,7 +379,9 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       typeof record.nonce !== 'string' ||
       typeof record.verifier !== 'string' ||
       typeof record.return_to !== 'string' ||
-      typeof record.expires_at !== 'number'
+      typeof record.expires_at !== 'number' ||
+      !optionalId(record.link_user_id) ||
+      !optionalId(record.link_session_id)
     ) {
       return null;
     }
@@ -316,6 +393,8 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       verifier: record.verifier,
       return_to: safeReturnPath(record.return_to),
       expires_at: record.expires_at,
+      link_user_id: record.link_user_id,
+      link_session_id: record.link_session_id,
     };
   }
 
@@ -380,22 +459,65 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
   }
 
   /**
-   * Whether a portal account's `email_verified` is evidence that its holder
-   * controls the address — the portal half of the linking rule.
+   * Whether the portal holds proof that `account`'s holder controls its
+   * current address — the portal half of the linking rule.
    *
-   * With the registration policy's `require_email_verification` off, a new
-   * account is marked verified without any proof, so the flag alone would let
-   * somebody register a victim's address in advance and have the victim's
-   * later single sign-on land in an account the attacker holds the password
-   * to (account pre-hijacking). It counts only when the policy demands the
-   * proof, for a `super_admin` (seated by the bootstrap token or promoted by
-   * one), or for an account whose address an identity provider already
-   * verified when it was provisioned or linked.
+   * `users.email_verified` is not proof: with the registration policy's
+   * verification off, every registration is marked verified without any, and
+   * turning verification on later does not change what those rows are. A
+   * proof is written only by a redeemed verification link, a completed
+   * password reset, or a provider that verified the address, and covers the
+   * address it was written for.
    */
-  async function addressProven(account: UserRecord, linkedIdentities: number): Promise<boolean> {
-    if (!account.email_verified) return false;
-    if (account.role === 'super_admin' || linkedIdentities > 0) return true;
-    return (await readRegistrationPolicy(store)).require_email_verification;
+  async function addressProven(account: UserRecord): Promise<boolean> {
+    const proof = await store.emailProofs.findByUser(account.id);
+    return proof !== null && proof.email === account.email.trim().toLowerCase();
+  }
+
+  /** Decide which account an explicit link attaches to. */
+  async function planExplicitLink(
+    provider: ResolvedSsoProvider,
+    claims: IdTokenClaims,
+    email: string | null,
+    emailVerified: boolean,
+    mapping: ClaimMapping,
+    transaction: SsoTransaction,
+    current: SsoCurrentSession | null,
+  ): Promise<SignInPlan> {
+    // The attempt is bound to the session that started it: a link that comes
+    // back to another browser, or after the session changed, attaches nothing.
+    if (
+      current === null ||
+      current.userId !== transaction.link_user_id ||
+      current.sessionId !== transaction.link_session_id
+    ) {
+      throw new OidcError('link_session_mismatch', 'The link did not return to its session');
+    }
+    const settings = provider.settings;
+    checkDomains(email, emailVerified, settings.allowed_email_domains);
+    const account = await store.users.findById(current.userId);
+    if (!account || account.status !== 'active') {
+      throw new OidcError('account_disabled', 'The account is not active');
+    }
+    const identity = await store.userIdentities.findBySubject(
+      settings.id,
+      settings.issuer,
+      claims.sub,
+    );
+    if (identity) {
+      if (identity.user_id !== account.id) {
+        throw new OidcError('already_linked', 'The identity is linked to another account');
+      }
+      return { kind: 'returning', user: account, identity };
+    }
+    const links = await store.userIdentities.listByUser(account.id);
+    if (links.some((link) => link.provider_id === settings.id)) {
+      throw new OidcError('already_linked', 'The account is already linked at this provider');
+    }
+    if (mapping.role === null && account.role !== 'super_admin') {
+      throw new OidcError('access_denied', 'The claims map to no role');
+    }
+    return { kind: 'link', user: account, explicit: true };
   }
 
   /** Decide which account the claims open, refusing with an {@link OidcError}. */
@@ -409,15 +531,21 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     context: RequestContext,
   ): Promise<SignInPlan> {
     const settings = provider.settings;
-    const identity = await store.userIdentities.findBySubject(settings.id, claims.sub);
+    const identity = await store.userIdentities.findBySubject(
+      settings.id,
+      settings.issuer,
+      claims.sub,
+    );
     if (identity) {
       const user = await store.users.findById(identity.user_id);
       if (!user) throw new OidcError('server_error', 'The linked account no longer exists');
       if (user.status !== 'active') {
         throw new OidcError('account_disabled', 'The linked account is disabled');
       }
-      if (mapping.role === null) {
-        if (stored.deprovision_on_access_loss && user.role !== 'super_admin') {
+      // A super admin's role is never decided by claims, so claims that map
+      // to nothing do not lock one out either.
+      if (mapping.role === null && user.role !== 'super_admin') {
+        if (stored.deprovision_on_access_loss) {
           await deprovision(user, settings, claims.sub, context);
         }
         throw new OidcError('access_denied', 'The claims map to no role');
@@ -426,21 +554,27 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     }
 
     if (email === null) throw new OidcError('email_required', 'The ID token has no usable email');
+    checkDomains(email, emailVerified, settings.allowed_email_domains);
     const existing = await store.users.findByEmail(email);
     if (existing) {
       if (!settings.link_existing_accounts) {
         throw new OidcError('account_exists', 'Linking existing accounts is off for this provider');
       }
+      // Whoever controls a provider that asserts this address would gain the
+      // account: never an administrator's, which links explicitly instead.
+      if (roleAtLeast(existing.role, 'admin')) {
+        throw new OidcError('privileged_account', 'Administrator accounts link explicitly');
+      }
       if (!emailVerified) {
         throw new OidcError('email_not_verified', 'The provider did not verify the address');
       }
-      const links = await store.userIdentities.listByUser(existing.id);
-      if (!(await addressProven(existing, links.length))) {
-        throw new OidcError('account_exists', 'The portal account has not proven the address');
+      if (!(await addressProven(existing))) {
+        throw new OidcError('account_exists', 'The portal holds no proof of the address');
       }
       if (existing.status !== 'active') {
         throw new OidcError('account_disabled', 'The matching account is disabled');
       }
+      const links = await store.userIdentities.listByUser(existing.id);
       if (links.some((link) => link.provider_id === settings.id)) {
         throw new OidcError(
           'account_exists',
@@ -448,7 +582,7 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         );
       }
       if (mapping.role === null) throw new OidcError('access_denied', 'The claims map to no role');
-      return { kind: 'link', user: existing };
+      return { kind: 'link', user: existing, explicit: false };
     }
 
     if (!settings.jit_provisioning) {
@@ -504,11 +638,16 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         const identity = await tx.userIdentities.create({
           user_id: user.id,
           provider_id: provider.id,
+          issuer: provider.issuer,
           subject,
           email,
+          provisioned: true,
           last_login_at: at,
         });
         identityId = identity.id;
+        if (emailVerified) {
+          await tx.emailProofs.upsert(user.id, email, 'identity_provider', at);
+        }
         await audit.forStore(tx).record(
           { id: user.id, role: user.role },
           AuditAction.AUTH_SSO_PROVISION,
@@ -536,11 +675,17 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
           const identity = await tx.userIdentities.create({
             user_id: user.id,
             provider_id: provider.id,
+            issuer: provider.issuer,
             subject,
             email,
+            provisioned: false,
             last_login_at: at,
           });
           identityId = identity.id;
+          // A provider that verified this very address is proof of it too.
+          if (emailVerified && email !== null && email === user.email.trim().toLowerCase()) {
+            await tx.emailProofs.upsert(user.id, email, 'identity_provider', at);
+          }
           await audit.forStore(tx).record(
             { id: user.id, role: user.role },
             AuditAction.AUTH_SSO_LINK,
@@ -550,8 +695,8 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
               subject,
               identity_id: identity.id,
               email,
+              explicit: plan.explicit,
               email_verified_by_provider: emailVerified,
-              email_verified_locally: user.email_verified,
             },
             context.ip,
           );
@@ -646,7 +791,22 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         client_secret_set: provider.clientSecret !== null,
         redirect_uri: redirectUri(provider.settings.id),
       })),
+      shadowed_provider_ids: shadowedProviderIds(config, stored),
     };
+  }
+
+  /** Normalise one list of domains, refusing anything that is not one. */
+  function normalizeDomains(entries: readonly string[], what: string): string[] {
+    if (entries.length > MAX_ALLOWED_EMAIL_DOMAINS) {
+      throw validationFailed(`At most ${MAX_ALLOWED_EMAIL_DOMAINS} email domains are allowed`);
+    }
+    const domains: string[] = [];
+    for (const entry of entries) {
+      const domain = normalizeEmailDomain(entry);
+      if (domain === null) throw validationFailed(`${what}: '${entry}' is not a domain name`);
+      if (!domains.includes(domain)) domains.push(domain);
+    }
+    return domains;
   }
 
   return {
@@ -657,34 +817,31 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       try {
         const stored = await readStoredSsoSettings(store);
         const provider = await findProvider(providerId, stored);
-        const discovery = await oidc.discover(provider.settings.issuer);
-        const transaction: SsoTransaction = {
-          v: 1,
-          provider: provider.settings.id,
-          state: randomUrlToken(),
-          nonce: randomUrlToken(),
-          verifier: randomUrlToken(),
-          return_to: safeReturnPath(returnTo),
-          expires_at: Date.now() + SSO_TRANSACTION_TTL_SECONDS * 1000,
-        };
-        return {
-          location: authorizationUrl({
-            discovery,
-            clientId: provider.settings.client_id,
-            redirectUri: redirectUri(provider.settings.id),
-            scopes: provider.settings.scopes,
-            state: transaction.state,
-            nonce: transaction.nonce,
-            codeChallenge: pkceChallenge(transaction.verifier),
-          }),
-          transaction: crypto.sealSsoTransaction(transaction),
-        };
+        return await begin(provider, safeReturnPath(returnTo), null);
       } catch (error) {
-        return { location: loginErrorLocation(refused(providerId, error)), transaction: null };
+        return { location: errorLocation(refused(providerId, error), false), transaction: null };
       }
     },
 
-    async callback(providerId, query, transactionCookie, context): Promise<SsoCallbackResult> {
+    async startLink(providerId, current): Promise<{ location: string; transaction: string }> {
+      try {
+        const stored = await readStoredSsoSettings(store);
+        const provider = await findProvider(providerId, stored);
+        return await begin(provider, '/profile', current);
+      } catch (error) {
+        const reason = refused(providerId, error);
+        throw validationFailed('Linking cannot start with that provider', { reason });
+      }
+    },
+
+    async callback(
+      providerId,
+      query,
+      transactionCookie,
+      current,
+      context,
+    ): Promise<SsoCallbackResult> {
+      let linking = false;
       try {
         const stored = await readStoredSsoSettings(store);
         const provider = await findProvider(providerId, stored);
@@ -701,6 +858,7 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         ) {
           throw new OidcError('invalid_state', 'No live sign-in attempt for this browser');
         }
+        linking = transaction.link_user_id !== null;
         if (typeof query.state !== 'string' || !tokensEqual(query.state, transaction.state)) {
           throw new OidcError('invalid_state', 'The state does not match this sign-in attempt');
         }
@@ -730,24 +888,21 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
 
         const email = normalizeEmailClaim(claims.email);
         const emailVerified = emailVerifiedClaim(claims.email_verified);
-        if (stored.allowed_email_domains.length > 0) {
-          if (email === null) {
-            throw new OidcError('email_required', 'An allowed-domain check needs an email');
-          }
-          if (!emailDomainAllowed(email, stored.allowed_email_domains)) {
-            throw new OidcError('email_domain_not_allowed', 'The email domain is not allowed');
-          }
-        }
+        // The deployment-wide list applies to every sign-in, returning ones
+        // included; the provider's own list to linking and provisioning.
+        checkDomains(email, emailVerified, stored.allowed_email_domains);
         const mapping = mapClaims(provider.settings, claims);
-        const plan = await planSignIn(
-          provider,
-          claims,
-          email,
-          emailVerified,
-          mapping,
-          stored,
-          context,
-        );
+        const plan = linking
+          ? await planExplicitLink(
+              provider,
+              claims,
+              email,
+              emailVerified,
+              mapping,
+              transaction,
+              current,
+            )
+          : await planSignIn(provider, claims, email, emailVerified, mapping, stored, context);
         const issued = await signIn(
           plan,
           provider.settings,
@@ -760,7 +915,7 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         return { ok: true, location: `${config.publicUrl}${transaction.return_to}`, issued };
       } catch (error) {
         const reason = refused(providerId, error);
-        return { ok: false, location: loginErrorLocation(reason), reason };
+        return { ok: false, location: errorLocation(reason, linking), reason };
       }
     },
 
@@ -777,15 +932,7 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         changed.push('policy');
       }
       if (patch.allowed_email_domains !== undefined) {
-        if (patch.allowed_email_domains.length > MAX_ALLOWED_EMAIL_DOMAINS) {
-          throw validationFailed(`At most ${MAX_ALLOWED_EMAIL_DOMAINS} email domains are allowed`);
-        }
-        const domains: string[] = [];
-        for (const entry of patch.allowed_email_domains) {
-          const domain = normalizeEmailDomain(entry);
-          if (domain === null) throw validationFailed(`'${entry}' is not a domain name`);
-          if (!domains.includes(domain)) domains.push(domain);
-        }
+        const domains = normalizeDomains(patch.allowed_email_domains, 'Allowed email domains');
         if (!isDeepStrictEqual(domains, stored.allowed_email_domains)) {
           next.allowed_email_domains = domains;
           changed.push('allowed_email_domains');
@@ -808,8 +955,10 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         if (envIds.size + patch.providers.length > MAX_SSO_PROVIDERS) {
           throw validationFailed(`At most ${MAX_SSO_PROVIDERS} providers can be configured`);
         }
+        const previous = new Map(stored.providers.map((provider) => [provider.id, provider]));
         const seen = new Set<string>();
-        for (const provider of patch.providers) {
+        const providers: SsoProviderSettings[] = [];
+        for (const { client_secret: secret, ...provider } of patch.providers) {
           if (seen.has(provider.id)) {
             throw validationFailed(`Provider '${provider.id}' is listed more than once`);
           }
@@ -823,36 +972,61 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
           if (problem !== null) {
             throw validationFailed(`Provider '${provider.id}' issuer ${problem}`);
           }
+          // Links are keyed on the issuer: moving a provider with links to
+          // another issuer would strand them, or worse, keep an id pointing at
+          // accounts the new issuer's subjects must not reach.
+          const before = previous.get(provider.id);
+          if (
+            before !== undefined &&
+            before.issuer !== provider.issuer &&
+            (await store.userIdentities.countByProvider(provider.id)) > 0
+          ) {
+            throw validationFailed(
+              `Provider '${provider.id}' has linked accounts; add another provider for that issuer`,
+            );
+          }
           for (const mapping of provider.org_mappings) {
             if (!(await store.organizations.findById(mapping.org_id))) {
               throw notFound('Organization', mapping.org_id);
             }
           }
+          providers.push({
+            ...provider,
+            allowed_email_domains: normalizeDomains(
+              provider.allowed_email_domains,
+              `Provider '${provider.id}' allowed email domains`,
+            ),
+          });
+          if (secret !== undefined) secretWrites.set(provider.id, secret);
         }
-        const before = new Set(stored.providers.map((provider) => provider.id));
-        for (const id of seen) if (!before.has(id)) added.push(id);
-        for (const id of before) {
+        for (const id of seen) if (!previous.has(id)) added.push(id);
+        for (const id of previous.keys()) {
           if (!seen.has(id)) {
             removed.push(id);
             secretWrites.set(id, null);
           }
         }
-        for (const provider of patch.providers) {
-          if (provider.client_secret !== undefined) {
-            secretWrites.set(provider.id, provider.client_secret);
-          }
-        }
-        next.providers = patch.providers.map(
-          ({ client_secret: _secret, ...settings }): SsoProviderSettings => settings,
-        );
+        next.providers = providers;
         if (!isDeepStrictEqual(next.providers, stored.providers)) changed.push('providers');
       }
 
-      // A policy that refuses passwords needs a way in that is not a password.
-      if (next.policy === 'sso_only') {
-        const usable = providersInForce(config, next).some(({ settings }) => settings.enabled);
-        if (!usable) {
+      // A policy that refuses passwords needs a way in that is not a password
+      // — for everyone, and for the super admin saving it in particular.
+      if (next.policy === 'sso_only' && (patch.policy !== undefined || patch.providers)) {
+        const enabled = new Map(
+          providersInForce(config, next)
+            .filter(({ settings }) => settings.enabled)
+            .map(({ settings }): [string, string] => [settings.id, settings.issuer]),
+        );
+        if (enabled.size === 0) {
           throw validationFailed('The sso_only policy needs at least one enabled provider');
+        }
+        const own = await store.userIdentities.listByUser(actor.id);
+        if (!own.some((link) => enabled.get(link.provider_id) === link.issuer)) {
+          throw validationFailed(
+            'Link your own account to an enabled provider (Profile → Linked sign-in) ' +
+              'before switching to sso_only',
+          );
         }
       }
 
@@ -869,6 +1043,16 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
           if (blob === null) await tx.settings.delete(ssoClientSecretKey(id));
           else await tx.settings.set(ssoClientSecretKey(id), blob, true);
         }
+        // A removed provider's links go with it, so a provider added later
+        // under the same id starts with none. A stored provider shadowed by an
+        // environment one leaves the links alone: they are the environment
+        // provider's, which stays in force.
+        const envIds = new Set(config.sso.providers.map((provider) => provider.settings.id));
+        const linksRemoved: Record<string, number> = {};
+        for (const id of removed) {
+          if (envIds.has(id)) continue;
+          linksRemoved[id] = await tx.userIdentities.deleteByProvider(id);
+        }
         // Key names and provider ids only: never a secret, and never the
         // mappings themselves, which the settings page shows to admins anyway.
         await audit.forStore(tx).record(
@@ -880,6 +1064,7 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
             changed_keys: changed,
             providers_added: added,
             providers_removed: removed,
+            links_removed: linksRemoved,
             client_secrets_changed: [...secretWrites.keys()],
           },
           ip,

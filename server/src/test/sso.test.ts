@@ -85,7 +85,13 @@ async function finish(
   h: TestApp,
   providerId: string,
   attempt: Attempt,
-  overrides: { state?: string; code?: string; cookie?: string | null; error?: string } = {},
+  overrides: {
+    state?: string;
+    code?: string;
+    cookie?: string | null;
+    error?: string;
+    session?: TestSession;
+  } = {},
 ): Promise<LightMyRequestResponse> {
   const query = new URLSearchParams({
     code: overrides.code ?? attempt.authorization.code,
@@ -93,11 +99,51 @@ async function finish(
     ...(overrides.error === undefined ? {} : { error: overrides.error }),
   });
   const cookie = overrides.cookie === undefined ? attempt.transaction : overrides.cookie;
+  const cookies: Record<string, string> = {
+    ...(cookie === null ? {} : { [SSO_TRANSACTION_COOKIE]: cookie }),
+    ...(overrides.session
+      ? {
+          [SESSION_COOKIE]: overrides.session.sessionToken,
+          [CSRF_COOKIE]: overrides.session.csrfToken,
+        }
+      : {}),
+  };
   return h.app.inject({
     method: 'GET',
     url: `/api/auth/sso/${providerId}/callback?${query.toString()}`,
-    ...(cookie === null ? {} : { cookies: { [SSO_TRANSACTION_COOKIE]: cookie } }),
+    cookies,
   });
+}
+
+/** Start an explicit link from a signed-in session, and act as the user at the provider. */
+async function beginLink(
+  h: TestApp,
+  idp: MockOidcProvider,
+  providerId: string,
+  session: TestSession,
+  claims: Record<string, unknown>,
+): Promise<Attempt> {
+  const start = await h.authed(session, {
+    method: 'POST',
+    url: `/api/auth/sso/${providerId}/link`,
+  });
+  assert.equal(start.statusCode, 200, start.body);
+  const transaction = cookieValue(start, SSO_TRANSACTION_COOKIE);
+  assert.ok(transaction, 'the link attempt is sealed into a cookie');
+  const authorization = idp.authorize(start.json<{ location: string }>().location, claims);
+  return { start, authorization, transaction };
+}
+
+/** Link `session`'s account to the provider end to end. */
+async function link(
+  h: TestApp,
+  idp: MockOidcProvider,
+  providerId: string,
+  session: TestSession,
+  claims: Record<string, unknown>,
+): Promise<LightMyRequestResponse> {
+  const attempt = await beginLink(h, idp, providerId, session, claims);
+  return finish(h, providerId, attempt, { session });
 }
 
 /** The `sso_error` a refused callback redirected with, or `null` on success. */
@@ -152,6 +198,7 @@ function providersEnv(corp: MockOidcProvider, partner: MockOidcProvider): string
       issuer: partner.issuer,
       client_id: 'nexus-partner',
       default_role: null,
+      disable_local_password_for_linked: true,
       role_mappings: [{ claim: 'groups', value: 'partners', role: 'client' }],
     },
   ]);
@@ -342,6 +389,20 @@ describe('single sign-on', () => {
     assert.equal(await h.store.users.findByEmail(who.email), null);
   });
 
+  it('refuses an attempt whose sealed cookie has expired', async () => {
+    const who = person('expired');
+    const attempt = await begin(h, corp, 'corp', { ...who, email_verified: true });
+    const sealed = h.app.nexus.crypto.openSsoTransaction<Record<string, unknown>>(
+      attempt.transaction,
+    );
+    const expired = h.app.nexus.crypto.sealSsoTransaction({
+      ...sealed,
+      expires_at: Date.now() - 1_000,
+    });
+    assert.equal(ssoError(await finish(h, 'corp', attempt, { cookie: expired })), 'invalid_state');
+    assert.equal(await h.store.users.findByEmail(who.email), null);
+  });
+
   it('binds the code to its own PKCE verifier', async () => {
     // Deliver attempt A's code and state with attempt B's sealed cookie
     // re-sealed around A's state: the only thing left that does not match is
@@ -418,20 +479,81 @@ describe('single sign-on', () => {
 
   /* ── Linking ────────────────────────────────────────────────────────── */
 
-  /** A local account as a portal that requires email verification holds one. */
-  async function localAccount(email: string, verified: boolean): Promise<UserRecord> {
-    return h.store.users.create({
+  /** A local account, with or without a recorded proof of its address. */
+  async function localAccount(
+    email: string,
+    proven: boolean,
+    role: UserRecord['role'] = 'client',
+  ): Promise<UserRecord> {
+    const account = await h.store.users.create({
       email,
       password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
       display_name: 'Local Account',
-      role: 'client',
+      role,
       status: 'active',
-      email_verified: verified,
+      email_verified: true,
     });
+    if (proven) {
+      const at = new Date().toISOString();
+      await h.store.emailProofs.upsert(account.id, email, 'verification_link', at);
+    }
+    return account;
   }
 
-  /** Run `body` with the registration policy requiring email verification. */
-  async function withVerificationRequired(body: () => Promise<void>): Promise<void> {
+  it('links a local account only when both sides proved the address', async () => {
+    const local = await localAccount('linkme@corp.example.test', true);
+    const response = await signIn(h, corp, 'corp', {
+      sub: 'link-subject',
+      email: 'LinkMe@corp.example.test',
+      email_verified: true,
+    });
+    const session = await sessionOf(h, response);
+    assert.equal(session.user.id, local.id);
+    const row = (await h.auditRows(AuditAction.AUTH_SSO_LINK)).find(
+      (entry) => entry.target_id === local.id,
+    );
+    assert.equal(row?.details.provider_id, 'corp');
+    assert.equal(row?.details.subject, 'link-subject');
+    assert.equal(row?.details.explicit, false);
+    const [identity] = await h.store.userIdentities.listByUser(local.id);
+    assert.equal(identity?.issuer, corp.issuer);
+    assert.equal(identity?.provisioned, false);
+  });
+
+  it('never links, or provisions, on an address the provider did not verify', async () => {
+    const local = await localAccount('takeover@corp.example.test', true);
+    for (const emailVerified of [false, 'true', undefined]) {
+      const response = await signIn(h, corp, 'corp', {
+        sub: `attacker-${String(emailVerified)}`,
+        email: 'takeover@corp.example.test',
+        ...(emailVerified === undefined ? {} : { email_verified: emailVerified }),
+      });
+      assert.equal(ssoError(response), 'email_not_verified', String(emailVerified));
+    }
+    assert.deepEqual(await h.store.userIdentities.listByUser(local.id), []);
+    const unverified = person('unverified');
+    const response = await signIn(h, corp, 'corp', { ...unverified, email_verified: false });
+    assert.equal(ssoError(response), 'email_not_verified');
+    assert.equal(await h.store.users.findByEmail(unverified.email), null);
+  });
+
+  it('never links to an account the portal holds no proof for', async () => {
+    const local = await localAccount('unproven@corp.example.test', false);
+    const response = await signIn(h, corp, 'corp', {
+      sub: 'unproven-subject',
+      email: 'unproven@corp.example.test',
+      email_verified: true,
+    });
+    assert.equal(ssoError(response), 'account_exists');
+    assert.deepEqual(await h.store.userIdentities.listByUser(local.id), []);
+  });
+
+  it('never links to an account registered with verification off, once it is on', async () => {
+    // Registered with verification off: marked verified without any proof.
+    const squatted = await h.registerUser({ email: 'squatted@corp.example.test' });
+    assert.equal(squatted.user.email_verified, true);
+    // An administrator turns verification on afterwards; the old row still
+    // proves nothing, so the victim's first single sign-on must not land in it.
     const previous = await h.store.settings.get(REGISTRATION_SETTINGS_KEY);
     await h.store.settings.set(REGISTRATION_SETTINGS_KEY, {
       open_registration: true,
@@ -439,75 +561,94 @@ describe('single sign-on', () => {
       allowed_roles: ['client', 'provider'],
     });
     try {
-      await body();
+      const response = await signIn(h, corp, 'corp', {
+        sub: 'victim-subject',
+        email: 'squatted@corp.example.test',
+        email_verified: true,
+      });
+      assert.equal(ssoError(response), 'account_exists');
+      assert.deepEqual(await h.store.userIdentities.listByUser(squatted.user.id), []);
     } finally {
       if (previous) await h.store.settings.set(REGISTRATION_SETTINGS_KEY, previous.value);
       else await h.store.settings.delete(REGISTRATION_SETTINGS_KEY);
     }
-  }
-
-  it('links a local account only when both sides verified the address', async () => {
-    await withVerificationRequired(async () => {
-      const local = await localAccount('linkme@corp.example.test', true);
-      const response = await signIn(h, corp, 'corp', {
-        sub: 'link-subject',
-        email: 'LinkMe@corp.example.test',
-        email_verified: true,
-      });
-      const session = await sessionOf(h, response);
-      assert.equal(session.user.id, local.id);
-      const link = (await h.auditRows(AuditAction.AUTH_SSO_LINK)).find(
-        (row) => row.target_id === local.id,
-      );
-      assert.equal(link?.details.provider_id, 'corp');
-      assert.equal(link?.details.subject, 'link-subject');
-    });
   });
 
-  it('never links, or provisions, on an address the provider did not verify', async () => {
-    await withVerificationRequired(async () => {
-      const local = await localAccount('takeover@corp.example.test', true);
-      for (const emailVerified of [false, 'true', undefined]) {
-        const response = await signIn(h, corp, 'corp', {
-          sub: `attacker-${String(emailVerified)}`,
-          email: 'takeover@corp.example.test',
-          ...(emailVerified === undefined ? {} : { email_verified: emailVerified }),
-        });
-        assert.equal(ssoError(response), 'email_not_verified', String(emailVerified));
-      }
-      assert.deepEqual(await h.store.userIdentities.listByUser(local.id), []);
-      const unverified = person('unverified');
-      const response = await signIn(h, corp, 'corp', { ...unverified, email_verified: false });
-      assert.equal(ssoError(response), 'email_not_verified');
-      assert.equal(await h.store.users.findByEmail(unverified.email), null);
+  it('records a redeemed verification link or reset as proof', async () => {
+    const local = await localAccount('proof-by-reset@corp.example.test', false);
+    const token = 'reset-token-for-proof-0123456789';
+    await h.store.verificationTokens.create({
+      user_id: local.id,
+      token_hash: h.app.nexus.crypto.hashToken(token),
+      purpose: 'password_reset',
+      expires_at: new Date(Date.now() + 600_000).toISOString(),
     });
-  });
-
-  it('never links to a local account that has not verified its own address', async () => {
-    await withVerificationRequired(async () => {
-      const local = await localAccount('unconfirmed@corp.example.test', false);
-      const response = await signIn(h, corp, 'corp', {
-        sub: 'unconfirmed-subject',
-        email: 'unconfirmed@corp.example.test',
-        email_verified: true,
-      });
-      assert.equal(ssoError(response), 'account_exists');
-      assert.deepEqual(await h.store.userIdentities.listByUser(local.id), []);
+    const reset = await h.app.inject({
+      method: 'POST',
+      url: '/api/auth/reset-password',
+      payload: { token, new_password: TEST_PASSWORD },
     });
-  });
-
-  it('never links to an account registered where verification was not required', async () => {
-    // With verification off a registration is marked verified without proof,
-    // so a pre-registered victim address must not capture the victim's SSO.
-    const squatted = await h.registerUser({ email: 'squatted@corp.example.test' });
-    assert.equal(squatted.user.email_verified, true);
+    assert.equal(reset.statusCode, 200, reset.body);
+    const proof = await h.store.emailProofs.findByUser(local.id);
+    assert.equal(proof?.method, 'password_reset');
     const response = await signIn(h, corp, 'corp', {
-      sub: 'victim-subject',
-      email: 'squatted@corp.example.test',
+      sub: 'proof-by-reset-subject',
+      email: 'proof-by-reset@corp.example.test',
       email_verified: true,
     });
-    assert.equal(ssoError(response), 'account_exists');
-    assert.deepEqual(await h.store.userIdentities.listByUser(squatted.user.id), []);
+    assert.equal((await sessionOf(h, response)).user.id, local.id);
+  });
+
+  it('never links an administrator automatically, whatever the provider asserts', async () => {
+    for (const role of ['admin', 'super_admin'] as const) {
+      const privileged = await localAccount(`${role}-target@corp.example.test`, true, role);
+      const response = await signIn(h, partner, 'partner', {
+        sub: `${role}-impostor`,
+        email: `${role}-target@corp.example.test`,
+        email_verified: true,
+        groups: ['partners'],
+      });
+      assert.equal(ssoError(response), 'privileged_account', role);
+      assert.deepEqual(await h.store.userIdentities.listByUser(privileged.id), []);
+    }
+  });
+
+  it('links explicitly from a signed-in session, and only back to that session', async () => {
+    const holder = await h.registerUser({ email: 'explicit@corp.example.test' });
+    // The identity's address differs from the account's: an explicit link
+    // attaches it anyway, because the account holder started it.
+    const claims = { sub: 'explicit-subject', email: 'someone-else@corp.example.test' };
+
+    // Back to no session, or another one: nothing is attached.
+    const stray = await beginLink(h, corp, 'corp', holder, claims);
+    assert.equal(ssoError(await finish(h, 'corp', stray)), 'link_session_mismatch');
+    const other = await h.registerUser({ email: 'explicit-other@corp.example.test' });
+    const crossed = await beginLink(h, corp, 'corp', holder, claims);
+    const crossedResponse = await finish(h, 'corp', crossed, { session: other });
+    assert.equal(ssoError(crossedResponse), 'link_session_mismatch');
+    assert.match(String(crossedResponse.headers.location), /\/profile\?sso_error=/);
+    assert.deepEqual(await h.store.userIdentities.listByUser(holder.user.id), []);
+
+    const linked = await link(h, corp, 'corp', holder, claims);
+    assert.equal(ssoError(linked), null);
+    assert.equal(linked.headers.location, `${h.config.publicUrl}/profile`);
+    const [identity] = await h.store.userIdentities.listByUser(holder.user.id);
+    assert.equal(identity?.subject, 'explicit-subject');
+    const row = (await h.auditRows(AuditAction.AUTH_SSO_LINK)).find(
+      (entry) => entry.target_id === holder.user.id,
+    );
+    assert.equal(row?.details.explicit, true);
+    // An address the provider did not verify for this account is no proof of it.
+    assert.equal(await h.store.emailProofs.findByUser(holder.user.id), null);
+
+    // The same subject cannot then be attached to another account.
+    const again = await link(h, corp, 'corp', other, claims);
+    assert.equal(ssoError(again), 'already_linked');
+
+    // The account's own view lists the link.
+    const mine = await h.authed(holder, { method: 'GET', url: '/api/users/me/identities' });
+    assert.equal(mine.statusCode, 200, mine.body);
+    assert.equal(mine.json<{ items: unknown[] }>().items.length, 1);
   });
 
   it('holds a second provider to the same rule, and one identity per provider', async () => {
@@ -524,7 +665,8 @@ describe('single sign-on', () => {
       groups: ['partners'],
     });
     assert.equal(ssoError(unverified), 'email_not_verified');
-    // It does now: the account gains its second identity.
+    // It does now: the provider-verified address is proof, and the account
+    // gains its second identity.
     const verified = await signIn(h, partner, 'partner', {
       sub: `${who.sub}-partner`,
       email: who.email,
@@ -543,6 +685,76 @@ describe('single sign-on', () => {
       .map((identity) => identity.provider_id)
       .sort();
     assert.deepEqual(providers, ['corp', 'partner']);
+  });
+
+  /* ── Passwords after single sign-on ─────────────────────────────────── */
+
+  it('gives a provisioned account no password to sign in with or to reset', async () => {
+    const who = person('nopassword');
+    await sessionOf(h, await signIn(h, corp, 'corp', { ...who, email_verified: true }));
+    const forgot = await h.app.inject({
+      method: 'POST',
+      url: '/api/auth/forgot-password',
+      payload: { email: who.email },
+    });
+    assert.equal(forgot.statusCode, 200, forgot.body);
+    assert.deepEqual(
+      (await h.outbox()).filter((message) => message.to_email === who.email),
+      [],
+      'no reset link is issued',
+    );
+    const account = await h.store.users.findByEmail(who.email);
+    assert.ok(account);
+    const token = 'reset-token-for-provisioned-0123';
+    await h.store.verificationTokens.create({
+      user_id: account.id,
+      token_hash: h.app.nexus.crypto.hashToken(token),
+      purpose: 'password_reset',
+      expires_at: new Date(Date.now() + 600_000).toISOString(),
+    });
+    const reset = await h.app.inject({
+      method: 'POST',
+      url: '/api/auth/reset-password',
+      payload: { token, new_password: TEST_PASSWORD },
+    });
+    assert.equal(reset.statusCode, 400, reset.body);
+  });
+
+  it('keeps a linked account’s password unless its provider says otherwise', async () => {
+    const local = await h.registerUser({ email: 'keeps-password@corp.example.test' });
+    await h.store.emailProofs.upsert(
+      local.user.id,
+      local.user.email,
+      'verification_link',
+      new Date().toISOString(),
+    );
+    // corp leaves linked accounts their password.
+    await sessionOf(
+      h,
+      await signIn(h, corp, 'corp', {
+        sub: 'keeps-password-subject',
+        email: local.user.email,
+        email_verified: true,
+      }),
+    );
+    assert.equal((await h.loginUser(local.user.email)).user.id, local.user.id);
+    // partner sets disable_local_password_for_linked: once linked there, the
+    // provider's offboarding holds for the account.
+    await sessionOf(
+      h,
+      await signIn(h, partner, 'partner', {
+        sub: 'keeps-password-partner',
+        email: local.user.email,
+        email_verified: true,
+        groups: ['partners'],
+      }),
+    );
+    const login = await h.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { email: local.user.email, password: TEST_PASSWORD },
+    });
+    assert.equal(login.statusCode, 401, login.body);
   });
 
   /* ── Mapping ────────────────────────────────────────────────────────── */
@@ -568,14 +780,15 @@ describe('single sign-on', () => {
   });
 
   it('never grants, removes or changes super_admin from claims', async () => {
-    await h.store.users.update(founder.user.id, { email_verified: true });
-    const response = await signIn(h, corp, 'corp', {
+    // A super admin links explicitly, from their own session.
+    const linked = await link(h, corp, 'corp', founder, {
       sub: 'founder-subject',
       email: founder.user.email,
       email_verified: true,
       groups: [],
     });
-    const session = await sessionOf(h, response);
+    assert.equal(ssoError(linked), null);
+    const session = await sessionOf(h, linked);
     assert.equal(session.user.id, founder.user.id);
     assert.equal(session.user.role, 'super_admin', 'a claim mapping to client does not demote');
     const again = await sessionOf(
@@ -598,6 +811,20 @@ describe('single sign-on', () => {
       all.items.map((user) => user.id),
       [founder.user.id],
     );
+  });
+
+  it('never locks a super admin out for claims that map to no role', async () => {
+    const response = await signIn(h, partner, 'partner', { sub: 'founder-partner', groups: [] });
+    // Not linked at partner: refused like anyone unknown…
+    assert.notEqual(ssoError(response), null);
+    // …but once linked, a super admin with no mapped role still signs in.
+    const linked = await link(h, partner, 'partner', founder, {
+      sub: 'founder-partner',
+      groups: [],
+    });
+    assert.equal(ssoError(linked), null);
+    const returning = await signIn(h, partner, 'partner', { sub: 'founder-partner', groups: [] });
+    assert.equal((await sessionOf(h, returning)).user.role, 'super_admin');
   });
 
   it('denies claims that map to no role, and creates nothing', async () => {
@@ -646,6 +873,8 @@ describe('single sign-on', () => {
       jit_provisioning: true,
       link_existing_accounts: true,
       require_verified_email: true,
+      allowed_email_domains: [],
+      disable_local_password_for_linked: false,
       sync_roles: true,
       default_role: 'client',
       role_mappings: [],
@@ -710,6 +939,13 @@ describe('single sign-on', () => {
       const outside = person('domain');
       const refused = await signIn(h, corp, 'corp', { ...outside, email_verified: true });
       assert.equal(ssoError(refused), 'email_domain_not_allowed');
+      // An address the provider did not verify proves no domain.
+      const unverified = await signIn(h, corp, 'corp', {
+        sub: 'domain-unverified',
+        email: 'claims@allowed.example.test',
+        email_verified: false,
+      });
+      assert.equal(ssoError(unverified), 'email_not_verified');
       const inside = await signIn(h, corp, 'corp', {
         sub: 'domain-inside',
         email: 'someone@allowed.example.test',
@@ -723,6 +959,106 @@ describe('single sign-on', () => {
         payload: { allowed_email_domains: [] },
       });
     }
+  });
+
+  it('keeps links to their issuer: no issuer change with links, removal deletes them', async () => {
+    const provider = {
+      id: 'lifecycle',
+      display_name: 'Lifecycle',
+      issuer: corp.issuer,
+      client_id: 'nexus-corp',
+      client_secret: CORP_SECRET,
+      scopes: ['openid', 'email'],
+      enabled: true,
+      jit_provisioning: true,
+      link_existing_accounts: true,
+      require_verified_email: true,
+      allowed_email_domains: ['corp.example.test'],
+      disable_local_password_for_linked: false,
+      sync_roles: true,
+      default_role: 'client',
+      role_mappings: [],
+      org_mappings: [],
+    };
+    const put = (providers: unknown[]): Promise<LightMyRequestResponse> =>
+      h.authed(founder, { method: 'PUT', url: '/api/admin/sso', payload: { providers } });
+    assert.equal((await put([provider])).statusCode, 200);
+
+    // The provider's own domain list applies when provisioning.
+    const outsider = await signIn(h, corp, 'lifecycle', {
+      sub: 'lifecycle-outsider',
+      email: 'someone@elsewhere.example.test',
+      email_verified: true,
+    });
+    assert.equal(ssoError(outsider), 'email_domain_not_allowed');
+    const who = person('lifecycle');
+    const account = await sessionOf(
+      h,
+      await signIn(h, corp, 'lifecycle', { ...who, email_verified: true }),
+    );
+    assert.equal(await h.store.userIdentities.countByProvider('lifecycle'), 1);
+
+    const moved = await put([{ ...provider, issuer: 'https://another.example.com' }]);
+    assert.equal(moved.statusCode, 400, moved.body);
+
+    // Removing the provider removes its links, so an id reused later starts clean.
+    assert.equal((await put([])).statusCode, 200);
+    assert.equal(await h.store.userIdentities.countByProvider('lifecycle'), 0);
+    const removal = (await h.auditRows(AuditAction.ADMIN_SETTINGS_UPDATE)).find(
+      (row) => row.target_id === SSO_SETTINGS_KEY,
+    );
+    assert.deepEqual(removal?.details.links_removed, { lifecycle: 1 });
+    assert.equal((await put([provider])).statusCode, 200);
+    // The same subject, now asserting another address, is a stranger: the
+    // old link did not survive to open the old account.
+    const reused = await signIn(h, corp, 'lifecycle', {
+      sub: who.sub,
+      email: person('reused').email,
+      email_verified: true,
+    });
+    assert.notEqual((await sessionOf(h, reused)).user.id, account.user.id);
+    assert.equal((await put([])).statusCode, 200);
+  });
+
+  it('reports a stored provider that an environment provider shadows', async () => {
+    const current = (await h.store.settings.get(SSO_SETTINGS_KEY))?.value ?? {};
+    const shadow = {
+      id: 'corp',
+      display_name: 'Stale corp',
+      issuer: 'https://stale.example.com',
+      client_id: 'stale',
+      scopes: ['openid'],
+      enabled: true,
+      jit_provisioning: true,
+      link_existing_accounts: true,
+      require_verified_email: true,
+      allowed_email_domains: [],
+      disable_local_password_for_linked: false,
+      sync_roles: true,
+      default_role: 'client',
+      role_mappings: [],
+      org_mappings: [],
+    };
+    await h.store.settings.set(SSO_SETTINGS_KEY, { ...(current as object), providers: [shadow] });
+    const view = await h.authed(founder, { method: 'GET', url: '/api/admin/sso' });
+    const body = view.json<SsoAdminSettingsResponse>();
+    assert.deepEqual(body.shadowed_provider_ids, ['corp']);
+    const corpView = body.providers.filter((provider) => provider.id === 'corp');
+    assert.equal(corpView.length, 1);
+    assert.equal(corpView[0]?.source, 'environment');
+
+    // Saving removes the shadowed provider, and leaves the environment
+    // provider's links — which share its id — alone.
+    const links = await h.store.userIdentities.countByProvider('corp');
+    assert.ok(links > 0);
+    const saved = await h.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/sso',
+      payload: { providers: [] },
+    });
+    assert.equal(saved.statusCode, 200, saved.body);
+    assert.deepEqual(saved.json<SsoAdminSettingsResponse>().shadowed_provider_ids, []);
+    assert.equal(await h.store.userIdentities.countByProvider('corp'), links);
   });
 
   it('lets an administrator list and remove an account’s links', async () => {
@@ -814,6 +1150,8 @@ describe('single sign-on organization mapping and deprovisioning', () => {
             jit_provisioning: true,
             link_existing_accounts: true,
             require_verified_email: true,
+            allowed_email_domains: [],
+            disable_local_password_for_linked: false,
             sync_roles: true,
             default_role: 'client',
             role_mappings: [],
@@ -1027,6 +1365,31 @@ describe('single sign-on login policies', () => {
         payload: { policy: 'sso_only' },
       });
       assert.equal(response.statusCode, 400, response.body);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('refuses sso_only until the saving super admin has a link of their own', async () => {
+    const h = await app();
+    try {
+      const founder = await h.registerUser({ email: 'own-link@corp.example.test' });
+      const put = (): Promise<LightMyRequestResponse> =>
+        h.authed(founder, {
+          method: 'PUT',
+          url: '/api/admin/sso',
+          payload: { policy: 'sso_only' },
+        });
+      const refused = await put();
+      assert.equal(refused.statusCode, 400, refused.body);
+      assert.match(refused.body, /Link your own account/);
+      const linked = await link(h, corp, 'corp', founder, {
+        sub: 'own-link-subject',
+        email: founder.user.email,
+        email_verified: true,
+      });
+      assert.equal(ssoError(linked), null);
+      assert.equal((await put()).statusCode, 200);
     } finally {
       await h.close();
     }

@@ -1,7 +1,10 @@
+import { useSearch } from '@tanstack/react-router';
 import { useState, type FormEvent, type ReactElement } from 'react';
-import { MIN_PASSWORD_LENGTH } from '@ferrum-nexus/shared';
+import { isSsoErrorReason, MIN_PASSWORD_LENGTH } from '@ferrum-nexus/shared';
 import { formatDateTime } from '../lib/format';
-import { useUpdateProfile } from '../hooks/useUsers';
+import { SSO_ERROR_MESSAGES } from '../lib/sso-errors';
+import { useSsoConfig } from '../hooks/useBranding';
+import { useMyIdentities, useStartSsoLink, useUpdateProfile } from '../hooks/useUsers';
 import { useAuth } from '../stores/auth';
 import { useToast } from '../stores/toast';
 import { Button } from '../components/ui/Button';
@@ -18,6 +21,80 @@ function initials(name: string): string {
   if (parts.length === 0) return '?';
   if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
   return `${parts[0]![0] ?? ''}${parts[parts.length - 1]![0] ?? ''}`.toUpperCase();
+}
+
+/**
+ * The account's single sign-on links, and a button per provider it is not
+ * linked at yet. Linking here is the only way an administrator's account is
+ * ever linked: sign-in never links one automatically.
+ */
+function LinkedSignIn(): ReactElement | null {
+  const { data: sso } = useSsoConfig();
+  const { data: identities } = useMyIdentities();
+  const startLink = useStartSsoLink();
+  // `?sso_error=` is how a refused link comes back to this page.
+  const search: { sso_error?: unknown } = useSearch({ strict: false });
+  const refusal = isSsoErrorReason(search.sso_error) ? SSO_ERROR_MESSAGES[search.sso_error] : null;
+
+  const providers = sso?.providers ?? [];
+  const links = identities?.items ?? [];
+  if (providers.length === 0 && links.length === 0 && refusal === null) return null;
+  const names = new Map(providers.map((provider) => [provider.id, provider.display_name]));
+  const linked = new Set(links.map((identity) => identity.provider_id));
+  const unlinked = providers.filter((provider) => !linked.has(provider.id));
+
+  return (
+    <Card className="mt-6">
+      <CardHeader
+        icon="link"
+        title="Linked sign-in"
+        description="Identity providers you can use to sign in to this account."
+      />
+      <CardBody>
+        <div className="flex flex-col gap-4">
+          {refusal ? <FormNotice>{refusal}</FormNotice> : null}
+          {links.length === 0 ? (
+            <p className="text-sm text-fg-muted">No identity provider is linked yet.</p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {links.map((identity) => (
+                <li
+                  key={identity.id}
+                  className="flex flex-wrap items-center justify-between gap-2 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-fg">
+                      {names.get(identity.provider_id) ?? identity.provider_id}
+                    </p>
+                    <p className="truncate text-xs text-fg-muted">
+                      {identity.email ?? identity.subject}
+                    </p>
+                  </div>
+                  <span className="text-xs text-fg-subtle tabular-nums">
+                    Last used {formatDateTime(identity.last_login_at)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {unlinked.length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {unlinked.map((provider) => (
+                <Button
+                  key={provider.id}
+                  type="button"
+                  loading={startLink.isPending && startLink.variables === provider.id}
+                  onClick={() => startLink.mutate(provider.id)}
+                >
+                  Link {provider.display_name}
+                </Button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </CardBody>
+    </Card>
+  );
 }
 
 /** Self-service profile and password management. */
@@ -211,6 +288,8 @@ export function ProfilePage(): ReactElement {
           </CardBody>
         </Card>
       </div>
+
+      <LinkedSignIn />
     </>
   );
 }

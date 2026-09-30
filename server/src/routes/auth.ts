@@ -24,6 +24,7 @@ import {
   type ResendVerificationResponse,
   type ResetPasswordResponse,
   type SsoPublicConfigResponse,
+  type StartSsoLinkResponse,
   type VerifyEmailResponse,
 } from '@ferrum-nexus/shared';
 
@@ -205,16 +206,33 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, opt
     clearSsoTransactionCookie(reply, config);
     const params = ssoProviderParams.safeParse(request.params);
     const query = ssoCallbackQuery.safeParse(request.query);
+    const current =
+      request.session && request.currentUser
+        ? { userId: request.currentUser.id, sessionId: request.session.id }
+        : null;
     const result = await sso.callback(
       params.success ? params.data.provider : '',
       // A malformed query is a callback nobody can finish, and reads as one
       // with no state at all.
       query.success ? query.data : {},
       transaction,
+      current,
       requestContext(request),
     );
     if (result.ok) setSessionCookies(reply, config, result.issued);
     return reply.redirect(result.location, 302);
+  });
+
+  // Linking the signed-in account: a POST under the session and its CSRF
+  // token, so a cross-site page cannot start one. The attempt is sealed with
+  // this account and session, and the callback attaches the identity only when
+  // it returns to them. The SPA then navigates the browser to `location`.
+  app.post('/sso/:provider/link', async (request, reply): Promise<StartSsoLinkResponse> => {
+    const { user, session } = requireAuth(request);
+    const { provider } = parseOrThrow(ssoProviderParams, request.params);
+    const started = await sso.startLink(provider, { userId: user.id, sessionId: session.id });
+    setSsoTransactionCookie(reply, config, started.transaction);
+    return { location: started.location };
   });
 };
 

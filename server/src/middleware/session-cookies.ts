@@ -78,6 +78,10 @@ export function forbidResponseCaching(reply: FastifyReply): void {
  * - Any other `/api` response without its own directive gets
  *   {@link API_DEFAULT_CACHE_CONTROL}.
  *
+ * This hook sees headers set through Fastify's reply API. Raw response headers
+ * (`reply.raw.setHeader` or `writeHead`) and hijacked replies bypass this hook;
+ * those paths must not set cookies. No such path exists today.
+ *
  * It must be added after `@fastify/cookie` is registered: that plugin
  * serializes `reply.setCookie` calls into the `Set-Cookie` header in its own
  * root `onSend` hook, and Fastify runs hooks in registration order, so by the

@@ -633,6 +633,7 @@ const envSchema = z.object({
 
   NEXUS_OIDC_PROVIDERS: optionalString(),
   NEXUS_OIDC_ALLOW_HTTP_LOOPBACK: boolish(false),
+  NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES: boolish(false),
   NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN: boolish(false),
 });
 
@@ -877,6 +878,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     sso: {
       providers: ssoProviders,
       allowHttpLoopback: raw.NEXUS_OIDC_ALLOW_HTTP_LOOPBACK,
+      allowPrivateAddresses: raw.NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES,
       breakGlassLocalLogin: raw.NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN,
     },
   };

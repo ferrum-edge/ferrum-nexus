@@ -43,11 +43,17 @@ import type {
   NotificationType,
   RateLimitConfig,
   Role,
+  SpecChangeReport,
   SpecEnforcementLevel,
+  SpecRevisionKind,
   UserStatus,
   Uuid,
 } from '@ferrum-nexus/shared';
-import { DEFAULT_SPEC_ENFORCEMENT, isSpecEnforcementLevel } from '@ferrum-nexus/shared';
+import {
+  DEFAULT_SPEC_ENFORCEMENT,
+  emptySpecChangeReport,
+  isSpecEnforcementLevel,
+} from '@ferrum-nexus/shared';
 
 import { newId, nowIso } from '../../lib/ids.js';
 import { fenceTransactionBody } from '../../lib/lease-fence.js';
@@ -68,6 +74,8 @@ import type {
   ApiPluginRepo,
   ApiRecord,
   ApiRepo,
+  ApiSpecChangeRecord,
+  ApiSpecChangeRepo,
   ApiSpecRecord,
   ApiSpecRepo,
   ApiViewerFilter,
@@ -82,6 +90,9 @@ import type {
   CredentialRepo,
   EmailOutboxRecord,
   EmailOutboxRepo,
+  EmailProofMethod,
+  EmailProofRecord,
+  EmailProofRepo,
   EmailTemplateRecord,
   EmailTemplateRepo,
   GatewayIdentityRecord,
@@ -228,9 +239,22 @@ function mapUserIdentity(row: Row): UserIdentityRecord {
     id: text(row.id),
     user_id: text(row.user_id),
     provider_id: text(row.provider_id),
+    issuer: text(row.issuer),
     subject: text(row.subject),
     email: textOrNull(row.email),
+    provisioned: bool(row.provisioned),
     last_login_at: textOrNull(row.last_login_at),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapEmailProof(row: Row): EmailProofRecord {
+  return {
+    user_id: text(row.user_id),
+    email: text(row.email),
+    method: text(row.method) as EmailProofMethod,
+    proven_at: text(row.proven_at),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -315,6 +339,23 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     revision_seq: int(row.revision_seq),
     created_by: textOrNull(row.created_by),
     rolled_back_from_id: textOrNull(row.rolled_back_from_id),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapApiSpecChange(row: Row): ApiSpecChangeRecord {
+  return {
+    id: text(row.id),
+    api_id: text(row.api_id),
+    revision_id: text(row.spec_id),
+    previous_revision_id: textOrNull(row.previous_spec_id),
+    kind: text(row.kind) as SpecRevisionKind,
+    version: text(row.version),
+    previous_version: textOrNull(row.previous_version),
+    revision_seq: int(row.revision_seq),
+    // See the sqlite adapter: an undecodable summary is an incomplete one.
+    report: json<SpecChangeReport>(row.report_json, emptySpecChangeReport(false)),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -758,10 +799,12 @@ function stamps(input: {
 export interface SqlRepos {
   users: UserRepo;
   userIdentities: UserIdentityRepo;
+  emailProofs: EmailProofRepo;
   organizations: OrganizationRepo;
   sessions: SessionRepo;
   apis: ApiRepo;
   apiSpecs: ApiSpecRepo;
+  apiSpecChanges: ApiSpecChangeRepo;
   apiPlugins: ApiPluginRepo;
   apiGatewayPlugins: ApiGatewayPluginRepo;
   apiViewers: ApiViewerRepo;
@@ -951,14 +994,17 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         execute(
           exec,
           `INSERT INTO user_identities
-             (id, user_id, provider_id, subject, email, last_login_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, user_id, provider_id, issuer, subject, email, provisioned, last_login_at,
+              created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.user_id,
             input.provider_id,
+            input.issuer,
             input.subject,
             input.email ?? null,
+            encodeBool(input.provisioned),
             input.last_login_at ?? null,
             meta.created_at,
             meta.updated_at,
@@ -975,11 +1021,11 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return row ? mapUserIdentity(row) : null;
     },
 
-    findBySubject: async (providerId, subject) => {
+    findBySubject: async (providerId, issuer, subject) => {
       const row = await queryOne(
         exec,
-        'SELECT * FROM user_identities WHERE provider_id = ? AND subject = ?',
-        [providerId, subject],
+        'SELECT * FROM user_identities WHERE provider_id = ? AND issuer = ? AND subject = ?',
+        [providerId, issuer, subject],
       );
       return row ? mapUserIdentity(row) : null;
     },
@@ -993,6 +1039,11 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return rows.map(mapUserIdentity);
     },
 
+    countByProvider: async (providerId) =>
+      queryCount(exec, 'SELECT COUNT(*) AS cnt FROM user_identities WHERE provider_id = ?', [
+        providerId,
+      ]),
+
     touchLogin: async (id, email, at) => {
       const changed = await execute(
         exec,
@@ -1004,6 +1055,39 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     delete: async (id) =>
       (await execute(exec, 'DELETE FROM user_identities WHERE id = ?', [id])) > 0,
+
+    deleteByProvider: async (providerId) =>
+      execute(exec, 'DELETE FROM user_identities WHERE provider_id = ?', [providerId]),
+  };
+
+  /* ── emailProofs ────────────────────────────────────────────────────── */
+
+  const EMAIL_PROOF_UPSERT = upsertSql(
+    dialect,
+    'user_email_proofs',
+    ['user_id', 'email', 'method', 'proven_at', 'created_at', 'updated_at'],
+    'user_id',
+    ['email', 'method', 'proven_at', 'updated_at'],
+  );
+
+  const emailProofs: EmailProofRepo = {
+    upsert: async (userId, email, method, at) => {
+      await execute(exec, EMAIL_PROOF_UPSERT, [
+        userId,
+        email.trim().toLowerCase(),
+        method,
+        at,
+        at,
+        at,
+      ]);
+    },
+
+    findByUser: async (userId) => {
+      const row = await queryOne(exec, 'SELECT * FROM user_email_proofs WHERE user_id = ?', [
+        userId,
+      ]);
+      return row ? mapEmailProof(row) : null;
+    },
   };
 
   /* ── organizations ──────────────────────────────────────────────────── */
@@ -1493,6 +1577,88 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         ids,
       );
     },
+  };
+
+  /* ── apiSpecChanges ─────────────────────────────────────────────────── */
+
+  const apiSpecChanges: ApiSpecChangeRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapSqlConflict('That revision already has a change summary', () =>
+        execute(
+          exec,
+          `INSERT INTO api_spec_changes
+             (id, api_id, spec_id, previous_spec_id, kind, version, previous_version,
+              revision_seq, report_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            meta.id,
+            input.api_id,
+            input.revision_id,
+            input.previous_revision_id ?? null,
+            input.kind,
+            input.version,
+            input.previous_version ?? null,
+            input.revision_seq,
+            JSON.stringify(input.report),
+            meta.created_at,
+            meta.updated_at,
+          ],
+        ),
+      );
+      const row = await queryOne(exec, 'SELECT * FROM api_spec_changes WHERE id = ?', [meta.id]);
+      if (!row) throw new Error('apiSpecChanges.create: row vanished immediately after insert');
+      return mapApiSpecChange(row);
+    },
+
+    findByRevision: async (apiId, revisionId) => {
+      const row = await queryOne(
+        exec,
+        'SELECT * FROM api_spec_changes WHERE api_id = ? AND spec_id = ?',
+        [apiId, revisionId],
+      );
+      return row ? mapApiSpecChange(row) : null;
+    },
+
+    listByApi: async (apiId, options) => {
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        'SELECT COUNT(*) AS cnt FROM api_spec_changes WHERE api_id = ?',
+        [apiId],
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM api_spec_changes WHERE api_id = ?
+          ORDER BY revision_seq DESC
+          LIMIT ? OFFSET ?`,
+        [apiId, limit, offset],
+      );
+      return { items: rows.map(mapApiSpecChange), total };
+    },
+
+    prune: async (apiId, keep) => {
+      // Selected then deleted by id, as `apiSpecs.pruneHistory` is: MySQL
+      // refuses a `DELETE` whose subquery names its own table.
+      const rows = await queryAll(
+        exec,
+        `SELECT id FROM api_spec_changes
+          WHERE api_id = ?
+          ORDER BY revision_seq DESC
+          LIMIT ? OFFSET ?`,
+        [apiId, SPEC_HISTORY_PRUNE_BATCH, Math.max(0, keep)],
+      );
+      if (rows.length === 0) return 0;
+      const ids = rows.map((row) => text(row.id));
+      return execute(
+        exec,
+        `DELETE FROM api_spec_changes WHERE id IN (${ids.map(() => '?').join(', ')})`,
+        ids,
+      );
+    },
+
+    deleteByApi: async (apiId) =>
+      execute(exec, 'DELETE FROM api_spec_changes WHERE api_id = ?', [apiId]),
   };
 
   /* ── apiPlugins ─────────────────────────────────────────────────────── */
@@ -3332,10 +3498,12 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
   return {
     users,
     userIdentities,
+    emailProofs,
     organizations,
     sessions,
     apis,
     apiSpecs,
+    apiSpecChanges,
     apiPlugins,
     apiGatewayPlugins,
     apiViewers,
@@ -3424,10 +3592,12 @@ class SqlStore implements NexusStore {
 
   readonly users: UserRepo;
   readonly userIdentities: UserIdentityRepo;
+  readonly emailProofs: EmailProofRepo;
   readonly organizations: OrganizationRepo;
   readonly sessions: SessionRepo;
   readonly apis: ApiRepo;
   readonly apiSpecs: ApiSpecRepo;
+  readonly apiSpecChanges: ApiSpecChangeRepo;
   readonly apiPlugins: ApiPluginRepo;
   readonly apiGatewayPlugins: ApiGatewayPluginRepo;
   readonly apiViewers: ApiViewerRepo;
@@ -3469,10 +3639,12 @@ class SqlStore implements NexusStore {
 
     this.users = repos.users;
     this.userIdentities = repos.userIdentities;
+    this.emailProofs = repos.emailProofs;
     this.organizations = repos.organizations;
     this.sessions = repos.sessions;
     this.apis = repos.apis;
     this.apiSpecs = repos.apiSpecs;
+    this.apiSpecChanges = repos.apiSpecChanges;
     this.apiPlugins = repos.apiPlugins;
     this.apiGatewayPlugins = repos.apiGatewayPlugins;
     this.apiViewers = repos.apiViewers;

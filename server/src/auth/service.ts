@@ -67,7 +67,7 @@ import {
 import { isoInSeconds, nowIso } from '../lib/ids.js';
 import { SUPER_ADMIN_LOCK_KEY, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import { rewordLeaseLost } from '../lib/lease-fence.js';
-import { readLoginPolicy } from '../sso/settings.js';
+import { localPasswordBlocked, readLoginPolicy } from '../sso/settings.js';
 import type { CaptchaService } from './captcha.js';
 import { createPasswordChangeSerializer } from './password-change.js';
 
@@ -745,6 +745,12 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       if (ssoOnly && record.role !== 'super_admin') {
         throw unauthorized('Email address or password is incorrect');
       }
+      // An account an identity provider provisioned, or one linked to a
+      // provider that forbids it, signs in there: a password set through a
+      // reset must not outlive the provider's offboarding.
+      if (await localPasswordBlocked(config, store, record.id)) {
+        throw unauthorized('Email address or password is incorrect');
+      }
       if (record.status !== 'active') {
         throw userDisabled();
       }
@@ -851,6 +857,9 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 
         const user = await tx.users.update(row.user_id, { email_verified: true });
         if (!user) throw validationFailed('That verification link is not valid');
+        // The one proof of the address that single sign-on accepts for linking;
+        // `email_verified` alone can be true without any.
+        await tx.emailProofs.upsert(user.id, user.email, 'verification_link', nowIso());
 
         await audit
           .forStore(tx)
@@ -948,6 +957,8 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         const email = rawEmail.trim().toLowerCase();
         const record = await store.users.findByEmail(email);
         if (!record || record.status !== 'active') return;
+        // No password to reset: such an account signs in with its provider.
+        if (await localPasswordBlocked(config, store, record.id)) return;
         const existing = await store.verificationTokens.findLatestLiveForUser(
           record.id,
           'password_reset',
@@ -1025,6 +1036,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       const record = await store.users.findById(row.user_id);
       if (!record) throw invalidResetLink();
       if (record.status !== 'active') throw userDisabled();
+      if (await localPasswordBlocked(config, store, record.id)) throw invalidResetLink();
 
       // Hash outside the transaction: scrypt takes ~100 ms and holding a write
       // transaction open across it would serialise unrelated work behind it.
@@ -1054,6 +1066,9 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
             email_verified: true,
           });
           if (!updated) throw invalidResetLink();
+
+          // Redeeming a mailed link proves the mailbox.
+          await tx.emailProofs.upsert(updated.id, updated.email, 'password_reset', nowIso());
 
           // Any other reset link for this account dies with this one, and every
           // session goes: whoever prompted the reset must not keep a live one.

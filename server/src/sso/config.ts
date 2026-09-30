@@ -28,6 +28,12 @@ export const MAX_ALLOWED_EMAIL_DOMAINS = 100;
 /** Longest client secret accepted. */
 export const MAX_CLIENT_SECRET_LENGTH = 2048;
 
+/**
+ * Longest issuer accepted. Links are keyed on the issuer, and this keeps that
+ * key within the narrowest index every adapter can build (MySQL's).
+ */
+export const MAX_ISSUER_LENGTH = 255;
+
 /** Scopes requested when a provider does not say. */
 export const DEFAULT_SSO_SCOPES: readonly string[] = ['openid', 'email', 'profile'];
 
@@ -40,12 +46,14 @@ const SCOPE_TOKEN = /^[\x21\x23-\x5b\x5d-\x7e]+$/;
 const EMAIL_DOMAIN =
   /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
 
-/** Hosts an `http://` issuer may name under `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`. */
+/**
+ * Hosts an `http://` issuer may name under `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`:
+ * the literal `localhost`, `127.0.0.1` and `::1`, nothing else — no other
+ * loopback address, and no `*.localhost` name a resolver could point anywhere.
+ */
 export function isLoopbackHostname(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  if (host === 'localhost' || host.endsWith('.localhost')) return true;
-  if (host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
 /**
@@ -122,13 +130,15 @@ const scopesSchema = z
 export const ssoProviderSettingsShape = {
   id: z.string().regex(PROVIDER_ID, 'must be 1-32 lower-case letters, digits or hyphens'),
   display_name: z.string().trim().min(1).max(100),
-  issuer: z.string().trim().min(1).max(2048),
+  issuer: z.string().trim().min(1).max(MAX_ISSUER_LENGTH),
   client_id: z.string().trim().min(1).max(512),
   scopes: scopesSchema,
   enabled: z.boolean(),
   jit_provisioning: z.boolean(),
   link_existing_accounts: z.boolean(),
   require_verified_email: z.boolean(),
+  allowed_email_domains: z.array(z.string().trim().min(1).max(253)).max(MAX_ALLOWED_EMAIL_DOMAINS),
+  disable_local_password_for_linked: z.boolean(),
   sync_roles: z.boolean(),
   default_role: z.enum(SSO_MAPPABLE_ROLES).nullable(),
   role_mappings: z.array(ssoRoleMappingSchema).max(MAX_SSO_MAPPINGS),
@@ -155,6 +165,8 @@ const envProviderSchema = z
     jit_provisioning: z.boolean().optional(),
     link_existing_accounts: z.boolean().optional(),
     require_verified_email: z.boolean().optional(),
+    allowed_email_domains: ssoProviderSettingsShape.allowed_email_domains.optional(),
+    disable_local_password_for_linked: z.boolean().optional(),
     sync_roles: z.boolean().optional(),
     default_role: z.enum(SSO_MAPPABLE_ROLES).nullable().optional(),
     role_mappings: z.array(ssoRoleMappingSchema).max(MAX_SSO_MAPPINGS).optional(),
@@ -175,6 +187,12 @@ export interface SsoEnvConfig {
   providers: EnvSsoProvider[];
   /** `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK`: accept `http://` issuers on a loopback host. */
   allowHttpLoopback: boolean;
+  /**
+   * `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES`: let discovery, the key set and the
+   * token endpoint resolve to private, link-local or other non-public
+   * addresses — an identity provider on the internal network.
+   */
+  allowPrivateAddresses: boolean;
   /**
    * `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN`: under the `sso_only` policy, still
    * accept password sign-in for `super_admin` accounts. Environment-only, like
@@ -242,6 +260,15 @@ export function parseEnvSsoProviders(
       problems.push(`NEXUS_OIDC_PROVIDERS['${value.id}'].issuer ${issuer}`);
       return;
     }
+    const domains: string[] = [];
+    for (const entry of value.allowed_email_domains ?? []) {
+      const domain = normalizeEmailDomain(entry);
+      if (domain === null) {
+        problems.push(`NEXUS_OIDC_PROVIDERS['${value.id}'].allowed_email_domains has a non-domain`);
+        return;
+      }
+      if (!domains.includes(domain)) domains.push(domain);
+    }
     const variable = envClientSecretVariable(value.id);
     const fromVariable = secretFor(variable);
     const clientSecret =
@@ -261,6 +288,8 @@ export function parseEnvSsoProviders(
         jit_provisioning: value.jit_provisioning ?? true,
         link_existing_accounts: value.link_existing_accounts ?? true,
         require_verified_email: value.require_verified_email ?? true,
+        allowed_email_domains: domains,
+        disable_local_password_for_linked: value.disable_local_password_for_linked ?? false,
         sync_roles: value.sync_roles ?? true,
         default_role: value.default_role === undefined ? 'client' : value.default_role,
         role_mappings: value.role_mappings ?? [],

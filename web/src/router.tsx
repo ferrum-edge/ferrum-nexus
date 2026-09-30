@@ -17,6 +17,7 @@ import {
 } from '@tanstack/react-router';
 import { isSsoErrorReason, type SsoErrorReason } from '@ferrum-nexus/shared';
 import { AppShell } from './components/layout/AppShell';
+import { isCatalogDetailTab, type CatalogDetailTab } from './lib/catalog-tabs';
 import { NotFoundPage } from './routes/NotFoundPage';
 
 const rootRoute = createRootRoute({
@@ -102,6 +103,10 @@ const catalogRoute = createRoute({
 const catalogDetailRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/catalog/$slug',
+  // `?tab=changes` is where a spec-change notification lands. An unknown tab
+  // is dropped rather than refused, so an old or mistyped link still opens.
+  validateSearch: (search: Record<string, unknown>): { tab?: CatalogDetailTab } =>
+    isCatalogDetailTab(search.tab) ? { tab: search.tab } : {},
   component: lazyRouteComponent(() => import('./routes/CatalogDetailPage'), 'CatalogDetailPage'),
 });
 
@@ -138,6 +143,9 @@ const messageThreadRoute = createRoute({
 const profileRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/profile',
+  // `?sso_error=<reason>` is how a refused explicit link comes back.
+  validateSearch: (search: Record<string, unknown>): { sso_error?: SsoErrorReason } =>
+    isSsoErrorReason(search.sso_error) ? { sso_error: search.sso_error } : {},
   component: lazyRouteComponent(() => import('./routes/ProfilePage'), 'ProfilePage'),
 });
 

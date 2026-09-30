@@ -105,6 +105,20 @@ as uploaded (`raw_spec`).
 Large documents show 200 operation entries at first; **Show 200 more** adds
 the next batch. An operation listed under several tags counts once per tag.
 
+### Seeing what changed
+
+The **Changes** tab lists each revision the provider published after the first,
+newest first, with what it changed: operations added, removed or deprecated,
+parameters, request bodies, responses and the fields of their schemas. Each
+change is marked **Breaking** when a client written against the previous
+revision may fail against the new one, for example a removed operation, a new
+required parameter or a response field that is no longer sent. A rollback is
+labelled as one.
+
+It is a structural comparison of the two documents. It cannot see how the API
+behaves, so a change it does not list can still affect you. The history is
+readable by everyone who can read the documentation.
+
 ### "I was sent a link but cannot find the API in the catalog"
 
 It is an **internal** (unlisted) API. It does not appear in browsing, but

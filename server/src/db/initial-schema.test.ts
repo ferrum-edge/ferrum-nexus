@@ -14,7 +14,8 @@ describe('buildout schema baseline', () => {
           '001_initial',
           '002_api_gateway_plugins',
           '003_messages_thread_latest',
-          '004_user_identities',
+          '004_api_spec_changes',
+          '006_user_identities',
         ],
       );
       const statements = splitSqlStatements(files[0]!.sql);
@@ -188,55 +189,110 @@ describe('buildout schema baseline', () => {
     }
   });
 
-  it('adds the identity-provider link table as a replayable forward migration', () => {
+  it('adds the revision change history as a replayable forward migration', () => {
+    const mysqlStep = loadMigrations('mysql').find((file) => file.id === '004_api_spec_changes');
+    assert.ok(mysqlStep, 'mysql ships 004_api_spec_changes');
+    // The MySQL runner applies nothing but replayable CREATE TABLEs.
+    assert.deepEqual(
+      splitSqlStatements(mysqlStep.sql).map(
+        (statement) => /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement)?.[1],
+      ),
+      ['api_spec_changes'],
+    );
+
+    const db = openSqliteDatabase(':memory:');
+    try {
+      for (const file of loadMigrations('sqlite')) db.exec(file.sql);
+      const sql =
+        'INSERT INTO api_spec_changes (id, api_id, spec_id, kind, version, revision_seq, ' +
+        'report_json, created_at, updated_at) ' +
+        "VALUES (?, 'a', ?, ?, '2.0.0', ?, '{}', 'now', 'now')";
+      const insert = (id: string, specId: string, seq: number, kind = 'update'): void => {
+        db.prepare(sql).run(id, specId, kind, seq);
+      };
+      db.exec(`
+        INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)
+          VALUES ('u', 'user@example.test', 'unused', 'User', 'provider', 'now', 'now');
+        INSERT INTO apis (id, name, slug, owner_user_id, namespace, version, auth_plugin,
+                          created_at, updated_at)
+          VALUES ('a', 'API', 'api', 'u', 'ferrum', '1.0.0', 'key_auth', 'now', 'now');
+      `);
+      // No foreign key to the revision: the summary outlives its document.
+      insert('c1', 'pruned-revision', 2);
+      assert.throws(() => insert('c2', 'pruned-revision', 3), /UNIQUE constraint failed/);
+      assert.throws(() => insert('c3', 'other-revision', 2), /UNIQUE constraint failed/);
+      assert.throws(() => insert('c4', 'third-revision', 4, 'publish'), /CHECK constraint failed/);
+      // Deleting the API takes its history with it.
+      db.exec("DELETE FROM apis WHERE id = 'a'");
+      assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM api_spec_changes').get(), { n: 0 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('adds identity-provider links and address proofs as a replayable forward migration', () => {
     for (const dialect of ['sqlite', 'pg', 'mysql'] as const) {
-      const forward = loadMigrations(dialect).find((file) => file.id === '004_user_identities');
-      assert.ok(forward, `${dialect} ships 004_user_identities`);
+      const forward = loadMigrations(dialect).find((file) => file.id === '006_user_identities');
+      assert.ok(forward, `${dialect} ships 006_user_identities`);
       // The MySQL runner applies nothing but replayable CREATE TABLEs.
       const statements = splitSqlStatements(forward.sql);
       assert.deepEqual(
         statements.map((statement) => /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement)?.[1]),
-        ['user_identities'],
+        ['user_identities', 'user_email_proofs'],
       );
     }
 
     const db = openSqliteDatabase(':memory:');
     try {
       for (const file of loadMigrations('sqlite')) db.exec(file.sql);
+      const link = (id: string, user: string, provider: string, issuer: string, sub: string) =>
+        db
+          .prepare(
+            'INSERT INTO user_identities (id, user_id, provider_id, issuer, subject, ' +
+              "created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'now', 'now')",
+          )
+          .run(id, user, provider, issuer, sub);
       db.exec(`
         INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)
           VALUES ('u', 'user@example.test', 'unused', 'User', 'client', 'now', 'now');
         INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)
           VALUES ('v', 'other@example.test', 'unused', 'Other', 'client', 'now', 'now');
-        INSERT INTO user_identities (id, user_id, provider_id, subject, created_at, updated_at)
-          VALUES ('i', 'u', 'corp', 'subject-1', 'now', 'now');
       `);
-      // One account per subject at a provider…
+      link('i', 'u', 'corp', 'https://a.example', 'subject-1');
+      // One account per subject at a provider and issuer…
       assert.throws(
-        () =>
-          db.exec(`
-        INSERT INTO user_identities (id, user_id, provider_id, subject, created_at, updated_at)
-          VALUES ('j', 'v', 'corp', 'subject-1', 'now', 'now')
-      `),
+        () => link('j', 'v', 'corp', 'https://a.example', 'subject-1'),
         /UNIQUE constraint failed/,
       );
-      // …and one identity per account at a provider.
+      // …one identity per account at a provider…
       assert.throws(
-        () =>
-          db.exec(`
-        INSERT INTO user_identities (id, user_id, provider_id, subject, created_at, updated_at)
-          VALUES ('k', 'u', 'corp', 'subject-2', 'now', 'now')
-      `),
+        () => link('k', 'u', 'corp', 'https://a.example', 'subject-2'),
         /UNIQUE constraint failed/,
       );
+      // …and the same subject under another issuer is another identity.
+      link('l', 'v', 'corp', 'https://b.example', 'subject-1');
       // Subjects are compared case-sensitively, as OpenID Connect requires.
+      link('m', 'v', 'partner', 'https://a.example', 'SUBJECT-1');
+      const first = db.prepare("SELECT provisioned FROM user_identities WHERE id = 'i'").get();
+      assert.deepEqual(first, { provisioned: 0 });
+
       db.exec(`
-        INSERT INTO user_identities (id, user_id, provider_id, subject, created_at, updated_at)
-          VALUES ('l', 'v', 'corp', 'SUBJECT-1', 'now', 'now')
+        INSERT INTO user_email_proofs (user_id, email, method, proven_at, created_at, updated_at)
+          VALUES ('u', 'user@example.test', 'verification_link', 'now', 'now', 'now');
       `);
-      // Deleting the account takes its links with it.
+      assert.throws(
+        () =>
+          db.exec(`
+        INSERT INTO user_email_proofs (user_id, email, method, proven_at, created_at, updated_at)
+          VALUES ('v', 'other@example.test', 'said-so', 'now', 'now', 'now')
+      `),
+        /CHECK constraint failed/,
+      );
+      // Deleting the account takes its links and its proof with it.
       db.exec("DELETE FROM users WHERE id = 'u'");
-      assert.deepEqual(db.prepare('SELECT id FROM user_identities').all(), [{ id: 'l' }]);
+      const remaining = db.prepare('SELECT id FROM user_identities ORDER BY id').all();
+      assert.deepEqual(remaining, [{ id: 'l' }, { id: 'm' }]);
+      assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM user_email_proofs').get(), { n: 0 });
     } finally {
       db.close();
     }

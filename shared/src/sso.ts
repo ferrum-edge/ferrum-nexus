@@ -98,6 +98,15 @@ export const SSO_ERROR_REASONS = [
   'email_not_verified',
   /** A local account holds the address and could not be linked safely. */
   'account_exists',
+  /**
+   * The address belongs to an `admin` or `super_admin`, which is never linked
+   * automatically: its holder links from their profile while signed in.
+   */
+  'privileged_account',
+  /** An explicit link attempt did not come from the signed-in account that started it. */
+  'link_session_mismatch',
+  /** An explicit link found the subject already linked, or the account already linked there. */
+  'already_linked',
   /** The claims map to no role, so the account has no access. */
   'access_denied',
   /** The linked account is disabled. */
@@ -158,6 +167,17 @@ export interface SsoProviderSettings {
   link_existing_accounts: boolean;
   /** Refuse just-in-time provisioning unless the provider asserts `email_verified: true`. */
   require_verified_email: boolean;
+  /**
+   * Lower-case domains this provider's addresses must belong to, on top of the
+   * deployment-wide list, checked when provisioning or linking. Empty: any.
+   */
+  allowed_email_domains: string[];
+  /**
+   * Refuse password sign-in and password reset for an existing account once
+   * it is linked to this provider, so the provider's offboarding and MFA hold
+   * for it. Accounts the provider provisioned never have a password anyway.
+   */
+  disable_local_password_for_linked: boolean;
   /** Re-apply the mapped role on every sign-in. */
   sync_roles: boolean;
   /** Role when no {@link SsoRoleMapping} matches; `null` denies access instead. */
@@ -191,8 +211,12 @@ export interface UserIdentity {
   id: string;
   user_id: string;
   provider_id: string;
+  /** The issuer the subject belongs to. */
+  issuer: string;
   /** The provider's `sub` claim. */
   subject: string;
+  /** True for the identity that created the account (just-in-time provisioning). */
+  provisioned: boolean;
   /** The email address the provider last asserted. */
   email: string | null;
   last_login_at: string | null;

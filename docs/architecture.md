@@ -85,7 +85,7 @@ docker/    Dockerfile + docker-compose.example.yml
 | `index.ts`                                     | Composition root: `buildServer(config, deps)` + `main()`. No business logic.                                                                                           |
 | `config/index.ts`                              | The **only** reader of `process.env`. zod-validated into `NexusConfig`.                                                                                                |
 | `lib/`                                         | `crypto.ts`, `errors.ts` (`NexusError`), `keyed-serializer.ts` + `lease-fence.ts` (§5.2), `ids.ts`, `logger.ts`.                                                       |
-| `db/store.ts`                                  | The `NexusStore` interface: 25 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                                                 |
+| `db/store.ts`                                  | The `NexusStore` interface: 27 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                                                 |
 | `db/adapters/{sqlite,postgres,mysql,mongodb}/` | The four implementations.                                                                                                                                              |
 | `db/adapters/sql-common.ts`, `sql-repos.ts`    | Dialect shims and the repository bodies shared by PostgreSQL and MySQL.                                                                                                |
 | `db/migrations/`                               | SQL migrations per dialect: `.sql` (SQLite), `.pg.sql`, `.mysql.sql`. MongoDB declares its indexes in code.                                                            |
@@ -665,6 +665,17 @@ released. A revision that rewrites the proxy first commits an
 `api.spec_revision_start` intent row; a failed restore writes
 `api.gateway_repair_required` and the catalog keeps its previous revision. The
 full audit sequence is in [`api.md`](api.md).
+
+**Spec change summaries.** Under the same lease, after the previous revision is
+re-read, `publishing/spec-changes.ts` compares it with the new document for
+consumers: operations, parameters, request bodies, responses and their schemas,
+each change classified as breaking or not. The comparison is pure and bounded
+(each shared component compared once per direction, a fixed work budget, capped
+output), so it runs before the store transaction rather than inside a body that
+may re-run. The summary commits with the revision in `api_spec_changes`, which
+has no foreign key to `api_specs` and so outlives retention. The catalog serves
+it under the detail page's visibility rule
+([`api.md`](api.md#get-apicatalogslugchanges)).
 
 ### Spec-owned proxies
 

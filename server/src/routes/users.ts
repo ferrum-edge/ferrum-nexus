@@ -104,6 +104,12 @@ export const usersRoutes: FastifyPluginAsync<UsersRoutesOptions> = async (app, o
     return { user: users.getMe(user) };
   });
 
+  /** The caller's own single sign-on links, for the profile page. */
+  app.get('/me/identities', async (request): Promise<ListUserIdentitiesResponse> => {
+    const { user } = requireAuth(request);
+    return { items: await sso.listIdentities(user.id) };
+  });
+
   app.patch(
     '/me',
     { config: { rateLimit: { ...UPDATE_ME_RATE_LIMIT } } },

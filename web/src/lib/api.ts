@@ -38,6 +38,9 @@ import {
   type UpdateApplicationResponse,
   type CatalogListQuery,
   type CatalogListResponse,
+  type CatalogSpecChangeResponse,
+  type CatalogSpecChangesQuery,
+  type CatalogSpecChangesResponse,
   type CatalogSpecResponse,
   type CreateAccessRequestRequest,
   type CreateAccessRequestResponse,
@@ -144,6 +147,7 @@ import {
   type SmtpTestResponse,
   type SsoAdminSettingsResponse,
   type SsoPublicConfigResponse,
+  type StartSsoLinkResponse,
   type UnlinkUserIdentityResponse,
   type UpdateSsoSettingsRequest,
   type UpdateSsoSettingsResponse,
@@ -373,6 +377,12 @@ export const authApi = {
    */
   sso: (): Promise<SsoPublicConfigResponse> =>
     request<SsoPublicConfigResponse>('GET', '/auth/sso', { skipUnauthorizedHandler: true }),
+  /**
+   * Begin linking the signed-in account to a provider. The browser is then
+   * sent to the returned `location`, and comes back to the profile page.
+   */
+  startSsoLink: (providerId: string): Promise<StartSsoLinkResponse> =>
+    post<StartSsoLinkResponse>(`/auth/sso/${encodeURIComponent(providerId)}/link`),
 };
 
 /**
@@ -398,6 +408,9 @@ export const usersApi = {
     patch<UpdateUserResponse>(`/users/${encodeURIComponent(id)}`, body),
   retryGatewayTeardown: (id: string): Promise<RetryGatewayTeardownResponse> =>
     post<RetryGatewayTeardownResponse>(`/users/${encodeURIComponent(id)}/gateway-teardown/retry`),
+  /** The signed-in account's own single sign-on links. */
+  myIdentities: (): Promise<ListUserIdentitiesResponse> =>
+    get<ListUserIdentitiesResponse>('/users/me/identities'),
   /** The account's single sign-on links (admin). */
   identities: (id: string): Promise<ListUserIdentitiesResponse> =>
     get<ListUserIdentitiesResponse>(`/users/${encodeURIComponent(id)}/identities`),
@@ -425,6 +438,17 @@ export const catalogApi = {
     get<CatalogDetailResponse>(`/catalog/${encodeURIComponent(slug)}`),
   spec: (slug: string): Promise<CatalogSpecResponse> =>
     get<CatalogSpecResponse>(`/catalog/${encodeURIComponent(slug)}/spec`),
+  /** What each published revision changed, newest first. */
+  changes: (
+    slug: string,
+    query: CatalogSpecChangesQuery = {},
+  ): Promise<CatalogSpecChangesResponse> =>
+    get<CatalogSpecChangesResponse>(`/catalog/${encodeURIComponent(slug)}/changes`, { ...query }),
+  /** What one revision changed against the revision it replaced. */
+  change: (slug: string, revisionId: string): Promise<CatalogSpecChangeResponse> =>
+    get<CatalogSpecChangeResponse>(
+      `/catalog/${encodeURIComponent(slug)}/changes/${encodeURIComponent(revisionId)}`,
+    ),
   /**
    * One identity's request and grant on an API: `null` is the account itself,
    * an id one of the caller's own applications.

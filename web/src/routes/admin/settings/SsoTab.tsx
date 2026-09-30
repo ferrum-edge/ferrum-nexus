@@ -72,6 +72,7 @@ type ProviderFlag =
   | 'jit_provisioning'
   | 'link_existing_accounts'
   | 'require_verified_email'
+  | 'disable_local_password_for_linked'
   | 'sync_roles';
 
 /** One settings provider as the form edits it. */
@@ -79,6 +80,8 @@ interface ProviderDraft {
   settings: SsoProviderInput;
   /** Space-separated scopes, parsed on save. */
   scopesText: string;
+  /** The provider's own allowed email domains, one per line, parsed on save. */
+  domainsText: string;
   /** A new secret typed into the form; empty keeps the stored one. */
   secret: string;
   clearSecret: boolean;
@@ -96,6 +99,7 @@ function toDraft(provider: SsoProviderAdminView): ProviderDraft {
   return {
     settings,
     scopesText: settings.scopes.join(' '),
+    domainsText: settings.allowed_email_domains.join('\n'),
     secret: '',
     clearSecret: false,
     secretSet,
@@ -115,12 +119,15 @@ function newDraft(): ProviderDraft {
       jit_provisioning: true,
       link_existing_accounts: true,
       require_verified_email: true,
+      allowed_email_domains: [],
+      disable_local_password_for_linked: false,
       sync_roles: true,
       default_role: 'client',
       role_mappings: [],
       org_mappings: [],
     },
     scopesText: 'openid email profile',
+    domainsText: '',
     secret: '',
     clearSecret: false,
     secretSet: false,
@@ -128,11 +135,20 @@ function newDraft(): ProviderDraft {
   };
 }
 
+/** Domains typed one per line (or comma-separated), as the API takes them. */
+function parseDomains(text: string): string[] {
+  return text
+    .split(/[\s,]+/)
+    .map((domain) => domain.trim())
+    .filter((domain) => domain.length > 0);
+}
+
 /** The wire shape of one draft: the secret only when it changes. */
 function toInput(draft: ProviderDraft): SsoProviderInput {
   const scopes = draft.scopesText.split(/\s+/).filter((scope) => scope.length > 0);
   const secret = draft.secret.trim();
-  const input: SsoProviderInput = { ...draft.settings, scopes };
+  const domains = parseDomains(draft.domainsText);
+  const input: SsoProviderInput = { ...draft.settings, scopes, allowed_email_domains: domains };
   // Omitted keeps the stored secret; `null` clears it.
   if (secret !== '') input.client_secret = secret;
   else if (draft.clearSecret) input.client_secret = null;
@@ -180,10 +196,7 @@ function PolicyCard({ settings }: { settings: SsoAdminSettingsResponse }): React
     update.mutate(
       {
         policy,
-        allowed_email_domains: domains
-          .split(/[\s,]+/)
-          .map((domain) => domain.trim())
-          .filter((domain) => domain.length > 0),
+        allowed_email_domains: parseDomains(domains),
         deprovision_on_access_loss: deprovision,
       },
       { onSuccess: () => toast.success('Sign-in policy saved') },
@@ -218,7 +231,7 @@ function PolicyCard({ settings }: { settings: SsoAdminSettingsResponse }): React
           disabled={!canSuperAdmin}
           rows={3}
           placeholder="example.com"
-          hint="One per line. Every single sign-on must use an address in one of them; leave empty to allow any."
+          hint="One per line. Every single sign-on must use an address the provider verified in one of them; leave empty to allow any."
         />
         <FieldGroup
           label="Losing access"
@@ -464,6 +477,15 @@ function ProviderEditor({
           onChange={(event) => onChange({ ...draft, scopesText: event.target.value })}
           hint="Space-separated; must include openid."
         />
+        <LabeledTextarea
+          label="Allowed email domains"
+          value={draft.domainsText}
+          disabled={disabled}
+          rows={2}
+          placeholder="example.com"
+          onChange={(event) => onChange({ ...draft, domainsText: event.target.value })}
+          hint="This provider only: one per line. Linking and account creation need a verified address in one of them, on top of the deployment-wide list. Empty allows any."
+        />
       </div>
       {draft.secretSet ? (
         <Checkbox
@@ -477,9 +499,13 @@ function ProviderEditor({
         <div className="grid gap-2 md:grid-cols-2">
           {flag('enabled', 'Enabled (shown on the sign-in page)')}
           {flag('jit_provisioning', 'Create accounts on first sign-in')}
-          {flag('link_existing_accounts', 'Link existing accounts with a verified address')}
+          {flag('link_existing_accounts', 'Link existing non-admin accounts by proven address')}
           {flag('require_verified_email', 'Provision only verified addresses')}
           {flag('sync_roles', 'Re-apply the mapped role on every sign-in')}
+          {flag(
+            'disable_local_password_for_linked',
+            'Disable password sign-in for accounts linked here',
+          )}
         </div>
       </FieldGroup>
       <LabeledSelect<DefaultRoleChoice>
@@ -555,6 +581,11 @@ function ProvidersCard({ settings }: { settings: SsoAdminSettingsResponse }): Re
       />
       <CardBody className="flex flex-col gap-4">
         {update.error ? <FormNotice>{update.error.message}</FormNotice> : null}
+        {settings.shadowed_provider_ids.length > 0 ? (
+          <FormNotice tone="warning">
+            {`Stored provider ${settings.shadowed_provider_ids.join(', ')} has the id of an environment provider, which is the one in force. Save the providers to remove it; the environment provider's links are kept.`}
+          </FormNotice>
+        ) : null}
         {environment.map((provider) => (
           <EnvironmentProvider key={provider.id} provider={provider} />
         ))}

@@ -80,6 +80,7 @@ import type {
   ApiPlugin,
   ApiPluginTrigger,
   ApiSpec,
+  ApiSpecChangeEntry,
   ApiStatus,
   ApiGatewayState,
   ApiVisibility,
@@ -177,21 +178,44 @@ export type OrganizationRecord = Organization;
  * A `user_identities` row: one account linked to one subject (`sub`) at one
  * OpenID Connect provider.
  *
- * `(provider_id, subject)` is unique — a subject belongs to one account — and
- * so is `(user_id, provider_id)`: an account holds at most one identity per
- * provider. A returning sign-in is matched on the pair, never on the email
- * address, which the provider may change and which is only a hint here.
+ * `(provider_id, issuer, subject)` is unique — a subject belongs to one
+ * account, and a provider id later pointed at another issuer matches none of
+ * the old links — and so is `(user_id, provider_id)`: an account holds at
+ * most one identity per provider. A returning sign-in is matched on the
+ * triple, never on the email address, which is only a hint here.
  */
 export interface UserIdentityRecord {
   id: Uuid;
   user_id: Uuid;
   /** The provider's configured id (`SsoProviderSettings.id`). */
   provider_id: string;
+  /** The issuer the link was made under. */
+  issuer: string;
   /** The provider's `sub` claim, compared case-sensitively. */
   subject: string;
   /** The email address the provider last asserted. */
   email: string | null;
+  /** True for the identity that created the account: it has no local password. */
+  provisioned: boolean;
   last_login_at: IsoTimestamp | null;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
+/** How an account's holder proved they control its address. */
+export type EmailProofMethod = 'verification_link' | 'password_reset' | 'identity_provider';
+
+/**
+ * A `user_email_proofs` row: evidence that the account's holder controls
+ * `email`. Written only by a real proof event, so an account marked
+ * `email_verified` without one — a registration while verification was off —
+ * has none. It covers `email` only: an address change leaves it stale.
+ */
+export interface EmailProofRecord {
+  user_id: Uuid;
+  email: string;
+  method: EmailProofMethod;
+  proven_at: IsoTimestamp;
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
 }
@@ -777,12 +801,27 @@ export interface UserIdentityRepo {
   create(input: CreateInput<UserIdentityRecord>): Promise<UserIdentityRecord>;
   findById(id: Uuid): Promise<UserIdentityRecord | null>;
   /** The account a returning sign-in belongs to. */
-  findBySubject(providerId: string, subject: string): Promise<UserIdentityRecord | null>;
+  findBySubject(
+    providerId: string,
+    issuer: string,
+    subject: string,
+  ): Promise<UserIdentityRecord | null>;
   /** Every identity of one account, oldest first. */
   listByUser(userId: Uuid): Promise<UserIdentityRecord[]>;
+  /** How many links a provider holds. */
+  countByProvider(providerId: string): Promise<number>;
   /** Record a sign-in through the link. Returns `false` when the link is gone. */
   touchLogin(id: Uuid, email: string | null, at: IsoTimestamp): Promise<boolean>;
   delete(id: Uuid): Promise<boolean>;
+  /** Remove every link of a provider that is being removed. Returns the count. */
+  deleteByProvider(providerId: string): Promise<number>;
+}
+
+/** Proof that an account's holder controls its address. */
+export interface EmailProofRepo {
+  /** Record (or replace) the account's proof. */
+  upsert(userId: Uuid, email: string, method: EmailProofMethod, at: IsoTimestamp): Promise<void>;
+  findByUser(userId: Uuid): Promise<EmailProofRecord | null>;
 }
 
 /** Browser sessions. */
@@ -987,6 +1026,48 @@ export interface ApiSpecRepo {
  * statement, which is also the kinder thing to do to a live database.
  */
 export const SPEC_HISTORY_PRUNE_BATCH = 1_000;
+
+/**
+ * An `api_spec_changes` row: what one published revision changed, recorded
+ * when it became current (issue #448).
+ *
+ * Kept apart from `api_specs` so that it outlives the documents
+ * `NEXUS_SPEC_HISTORY_LIMIT` prunes: consumers are still owed the account of
+ * what changed after the revision it describes is gone. `revision_id` is
+ * therefore a plain reference, not a foreign key.
+ */
+export interface ApiSpecChangeRecord extends ApiSpecChangeEntry {
+  /**
+   * The {@link ApiSpecRecord.revision_seq} of the revision described, which
+   * orders the history for the reason it orders revisions. Store-internal,
+   * absent from the wire entry.
+   */
+  revision_seq: number;
+  updated_at: IsoTimestamp;
+}
+
+/** Change summaries of published revisions, one row per revision. */
+export interface ApiSpecChangeRepo {
+  /**
+   * Record one revision's summary. A revision has at most one, and an API one
+   * per `revision_seq`: a second is a `CONFLICT`.
+   */
+  create(input: CreateInput<ApiSpecChangeRecord>): Promise<ApiSpecChangeRecord>;
+  /** The summary of `revisionId`, scoped to `apiId`; `null` when there is none. */
+  findByRevision(apiId: Uuid, revisionId: Uuid): Promise<ApiSpecChangeRecord | null>;
+  /** One page of an API's summaries, newest first by `revision_seq`. */
+  listByApi(apiId: Uuid, options?: ListOptions): Promise<Paginated<ApiSpecChangeRecord>>;
+  /**
+   * Drop every summary of `apiId` beyond the newest `keep`, at most
+   * {@link SPEC_HISTORY_PRUNE_BATCH} per call, for the reason
+   * {@link ApiSpecRepo.pruneHistory} gives.
+   *
+   * @returns the number of summaries removed
+   */
+  prune(apiId: Uuid, keep: number): Promise<number>;
+  /** Cascade helper for API deletion. Returns the number of summaries removed. */
+  deleteByApi(apiId: Uuid): Promise<number>;
+}
 
 /**
  * Palette plugins a provider switched on for their own API.
@@ -1742,11 +1823,13 @@ export interface NexusStore {
 
   readonly users: UserRepo;
   readonly userIdentities: UserIdentityRepo;
+  readonly emailProofs: EmailProofRepo;
   readonly organizations: OrganizationRepo;
   readonly sessions: SessionRepo;
   readonly applications: ApplicationRepo;
   readonly apis: ApiRepo;
   readonly apiSpecs: ApiSpecRepo;
+  readonly apiSpecChanges: ApiSpecChangeRepo;
   readonly apiPlugins: ApiPluginRepo;
   readonly apiGatewayPlugins: ApiGatewayPluginRepo;
   readonly apiViewers: ApiViewerRepo;
