@@ -16,6 +16,10 @@
  *    `nexus-outbox-v1`), with the message's identity as additional
  *    authenticated data. It keeps the single-use links in queued mail out of
  *    the database's plaintext; see `email/sealed-outbox.ts`.
+ * 5. **SSO transaction sealing** — AES-256-GCM under a fourth HKDF-derived
+ *    key (info `nexus-sso-transaction-v1`). It seals the `state`, `nonce` and
+ *    PKCE verifier of one single sign-on attempt into the short-lived cookie
+ *    that carries them from the redirect to the callback; see `sso/service.ts`.
  *
  * Rotating `NEXUS_SECRET_KEY` invalidates every encrypted setting, every live
  * session and every sealed outbox message — see docs/operations.md for the
@@ -177,6 +181,12 @@ export const SESSION_HMAC_KEY_INFO = 'nexus-session-hmac-v1';
 /** HKDF `info` label for the AES-256-GCM key that seals queued `email_outbox` content. */
 export const OUTBOX_KEY_INFO = 'nexus-outbox-v1';
 
+/** HKDF `info` label for the AES-256-GCM key that seals a single sign-on attempt's cookie. */
+export const SSO_TRANSACTION_KEY_INFO = 'nexus-sso-transaction-v1';
+
+/** Additional authenticated data every sealed single sign-on attempt is bound to. */
+const SSO_TRANSACTION_AAD = 'nexus-sso-transaction';
+
 /** Fixed HKDF salt. The master secret supplies the entropy; the salt only separates domains. */
 const HKDF_SALT = Buffer.from('ferrum-nexus-hkdf-salt-v1', 'utf8');
 
@@ -270,6 +280,13 @@ export interface NexusCrypto {
    * different `aad` or a rotated key.
    */
   openOutbox<T = unknown>(blob: string, aad: string): T;
+  /** Seal one single sign-on attempt for its short-lived cookie. */
+  sealSsoTransaction(value: unknown): string;
+  /**
+   * Open a blob from {@link NexusCrypto.sealSsoTransaction}. Throws on
+   * tampering, a blob sealed for another purpose, or a rotated key.
+   */
+  openSsoTransaction<T = unknown>(blob: string): T;
   /** Mint a fresh opaque session token (returned to the browser in a cookie). */
   newSessionToken(): string;
   /** HMAC-SHA-256 of a session/verification token — this is what the DB stores. */
@@ -283,6 +300,7 @@ export function createCrypto(secretKey: string): NexusCrypto {
   const settingsKey = deriveKey(secretKey, SETTINGS_KEY_INFO);
   const sessionKey = deriveKey(secretKey, SESSION_HMAC_KEY_INFO);
   const outboxKey = deriveKey(secretKey, OUTBOX_KEY_INFO);
+  const ssoTransactionKey = deriveKey(secretKey, SSO_TRANSACTION_KEY_INFO);
   return {
     hashPassword,
     verifyPassword,
@@ -290,6 +308,10 @@ export function createCrypto(secretKey: string): NexusCrypto {
     decryptJson: <T>(blob: string) => decryptJsonWithKey<T>(settingsKey, blob),
     sealOutbox: (value, aad) => encryptJsonWithKey(outboxKey, value, aad),
     openOutbox: <T>(blob: string, aad: string) => decryptJsonWithKey<T>(outboxKey, blob, aad),
+    sealSsoTransaction: (value) =>
+      encryptJsonWithKey(ssoTransactionKey, value, SSO_TRANSACTION_AAD),
+    openSsoTransaction: <T>(blob: string) =>
+      decryptJsonWithKey<T>(ssoTransactionKey, blob, SSO_TRANSACTION_AAD),
     newSessionToken: () => randomToken(32),
     hashToken: (token) => createHmac('sha256', sessionKey).update(token).digest('hex'),
     fingerprint,

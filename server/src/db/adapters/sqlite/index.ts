@@ -135,6 +135,11 @@ import type {
   CredentialRepo,
   EmailOutboxRecord,
   EmailOutboxRepo,
+  EmailProofMethod,
+  EmailProofRecord,
+  EmailProofRepo,
+  PasswordLockRecord,
+  PasswordLockRepo,
   EmailTemplateRecord,
   EmailTemplateRepo,
   EnqueueEmailInput,
@@ -166,6 +171,8 @@ import type {
   TransactionOptions,
   UpdateInput,
   UserFilter,
+  UserIdentityRecord,
+  UserIdentityRepo,
   UserRecord,
   UserRepo,
   VerificationTokenPurpose,
@@ -281,6 +288,40 @@ function mapOrganization(row: Row): OrganizationRecord {
     description: textOrNull(row.description),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
+  };
+}
+
+function mapUserIdentity(row: Row): UserIdentityRecord {
+  return {
+    id: text(row.id),
+    user_id: text(row.user_id),
+    provider_id: text(row.provider_id),
+    issuer: text(row.issuer),
+    subject: text(row.subject),
+    email: textOrNull(row.email),
+    provisioned: bool(row.provisioned),
+    last_login_at: textOrNull(row.last_login_at),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapEmailProof(row: Row): EmailProofRecord {
+  return {
+    user_id: text(row.user_id),
+    email: text(row.email),
+    method: text(row.method) as EmailProofMethod,
+    proven_at: text(row.proven_at),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapPasswordLock(row: Row): PasswordLockRecord {
+  return {
+    user_id: text(row.user_id),
+    provider_id: text(row.provider_id),
+    created_at: text(row.created_at),
   };
 }
 
@@ -787,6 +828,9 @@ class SqliteStore implements NexusStore {
     // hole the gate closes, which is what `index.test.ts` checks.
     const mediate: Mediator = (work) => this.mediate(work);
     this.users = guardRepo(this.users, mediate);
+    this.userIdentities = guardRepo(this.userIdentities, mediate);
+    this.emailProofs = guardRepo(this.emailProofs, mediate);
+    this.passwordLocks = guardRepo(this.passwordLocks, mediate);
     this.organizations = guardRepo(this.organizations, mediate);
     this.sessions = guardRepo(this.sessions, mediate);
     this.applications = guardRepo(this.applications, mediate);
@@ -1078,6 +1122,123 @@ class SqliteStore implements NexusStore {
         where.params,
       );
       return rows.map(mapUser);
+    },
+  };
+
+  /* ── userIdentities ───────────────────────────────────────────────────── */
+
+  readonly userIdentities: UserIdentityRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      mapConflict('That identity is already linked to an account', () =>
+        execute(
+          this.db,
+          `INSERT INTO user_identities
+             (id, user_id, provider_id, issuer, subject, email, provisioned, last_login_at,
+              created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            meta.id,
+            input.user_id,
+            input.provider_id,
+            input.issuer,
+            input.subject,
+            input.email ?? null,
+            encodeBool(input.provisioned),
+            input.last_login_at ?? null,
+            meta.created_at,
+            meta.updated_at,
+          ],
+        ),
+      );
+      const created = await this.userIdentities.findById(meta.id);
+      if (!created) throw new Error('userIdentities.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = queryOne(this.db, 'SELECT * FROM user_identities WHERE id = ?', [id]);
+      return row ? mapUserIdentity(row) : null;
+    },
+
+    findBySubject: async (providerId, issuer, subject) => {
+      const row = queryOne(
+        this.db,
+        'SELECT * FROM user_identities WHERE provider_id = ? AND issuer = ? AND subject = ?',
+        [providerId, issuer, subject],
+      );
+      return row ? mapUserIdentity(row) : null;
+    },
+
+    listByUser: async (userId) => {
+      const rows = queryAll(
+        this.db,
+        'SELECT * FROM user_identities WHERE user_id = ? ORDER BY created_at ASC, id ASC',
+        [userId],
+      );
+      return rows.map(mapUserIdentity);
+    },
+
+    countByProvider: async (providerId) =>
+      queryCount(this.db, 'SELECT COUNT(*) AS count FROM user_identities WHERE provider_id = ?', [
+        providerId,
+      ]),
+
+    touchLogin: async (id, email, at) => {
+      const changed = execute(
+        this.db,
+        'UPDATE user_identities SET email = ?, last_login_at = ?, updated_at = ? WHERE id = ?',
+        [email, at, nowIso(), id],
+      );
+      return changed > 0;
+    },
+
+    delete: async (id) => execute(this.db, 'DELETE FROM user_identities WHERE id = ?', [id]) > 0,
+
+    deleteByProvider: async (providerId) =>
+      execute(this.db, 'DELETE FROM user_identities WHERE provider_id = ?', [providerId]),
+  };
+
+  /* ── emailProofs ──────────────────────────────────────────────────────── */
+
+  readonly emailProofs: EmailProofRepo = {
+    upsert: async (userId, email, method, at) => {
+      execute(
+        this.db,
+        `INSERT INTO user_email_proofs (user_id, email, method, proven_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (user_id) DO UPDATE SET
+           email = excluded.email,
+           method = excluded.method,
+           proven_at = excluded.proven_at,
+           updated_at = excluded.updated_at`,
+        [userId, email.trim().toLowerCase(), method, at, at, at],
+      );
+    },
+
+    findByUser: async (userId) => {
+      const row = queryOne(this.db, 'SELECT * FROM user_email_proofs WHERE user_id = ?', [userId]);
+      return row ? mapEmailProof(row) : null;
+    },
+  };
+
+  /* ── passwordLocks ────────────────────────────────────────────────────── */
+
+  readonly passwordLocks: PasswordLockRepo = {
+    create: async (userId, providerId, at) => {
+      execute(
+        this.db,
+        `INSERT INTO user_password_locks (user_id, provider_id, created_at) VALUES (?, ?, ?)
+         ON CONFLICT (user_id) DO NOTHING`,
+        [userId, providerId, at],
+      );
+    },
+
+    findByUser: async (userId) => {
+      const row = queryOne(this.db, 'SELECT * FROM user_password_locks WHERE user_id = ?', [
+        userId,
+      ]);
+      return row ? mapPasswordLock(row) : null;
     },
   };
 

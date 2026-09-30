@@ -16,6 +16,7 @@ describe('buildout schema baseline', () => {
           '003_messages_thread_latest',
           '004_api_spec_changes',
           '005_notification_preferences',
+          '006_user_identities',
         ],
       );
       const statements = splitSqlStatements(files[0]!.sql);
@@ -225,6 +226,79 @@ describe('buildout schema baseline', () => {
       // Deleting the API takes its history with it.
       db.exec("DELETE FROM apis WHERE id = 'a'");
       assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM api_spec_changes').get(), { n: 0 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('adds identity-provider links, proofs and password locks as a replayable migration', () => {
+    for (const dialect of ['sqlite', 'pg', 'mysql'] as const) {
+      const forward = loadMigrations(dialect).find((file) => file.id === '006_user_identities');
+      assert.ok(forward, `${dialect} ships 006_user_identities`);
+      // The MySQL runner applies nothing but replayable CREATE TABLEs.
+      const statements = splitSqlStatements(forward.sql);
+      assert.deepEqual(
+        statements.map((statement) => /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement)?.[1]),
+        ['user_identities', 'user_email_proofs', 'user_password_locks'],
+      );
+    }
+
+    const db = openSqliteDatabase(':memory:');
+    try {
+      for (const file of loadMigrations('sqlite')) db.exec(file.sql);
+      const link = (id: string, user: string, provider: string, issuer: string, sub: string) =>
+        db
+          .prepare(
+            'INSERT INTO user_identities (id, user_id, provider_id, issuer, subject, ' +
+              "created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'now', 'now')",
+          )
+          .run(id, user, provider, issuer, sub);
+      db.exec(`
+        INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)
+          VALUES ('u', 'user@example.test', 'unused', 'User', 'client', 'now', 'now');
+        INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)
+          VALUES ('v', 'other@example.test', 'unused', 'Other', 'client', 'now', 'now');
+      `);
+      link('i', 'u', 'corp', 'https://a.example', 'subject-1');
+      // One account per subject at a provider and issuer…
+      assert.throws(
+        () => link('j', 'v', 'corp', 'https://a.example', 'subject-1'),
+        /UNIQUE constraint failed/,
+      );
+      // …one identity per account at a provider…
+      assert.throws(
+        () => link('k', 'u', 'corp', 'https://a.example', 'subject-2'),
+        /UNIQUE constraint failed/,
+      );
+      // …and the same subject under another issuer is another identity.
+      link('l', 'v', 'corp', 'https://b.example', 'subject-1');
+      // Subjects are compared case-sensitively, as OpenID Connect requires.
+      link('m', 'v', 'partner', 'https://a.example', 'SUBJECT-1');
+      const first = db.prepare("SELECT provisioned FROM user_identities WHERE id = 'i'").get();
+      assert.deepEqual(first, { provisioned: 0 });
+
+      db.exec(`
+        INSERT INTO user_email_proofs (user_id, email, method, proven_at, created_at, updated_at)
+          VALUES ('u', 'user@example.test', 'verification_link', 'now', 'now', 'now');
+      `);
+      assert.throws(
+        () =>
+          db.exec(`
+        INSERT INTO user_email_proofs (user_id, email, method, proven_at, created_at, updated_at)
+          VALUES ('v', 'other@example.test', 'said-so', 'now', 'now', 'now')
+      `),
+        /CHECK constraint failed/,
+      );
+      db.exec(`
+        INSERT INTO user_password_locks (user_id, provider_id, created_at)
+          VALUES ('u', 'corp', 'now');
+      `);
+      // Deleting the account takes its links, its proof and its lock with it.
+      db.exec("DELETE FROM users WHERE id = 'u'");
+      const remaining = db.prepare('SELECT id FROM user_identities ORDER BY id').all();
+      assert.deepEqual(remaining, [{ id: 'l' }, { id: 'm' }]);
+      assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM user_email_proofs').get(), { n: 0 });
+      assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM user_password_locks').get(), { n: 0 });
     } finally {
       db.close();
     }

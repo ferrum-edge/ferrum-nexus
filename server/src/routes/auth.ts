@@ -1,6 +1,6 @@
 /**
  * `/api/auth` — register, login, logout, me, email verification, password
- * recovery, captcha config.
+ * recovery, captcha config, and OpenID Connect single sign-on.
  *
  * Routes never import service modules: everything arrives through the plugin
  * registration options. Cookie policy lives in
@@ -13,6 +13,8 @@ import { z } from 'zod';
 import {
   MIN_PASSWORD_LENGTH,
   REGISTRABLE_ROLES,
+  SSO_PROVIDER_ID_PATTERN,
+  SSO_TRANSACTION_COOKIE,
   type CaptchaConfigResponse,
   type ForgotPasswordResponse,
   type LoginResponse,
@@ -21,6 +23,8 @@ import {
   type RegisterResponse,
   type ResendVerificationResponse,
   type ResetPasswordResponse,
+  type SsoPublicConfigResponse,
+  type StartSsoLinkResponse,
   type VerifyEmailResponse,
 } from '@ferrum-nexus/shared';
 
@@ -28,13 +32,20 @@ import type { AuthService } from '../auth/service.js';
 import type { CaptchaService } from '../auth/captcha.js';
 import type { NexusConfig } from '../config/index.js';
 import { requestContext, requireAuth } from '../middleware/auth-plugin.js';
-import { clearSessionCookies, setSessionCookies } from '../middleware/session-cookies.js';
+import {
+  clearSessionCookies,
+  clearSsoTransactionCookie,
+  setSessionCookies,
+  setSsoTransactionCookie,
+} from '../middleware/session-cookies.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
+import type { SsoService } from '../sso/service.js';
 
 /** Services this route plugin needs. */
 export interface AuthRoutesOptions {
   config: NexusConfig;
   auth: AuthService;
+  sso: SsoService;
 }
 
 const registerBody = z.object({
@@ -76,9 +87,26 @@ const resetPasswordBody = z.object({
   new_password: z.string().min(MIN_PASSWORD_LENGTH).max(1024),
 });
 
+const ssoProviderParams = z.object({
+  provider: z.string().regex(new RegExp(SSO_PROVIDER_ID_PATTERN)),
+});
+
+const ssoStartQuery = z.object({ return_to: z.string().max(512).optional() });
+
+/**
+ * What a provider sends back. Unknown parameters (`session_state`, `iss`,
+ * `scope`, …) are ignored; the error description is never read, because it
+ * is free text the provider controls.
+ */
+const ssoCallbackQuery = z.object({
+  code: z.string().min(1).max(4096).optional(),
+  state: z.string().min(1).max(512).optional(),
+  error: z.string().max(256).optional(),
+});
+
 /** `/api/auth` route plugin. */
 export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, options) => {
-  const { config, auth } = options;
+  const { config, auth, sso } = options;
 
   app.post('/register', async (request, reply): Promise<RegisterResponse> => {
     const input = parseOrThrow(registerBody, request.body);
@@ -151,17 +179,76 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, opt
     clearSessionCookies(reply, config);
     return { ok: true };
   });
+
+  // Single sign-on. Both routes are top-level browser navigations, so they
+  // answer with redirects — to the provider, back into the SPA, or to the
+  // sign-in page with `?sso_error=<reason>` — never with JSON. Both are GETs,
+  // outside the CSRF check by method; what binds a callback to the browser
+  // that started it is the sealed `state` in the `nexus_sso` cookie.
+
+  app.get('/sso/:provider/start', async (request, reply) => {
+    const params = ssoProviderParams.safeParse(request.params);
+    const query = ssoStartQuery.safeParse(request.query);
+    const result = await sso.start(
+      params.success ? params.data.provider : '',
+      query.success ? query.data.return_to : undefined,
+    );
+    if (result.transaction !== null) {
+      setSsoTransactionCookie(reply, config, result.transaction);
+    }
+    return reply.redirect(result.location, 302);
+  });
+
+  app.get('/sso/:provider/callback', async (request, reply) => {
+    // Spent whatever happens next: a second callback with the same attempt
+    // finds nothing to match.
+    const transaction = request.cookies[SSO_TRANSACTION_COOKIE];
+    clearSsoTransactionCookie(reply, config);
+    const params = ssoProviderParams.safeParse(request.params);
+    const query = ssoCallbackQuery.safeParse(request.query);
+    const current =
+      request.session && request.currentUser
+        ? { userId: request.currentUser.id, sessionId: request.session.id }
+        : null;
+    const result = await sso.callback(
+      params.success ? params.data.provider : '',
+      // A malformed query is a callback nobody can finish, and reads as one
+      // with no state at all.
+      query.success ? query.data : {},
+      transaction,
+      current,
+      requestContext(request),
+    );
+    if (result.ok) setSessionCookies(reply, config, result.issued);
+    return reply.redirect(result.location, 302);
+  });
+
+  // Linking the signed-in account: a POST under the session and its CSRF
+  // token, so a cross-site page cannot start one. The attempt is sealed with
+  // this account and session, and the callback attaches the identity only when
+  // it returns to them. The SPA then navigates the browser to `location`.
+  app.post('/sso/:provider/link', async (request, reply): Promise<StartSsoLinkResponse> => {
+    const { user, session } = requireAuth(request);
+    const { provider } = parseOrThrow(ssoProviderParams, request.params);
+    const started = await sso.startLink(provider, { userId: user.id, sessionId: session.id });
+    setSsoTransactionCookie(reply, config, started.transaction);
+    return { location: started.location };
+  });
 };
 
 /** Read-only bootstrap routes registered under their own rate-limit scope. */
 export const authBootstrapRoutes: FastifyPluginAsync<{
   auth: AuthService;
   captcha: CaptchaService;
-}> = async (app, { auth, captcha }) => {
+  sso: SsoService;
+}> = async (app, { auth, captcha, sso }) => {
   app.get('/me', async (request): Promise<MeResponse> => {
     const { user, session } = requireAuth(request);
     return auth.me(user, session);
   });
 
   app.get('/captcha', async (): Promise<CaptchaConfigResponse> => captcha.getPublicConfig());
+
+  // What the sign-in page offers: the login policy and the enabled providers.
+  app.get('/sso', async (): Promise<SsoPublicConfigResponse> => sso.publicConfig());
 };

@@ -175,6 +175,64 @@ export interface UserRecord extends User {
 /** An `organizations` row. */
 export type OrganizationRecord = Organization;
 
+/**
+ * A `user_identities` row: one account linked to one subject (`sub`) at one
+ * OpenID Connect provider.
+ *
+ * `(provider_id, issuer, subject)` is unique — a subject belongs to one
+ * account, and a provider id later pointed at another issuer matches none of
+ * the old links — and so is `(user_id, provider_id)`: an account holds at
+ * most one identity per provider. A returning sign-in is matched on the
+ * triple, never on the email address, which is only a hint here.
+ */
+export interface UserIdentityRecord {
+  id: Uuid;
+  user_id: Uuid;
+  /** The provider's configured id (`SsoProviderSettings.id`). */
+  provider_id: string;
+  /** The issuer the link was made under. */
+  issuer: string;
+  /** The provider's `sub` claim, compared case-sensitively. */
+  subject: string;
+  /** The email address the provider last asserted. */
+  email: string | null;
+  /** True for the identity that created the account: it has no local password. */
+  provisioned: boolean;
+  last_login_at: IsoTimestamp | null;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
+/** How an account's holder proved they control its address. */
+export type EmailProofMethod = 'verification_link' | 'password_reset' | 'identity_provider';
+
+/**
+ * A `user_email_proofs` row: evidence that the account's holder controls
+ * `email`. Written only by a real proof event, so an account marked
+ * `email_verified` without one — a registration while verification was off —
+ * has none. It covers `email` only: an address change leaves it stale.
+ */
+export interface EmailProofRecord {
+  user_id: Uuid;
+  email: string;
+  method: EmailProofMethod;
+  proven_at: IsoTimestamp;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
+/**
+ * A `user_password_locks` row: the account has no local password, because an
+ * identity provider created it (`provider_id`). It is independent of the
+ * account's links, so removing the provider or unlinking the identity does not
+ * hand the account a password it never had. Nothing clears it.
+ */
+export interface PasswordLockRecord {
+  user_id: Uuid;
+  provider_id: string;
+  created_at: IsoTimestamp;
+}
+
 /** A `sessions` row. The plaintext token exists only in the browser cookie. */
 export interface SessionRecord {
   id: Uuid;
@@ -745,6 +803,45 @@ export interface OrganizationRepo {
   list(options?: ListOptions & { q?: string }): Promise<Paginated<OrganizationRecord>>;
   /** Members keep their `org_id` unless the caller clears it first. */
   delete(id: Uuid): Promise<boolean>;
+}
+
+/** Links between portal accounts and identity-provider subjects. */
+export interface UserIdentityRepo {
+  /**
+   * Insert a link. A second link for the same `(provider_id, subject)`, or a
+   * second identity of one account at the same provider, raises `CONFLICT`.
+   */
+  create(input: CreateInput<UserIdentityRecord>): Promise<UserIdentityRecord>;
+  findById(id: Uuid): Promise<UserIdentityRecord | null>;
+  /** The account a returning sign-in belongs to. */
+  findBySubject(
+    providerId: string,
+    issuer: string,
+    subject: string,
+  ): Promise<UserIdentityRecord | null>;
+  /** Every identity of one account, oldest first. */
+  listByUser(userId: Uuid): Promise<UserIdentityRecord[]>;
+  /** How many links a provider holds. */
+  countByProvider(providerId: string): Promise<number>;
+  /** Record a sign-in through the link. Returns `false` when the link is gone. */
+  touchLogin(id: Uuid, email: string | null, at: IsoTimestamp): Promise<boolean>;
+  delete(id: Uuid): Promise<boolean>;
+  /** Remove every link of a provider that is being removed. Returns the count. */
+  deleteByProvider(providerId: string): Promise<number>;
+}
+
+/** Proof that an account's holder controls its address. */
+export interface EmailProofRepo {
+  /** Record (or replace) the account's proof. */
+  upsert(userId: Uuid, email: string, method: EmailProofMethod, at: IsoTimestamp): Promise<void>;
+  findByUser(userId: Uuid): Promise<EmailProofRecord | null>;
+}
+
+/** Accounts that may never use a local password. */
+export interface PasswordLockRepo {
+  /** Record the lock. Idempotent: an account already locked keeps its row. */
+  create(userId: Uuid, providerId: string, at: IsoTimestamp): Promise<void>;
+  findByUser(userId: Uuid): Promise<PasswordLockRecord | null>;
 }
 
 /** Browser sessions. */
@@ -1792,6 +1889,9 @@ export interface NexusStore {
   transaction<T>(fn: (tx: NexusStore) => Promise<T>, options?: TransactionOptions): Promise<T>;
 
   readonly users: UserRepo;
+  readonly userIdentities: UserIdentityRepo;
+  readonly emailProofs: EmailProofRepo;
+  readonly passwordLocks: PasswordLockRepo;
   readonly organizations: OrganizationRepo;
   readonly sessions: SessionRepo;
   readonly applications: ApplicationRepo;

@@ -13,7 +13,7 @@ import { ResendVerification } from '../components/auth/ResendVerification';
 import { Button, buttonClassName } from '../components/ui/Button';
 import { Icon, type IconName } from '../components/ui/Icon';
 import { FieldGroup, LabeledInput } from '../components/ui/Input';
-import { useBranding, useCaptchaConfig } from '../hooks/useBranding';
+import { useBranding, useCaptchaConfig, useSsoConfig } from '../hooks/useBranding';
 import { cn } from '../lib/cn';
 import { ApiError } from '../lib/api';
 import { useAuth } from '../stores/auth';
@@ -28,11 +28,15 @@ const ROLE_ICONS: Readonly<Record<RegistrableRole, IconName>> = {
   provider: 'upload',
 };
 
+const SSO_ONLY_NOTICE =
+  'This portal signs people in with single sign-on, which creates your account the first time you use it.';
+
 /** Self-service registration. */
 export function RegisterPage(): ReactElement {
   const { status, register } = useAuth();
   const { data: captcha } = useCaptchaConfig();
   const branding = useBranding().data;
+  const sso = useSsoConfig().data;
   // True only while the portal has no active super_admin: this registration
   // seats one, so it has to carry the operator's bootstrap token.
   const bootstrapRequired = branding?.bootstrap_required === true;
@@ -111,6 +115,25 @@ export function RegisterPage(): ReactElement {
               : 'Your account is ready. You can sign in now.'}
           </FormNotice>
           {done.verificationRequired ? <ResendVerification email={email} /> : null}
+          <Link
+            to="/login"
+            className={buttonClassName({ variant: 'primary', size: 'lg', className: 'w-full' })}
+          >
+            Go to sign in
+            <Icon name="arrow-right" className="h-4 w-4" />
+          </Link>
+        </div>
+      </AuthShell>
+    );
+  }
+
+  // Under the `sso_only` policy accounts come from the identity provider. The
+  // founding registration is the exception, whatever the policy.
+  if (sso?.registration_enabled === false && !bootstrapRequired) {
+    return (
+      <AuthShell title="Create an account">
+        <div className="flex flex-col gap-4">
+          <FormNotice tone="info">{SSO_ONLY_NOTICE}</FormNotice>
           <Link
             to="/login"
             className={buttonClassName({ variant: 'primary', size: 'lg', className: 'w-full' })}

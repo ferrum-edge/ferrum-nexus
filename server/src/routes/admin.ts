@@ -24,6 +24,7 @@ import { z } from 'zod';
 
 import {
   EMAIL_TEMPLATE_KEYS,
+  LOGIN_POLICIES,
   MAX_BRANDING_FOOTER_LINKS,
   MAX_BRANDING_FOOTER_TEXT_LENGTH,
   MAX_BRANDING_LINK_LABEL_LENGTH,
@@ -42,9 +43,12 @@ import {
   type ReconcileGatewayResponse,
   type RepairGatewayReferencesResponse,
   type SmtpTestResponse,
+  type SsoAdminSettingsResponse,
   type UpdateEmailTemplateResponse,
   type UpdateSettingsRequest,
   type UpdateSettingsResponse,
+  type UpdateSsoSettingsRequest,
+  type UpdateSsoSettingsResponse,
 } from '@ferrum-nexus/shared';
 
 import type { GatewayReconciliationService } from '../admin/gateway-reconciliation.js';
@@ -57,6 +61,13 @@ import type { AuditLogFilter } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import { assertRole, clientIp, requireAuth, requireRole } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
+import {
+  MAX_ALLOWED_EMAIL_DOMAINS,
+  MAX_CLIENT_SECRET_LENGTH,
+  MAX_SSO_PROVIDERS,
+  ssoProviderSettingsShape,
+} from '../sso/config.js';
+import type { SsoService } from '../sso/service.js';
 import { listOptions, listQuerySchema } from './common.js';
 
 /** Services this route plugin needs. */
@@ -68,6 +79,7 @@ export interface AdminRoutesOptions {
   god: GodService;
   credentials: CredentialsService;
   reconciliation: GatewayReconciliationService;
+  sso: SsoService;
 }
 
 /** Largest accepted logo, as a data URL. Roughly 384 KiB of binary. */
@@ -289,9 +301,36 @@ const godBroadcastBody = z.object({
   idempotency_key: z.string().trim().min(8).max(128).optional(),
 });
 
+/**
+ * `PUT /admin/sso`. The provider shape is the one `NEXUS_OIDC_PROVIDERS` is
+ * validated against (`sso/config.ts`), plus the write-only secret; the
+ * service checks issuers, organizations and the provider count.
+ */
+const updateSsoBody: z.ZodType<UpdateSsoSettingsRequest> = z
+  .object({
+    policy: z.enum(LOGIN_POLICIES).optional(),
+    allowed_email_domains: z
+      .array(z.string().trim().min(1).max(253))
+      .max(MAX_ALLOWED_EMAIL_DOMAINS)
+      .optional(),
+    deprovision_on_access_loss: z.boolean().optional(),
+    providers: z
+      .array(
+        z
+          .object({
+            ...ssoProviderSettingsShape,
+            client_secret: z.string().min(1).max(MAX_CLIENT_SECRET_LENGTH).nullish(),
+          })
+          .strict(),
+      )
+      .max(MAX_SSO_PROVIDERS)
+      .optional(),
+  })
+  .strict();
+
 /** `/api/admin` route plugin. */
 export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, options) => {
-  const { settings, massEmail, email, audit, god, credentials, reconciliation } = options;
+  const { settings, massEmail, email, audit, god, credentials, reconciliation, sso } = options;
   app.addHook('onRequest', requireRole('admin'));
 
   /* ── Settings ─────────────────────────────────────────────────────────── */
@@ -305,6 +344,19 @@ export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, o
     // `gateway` sections need `super_admin`, enforced by the service so the rule
     // holds wherever `updateSettings` is called from.
     return settings.updateSettings({ id: user.id, role: user.role }, patch, clientIp(request));
+  });
+
+  /* ── Single sign-on ───────────────────────────────────────────────────── */
+
+  // Readable by any admin — client secrets are never part of it. Writable by
+  // a super admin only (the service enforces it): the role mappings decide
+  // who becomes an admin.
+  app.get('/sso', async (): Promise<SsoAdminSettingsResponse> => sso.getAdminSettings());
+
+  app.put('/sso', async (request): Promise<UpdateSsoSettingsResponse> => {
+    const { user } = assertRole(request, 'super_admin');
+    const patch = parseOrThrow(updateSsoBody, request.body);
+    return sso.updateAdminSettings({ id: user.id, role: user.role }, patch, clientIp(request));
   });
 
   app.post('/settings/smtp-test', async (request): Promise<SmtpTestResponse> => {

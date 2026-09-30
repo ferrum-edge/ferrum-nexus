@@ -144,6 +144,11 @@ import type {
   CredentialRepo,
   EmailOutboxRecord,
   EmailOutboxRepo,
+  EmailProofMethod,
+  EmailProofRecord,
+  EmailProofRepo,
+  PasswordLockRecord,
+  PasswordLockRepo,
   EmailTemplateRecord,
   EmailTemplateRepo,
   GatewayIdentityRecord,
@@ -175,6 +180,8 @@ import type {
   TransactionOptions,
   UpdateInput,
   UserFilter,
+  UserIdentityRecord,
+  UserIdentityRepo,
   UserRecord,
   UserRepo,
   VerificationTokenPurpose,
@@ -200,6 +207,9 @@ import {
 const COLLECTIONS = {
   organizations: 'organizations',
   users: 'users',
+  userIdentities: 'user_identities',
+  emailProofs: 'user_email_proofs',
+  passwordLocks: 'user_password_locks',
   sessions: 'sessions',
   applications: 'applications',
   apis: 'apis',
@@ -449,6 +459,40 @@ function mapOrganization(row: Row): OrganizationRecord {
     description: strOrNull(row.description),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
+  };
+}
+
+function mapUserIdentity(row: Row): UserIdentityRecord {
+  return {
+    id: str(row._id),
+    user_id: str(row.user_id),
+    provider_id: str(row.provider_id),
+    issuer: str(row.issuer),
+    subject: str(row.subject),
+    email: strOrNull(row.email),
+    provisioned: flag(row.provisioned),
+    last_login_at: strOrNull(row.last_login_at),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
+function mapEmailProof(row: Row): EmailProofRecord {
+  return {
+    user_id: str(row._id),
+    email: str(row.email),
+    method: str(row.method) as EmailProofMethod,
+    proven_at: str(row.proven_at),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
+function mapPasswordLock(row: Row): PasswordLockRecord {
+  return {
+    user_id: str(row._id),
+    provider_id: str(row.provider_id),
+    created_at: str(row.created_at),
   };
 }
 
@@ -1315,6 +1359,30 @@ export const MESSAGE_THREAD_LATEST_INDEXES: readonly IndexDefinition[] = [
   },
 ];
 
+/**
+ * `006_user_identities`: the two keys of an identity-provider link, which the
+ * SQL dialects declare as unique constraints. `(provider_id, issuer, subject)`
+ * decides whose account a returning sign-in opens; `(user_id, provider_id)`
+ * keeps an account to one identity per provider and serves the per-account
+ * listing. `user_email_proofs` and `user_password_locks` are keyed by `_id`
+ * (the account id) and need no index. No collection needs a creation step;
+ * the first insert makes it.
+ */
+export const USER_IDENTITY_INDEXES: readonly IndexDefinition[] = [
+  {
+    collection: 'user_identities',
+    name: 'ux_user_identities_subject',
+    key: { provider_id: 1, issuer: 1, subject: 1 },
+    unique: true,
+  },
+  {
+    collection: 'user_identities',
+    name: 'ux_user_identities_user_provider',
+    key: { user_id: 1, provider_id: 1 },
+    unique: true,
+  },
+];
+
 /** The baseline messages index {@link MESSAGE_THREAD_LATEST_INDEXES} supersedes. */
 const SUPERSEDED_MESSAGES_THREAD_INDEX = 'ix_messages_thread';
 
@@ -1393,6 +1461,11 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
     id: '005_notification_preferences',
     indexes: [],
     apply: async (): Promise<void> => {},
+  },
+  {
+    id: '006_user_identities',
+    indexes: USER_IDENTITY_INDEXES,
+    apply: (db: Db): Promise<void> => createIndexes(db, USER_IDENTITY_INDEXES),
   },
 ];
 
@@ -1821,6 +1894,125 @@ class MongoStore implements NexusStore {
         .sort({ created_at: 1, _id: 1 })
         .toArray();
       return docs.map((doc) => mapUser(doc as Row));
+    },
+  };
+
+  /* ── userIdentities ───────────────────────────────────────────────────── */
+
+  readonly userIdentities: UserIdentityRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapConflict('That identity is already linked to an account', () =>
+        this.col(COLLECTIONS.userIdentities).insertOne(
+          {
+            _id: meta.id,
+            user_id: input.user_id,
+            provider_id: input.provider_id,
+            issuer: input.issuer,
+            subject: input.subject,
+            email: input.email ?? null,
+            provisioned: input.provisioned,
+            last_login_at: input.last_login_at ?? null,
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
+          } as NexusDoc,
+          this.opts,
+        ),
+      );
+      const created = await this.userIdentities.findById(meta.id);
+      if (!created) throw new Error('userIdentities.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = asRow(await this.col(COLLECTIONS.userIdentities).findOne({ _id: id }, this.opts));
+      return row ? mapUserIdentity(row) : null;
+    },
+
+    findBySubject: async (providerId, issuer, subject) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.userIdentities).findOne(
+          { provider_id: providerId, issuer, subject } as Filter<NexusDoc>,
+          this.opts,
+        ),
+      );
+      return row ? mapUserIdentity(row) : null;
+    },
+
+    listByUser: async (userId) => {
+      const docs = await this.col(COLLECTIONS.userIdentities)
+        .find({ user_id: userId } as Filter<NexusDoc>, this.opts)
+        .sort({ created_at: 1, _id: 1 })
+        .toArray();
+      return docs.map((doc) => mapUserIdentity(doc as Row));
+    },
+
+    countByProvider: async (providerId) =>
+      this.col(COLLECTIONS.userIdentities).countDocuments(
+        { provider_id: providerId } as Filter<NexusDoc>,
+        this.opts,
+      ),
+
+    touchLogin: async (id, email, at) => {
+      const result = await this.col(COLLECTIONS.userIdentities).updateOne(
+        { _id: id },
+        { $set: { email, last_login_at: at, updated_at: nowIso() } },
+        this.opts,
+      );
+      return result.matchedCount > 0;
+    },
+
+    delete: async (id) =>
+      (await this.col(COLLECTIONS.userIdentities).deleteOne({ _id: id }, this.opts)).deletedCount >
+      0,
+
+    deleteByProvider: async (providerId) =>
+      (
+        await this.col(COLLECTIONS.userIdentities).deleteMany(
+          { provider_id: providerId } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount,
+  };
+
+  /* ── emailProofs ──────────────────────────────────────────────────────── */
+
+  readonly emailProofs: EmailProofRepo = {
+    upsert: async (userId, email, method, at) => {
+      await this.col(COLLECTIONS.emailProofs).updateOne(
+        { _id: userId },
+        {
+          $set: { email: email.trim().toLowerCase(), method, proven_at: at, updated_at: at },
+          $setOnInsert: { created_at: at },
+        },
+        { ...this.opts, upsert: true },
+      );
+    },
+
+    findByUser: async (userId) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.emailProofs).findOne({ _id: userId }, this.opts),
+      );
+      return row ? mapEmailProof(row) : null;
+    },
+  };
+
+  /* ── passwordLocks ────────────────────────────────────────────────────── */
+
+  readonly passwordLocks: PasswordLockRepo = {
+    create: async (userId, providerId, at) => {
+      await this.col(COLLECTIONS.passwordLocks).updateOne(
+        { _id: userId },
+        { $setOnInsert: { provider_id: providerId, created_at: at } },
+        { ...this.opts, upsert: true },
+      );
+    },
+
+    findByUser: async (userId) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.passwordLocks).findOne({ _id: userId }, this.opts),
+      );
+      return row ? mapPasswordLock(row) : null;
     },
   };
 

@@ -20,8 +20,9 @@
  * ones — and the current schema is whatever `store.migrate()` builds, so every
  * forward migration a release has not shipped (from `v0.1.0`,
  * `002_api_gateway_plugins` and `003_messages_thread_latest`; from every
- * release, `004_api_spec_changes`) is applied here on top of a populated
- * database with no change to the harness.
+ * release, `004_api_spec_changes`, `005_notification_preferences` and
+ * `006_user_identities`) is applied here on top of a populated database with
+ * no change to the harness.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
@@ -1061,6 +1062,27 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
               [ID.specV2],
             );
             assert.equal(await store.apiSpecChanges.deleteByApi(ID.invoices), 1);
+            // So is `006_user_identities`: a baseline account can be linked to
+            // an identity-provider subject, found by it, and unlinked.
+            const identity = await store.userIdentities.create({
+              user_id: ID.client,
+              provider_id: 'corp',
+              issuer: 'https://idp.example.com',
+              subject: 'upgrade-subject',
+              email: 'client@example.test',
+              provisioned: false,
+            });
+            const found = await store.userIdentities.findBySubject(
+              'corp',
+              'https://idp.example.com',
+              'upgrade-subject',
+            );
+            assert.equal(found?.user_id, ID.client);
+            assert.equal(await store.userIdentities.delete(identity.id), true);
+            // No account upgraded from an earlier release holds an address
+            // proof, whatever its `email_verified` says, or a password lock.
+            assert.equal(await store.emailProofs.findByUser(ID.client), null);
+            assert.equal(await store.passwordLocks.findByUser(ID.client), null);
 
             // `005_notification_preferences` records nothing for an existing
             // account, which therefore keeps receiving every notice.

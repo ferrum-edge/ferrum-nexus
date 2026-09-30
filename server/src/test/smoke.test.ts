@@ -3651,6 +3651,159 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal((await store.emailOutbox.findById(mine?.id ?? ''))?.status, 'pending');
     });
 
+    /* ── identity-provider links ──────────────────────────────────────── */
+
+    it('userIdentities: one account per subject, one identity per provider', async () => {
+      const owner = await makeUser();
+      const other = await makeUser();
+      const provider = `corp-${newId().slice(0, 8)}`;
+      const issuer = 'https://idp.example.com/realms/corp';
+      const subject = `subject-${newId()}`;
+
+      const linked = await store.userIdentities.create({
+        user_id: owner.id,
+        provider_id: provider,
+        issuer,
+        subject,
+        email: owner.email,
+        provisioned: true,
+      });
+      assert.equal(linked.user_id, owner.id);
+      assert.equal(linked.provider_id, provider);
+      assert.equal(linked.issuer, issuer);
+      assert.equal(linked.subject, subject);
+      assert.equal(linked.email, owner.email);
+      assert.equal(linked.provisioned, true);
+      assert.equal(linked.last_login_at, null);
+      assert.deepEqual(await store.userIdentities.findById(linked.id), linked);
+      assert.deepEqual(await store.userIdentities.findBySubject(provider, issuer, subject), linked);
+      // Subjects are case-sensitive, and scoped to their provider and issuer.
+      assert.equal(
+        await store.userIdentities.findBySubject(provider, issuer, subject.toUpperCase()),
+        null,
+      );
+      assert.equal(
+        await store.userIdentities.findBySubject(`${provider}-x`, issuer, subject),
+        null,
+      );
+      assert.equal(
+        await store.userIdentities.findBySubject(provider, 'https://other.example.com', subject),
+        null,
+      );
+
+      // The subject cannot be claimed by a second account…
+      await assert.rejects(
+        store.userIdentities.create({
+          user_id: other.id,
+          provider_id: provider,
+          issuer,
+          subject,
+          provisioned: false,
+        }),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+      // …and the account cannot hold a second identity at the same provider.
+      await assert.rejects(
+        store.userIdentities.create({
+          user_id: owner.id,
+          provider_id: provider,
+          issuer,
+          subject: `${subject}-second`,
+          provisioned: false,
+        }),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+
+      const elsewhere = await store.userIdentities.create({
+        user_id: owner.id,
+        provider_id: `${provider}-b`,
+        issuer,
+        subject,
+        provisioned: false,
+      });
+      assert.equal(elsewhere.email, null);
+      assert.equal(elsewhere.provisioned, false);
+      assert.deepEqual(
+        (await store.userIdentities.listByUser(owner.id)).map((row) => row.id).sort(),
+        [linked.id, elsewhere.id].sort(),
+      );
+      assert.deepEqual(await store.userIdentities.listByUser(other.id), []);
+      assert.equal(await store.userIdentities.countByProvider(provider), 1);
+      assert.equal(await store.userIdentities.countByProvider(`${provider}-none`), 0);
+
+      const at = nowIso();
+      assert.equal(await store.userIdentities.touchLogin(linked.id, 'new@example.test', at), true);
+      const touched = await store.userIdentities.findById(linked.id);
+      assert.equal(touched?.email, 'new@example.test');
+      assert.equal(touched?.last_login_at, at);
+      assert.equal(await store.userIdentities.touchLogin(newId(), null, at), false);
+
+      // A link written in a transaction that rolls back is not there afterwards.
+      const rolledBack = `subject-${newId()}`;
+      await assert.rejects(
+        store.transaction(async (tx) => {
+          await tx.userIdentities.create({
+            user_id: other.id,
+            provider_id: provider,
+            issuer,
+            subject: rolledBack,
+            provisioned: false,
+          });
+          throw new Error('roll back');
+        }),
+        /roll back/,
+      );
+      assert.equal(await store.userIdentities.findBySubject(provider, issuer, rolledBack), null);
+
+      assert.equal(await store.userIdentities.delete(linked.id), true);
+      assert.equal(await store.userIdentities.delete(linked.id), false);
+      assert.equal(await store.userIdentities.findBySubject(provider, issuer, subject), null);
+      // With the link gone the subject can be linked again.
+      const relinked = await store.userIdentities.create({
+        user_id: other.id,
+        provider_id: provider,
+        issuer,
+        subject,
+        provisioned: false,
+      });
+      assert.equal(relinked.user_id, other.id);
+      // Removing a provider removes its links, and only its links.
+      assert.equal(await store.userIdentities.deleteByProvider(provider), 1);
+      assert.equal(await store.userIdentities.countByProvider(provider), 0);
+      assert.equal(await store.userIdentities.countByProvider(`${provider}-b`), 1);
+    });
+
+    it('emailProofs: one proof per account, replaced by the next one', async () => {
+      const account = await makeUser();
+      assert.equal(await store.emailProofs.findByUser(account.id), null);
+      const first = nowIso();
+      await store.emailProofs.upsert(account.id, 'Proven@Example.test', 'verification_link', first);
+      const proof = await store.emailProofs.findByUser(account.id);
+      assert.equal(proof?.email, 'proven@example.test');
+      assert.equal(proof?.method, 'verification_link');
+      assert.equal(proof?.proven_at, first);
+      const later = isoInSeconds(60);
+      await store.emailProofs.upsert(account.id, 'moved@example.test', 'identity_provider', later);
+      const replaced = await store.emailProofs.findByUser(account.id);
+      assert.equal(replaced?.email, 'moved@example.test');
+      assert.equal(replaced?.method, 'identity_provider');
+      assert.equal(replaced?.proven_at, later);
+      assert.equal(replaced?.created_at, proof?.created_at);
+      assert.equal(await store.emailProofs.findByUser(newId()), null);
+    });
+
+    it('passwordLocks: one lock per account, kept by a second one', async () => {
+      const account = await makeUser();
+      assert.equal(await store.passwordLocks.findByUser(account.id), null);
+      const first = nowIso();
+      await store.passwordLocks.create(account.id, 'corp', first);
+      const lock = await store.passwordLocks.findByUser(account.id);
+      assert.deepEqual(lock, { user_id: account.id, provider_id: 'corp', created_at: first });
+      await store.passwordLocks.create(account.id, 'partner', isoInSeconds(60));
+      assert.deepEqual(await store.passwordLocks.findByUser(account.id), lock);
+      assert.equal(await store.passwordLocks.findByUser(newId()), null);
+    });
+
     /* ── gateway identities ───────────────────────────────────────────── */
 
     it('gatewayIdentities: one registration per name, moved by a later claim', async () => {

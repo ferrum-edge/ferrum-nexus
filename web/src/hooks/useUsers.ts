@@ -13,8 +13,10 @@ import type {
   ListOrganizationsQuery,
   ListOrganizationsResponse,
   ListUsersQuery,
+  ListUserIdentitiesResponse,
   ListUsersResponse,
   RetryGatewayTeardownResponse,
+  StartSsoLinkResponse,
   UpdateMeRequest,
   UpdateMeResponse,
   UpdateNotificationPreferencesRequest,
@@ -22,7 +24,7 @@ import type {
   UpdateUserRequest,
   UpdateUserResponse,
 } from '@ferrum-nexus/shared';
-import { organizationsApi, usersApi } from '../lib/api';
+import { authApi, organizationsApi, usersApi } from '../lib/api';
 import { useOptionalAuth } from '../stores/auth';
 import { queryKeys } from './keys';
 
@@ -118,6 +120,28 @@ export function useUpdateNotificationPreferences(): UseMutationResult<
       usersApi.updateNotificationPreferences(body),
     onSuccess: (data) => {
       queryClient.setQueryData(queryKeys.users.notificationPreferences, data);
+    },
+  });
+}
+
+/** The signed-in account's own single sign-on links. */
+export function useMyIdentities(): UseQueryResult<ListUserIdentitiesResponse> {
+  return useQuery({
+    queryKey: queryKeys.users.myIdentities,
+    queryFn: () => usersApi.myIdentities(),
+  });
+}
+
+/**
+ * Link the signed-in account to a provider: start the attempt, then leave for
+ * the provider with a full navigation. The callback brings the browser back to
+ * the profile page.
+ */
+export function useStartSsoLink(): UseMutationResult<StartSsoLinkResponse, Error, string> {
+  return useMutation({
+    mutationFn: (providerId: string) => authApi.startSsoLink(providerId),
+    onSuccess: ({ location }) => {
+      window.location.assign(location);
     },
   });
 }

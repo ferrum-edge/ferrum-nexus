@@ -273,6 +273,20 @@ template` and sends the built-in one, so account recovery keeps working.
 
 See the [template authoring rules](guides/admin-guide.md#placeholders).
 
+### Single sign-on
+
+All optional. Providers can also be added in **Admin → Settings → Single
+sign-on**. Setup, fields and the login policies are in
+[§14](#14-single-sign-on-openid-connect).
+
+| Variable                             | Default   | Notes                                                                                                                                                                 |
+| ------------------------------------ | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXUS_OIDC_PROVIDERS`               | _(empty)_ | JSON array of providers, validated at startup like a settings save. Read-only in the admin UI.                                                                        |
+| `NEXUS_OIDC_CLIENT_SECRET_<ID>`      | _(unset)_ | A provider's client secret instead of `client_secret` in the JSON; the id upper-cased, `-` as `_`. Never logged.                                                      |
+| `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK`     | `false`   | Development only: accept a plain `http://` issuer on exactly `localhost`, `127.0.0.1` or `::1`. Every other issuer must be `https://`.                                |
+| `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES` | `false`   | Let provider requests reach private, loopback and reserved addresses, for a provider on a private network. Off, every provider host must resolve to public addresses. |
+| `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN`  | `false`   | Under the `sso_only` policy, still accept password sign-in for `super_admin` accounts. Environment-only; each such sign-in is audited `break_glass`.                  |
+
 ### Abuse controls
 
 Registration may be open, so a signed-up account is semi-trusted. These bounds
@@ -1305,12 +1319,13 @@ standalone mode has no rollback guarantee.
 
 ## 7. Rotating `NEXUS_SECRET_KEY`
 
-Two subkeys are HKDF-derived from `NEXUS_SECRET_KEY`:
+These subkeys are HKDF-derived from `NEXUS_SECRET_KEY`:
 
-| Subkey                            | HKDF `info`             | Protects                                                                        |
-| --------------------------------- | ----------------------- | ------------------------------------------------------------------------------- |
-| Settings encryption (AES-256-GCM) | `nexus-settings-v1`     | `app_settings` rows with `encrypted = 1`: `smtp.password`, `captcha.secret_key` |
-| Session token HMAC (HMAC-SHA-256) | `nexus-session-hmac-v1` | `sessions.token_hash`, `email_verification_tokens.token_hash`                   |
+| Subkey                               | HKDF `info`                | Protects                                                                                                  |
+| ------------------------------------ | -------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Settings encryption (AES-256-GCM)    | `nexus-settings-v1`        | `app_settings` rows with `encrypted = 1`: `smtp.password`, `captcha.secret_key`, `sso.client_secret.<id>` |
+| Session token HMAC (HMAC-SHA-256)    | `nexus-session-hmac-v1`    | `sessions.token_hash`, `email_verification_tokens.token_hash`                                             |
+| Single sign-on attempt (AES-256-GCM) | `nexus-sso-transaction-v1` | The `nexus_sso` cookie of a sign-in in progress (10 minutes at most)                                      |
 
 Passwords are hashed with scrypt and a random salt, independent of the key, so
 password sign-in survives a rotation.
@@ -1325,6 +1340,10 @@ Swapping the key without re-encrypting breaks the encrypted settings:
   `smtp.password_set` reads `false` until a super admin re-enters it.
 - **CAPTCHA fails closed** (`CAPTCHA_FAILED`, "CAPTCHA is enabled but not fully
   configured"), so registration **and login** stop working.
+- **A single sign-on provider saved in settings fails closed**
+  (`provider_unavailable`) until its client secret is re-entered. Environment
+  providers are unaffected. A sign-in in progress during the swap fails with
+  `invalid_state` and can simply be retried.
 
 `npm run rotate-secret-key` (in an image: `node server/dist/db/rotate-key-cli.js`)
 avoids this. It re-encrypts every encrypted `app_settings` row from
@@ -2261,6 +2280,232 @@ the gateway, so you can run one at any time to decide.
   consumers.
 - Alert on `edge.reconciliation.status == "orphaned"` and on the
   `The gateway no longer holds references the portal stored` log line.
+
+---
+
+## 14. Single sign-on (OpenID Connect)
+
+Nexus signs users in with any standards-compliant OpenID Connect provider —
+Keycloak, Dex, Entra ID, Okta, Auth0, Google Workspace — using the
+authorization-code flow with PKCE. Accounts are created on first sign-in, roles
+and organizations follow the provider's groups or claims, and each deployment
+chooses whether passwords still work. The security model is in
+[`security.md`, "Single sign-on"](security.md#single-sign-on-openid-connect).
+
+### Register Nexus with the provider
+
+Create a confidential OpenID Connect client (a public client works too; PKCE is
+always used) with:
+
+- **Redirect URI:** `NEXUS_PUBLIC_URL` + `/api/auth/sso/<id>/callback`, where
+  `<id>` is the provider id you give Nexus, e.g.
+  `https://portal.example.com/api/auth/sso/corp/callback`. **Admin → Settings →
+  Single sign-on** shows the exact value for each provider.
+- **Grant type:** authorization code. **PKCE:** `S256` (Nexus refuses a
+  provider whose discovery document lists PKCE methods without it).
+- **Scopes:** `openid email profile`, plus whatever carries your groups (Dex:
+  `groups`; Keycloak: a "groups" client-scope mapper, or `realm_access.roles`).
+- **ID token signing:** `RS256` or `ES256`. Nothing else is accepted.
+- **Claims:** `sub`, `email` and `email_verified`. An address the provider does
+  not mark `email_verified: true` (the JSON boolean) is never linked to an
+  existing account automatically, never admitted by a domain list, and by
+  default never provisioned. Providers that omit the claim (Entra ID, for one)
+  need `require_verified_email: false` and no domain list. Their users are then
+  provisioned, but an existing account is linked only explicitly, from its
+  profile.
+
+The issuer must be `https://` and must match the provider's discovery document
+exactly — including any trailing slash (`https://tenant.auth0.com/`). Nexus
+fetches `<issuer>/.well-known/openid-configuration` and the key set over HTTPS,
+without following redirects, and caches both for an hour; a failed fetch is
+retried after 30 seconds at the earliest. Every provider host, the endpoints
+its discovery document names included, must resolve to public addresses. For
+a provider on a private network set `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES=true`.
+
+### Configure the provider in Nexus
+
+Either in the environment (read-only in the admin UI):
+
+```bash
+NEXUS_OIDC_PROVIDERS='[{
+  "id": "corp",
+  "display_name": "Corporate SSO",
+  "issuer": "https://idp.example.com/realms/corp",
+  "client_id": "nexus",
+  "scopes": ["openid", "email", "profile", "groups"],
+  "role_mappings": [
+    { "claim": "groups", "value": "api-publishers", "role": "provider" },
+    { "claim": "groups", "value": "nexus-admins", "role": "admin" }
+  ]
+}]'
+NEXUS_OIDC_CLIENT_SECRET_CORP='…'   # or "client_secret" in the JSON
+```
+
+or as a `super_admin` in **Admin → Settings → Single sign-on**, where the
+client secret is write-only and stored AES-256-GCM encrypted under
+`NEXUS_SECRET_KEY` (`rotate-secret-key` re-encrypts it). An id declared in the
+environment cannot also be saved in settings. At most 10 providers in all.
+
+A saved provider's `issuer` cannot change while accounts are linked through it:
+the links belong to the old issuer's subjects. Remove the provider, which
+deletes its links, and add it again. Accounts it provisioned keep their
+password lock (see "How accounts are matched"). If an environment provider is later
+declared with the id of a saved one, the environment provider is in force. The
+settings page then lists the saved one as shadowed
+(`shadowed_provider_ids`), and saving the providers removes it. The
+environment provider's links are kept.
+
+| Field                               | Default                        | Meaning                                                                                                                                                                                  |
+| ----------------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                                | _(required)_                   | 1–32 lower-case letters, digits or hyphens; part of the redirect URI.                                                                                                                    |
+| `display_name`                      | the id                         | Label of the sign-in button.                                                                                                                                                             |
+| `issuer`, `client_id`               | _(required)_                   | As registered at the provider.                                                                                                                                                           |
+| `client_secret`                     | _(none — public client)_       | Sent with `client_secret_basic` (or `client_secret_post` when that is all the provider supports). In the environment it may come from `NEXUS_OIDC_CLIENT_SECRET_<ID>` (`-` becomes `_`). |
+| `scopes`                            | `["openid","email","profile"]` | Must include `openid`.                                                                                                                                                                   |
+| `enabled`                           | `true`                         | A disabled provider has no button and refuses callbacks.                                                                                                                                 |
+| `jit_provisioning`                  | `true`                         | Create an account on first sign-in when none is linked or matched.                                                                                                                       |
+| `link_existing_accounts`            | `true`                         | Link automatically to an existing non-admin account with the same address, under the proven-address rule below.                                                                          |
+| `require_verified_email`            | `true`                         | Provision only when the provider asserts `email_verified: true`.                                                                                                                         |
+| `allowed_email_domains`             | `[]`                           | This provider only: linking and provisioning need a verified address in one of these domains, on top of the deployment-wide list. Empty admits any.                                      |
+| `disable_local_password_for_linked` | `false`                        | Refuse password sign-in and reset for accounts linked at this provider, so its offboarding and MFA bind them.                                                                            |
+| `sync_roles`                        | `true`                         | Re-apply the mapped role on every sign-in.                                                                                                                                               |
+| `default_role`                      | `client`                       | Role when no mapping matches; `null` refuses the sign-in instead.                                                                                                                        |
+| `role_mappings`                     | `[]`                           | `{ claim, value, role }`, `role` one of `client`, `provider`, `admin`. The highest matching role wins.                                                                                   |
+| `org_mappings`                      | `[]`                           | `{ claim, value, org_id }`; the first match wins, no match means no organization. Empty: organizations are not managed from claims.                                                      |
+
+A `claim` is a claim name (`groups`, or a namespaced `https://example.com/groups`)
+or a dot path into the ID token (`realm_access.roles`). It matches when the
+claim equals the value or is an array containing it; values compare exactly.
+Claims are read from the ID token only — map groups into the ID token at the
+provider.
+
+**`super_admin` cannot be mapped.** A mapping names `client`, `provider` or
+`admin` only. An account that is a `super_admin` is never changed by claims,
+and is not refused when its claims map to no role.
+Mapping `admin` makes the provider's group the source of truth for who
+administers the portal, which is why only a `super_admin` may edit these
+settings.
+
+### Deployment-wide settings
+
+Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
+
+- **Login policy.** `local_and_sso` (the default — with no provider it is
+  password-only in effect), `local_only` (single sign-on off), or `sso_only`:
+  password sign-in and self-service registration are refused. `sso_only` cannot
+  be saved without an enabled provider, nor before the `super_admin` saving it
+  has linked their own account to an enabled provider.
+- **Allowed email domains.** When set, every single sign-on must present an
+  address the provider verified in one of these domains. That includes
+  returning users, so once a list is set, a provider that never sends
+  `email_verified` (Entra ID, for one) is refused for everyone
+  (`email_not_verified`). Domains match exactly: `example.com` does not admit
+  `sub.example.com`. A provider's own `allowed_email_domains` applies as well
+  when it links or provisions.
+- **Deprovision on access loss.** Off by default. When on, a sign-in whose
+  claims map to no role disables the account, ends its sessions and queues the
+  same gateway revocation an administrator's disable does
+  ([§11](#11-gateway-revocation-for-disabled-accounts)): every ACL group and
+  credential of `nexus-user-<id>` and each `nexus-app-<id>` goes. Grants are
+  kept, so re-enabling the account restores their ACL groups, as for any
+  disable. This runs **when the user next signs in**; Nexus gets no events
+  from the provider.
+
+### How accounts are matched
+
+1. A returning sign-in is matched on the provider id, its issuer and `sub`,
+   never on the address. The account's own address is not rewritten when the
+   provider's changes.
+2. With no link, an existing account with the same address is linked
+   automatically only when all of these hold:
+   - `link_existing_accounts` is on;
+   - the account is not an `admin` or `super_admin` (`privileged_account`);
+   - the provider asserts `email_verified: true`;
+   - the portal holds a **recorded proof** of the account's address. The
+     holder redeemed a verification link or completed a password reset for
+     it, or an identity provider asserted it verified when it provisioned or
+     linked the account.
+
+   The registration policy plays no part. Accounts registered while
+   `require_email_verification` was off have no proof, and turning the
+   requirement on later does not give them one. They are linked only once
+   their holder verifies or resets, or explicitly (below). Otherwise the
+   sign-in is refused with `account_exists`.
+
+3. Otherwise a new account is created (`jit_provisioning`) with the mapped role
+   and organization. It has no usable password: password sign-in fails,
+   **Forgot password** sends nothing, and a reset link is refused. The account
+   signs in through its provider only. This lock is kept apart from the link
+   and cannot be cleared. Unlinking the identity or removing the provider
+   leaves the account active but with no way to sign in until a provider
+   links it again by its proven address. To end such an account's access,
+   disable it.
+
+**Explicit linking.** A signed-in user links their own account from **Profile →
+Linked sign-in**, whatever address the provider holds. The provider's domain
+list still applies. This is how administrators link: no provider can link an
+`admin` or `super_admin` account by address.
+
+**Passwords of linked accounts.** A pre-existing account keeps its password
+when it is linked, so the provider's offboarding and MFA do not bind it: it
+can still sign in with the password. Set `disable_local_password_for_linked`
+on the provider, or use `sso_only`, where that matters. With the flag on,
+password sign-in and reset are refused for every account linked at that
+provider while the link exists. A `super_admin` is exempt from all of this, so
+break-glass sign-in and password reset always work for one.
+
+Administrators see and remove an account's links with
+`GET /api/users/:id/identities` and
+`DELETE /api/users/:id/identities/:identityId`. A user sees their own with
+`GET /api/users/me/identities`.
+
+### Moving to SSO only, and getting back in
+
+1. Configure the provider under `local_and_sso`. Every `super_admin` signs in
+   with their password and links their account from **Profile → Linked
+   sign-in**. The portal refuses `sso_only` until the `super_admin` saving it
+   has a link to an enabled provider.
+2. Switch the policy to `sso_only`. The founding registration (with the
+   bootstrap token) still works on an empty portal.
+3. Keep `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN` in your runbook. Set it to `true`
+   and restart, and a `super_admin` can sign in with a password under
+   `sso_only`, audited with `break_glass: true`, while everyone else is still
+   refused. Use it when the provider is down or misconfigured, fix the
+   settings, then remove it.
+
+### When a sign-in fails
+
+The browser lands on `/login?sso_error=<reason>`, or on
+`/profile?sso_error=<reason>` for a link started from the profile, and the
+server logs
+`A single sign-on attempt was refused` at `warn` with the provider id, the
+reason and a short detail (never a token or secret):
+
+| Reason                     | Usual cause                                                                                                                                       |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sso_disabled`             | Policy `local_only`, or an unknown or disabled provider.                                                                                          |
+| `provider_unavailable`     | Discovery, JWKS or the token endpoint failed; an issuer mismatch; a secret that no longer decrypts.                                               |
+| `invalid_state`            | The sign-in took over 10 minutes, cookies were blocked, or the response was not for this browser.                                                 |
+| `idp_error`                | The provider refused the request (consent denied, client misconfigured).                                                                          |
+| `token_invalid`            | The ID token failed validation: wrong issuer or audience, expired or `iat` in the future (beyond 60 s of skew), older than 10 minutes, bad nonce. |
+| `email_required`           | No usable `email` claim — request the `email` scope.                                                                                              |
+| `email_domain_not_allowed` | The address is outside the allowed domains (deployment-wide or the provider's).                                                                   |
+| `email_not_verified`       | The provider did not assert `email_verified: true` where linking, a domain list or provisioning needs it.                                         |
+| `account_exists`           | An account holds the address but the portal has no proof of it, or it is linked there already (see "How accounts are matched").                   |
+| `privileged_account`       | The address belongs to an `admin` or `super_admin`, which links from its profile only.                                                            |
+| `link_session_mismatch`    | A profile link came back to a different session, or none: start it again while signed in.                                                         |
+| `already_linked`           | A profile link found the identity linked to another account, or this account linked at that provider.                                             |
+| `access_denied`            | The claims map to no role.                                                                                                                        |
+| `account_disabled`         | The linked account is disabled.                                                                                                                   |
+| `signup_disabled`          | No account matched and `jit_provisioning` is off.                                                                                                 |
+| `server_error`             | Anything else; see the log.                                                                                                                       |
+
+### Local development against a provider
+
+`NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true` accepts a plain `http://` issuer on
+exactly `localhost`, `127.0.0.1` or `::1`, such as a Dex or Keycloak on the
+same machine, and exempts those hosts from the public-address check. Every
+other issuer must be HTTPS whatever it says. Never set it in production.
 
 ## Gateway resource attribution
 

@@ -15,6 +15,7 @@ import {
   lazyRouteComponent,
   Outlet,
 } from '@tanstack/react-router';
+import { isSsoErrorReason, type SsoErrorReason } from '@ferrum-nexus/shared';
 import { AppShell } from './components/layout/AppShell';
 import { isCatalogDetailTab, type CatalogDetailTab } from './lib/catalog-tabs';
 import { NotFoundPage } from './routes/NotFoundPage';
@@ -34,8 +35,18 @@ const loginRoute = createRoute({
   // has to be shown on the page the user is sent to next. The key is omitted
   // rather than set to `false`, which is what keeps every other `to="/login"`
   // link from having to spell it out.
-  validateSearch: (search: Record<string, unknown>): { reset?: true } =>
-    search.reset === true || search.reset === 'true' || search.reset === '1' ? { reset: true } : {},
+  //
+  // `?sso_error=<reason>` is how a refused single sign-on comes back: the
+  // callback is a server redirect, so the reason rides on the URL. Only the
+  // closed set of reasons is kept; anything else is dropped rather than shown.
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { reset?: true; sso_error?: SsoErrorReason } => ({
+    ...(search.reset === true || search.reset === 'true' || search.reset === '1'
+      ? { reset: true as const }
+      : {}),
+    ...(isSsoErrorReason(search.sso_error) ? { sso_error: search.sso_error } : {}),
+  }),
   component: lazyRouteComponent(() => import('./routes/LoginPage'), 'LoginPage'),
 });
 
@@ -132,6 +143,9 @@ const messageThreadRoute = createRoute({
 const profileRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/profile',
+  // `?sso_error=<reason>` is how a refused explicit link comes back.
+  validateSearch: (search: Record<string, unknown>): { sso_error?: SsoErrorReason } =>
+    isSsoErrorReason(search.sso_error) ? { sso_error: search.sso_error } : {},
   component: lazyRouteComponent(() => import('./routes/ProfilePage'), 'ProfilePage'),
 });
 

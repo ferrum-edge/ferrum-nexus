@@ -1,0 +1,19 @@
+{
+  "id": "006_user_identities",
+  "backend": "mongodb",
+  "description": "Frozen snapshot of USER_IDENTITY_INDEXES in server/src/db/adapters/mongodb/index.ts",
+  "indexes": [
+    {
+      "collection": "user_identities",
+      "name": "ux_user_identities_subject",
+      "key": { "provider_id": 1, "issuer": 1, "subject": 1 },
+      "unique": true
+    },
+    {
+      "collection": "user_identities",
+      "name": "ux_user_identities_user_provider",
+      "key": { "user_id": 1, "provider_id": 1 },
+      "unique": true
+    }
+  ]
+}

@@ -1,5 +1,9 @@
 import { useQuery, type UseQueryResult } from '@tanstack/react-query';
-import type { BrandingResponse, CaptchaConfigResponse } from '@ferrum-nexus/shared';
+import type {
+  BrandingResponse,
+  CaptchaConfigResponse,
+  SsoPublicConfigResponse,
+} from '@ferrum-nexus/shared';
 import { authApi, brandingApi } from '../lib/api';
 import { queryKeys } from './keys';
 
@@ -19,6 +23,16 @@ export function useCaptchaConfig(): UseQueryResult<CaptchaConfigResponse> {
     queryKey: queryKeys.captcha,
     queryFn: () => authApi.captcha(),
     staleTime: 5 * 60_000,
+    retry: 1,
+  });
+}
+
+/** The login policy and the single sign-on providers the sign-in page offers. */
+export function useSsoConfig(): UseQueryResult<SsoPublicConfigResponse> {
+  return useQuery({
+    queryKey: queryKeys.sso,
+    queryFn: () => authApi.sso(),
+    staleTime: 60_000,
     retry: 1,
   });
 }

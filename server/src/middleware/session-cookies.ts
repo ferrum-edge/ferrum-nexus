@@ -2,10 +2,12 @@
  * The one place that knows how the session cookie pair is written and cleared.
  *
  * Three callers share it and must not drift apart: `/api/auth` (login,
- * register, logout), `/api/users` (a password change re-issues the session),
- * and the auth plugin's sliding-expiration hook, which re-stamps the pair
- * whenever it extends the session row. Keeping the flags in a single module is
- * what makes "the cookie lifetime always matches the row" checkable.
+ * register, logout, and the single sign-on callback), `/api/users` (a password
+ * change re-issues the session), and the auth plugin's sliding-expiration
+ * hook, which re-stamps the pair whenever it extends the session row. Keeping
+ * the flags in a single module is what makes "the cookie lifetime always
+ * matches the row" checkable. The short-lived single sign-on attempt cookie
+ * is written here too, under the same no-cache rule.
  *
  * It also owns the rule that keeps those cookies out of shared caches: a
  * response carrying `Set-Cookie` is never cacheable. The pair is a bearer
@@ -18,7 +20,13 @@
 
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
-import { CSRF_COOKIE, SESSION_COOKIE } from '@ferrum-nexus/shared';
+import {
+  CSRF_COOKIE,
+  SESSION_COOKIE,
+  SSO_TRANSACTION_COOKIE,
+  SSO_TRANSACTION_COOKIE_PATH,
+  SSO_TRANSACTION_TTL_SECONDS,
+} from '@ferrum-nexus/shared';
 
 import type { NexusConfig } from '../config/index.js';
 import { isApiRequest } from './api-route.js';
@@ -136,5 +144,41 @@ export function clearSessionCookies(reply: FastifyReply, config: NexusConfig): v
   const base = { path: '/', sameSite: 'lax' as const, secure: config.cookieSecure };
   reply.clearCookie(SESSION_COOKIE, { ...base, httpOnly: true });
   reply.clearCookie(CSRF_COOKIE, { ...base, httpOnly: false });
+  forbidResponseCaching(reply);
+}
+
+/**
+ * Write the sealed single sign-on attempt (`nexus_sso`).
+ *
+ * HttpOnly, scoped to `/api/auth/sso` so no other route ever receives it, and
+ * alive only as long as one attempt may take. `SameSite=Lax` rather than
+ * `Strict` on purpose: the provider sends the browser back with a top-level
+ * cross-site `GET`, and a `Strict` cookie would not come with it. What makes
+ * the callback safe against a forged response is not the cookie's reach but
+ * its content — the sealed `state` the response has to match.
+ */
+export function setSsoTransactionCookie(
+  reply: FastifyReply,
+  config: NexusConfig,
+  sealed: string,
+): void {
+  reply.setCookie(SSO_TRANSACTION_COOKIE, sealed, {
+    path: SSO_TRANSACTION_COOKIE_PATH,
+    sameSite: 'lax',
+    secure: config.cookieSecure,
+    httpOnly: true,
+    maxAge: SSO_TRANSACTION_TTL_SECONDS,
+  });
+  forbidResponseCaching(reply);
+}
+
+/** Clear the single sign-on attempt: every callback spends it, whatever the outcome. */
+export function clearSsoTransactionCookie(reply: FastifyReply, config: NexusConfig): void {
+  reply.clearCookie(SSO_TRANSACTION_COOKIE, {
+    path: SSO_TRANSACTION_COOKIE_PATH,
+    sameSite: 'lax',
+    secure: config.cookieSecure,
+    httpOnly: true,
+  });
   forbidResponseCaching(reply);
 }
