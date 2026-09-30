@@ -118,6 +118,7 @@ import type {
 import {
   API_GATEWAY_PLUGIN_ROLES,
   assertLeaseKeyLength,
+  OUTBOX_SEALED_SUBJECT,
   SPEC_HISTORY_PRUNE_BATCH,
 } from '../store.js';
 import {
@@ -681,6 +682,9 @@ function auditWhere(filter: AuditLogFilter): SqlWhereBuilder {
     .add(filter.from, 'created_at >= ?', filter.from ?? null)
     .add(filter.to, 'created_at < ?', filter.to ?? null);
   if (filter.actions !== undefined) builder.addIn('action', filter.actions);
+  for (const [key, value] of Object.entries(filter.details ?? {})) {
+    builder.add(value, 'details_json LIKE ?', `%"${key}":${JSON.stringify(value)}%`);
+  }
   return builder;
 }
 
@@ -2701,9 +2705,15 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       ),
 
     list: async (filter, options) => {
+      const prefix = filter.idempotency_key_prefix;
+      const sealed = filter.sealed;
       const where = new SqlWhereBuilder()
         .add(filter.status, 'status = ?', filter.status ?? null)
         .add(filter.to_email, 'lower(to_email) = ?', (filter.to_email ?? '').toLowerCase())
+        // `substr` rather than `LIKE`, so a prefix never needs wildcard
+        // escaping; the length is our own integer, never caller text.
+        .add(prefix, `substr(idempotency_key, 1, ${prefix?.length ?? 0}) = ?`, prefix ?? null)
+        .add(sealed, sealed ? 'subject = ?' : 'subject <> ?', OUTBOX_SEALED_SUBJECT)
         .build();
       const { limit, offset } = page(options);
       const total = await queryCount(
@@ -2718,6 +2728,16 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       );
       return { items: rows.map(mapOutbox), total };
     },
+
+    // The swap always changes `subject`, so a matching row is always a changed
+    // row and MySQL's CLIENT_FOUND_ROWS count still says whether it landed.
+    sealContent: async (id, sealed) =>
+      (await execute(
+        exec,
+        `UPDATE email_outbox SET subject = ?, body_html = ?, body_text = ?
+         WHERE id = ? AND subject <> ?`,
+        [OUTBOX_SEALED_SUBJECT, sealed.body_html, sealed.body_text, id, OUTBOX_SEALED_SUBJECT],
+      )) > 0,
   };
 
   /* ── gatewayTeardownJobs ────────────────────────────────────────────── */

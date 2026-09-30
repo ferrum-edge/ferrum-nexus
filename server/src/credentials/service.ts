@@ -223,7 +223,6 @@ import type {
   CreateInput,
   CredentialFilter,
   CredentialRecord,
-  AuditLogRecord,
   GatewayIdentityRecord,
   GatewayTeardownJobRecord,
   ListOptions,
@@ -244,6 +243,7 @@ import {
   edgeError,
   forbidden,
   notFound,
+  NexusError,
   userDisabled,
   validationFailed,
 } from '../lib/errors.js';
@@ -273,6 +273,7 @@ export const LIVE_CREDENTIAL_STATUSES = [
   'retiring',
 ] as const satisfies readonly CredentialStatus[];
 const LIVE_STATUSES = new Set<string>(LIVE_CREDENTIAL_STATUSES);
+const LEGACY_BASICAUTH_SCAN_SETTING = 'credentials.legacy_basicauth_scan_v1';
 
 /** What Edge substitutes for credential material on every ordinary read. */
 const REDACTED_MATERIAL = '[REDACTED]';
@@ -2008,85 +2009,80 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     issueForConsumer,
 
     async initializeLegacyBasicAuthPositions(): Promise<void> {
+      if (await store.settings.get(LEGACY_BASICAUTH_SCAN_SETTING)) return;
       let offset = 0;
-      const candidates: { consumerId: string; event: AuditLogRecord }[] = [];
+      const seenConsumers = new Set<string>();
       while (true) {
         const page = await store.auditLogs.list(
-          { action: AuditAction.CREDENTIAL_APPEND_ROLLBACK },
+          {
+            action: AuditAction.CREDENTIAL_APPEND_ROLLBACK,
+            details: { credential_type: 'basicauth', withdrawn: false },
+          },
           { limit: MAX_PAGE_SIZE, offset },
         );
         for (const event of page.items) {
           const details = event.details;
+          const consumerId = details.consumer_id;
           if (
-            details.credential_type === 'basicauth' &&
-            details.withdrawn === false &&
-            typeof details.stranded_credential_id === 'string' &&
-            typeof details.consumer_id === 'string'
+            typeof consumerId !== 'string' ||
+            typeof details.stranded_credential_id !== 'string' ||
+            seenConsumers.has(consumerId)
           ) {
-            candidates.push({ consumerId: details.consumer_id, event });
+            continue;
           }
+          seenConsumers.add(consumerId);
+          await edge.serializePerKey(consumerId, async () => {
+            const live = await store.credentials.listByConsumer(
+              consumerId,
+              'basicauth',
+              LIVE_CREDENTIAL_STATUSES,
+            );
+            if (live.some((row) => row.label === 'legacy-unconfirmed-basicauth')) return;
+            const event = page.items.find((item) => item.details.consumer_id === consumerId);
+            if (!event) return;
+            const ownerId =
+              (typeof event.details.owner_user_id === 'string' && event.details.owner_user_id) ||
+              event.actor_user_id;
+            if (!ownerId || !(await store.users.findById(ownerId))) return;
+            let changeOffset = 0;
+            let alreadyCleared = false;
+            while (!alreadyCleared) {
+              const changes = await store.auditLogs.list(
+                {
+                  actions: [AuditAction.CREDENTIAL_RECONCILE, AuditAction.CREDENTIAL_REVOKE],
+                  from: event.created_at,
+                },
+                { limit: MAX_PAGE_SIZE, offset: changeOffset },
+              );
+              alreadyCleared = changes.items.some(
+                (row) =>
+                  row.created_at > event.created_at &&
+                  ((row.target_id === consumerId &&
+                    row.action === AuditAction.CREDENTIAL_RECONCILE) ||
+                    (row.details.consumer_id === consumerId && row.details.scope === 'whole-type')),
+              );
+              if (alreadyCleared || changes.items.length < MAX_PAGE_SIZE) break;
+              changeOffset += changes.items.length;
+            }
+            if (alreadyCleared) return;
+            await store.credentials.create({
+              user_id: ownerId,
+              application_id: null,
+              ferrum_consumer_id: consumerId,
+              credential_type: 'basicauth',
+              ferrum_credential_id: `${consumerId}/credentials/basicauth`,
+              fingerprint: crypto.fingerprint(`legacy-unconfirmed:${event.id}`),
+              last4: typeof event.details.last4 === 'string' ? event.details.last4 : '????',
+              label: 'legacy-unconfirmed-basicauth',
+              status: 'retiring',
+              rotated_from_id: null,
+            });
+          });
         }
         if (page.items.length < MAX_PAGE_SIZE) break;
         offset += page.items.length;
       }
-      const byConsumer = new Map<string, typeof candidates>();
-      for (const candidate of candidates) {
-        const group = byConsumer.get(candidate.consumerId) ?? [];
-        group.push(candidate);
-        byConsumer.set(candidate.consumerId, group);
-      }
-      for (const [consumerId, events] of byConsumer) {
-        await edge.serializePerKey(consumerId, async () => {
-          const live = await store.credentials.listByConsumer(
-            consumerId,
-            'basicauth',
-            LIVE_CREDENTIAL_STATUSES,
-          );
-          if (live.some((row) => row.label === 'legacy-unconfirmed-basicauth')) return;
-          const latest = events.sort((a, b) =>
-            b.event.created_at.localeCompare(a.event.created_at),
-          )[0];
-          if (!latest) return;
-          const event = latest.event;
-          const ownerId =
-            (typeof event.details.owner_user_id === 'string' && event.details.owner_user_id) ||
-            event.actor_user_id;
-          if (!ownerId || !(await store.users.findById(ownerId))) return;
-          let changeOffset = 0;
-          let alreadyCleared = false;
-          while (!alreadyCleared) {
-            const changes = await store.auditLogs.list(
-              {
-                actions: [AuditAction.CREDENTIAL_RECONCILE, AuditAction.CREDENTIAL_REVOKE],
-                from: event.created_at,
-              },
-              { limit: MAX_PAGE_SIZE, offset: changeOffset },
-            );
-            alreadyCleared = changes.items.some(
-              (row) =>
-                row.created_at > event.created_at &&
-                ((row.target_id === consumerId &&
-                  row.action === AuditAction.CREDENTIAL_RECONCILE) ||
-                  (row.details.consumer_id === consumerId && row.details.scope === 'whole-type')),
-            );
-            if (alreadyCleared || changes.items.length < MAX_PAGE_SIZE) break;
-            changeOffset += changes.items.length;
-          }
-          if (alreadyCleared) return;
-          await store.credentials.create({
-            user_id: ownerId,
-            application_id: null,
-            ferrum_consumer_id: consumerId,
-            credential_type: 'basicauth',
-            ferrum_credential_id: `${consumerId}/credentials/basicauth`,
-            fingerprint: crypto.fingerprint(`legacy-unconfirmed:${event.id}`),
-            last4: typeof event.details.last4 === 'string' ? event.details.last4 : '????',
-            label: 'legacy-unconfirmed-basicauth',
-            status: 'retiring',
-            rotated_from_id: null,
-          });
-        });
-      }
+      await store.settings.insertIfAbsent(LEGACY_BASICAUTH_SCAN_SETTING, { completed: true });
     },
 
     async teardownGatewayIdentity(

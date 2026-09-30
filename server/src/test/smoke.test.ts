@@ -72,6 +72,7 @@ import { runOutboxFencingContract } from './outbox-fencing-contract.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
 import { runPrivilegedAuditContract } from './privileged-audit-contract.js';
 import { runRecoveryThrottleContract } from './recovery-throttle-contract.js';
+import { runSealedOutboxContract } from './sealed-outbox-contract.js';
 import { runSettingsTransactionContract } from './settings-transaction-contract.js';
 import { runTeardownCancellationContract } from './teardown-cancellation-contract.js';
 import { runTeardownFencingContract } from './teardown-fencing-contract.js';
@@ -342,6 +343,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
   runPasswordChangeContract(label, makeStore);
   runPrivilegedAuditContract(label, makeStore);
   runRecoveryThrottleContract(label, makeStore);
+  runSealedOutboxContract(label, makeStore);
   runSettingsTransactionContract(label, makeStore);
   runTeardownCancellationContract(label, makeStore);
   runTeardownFencingContract(label, makeStore);
@@ -3722,6 +3724,25 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal((await store.auditLogs.list({ actor_user_id: actor.id })).total, 2);
       assert.equal(
         (await store.auditLogs.list({ actor_user_id: actor.id, action: 'auth.login' })).total,
+        1,
+      );
+      await store.auditLogs.create({
+        action: 'credential.append_rollback',
+        target_type: 'credential',
+        details: { credential_type: 'basicauth', withdrawn: false },
+      });
+      await store.auditLogs.create({
+        action: 'credential.append_rollback',
+        target_type: 'credential',
+        details: { credential_type: 'keyauth', withdrawn: false },
+      });
+      assert.equal(
+        (
+          await store.auditLogs.list({
+            action: 'credential.append_rollback',
+            details: { credential_type: 'basicauth', withdrawn: false },
+          })
+        ).total,
         1,
       );
       assert.equal(

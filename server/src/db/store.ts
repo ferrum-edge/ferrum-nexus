@@ -346,6 +346,17 @@ export type MessageRecord = Omit<Message, 'sender'>;
 /** A `notifications` row. */
 export type NotificationRecord = Notification;
 
+/**
+ * What the `subject` column of a **sealed** `email_outbox` row holds.
+ *
+ * A message carrying a single-use link (verification, password reset) is
+ * stored sealed: its real subject and bodies are one AES-256-GCM envelope in
+ * `body_text`, `body_html` is empty, and `subject` is this marker. The store
+ * only needs the marker to filter on and to make {@link EmailOutboxRepo.sealContent}
+ * a compare-and-swap; the envelope itself is `email/sealed-outbox.ts`'s.
+ */
+export const OUTBOX_SEALED_SUBJECT = 'nexus:sealed:v1';
+
 /** An `email_outbox` row, including the rendered bodies the worker sends. */
 export interface EmailOutboxRecord extends EmailOutboxEntry {
   body_html: string;
@@ -639,6 +650,13 @@ export interface NotificationFilter {
 export interface EmailOutboxFilter {
   status?: EmailOutboxEntry['status'];
   to_email?: string;
+  /** Only rows whose `idempotency_key` starts with this (ASCII) prefix, e.g. `reset:`. */
+  idempotency_key_prefix?: string;
+  /**
+   * `true`: only sealed rows (`subject` is {@link OUTBOX_SEALED_SUBJECT});
+   * `false`: only rows that are not.
+   */
+  sealed?: boolean;
 }
 
 /** Filters for `gatewayTeardownJobs.list`. */
@@ -657,6 +675,8 @@ export interface AuditLogFilter {
   actions?: string[];
   target_type?: string;
   target_id?: string;
+  /** Exact scalar matches against fields in the audit details object. */
+  details?: Record<string, string | boolean>;
   /** Inclusive lower bound on `created_at`. */
   from?: IsoTimestamp;
   /** Exclusive upper bound on `created_at`. */
@@ -1375,6 +1395,16 @@ export interface EmailOutboxRepo {
   /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
   releaseStale(olderThan: IsoTimestamp): Promise<number>;
   list(filter: EmailOutboxFilter, options?: ListOptions): Promise<Paginated<EmailOutboxRecord>>;
+  /**
+   * Replace a row's rendered content with its sealed form: `subject` becomes
+   * {@link OUTBOX_SEALED_SUBJECT} and the bodies are the supplied ones. Status,
+   * attempts, schedule and `updated_at` are left alone.
+   *
+   * A compare-and-swap on "not sealed yet": `false` means the row is gone or
+   * was already sealed (by another instance's sweep, say), and nothing was
+   * written.
+   */
+  sealContent(id: Uuid, sealed: { body_html: string; body_text: string }): Promise<boolean>;
 }
 
 /**

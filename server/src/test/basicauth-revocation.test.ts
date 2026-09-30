@@ -553,7 +553,12 @@ describe('basicauth recovery above the default credential cap', () => {
         },
         ip: null,
       });
+      await harness.store.settings.delete('credentials.legacy_basicauth_scan_v1');
       await harness.services.credentials.initializeLegacyBasicAuthPositions();
+      assert.deepEqual(
+        (await harness.store.settings.get('credentials.legacy_basicauth_scan_v1'))?.value,
+        { completed: true },
+      );
       const cleared = await harness.authed(user, {
         method: 'DELETE',
         url: `/api/credentials/${issued[1]!.id}?clear_type=true`,
