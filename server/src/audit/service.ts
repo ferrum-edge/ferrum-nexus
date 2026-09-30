@@ -318,6 +318,14 @@ export const AuditAction = {
    * portal rows — the repair for positions that can no longer be trusted.
    */
   CREDENTIAL_RECONCILE: 'credential.reconcile',
+  /**
+   * The upgrade scan found a `basicauth` append an earlier release left on the
+   * gateway without a live row, and wrote a `retiring` placeholder that holds
+   * the consumer's positions closed until the type is cleared.
+   * `source_event_id` names the {@link CREDENTIAL_APPEND_ROLLBACK} row it
+   * came from.
+   */
+  CREDENTIAL_LEGACY_PLACEHOLDER: 'credential.legacy_placeholder',
 
   /* messaging & notifications */
   MESSAGE_THREAD_CREATE: 'message.thread_create',
@@ -501,6 +509,7 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.CREDENTIAL_SETTLE]: TRANSACTIONAL,
   [AuditAction.CREDENTIAL_APPEND_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.CREDENTIAL_RECONCILE]: TRANSACTIONAL,
+  [AuditAction.CREDENTIAL_LEGACY_PLACEHOLDER]: TRANSACTIONAL,
   [AuditAction.MESSAGE_THREAD_CREATE]: TRANSACTIONAL,
   [AuditAction.MESSAGE_SEND]: TRANSACTIONAL,
   [AuditAction.NOTIFICATION_READ]: postCommit(

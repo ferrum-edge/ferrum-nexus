@@ -117,7 +117,11 @@ export const credentialsRoutes: FastifyPluginAsync<CredentialsRoutesOptions> = a
   app.delete('/:id', async (request): Promise<DeleteCredentialResponse> => {
     const { user } = requireAuth(request);
     const { id } = parseOrThrow(idParamSchema, request.params);
-    await credentials.revoke(user, id, clientIp(request));
+    const query = parseOrThrow(
+      z.object({ clear_type: z.enum(['true']).optional() }),
+      request.query,
+    );
+    await credentials.revoke(user, id, clientIp(request), query.clear_type === 'true');
     return { ok: true };
   });
 };

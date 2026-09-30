@@ -123,7 +123,7 @@ describe('grant and credential mutations', () => {
       (hooks: CredentialHooks) => hooks.issue.mutateAsync({ credential_type: 'keyauth' }),
     ],
     ['rotating', (hooks: CredentialHooks) => hooks.rotate.mutateAsync({ id: CREDENTIAL.id })],
-    ['revoking', (hooks: CredentialHooks) => hooks.remove.mutateAsync(CREDENTIAL.id)],
+    ['revoking', (hooks: CredentialHooks) => hooks.remove.mutateAsync({ id: CREDENTIAL.id })],
   ] as const)('refreshes application credential counts after %s', async (_name, run) => {
     const { result } = renderHook(useCredentialHooks, { wrapper });
     await act(async () => {

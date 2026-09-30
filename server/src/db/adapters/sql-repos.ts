@@ -682,6 +682,9 @@ function auditWhere(filter: AuditLogFilter): SqlWhereBuilder {
     .add(filter.from, 'created_at >= ?', filter.from ?? null)
     .add(filter.to, 'created_at < ?', filter.to ?? null);
   if (filter.actions !== undefined) builder.addIn('action', filter.actions);
+  for (const [key, value] of Object.entries(filter.details ?? {})) {
+    builder.add(value, 'details_json LIKE ?', `%"${key}":${JSON.stringify(value)}%`);
+  }
   return builder;
 }
 

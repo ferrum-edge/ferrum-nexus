@@ -6,12 +6,6 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
-### Security
-
-- Nodemailer 10.0.12 hardens SMTP message-body line endings by converting bare
-  carriage returns to CRLF, and makes `requireTLS` fail instead of silently
-  downgrading the connection.
-
 ### Changed
 
 - Upgrade Nodemailer to 10.0.13. This also includes the 10.0.11 CommonJS and
@@ -39,6 +33,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Security
 
+- Nodemailer 10.0.12 hardens SMTP message-body line endings by converting bare
+  carriage returns to CRLF, and makes `requireTLS` fail instead of silently
+  downgrading the connection.
+
 - **Responses that set session cookies are never cacheable**
   (GHSA-pr4m-gv4h-3x72). `GET /api/branding` is served with
   `Cache-Control: public` so it can be cached in front of the server, but a
@@ -50,6 +48,21 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `Cache-Control: private, no-store` with `Vary: Cookie`, overriding whatever
   directive its route set. Sign-in and other cookie-setting responses change
   from `no-store` to `private, no-store`.
+- **Revoking an HTTP Basic (`basicauth`) credential removes that credential's
+  password** (GHSA-5526-6x2h-9hjw). Edge never lists `basicauth` entries, so
+  the portal locates one only by the position its own rows give it. An append
+  the gateway accepted but the portal could not record, or a delete whose
+  outcome was never confirmed, shifted those positions, and a later revoke
+  could delete a different password and report the requested one revoked while
+  it kept working. The portal now records every `basicauth` append before
+  making it, and while any `basicauth` change on an identity is unconfirmed it
+  refuses to issue, rotate or revoke a single one (`409 CONFLICT`) instead of
+  guessing. The owner can then revoke all of the identity's HTTP Basic
+  credentials at once, which the credentials page offers as a second
+  confirmation, or an administrator can reconcile the consumer. On upgrade,
+  Nexus also holds appends that earlier releases recorded as not taken back.
+  This does not cover a Nexus database restored on its own: reconcile
+  `basicauth` for every consumer afterwards. See `docs/operations.md` §12.
 - Queued mail carrying a single-use link is no longer readable from the
   database (GHSA-cx8j-q289-8w35). Verification, re-sent verification and
   password-reset messages are sealed with AES-256-GCM before they reach
