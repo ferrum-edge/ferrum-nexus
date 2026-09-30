@@ -250,9 +250,9 @@ function renderNode(
   const description = displayText(asString(node.description), MAX_DISPLAYED_DESCRIPTION_LENGTH);
   const properties = asRecord(node.properties);
   const requiredNames = new Set<string>();
-  const required = asArray(node.required) ?? [];
-  for (let index = 0; index < required.length && index < budget.remaining; index += 1) {
-    const entry = asString(required[index]);
+  const requiredEntries = asArray(node.required) ?? [];
+  for (let index = 0; index < requiredEntries.length && index < budget.remaining; index += 1) {
+    const entry = asString(requiredEntries[index]);
     if (entry !== null) requiredNames.add(entry);
   }
   const items = node.items;

@@ -41,7 +41,7 @@ function specWithPaths(count: number): string {
 /**
  * A document with one operation whose render cost comes from all four counted
  * dimensions: `schemaCount` empty schema properties, six parameters, one
- * response and its six media types. Its total is `schemaCount + 15` render units.
+ * response and its six media types. Its total is `schemaCount + 16` render units.
  */
 function renderCostSpec(schemaCount: number): string {
   const properties: Record<string, unknown> = {};
@@ -402,11 +402,11 @@ describe('OpenAPI parsing', () => {
     // Everything the viewer walks and neither the path nor the operation count
     // sees: one operation, one path, and a components section whose expansion
     // is what a reader actually pays for.
-    const atLimit = renderCostSpec(MAX_SPEC_RENDER_UNITS - 15);
+    const atLimit = renderCostSpec(MAX_SPEC_RENDER_UNITS - 16);
     assert.ok(Buffer.byteLength(atLimit, 'utf8') < MAX_SPEC_BYTES);
     assert.equal(parseOpenApiSpec(atLimit).operationCount, 1);
 
-    const overLimit = renderCostSpec(MAX_SPEC_RENDER_UNITS - 14);
+    const overLimit = renderCostSpec(MAX_SPEC_RENDER_UNITS - 15);
     assert.ok(Buffer.byteLength(overLimit, 'utf8') < MAX_SPEC_BYTES);
     const failure = expectSpecInvalid(() => parseOpenApiSpec(overLimit));
     assert.match(failure.message, /schema nodes, 6 parameters, 6 media types and 1 responses/);
@@ -479,14 +479,14 @@ describe('OpenAPI parsing', () => {
       });
     };
 
-    // The schema object, its `properties` and each property: N + 2 nodes, plus
+    // The schema object, its `type`, `properties` and each property: N + 3 nodes, plus
     // twenty parameters and the one response.
-    const atLimit = referencing(MAX_SPEC_RENDER_UNITS - 23);
+    const atLimit = referencing(MAX_SPEC_RENDER_UNITS - 24);
     assert.ok(Buffer.byteLength(atLimit, 'utf8') < MAX_SPEC_BYTES);
     assert.equal(parseOpenApiSpec(atLimit).operationCount, 1);
 
     const failure = expectSpecInvalid(() =>
-      parseOpenApiSpec(referencing(MAX_SPEC_RENDER_UNITS - 22)),
+      parseOpenApiSpec(referencing(MAX_SPEC_RENDER_UNITS - 23)),
     );
     assert.deepEqual(failure.details, {
       field: 'paths',
