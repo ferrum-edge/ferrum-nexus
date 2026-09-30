@@ -13,7 +13,11 @@ import {
   type SpecChangeReport,
 } from '@ferrum-nexus/shared';
 
-import { compareSpecRevisions, type SpecChangeStats } from './spec-changes.js';
+import {
+  compareSpecRevisions,
+  compareSpecRevisionsSafely,
+  type SpecChangeStats,
+} from './spec-changes.js';
 
 type Document = Record<string, unknown>;
 
@@ -457,6 +461,87 @@ describe('consumer-facing revision comparison', () => {
     assert.equal(report.counts.breaking, 1);
     const text = JSON.stringify(report);
     assert.doesNotMatch(text, /SECRET|internal\.example/);
+  });
+
+  it('reads at most a bounded prefix of a `type` list, however long', () => {
+    // Junk names are not types, so the only ones that count are the seven
+    // JSON Schema ones, and a list is read no further than a type list can be.
+    const junk = Array.from({ length: 100_000 }, (_, index) => `t${index}`);
+    const paths = (types: string[]): Document => {
+      const result: Document = {};
+      for (let index = 0; index < 200; index += 1) {
+        result[`/p${index}`] = {
+          get: { responses: { '200': jsonResponse({ type: types }) } },
+        };
+      }
+      return result;
+    };
+    const counters = stats();
+    const report = compareSpecRevisions(
+      document(paths(junk)),
+      document(paths([...junk, 'string'])),
+      { stats: counters },
+    );
+    assert.equal(report.complete, true);
+    assert.equal(report.counts.breaking + report.counts.non_breaking, 0);
+    assert.ok(counters.units < 2_000, `spent ${counters.units}`);
+
+    // A real list still compares.
+    const widened = compareSpecRevisions(
+      document({ '/x': { get: { responses: { '200': jsonResponse({ type: ['string'] }) } } } }),
+      document({
+        '/x': { get: { responses: { '200': jsonResponse({ type: ['string', 'null'] }) } } },
+      }),
+    );
+    assert.deepEqual(lines(widened), [
+      // The schema itself: its path is the empty string.
+      'breaking | schema_type_changed | GET /x | response | 200 application/json | ',
+    ]);
+  });
+
+  it('compares `required` even where the schema declares no properties', () => {
+    const body = (required: string[]): Document => ({
+      '/orders': {
+        post: {
+          requestBody: {
+            content: {
+              'application/json': {
+                schema: { allOf: [{ $ref: '#/components/schemas/Base' }, { required }] },
+              },
+            },
+          },
+          responses: { '201': {} },
+        },
+      },
+    });
+    const components = {
+      schemas: { Base: { type: 'object', properties: { id: { type: 'string' } } } },
+    };
+    const report = compareSpecRevisions(
+      document(body([]), components),
+      document(body(['id']), components),
+    );
+    assert.deepEqual(lines(report), [
+      'breaking | schema_property_required | POST /orders | request | application/json | allOf[1].id',
+    ]);
+  });
+
+  it('never throws out of the safe comparison', () => {
+    const failing = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('boom');
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error('boom');
+        },
+      },
+    ) as Document;
+    const errors: unknown[] = [];
+    const report = compareSpecRevisionsSafely(failing, document({}), (error) => errors.push(error));
+    assert.deepEqual(report, emptySpecChangeReport(false));
+    assert.equal(errors.length, 1);
   });
 
   it('is deterministic', () => {

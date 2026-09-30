@@ -88,21 +88,21 @@ Counters are per process, so N instances allow N × the limit; enforce
 aggregate limits at the proxy. Client IPs come from Fastify's configured proxy
 trust, not from an untrusted forwarded header.
 
-| Scope                                                       | Limit per minute | Keyed by |
-| ----------------------------------------------------------- | ---------------- | -------- |
-| `/api/health*`                                              | 120              | IP       |
-| `/api/branding`                                             | 120              | IP       |
-| Every `POST /api/auth/*` route                              | 20, shared       | IP       |
-| `GET /api/auth/me`, `GET /api/auth/captcha`                 | 120, shared      | IP       |
-| `PATCH /api/users/me`                                       | 10               | account  |
-| `POST /api/threads`                                         | 10               | account  |
-| `POST /api/threads/:id/messages`                            | 30               | account  |
-| `GET /api/catalog/:slug/spec`                               | 60               | account  |
-| `/api/apis` mutations and the two spec diffs, per route     | 30               | account  |
-| `GET /api/apis/:id/usage`                                   | 30               | IP       |
-| `POST /api/access-requests`                                 | 10               | account  |
-| `POST /api/access-requests/:id/cancel`                      | 30               | account  |
-| `POST`, `PATCH`, `DELETE` on `/api/applications`, per route | 30               | account  |
+| Scope                                                                          | Limit per minute | Keyed by |
+| ------------------------------------------------------------------------------ | ---------------- | -------- |
+| `/api/health*`                                                                 | 120              | IP       |
+| `/api/branding`                                                                | 120              | IP       |
+| Every `POST /api/auth/*` route                                                 | 20, shared       | IP       |
+| `GET /api/auth/me`, `GET /api/auth/captcha`                                    | 120, shared      | IP       |
+| `PATCH /api/users/me`                                                          | 10               | account  |
+| `POST /api/threads`                                                            | 10               | account  |
+| `POST /api/threads/:id/messages`                                               | 30               | account  |
+| `GET /api/catalog/:slug/spec`, `…/changes`, `…/changes/:revisionId`, per route | 60               | account  |
+| `/api/apis` mutations and the two spec diffs, per route                        | 30               | account  |
+| `GET /api/apis/:id/usage`                                                      | 30               | IP       |
+| `POST /api/access-requests`                                                    | 10               | account  |
+| `POST /api/access-requests/:id/cancel`                                         | 30               | account  |
+| `POST`, `PATCH`, `DELETE` on `/api/applications`, per route                    | 30               | account  |
 
 "Account" falls back to the IP for a request without a session. Every other
 route is unlimited.
@@ -1502,11 +1502,28 @@ the previous revision may fail against the new one:
 | `schema_enum_values_added`                                          | the schema is read, or an enum now restricts a sent one                                         |
 | `schema_composition_changed`                                        | a sent schema accepts less (fewer `oneOf` or `anyOf` entries, more `allOf`), or a read one more |
 
-The comparison reads types (with `nullable`), properties, `required`, enums,
-`items` and `oneOf`/`anyOf`/`allOf` entries. It does not compare formats,
-patterns, numeric bounds, examples or security requirements, and it cannot see
-how the API behaves, so an empty list means it found nothing, not that a change
-is safe. It is bounded however large the documents are:
+The comparison reads types (with `nullable`), properties, `required` (including
+names a schema requires without declaring them, as in
+`allOf: [{ $ref: … }, { required: [id] }]`), enums, `items` and
+`oneOf`/`anyOf`/`allOf` entries. It does not compare formats, patterns, numeric
+bounds, examples or security requirements, and it cannot see how the API
+behaves, so an empty list means it found nothing, not that a change is safe.
+Some of what it does report needs reading with care:
+
+- A change inside a shared component schema is reported once, under the
+  component's `$ref` with `operation: null`, not under each operation that
+  uses it.
+- A subtree the document repeats inline (a YAML alias) is compared once, and
+  its changes are reported under the first operation that reaches it only.
+- `oneOf`, `anyOf` and `allOf` entries are matched by position, so reordering
+  them reads as changes to each.
+- Only the seven JSON Schema type names count in a `type`, and only its first
+  32 entries are read.
+- On an API with no gateway proxy, two revisions published at the same moment
+  can both be compared against the same predecessor, so the history may skip
+  the difference between them.
+
+It is bounded however large the documents are:
 
 - **A `$ref` is never expanded where it occurs.** Where both revisions reference
   a component at the same place, the two targets are compared once per

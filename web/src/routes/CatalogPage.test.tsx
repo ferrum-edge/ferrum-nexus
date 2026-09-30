@@ -333,7 +333,7 @@ describe('catalog change history (issue #448)', () => {
     expect(within(panel).getByText(hostilePath)).toBeInTheDocument();
     expect(panel.querySelector('img')).toBeNull();
     // The unchanged revision says so, and the caveat is always there.
-    expect(within(panel).getByText(/No differences found/)).toBeInTheDocument();
+    expect(within(panel).getByText(/No structural differences found/)).toBeInTheDocument();
     expect(within(panel).getByText(/structural comparison/)).toBeInTheDocument();
   });
 
@@ -345,7 +345,7 @@ describe('catalog change history (issue #448)', () => {
     await openDetail('Changes');
     const panel = await screen.findByRole('tabpanel');
     expect(await within(panel).findByText(/This comparison is incomplete/)).toBeInTheDocument();
-    expect(within(panel).queryByText(/No differences found/)).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/No structural differences found/)).not.toBeInTheDocument();
   });
 
   it('pages through a long history', async () => {

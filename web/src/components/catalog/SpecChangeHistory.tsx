@@ -84,8 +84,7 @@ function RevisionReport({ report }: { report: SpecChangeReport }): ReactElement 
         </>
       ) : report.complete ? (
         <p className="text-sm text-fg-muted">
-          No differences found: this revision declares the same operations, parameters and schemas
-          as the one before it.
+          No structural differences found between this revision and the one before it.
         </p>
       ) : null}
     </div>
