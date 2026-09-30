@@ -20,8 +20,9 @@
  * ones — and the current schema is whatever `store.migrate()` builds, so every
  * forward migration a release has not shipped (from `v0.1.0`,
  * `002_api_gateway_plugins` and `003_messages_thread_latest`; from every
- * release, `004_api_spec_changes` and `006_user_identities`) is applied here
- * on top of a populated database with no change to the harness.
+ * release, `004_api_spec_changes`, `005_notification_preferences` and
+ * `006_user_identities`) is applied here on top of a populated database with
+ * no change to the harness.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
@@ -1082,6 +1083,15 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
             // proof, whatever its `email_verified` says, or a password lock.
             assert.equal(await store.emailProofs.findByUser(ID.client), null);
             assert.equal(await store.passwordLocks.findByUser(ID.client), null);
+
+            // `005_notification_preferences` records nothing for an existing
+            // account, which therefore keeps receiving every notice.
+            assert.equal(await store.notificationPreferences.find(ID.client), null);
+            const saved = await store.notificationPreferences.upsert(ID.client, {
+              api_spec_updated_in_app: true,
+              api_spec_updated_email: false,
+            });
+            assert.equal(saved.api_spec_updated_email, false);
 
             // Re-running in the same process changes nothing.
             await store.migrate();

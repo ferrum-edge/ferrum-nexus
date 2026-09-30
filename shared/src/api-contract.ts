@@ -52,6 +52,7 @@ import type {
   MessageThread,
   MessageThreadDetail,
   Notification,
+  NotificationPreferences,
   NotificationType,
   Organization,
   RateLimitConfig,
@@ -341,6 +342,17 @@ export interface UpdateMeRequest {
 
 /** `PATCH /api/users/me` */
 export type UpdateMeResponse = GetMeUserResponse;
+
+/** `GET /api/users/me/notification-preferences` */
+export interface GetNotificationPreferencesResponse {
+  preferences: NotificationPreferences;
+}
+
+/** `PATCH /api/users/me/notification-preferences` — only the fields sent change. */
+export type UpdateNotificationPreferencesRequest = Partial<NotificationPreferences>;
+
+/** `PATCH /api/users/me/notification-preferences` */
+export type UpdateNotificationPreferencesResponse = GetNotificationPreferencesResponse;
 
 /** `GET /api/users` (admin) */
 export interface ListUsersQuery extends ListQuery {

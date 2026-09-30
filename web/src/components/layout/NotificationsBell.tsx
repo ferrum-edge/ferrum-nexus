@@ -4,6 +4,7 @@ import { useState, type ReactElement } from 'react';
 import type { Notification } from '@ferrum-nexus/shared';
 import { formatRelative } from '../../lib/format';
 import { cn } from '../../lib/cn';
+import { notificationIcon } from '../../lib/notification-icons';
 import { useMarkNotificationsRead, useNotifications } from '../../hooks/useNotifications';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
@@ -89,6 +90,10 @@ export function NotificationsBell(): ReactElement {
                         'mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full',
                         isUnread ? 'bg-accent' : 'bg-transparent',
                       )}
+                    />
+                    <Icon
+                      name={notificationIcon(notification.type)}
+                      className="mt-0.5 h-4 w-4 text-fg-subtle"
                     />
                     <span className="min-w-0 flex-1">
                       <span

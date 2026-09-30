@@ -85,7 +85,7 @@ docker/    Dockerfile + docker-compose.example.yml
 | `index.ts`                                     | Composition root: `buildServer(config, deps)` + `main()`. No business logic.                                                                                           |
 | `config/index.ts`                              | The **only** reader of `process.env`. zod-validated into `NexusConfig`.                                                                                                |
 | `lib/`                                         | `crypto.ts`, `errors.ts` (`NexusError`), `keyed-serializer.ts` + `lease-fence.ts` (§5.2), `ids.ts`, `logger.ts`.                                                       |
-| `db/store.ts`                                  | The `NexusStore` interface: 28 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                                                 |
+| `db/store.ts`                                  | The `NexusStore` interface: 29 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                                                 |
 | `db/adapters/{sqlite,postgres,mysql,mongodb}/` | The four implementations.                                                                                                                                              |
 | `db/adapters/sql-common.ts`, `sql-repos.ts`    | Dialect shims and the repository bodies shared by PostgreSQL and MySQL.                                                                                                |
 | `db/migrations/`                               | SQL migrations per dialect: `.sql` (SQLite), `.pg.sql`, `.mysql.sql`. MongoDB declares its indexes in code.                                                            |
@@ -676,6 +676,22 @@ may re-run. The summary commits with the revision in `api_spec_changes`, which
 has no foreign key to `api_specs` and so outlives retention. The catalog serves
 it under the detail page's visibility rule
 ([`api.md`](api.md#get-apicatalogslugchanges)).
+
+**Spec change notices.** Once the revision has committed and the proxy lease is
+released, `publishing/spec-change-notices.ts` tells the API's grantees what
+changed: an in-app notice and an outbox email per account, as each account's
+`user_notification_preferences` allow. The publish starts it and does not wait
+for it; it never rejects, so it can neither slow the publish nor fail it. Its
+fan-outs run one at a time per API, and of several waiting only the newest
+runs. On a graceful stop no further batch starts and the server waits at most
+10 seconds; what is left is skipped. It is coalesced two ways: an unread notice
+for the API is rewritten rather than repeated, keeping a breaking mark, and one
+email per API per account per clock hour goes out through the outbox
+idempotency key. One fan-out queues at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`
+emails. Each batch of
+200 accounts re-reads grants and account status, and commits its notices,
+emails and `api.spec_notify` audit row together; a failed batch does not stop
+the next.
 
 ### Spec-owned proxies
 

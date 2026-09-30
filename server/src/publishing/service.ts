@@ -236,6 +236,7 @@ import {
   type ApiGatewayPluginIds,
   type ApiGatewayPluginRole,
   type ApiRecord,
+  type ApiSpecChangeRecord,
   type ApiSpecRecord,
   type CredentialRecord,
   type GrantRecord,
@@ -292,6 +293,7 @@ import {
   type UpstreamPolicy,
   type UpstreamResolver,
 } from './oas.js';
+import type { SpecChangeNotifier } from './spec-change-notices.js';
 import { compareSpecRevisionsSafely } from './spec-changes.js';
 import { diffSpecDocuments } from './spec-diff.js';
 import {
@@ -300,6 +302,14 @@ import {
   routesSpecDocument,
   submittableProxyBody,
 } from './spec-document.js';
+
+/** What a spec revision's gateway-and-store step committed. */
+interface AppliedRevision {
+  spec: ApiSpecRecord;
+  api: ApiRecord;
+  /** The change summary recorded with it, when it replaced a revision. */
+  change: ApiSpecChangeRecord | null;
+}
 
 /** Result of {@link PublishingService.restoreGateway}. */
 export interface RestoreResult {
@@ -473,6 +483,12 @@ export interface PublishingServiceDeps {
    * on.
    */
   upstreamResolver: UpstreamResolver;
+  /**
+   * Tells an API's grantees what a published revision changed (issue #447).
+   * Started after the revision has committed and not awaited, so it can
+   * neither slow the publish down nor fail it. Absent, nobody is told.
+   */
+  specChangeNotifier?: SpecChangeNotifier;
 }
 
 /* ── Edge plugin config bodies ──────────────────────────────────────────── */
@@ -1452,7 +1468,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
      * have interleaved. Everything inside therefore uses the `…Locked`
      * helpers — the serializer is not re-entrant.
      */
-    const apply = async (): Promise<{ spec: ApiSpecRecord; api: ApiRecord }> => {
+    const apply = async (): Promise<AppliedRevision> => {
       const fresh = await loadApi(apiId);
       assertCanAdminister(actor, fresh);
       if (fresh.ferrum_proxy_id !== proxyId) {
@@ -1600,8 +1616,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // The consumer-facing summary commits with the revision it
           // describes, and is bounded by its own retention: it outlives the
           // document the prune above may just have dropped.
+          let change: ApiSpecChangeRecord | null = null;
           if (replaced && specChanges) {
-            await tx.apiSpecChanges.create({
+            change = await tx.apiSpecChanges.create({
               api_id: api.id,
               revision_id: revision.id,
               previous_revision_id: replaced.id,
@@ -1660,7 +1677,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             },
             ip,
           );
-          return { spec: revision, api: row };
+          return { spec: revision, api: row, change };
         });
       } catch (error) {
         // Best-effort by the same contract `update()` documents: the request
@@ -1729,6 +1746,20 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     };
 
     const persisted = proxyId ? await binder.withProxy(proxyId, apply) : await apply();
+
+    // Only once the revision has committed, outside the proxy lease, and
+    // detached: the response does not wait for a fan-out that can reach every
+    // grantee, and `notify` never rejects, so a notice that cannot be sent
+    // never fails the publish. A failed or compensated revision never reaches
+    // this line.
+    if (persisted.change) {
+      void deps.specChangeNotifier?.notify(
+        { id: actor.id, role: actor.role },
+        persisted.api,
+        persisted.change,
+        ip,
+      );
+    }
 
     return {
       api: presentApi(persisted.api, await settings.getGatewayPublicUrl()),

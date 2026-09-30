@@ -25,6 +25,31 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   rollback.
 - Forward migration `004_api_spec_changes` adds the `api_spec_changes` table on
   every backend. It copies no data.
+- **Grantees are told when an API's specification changes** (#447). When a
+  revision that changes something is published, or rolled back, every account
+  holding an active grant on the API gets an in-app notice (new type
+  `api_spec_updated`) and, if it opted in, a `spec_updated` email through the
+  outbox. Email is off by default: #447 asked for the in-app channel. Each names
+  up to five changes, removed operations first, and links to the Changes tab.
+  An account is told once however many of its identities hold a grant, and the
+  publisher is not told. A burst of revisions sends at most one email per API
+  per clock hour and no second notice while the first is unread; the unread
+  one is rewritten with the latest summary, moved to the top and still marked
+  `(breaking changes)` if an earlier revision was. Fan-outs of one API run one
+  at a time, and only the newest of those waiting runs. One fan-out queues at
+  most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` emails, and past that sends in-app
+  only. The fan-out runs detached from the publish, in batches of 200 audited
+  as `api.spec_notify`; it never fails or delays the publish. A graceful stop
+  waits at most 10 seconds and skips the batches left; a crash loses them.
+  Provider-written text in the email is made inert as a link. Notifications
+  now show an icon for their type.
+- **Notification preferences.** `GET` and `PATCH /api/users/me/notification-preferences`,
+  and a **Notifications** card on the profile page, choose the spec-change
+  notice per channel: in-app is on and email off until changed. Changes are
+  audited as `user.notification_preferences_update`, and limited to 10 a minute
+  per account like `PATCH /api/users/me`.
+- Forward migration `005_notification_preferences` adds the
+  `user_notification_preferences` table on every backend. It copies no data.
 - **OpenID Connect single sign-on** (part of #445). Users sign in with any
   standards-compliant provider — Keycloak, Dex, Entra ID, Okta, Auth0 — through
   the authorization-code flow with PKCE (`S256`), `state` and `nonce`.

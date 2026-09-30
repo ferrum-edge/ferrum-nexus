@@ -85,6 +85,10 @@ import { createApplicationsService, type ApplicationsService } from './applicati
 import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
 import { createSsoService, type SsoService } from './sso/service.js';
+import {
+  createSpecChangeNotifier,
+  type SpecChangeNotifier,
+} from './publishing/spec-change-notices.js';
 import { accessRequestRoutes, grantRoutes } from './routes/access.js';
 import { applicationRoutes } from './routes/applications.js';
 import { adminRoutes } from './routes/admin.js';
@@ -134,6 +138,11 @@ export interface NexusServices {
   applications: ApplicationsService;
   access: AccessService;
   god: GodService;
+  /**
+   * Tells grantees what a spec revision changed. It runs detached from the
+   * publish, so tests await `idle()` before asserting what it sent.
+   */
+  specChanges: SpecChangeNotifier;
   /**
    * Gateway-reference reconciliation: detection, the cached report
    * `/api/health` renders, and the `super_admin` repair. `scan()` runs one
@@ -213,6 +222,13 @@ export interface BuildServerDeps {
    * without waiting half a minute per case. Nothing in production sets it.
    */
   sendLockWaitMs?: number;
+  /**
+   * The clock the spec-change email window is read from. A seam for the tests
+   * that assert what the next window sends, which would otherwise wait an
+   * hour, or pass or fail depending on when in the hour they ran. Nothing in
+   * production sets it.
+   */
+  specChangeClock?: () => number;
   /**
    * The same seam for the store-level locks — the last-super-admin key and
    * each account's lifecycle key. Defaults to `LEASE_WAIT_MS` (30 s).
@@ -459,6 +475,14 @@ export async function buildServer(
     locks,
     log: warn,
   });
+  const specChanges = createSpecChangeNotifier({
+    store: deps.store,
+    email,
+    audit,
+    config,
+    log: warn,
+    ...(deps.specChangeClock ? { now: deps.specChangeClock } : {}),
+  });
   const publishing = createPublishingService({
     config,
     store: deps.store,
@@ -469,6 +493,7 @@ export async function buildServer(
     settings,
     log: (obj, message) => app.log.error(obj, message),
     upstreamResolver: deps.upstreamResolver ?? createUpstreamResolver(),
+    specChangeNotifier: specChanges,
   });
   const usage = createUsageService({ store: deps.store, edge: deps.edge, publishing });
   // Composed after publishing: the palette reuses its owner-or-admin check, so
@@ -594,6 +619,7 @@ export async function buildServer(
     applications,
     access,
     god,
+    specChanges,
     reconciliation,
   };
   const webDist = (deps.serveStatic ?? true) ? resolveWebDist(config) : null;
@@ -774,8 +800,10 @@ export async function buildServer(
 
   await app.register(
     async (scope) => {
-      // `global: false` so only the spec route — the one read that parses a
-      // whole document — carries a limit, bucketed per account.
+      // `global: false` so only the routes that ask for one carry a limit,
+      // bucketed per account: the spec route, the one read that parses a whole
+      // document, and the change history routes, which share its budget shape
+      // so one account cannot walk every API's history unthrottled.
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
       }
@@ -832,6 +860,9 @@ export async function buildServer(
   }
 
   app.addHook('onClose', async () => {
+    // A fan-out still running gets a bounded wait, and sends no further
+    // batches, before the store it writes to closes.
+    await specChanges.stop();
     await outbox.stop();
     await teardown.stop();
     await expirySweep.stop();

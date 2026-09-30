@@ -1,0 +1,6 @@
+{
+  "id": "005_notification_preferences",
+  "backend": "mongodb",
+  "description": "Frozen snapshot of the 005_notification_preferences step in server/src/db/adapters/mongodb/index.ts, which declares no index",
+  "indexes": []
+}

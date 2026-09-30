@@ -76,6 +76,7 @@ export const queryKeys = {
     detail: (id: string) => ['users', 'detail', id] as const,
     identities: (id: string) => ['users', 'identities', id] as const,
     me: ['users', 'me'] as const,
+    notificationPreferences: ['users', 'me', 'notification-preferences'] as const,
     myIdentities: ['users', 'me', 'identities'] as const,
   },
 

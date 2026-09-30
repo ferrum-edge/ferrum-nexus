@@ -98,6 +98,7 @@ trust, not from an untrusted forwarded header.
 | Every `POST /api/auth/*` route, and the SSO `start` and `callback`             | 20, shared       | IP       |
 | `GET /api/auth/me`, `GET /api/auth/captcha`, `GET /api/auth/sso`               | 120, shared      | IP       |
 | `PATCH /api/users/me`                                                          | 10               | account  |
+| `PATCH /api/users/me/notification-preferences`                                 | 10               | account  |
 | `POST /api/threads`                                                            | 10               | account  |
 | `POST /api/threads/:id/messages`                                               | 30               | account  |
 | `GET /api/catalog/:slug/spec`, `…/changes`, `…/changes/:revisionId`, per route | 60               | account  |
@@ -653,6 +654,24 @@ Errors: `400 VALIDATION_FAILED` (`new_password` without `current_password`),
 `403 FORBIDDEN` (wrong `current_password`), `429 RATE_LIMITED` (10 a minute per
 account).
 
+### `GET /api/users/me/notification-preferences`
+
+_session_ → `{ "preferences": NotificationPreferences }`. An account that never
+changed one gets the defaults below: the in-app notice on, the email off.
+
+| Field                     | Default | Controls                                                                                     |
+| ------------------------- | ------- | -------------------------------------------------------------------------------------------- |
+| `api_spec_updated_in_app` | `true`  | the in-app notice when an API the account holds a grant on publishes a changed spec revision |
+| `api_spec_updated_email`  | `false` | the same notice by email: off until the account turns it on                                  |
+
+### `PATCH /api/users/me/notification-preferences`
+
+_session_ — change the fields sent, and only those. Body: any of the fields
+above as booleans; an unknown field is `400 VALIDATION_FAILED`. →
+`{ "preferences": NotificationPreferences }`. A change is audited as
+`user.notification_preferences_update` with `details.changed`; a request that
+changes nothing writes nothing.
+
 ### `GET /api/users`
 
 _admin_ — `Paginated<User>` plus `pending_gateway_teardowns`: the portal-wide
@@ -883,15 +902,26 @@ own.
 
 _session_
 
-| Query             | Type                                                                                                                                                                       |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `unread`          | boolean — only unread                                                                                                                                                      |
-| `type`            | one of `access_request_created`, `access_request_approved`, `access_request_denied`, `access_revoked`, `message_received`, `credential_rotated`, `api_published`, `system` |
-| `limit`, `offset` | pagination                                                                                                                                                                 |
+| Query             | Type                                                                                                                                                                                           |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unread`          | boolean — only unread                                                                                                                                                                          |
+| `type`            | one of `access_request_created`, `access_request_approved`, `access_request_denied`, `access_revoked`, `message_received`, `credential_rotated`, `api_published`, `api_spec_updated`, `system` |
+| `limit`, `offset` | pagination                                                                                                                                                                                     |
 
 ```json
 { "items": [ … ], "total": 42, "unread_count": 3 }
 ```
+
+**`api_spec_updated`** is sent when an API the account holds an active grant on
+publishes a revision that changes something (see
+[`PUT /api/apis/:id/spec`](#put-apiapisidspec)). Its title is
+`<API name> spec updated to <version>` (or `rolled back to`), its body counts
+the changes and names up to five, removed operations first, and its `link` is
+`/catalog/<slug>?tab=changes`. An account that still has an unread one for the
+API gets no second one: its unread one is rewritten to describe the newest
+revision, moved to the top of the list, and says earlier revisions are on the
+Changes tab. A title ending `(breaking changes)` keeps that ending through a
+rewrite by a revision that broke nothing.
 
 ### `POST /api/notifications/read`
 
@@ -1258,7 +1288,7 @@ _admin_ → `{ "templates": EmailTemplate[], "keys": EmailTemplateKey[] }`.
 
 _admin_ — `key` ∈ `verification`, `password_reset`, `access_approved`,
 `access_denied`, `access_revoked`, `message_received`, `mass`,
-`credential_rotated`.
+`credential_rotated`, `spec_updated`.
 
 ```json
 {
@@ -2103,6 +2133,25 @@ _provider_, owner or admin — publish a new spec revision. Body: `spec`
   [`GET /api/catalog/:slug/changes`](#get-apicatalogslugchanges). The
   `api.spec_update` (or `api.spec_rollback`) row carries
   `spec_changes: { breaking, non_breaking, complete }`.
+- **Grantees are told.** Once the revision has committed, when the comparison
+  found a change, every account holding an active grant on the API gets an
+  `api_spec_updated` notification, and a `spec_updated` email if it turned
+  email on, once per account however many of its identities hold a grant, and
+  never the account that published. Each channel follows the account's
+  [notification preferences](#get-apiusersmenotification-preferences). A
+  second notice waits until the first is read (the unread one is rewritten
+  instead), and at most one email per API per account goes out per clock hour
+  (the outbox idempotency key `spec-updated:<api>:<user>:<hour>`). One fan-out
+  queues at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` emails; past that, accounts
+  get the in-app notice only. The fan-out commits in batches of 200 accounts,
+  each with an `api.spec_notify` audit row, and a batch that fails does not
+  stop the next. Fan-outs of one API run one at a time: one published while
+  another is running waits, and of several waiting only the newest runs, still
+  marking its notices breaking if one it replaced was. It is
+  **detached and best-effort**: the response does not wait for it, a failure
+  is logged and never fails the publish, and on a graceful stop the server
+  waits at most 10 seconds for it and skips the batches left; nothing retries
+  them.
 - **Backend following.** The proxy is re-pointed at the new document's
   `servers[0]` only when the API's `upstream_url` still equals the normalized
   `servers[0]` of the previous revision (scheme, host, port and base path).

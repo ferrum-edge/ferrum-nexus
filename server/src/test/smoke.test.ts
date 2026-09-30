@@ -3258,6 +3258,133 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.ok(await store.notifications.findById(target));
     });
 
+    it('notifications: finds and rewrites the unread notices for one link', async () => {
+      const [a, b, c] = [await makeUser(), await makeUser(), await makeUser()];
+      const link = '/catalog/billing?tab=changes';
+      await store.notifications.createMany([
+        { user_id: a.id, type: 'api_spec_updated', title: 'Billing', body: 'x', link },
+        { user_id: a.id, type: 'api_spec_updated', title: 'Billing', body: 'y', link },
+        { user_id: b.id, type: 'api_spec_updated', title: 'Other', body: 'x', link: '/catalog/x' },
+        { user_id: c.id, type: 'system', title: 'Same link', body: 'x', link },
+      ]);
+      const holders = async (): Promise<string[]> => {
+        const found = await store.notifications.listUnread(
+          [a.id, b.id, c.id],
+          'api_spec_updated',
+          link,
+        );
+        return found.map((row) => row.user_id);
+      };
+      assert.deepEqual(await holders(), [a.id, a.id], 'both of its unread notices');
+      assert.deepEqual(await store.notifications.listUnread([], 'api_spec_updated', link), []);
+
+      // Rewritten in place: only unread notices of that type and link.
+      const type = 'api_spec_updated' as const;
+      const content = { title: 'Billing, newer', body: 'z' };
+      const everyone = [a.id, b.id, c.id];
+      const [original] = await store.notifications.listUnread([a.id], type, link);
+      const rewritten = await store.notifications.updateUnread(everyone, type, link, content);
+      assert.equal(rewritten, 2);
+      const mine = await store.notifications.list({ user_id: a.id });
+      assert.ok(
+        (mine.items[0]?.created_at ?? '') >= (original?.created_at ?? ''),
+        'a rewritten notice lists as new',
+      );
+      assert.deepEqual(
+        mine.items.map((row) => row.title),
+        ['Billing, newer', 'Billing, newer'],
+      );
+      const theirs = await store.notifications.list({ user_id: b.id });
+      assert.equal(theirs.items[0]?.title, 'Other', 'another link is untouched');
+      const system = await store.notifications.list({ user_id: c.id });
+      assert.equal(system.items[0]?.title, 'Same link', 'another type is untouched');
+      assert.equal(await store.notifications.updateUnread([], type, link, content), 0);
+
+      await store.notifications.markAllRead(a.id, nowIso());
+      assert.deepEqual(await holders(), [], 'a read notice no longer counts');
+      const again = await store.notifications.updateUnread([a.id], type, link, content);
+      assert.equal(again, 0, 'a read notice is left as it was read');
+    });
+
+    it('grants: lists which of a batch of accounts hold an active grant', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+      const [held, twice, revoked, none] = [
+        await makeUser(),
+        await makeUser(),
+        await makeUser(),
+        await makeUser(),
+      ];
+      const grant = (userId: string, status: 'active' | 'revoked') =>
+        store.grants.create({
+          api_id: api.id,
+          user_id: userId,
+          access_request_id: null,
+          acl_group: `nexus:api:${api.id}:approved`,
+          status,
+          granted_by: owner.id,
+          revoked_by: null,
+          revoked_at: null,
+        });
+      await grant(held.id, 'active');
+      await grant(twice.id, 'active');
+      await grant(revoked.id, 'revoked');
+      const app = await store.applications.create({
+        owner_user_id: twice.id,
+        name: 'Second identity',
+        status: 'active',
+      });
+      await store.grants.create({
+        api_id: api.id,
+        user_id: twice.id,
+        application_id: app.id,
+        access_request_id: null,
+        acl_group: `nexus:api:${api.id}:approved`,
+        status: 'active',
+        granted_by: owner.id,
+        revoked_by: null,
+        revoked_at: null,
+      });
+      const found = await store.grants.listActiveHolders(api.id, [
+        held.id,
+        twice.id,
+        revoked.id,
+        none.id,
+      ]);
+      assert.deepEqual([...found].sort(), [held.id, twice.id].sort(), 'each holder once');
+      assert.deepEqual(await store.grants.listActiveHolders(api.id, []), []);
+    });
+
+    it('notificationPreferences: defaults by absence, upserts and keeps created_at', async () => {
+      const user = await makeUser();
+      const other = await makeUser();
+      assert.equal(await store.notificationPreferences.find(user.id), null);
+      assert.deepEqual(await store.notificationPreferences.findManyByUsers([user.id]), []);
+
+      const first = await store.notificationPreferences.upsert(user.id, {
+        api_spec_updated_in_app: true,
+        api_spec_updated_email: false,
+      });
+      assert.equal(first.user_id, user.id);
+      assert.equal(first.api_spec_updated_in_app, true);
+      assert.equal(first.api_spec_updated_email, false);
+
+      const second = await store.notificationPreferences.upsert(user.id, {
+        api_spec_updated_in_app: false,
+        api_spec_updated_email: true,
+      });
+      assert.equal(second.api_spec_updated_in_app, false);
+      assert.equal(second.api_spec_updated_email, true);
+      assert.equal(second.created_at, first.created_at, 'created once');
+
+      const many = await store.notificationPreferences.findManyByUsers([user.id, other.id]);
+      assert.deepEqual(
+        many.map((row) => row.user_id),
+        [user.id],
+      );
+      assert.deepEqual(await store.notificationPreferences.findManyByUsers([]), []);
+    });
+
     it('messaging: stores the full 300-character broadcast subject', async () => {
       // The god.broadcast route accepts a subject up to 300 chars and writes it
       // into both `notifications.title` and `message_threads.subject`; MySQL

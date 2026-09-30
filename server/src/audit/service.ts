@@ -96,6 +96,8 @@ export const AuditAction = {
 
   /* users & organizations */
   USER_UPDATE: 'user.update',
+  /** An account changed its own notification preferences; `details.changed` names which. */
+  USER_NOTIFICATION_PREFERENCES_UPDATE: 'user.notification_preferences_update',
   USER_ROLE_CHANGE: 'user.role_change',
   USER_DISABLE: 'user.disable',
   USER_ENABLE: 'user.enable',
@@ -146,6 +148,14 @@ export const AuditAction = {
    * revision.
    */
   API_SPEC_REVISION_FAILED: 'api.spec_revision_failed',
+  /**
+   * The grantees of an API were told that a spec revision changed it: the
+   * in-app notices and outbox emails of the fan-out commit with this row, which
+   * counts who was notified, emailed, already told (coalesced) or opted out.
+   * Written after the revision committed, and only when it changed something;
+   * `details.spec_id` is the revision.
+   */
+  API_SPEC_NOTIFY: 'api.spec_notify',
   API_RETIRE: 'api.retire',
   /**
    * An API delete is about to take the API's Edge objects down. Committed
@@ -481,6 +491,7 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.AUTH_SSO_CLAIMS_SYNC]: TRANSACTIONAL,
   [AuditAction.AUTH_SSO_DEPROVISION]: TRANSACTIONAL,
   [AuditAction.USER_UPDATE]: TRANSACTIONAL,
+  [AuditAction.USER_NOTIFICATION_PREFERENCES_UPDATE]: TRANSACTIONAL,
   [AuditAction.USER_ROLE_CHANGE]: TRANSACTIONAL,
   [AuditAction.USER_DISABLE]: TRANSACTIONAL,
   [AuditAction.USER_ENABLE]: rowOnly(
@@ -504,6 +515,10 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.API_SPEC_ROLLBACK]: TRANSACTIONAL,
   [AuditAction.API_SPEC_REVISION_START]: INTENT,
   [AuditAction.API_SPEC_REVISION_FAILED]: postCommit(COMPENSATION_TRAIL),
+  [AuditAction.API_SPEC_NOTIFY]: rowOnly(
+    'A fan-out whose every recipient opted out or had already been told writes no notice or ' +
+      'email, and still records that it ran.',
+  ),
   [AuditAction.API_RETIRE]: TRANSACTIONAL,
   [AuditAction.API_DELETE_START]: INTENT,
   [AuditAction.API_DELETE]: TRANSACTIONAL,

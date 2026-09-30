@@ -306,6 +306,7 @@ limit what one account can consume.
 | `GET /api/catalog/:slug/spec`, `GET /api/catalog/:slug/changes`, `GET /api/catalog/:slug/changes/:revisionId`, per route                                                                                                                                                              | 60/min          | account  |
 | `/api/applications` create, update, delete                                                                                                                                                                                                                                            | 30/min          | account  |
 | `PATCH /api/users/me`                                                                                                                                                                                                                                                                 | 10/min          | account  |
+| `PATCH /api/users/me/notification-preferences`                                                                                                                                                                                                                                        | 10/min          | account  |
 | `POST /api/threads` / `POST /api/threads/:id/messages`                                                                                                                                                                                                                                | 10 / 30 per min | account  |
 | `POST /api/access-requests` / `POST /api/access-requests/:id/cancel`                                                                                                                                                                                                                  | 10 / 30 per min | account  |
 
@@ -356,14 +357,17 @@ Each message writes a message row and an audit row. A **platform thread** (no
 `recipient_user_id`) also notifies and emails every active `admin` and
 `super_admin`. Broadcasts and mass email fan out further. The bounds:
 
-| Bound                    | Value                                     | Where                                 |
-| ------------------------ | ----------------------------------------- | ------------------------------------- |
-| New threads / replies    | 10 / 30 per minute per account            | Rate limiter                          |
-| Messages per account     | 200 per rolling 24 h (`0` = unlimited)    | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` |
-| Broadcast recipients     | 5 000 per broadcast (`0` = unlimited)     | `NEXUS_MAX_BROADCAST_RECIPIENTS`      |
-| Broadcasts per admin     | 20 per rolling 24 h (`0` = unlimited)     | `NEXUS_MAX_BROADCASTS_PER_DAY`        |
-| Mass-email recipients    | 5 000 per campaign (`0` = unlimited)      | `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`     |
-| `message_received` email | 1 per recipient per thread per 10 minutes | Outbox idempotency key; fixed         |
+| Bound                             | Value                                               | Where                                 |
+| --------------------------------- | --------------------------------------------------- | ------------------------------------- |
+| New threads / replies             | 10 / 30 per minute per account                      | Rate limiter                          |
+| Messages per account              | 200 per rolling 24 h (`0` = unlimited)              | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` |
+| Broadcast recipients              | 5 000 per broadcast (`0` = unlimited)               | `NEXUS_MAX_BROADCAST_RECIPIENTS`      |
+| Broadcasts per admin              | 20 per rolling 24 h (`0` = unlimited)               | `NEXUS_MAX_BROADCASTS_PER_DAY`        |
+| Mass-email recipients             | 5 000 per campaign (`0` = unlimited)                | `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`     |
+| `message_received` email          | 1 per recipient per thread per 10 minutes           | Outbox idempotency key; fixed         |
+| `spec_updated` email              | 1 per recipient per API per clock hour              | Outbox idempotency key; fixed         |
+| `api_spec_updated` notice         | 1 while unread; rewritten, not repeated             | Checked per recipient; fixed          |
+| `spec_updated` emails per fan-out | `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (`0` = unlimited) | Past it, in-app only                  |
 
 - **The daily budgets are exact across instances.** The count and the insert run
   under a per-sender lease in `edge_leases`. A sender whose lease is held
@@ -384,6 +388,37 @@ Each message writes a message row and an audit row. A **platform thread** (no
 - **The `message_received` email does not quote the message** by default,
   because only the first message in each 10-minute window sends one. In-app
   notifications are still one per message.
+- **A spec change reaches each grantee account once.** When a revision that
+  changes something is published, every account holding an active grant on the
+  API (once, whatever its identities hold) except the publisher gets an
+  `api_spec_updated` notice and, if the account turned email on (it is off by
+  default), a `spec_updated` email. A provider publishing many revisions sends
+  each account at most one email per API per clock hour and one notice, which
+  is rewritten until it is read; both link to the API's Changes tab, which
+  lists every revision.
+- **The fan-out is detached, batched and capped.** It runs after the revision
+  commits and the publish response does not wait for it. It works in
+  transactions of 200 accounts, re-reading each account's grant and status,
+  each with an `api.spec_notify` audit row counting who was notified, emailed,
+  coalesced, capped or had the channel off; a failed batch is logged at `warn`,
+  counted as `failed_batches`, and does not stop the next. One fan-out queues
+  at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` emails (`0` = unlimited), so a
+  large API cannot crowd verification and password-reset mail out of the
+  outbox, which delivers in the order rows were queued; accounts past the cap,
+  the ones latest in the API's grant list, get the in-app notice only.
+  Fan-outs of one API run one at a time, and of several waiting only the
+  newest runs: its audit rows name the others (`superseded_spec_ids`), and if
+  any of them broke something, its notices and email say so. **It is
+  best-effort:** on a graceful stop the server stops starting batches and
+  waits at most 10 seconds for the running ones; the batches left are skipped
+  and recorded as `skipped_batches`, and a crash loses the whole fan-out.
+  Nothing retries either.
+- **Outbox and notification rows accumulate.** Sent `email_outbox` rows and
+  `notifications` are kept, and each spec-change fan-out adds up to one
+  notification per grantee account (fewer while notices are unread) and up to
+  `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` outbox rows. Neither table is purged by the
+  portal; prune old sent outbox rows and read notifications on a schedule if
+  they grow large.
 
 #### Branding
 
@@ -566,6 +601,13 @@ owns. It copies no data:
   creates its own next to it.
 - A leftover auth config beside the portal's stays attached after an
   `auth_plugin` change and is listed under `outgoing_auth_configs_remaining`.
+
+`005_notification_preferences` (pending; ships in the next release) adds the
+`user_notification_preferences` table: one row per account that changed a
+notification preference, keyed by the account. It copies no data, so every
+existing account gets the defaults (the spec-change notice in-app, no email)
+until it changes one. On MongoDB
+the collection is keyed by `_id` and the step declares no index.
 
 `004_api_spec_changes` (pending; ships in the next release) adds the
 `api_spec_changes` table: one consumer-facing change summary per published

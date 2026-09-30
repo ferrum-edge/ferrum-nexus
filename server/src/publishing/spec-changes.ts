@@ -110,6 +110,8 @@ export interface SpecChangeStats {
   schemaPairs: number;
   /** Pairs of referenced components compared. */
   componentPairs: number;
+  /** Entries of `type` lists read, across every schema looked at. */
+  typeEntries: number;
 }
 
 /** Limits a test may lower, to reach them with a small document. */
@@ -206,7 +208,7 @@ const SCHEMA_TYPES: ReadonlySet<string> = new Set([
  * {@link SCHEMA_TYPES}, so a longer one is junk, and reading it whole would
  * let a document make every comparison of it as slow as the list is long.
  */
-const MAX_TYPE_ENTRIES = 32;
+export const MAX_TYPE_ENTRIES = 32;
 
 /**
  * The types a schema allows, sorted: `type` as written, `null` when OpenAPI
@@ -216,13 +218,14 @@ const MAX_TYPE_ENTRIES = 32;
  * and only the first {@link MAX_TYPE_ENTRIES} entries of a list are read, so
  * the result has at most seven entries whatever the document says.
  */
-function typesOf(schema: Record<string, unknown>): string[] {
+function typesOf(schema: Record<string, unknown>, stats?: SpecChangeStats): string[] {
   const written = own(schema, 'type');
   const types = new Set<string>();
   if (typeof written === 'string') {
     if (SCHEMA_TYPES.has(written)) types.add(written);
   } else if (Array.isArray(written)) {
     const read = Math.min(written.length, MAX_TYPE_ENTRIES);
+    if (stats) stats.typeEntries += read;
     for (let index = 0; index < read; index += 1) {
       const entry: unknown = written[index];
       if (typeof entry === 'string' && SCHEMA_TYPES.has(entry)) types.add(entry);
@@ -426,7 +429,7 @@ export function compareSpecRevisions(
     const ref = refOf(value);
     if (ref !== null) return clipSpecText(`$ref ${ref}`);
     if (typeof value === 'boolean') return value ? 'any' : 'nothing';
-    if (isRecord(value)) return describeTypes(typesOf(value));
+    if (isRecord(value)) return describeTypes(typesOf(value, stats));
     return 'invalid';
   };
 
@@ -522,8 +525,8 @@ export function compareSpecRevisions(
     const narrowing: SpecChangeSeverity = sends(direction) ? 'breaking' : 'non_breaking';
     const widening: SpecChangeSeverity = sends(direction) ? 'non_breaking' : 'breaking';
 
-    const fromTypes = typesOf(left);
-    const toTypes = typesOf(right);
+    const fromTypes = typesOf(left, stats);
+    const toTypes = typesOf(right, stats);
     const sameTypes =
       fromTypes.length === toTypes.length && fromTypes.every((type, i) => type === toTypes[i]);
     if (!sameTypes) {

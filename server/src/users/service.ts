@@ -42,6 +42,7 @@ import {
   roleAtLeast,
   type GatewayTeardownOutcome,
   type GatewayTeardownState,
+  type NotificationPreferences,
   type Organization,
   type Paginated,
   type Role,
@@ -67,6 +68,7 @@ import type {
   GatewayTeardownJobRecord,
   ListOptions,
   NexusStore,
+  NotificationPreferencesRecord,
   UpdateInput,
   UserFilter,
   UserRecord,
@@ -150,6 +152,23 @@ export interface UserListFilter {
   q?: string;
 }
 
+/** Every preference, in the order an audit row names what changed. */
+const NOTIFICATION_PREFERENCE_KEYS = [
+  'api_spec_updated_in_app',
+  'api_spec_updated_email',
+] as const satisfies readonly (keyof NotificationPreferences)[];
+
+/**
+ * An account's preferences, from its row or, without one, the defaults: the
+ * in-app spec-change notice on, its email off until the account asks for it.
+ */
+function preferencesOf(record: NotificationPreferencesRecord | null): NotificationPreferences {
+  return {
+    api_spec_updated_in_app: record?.api_spec_updated_in_app ?? true,
+    api_spec_updated_email: record?.api_spec_updated_email ?? false,
+  };
+}
+
 /** Profile, user administration and organization operations. */
 export interface UsersService {
   /** The caller's own account. */
@@ -165,6 +184,14 @@ export interface UsersService {
     patch: UpdateMeInput,
     context?: RequestContext,
   ): Promise<UpdateMeResult>;
+  /** The caller's notification preferences, or the defaults until it changes one. */
+  getNotificationPreferences(user: UserRecord): Promise<NotificationPreferences>;
+  /** Change the preferences named in `patch`, and only those. Audited when one changes. */
+  updateNotificationPreferences(
+    user: UserRecord,
+    patch: Partial<NotificationPreferences>,
+    ip?: string | null,
+  ): Promise<NotificationPreferences>;
   listUsers(filter?: UserListFilter, options?: ListOptions): Promise<Paginated<User>>;
   /** Portal-wide count of disabled accounts still owing a gateway revocation. */
   countPendingGatewayTeardowns(): Promise<number>;
@@ -255,6 +282,33 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
 
   return {
     getMe: (user) => toPublicUser(user),
+
+    async getNotificationPreferences(user): Promise<NotificationPreferences> {
+      return preferencesOf(await store.notificationPreferences.find(user.id));
+    },
+
+    async updateNotificationPreferences(user, patch, ip = null): Promise<NotificationPreferences> {
+      return store.transaction(async (tx) => {
+        const current = preferencesOf(await tx.notificationPreferences.find(user.id));
+        const next: NotificationPreferences = {
+          api_spec_updated_in_app: patch.api_spec_updated_in_app ?? current.api_spec_updated_in_app,
+          api_spec_updated_email: patch.api_spec_updated_email ?? current.api_spec_updated_email,
+        };
+        const changed = NOTIFICATION_PREFERENCE_KEYS.filter((key) => next[key] !== current[key]);
+        if (changed.length === 0) return current;
+        await tx.notificationPreferences.upsert(user.id, next);
+        await audit
+          .forStore(tx)
+          .record(
+            { id: user.id, role: user.role },
+            AuditAction.USER_NOTIFICATION_PREFERENCES_UPDATE,
+            { type: 'user', id: user.id },
+            { changed, ...next },
+            ip,
+          );
+        return next;
+      });
+    },
 
     async updateMe(user, patch, context = { ip: null, userAgent: null }): Promise<UpdateMeResult> {
       const ip = context.ip;

@@ -66,6 +66,13 @@ function stubApi(
       if (url === '/api/admin/settings') {
         return Promise.resolve(json({ branding, gateway: { public_url: null } }));
       }
+      // The profile page's notification card reads these; the list-shaped
+      // fallback below is not one, and the card would report it as a failure.
+      if (url === '/api/users/me/notification-preferences') {
+        return Promise.resolve(
+          json({ preferences: { api_spec_updated_in_app: true, api_spec_updated_email: false } }),
+        );
+      }
       return Promise.resolve(json({ items: [], total: 0, unread_count: 0 }));
     }),
   );

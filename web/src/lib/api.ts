@@ -64,6 +64,7 @@ import {
   type GetApiSpecResponse,
   type GetEmailTemplateResponse,
   type GetMeUserResponse,
+  type GetNotificationPreferencesResponse,
   type GetThreadQuery,
   type GetThreadResponse,
   type GetUserResponse,
@@ -160,6 +161,8 @@ import {
   type UpdateEmailTemplateResponse,
   type UpdateMeRequest,
   type UpdateMeResponse,
+  type UpdateNotificationPreferencesRequest,
+  type UpdateNotificationPreferencesResponse,
   type UpdateSettingsRequest,
   type UpdateSettingsResponse,
   type UpdateUserRequest,
@@ -400,6 +403,14 @@ export const usersApi = {
   me: (): Promise<GetMeUserResponse> => get<GetMeUserResponse>('/users/me'),
   updateMe: (body: UpdateMeRequest): Promise<UpdateMeResponse> =>
     patch<UpdateMeResponse>('/users/me', body),
+  /** The caller's own notification preferences. */
+  notificationPreferences: (): Promise<GetNotificationPreferencesResponse> =>
+    get<GetNotificationPreferencesResponse>('/users/me/notification-preferences'),
+  /** Change the preferences named in `body`. */
+  updateNotificationPreferences: (
+    body: UpdateNotificationPreferencesRequest,
+  ): Promise<UpdateNotificationPreferencesResponse> =>
+    patch<UpdateNotificationPreferencesResponse>('/users/me/notification-preferences', body),
   list: (query: ListUsersQuery = {}): Promise<ListUsersResponse> =>
     get<ListUsersResponse>('/users', { ...query }),
   get: (id: string): Promise<GetUserResponse> =>

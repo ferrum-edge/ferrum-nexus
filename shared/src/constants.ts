@@ -260,7 +260,8 @@ export type EmailTemplateKey =
   | 'access_revoked'
   | 'message_received'
   | 'mass'
-  | 'credential_rotated';
+  | 'credential_rotated'
+  | 'spec_updated';
 
 /** Every email template key, in admin UI display order. */
 export const EMAIL_TEMPLATE_KEYS = [
@@ -272,6 +273,7 @@ export const EMAIL_TEMPLATE_KEYS = [
   'message_received',
   'mass',
   'credential_rotated',
+  'spec_updated',
 ] as const satisfies readonly EmailTemplateKey[];
 
 /** Human-readable labels for {@link EmailTemplateKey}. */
@@ -284,6 +286,7 @@ export const EMAIL_TEMPLATE_LABELS: Readonly<Record<EmailTemplateKey, string>> =
   message_received: 'New message received',
   mass: 'Mass email',
   credential_rotated: 'Credential rotated',
+  spec_updated: 'API specification changed',
 };
 
 /** Runtime type guard for {@link EmailTemplateKey}. */
@@ -518,6 +521,16 @@ export const SPEC_CHANGE_HISTORY_LIMIT = 100;
 
 /** Largest page of change summaries `GET /api/catalog/:slug/changes` returns. */
 export const MAX_SPEC_CHANGE_PAGE_SIZE = 20;
+
+/**
+ * How long one spec-change email covers, per API and recipient. A provider
+ * publishing several revisions inside it sends each grantee one email, for the
+ * first; it links to the change history, which lists the rest.
+ */
+export const SPEC_CHANGE_EMAIL_WINDOW_MS = 60 * 60 * 1000;
+
+/** Changes a spec-change notice names before it says how many more there are. */
+export const SPEC_CHANGE_NOTICE_NAMED = 5;
 
 /**
  * Clamp a caller-supplied page size into `[1, MAX_PAGE_SIZE]`, falling back to

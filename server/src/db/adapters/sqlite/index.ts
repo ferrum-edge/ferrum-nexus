@@ -155,6 +155,8 @@ import type {
   MessageRecord,
   MessageRepo,
   NexusStore,
+  NotificationPreferenceRepo,
+  NotificationPreferencesRecord,
   NotificationRecord,
   NotificationRepo,
   OrganizationRecord,
@@ -565,6 +567,16 @@ function mapNotification(row: Row): NotificationRecord {
   };
 }
 
+function mapNotificationPreferences(row: Row): NotificationPreferencesRecord {
+  return {
+    user_id: text(row.user_id),
+    api_spec_updated_in_app: bool(row.api_spec_updated_in_app),
+    api_spec_updated_email: bool(row.api_spec_updated_email),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
 function mapOutbox(row: Row): EmailOutboxRecord {
   return {
     id: text(row.id),
@@ -836,6 +848,7 @@ class SqliteStore implements NexusStore {
     this.threads = guardRepo(this.threads, mediate);
     this.messages = guardRepo(this.messages, mediate);
     this.notifications = guardRepo(this.notifications, mediate);
+    this.notificationPreferences = guardRepo(this.notificationPreferences, mediate);
     this.emailOutbox = guardRepo(this.emailOutbox, mediate);
     this.gatewayTeardownJobs = guardRepo(this.gatewayTeardownJobs, mediate);
     this.auditLogs = guardRepo(this.auditLogs, mediate);
@@ -2239,6 +2252,18 @@ class SqliteStore implements NexusStore {
         mapGrant,
       ),
 
+    listActiveHolders: async (apiId, userIds) => {
+      if (userIds.length === 0) return [];
+      const rows = queryAll(
+        this.db,
+        `SELECT DISTINCT user_id FROM grants
+          WHERE api_id = ? AND status = 'active'
+            AND user_id IN (${userIds.map(() => '?').join(', ')})`,
+        [apiId, ...userIds],
+      );
+      return rows.map((row) => text(row.user_id));
+    },
+
     count: async (filter) => {
       const where = grantWhere(filter).build();
       return queryCount(this.db, `SELECT COUNT(*) AS count FROM grants${where.sql}`, where.params);
@@ -2901,6 +2926,79 @@ class SqliteStore implements NexusStore {
         'UPDATE notifications SET read_at = ?, updated_at = ? WHERE user_id = ? AND read_at IS NULL',
         [at, nowIso(), userId],
       ),
+
+    listUnread: async (userIds, type, link) => {
+      if (userIds.length === 0) return [];
+      const rows = queryAll(
+        this.db,
+        `SELECT * FROM notifications
+          WHERE type = ? AND link = ? AND read_at IS NULL
+            AND user_id IN (${userIds.map(() => '?').join(', ')})`,
+        [type, link, ...userIds],
+      );
+      return rows.map(mapNotification);
+    },
+
+    updateUnread: async (userIds, type, link, content) => {
+      if (userIds.length === 0) return 0;
+      const at = nowIso();
+      return execute(
+        this.db,
+        `UPDATE notifications SET title = ?, body = ?, created_at = ?, updated_at = ?
+          WHERE type = ? AND link = ? AND read_at IS NULL
+            AND user_id IN (${userIds.map(() => '?').join(', ')})`,
+        [content.title, content.body, at, at, type, link, ...userIds],
+      );
+    },
+  };
+
+  /* ── notificationPreferences ──────────────────────────────────────────── */
+
+  readonly notificationPreferences: NotificationPreferenceRepo = {
+    find: async (userId) => {
+      const row = queryOne(
+        this.db,
+        'SELECT * FROM user_notification_preferences WHERE user_id = ?',
+        [userId],
+      );
+      return row ? mapNotificationPreferences(row) : null;
+    },
+
+    findManyByUsers: async (userIds) => {
+      if (userIds.length === 0) return [];
+      return queryAll(
+        this.db,
+        `SELECT * FROM user_notification_preferences
+          WHERE user_id IN (${userIds.map(() => '?').join(', ')})`,
+        userIds,
+      ).map(mapNotificationPreferences);
+    },
+
+    upsert: async (userId, preferences) => {
+      const at = nowIso();
+      // `created_at` is written once, by the insert; a later write only moves
+      // the preferences and `updated_at`.
+      execute(
+        this.db,
+        `INSERT INTO user_notification_preferences
+           (user_id, api_spec_updated_in_app, api_spec_updated_email, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (user_id) DO UPDATE SET
+           api_spec_updated_in_app = excluded.api_spec_updated_in_app,
+           api_spec_updated_email = excluded.api_spec_updated_email,
+           updated_at = excluded.updated_at`,
+        [
+          userId,
+          encodeBool(preferences.api_spec_updated_in_app),
+          encodeBool(preferences.api_spec_updated_email),
+          at,
+          at,
+        ],
+      );
+      const saved = await this.notificationPreferences.find(userId);
+      if (!saved) throw new Error('notificationPreferences.upsert: row vanished after write');
+      return saved;
+    },
   };
 
   /* ── emailOutbox ──────────────────────────────────────────────────────── */

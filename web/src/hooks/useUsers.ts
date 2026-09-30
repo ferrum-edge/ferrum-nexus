@@ -8,6 +8,7 @@ import {
 import type {
   CreateOrganizationRequest,
   CreateOrganizationResponse,
+  GetNotificationPreferencesResponse,
   GetUserResponse,
   ListOrganizationsQuery,
   ListOrganizationsResponse,
@@ -18,6 +19,8 @@ import type {
   StartSsoLinkResponse,
   UpdateMeRequest,
   UpdateMeResponse,
+  UpdateNotificationPreferencesRequest,
+  UpdateNotificationPreferencesResponse,
   UpdateUserRequest,
   UpdateUserResponse,
 } from '@ferrum-nexus/shared';
@@ -93,6 +96,30 @@ export function useUpdateProfile(): UseMutationResult<UpdateMeResponse, Error, U
     mutationFn: (body: UpdateMeRequest) => usersApi.updateMe(body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.users.all });
+    },
+  });
+}
+
+/** The caller's own notification preferences. */
+export function useNotificationPreferences(): UseQueryResult<GetNotificationPreferencesResponse> {
+  return useQuery({
+    queryKey: queryKeys.users.notificationPreferences,
+    queryFn: () => usersApi.notificationPreferences(),
+  });
+}
+
+/** Change some of the caller's notification preferences. */
+export function useUpdateNotificationPreferences(): UseMutationResult<
+  UpdateNotificationPreferencesResponse,
+  Error,
+  UpdateNotificationPreferencesRequest
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: UpdateNotificationPreferencesRequest) =>
+      usersApi.updateNotificationPreferences(body),
+    onSuccess: (data) => {
+      queryClient.setQueryData(queryKeys.users.notificationPreferences, data);
     },
   });
 }
