@@ -2049,7 +2049,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             while (!alreadyCleared) {
               const changes = await store.auditLogs.list(
                 {
-                  actions: [AuditAction.CREDENTIAL_RECONCILE, AuditAction.CREDENTIAL_REVOKE],
+                  action: AuditAction.CREDENTIAL_RECONCILE,
                   from: event.created_at,
                 },
                 { limit: MAX_PAGE_SIZE, offset: changeOffset },
@@ -2057,9 +2057,25 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
               alreadyCleared = changes.items.some(
                 (row) =>
                   row.created_at > event.created_at &&
-                  ((row.target_id === consumerId &&
-                    row.action === AuditAction.CREDENTIAL_RECONCILE) ||
-                    (row.details.consumer_id === consumerId && row.details.scope === 'whole-type')),
+                  row.target_id === consumerId,
+              );
+              if (alreadyCleared || changes.items.length < MAX_PAGE_SIZE) break;
+              changeOffset += changes.items.length;
+            }
+            changeOffset = 0;
+            while (!alreadyCleared) {
+              const changes = await store.auditLogs.list(
+                {
+                  action: AuditAction.CREDENTIAL_REVOKE,
+                  from: event.created_at,
+                },
+                { limit: MAX_PAGE_SIZE, offset: changeOffset },
+              );
+              alreadyCleared = changes.items.some(
+                (row) =>
+                  row.created_at > event.created_at &&
+                  row.details.consumer_id === consumerId &&
+                  row.details.scope === 'whole-type',
               );
               if (alreadyCleared || changes.items.length < MAX_PAGE_SIZE) break;
               changeOffset += changes.items.length;

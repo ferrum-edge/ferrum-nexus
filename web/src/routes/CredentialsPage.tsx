@@ -471,7 +471,10 @@ export function CredentialsPage(): ReactElement {
         onConfirm={() => {
           if (!revoking) return;
           remove.mutate(
-            { id: revoking.id, clearType: revoking.credential_type === 'basicauth' },
+            {
+              id: revoking.id,
+              ...(revoking.credential_type === 'basicauth' ? { clearType: true } : {}),
+            },
             {
               onSuccess: () => {
                 setRevoking(null);

@@ -80,7 +80,7 @@ export function useDeleteCredential(): UseMutationResult<
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ id, clearType }: { id: string; clearType?: boolean }) =>
-      credentialsApi.remove(id, clearType),
+      clearType ? credentialsApi.remove(id, true) : credentialsApi.remove(id),
     onSuccess: () => invalidateCredentialViews(queryClient),
   });
 }

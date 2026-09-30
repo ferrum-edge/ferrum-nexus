@@ -265,6 +265,21 @@ describe('credential management', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
+  it('clears the whole HTTP Basic type when revoking from the UI', async () => {
+    credentials = [{ ...CREDENTIAL, credential_type: 'basicauth' }];
+    renderPage(<CredentialsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Revoke' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(
+      within(dialog).getByText(/clears every HTTP Basic credential for this identity/),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Revoke all HTTP Basic credentials' }),
+    );
+    await screen.findByText('Credential revoked');
+    expect(credentialsApi.remove).toHaveBeenCalledWith(CREDENTIAL.id, true);
+  });
+
   it.each(['Rotate', 'Revoke'] as const)('keeps a failed %s open for retry', async (action) => {
     credentials = [CREDENTIAL];
     vi.mocked(credentialsApi.rotate).mockRejectedValue(new Error('Gateway unavailable'));

@@ -340,13 +340,14 @@ function swallowedBy(node: ts.Node, boundary: ts.Node): ts.TryStatement | null {
 /** `AuditAction.X` as the `action` of a `list`/`count` filter: a read, not a record. */
 function isFilterRead(action: ts.PropertyAccessExpression): boolean {
   const property = action.parent;
-  if (!ts.isPropertyAssignment(property) || !ts.isIdentifier(property.name)) return false;
-  const isActionField =
-    (property.name.text === 'action' && property.initializer === action) ||
-    (property.name.text === 'actions' &&
-      ts.isArrayLiteralExpression(property.initializer) &&
-      property.initializer.elements.includes(action));
-  if (!isActionField) return false;
+  if (
+    !ts.isPropertyAssignment(property) ||
+    property.initializer !== action ||
+    !ts.isIdentifier(property.name) ||
+    property.name.text !== 'action'
+  ) {
+    return false;
+  }
   const filter = property.parent;
   const call = filter.parent;
   const name = ts.isCallExpression(call) ? calleeName(call) : null;
@@ -736,19 +737,6 @@ describe('the transactional audit scan itself', () => {
     );
     assert.deepEqual(scan.findings, []);
     assert.ok(scan.recorded.has('ACCESS_APPROVE'));
-  });
-
-  it('accepts audit action references in a multi-action read filter', () => {
-    assert.deepEqual(
-      findingsFor(`
-        async function scan(store: NexusStore): Promise<void> {
-          await store.auditLogs.list({
-            actions: [AuditAction.CREDENTIAL_RECONCILE, AuditAction.CREDENTIAL_REVOKE],
-          });
-        }
-      `),
-      [],
-    );
   });
 
   it('accepts a const bound to forStore(tx) and a helper only ever handed tx', () => {

@@ -298,7 +298,11 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
   const sharedEdge = options.edge !== undefined;
   const edge =
     options.edge ??
-    createMockFerrumEdge({ jwtSecret: TEST_EDGE_JWT_SECRET, issuer: 'ferrum-edge' });
+    createMockFerrumEdge({
+      jwtSecret: TEST_EDGE_JWT_SECRET,
+      issuer: 'ferrum-edge',
+      maxCredentialsPerType: Number(options.env?.FERRUM_MAX_CREDENTIALS_PER_TYPE ?? 2),
+    });
   const edgeUrl = sharedEdge ? edge.url : await edge.start();
 
   const config = loadConfig({
