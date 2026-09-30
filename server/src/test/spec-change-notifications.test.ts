@@ -275,10 +275,12 @@ describe('spec change notifications', () => {
     assert.equal(rolledBack.statusCode, 200, rolledBack.body);
     await harness.services.specChanges.idle();
 
-    const [newest] = await notices(alice);
+    // Picked by title rather than position, which a shared millisecond can swap.
+    const alices = await notices(alice);
+    assert.equal(alices.length, 2);
+    const newest = alices.find((row) => row.title.includes('rolled back to 1.0.0'));
     assert.equal(newest?.title, 'Notify Billing spec rolled back to 1.0.0 (breaking changes)');
     assert.equal(newest?.read_at, null);
-    assert.equal((await notices(alice)).length, 2);
     const bobs = await notices(bob);
     assert.equal(bobs.length, 1, 'bob has still not read his');
     assert.equal(bobs[0]?.title, 'Notify Billing spec rolled back to 1.0.0 (breaking changes)');
@@ -533,10 +535,14 @@ describe('spec change notifications', () => {
         created_at: new Date().toISOString(),
       };
       await notifier.notify({ id: provider.user.id, role: provider.user.role }, api, change, null);
-      const [fresh, read, ...extra] = await quickNotices();
-      assert.deepEqual(extra, []);
-      assert.equal(fresh?.read_at, null, 'a new, unread notice');
-      assert.equal(fresh?.title, 'Notify Quick spec updated to 9.0.0');
+      // Picked by title, not position: the two can share a millisecond, and
+      // then the listing order between them is the ids'.
+      const all = await quickNotices();
+      assert.equal(all.length, 2);
+      const fresh = all.find((row) => row.title === 'Notify Quick spec updated to 9.0.0');
+      assert.ok(fresh, 'a new notice for the revision');
+      assert.equal(fresh.read_at, null, 'and unread');
+      const read = all.find((row) => row !== fresh);
       assert.ok(read?.read_at, 'beside the one they read');
     });
 
@@ -603,10 +609,22 @@ describe('spec change notifications', () => {
       assert.deepEqual(last?.superseded_spec_ids, ['abc-b'], 'B is named, not just counted');
       assert.equal(last?.superseded_breaking, true);
 
-      const [newest] = await quickNotices();
-      assert.equal(newest?.read_at, null);
-      assert.equal(newest?.title, 'Notify Quick spec updated to abc-c (breaking changes)');
-      assert.match(newest?.body ?? '', /An earlier revision since you last read included breaking/);
+      // Picked by title, not position: A's rewrite and C's new notice can share
+      // a millisecond. A's is the one erin read at C's batch; C's is new.
+      const all = await quickNotices();
+      const fromA = all.find((row) => row.title === 'Notify Quick spec updated to abc-a');
+      assert.ok(fromA?.read_at, "A's notice, read before C's batch was written");
+      const fromC = all.find(
+        (row) => row.title === 'Notify Quick spec updated to abc-c (breaking changes)',
+      );
+      assert.ok(fromC, "C's notice carries B's breaking mark");
+      assert.equal(fromC.read_at, null, 'and is new, so unread');
+      assert.match(fromC.body, /An earlier revision since you last read included breaking/);
+      assert.equal(
+        all.filter((row) => row.read_at === null).length,
+        1,
+        'exactly one unread notice',
+      );
     });
   });
 
