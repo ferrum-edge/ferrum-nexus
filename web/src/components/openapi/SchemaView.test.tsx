@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { MAX_OPENAPI_REF_LENGTH } from '@ferrum-nexus/shared';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createRenderBudget, MAX_PAGE_NODES, SchemaView } from './SchemaView';
@@ -327,8 +328,10 @@ describe('SchemaView', () => {
   });
 
   it('shortens long schema references in its badges', () => {
-    const name = 'x'.repeat(5_000);
+    // Far past the displayed length, and still short enough to be followed.
+    const name = 'x'.repeat(1_000);
     const ref = `#/components/schemas/${name}`;
+    expect(`${ref}-missing`.length).toBeLessThanOrEqual(MAX_OPENAPI_REF_LENGTH);
     const doc = {
       components: {
         schemas: { [name]: { type: 'object', properties: { self: { $ref: ref } } } },
@@ -351,6 +354,19 @@ describe('SchemaView', () => {
       screen.getByText(/^unresolved \$ref #\/components\/schemas\/x+…$/),
     ];
     for (const badge of badges) expect(badge.textContent?.length).toBeLessThan(250);
+  });
+
+  it('shows a reference longer than the reference length limit as unresolved', () => {
+    const name = 'x'.repeat(MAX_OPENAPI_REF_LENGTH);
+    const ref = `#/components/schemas/${name}`;
+    const doc = { components: { schemas: { [name]: { type: 'string' } } } } as SpecNode;
+    const budget = createRenderBudget();
+    render(<SchemaView doc={doc} budget={budget} schema={{ $ref: ref }} />);
+
+    const badge = screen.getByText(/^unresolved \$ref #\/components\/schemas\/x+…$/);
+    expect(badge.textContent?.length).toBeLessThan(250);
+    expect(screen.queryByText('string')).not.toBeInTheDocument();
+    expect(MAX_PAGE_NODES - budget.remaining).toBe(1);
   });
 });
 
