@@ -529,6 +529,11 @@ label follows the document's `info.version`, so bump it when you publish. The
 portal keeps a limited number of older revisions (10 by default,
 `NEXUS_SPEC_HISTORY_LIMIT`) and drops the oldest as new ones arrive.
 
+Everyone who can read your API's documentation sees what each published
+revision changed on the catalog page's **Changes** tab, with breaking changes
+marked. That summary is recorded when you publish and stays after the revision
+itself is dropped.
+
 ### Reading the review
 
 The review lists operations that would **stop being served** first, then added

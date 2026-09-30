@@ -5,7 +5,9 @@ import {
   MAX_JUSTIFICATION_LENGTH,
   consumerUsernameForApplication,
   consumerUsernameForUser,
+  emptySpecChangeReport,
   type AccessRequest,
+  type ApiSpecChangeEntry,
   type Application,
   type ApplicationSummary,
   type CatalogDetailResponse,
@@ -13,6 +15,7 @@ import {
   type CatalogListResponse,
   type CatalogSpecResponse,
   type Grant,
+  type SpecChange,
 } from '@ferrum-nexus/shared';
 import {
   API,
@@ -30,10 +33,17 @@ import { CatalogPage } from './CatalogPage';
 
 const session = vi.hoisted(() => ({ canAdmin: false }));
 const navigate = vi.hoisted(() => vi.fn());
+/** The detail route's search params, e.g. `{ tab: 'changes' }` from a notification link. */
+const search = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));
 
 vi.mock('@tanstack/react-router', async () => {
   const { TestLink } = await import('../../test/helpers');
-  return { Link: TestLink, useParams: () => ({ slug: 'billing' }), useNavigate: () => navigate };
+  return {
+    Link: TestLink,
+    useParams: () => ({ slug: 'billing' }),
+    useSearch: () => search.value,
+    useNavigate: () => navigate,
+  };
 });
 vi.mock('../stores/auth', () => ({
   useAuth: () => ({ user: { id: 'user-1' }, canAdmin: session.canAdmin }),
@@ -48,6 +58,7 @@ const NO_ACCESS: CatalogIdentityAccessResponse = { application: null, request: n
 beforeEach(() => {
   session.canAdmin = false;
   navigate.mockReset();
+  search.value = {};
   detail = { api: catalogEntry(), spec: SPEC, my_request: null, my_grant: null };
   identities = {};
   vi.spyOn(catalogApi, 'list').mockResolvedValue({ items: [], total: 0 });
@@ -64,6 +75,7 @@ beforeEach(() => {
     parsed_version: SPEC.parsed_version,
   });
   vi.spyOn(threadsApi, 'create').mockResolvedValue(THREAD_RESPONSE);
+  vi.spyOn(catalogApi, 'changes').mockResolvedValue({ items: [], total: 0 });
 });
 
 afterEach(() => {
@@ -220,6 +232,143 @@ describe('catalog browsing', () => {
     vi.mocked(catalogApi.spec).mockRejectedValue(new Error('Unavailable'));
     await openDetail('Documentation');
     expect(await screen.findByText('Specification unavailable')).toBeInTheDocument();
+  });
+});
+
+/** One recorded change summary, as `GET /api/catalog/:slug/changes` serves it. */
+function changeEntry(overrides: Partial<ApiSpecChangeEntry> = {}): ApiSpecChangeEntry {
+  return {
+    id: 'change-1',
+    api_id: API.id,
+    revision_id: 'revision-2',
+    previous_revision_id: 'revision-1',
+    kind: 'update',
+    version: '2.0.0',
+    previous_version: '1.0.0',
+    report: emptySpecChangeReport(),
+    created_at: '2026-09-20T10:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function change(overrides: Partial<SpecChange>): SpecChange {
+  return {
+    kind: 'operation_added',
+    severity: 'non_breaking',
+    operation: { method: 'GET', path: '/orders' },
+    section: 'operation',
+    location: null,
+    schema_path: null,
+    from: null,
+    to: null,
+    ...overrides,
+  };
+}
+
+describe('catalog change history (issue #448)', () => {
+  it('fetches nothing until opened, then shows the empty state', async () => {
+    await openDetail();
+    expect(catalogApi.changes).not.toHaveBeenCalled();
+    selectTab('Changes');
+    expect(await screen.findByText('No changes since it was first published')).toBeInTheDocument();
+    expect(catalogApi.changes).toHaveBeenCalledWith('billing', { limit: 10, offset: 0 });
+  });
+
+  it('lists each revision, breaking changes first, as text', async () => {
+    const hostilePath = '/orders/<img src=x onerror=alert(1)>';
+    vi.mocked(catalogApi.changes).mockResolvedValue({
+      total: 2,
+      items: [
+        changeEntry({
+          id: 'change-2',
+          kind: 'rollback',
+          version: '1.0.0',
+          previous_version: '2.0.0',
+          report: {
+            ...emptySpecChangeReport(),
+            changed: true,
+            changes: [
+              change({
+                kind: 'operation_removed',
+                severity: 'breaking',
+                operation: { method: 'DELETE', path: hostilePath },
+              }),
+              change({
+                kind: 'schema_property_added',
+                section: 'response',
+                location: '200 application/json',
+                schema_path: 'currency',
+                to: 'optional',
+              }),
+            ],
+            counts: {
+              ...emptySpecChangeReport().counts,
+              breaking: 1,
+              non_breaking: 3,
+              operations_removed: 1,
+            },
+            truncated: true,
+            info_changes: ['version'],
+          },
+        }),
+        changeEntry(),
+      ],
+    });
+    await openDetail('Changes');
+    const panel = await screen.findByRole('tabpanel');
+    await within(panel).findByText('Rollback');
+    expect(within(panel).getByText('Update')).toBeInTheDocument();
+    expect(within(panel).getByText(/replaced v2\.0\.0/)).toBeInTheDocument();
+    expect(
+      within(panel).getByText('Operation removed: requests to it may now fail'),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByText('Response 200 application/json, field currency: added (optional)'),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText('1 breaking')).toBeInTheDocument();
+    expect(within(panel).getByText('3 non-breaking')).toBeInTheDocument();
+    expect(within(panel).getByText('Also changed: version')).toBeInTheDocument();
+    expect(within(panel).getByText('…and 2 more changes not listed.')).toBeInTheDocument();
+    // Provider-written names are text, never markup.
+    expect(within(panel).getByText(hostilePath)).toBeInTheDocument();
+    expect(panel.querySelector('img')).toBeNull();
+    // The unchanged revision says so, and the caveat is always there.
+    expect(within(panel).getByText(/No differences found/)).toBeInTheDocument();
+    expect(within(panel).getByText(/structural comparison/)).toBeInTheDocument();
+  });
+
+  it('says when a comparison is incomplete instead of claiming nothing changed', async () => {
+    vi.mocked(catalogApi.changes).mockResolvedValue({
+      total: 1,
+      items: [changeEntry({ report: emptySpecChangeReport(false) })],
+    });
+    await openDetail('Changes');
+    const panel = await screen.findByRole('tabpanel');
+    expect(await within(panel).findByText(/This comparison is incomplete/)).toBeInTheDocument();
+    expect(within(panel).queryByText(/No differences found/)).not.toBeInTheDocument();
+  });
+
+  it('pages through a long history', async () => {
+    vi.mocked(catalogApi.changes).mockResolvedValue({ total: 12, items: [changeEntry()] });
+    await openDetail('Changes');
+    fireEvent.click(await screen.findByRole('button', { name: 'Next page' }));
+    await waitFor(() =>
+      expect(catalogApi.changes).toHaveBeenLastCalledWith('billing', { limit: 10, offset: 10 }),
+    );
+  });
+
+  it('opens the Changes tab directly from a link', async () => {
+    search.value = { tab: 'changes' };
+    renderPage(<CatalogDetailPage />);
+    await screen.findByRole('heading', { name: API.name });
+    expect(screen.getByRole('tab', { name: 'Changes' })).toHaveAttribute('aria-selected', 'true');
+    expect(await screen.findByText('No changes since it was first published')).toBeInTheDocument();
+  });
+
+  it('reports a failed history request', async () => {
+    vi.mocked(catalogApi.changes).mockRejectedValue(new Error('Unavailable'));
+    await openDetail('Changes');
+    expect(await screen.findByText('Change history unavailable')).toBeInTheDocument();
   });
 });
 

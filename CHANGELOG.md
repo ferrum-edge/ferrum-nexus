@@ -6,6 +6,23 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Consumers can see what changed in an API's specification** (#448). Each
+  revision that replaces another, by upload or rollback, records a summary of
+  what it changed: operations added, removed and deprecated, parameters added,
+  removed or made required, request bodies, response status codes and media
+  types, and the properties, types, `required` lists and enums of request and
+  response schemas, each marked breaking or not. The catalog page has a new
+  **Changes** tab listing them newest first, and
+  `GET /api/catalog/:slug/changes` (and `…/changes/:revisionId`) serve them to
+  anyone who may read the API's documentation, under the same visibility rules.
+  Summaries outlive `NEXUS_SPEC_HISTORY_LIMIT` pruning; the newest 100 per API
+  are kept. A first publish records none, and revisions published before the
+  upgrade have none.
+- Forward migration `004_api_spec_changes` adds the `api_spec_changes` table on
+  every backend. It copies no data.
+
 ### Changed
 
 - **OpenAPI render cost is counted the way the catalog viewer renders**

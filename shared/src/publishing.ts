@@ -1,5 +1,5 @@
 import { MAX_UPSTREAM_URL_LENGTH } from './constants.js';
-import type { SpecChangeReport } from './entities.js';
+import type { SpecChange, SpecChangeReport } from './entities.js';
 
 /** Maximum length of the slug used in an API's listen path. */
 export const MAX_API_SLUG_LENGTH = 60;
@@ -123,4 +123,87 @@ export function emptySpecChangeReport(complete = true): SpecChangeReport {
     truncated: false,
     info_changes: [],
   };
+}
+
+/** What a change is in, for a sentence: `Parameter query limit`, `Response 200`. */
+function specChangeSubject(change: SpecChange): string {
+  const at = change.location ?? '';
+  if (change.operation === null) {
+    return `Schema ${at} (in ${change.section === 'response' ? 'responses' : 'requests'})`;
+  }
+  switch (change.section) {
+    case 'parameter':
+      return `Parameter ${at}`;
+    case 'request':
+      return at === '' ? 'Request body' : `Request body ${at}`;
+    case 'response':
+      return `Response ${at}`;
+    default:
+      return 'Operation';
+  }
+}
+
+/**
+ * One {@link SpecChange} as a sentence, for the catalog's change history and
+ * the notifications that link to it. Plain text: every caller renders it as
+ * text, never as markup, because it quotes provider-written names.
+ */
+export function describeSpecChange(change: SpecChange): string {
+  const subject = specChangeSubject(change);
+  const field = change.schema_path ? `${subject}, field ${change.schema_path}` : subject;
+  const detail = change.to ? ` (${change.to})` : '';
+  switch (change.kind) {
+    case 'operation_added':
+      return 'Operation added';
+    case 'operation_removed':
+      return 'Operation removed: requests to it may now fail';
+    case 'operation_deprecated':
+      return 'Operation deprecated';
+    case 'operation_undeprecated':
+      return 'Operation no longer deprecated';
+    case 'parameter_added':
+      return `${subject} added${detail}`;
+    case 'parameter_removed':
+      return `${subject} removed`;
+    case 'parameter_required':
+      return `${subject} is now required`;
+    case 'parameter_optional':
+      return `${subject} is now optional`;
+    case 'request_body_added':
+      return 'Request body added';
+    case 'request_body_removed':
+      return 'Request body removed';
+    case 'request_body_required':
+      return 'Request body is now required';
+    case 'request_body_optional':
+      return 'Request body is now optional';
+    case 'response_added':
+      return `${subject} added`;
+    case 'response_removed':
+      return `${subject} removed`;
+    case 'media_type_added':
+      return `${subject}: media type added`;
+    case 'media_type_removed':
+      return `${subject}: media type removed`;
+    case 'schema_type_changed':
+      return `${field}: type changed from ${change.from ?? 'any'} to ${change.to ?? 'any'}`;
+    case 'schema_property_added':
+      return `${field}: added${detail}`;
+    case 'schema_property_removed':
+      return `${field}: removed`;
+    case 'schema_property_required':
+      return `${field}: now required`;
+    case 'schema_property_optional':
+      return `${field}: now optional`;
+    case 'schema_enum_values_added':
+      return change.from === 'any value'
+        ? `${field}: now restricted to ${change.to ?? 'fixed values'}`
+        : `${field}: now also allows ${change.to ?? 'more values'}`;
+    case 'schema_enum_values_removed':
+      return change.to === 'any value'
+        ? `${field}: no longer restricted to fixed values`
+        : `${field}: no longer allows ${change.from ?? 'some values'}`;
+    case 'schema_composition_changed':
+      return `${field}: changed from ${change.from ?? '?'} to ${change.to ?? '?'}`;
+  }
 }

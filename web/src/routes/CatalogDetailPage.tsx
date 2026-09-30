@@ -1,5 +1,5 @@
-import { Link, useParams } from '@tanstack/react-router';
-import { useState, type ReactElement, type ReactNode } from 'react';
+import { Link, useParams, useSearch } from '@tanstack/react-router';
+import { useEffect, useState, type ReactElement, type ReactNode } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   MAX_JUSTIFICATION_LENGTH,
@@ -10,6 +10,7 @@ import {
   type CatalogDetailResponse,
   type CatalogIdentityAccessResponse,
 } from '@ferrum-nexus/shared';
+import { isCatalogDetailTab } from '../lib/catalog-tabs';
 import { formatDateTime } from '../lib/format';
 import { useCatalogApi, useCatalogIdentityAccess, useCatalogSpec } from '../hooks/useCatalog';
 import { useCancelAccessRequest, useCreateAccessRequest } from '../hooks/useAccessRequests';
@@ -17,6 +18,7 @@ import { useAuth } from '../stores/auth';
 import { useToast } from '../stores/toast';
 import { ACCOUNT_IDENTITY, IdentityPicker } from '../components/applications/IdentityPicker';
 import { CallApiPanel } from '../components/catalog/CallApiPanel';
+import { SpecChangeHistory } from '../components/catalog/SpecChangeHistory';
 import { OpenApiView } from '../components/openapi/OpenApiView';
 import { StartThreadDialog } from '../components/messaging/StartThreadDialog';
 import { FormNotice } from '../components/auth/AuthShell';
@@ -531,12 +533,20 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
   );
 }
 
-/** Catalog entry detail: overview, rendered documentation and access request. */
+/** Catalog entry detail: overview, documentation, change history and access request. */
 
 export function CatalogDetailPage(): ReactElement {
   const params = useParams({ strict: false });
   const slug = params.slug ?? '';
-  const [tab, setTab] = useState('overview');
+  // `?tab=` opens one tab directly: a spec-change notification links to
+  // `changes`. Anything else it could say opens the overview.
+  const search: { tab?: unknown } = useSearch({ strict: false });
+  const linked = isCatalogDetailTab(search.tab) ? search.tab : null;
+  const [tab, setTab] = useState<string>(linked ?? 'overview');
+  // A second link to the same page selects its tab without a remount.
+  useEffect(() => {
+    if (linked !== null) setTab(linked);
+  }, [linked]);
   const [messageOpen, setMessageOpen] = useState(false);
   const { canAdmin } = useAuth();
   const query = useCatalogApi(slug);
@@ -616,6 +626,7 @@ export function CatalogDetailPage(): ReactElement {
             label: 'Documentation',
             content: <Documentation slug={slug} hasSpec={detail.spec !== null} />,
           },
+          { value: 'changes', label: 'Changes', content: <SpecChangeHistory slug={slug} /> },
           { value: 'access', label: 'Access', content: <AccessPanel detail={detail} /> },
         ]}
       />

@@ -38,6 +38,9 @@ import {
   type UpdateApplicationResponse,
   type CatalogListQuery,
   type CatalogListResponse,
+  type CatalogSpecChangeResponse,
+  type CatalogSpecChangesQuery,
+  type CatalogSpecChangesResponse,
   type CatalogSpecResponse,
   type CreateAccessRequestRequest,
   type CreateAccessRequestResponse,
@@ -397,6 +400,17 @@ export const catalogApi = {
     get<CatalogDetailResponse>(`/catalog/${encodeURIComponent(slug)}`),
   spec: (slug: string): Promise<CatalogSpecResponse> =>
     get<CatalogSpecResponse>(`/catalog/${encodeURIComponent(slug)}/spec`),
+  /** What each published revision changed, newest first. */
+  changes: (
+    slug: string,
+    query: CatalogSpecChangesQuery = {},
+  ): Promise<CatalogSpecChangesResponse> =>
+    get<CatalogSpecChangesResponse>(`/catalog/${encodeURIComponent(slug)}/changes`, { ...query }),
+  /** What one revision changed against the revision it replaced. */
+  change: (slug: string, revisionId: string): Promise<CatalogSpecChangeResponse> =>
+    get<CatalogSpecChangeResponse>(
+      `/catalog/${encodeURIComponent(slug)}/changes/${encodeURIComponent(revisionId)}`,
+    ),
   /**
    * One identity's request and grant on an API: `null` is the account itself,
    * an id one of the caller's own applications.

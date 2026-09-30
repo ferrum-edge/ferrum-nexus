@@ -1467,7 +1467,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // replaces as re-read under the lease. Pure and bounded, so it is
       // computed here, once, rather than in a transaction body that may re-run.
       const replaced = previous;
-      const changes = replaced ? revisionChanges(replaced, parsed) : null;
+      const specChanges = replaced ? revisionChanges(replaced, parsed) : null;
       // A revision that rewrites a live proxy commits its intent first, in a
       // transaction of its own under the lease (so the fence covers it): the
       // completion row below commits with the revision, but a gateway write
@@ -1588,7 +1588,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // The consumer-facing summary commits with the revision it
           // describes, and is bounded by its own retention: it outlives the
           // document the prune above may just have dropped.
-          if (replaced && changes) {
+          if (replaced && specChanges) {
             await tx.apiSpecChanges.create({
               api_id: api.id,
               revision_id: revision.id,
@@ -1597,7 +1597,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               version: nextVersion,
               previous_version: replaced.version,
               revision_seq: revision.revision_seq,
-              report: changes,
+              report: specChanges,
             });
             await tx.apiSpecChanges.prune(api.id, SPEC_CHANGE_HISTORY_LIMIT);
           }
@@ -1631,11 +1631,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               spec_enforcement: api.spec_enforcement,
               backend_updated: backendUpdated,
               pruned_revisions: pruned,
-              spec_changes: changes
+              spec_changes: specChanges
                 ? {
-                    breaking: changes.counts.breaking,
-                    non_breaking: changes.counts.non_breaking,
-                    complete: changes.complete,
+                    breaking: specChanges.counts.breaking,
+                    non_breaking: specChanges.counts.non_breaking,
+                    complete: specChanges.complete,
                   }
                 : null,
               ...(restoredFrom
