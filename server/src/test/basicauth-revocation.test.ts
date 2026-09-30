@@ -299,7 +299,12 @@ describe('basicauth revocation removes the selected password', () => {
 
   it('clears the pending row when Edge definitely rejects a Basic Auth append', async () => {
     const user = await client();
-    harness.edge.queueFailure(400, { error: 'credential cap reached' }, '/credentials/basicauth', 'POST');
+    harness.edge.queueFailure(
+      400,
+      { error: 'credential cap reached' },
+      '/credentials/basicauth',
+      'POST',
+    );
     const rejected = await tryIssue(user);
     assert.equal(rejected.statusCode, 502, rejected.body);
     assert.equal(livePasswords(user).length, 0);
@@ -381,6 +386,55 @@ describe('basicauth revocation removes the selected password', () => {
     assert.equal(retried.statusCode, 200, retried.body);
     assert.equal(await statusOf(first.credential.id), 'revoked');
     assert.equal(await statusOf(second.credential.id), 'revoked');
+  });
+
+  it('keeps a failed append-first rotation recoverable when the old delete fails', async () => {
+    const user = await client();
+    const original = await issue(user);
+    harness.edge.queueFailure(
+      400,
+      { error: 'delete refused' },
+      '/credentials/basicauth/',
+      'DELETE',
+    );
+
+    const failed = await rotate(user, original.credential.id);
+    assert.equal(failed.statusCode, 502, failed.body);
+    assert.ok(!('secret' in JSON.parse(failed.body)), 'the replacement secret was not returned');
+    const rows = await liveRowsOf(user);
+    assert.equal(rows.filter((row) => row.status === 'retiring').length, 1);
+    assert.equal(rows.filter((row) => row.status === 'active').length, 1);
+
+    const survivor = rows.find((row) => row.status === 'active');
+    assert.ok(survivor);
+    const cleared = await harness.authed(user, {
+      method: 'DELETE',
+      url: `/api/credentials/${survivor.id}?clear_type=true`,
+    });
+    assert.equal(cleared.statusCode, 200, cleared.body);
+    assert.equal(livePasswords(user).length, 0);
+  });
+
+  it('keeps a lost append acknowledgement at the cap named during rotation', async () => {
+    const user = await client();
+    const first = await issue(user);
+    const second = await issue(user);
+    harness.edge.queueLostAck(503, { error: 'timeout' }, '/credentials/basicauth', 'POST');
+
+    const failed = await rotate(user, first.credential.id);
+    assert.equal(failed.statusCode, 502, failed.body);
+    assert.equal(await statusOf(first.credential.id), 'revoked');
+    assert.equal(await statusOf(second.credential.id), 'active');
+    const rows = await liveRowsOf(user);
+    assert.equal(rows.filter((row) => row.status === 'retiring').length, 1);
+    assert.equal(livePasswords(user).length, 2);
+
+    const cleared = await harness.authed(user, {
+      method: 'DELETE',
+      url: `/api/credentials/${second.credential.id}?clear_type=true`,
+    });
+    assert.equal(cleared.statusCode, 200, cleared.body);
+    assert.equal(livePasswords(user).length, 0);
   });
 
   it('leaves a failed settlement for reconciliation instead of guessing', async () => {
