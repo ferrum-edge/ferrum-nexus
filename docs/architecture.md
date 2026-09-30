@@ -80,34 +80,35 @@ docker/    Dockerfile + docker-compose.example.yml
 
 ### `server/src`
 
-| Path                                           | Responsibility                                                                                                      |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `index.ts`                                     | Composition root: `buildServer(config, deps)` + `main()`. No business logic.                                        |
-| `config/index.ts`                              | The **only** reader of `process.env`. zod-validated into `NexusConfig`.                                             |
-| `lib/`                                         | `crypto.ts`, `errors.ts` (`NexusError`), `keyed-serializer.ts` + `lease-fence.ts` (§5.2), `ids.ts`, `logger.ts`.    |
-| `db/store.ts`                                  | The `NexusStore` interface: 24 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.              |
-| `db/adapters/{sqlite,postgres,mysql,mongodb}/` | The four implementations.                                                                                           |
-| `db/adapters/sql-common.ts`, `sql-repos.ts`    | Dialect shims and the repository bodies shared by PostgreSQL and MySQL.                                             |
-| `db/migrations/`                               | SQL migrations per dialect: `.sql` (SQLite), `.pg.sql`, `.mysql.sql`. MongoDB declares its indexes in code.         |
-| `ferrum-admin/`                                | The **only** module that knows Edge's HTTP shape: `client.ts`, `jwt.ts`, `types.ts` and helpers.                    |
-| `middleware/auth-plugin.ts`                    | Session resolution, sliding expiry, CSRF double-submit, RBAC guards.                                                |
-| `middleware/error-handler.ts`                  | The single place an exception becomes an HTTP response.                                                             |
-| `audit/service.ts`                             | The only writer of `audit_logs`, the `AuditAction` catalog, and how each action commits.                            |
-| `auth/`                                        | `service.ts` (register/login/logout/verify/reset), `captcha.ts`, `expiry-sweep.ts`.                                 |
-| `users/service.ts`                             | Profile self-service, admin user management, organizations.                                                         |
-| `applications/service.ts`                      | Per-account applications, each its own gateway identity (§5.4).                                                     |
-| `catalog/`                                     | `service.ts` (browse/read, `canList` vs `canView`), `read-access.ts` (the shared "may this account read it" check). |
-| `publishing/`                                  | `service.ts` (proxy lifecycle), `edge-plugins.ts` (the binder), `spec-document.ts`, `oas.ts`, `viewers.ts`.         |
-| `plugins/`                                     | The provider plugin palette: `service.ts`, `schema.ts` (§5.7).                                                      |
-| `access/service.ts`                            | request → approve/deny → grant → revoke, and the ACL-group writes.                                                  |
-| `credentials/`                                 | `service.ts` (show-once issue/rotate/revoke), `consumers.ts` (the provisioner), `teardown-worker.ts`.               |
-| `usage/service.ts`                             | Per-API usage and backend health, read from Edge's metrics.                                                         |
-| `messaging/service.ts`                         | 1:1 threads and the platform inbox.                                                                                 |
-| `notifications/service.ts`                     | The header bell and inbox. A courtesy channel, never the record.                                                    |
-| `email/`                                       | `service.ts` (render + enqueue), `outbox-worker.ts` (the only SMTP caller), `templates.ts`.                         |
-| `admin/`                                       | `settings-service.ts`, `mass-email-service.ts`, `god-service.ts`, `gateway-reconciliation.ts`, `rotate-key.ts`.     |
-| `routes/`                                      | One plugin per domain. Routes validate shapes and delegate to the services they are handed.                         |
-| `test/`                                        | `helpers.ts` boots the real app on in-memory SQLite; `mock-ferrum-edge.ts` is a real HTTP server.                   |
+| Path                                           | Responsibility                                                                                                                                                         |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `index.ts`                                     | Composition root: `buildServer(config, deps)` + `main()`. No business logic.                                                                                           |
+| `config/index.ts`                              | The **only** reader of `process.env`. zod-validated into `NexusConfig`.                                                                                                |
+| `lib/`                                         | `crypto.ts`, `errors.ts` (`NexusError`), `keyed-serializer.ts` + `lease-fence.ts` (§5.2), `ids.ts`, `logger.ts`.                                                       |
+| `db/store.ts`                                  | The `NexusStore` interface: 25 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                                                 |
+| `db/adapters/{sqlite,postgres,mysql,mongodb}/` | The four implementations.                                                                                                                                              |
+| `db/adapters/sql-common.ts`, `sql-repos.ts`    | Dialect shims and the repository bodies shared by PostgreSQL and MySQL.                                                                                                |
+| `db/migrations/`                               | SQL migrations per dialect: `.sql` (SQLite), `.pg.sql`, `.mysql.sql`. MongoDB declares its indexes in code.                                                            |
+| `ferrum-admin/`                                | The **only** module that knows Edge's HTTP shape: `client.ts`, `jwt.ts`, `types.ts` and helpers.                                                                       |
+| `middleware/auth-plugin.ts`                    | Session resolution, sliding expiry, CSRF double-submit, RBAC guards.                                                                                                   |
+| `middleware/error-handler.ts`                  | The single place an exception becomes an HTTP response.                                                                                                                |
+| `audit/service.ts`                             | The only writer of `audit_logs`, the `AuditAction` catalog, and how each action commits.                                                                               |
+| `auth/`                                        | `service.ts` (register/login/logout/verify/reset), `captcha.ts`, `expiry-sweep.ts`.                                                                                    |
+| `sso/`                                         | OpenID Connect single sign-on: `oidc.ts` (discovery, JWKS, PKCE, ID token validation), `mapping.ts`, `settings.ts`, `service.ts` (the flow, provisioning and linking). |
+| `users/service.ts`                             | Profile self-service, admin user management, organizations.                                                                                                            |
+| `applications/service.ts`                      | Per-account applications, each its own gateway identity (§5.4).                                                                                                        |
+| `catalog/`                                     | `service.ts` (browse/read, `canList` vs `canView`), `read-access.ts` (the shared "may this account read it" check).                                                    |
+| `publishing/`                                  | `service.ts` (proxy lifecycle), `edge-plugins.ts` (the binder), `spec-document.ts`, `oas.ts`, `viewers.ts`.                                                            |
+| `plugins/`                                     | The provider plugin palette: `service.ts`, `schema.ts` (§5.7).                                                                                                         |
+| `access/service.ts`                            | request → approve/deny → grant → revoke, and the ACL-group writes.                                                                                                     |
+| `credentials/`                                 | `service.ts` (show-once issue/rotate/revoke), `consumers.ts` (the provisioner), `teardown-worker.ts`.                                                                  |
+| `usage/service.ts`                             | Per-API usage and backend health, read from Edge's metrics.                                                                                                            |
+| `messaging/service.ts`                         | 1:1 threads and the platform inbox.                                                                                                                                    |
+| `notifications/service.ts`                     | The header bell and inbox. A courtesy channel, never the record.                                                                                                       |
+| `email/`                                       | `service.ts` (render + enqueue), `outbox-worker.ts` (the only SMTP caller), `templates.ts`.                                                                            |
+| `admin/`                                       | `settings-service.ts`, `mass-email-service.ts`, `god-service.ts`, `gateway-reconciliation.ts`, `rotate-key.ts`.                                                        |
+| `routes/`                                      | One plugin per domain. Routes validate shapes and delegate to the services they are handed.                                                                            |
+| `test/`                                        | `helpers.ts` boots the real app on in-memory SQLite; `mock-ferrum-edge.ts` is a real HTTP server.                                                                      |
 
 ### `web/src`
 
@@ -1067,6 +1068,12 @@ commit ahead of the revocation.
   along with every other session of that user.
 - **Expired rows are purged** by `auth/expiry-sweep.ts`: expired sessions and
   email tokens, once at startup and then hourly. Reads already ignore them.
+- **A single sign-on issues the same session.** `sso/service.ts` calls
+  `auth.issueSession` inside the transaction that provisions, links or syncs
+  the account, and the callback sets the cookie pair through the same helper
+  as `POST /api/auth/login`. The only other cookie is `nexus_sso`, the sealed
+  `state`/`nonce`/PKCE verifier of one attempt, scoped to `/api/auth/sso`
+  (see [`security.md`](security.md#single-sign-on-openid-connect)).
 
 ### 8.2 CSRF
 

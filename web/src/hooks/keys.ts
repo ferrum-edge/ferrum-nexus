@@ -8,6 +8,7 @@
 export const queryKeys = {
   branding: ['branding'] as const,
   captcha: ['captcha'] as const,
+  sso: ['sso'] as const,
   health: ['health'] as const,
   edgeHealth: ['health', 'edge'] as const,
 
@@ -72,6 +73,7 @@ export const queryKeys = {
     all: ['users'] as const,
     list: (params: unknown) => ['users', 'list', params] as const,
     detail: (id: string) => ['users', 'detail', id] as const,
+    identities: (id: string) => ['users', 'identities', id] as const,
     me: ['users', 'me'] as const,
   },
 
@@ -83,6 +85,7 @@ export const queryKeys = {
   },
 
   adminSettings: ['admin', 'settings'] as const,
+  adminSso: ['admin', 'sso'] as const,
   emailTemplates: {
     all: ['admin', 'email-templates'] as const,
     detail: (key: string) => ['admin', 'email-templates', key] as const,

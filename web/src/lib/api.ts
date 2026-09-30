@@ -142,6 +142,12 @@ import {
   type SetApiPluginResponse,
   type SmtpTestRequest,
   type SmtpTestResponse,
+  type SsoAdminSettingsResponse,
+  type SsoPublicConfigResponse,
+  type UnlinkUserIdentityResponse,
+  type UpdateSsoSettingsRequest,
+  type UpdateSsoSettingsResponse,
+  type ListUserIdentitiesResponse,
   type UpdateApiRequest,
   type UpdateApiResponse,
   type UpdateApiSpecRequest,
@@ -361,7 +367,22 @@ export const authApi = {
   resetPassword: (body: ResetPasswordRequest): Promise<ResetPasswordResponse> =>
     post<ResetPasswordResponse>('/auth/reset-password', body),
   captcha: (): Promise<CaptchaConfigResponse> => get<CaptchaConfigResponse>('/auth/captcha'),
+  /**
+   * What the sign-in page offers: the login policy and the enabled single
+   * sign-on providers. Public, so a 401 here means nothing about the session.
+   */
+  sso: (): Promise<SsoPublicConfigResponse> =>
+    request<SsoPublicConfigResponse>('GET', '/auth/sso', { skipUnauthorizedHandler: true }),
 };
+
+/**
+ * Where a "Sign in with …" button navigates: a full page load, not a fetch,
+ * because the server answers with a redirect to the identity provider.
+ */
+export function ssoStartUrl(providerId: string, returnTo?: string): string {
+  const query = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : '';
+  return `${API_BASE}/auth/sso/${encodeURIComponent(providerId)}/start${query}`;
+}
 
 /* ── Users & organizations ──────────────────────────────────────────────── */
 
@@ -377,6 +398,13 @@ export const usersApi = {
     patch<UpdateUserResponse>(`/users/${encodeURIComponent(id)}`, body),
   retryGatewayTeardown: (id: string): Promise<RetryGatewayTeardownResponse> =>
     post<RetryGatewayTeardownResponse>(`/users/${encodeURIComponent(id)}/gateway-teardown/retry`),
+  /** The account's single sign-on links (admin). */
+  identities: (id: string): Promise<ListUserIdentitiesResponse> =>
+    get<ListUserIdentitiesResponse>(`/users/${encodeURIComponent(id)}/identities`),
+  unlinkIdentity: (id: string, identityId: string): Promise<UnlinkUserIdentityResponse> =>
+    del<UnlinkUserIdentityResponse>(
+      `/users/${encodeURIComponent(id)}/identities/${encodeURIComponent(identityId)}`,
+    ),
 };
 
 export const organizationsApi = {
@@ -599,6 +627,9 @@ export const adminApi = {
     put<UpdateSettingsResponse>('/admin/settings', body),
   smtpTest: (body: SmtpTestRequest = {}): Promise<SmtpTestResponse> =>
     post<SmtpTestResponse>('/admin/settings/smtp-test', body),
+  getSso: (): Promise<SsoAdminSettingsResponse> => get<SsoAdminSettingsResponse>('/admin/sso'),
+  updateSso: (body: UpdateSsoSettingsRequest): Promise<UpdateSsoSettingsResponse> =>
+    put<UpdateSsoSettingsResponse>('/admin/sso', body),
   listEmailTemplates: (): Promise<ListEmailTemplatesResponse> =>
     get<ListEmailTemplatesResponse>('/admin/email-templates'),
   getEmailTemplate: (key: EmailTemplateKey): Promise<GetEmailTemplateResponse> =>

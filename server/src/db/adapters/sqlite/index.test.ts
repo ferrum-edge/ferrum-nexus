@@ -1259,6 +1259,7 @@ describe('sqlite store', () => {
       // fails typecheck, and one added without a `guardRepo` call fails below.
       const repositories: Record<RepoKey, true> = {
         users: true,
+        userIdentities: true,
         organizations: true,
         sessions: true,
         applications: true,

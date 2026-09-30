@@ -84,6 +84,7 @@ import { createApiViewersService, type ApiViewersService } from './publishing/vi
 import { createApplicationsService, type ApplicationsService } from './applications/service.js';
 import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
+import { createSsoService, type SsoService } from './sso/service.js';
 import { accessRequestRoutes, grantRoutes } from './routes/access.js';
 import { applicationRoutes } from './routes/applications.js';
 import { adminRoutes } from './routes/admin.js';
@@ -120,6 +121,8 @@ export interface NexusServices {
   notifications: NotificationsService;
   settings: SettingsService;
   users: UsersService;
+  /** OpenID Connect single sign-on: the flow, provisioning, mapping and its settings. */
+  sso: SsoService;
   messaging: MessagingService;
   massEmail: MassEmailService;
   catalog: CatalogService;
@@ -444,6 +447,18 @@ export async function buildServer(
     locks,
     log: warn,
   });
+  // After credentials for the same reason: an account whose claims no longer
+  // map to a role is disabled through the same durable gateway revocation.
+  const sso = createSsoService({
+    config,
+    store: deps.store,
+    crypto,
+    audit,
+    auth,
+    credentials,
+    locks,
+    log: warn,
+  });
   const publishing = createPublishingService({
     config,
     store: deps.store,
@@ -567,6 +582,7 @@ export async function buildServer(
     notifications,
     settings,
     users,
+    sso,
     messaging,
     massEmail,
     catalog,
@@ -678,7 +694,7 @@ export async function buildServer(
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { ...AUTH_RATE_LIMIT });
       }
-      await scope.register(authRoutes, { config, auth });
+      await scope.register(authRoutes, { config, auth, sso });
     },
     { prefix: '/api/auth' },
   );
@@ -690,7 +706,7 @@ export async function buildServer(
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { ...AUTH_BOOTSTRAP_RATE_LIMIT });
       }
-      await scope.register(authBootstrapRoutes, { auth, captcha });
+      await scope.register(authBootstrapRoutes, { auth, captcha, sso });
     },
     { prefix: '/api/auth' },
   );
@@ -712,12 +728,12 @@ export async function buildServer(
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
       }
-      await scope.register(usersRoutes, { users, config });
+      await scope.register(usersRoutes, { users, config, sso });
     },
     { prefix: '/api/users' },
   );
 
-  await app.register(async (scope) => scope.register(organizationRoutes, { users, config }), {
+  await app.register(async (scope) => scope.register(organizationRoutes, { users, config, sso }), {
     prefix: '/api/organizations',
   });
 
@@ -750,6 +766,7 @@ export async function buildServer(
         god,
         credentials,
         reconciliation,
+        sso,
       }),
     { prefix: '/api/admin' },
   );

@@ -22,6 +22,7 @@ import { DEFAULT_FERRUM_NAMESPACE, DEFAULT_SESSION_TTL_SECONDS } from '@ferrum-n
 import type { CaptchaEnforcement, DbDriver } from '@ferrum-nexus/shared';
 import { NexusError } from '../lib/errors.js';
 import { GATEWAY_PUBLIC_URL_RULE, normalizeGatewayPublicUrl } from '../lib/gateway-url.js';
+import { parseEnvSsoProviders, type SsoEnvConfig } from '../sso/config.js';
 
 /** Raw environment shape accepted by {@link loadConfig}. */
 export type EnvRecord = Record<string, string | undefined>;
@@ -440,6 +441,8 @@ export interface NexusConfig {
   db: DbConfig;
   edge: EdgeConfig;
   smtp: SmtpConfig;
+  /** OpenID Connect single sign-on, as far as the environment configures it. */
+  sso: SsoEnvConfig;
 }
 
 /* ── Parsing helpers ────────────────────────────────────────────────────── */
@@ -627,6 +630,10 @@ const envSchema = z.object({
   NEXUS_SMTP_USER: optionalString(),
   NEXUS_SMTP_PASSWORD: optionalString(),
   NEXUS_EMAIL_FROM: stringish('Ferrum Nexus <no-reply@example.com>'),
+
+  NEXUS_OIDC_PROVIDERS: optionalString(),
+  NEXUS_OIDC_ALLOW_HTTP_LOOPBACK: boolish(false),
+  NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN: boolish(false),
 });
 
 const NAMESPACE_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -785,6 +792,17 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     );
   }
 
+  // ── Single sign-on providers ─────────────────────────────────────────────
+  // Validated with the same rules `PUT /api/admin/sso` applies. A client
+  // secret may come from the JSON or from `NEXUS_OIDC_CLIENT_SECRET_<ID>`, and
+  // neither appears in a problem message.
+  const ssoProviders = parseEnvSsoProviders(
+    raw.NEXUS_OIDC_PROVIDERS,
+    (name) => env[name],
+    raw.NEXUS_OIDC_ALLOW_HTTP_LOOPBACK,
+    problems,
+  );
+
   // ── Non-sqlite drivers need a connection URL ─────────────────────────────
   if (raw.NEXUS_DB_DRIVER !== 'sqlite' && raw.NEXUS_DB_URL === '') {
     problems.push(`NEXUS_DB_URL is required when NEXUS_DB_DRIVER=${raw.NEXUS_DB_DRIVER}`);
@@ -855,6 +873,11 @@ export function loadConfig(env: EnvRecord): NexusConfig {
       user: raw.NEXUS_SMTP_USER,
       password: raw.NEXUS_SMTP_PASSWORD,
       from: raw.NEXUS_EMAIL_FROM,
+    },
+    sso: {
+      providers: ssoProviders,
+      allowHttpLoopback: raw.NEXUS_OIDC_ALLOW_HTTP_LOOPBACK,
+      breakGlassLocalLogin: raw.NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN,
     },
   };
 }

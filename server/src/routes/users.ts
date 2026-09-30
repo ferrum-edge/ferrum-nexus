@@ -17,8 +17,10 @@ import {
   type GetOrganizationResponse,
   type GetUserResponse,
   type ListOrganizationsResponse,
+  type ListUserIdentitiesResponse,
   type ListUsersResponse,
   type RetryGatewayTeardownResponse,
+  type UnlinkUserIdentityResponse,
   type UpdateMeResponse,
   type UpdateUserResponse,
 } from '@ferrum-nexus/shared';
@@ -27,6 +29,7 @@ import type { NexusConfig } from '../config/index.js';
 import { clientIp, requestContext, requireAuth, requireRole } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 import { setSessionCookies } from '../middleware/session-cookies.js';
+import type { SsoService } from '../sso/service.js';
 import { toTeardownState, type UsersService } from '../users/service.js';
 import { idParamSchema, listOptions, listQuerySchema } from './common.js';
 
@@ -35,6 +38,8 @@ export interface UsersRoutesOptions {
   users: UsersService;
   /** Cookie policy for the session a password change re-issues. */
   config: NexusConfig;
+  /** An account's identity-provider links. */
+  sso: SsoService;
 }
 
 const updateMeBody = z.object({
@@ -78,6 +83,11 @@ const createOrganizationBody = z.object({
   description: z.string().trim().max(2000).nullish(),
 });
 
+const identityParams = z.object({
+  id: z.string().trim().min(1).max(64),
+  identityId: z.string().trim().min(1).max(64),
+});
+
 const updateOrganizationBody = z.object({
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().trim().max(2000).nullish(),
@@ -87,7 +97,7 @@ const listOrganizationsQuery = listQuerySchema.extend({ q: z.string().trim().max
 
 /** `/api/users` route plugin. */
 export const usersRoutes: FastifyPluginAsync<UsersRoutesOptions> = async (app, options) => {
-  const { users, config } = options;
+  const { users, config, sso } = options;
 
   app.get('/me', async (request): Promise<GetMeUserResponse> => {
     const { user } = requireAuth(request);
@@ -163,6 +173,32 @@ export const usersRoutes: FastifyPluginAsync<UsersRoutesOptions> = async (app, o
         gateway_teardown: result.gateway_teardown,
         job: result.job ? toTeardownState(result.job) : null,
       };
+    },
+  );
+
+  /** The account's identity-provider links (single sign-on). */
+  app.get(
+    '/:id/identities',
+    { onRequest: requireRole('admin') },
+    async (request): Promise<ListUserIdentitiesResponse> => {
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      return { items: await sso.listIdentities(id) };
+    },
+  );
+
+  /**
+   * Remove one link. The account keeps everything else; its next single
+   * sign-on through that provider is matched afresh — linked again only under
+   * the verified-email rule, or refused.
+   */
+  app.delete(
+    '/:id/identities/:identityId',
+    { onRequest: requireRole('admin') },
+    async (request): Promise<UnlinkUserIdentityResponse> => {
+      const { user } = requireAuth(request);
+      const { id, identityId } = parseOrThrow(identityParams, request.params);
+      await sso.unlinkIdentity(user, id, identityId, clientIp(request));
+      return { ok: true };
     },
   );
 };

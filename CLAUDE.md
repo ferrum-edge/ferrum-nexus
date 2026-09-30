@@ -140,8 +140,11 @@ container image.
    per-process token printed at startup). Other registrations may choose only `client` or
    `provider`. Only a `super_admin` can grant or remove `admin`. The last active `super_admin`
    cannot be demoted, disabled, or removed (`LAST_SUPER_ADMIN`).
-9. **Encrypted `app_settings` rows** (SMTP password, CAPTCHA secret) use AES-256-GCM with keys
-   HKDF-derived from `NEXUS_SECRET_KEY`. Key rotation: [docs/operations.md](docs/operations.md).
+   Single sign-on (`server/src/sso/`) never grants, removes or changes `super_admin` from claims,
+   and the founding registration works under every login policy, `sso_only` included.
+9. **Encrypted `app_settings` rows** (SMTP password, CAPTCHA secret, SSO client secrets) use
+   AES-256-GCM with keys HKDF-derived from `NEXUS_SECRET_KEY`. Key rotation:
+   [docs/operations.md](docs/operations.md).
 10. **MongoDB requires a replica set** for multi-document transactions. They run through the
     driver's `session.withTransaction()`, so a `TransientTransactionError` is retried rather than
     losing the body's work. Standalone Mongo is rejected at startup unless

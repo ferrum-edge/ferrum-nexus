@@ -19,8 +19,9 @@
  * read from the manifest — the entries up to its last one, never the pending
  * ones — and the current schema is whatever `store.migrate()` builds, so every
  * forward migration a release has not shipped (from `v0.1.0`,
- * `002_api_gateway_plugins` and `003_messages_thread_latest`) is applied here
- * on top of a populated database with no change to the harness.
+ * `002_api_gateway_plugins` and `003_messages_thread_latest`; from `v0.2.0`,
+ * `004_user_identities`) is applied here on top of a populated database with
+ * no change to the harness.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
@@ -1040,6 +1041,20 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
               ],
             );
             assert.equal(await store.apiGatewayPlugins.deleteByApi(ID.ledger), 2);
+
+            // So is `004_user_identities`: a baseline account can be linked to
+            // an identity-provider subject, found by it, and unlinked.
+            const identity = await store.userIdentities.create({
+              user_id: ID.client,
+              provider_id: 'corp',
+              subject: 'upgrade-subject',
+              email: 'client@example.test',
+            });
+            assert.equal(
+              (await store.userIdentities.findBySubject('corp', 'upgrade-subject'))?.user_id,
+              ID.client,
+            );
+            assert.equal(await store.userIdentities.delete(identity.id), true);
 
             // Re-running in the same process changes nothing.
             await store.migrate();

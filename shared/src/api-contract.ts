@@ -63,6 +63,13 @@ import type {
   Uuid,
 } from './entities.js';
 import type { ApiPlugin, ApiPluginTrigger } from './plugins.js';
+import type {
+  LoginPolicy,
+  SsoProviderAdminView,
+  SsoProviderSettings,
+  SsoProviderSummary,
+  UserIdentity,
+} from './sso.js';
 
 /* ── Envelopes ──────────────────────────────────────────────────────────── */
 
@@ -228,6 +235,76 @@ export type ResetPasswordResponse = OkResponse;
 
 /** `GET /api/auth/captcha` — public widget configuration. */
 export type CaptchaConfigResponse = CaptchaPublicConfig;
+
+/* ── Single sign-on ─────────────────────────────────────────────────────── */
+
+/**
+ * Whether the sign-in page offers the email-and-password form.
+ *
+ * `break_glass` means the policy is `sso_only` but the operator set
+ * `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN=true`: the form works for `super_admin`
+ * accounts only, and the SPA tucks it away behind a link.
+ */
+export type PasswordLoginAvailability = 'enabled' | 'break_glass' | 'disabled';
+
+/** `GET /api/auth/sso` — what the sign-in and registration pages offer. */
+export interface SsoPublicConfigResponse {
+  policy: LoginPolicy;
+  password_login: PasswordLoginAvailability;
+  /** False under `sso_only`; the founding registration is still accepted. */
+  registration_enabled: boolean;
+  /** Enabled providers, in configuration order. Empty under `local_only`. */
+  providers: SsoProviderSummary[];
+}
+
+/** `GET /api/admin/sso` */
+export interface SsoAdminSettingsResponse {
+  policy: LoginPolicy;
+  /** Lower-case domains an SSO email address must belong to; empty allows any. */
+  allowed_email_domains: string[];
+  /**
+   * Disable the account — and queue the gateway revocation every disable
+   * does — when a sign-in's claims no longer map to any role.
+   */
+  deprovision_on_access_loss: boolean;
+  /** `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN`; environment-only, reported for visibility. */
+  break_glass_local_login: boolean;
+  providers: SsoProviderAdminView[];
+}
+
+/** One provider in {@link UpdateSsoSettingsRequest.providers}. */
+export interface SsoProviderInput extends SsoProviderSettings {
+  /**
+   * Write-only; stored AES-256-GCM encrypted. Omit to keep the stored secret,
+   * `null` to clear it (a public client that authenticates with PKCE alone).
+   */
+  client_secret?: string | null;
+}
+
+/**
+ * `PUT /api/admin/sso` (`super_admin` only) — omitted fields are untouched.
+ *
+ * `providers`, when present, replaces the whole list of settings-sourced
+ * providers; a provider left out is removed together with its secret.
+ * Environment providers are never part of it.
+ */
+export interface UpdateSsoSettingsRequest {
+  policy?: LoginPolicy;
+  allowed_email_domains?: string[];
+  deprovision_on_access_loss?: boolean;
+  providers?: SsoProviderInput[];
+}
+
+/** `PUT /api/admin/sso` */
+export type UpdateSsoSettingsResponse = SsoAdminSettingsResponse;
+
+/** `GET /api/users/:id/identities` */
+export interface ListUserIdentitiesResponse {
+  items: UserIdentity[];
+}
+
+/** `DELETE /api/users/:id/identities/:identityId` */
+export type UnlinkUserIdentityResponse = OkResponse;
 
 /* ── Users & organizations ──────────────────────────────────────────────── */
 

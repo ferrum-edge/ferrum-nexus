@@ -1,0 +1,1050 @@
+/**
+ * OpenID Connect single sign-on, end to end through the real routes against a
+ * real (in-process, loopback) provider — see `mock-oidc-provider.ts`.
+ *
+ * Covers the flow's own guarantees (state, nonce, PKCE, ID token
+ * validation), provisioning and the account-linking rules, claim mapping to
+ * roles and organizations (never `super_admin`), the login policies and the
+ * bootstrap path under them, deprovisioning, administration, and that an SSO
+ * account is an ordinary account to the rest of the portal — its Edge
+ * consumer included.
+ */
+
+import assert from 'node:assert/strict';
+import { after, before, describe, it } from 'node:test';
+
+import type { LightMyRequestResponse } from 'fastify';
+
+import {
+  consumerUsernameForUser,
+  CSRF_COOKIE,
+  SESSION_COOKIE,
+  SSO_TRANSACTION_COOKIE,
+  type SsoAdminSettingsResponse,
+  type SsoPublicConfigResponse,
+  type User,
+} from '@ferrum-nexus/shared';
+
+import { AuditAction } from '../audit/service.js';
+import { REGISTRATION_SETTINGS_KEY } from '../auth/service.js';
+import type { UserRecord } from '../db/store.js';
+import { SSO_SETTINGS_KEY, ssoClientSecretKey } from '../sso/settings.js';
+import {
+  buildTestApp,
+  cookieValue,
+  TEST_BOOTSTRAP_TOKEN,
+  TEST_PASSWORD,
+  type TestApp,
+  type TestSession,
+} from './helpers.js';
+import {
+  createMockOidcProvider,
+  type MockAuthorization,
+  type MockOidcProvider,
+} from './mock-oidc-provider.js';
+
+const CORP_SECRET = 'corp-client-secret-value';
+const PARTNER_SECRET = 'partner-client-secret-value';
+
+let counter = 0;
+
+/** A fresh subject and address for one test. */
+function person(prefix = 'person'): { sub: string; email: string } {
+  counter += 1;
+  return { sub: `${prefix}-subject-${counter}`, email: `${prefix}${counter}@corp.example.test` };
+}
+
+interface Attempt {
+  start: LightMyRequestResponse;
+  authorization: MockAuthorization;
+  transaction: string;
+}
+
+/** Start a sign-in and act as the user at the provider. */
+async function begin(
+  h: TestApp,
+  idp: MockOidcProvider,
+  providerId: string,
+  claims: Record<string, unknown>,
+  returnTo?: string,
+): Promise<Attempt> {
+  const query = returnTo === undefined ? '' : `?return_to=${encodeURIComponent(returnTo)}`;
+  const start = await h.app.inject({
+    method: 'GET',
+    url: `/api/auth/sso/${providerId}/start${query}`,
+  });
+  assert.equal(start.statusCode, 302, start.body);
+  const transaction = cookieValue(start, SSO_TRANSACTION_COOKIE);
+  assert.ok(transaction, `the attempt is sealed into a cookie: ${String(start.headers.location)}`);
+  const authorization = idp.authorize(String(start.headers.location), claims);
+  return { start, authorization, transaction };
+}
+
+/** Deliver the provider's response to the callback, as the browser would. */
+async function finish(
+  h: TestApp,
+  providerId: string,
+  attempt: Attempt,
+  overrides: { state?: string; code?: string; cookie?: string | null; error?: string } = {},
+): Promise<LightMyRequestResponse> {
+  const query = new URLSearchParams({
+    code: overrides.code ?? attempt.authorization.code,
+    state: overrides.state ?? attempt.authorization.state,
+    ...(overrides.error === undefined ? {} : { error: overrides.error }),
+  });
+  const cookie = overrides.cookie === undefined ? attempt.transaction : overrides.cookie;
+  return h.app.inject({
+    method: 'GET',
+    url: `/api/auth/sso/${providerId}/callback?${query.toString()}`,
+    ...(cookie === null ? {} : { cookies: { [SSO_TRANSACTION_COOKIE]: cookie } }),
+  });
+}
+
+/** The `sso_error` a refused callback redirected with, or `null` on success. */
+function ssoError(response: LightMyRequestResponse): string | null {
+  assert.equal(response.statusCode, 302, response.body);
+  const location = new URL(String(response.headers.location));
+  return location.searchParams.get('sso_error');
+}
+
+/** The session a successful callback set, as the harness models one. */
+async function sessionOf(h: TestApp, response: LightMyRequestResponse): Promise<TestSession> {
+  const sessionToken = cookieValue(response, SESSION_COOKIE);
+  const csrfToken = cookieValue(response, CSRF_COOKIE);
+  assert.ok(sessionToken && csrfToken, `no session: ${String(response.headers.location)}`);
+  const cookieHeader = `${SESSION_COOKIE}=${sessionToken}; ${CSRF_COOKIE}=${csrfToken}`;
+  const me = await h.app.inject({
+    method: 'GET',
+    url: '/api/auth/me',
+    headers: { cookie: cookieHeader },
+  });
+  assert.equal(me.statusCode, 200, me.body);
+  return { user: me.json<{ user: User }>().user, sessionToken, csrfToken, cookieHeader };
+}
+
+/** Sign in end to end and return the callback's response. */
+async function signIn(
+  h: TestApp,
+  idp: MockOidcProvider,
+  providerId: string,
+  claims: Record<string, unknown>,
+  returnTo?: string,
+): Promise<LightMyRequestResponse> {
+  return finish(h, providerId, await begin(h, idp, providerId, claims, returnTo));
+}
+
+function providersEnv(corp: MockOidcProvider, partner: MockOidcProvider): string {
+  return JSON.stringify([
+    {
+      id: 'corp',
+      display_name: 'Corporate SSO',
+      issuer: corp.issuer,
+      client_id: 'nexus-corp',
+      client_secret: CORP_SECRET,
+      role_mappings: [
+        { claim: 'groups', value: 'api-publishers', role: 'provider' },
+        { claim: 'groups', value: 'portal-admins', role: 'admin' },
+      ],
+    },
+    {
+      id: 'partner',
+      display_name: 'Partner IdP',
+      issuer: partner.issuer,
+      client_id: 'nexus-partner',
+      default_role: null,
+      role_mappings: [{ claim: 'groups', value: 'partners', role: 'client' }],
+    },
+  ]);
+}
+
+describe('single sign-on', () => {
+  let corp: MockOidcProvider;
+  let partner: MockOidcProvider;
+  let h: TestApp;
+  let founder: TestSession;
+  let logLines: string[];
+
+  before(async () => {
+    corp = createMockOidcProvider({ clientId: 'nexus-corp', clientSecret: CORP_SECRET });
+    partner = createMockOidcProvider({ clientId: 'nexus-partner', clientSecret: null });
+    await corp.start();
+    await partner.start();
+    logLines = [];
+    h = await buildTestApp({
+      env: {
+        NEXUS_OIDC_ALLOW_HTTP_LOOPBACK: 'true',
+        NEXUS_OIDC_PROVIDERS: providersEnv(corp, partner),
+      },
+      deps: {
+        logger: {
+          level: 'warn',
+          stream: {
+            write(line: string): void {
+              logLines.push(line);
+            },
+          },
+        },
+      },
+    });
+    founder = await h.registerUser({ email: 'founder@corp.example.test' });
+    assert.equal(founder.user.role, 'super_admin');
+  });
+
+  after(async () => {
+    await h?.close();
+    await corp?.stop();
+    await partner?.stop();
+  });
+
+  /* ── The flow ───────────────────────────────────────────────────────── */
+
+  it('lists the enabled providers for the sign-in page', async () => {
+    const response = await h.app.inject({ method: 'GET', url: '/api/auth/sso' });
+    assert.equal(response.statusCode, 200, response.body);
+    const body = response.json<SsoPublicConfigResponse>();
+    assert.equal(body.policy, 'local_and_sso');
+    assert.equal(body.password_login, 'enabled');
+    assert.equal(body.registration_enabled, true);
+    assert.deepEqual(body.providers, [
+      { id: 'corp', display_name: 'Corporate SSO' },
+      { id: 'partner', display_name: 'Partner IdP' },
+    ]);
+    assert.doesNotMatch(response.body, /secret/i);
+  });
+
+  it('starts an authorization-code request with PKCE S256, state and nonce', async () => {
+    const attempt = await begin(h, corp, 'corp', { sub: 'x' });
+    const params = attempt.authorization.params;
+    assert.equal(params.get('response_type'), 'code');
+    assert.equal(params.get('client_id'), 'nexus-corp');
+    assert.equal(params.get('code_challenge_method'), 'S256');
+    assert.match(params.get('code_challenge') ?? '', /^[A-Za-z0-9_-]{43}$/);
+    assert.match(params.get('state') ?? '', /^[A-Za-z0-9_-]{43}$/);
+    assert.match(params.get('nonce') ?? '', /^[A-Za-z0-9_-]{43}$/);
+    assert.equal(params.get('redirect_uri'), `${h.config.publicUrl}/api/auth/sso/corp/callback`);
+    assert.equal(params.get('scope'), 'openid email profile');
+    // The attempt cookie is HttpOnly, scoped to the SSO routes, and the
+    // response carrying it is never cacheable.
+    const cookies = attempt.start.cookies as { name: string; path?: string; httpOnly?: boolean }[];
+    const cookie = cookies.find((entry) => entry.name === SSO_TRANSACTION_COOKIE);
+    assert.equal(cookie?.path, '/api/auth/sso');
+    assert.equal(cookie?.httpOnly, true);
+    assert.equal(attempt.start.headers['cache-control'], 'private, no-store');
+    // Nothing the attempt carries is readable in the cookie.
+    for (const value of [params.get('state'), params.get('nonce')]) {
+      assert.equal(attempt.transaction.includes(value ?? '<none>'), false);
+    }
+  });
+
+  it('provisions an account on first sign-in and signs it in', async () => {
+    const who = person('jit');
+    const response = await signIn(
+      h,
+      corp,
+      'corp',
+      { ...who, email_verified: true, name: 'Jit Person', groups: ['api-publishers'] },
+      '/catalog?q=billing',
+    );
+    assert.equal(ssoError(response), null);
+    assert.equal(response.headers.location, `${h.config.publicUrl}/catalog?q=billing`);
+    assert.equal(response.headers['cache-control'], 'private, no-store');
+    const session = await sessionOf(h, response);
+    assert.equal(session.user.email, who.email);
+    assert.equal(session.user.display_name, 'Jit Person');
+    assert.equal(session.user.role, 'provider');
+    assert.equal(session.user.email_verified, true);
+    // The attempt is spent with the callback.
+    const cleared = (response.cookies as { name: string; value: string }[]).find(
+      (entry) => entry.name === SSO_TRANSACTION_COOKIE,
+    );
+    assert.equal(cleared?.value, '');
+
+    const identities = await h.store.userIdentities.listByUser(session.user.id);
+    assert.deepEqual(
+      identities.map((identity) => [identity.provider_id, identity.subject, identity.email]),
+      [['corp', who.sub, who.email]],
+    );
+    const provision = (await h.auditRows(AuditAction.AUTH_SSO_PROVISION)).find(
+      (row) => row.target_id === session.user.id,
+    );
+    assert.equal(provision?.details.role, 'provider');
+    const login = (await h.auditRows(AuditAction.AUTH_SSO_LOGIN)).find(
+      (row) => row.target_id === session.user.id,
+    );
+    assert.equal(login?.details.provisioned, true);
+    assert.equal(login?.details.provider_id, 'corp');
+  });
+
+  it('opens the same account on a returning sign-in, whatever the email says now', async () => {
+    const who = person('return');
+    const first = await sessionOf(
+      h,
+      await signIn(h, corp, 'corp', { ...who, email_verified: true, groups: [] }),
+    );
+    const again = await signIn(h, corp, 'corp', {
+      sub: who.sub,
+      email: 'renamed@corp.example.test',
+      email_verified: true,
+      groups: [],
+    });
+    const second = await sessionOf(h, again);
+    assert.equal(second.user.id, first.user.id);
+    assert.equal(second.user.email, who.email, 'the portal address is not rewritten');
+    const [identity] = await h.store.userIdentities.listByUser(first.user.id);
+    assert.equal(identity?.email, 'renamed@corp.example.test');
+    assert.ok(identity?.last_login_at);
+  });
+
+  it('signs an SSO account in as an ordinary account, Edge consumer included', async () => {
+    const who = person('edge');
+    const session = await sessionOf(
+      h,
+      await signIn(h, corp, 'corp', { ...who, email_verified: true }),
+    );
+    const issued = await h.authed(session, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(issued.statusCode, 201, issued.body);
+    const consumer = h.edge.consumerByUsername(consumerUsernameForUser(session.user.id));
+    assert.ok(consumer, 'the account is nexus-user-<id> on the gateway, like any other');
+    // A password sign-in against the provisioned account fails like a wrong password.
+    const login = await h.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { email: who.email, password: TEST_PASSWORD },
+    });
+    assert.equal(login.statusCode, 401, login.body);
+  });
+
+  /* ── What the callback refuses ──────────────────────────────────────── */
+
+  it('refuses a state that is not the one this browser sealed', async () => {
+    const who = person('state');
+    const attempt = await begin(h, corp, 'corp', { ...who, email_verified: true });
+    assert.equal(ssoError(await finish(h, 'corp', attempt, { state: 'forged' })), 'invalid_state');
+    assert.equal(await h.store.users.findByEmail(who.email), null);
+  });
+
+  it('refuses a callback without the attempt cookie, or with another attempt’s', async () => {
+    const who = person('cookie');
+    const attempt = await begin(h, corp, 'corp', { ...who, email_verified: true });
+    assert.equal(ssoError(await finish(h, 'corp', attempt, { cookie: null })), 'invalid_state');
+    const garbage = await finish(h, 'corp', attempt, { cookie: 'garbage' });
+    assert.equal(ssoError(garbage), 'invalid_state');
+    // An attempt started for one provider cannot complete at another.
+    const other = await begin(h, partner, 'partner', { ...who, email_verified: true });
+    assert.equal(
+      ssoError(await finish(h, 'corp', attempt, { cookie: other.transaction })),
+      'invalid_state',
+    );
+    assert.equal(await h.store.users.findByEmail(who.email), null);
+  });
+
+  it('binds the code to its own PKCE verifier', async () => {
+    // Deliver attempt A's code and state with attempt B's sealed cookie
+    // re-sealed around A's state: the only thing left that does not match is
+    // the verifier, and the provider refuses the code without it.
+    const who = person('pkce');
+    const a = await begin(h, corp, 'corp', { ...who, email_verified: true });
+    const b = await begin(h, corp, 'corp', { ...who, email_verified: true });
+    const sealed = h.app.nexus.crypto.openSsoTransaction<Record<string, unknown>>(b.transaction);
+    const mixed = h.app.nexus.crypto.sealSsoTransaction({
+      ...sealed,
+      state: a.authorization.state,
+    });
+    const response = await finish(h, 'corp', a, { cookie: mixed });
+    assert.equal(ssoError(response), 'provider_unavailable');
+    const sent = corp.tokenRequests.at(-1);
+    assert.equal(sent?.form.get('code_verifier'), sealed.verifier);
+    assert.equal(await h.store.users.findByEmail(who.email), null);
+  });
+
+  it('never redeems the same attempt twice', async () => {
+    const who = person('replay');
+    const attempt = await begin(h, corp, 'corp', { ...who, email_verified: true });
+    assert.equal(ssoError(await finish(h, 'corp', attempt)), null);
+    // The code is single-use at the provider, whatever the portal does.
+    assert.equal(ssoError(await finish(h, 'corp', attempt)), 'provider_unavailable');
+  });
+
+  it('refuses an ID token whose nonce is not this attempt’s', async () => {
+    const who = person('nonce');
+    corp.nextIdToken = (payload) => ({ ...payload, nonce: 'another-attempts-nonce' });
+    const response = await signIn(h, corp, 'corp', { ...who, email_verified: true });
+    assert.equal(ssoError(response), 'token_invalid');
+    assert.equal(await h.store.users.findByEmail(who.email), null);
+  });
+
+  it('refuses an ID token for another audience, from another issuer, or expired', async () => {
+    const who = person('claims');
+    const now = Math.floor(Date.now() / 1000);
+    for (const tamper of [
+      { aud: 'someone-else' },
+      { iss: 'https://evil.example.com' },
+      { iat: now - 3600, exp: now - 600 },
+    ]) {
+      corp.nextIdToken = (payload) => ({ ...payload, ...tamper });
+      const response = await signIn(h, corp, 'corp', { ...who, email_verified: true });
+      assert.equal(ssoError(response), 'token_invalid', JSON.stringify(tamper));
+    }
+    assert.equal(await h.store.users.findByEmail(who.email), null);
+  });
+
+  it('refuses unsigned and HMAC-signed ID tokens', async () => {
+    const who = person('alg');
+    for (const signing of ['none', 'hs256', 'foreign-key'] as const) {
+      corp.nextSigning = signing;
+      const response = await signIn(h, corp, 'corp', { ...who, email_verified: true });
+      assert.equal(ssoError(response), 'token_invalid', signing);
+    }
+    assert.equal(await h.store.users.findByEmail(who.email), null);
+  });
+
+  it('reports a provider-side refusal without echoing it', async () => {
+    const attempt = await begin(h, corp, 'corp', { sub: 'x' });
+    const response = await finish(h, 'corp', attempt, { error: 'access_denied' });
+    assert.equal(ssoError(response), 'idp_error');
+  });
+
+  it('only returns to a same-origin portal path', async () => {
+    for (const returnTo of ['https://evil.example.com/', '//evil.example.com', '/api/auth/me']) {
+      const who = person('redirect');
+      const response = await signIn(h, corp, 'corp', { ...who, email_verified: true }, returnTo);
+      assert.equal(response.headers.location, `${h.config.publicUrl}/`, returnTo);
+    }
+  });
+
+  /* ── Linking ────────────────────────────────────────────────────────── */
+
+  /** A local account as a portal that requires email verification holds one. */
+  async function localAccount(email: string, verified: boolean): Promise<UserRecord> {
+    return h.store.users.create({
+      email,
+      password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+      display_name: 'Local Account',
+      role: 'client',
+      status: 'active',
+      email_verified: verified,
+    });
+  }
+
+  /** Run `body` with the registration policy requiring email verification. */
+  async function withVerificationRequired(body: () => Promise<void>): Promise<void> {
+    const previous = await h.store.settings.get(REGISTRATION_SETTINGS_KEY);
+    await h.store.settings.set(REGISTRATION_SETTINGS_KEY, {
+      open_registration: true,
+      require_email_verification: true,
+      allowed_roles: ['client', 'provider'],
+    });
+    try {
+      await body();
+    } finally {
+      if (previous) await h.store.settings.set(REGISTRATION_SETTINGS_KEY, previous.value);
+      else await h.store.settings.delete(REGISTRATION_SETTINGS_KEY);
+    }
+  }
+
+  it('links a local account only when both sides verified the address', async () => {
+    await withVerificationRequired(async () => {
+      const local = await localAccount('linkme@corp.example.test', true);
+      const response = await signIn(h, corp, 'corp', {
+        sub: 'link-subject',
+        email: 'LinkMe@corp.example.test',
+        email_verified: true,
+      });
+      const session = await sessionOf(h, response);
+      assert.equal(session.user.id, local.id);
+      const link = (await h.auditRows(AuditAction.AUTH_SSO_LINK)).find(
+        (row) => row.target_id === local.id,
+      );
+      assert.equal(link?.details.provider_id, 'corp');
+      assert.equal(link?.details.subject, 'link-subject');
+    });
+  });
+
+  it('never links, or provisions, on an address the provider did not verify', async () => {
+    await withVerificationRequired(async () => {
+      const local = await localAccount('takeover@corp.example.test', true);
+      for (const emailVerified of [false, 'true', undefined]) {
+        const response = await signIn(h, corp, 'corp', {
+          sub: `attacker-${String(emailVerified)}`,
+          email: 'takeover@corp.example.test',
+          ...(emailVerified === undefined ? {} : { email_verified: emailVerified }),
+        });
+        assert.equal(ssoError(response), 'email_not_verified', String(emailVerified));
+      }
+      assert.deepEqual(await h.store.userIdentities.listByUser(local.id), []);
+      const unverified = person('unverified');
+      const response = await signIn(h, corp, 'corp', { ...unverified, email_verified: false });
+      assert.equal(ssoError(response), 'email_not_verified');
+      assert.equal(await h.store.users.findByEmail(unverified.email), null);
+    });
+  });
+
+  it('never links to a local account that has not verified its own address', async () => {
+    await withVerificationRequired(async () => {
+      const local = await localAccount('unconfirmed@corp.example.test', false);
+      const response = await signIn(h, corp, 'corp', {
+        sub: 'unconfirmed-subject',
+        email: 'unconfirmed@corp.example.test',
+        email_verified: true,
+      });
+      assert.equal(ssoError(response), 'account_exists');
+      assert.deepEqual(await h.store.userIdentities.listByUser(local.id), []);
+    });
+  });
+
+  it('never links to an account registered where verification was not required', async () => {
+    // With verification off a registration is marked verified without proof,
+    // so a pre-registered victim address must not capture the victim's SSO.
+    const squatted = await h.registerUser({ email: 'squatted@corp.example.test' });
+    assert.equal(squatted.user.email_verified, true);
+    const response = await signIn(h, corp, 'corp', {
+      sub: 'victim-subject',
+      email: 'squatted@corp.example.test',
+      email_verified: true,
+    });
+    assert.equal(ssoError(response), 'account_exists');
+    assert.deepEqual(await h.store.userIdentities.listByUser(squatted.user.id), []);
+  });
+
+  it('holds a second provider to the same rule, and one identity per provider', async () => {
+    const who = person('cross');
+    const account = await sessionOf(
+      h,
+      await signIn(h, corp, 'corp', { ...who, email_verified: true }),
+    );
+    // The partner provider does not verify: no link across providers.
+    const unverified = await signIn(h, partner, 'partner', {
+      sub: `${who.sub}-partner`,
+      email: who.email,
+      email_verified: false,
+      groups: ['partners'],
+    });
+    assert.equal(ssoError(unverified), 'email_not_verified');
+    // It does now: the account gains its second identity.
+    const verified = await signIn(h, partner, 'partner', {
+      sub: `${who.sub}-partner`,
+      email: who.email,
+      email_verified: true,
+      groups: ['partners'],
+    });
+    assert.equal((await sessionOf(h, verified)).user.id, account.user.id);
+    // A different subject at corp cannot attach itself to the same account.
+    const second = await signIn(h, corp, 'corp', {
+      sub: `${who.sub}-again`,
+      email: who.email,
+      email_verified: true,
+    });
+    assert.equal(ssoError(second), 'account_exists');
+    const providers = (await h.store.userIdentities.listByUser(account.user.id))
+      .map((identity) => identity.provider_id)
+      .sort();
+    assert.deepEqual(providers, ['corp', 'partner']);
+  });
+
+  /* ── Mapping ────────────────────────────────────────────────────────── */
+
+  it('re-applies the mapped role on every sign-in, and audits the change', async () => {
+    const who = person('roles');
+    const first = await sessionOf(
+      h,
+      await signIn(h, corp, 'corp', { ...who, email_verified: true, groups: ['portal-admins'] }),
+    );
+    assert.equal(first.user.role, 'admin');
+    const demoted = await sessionOf(
+      h,
+      await signIn(h, corp, 'corp', { ...who, email_verified: true, groups: ['api-publishers'] }),
+    );
+    assert.equal(demoted.user.role, 'provider');
+    const sync = (await h.auditRows(AuditAction.AUTH_SSO_CLAIMS_SYNC)).find(
+      (row) => row.target_id === first.user.id,
+    );
+    assert.equal(sync?.details.from_role, 'admin');
+    assert.equal(sync?.details.to_role, 'provider');
+    assert.equal(sync?.actor_user_id, null, 'a claim-driven change is the system’s');
+  });
+
+  it('never grants, removes or changes super_admin from claims', async () => {
+    await h.store.users.update(founder.user.id, { email_verified: true });
+    const response = await signIn(h, corp, 'corp', {
+      sub: 'founder-subject',
+      email: founder.user.email,
+      email_verified: true,
+      groups: [],
+    });
+    const session = await sessionOf(h, response);
+    assert.equal(session.user.id, founder.user.id);
+    assert.equal(session.user.role, 'super_admin', 'a claim mapping to client does not demote');
+    const again = await sessionOf(
+      h,
+      await signIn(h, corp, 'corp', {
+        sub: 'founder-subject',
+        email: founder.user.email,
+        email_verified: true,
+        groups: ['portal-admins'],
+      }),
+    );
+    assert.equal(again.user.role, 'super_admin');
+    const syncs = (await h.auditRows(AuditAction.AUTH_SSO_CLAIMS_SYNC)).filter(
+      (row) => row.target_id === founder.user.id,
+    );
+    assert.deepEqual(syncs, []);
+    // And no claim makes anyone else one.
+    const all = await h.store.users.list({ role: 'super_admin' }, { limit: 100 });
+    assert.deepEqual(
+      all.items.map((user) => user.id),
+      [founder.user.id],
+    );
+  });
+
+  it('denies claims that map to no role, and creates nothing', async () => {
+    const who = person('denied');
+    const response = await signIn(h, partner, 'partner', {
+      ...who,
+      email_verified: true,
+      groups: ['not-partners'],
+    });
+    assert.equal(ssoError(response), 'access_denied');
+    assert.equal(await h.store.users.findByEmail(who.email), null);
+  });
+
+  /* ── Administration ─────────────────────────────────────────────────── */
+
+  it('shows administrators the providers without their secrets', async () => {
+    const response = await h.authed(founder, { method: 'GET', url: '/api/admin/sso' });
+    assert.equal(response.statusCode, 200, response.body);
+    const body = response.json<SsoAdminSettingsResponse>();
+    const corpView = body.providers.find((provider) => provider.id === 'corp');
+    assert.equal(corpView?.source, 'environment');
+    assert.equal(corpView?.client_secret_set, true);
+    assert.equal(corpView?.redirect_uri, `${h.config.publicUrl}/api/auth/sso/corp/callback`);
+    const partnerView = body.providers.find((provider) => provider.id === 'partner');
+    assert.equal(partnerView?.client_secret_set, false);
+    assert.equal(response.body.includes(CORP_SECRET), false);
+  });
+
+  it('lets only a super admin change the settings, and stores secrets encrypted', async () => {
+    const admin = await h.registerUser({ email: 'sso-admin@corp.example.test' });
+    await h.store.users.update(admin.user.id, { role: 'admin' });
+    const denied = await h.authed(admin, {
+      method: 'PUT',
+      url: '/api/admin/sso',
+      payload: { policy: 'local_only' },
+    });
+    assert.equal(denied.statusCode, 403, denied.body);
+
+    const extra = {
+      id: 'extra',
+      display_name: 'Extra',
+      issuer: 'https://extra.example.com',
+      client_id: 'nexus-extra',
+      scopes: ['openid', 'email'],
+      enabled: false,
+      jit_provisioning: true,
+      link_existing_accounts: true,
+      require_verified_email: true,
+      sync_roles: true,
+      default_role: 'client',
+      role_mappings: [],
+      org_mappings: [],
+      client_secret: PARTNER_SECRET,
+    };
+    const saved = await h.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/sso',
+      payload: { providers: [extra], allowed_email_domains: [] },
+    });
+    assert.equal(saved.statusCode, 200, saved.body);
+    assert.equal(saved.body.includes(PARTNER_SECRET), false);
+    const view = saved.json<SsoAdminSettingsResponse>().providers.find((p) => p.id === 'extra');
+    assert.equal(view?.source, 'settings');
+    assert.equal(view?.client_secret_set, true);
+    const row = await h.store.settings.get(ssoClientSecretKey('extra'));
+    assert.equal(row?.encrypted, true);
+    assert.equal(String(row?.value).includes(PARTNER_SECRET), false);
+    const audit = (await h.auditRows(AuditAction.ADMIN_SETTINGS_UPDATE)).find(
+      (entry) => entry.target_id === SSO_SETTINGS_KEY,
+    );
+    assert.deepEqual(audit?.details.client_secrets_changed, ['extra']);
+    assert.equal(JSON.stringify(audit?.details).includes(PARTNER_SECRET), false);
+
+    // An environment provider cannot be shadowed, super_admin is not a
+    // mappable role, and an issuer must be HTTPS.
+    for (const provider of [
+      { ...extra, id: 'corp' },
+      { ...extra, role_mappings: [{ claim: 'groups', value: 'root', role: 'super_admin' }] },
+      { ...extra, issuer: 'http://extra.example.com' },
+    ]) {
+      const refused = await h.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/sso',
+        payload: { providers: [provider] },
+      });
+      assert.equal(refused.statusCode, 400, refused.body);
+    }
+
+    // Removing the provider removes its secret.
+    const removed = await h.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/sso',
+      payload: { providers: [] },
+    });
+    assert.equal(removed.statusCode, 200, removed.body);
+    assert.equal(await h.store.settings.get(ssoClientSecretKey('extra')), null);
+  });
+
+  it('restricts sign-in to the allowed email domains', async () => {
+    const set = await h.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/sso',
+      payload: { allowed_email_domains: ['@Allowed.Example.Test'] },
+    });
+    assert.equal(set.statusCode, 200, set.body);
+    assert.deepEqual(set.json<SsoAdminSettingsResponse>().allowed_email_domains, [
+      'allowed.example.test',
+    ]);
+    try {
+      const outside = person('domain');
+      const refused = await signIn(h, corp, 'corp', { ...outside, email_verified: true });
+      assert.equal(ssoError(refused), 'email_domain_not_allowed');
+      const inside = await signIn(h, corp, 'corp', {
+        sub: 'domain-inside',
+        email: 'someone@allowed.example.test',
+        email_verified: true,
+      });
+      assert.equal(ssoError(inside), null);
+    } finally {
+      await h.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/sso',
+        payload: { allowed_email_domains: [] },
+      });
+    }
+  });
+
+  it('lets an administrator list and remove an account’s links', async () => {
+    const who = person('unlink');
+    const session = await sessionOf(
+      h,
+      await signIn(h, corp, 'corp', { ...who, email_verified: true }),
+    );
+    const listed = await h.authed(founder, {
+      method: 'GET',
+      url: `/api/users/${session.user.id}/identities`,
+    });
+    assert.equal(listed.statusCode, 200, listed.body);
+    const [identity] = listed.json<{ items: { id: string; provider_id: string }[] }>().items;
+    assert.equal(identity?.provider_id, 'corp');
+    const removed = await h.authed(founder, {
+      method: 'DELETE',
+      url: `/api/users/${session.user.id}/identities/${identity?.id ?? ''}`,
+    });
+    assert.equal(removed.statusCode, 200, removed.body);
+    assert.deepEqual(await h.store.userIdentities.listByUser(session.user.id), []);
+    const unlink = (await h.auditRows(AuditAction.AUTH_SSO_UNLINK)).find(
+      (row) => row.target_id === session.user.id,
+    );
+    assert.equal(unlink?.details.subject, who.sub);
+    // The client itself cannot.
+    const forbidden = await h.authed(session, {
+      method: 'GET',
+      url: `/api/users/${session.user.id}/identities`,
+    });
+    assert.equal(forbidden.statusCode, 403, forbidden.body);
+  });
+
+  it('keeps tokens, codes and secrets out of the audit log and the server log', async () => {
+    const attempt = await begin(h, corp, 'corp', { ...person('secrets'), email_verified: true });
+    await finish(h, 'corp', attempt);
+    await finish(h, 'corp', attempt, { state: 'forged' });
+    const rows = JSON.stringify(await h.auditRows());
+    const logs = logLines.join('\n');
+    for (const secret of [
+      attempt.authorization.code,
+      attempt.authorization.state,
+      attempt.authorization.params.get('nonce') ?? '<nonce>',
+      attempt.transaction,
+      CORP_SECRET,
+    ]) {
+      assert.equal(rows.includes(secret), false, 'audit rows');
+      assert.equal(logs.includes(secret), false, 'log lines');
+    }
+    assert.ok(logs.includes('A single sign-on attempt was refused'), 'refusals are logged');
+  });
+});
+
+describe('single sign-on organization mapping and deprovisioning', () => {
+  let corp: MockOidcProvider;
+  let partner: MockOidcProvider;
+  let h: TestApp;
+  let founder: TestSession;
+  let orgId = '';
+
+  before(async () => {
+    corp = createMockOidcProvider({ clientId: 'nexus-corp', clientSecret: CORP_SECRET });
+    partner = createMockOidcProvider({ clientId: 'nexus-partner', clientSecret: null });
+    await corp.start();
+    await partner.start();
+    h = await buildTestApp({
+      env: {
+        NEXUS_OIDC_ALLOW_HTTP_LOOPBACK: 'true',
+        NEXUS_OIDC_PROVIDERS: providersEnv(corp, partner),
+      },
+    });
+    founder = await h.registerUser({ email: 'org-founder@corp.example.test' });
+    orgId = (await h.store.organizations.create({ name: 'Payments', description: null })).id;
+    // A provider saved through the admin API, as opposed to the environment:
+    // its secret is stored encrypted and read back for the token request.
+    const saved = await h.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/sso',
+      payload: {
+        providers: [
+          {
+            id: 'corp-orgs',
+            display_name: 'Corporate SSO (organizations)',
+            issuer: corp.issuer,
+            client_id: 'nexus-corp',
+            client_secret: CORP_SECRET,
+            scopes: ['openid', 'email', 'profile'],
+            enabled: true,
+            jit_provisioning: true,
+            link_existing_accounts: true,
+            require_verified_email: true,
+            sync_roles: true,
+            default_role: 'client',
+            role_mappings: [],
+            org_mappings: [{ claim: 'department', value: 'payments', org_id: orgId }],
+          },
+        ],
+      },
+    });
+    assert.equal(saved.statusCode, 200, saved.body);
+  });
+
+  after(async () => {
+    await h?.close();
+    await corp?.stop();
+    await partner?.stop();
+  });
+
+  it('maps the organization from claims, and follows it on later sign-ins', async () => {
+    const who = person('org');
+    const first = await sessionOf(
+      h,
+      await signIn(h, corp, 'corp-orgs', { ...who, email_verified: true, department: 'payments' }),
+    );
+    assert.equal(first.user.org_id, orgId);
+    const moved = await sessionOf(
+      h,
+      await signIn(h, corp, 'corp-orgs', { ...who, email_verified: true, department: 'sales' }),
+    );
+    assert.equal(moved.user.org_id, null);
+    const sync = (await h.auditRows(AuditAction.AUTH_SSO_CLAIMS_SYNC)).find(
+      (row) => row.target_id === first.user.id,
+    );
+    assert.equal(sync?.details.from_org_id, orgId);
+    assert.equal(sync?.details.to_org_id, null);
+  });
+
+  it('disables an account whose claims lost their role, when deprovisioning is on', async () => {
+    const who = person('deprovision');
+    const claims = { ...who, email_verified: true, groups: ['partners'] };
+    const account = await sessionOf(h, await signIn(h, partner, 'partner', claims));
+    await h.authed(account, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+
+    // Off (the default): the sign-in is refused and the account left alone.
+    const refused = await signIn(h, partner, 'partner', { ...claims, groups: [] });
+    assert.equal(ssoError(refused), 'access_denied');
+    assert.equal((await h.store.users.findById(account.user.id))?.status, 'active');
+
+    const enable = await h.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/sso',
+      payload: { deprovision_on_access_loss: true },
+    });
+    assert.equal(enable.statusCode, 200, enable.body);
+    const deprovisioned = await signIn(h, partner, 'partner', { ...claims, groups: [] });
+    assert.equal(ssoError(deprovisioned), 'access_denied');
+    assert.equal((await h.store.users.findById(account.user.id))?.status, 'disabled');
+    // Through the same durable revocation an administrator's disable queues.
+    const job = await h.store.gatewayTeardownJobs.findByUser(account.user.id);
+    assert.ok(job, 'a gateway teardown was queued');
+    const credentials = await h.store.credentials.list({ user_id: account.user.id });
+    assert.ok(credentials.items.every((credential) => credential.status === 'revoked'));
+    const row = (await h.auditRows(AuditAction.AUTH_SSO_DEPROVISION)).find(
+      (entry) => entry.target_id === account.user.id,
+    );
+    assert.equal(row?.details.gateway_teardown, 'queued');
+    // The old session is gone.
+    const me = await h.app.inject({
+      method: 'GET',
+      url: '/api/auth/me',
+      headers: { cookie: account.cookieHeader },
+    });
+    assert.equal(me.statusCode, 401);
+    // And a later sign-in reports the account as disabled.
+    const later = await signIn(h, partner, 'partner', claims);
+    assert.equal(ssoError(later), 'account_disabled');
+  });
+});
+
+describe('single sign-on login policies', () => {
+  let corp: MockOidcProvider;
+  let partner: MockOidcProvider;
+
+  before(async () => {
+    corp = createMockOidcProvider({ clientId: 'nexus-corp', clientSecret: CORP_SECRET });
+    partner = createMockOidcProvider({ clientId: 'nexus-partner', clientSecret: null });
+    await corp.start();
+    await partner.start();
+  });
+
+  after(async () => {
+    await corp?.stop();
+    await partner?.stop();
+  });
+
+  async function app(breakGlass = false): Promise<TestApp> {
+    return buildTestApp({
+      env: {
+        NEXUS_OIDC_ALLOW_HTTP_LOOPBACK: 'true',
+        NEXUS_OIDC_PROVIDERS: providersEnv(corp, partner),
+        NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN: breakGlass ? 'true' : 'false',
+      },
+    });
+  }
+
+  async function publicConfig(h: TestApp): Promise<SsoPublicConfigResponse> {
+    const response = await h.app.inject({ method: 'GET', url: '/api/auth/sso' });
+    assert.equal(response.statusCode, 200, response.body);
+    return response.json<SsoPublicConfigResponse>();
+  }
+
+  async function setPolicy(h: TestApp, policy: string): Promise<void> {
+    const current = (await h.store.settings.get(SSO_SETTINGS_KEY))?.value ?? {};
+    await h.store.settings.set(SSO_SETTINGS_KEY, { ...(current as object), policy }, false);
+  }
+
+  it('local_only: no providers offered, and the SSO routes refuse', async () => {
+    const h = await app();
+    try {
+      await setPolicy(h, 'local_only');
+      const config = await publicConfig(h);
+      assert.deepEqual(config.providers, []);
+      assert.equal(config.password_login, 'enabled');
+      const start = await h.app.inject({ method: 'GET', url: '/api/auth/sso/corp/start' });
+      assert.equal(ssoError(start), 'sso_disabled');
+      assert.equal(cookieValue(start, SSO_TRANSACTION_COOKIE), undefined);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('sso_only: refuses passwords and registration, but not the founder', async () => {
+    const h = await app();
+    try {
+      // Set before anybody exists: the founder's seat is taken with the
+      // bootstrap token whatever the policy says.
+      await setPolicy(h, 'sso_only');
+      const founder = await h.registerUser({ email: 'sso-only-founder@corp.example.test' });
+      assert.equal(founder.user.role, 'super_admin');
+
+      const register = await h.app.inject({
+        method: 'POST',
+        url: '/api/auth/register',
+        payload: {
+          email: 'late@corp.example.test',
+          password: TEST_PASSWORD,
+          display_name: 'Late',
+          role: 'client',
+          bootstrap_token: TEST_BOOTSTRAP_TOKEN,
+        },
+      });
+      assert.equal(register.statusCode, 403, register.body);
+
+      const login = await h.app.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        payload: { email: founder.user.email, password: TEST_PASSWORD },
+      });
+      assert.equal(login.statusCode, 403, login.body);
+
+      const config = await publicConfig(h);
+      assert.equal(config.password_login, 'disabled');
+      assert.equal(config.registration_enabled, false);
+
+      // Single sign-on still provisions.
+      const who = person('ssoonly');
+      const response = await signIn(h, corp, 'corp', { ...who, email_verified: true });
+      assert.equal(ssoError(response), null);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('sso_only with break-glass: a super admin may use a password, nobody else', async () => {
+    const h = await app(true);
+    try {
+      const founder = await h.registerUser({ email: 'glass-founder@corp.example.test' });
+      const client = await h.registerUser({ email: 'glass-client@corp.example.test' });
+      await setPolicy(h, 'sso_only');
+      const config = await publicConfig(h);
+      assert.equal(config.password_login, 'break_glass');
+
+      const admitted = await h.loginUser(founder.user.email);
+      assert.equal(admitted.user.role, 'super_admin');
+      const row = (await h.auditRows(AuditAction.AUTH_LOGIN)).find(
+        (entry) => entry.target_id === founder.user.id,
+      );
+      assert.equal(row?.details.break_glass, true);
+
+      const refused = await h.app.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        payload: { email: client.user.email, password: TEST_PASSWORD },
+      });
+      assert.equal(refused.statusCode, 401, refused.body);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('refuses sso_only without an enabled provider to sign in with', async () => {
+    const h = await buildTestApp();
+    try {
+      const founder = await h.registerUser();
+      const response = await h.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/sso',
+        payload: { policy: 'sso_only' },
+      });
+      assert.equal(response.statusCode, 400, response.body);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('never seats a founder from single sign-on', async () => {
+    const h = await app();
+    try {
+      const response = await signIn(h, corp, 'corp', {
+        ...person('first'),
+        email_verified: true,
+        groups: ['portal-admins'],
+      });
+      const session = await sessionOf(h, response);
+      assert.equal(session.user.role, 'admin', 'the mapped role, never super_admin');
+      assert.equal(await h.services.auth.bootstrapRequired(), true, 'the seat stays open');
+    } finally {
+      await h.close();
+    }
+  });
+});

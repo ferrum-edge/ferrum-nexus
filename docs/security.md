@@ -12,18 +12,19 @@ Related: [`architecture.md`](architecture.md) · [`operations.md`](operations.md
 
 ### Assets
 
-| Asset                                                        | Where it lives                                                                 | Why it matters                                                          |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
-| Ferrum Edge admin authority                                  | `FERRUM_ADMIN_JWT_SECRET` in the Nexus process                                 | Full control of the gateway: any proxy, any consumer, any credential.   |
-| Gateway credentials (API keys, basic passwords, JWT secrets) | Generated in Nexus, stored **only** on Edge; Nexus keeps a fingerprint + last4 | Impersonation of a portal user against every API they are approved for. |
-| Portal sessions                                              | `sessions` table (HMAC of the token) + browser cookie                          | Impersonation of a portal user, including admins.                       |
-| Password hashes                                              | `users.password_hash` (scrypt)                                                 | Credential stuffing elsewhere if cracked.                               |
-| Encrypted settings                                           | `app_settings` (`smtp.password`, `captcha.secret_key`)                         | Relay abuse; disabling bot protection.                                  |
-| Single-use links in queued mail                              | `email_outbox` (sealed: AES-256-GCM)                                           | Account takeover through a password-reset link.                         |
-| Master secret                                                | `NEXUS_SECRET_KEY`                                                             | Derives the settings-encryption, outbox-sealing and session-HMAC keys.  |
-| Audit log                                                    | `audit_logs`                                                                   | The record of who did what.                                             |
-| Access decisions                                             | `access_requests`, `grants`                                                    | Who may call which API.                                                 |
-| Unpublished API documentation                                | `api_specs`                                                                    | Business-sensitive interface detail.                                    |
+| Asset                                                        | Where it lives                                                                   | Why it matters                                                             |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| Ferrum Edge admin authority                                  | `FERRUM_ADMIN_JWT_SECRET` in the Nexus process                                   | Full control of the gateway: any proxy, any consumer, any credential.      |
+| Gateway credentials (API keys, basic passwords, JWT secrets) | Generated in Nexus, stored **only** on Edge; Nexus keeps a fingerprint + last4   | Impersonation of a portal user against every API they are approved for.    |
+| Portal sessions                                              | `sessions` table (HMAC of the token) + browser cookie                            | Impersonation of a portal user, including admins.                          |
+| Identity-provider links                                      | `user_identities` (provider id + `sub`)                                          | Which account a single sign-on opens: a wrong link is an account takeover. |
+| Password hashes                                              | `users.password_hash` (scrypt)                                                   | Credential stuffing elsewhere if cracked.                                  |
+| Encrypted settings                                           | `app_settings` (`smtp.password`, `captcha.secret_key`, `sso.client_secret.<id>`) | Relay abuse; disabling bot protection; posing as the portal to an IdP.     |
+| Single-use links in queued mail                              | `email_outbox` (sealed: AES-256-GCM)                                             | Account takeover through a password-reset link.                            |
+| Master secret                                                | `NEXUS_SECRET_KEY`                                                               | Derives the settings-encryption, outbox-sealing and session-HMAC keys.     |
+| Audit log                                                    | `audit_logs`                                                                     | The record of who did what.                                                |
+| Access decisions                                             | `access_requests`, `grants`                                                      | Who may call which API.                                                    |
+| Unpublished API documentation                                | `api_specs`                                                                      | Business-sensitive interface detail.                                       |
 
 ### Adversaries
 
@@ -32,10 +33,11 @@ Related: [`architecture.md`](architecture.md) · [`operations.md`](operations.md
 | Anonymous internet         | Reach the portal; register if open         | Rate limiting, CAPTCHA, registration policy, bootstrap token, nothing readable beyond branding/health                                                                   |
 | Registered `client`        | A valid session                            | RBAC, row-level ownership checks, catalog visibility, credentials scoped to their own consumer, per-account budgets                                                     |
 | Registered `provider`      | A valid session; owns some APIs            | Ownership checks on every API mutation, public-upstream check, publishing quotas                                                                                        |
-| Malicious/careless `admin` | Broad portal authority                     | Audit log; only a `super_admin` may confer or remove admin power or change SMTP/CAPTCHA/gateway settings                                                                |
+| Malicious/careless `admin` | Broad portal authority                     | Audit log; only a `super_admin` may confer or remove admin power or change SMTP/CAPTCHA/gateway/single sign-on settings                                                 |
 | Cross-site attacker        | Can make a victim's browser issue requests | Session-bound CSRF double-submit; `SameSite=Lax`; `frame-ancestors 'none'`                                                                                              |
 | Network attacker           | Sees or modifies traffic                   | TLS at the proxy; `Secure` cookies; HSTS; Admin API over TLS or a private network                                                                                       |
 | Compromised database       | Reads every row                            | Passwords scrypt-hashed; session and email-link tokens stored as HMAC; settings secrets and queued single-use links AES-256-GCM under keys held only in the environment |
+| Identity provider          | Signs any claim it likes for its own users | Explicit trust per provider; subject-keyed links; linking only on a verified address on both sides; `super_admin` never from claims; allowed email domains              |
 
 ### Boundaries
 
@@ -214,6 +216,152 @@ without invalidating old hashes. Verification is constant-time and returns
 self-service change requires the current password and is rate-limited per
 account (see [Rate limiting](#rate-limiting)).
 
+### Single sign-on (OpenID Connect)
+
+Nexus is an OpenID Connect relying party (`server/src/sso/`). A provider comes
+from `NEXUS_OIDC_PROVIDERS` or from **Admin → Settings → Single sign-on**; setup
+is in [`operations.md` §14](operations.md#14-single-sign-on-openid-connect).
+**Configuring a provider is a trust decision**: whoever runs it can sign any
+claim for its own users, so the controls below bound what a provider can do
+with that rather than assume it is honest.
+
+**The flow.** Authorization code with PKCE (`S256`), `state` and `nonce`:
+
+- `GET /api/auth/sso/:provider/start` mints a 32-byte `state`, `nonce` and
+  PKCE verifier and seals them, with the provider id, the page to return to
+  and a 10-minute expiry, into the `nexus_sso` cookie: AES-256-GCM under a key
+  HKDF-derived from `NEXUS_SECRET_KEY` (info `nexus-sso-transaction-v1`),
+  `HttpOnly`, `SameSite=Lax`, `Path=/api/auth/sso`, `Secure` like the
+  session cookies. Nothing about the attempt is stored server-side or readable
+  in the browser.
+- `GET /api/auth/sso/:provider/callback` clears that cookie whatever happens,
+  and refuses (`invalid_state`) unless the cookie opens, names this provider,
+  has not expired, and its `state` equals the returned one (constant-time).
+  This is the login-CSRF defence: a response the browser did not ask for has
+  no matching cookie. Only then is the code redeemed, with the verifier, so a
+  stolen code is useless without the cookie that holds it.
+- **`SameSite=Lax`, not `Strict`.** The provider returns the browser with a
+  top-level cross-site `GET`, which a `Strict` cookie would not accompany.
+  Both routes are `GET`s, outside the CSRF check by method; neither changes
+  anything until the sealed `state` has matched.
+- Both answer with redirects, never JSON: to the provider, back into the SPA
+  (a same-origin path only — never an absolute URL, `//host`, an API route or
+  the sign-in page), or to `/login?sso_error=<reason>` with a reason from a
+  closed set. Provider error text, tokens and claims are never put in a URL.
+- The session is the ordinary one: the same issuance, cookies and CSRF
+  binding as a password sign-in, and every response that sets a cookie is
+  `private, no-store`.
+
+**Talking to the provider.** HTTPS only: the issuer and every endpoint its
+discovery document names (`authorization_endpoint`, `token_endpoint`,
+`jwks_uri`) must be `https://`. A plain `http://` issuer is accepted only for
+a loopback host and only with `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`, which is
+for a development provider on the same machine. Redirects are not followed,
+every request has a 5-second deadline and a 512 KiB response cap. The
+discovery document must name exactly the configured issuer, and is cached for
+an hour; so is the key set, which an unknown `kid` refetches at most once per
+30 seconds so forged tokens cannot turn the portal into a request amplifier. A
+provider that advertises PKCE methods without `S256`, or ID token algorithms
+without `RS256` or `ES256`, is refused.
+
+**ID token validation** (`sso/oidc.ts`, with `jose`):
+
+- The signature must verify against the provider's JWKS under an explicit
+  allow-list of `RS256` and `ES256`. `none` and the HMAC algorithms never
+  verify, which closes the classic confusion attack of an HMAC keyed with the
+  provider's public key.
+- `iss` must equal the discovered issuer; `aud` must contain the client id,
+  and with several audiences, or any `azp`, `azp` must be the client id.
+- `exp`, `nbf` and `iat` are checked with 60 seconds of leeway; `sub`,
+  `exp` and `iat` are required, and `sub` must be 1–255 characters.
+- `nonce` must equal the sealed one (constant-time), and `at_hash`, when the
+  token carries one, must match the access token.
+
+**Which account a sign-in opens.** In this order:
+
+1. **A linked subject.** `user_identities` keys a link on `(provider, sub)`
+   (unique, case-sensitive), never on the email address, so a provider that
+   changes a user's address — or lets a user change it — cannot move the
+   sign-in into another account. An account holds at most one identity per
+   provider.
+2. **An existing account with the same address**, linked only when **both
+   sides** have verified it: the ID token carries `email_verified: true` (the
+   JSON boolean — the string `"true"` or an absent claim is "not verified"),
+   **and** the portal account's address is proven. The portal half is stricter
+   than `users.email_verified`: with `require_email_verification` off a new
+   registration is marked verified without any proof, so a flag set that way
+   would let an attacker register a victim's address in advance and capture
+   the victim's first single sign-on (account pre-hijacking). The address
+   counts as proven only while the registration policy requires verification,
+   for a `super_admin`, or for an account an identity provider already
+   verified when it provisioned or linked it. Anything else is refused
+   (`email_not_verified` or `account_exists`) and nothing is linked. A second
+   provider is held to exactly the same rule.
+3. **Just-in-time provisioning**: a new account with the mapped role and
+   organization and an unusable password hash (a well-formed scrypt string of
+   random bytes, so a password attempt costs a full derivation and fails like
+   a wrong password). By default only for a verified address
+   (`require_verified_email`), so an unverified provider email cannot squat an
+   address. It never seats the founding `super_admin`: that stays with the
+   bootstrap token.
+
+**Claims map to roles, never to `super_admin`.** A mapping names a claim (a
+name or a dot path, e.g. `groups`, `realm_access.roles`) and a value; the
+highest matching role wins, else the provider's default, and a `null` default
+means no access. The role set a mapping can name is `client`, `provider`,
+`admin`: `super_admin` is not representable, and an account that already is
+one is never changed by claims — not demoted, not moved between
+organizations, never deprovisioned. With `sync_roles` the role is re-applied
+on every sign-in, so for linked accounts **the provider's groups are the source
+of truth**, including for `admin`; that is why only a `super_admin` may edit
+the single sign-on settings. Every change is written as `auth.sso_claims_sync`
+by the system actor in the sign-in's transaction.
+
+**Losing access.** Claims that map to no role refuse the sign-in
+(`access_denied`). With `deprovision_on_access_loss`, the account is also
+disabled exactly as an administrator's disable does it — sessions ended, and a
+durable `gateway_teardown_jobs` row queued in the same transaction that strips
+every gateway identity the account holds (`nexus-user-<id>`, each
+`nexus-app-<id>`) of its ACL groups and credentials; see
+[Disabling an account](#disabling-an-account). This happens **at the next
+sign-in**, not when the provider removes the user: Nexus receives no
+back-channel events, so an account whose provider access was revoked keeps its
+existing session until it expires, and its gateway credentials until an
+administrator disables it or it signs in again.
+
+**Login policy.** `local_only`, `sso_only` or `local_and_sso` (the default,
+which with no provider is `local_only` in effect). `sso_only` refuses
+password sign-in (`403`) and self-service registration, but **not the founding
+registration** that presents the bootstrap token: that is how a portal gets
+its first administrator whatever the policy. `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN=true`
+lets a `super_admin` — and nobody else, who gets the answer a wrong password
+gets — sign in with a password under `sso_only`, audited with
+`break_glass: true`. It is environment-only for the reason
+`NEXUS_CAPTCHA_ENFORCEMENT` is. `sso_only` cannot be saved without an enabled
+provider. The optional allowed-domain list applies to every single sign-on,
+returning ones included.
+
+**Secrets and logs.** A settings provider's client secret is stored AES-256-GCM
+encrypted (`sso.client_secret.<id>`, [§6](#6-settings-encryption)), is
+write-only over HTTP (`client_secret_set`), and is re-encrypted by
+`rotate-secret-key`; one that no longer decrypts fails the provider closed.
+Environment secrets stay in the environment. No token, code, verifier,
+`state`, `nonce` or secret is written to the audit log or the server log: a
+refused sign-in logs its provider and reason, request logs redact `code` and
+`state`, and `details` carry the provider id, the subject and the address.
+
+**Residual risks.**
+
+- A provider operator, or anyone who can make the provider assert a verified
+  address, can sign in as any linked or linkable account at that provider.
+  Configure only providers you trust with that; use the allowed-domain list
+  and `link_existing_accounts: false` for a provider you trust less.
+- A portal account whose address was marked verified while
+  `require_email_verification` was **on** counts as proven even if the flag was
+  set some other way (a database edit, an import).
+- Deprovisioning is at sign-in time, not real time (above). There is no SCIM or
+  back-channel logout.
+
 ---
 
 ## 3. CSRF
@@ -236,6 +384,9 @@ carries a session. The only exempt routes are the pre-session ones:
 `/api/auth/reset-password` and `/api/auth/captcha`. **`POST /api/auth/logout`
 is not exempt.** An anonymous mutation is rejected by the route's own guard with
 `401`.
+The single sign-on routes are `GET`s, so the method exempts them; their
+defence is the sealed `state` (see
+[Single sign-on](#single-sign-on-openid-connect)).
 
 Scope and exemptions use the route Fastify matched, not the raw path, so an
 encoded spelling such as `/%61pi/...` is still covered. Unknown `/api` paths
@@ -648,7 +799,8 @@ The procedures are in
 
 ## 6. Settings encryption
 
-`smtp.password` and `captcha.secret_key` are stored encrypted:
+`smtp.password`, `captcha.secret_key` and each single sign-on provider's
+`sso.client_secret.<id>` are stored encrypted:
 
 | Property    | Value                                                                    |
 | ----------- | ------------------------------------------------------------------------ |
@@ -657,8 +809,9 @@ The procedures are in
 | Key         | HKDF-SHA-256 from `NEXUS_SECRET_KEY`, info `nexus-settings-v1`, 32 bytes |
 | Integrity   | A tampered blob fails to decrypt                                         |
 
-Both are **write-only over HTTP**: set through `PUT /api/admin/settings`, never
-returned. Responses expose only `password_set` / `secret_set` booleans. The
+All are **write-only over HTTP**: set through `PUT /api/admin/settings` (or
+`PUT /api/admin/sso`), never returned. Responses expose only `password_set` /
+`secret_set` / `client_secret_set` booleans. The
 `admin.settings_update` row records changed key **names** and SMTP
 password-source changes, never values.
 
@@ -1166,7 +1319,8 @@ swallowed.
 
 **Secrets never appear in `details`.** Settings updates record key names;
 credential events record type and last4; plugin events record config keys, not
-values.
+values; single sign-on events record the provider id and subject, never a
+token, code or client secret.
 
 Naming is `<domain>.<verb>`, lowercase snake_case. God-mode actions are `god.*`.
 
@@ -1185,15 +1339,26 @@ Naming is `<domain>.<verb>`, lowercase snake_case. God-mode actions are `god.*`.
 
 ### Authentication
 
-| Action                        | Target type | Description                                                                                                                                           |
-| ----------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auth.register`               | `user`      | An account was created; the actor is the new account. `details`: `email`, `role`, `first_user`, `verification_required`, `captcha_bypassed` when set. |
-| `auth.login`                  | `user`      | A successful sign-in; `details.captcha_bypassed` when CAPTCHA enforcement was off. Failed sign-ins are rate-limited, not audited.                     |
-| `auth.logout`                 | `session`   | A session was ended by its owner.                                                                                                                     |
-| `auth.verify_email`           | `user`      | A verification token was redeemed.                                                                                                                    |
-| `auth.verification_resend`    | `user`      | A new verification link was issued and queued. Written only when a link was really sent.                                                              |
-| `auth.password_reset_request` | `user`      | A reset link was issued and queued. Absent for an unknown address, a disabled account or a throttled request.                                         |
-| `auth.password_reset`         | `user`      | A reset link was redeemed: new password set, address marked verified, every session ended.                                                            |
+| Action                        | Target type | Description                                                                                                                                                                                                           |
+| ----------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth.register`               | `user`      | An account was created; the actor is the new account. `details`: `email`, `role`, `first_user`, `verification_required`, `captcha_bypassed` when set.                                                                 |
+| `auth.login`                  | `user`      | A successful password sign-in; `details.captcha_bypassed` when CAPTCHA enforcement was off, `details.break_glass` when the `sso_only` policy admitted a `super_admin`. Failed sign-ins are rate-limited, not audited. |
+| `auth.logout`                 | `session`   | A session was ended by its owner.                                                                                                                                                                                     |
+| `auth.verify_email`           | `user`      | A verification token was redeemed.                                                                                                                                                                                    |
+| `auth.verification_resend`    | `user`      | A new verification link was issued and queued. Written only when a link was really sent.                                                                                                                              |
+| `auth.password_reset_request` | `user`      | A reset link was issued and queued. Absent for an unknown address, a disabled account or a throttled request.                                                                                                         |
+| `auth.password_reset`         | `user`      | A reset link was redeemed: new password set, address marked verified, every session ended.                                                                                                                            |
+
+### Single sign-on
+
+| Action                 | Target type | Description                                                                                                                                                                                                                                                                                                                                                                         |
+| ---------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth.sso_login`       | `user`      | A single sign-on opened a session; committed with the session. `details`: `provider_id`, `subject`, `identity_id`, `email`, `provisioned` or `linked` when this sign-in did that too. Refused sign-ins are logged (provider and reason), not audited.                                                                                                                               |
+| `auth.sso_provision`   | `user`      | Just-in-time provisioning created the account. `details`: `provider_id`, `subject`, `email`, `email_verified`, `role`, `org_id`, `role_mapping`, `org_mapping` (the rules that matched). Never `super_admin`.                                                                                                                                                                       |
+| `auth.sso_link`        | `user`      | An identity-provider subject was linked to an existing account under the verified-address rule. `details`: `provider_id`, `subject`, `identity_id`, `email`, `email_verified_by_provider`, `email_verified_locally`.                                                                                                                                                                |
+| `auth.sso_unlink`      | `user`      | An administrator removed a link (`DELETE /api/users/:id/identities/:identityId`). `details`: `identity_id`, `provider_id`, `subject`.                                                                                                                                                                                                                                               |
+| `auth.sso_claims_sync` | `user`      | A sign-in's claims changed the account's role or organization; the actor is the system. `details`: `provider_id`, `subject`, `from_role`/`to_role` and/or `from_org_id`/`to_org_id`, `role_mapping`, `org_mapping`. Never written for a `super_admin`.                                                                                                                              |
+| `auth.sso_deprovision` | `user`      | A sign-in's claims mapped to no role and `deprovision_on_access_loss` is on: the account was disabled, its sessions ended and its gateway revocation queued, in one transaction; the actor is the system. `details`: `provider_id`, `subject`, `reason`, `role`, `terminated_sessions`, `gateway_teardown: "queued"`. The revocation's outcome is `user.gateway_teardown_complete`. |
 
 ### Users and organizations
 
@@ -1330,12 +1495,12 @@ Revoking a `retiring` credential again completes it.
 
 ### Administration
 
-| Action                  | Target type      | Description                                                                                                                                                                        |
-| ----------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `admin.settings_update` | `settings`       | Portal settings changed. `target_id` is `null`. `details`: `changed_keys` (never values), `smtp_password_source_change` when relevant, `captcha_self_test: "passed"` when one ran. |
-| `admin.template_update` | `email_template` | An email template was overridden. `target_id` is the template key. `details`: `key`, `body_html_sha256`, `body_text_sha256` (hex SHA-256 of the saved bodies).                     |
-| `admin.mass_email`      | `mass_email`     | A mass email was queued. `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `enqueued`.                                                            |
-| `admin.smtp_test`       | `settings`       | A test message was sent through SMTP. `target_id` is `smtp`. `details`: `to_email`, `ok`.                                                                                          |
+| Action                  | Target type      | Description                                                                                                                                                                                                                                                                                                                          |
+| ----------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `admin.settings_update` | `settings`       | Portal settings changed. `target_id` is `null`, or `sso` for `PUT /api/admin/sso`. `details`: `changed_keys` (never values), `smtp_password_source_change` when relevant, `captcha_self_test: "passed"` when one ran; for `sso`, `section`, `providers_added`, `providers_removed` and `client_secrets_changed` (provider ids only). |
+| `admin.template_update` | `email_template` | An email template was overridden. `target_id` is the template key. `details`: `key`, `body_html_sha256`, `body_text_sha256` (hex SHA-256 of the saved bodies).                                                                                                                                                                       |
+| `admin.mass_email`      | `mass_email`     | A mass email was queued. `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `enqueued`.                                                                                                                                                                                                              |
+| `admin.smtp_test`       | `settings`       | A test message was sent through SMTP. `target_id` is `smtp`. `details`: `to_email`, `ok`.                                                                                                                                                                                                                                            |
 
 ### God mode (`super_admin` only)
 
@@ -1412,6 +1577,13 @@ Before going live:
 - [ ] SMTP is configured and a test message delivered; otherwise verification
       and decision mail queues silently.
 - [ ] At least **two** active `super_admin` accounts.
+- [ ] Single sign-on, if used: every provider's issuer is `https://`,
+      `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK` is unset, the role mappings grant
+      `admin` only to the groups you mean, and a provider you trust less has
+      `link_existing_accounts` off or an allowed-domain list.
+- [ ] Before switching to `sso_only`: a `super_admin` has signed in through
+      single sign-on at least once, and you know how to set
+      `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN` if the provider becomes unreachable.
 - [ ] Backups run and a restore has been rehearsed, for both the Nexus database
       and Ferrum Edge.
 - [ ] `GET /api/health` is wired to your monitor, treating `degraded` as

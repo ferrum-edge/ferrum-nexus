@@ -10,7 +10,12 @@ describe('buildout schema baseline', () => {
       const files = loadMigrations(dialect);
       assert.deepEqual(
         files.map((file) => file.id),
-        ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest'],
+        [
+          '001_initial',
+          '002_api_gateway_plugins',
+          '003_messages_thread_latest',
+          '004_user_identities',
+        ],
       );
       const statements = splitSqlStatements(files[0]!.sql);
       assert.ok(statements.length > 0);
@@ -178,6 +183,60 @@ describe('buildout schema baseline', () => {
         false,
         plan.join('\n'),
       );
+    } finally {
+      db.close();
+    }
+  });
+
+  it('adds the identity-provider link table as a replayable forward migration', () => {
+    for (const dialect of ['sqlite', 'pg', 'mysql'] as const) {
+      const forward = loadMigrations(dialect).find((file) => file.id === '004_user_identities');
+      assert.ok(forward, `${dialect} ships 004_user_identities`);
+      // The MySQL runner applies nothing but replayable CREATE TABLEs.
+      const statements = splitSqlStatements(forward.sql);
+      assert.deepEqual(
+        statements.map((statement) => /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement)?.[1]),
+        ['user_identities'],
+      );
+    }
+
+    const db = openSqliteDatabase(':memory:');
+    try {
+      for (const file of loadMigrations('sqlite')) db.exec(file.sql);
+      db.exec(`
+        INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)
+          VALUES ('u', 'user@example.test', 'unused', 'User', 'client', 'now', 'now');
+        INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)
+          VALUES ('v', 'other@example.test', 'unused', 'Other', 'client', 'now', 'now');
+        INSERT INTO user_identities (id, user_id, provider_id, subject, created_at, updated_at)
+          VALUES ('i', 'u', 'corp', 'subject-1', 'now', 'now');
+      `);
+      // One account per subject at a provider…
+      assert.throws(
+        () =>
+          db.exec(`
+        INSERT INTO user_identities (id, user_id, provider_id, subject, created_at, updated_at)
+          VALUES ('j', 'v', 'corp', 'subject-1', 'now', 'now')
+      `),
+        /UNIQUE constraint failed/,
+      );
+      // …and one identity per account at a provider.
+      assert.throws(
+        () =>
+          db.exec(`
+        INSERT INTO user_identities (id, user_id, provider_id, subject, created_at, updated_at)
+          VALUES ('k', 'u', 'corp', 'subject-2', 'now', 'now')
+      `),
+        /UNIQUE constraint failed/,
+      );
+      // Subjects are compared case-sensitively, as OpenID Connect requires.
+      db.exec(`
+        INSERT INTO user_identities (id, user_id, provider_id, subject, created_at, updated_at)
+          VALUES ('l', 'v', 'corp', 'SUBJECT-1', 'now', 'now')
+      `);
+      // Deleting the account takes its links with it.
+      db.exec("DELETE FROM users WHERE id = 'u'");
+      assert.deepEqual(db.prepare('SELECT id FROM user_identities').all(), [{ id: 'l' }]);
     } finally {
       db.close();
     }

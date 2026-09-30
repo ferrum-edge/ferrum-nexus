@@ -67,6 +67,7 @@ import {
 import { isoInSeconds, nowIso } from '../lib/ids.js';
 import { SUPER_ADMIN_LOCK_KEY, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import { rewordLeaseLost } from '../lib/lease-fence.js';
+import { readLoginPolicy } from '../sso/settings.js';
 import type { CaptchaService } from './captcha.js';
 import { createPasswordChangeSerializer } from './password-change.js';
 
@@ -93,6 +94,14 @@ export const SUPER_ADMIN_CLAIM_KEY = 'bootstrap.super_admin_claimed';
  */
 export const SIGN_IN_LEASE_LOST_MESSAGE =
   'Signing in took too long and no session was created — please sign in again';
+
+/** `FORBIDDEN` text for a password sign-in under the `sso_only` login policy. */
+export const PASSWORD_LOGIN_DISABLED_MESSAGE =
+  'Password sign-in is disabled on this portal — sign in with single sign-on';
+
+/** `FORBIDDEN` text for a self-service registration under the `sso_only` login policy. */
+export const REGISTRATION_SSO_ONLY_MESSAGE =
+  'Self-service registration is disabled on this portal — sign in with single sign-on';
 
 /** Stored registration policy, with the defaults applied when unset. */
 export interface RegistrationPolicy {
@@ -641,6 +650,12 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         // leaves no trace beyond the audit-free 403 it gets back.
         requireBootstrapToken(input.bootstrap_token);
       } else {
+        // Under `sso_only` accounts come from the identity provider. The
+        // founder's registration above is the exception on purpose: it is the
+        // only way a portal gets its first super admin, whatever the policy.
+        if ((await readLoginPolicy(store)) === 'sso_only') {
+          throw forbidden(REGISTRATION_SSO_ONLY_MESSAGE);
+        }
         if (!policy.open_registration) {
           throw forbidden('Self-service registration is currently closed');
         }
@@ -704,6 +719,14 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 
     async login(input, context): Promise<LoginResult> {
       const email = input.email.trim().toLowerCase();
+      // Under `sso_only` a password opens nothing, unless the operator turned
+      // on the break-glass switch — and then only a super admin's. Refused
+      // before any password work, so the refusal says nothing about the
+      // address.
+      const ssoOnly = (await readLoginPolicy(store)) === 'sso_only';
+      if (ssoOnly && !config.sso.breakGlassLocalLogin) {
+        throw forbidden(PASSWORD_LOGIN_DISABLED_MESSAGE);
+      }
       const captchaOutcome = await captcha.verify(input.captcha_token, context.ip);
 
       const record = await store.users.findByEmail(email);
@@ -715,6 +738,11 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       );
 
       if (!record || !passwordOk) {
+        throw unauthorized('Email address or password is incorrect');
+      }
+      // Break-glass admits super admins only, and anyone else gets the answer
+      // a wrong password gets: the switch must not become a role oracle.
+      if (ssoOnly && record.role !== 'super_admin') {
         throw unauthorized('Email address or password is incorrect');
       }
       if (record.status !== 'active') {
@@ -749,6 +777,9 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
             if (!current || current.password_hash !== record.password_hash) {
               throw unauthorized('Email address or password is incorrect');
             }
+            if (ssoOnly && current.role !== 'super_admin') {
+              throw unauthorized('Email address or password is incorrect');
+            }
             if (current.status !== 'active') throw userDisabled();
             await tx.users.touchLastLogin(record.id, at);
             return issueSession(current, context, tx);
@@ -763,7 +794,13 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         // `captcha_bypassed` only ever appears while the operator's break-glass
         // switch is on, which is the one state where a sign-in that looks
         // CAPTCHA-protected was not.
-        { email, ...(captchaOutcome === 'bypassed' ? { captcha_bypassed: true } : {}) },
+        {
+          email,
+          ...(captchaOutcome === 'bypassed' ? { captcha_bypassed: true } : {}),
+          // A password sign-in the `sso_only` policy let through: the record
+          // that the break-glass switch was used, and by whom.
+          ...(ssoOnly ? { break_glass: true } : {}),
+        },
         context.ip,
       );
 

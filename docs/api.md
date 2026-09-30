@@ -51,6 +51,8 @@ Exempt, because they run before a session exists: `POST /api/auth/login`,
 `/register`, `/verify-email`, `/resend-verification`, `/forgot-password`,
 `/reset-password` and `GET /api/auth/captcha`. **`POST /api/auth/logout` is not
 exempt.**
+The single sign-on routes are `GET`s; the sealed `state` is what binds a
+callback to the browser that started it.
 
 ### Auth requirement markers
 
@@ -88,21 +90,21 @@ Counters are per process, so N instances allow N × the limit; enforce
 aggregate limits at the proxy. Client IPs come from Fastify's configured proxy
 trust, not from an untrusted forwarded header.
 
-| Scope                                                       | Limit per minute | Keyed by |
-| ----------------------------------------------------------- | ---------------- | -------- |
-| `/api/health*`                                              | 120              | IP       |
-| `/api/branding`                                             | 120              | IP       |
-| Every `POST /api/auth/*` route                              | 20, shared       | IP       |
-| `GET /api/auth/me`, `GET /api/auth/captcha`                 | 120, shared      | IP       |
-| `PATCH /api/users/me`                                       | 10               | account  |
-| `POST /api/threads`                                         | 10               | account  |
-| `POST /api/threads/:id/messages`                            | 30               | account  |
-| `GET /api/catalog/:slug/spec`                               | 60               | account  |
-| `/api/apis` mutations and the two spec diffs, per route     | 30               | account  |
-| `GET /api/apis/:id/usage`                                   | 30               | IP       |
-| `POST /api/access-requests`                                 | 10               | account  |
-| `POST /api/access-requests/:id/cancel`                      | 30               | account  |
-| `POST`, `PATCH`, `DELETE` on `/api/applications`, per route | 30               | account  |
+| Scope                                                              | Limit per minute | Keyed by |
+| ------------------------------------------------------------------ | ---------------- | -------- |
+| `/api/health*`                                                     | 120              | IP       |
+| `/api/branding`                                                    | 120              | IP       |
+| Every `POST /api/auth/*` route, and the SSO `start` and `callback` | 20, shared       | IP       |
+| `GET /api/auth/me`, `GET /api/auth/captcha`, `GET /api/auth/sso`   | 120, shared      | IP       |
+| `PATCH /api/users/me`                                              | 10               | account  |
+| `POST /api/threads`                                                | 10               | account  |
+| `POST /api/threads/:id/messages`                                   | 30               | account  |
+| `GET /api/catalog/:slug/spec`                                      | 60               | account  |
+| `/api/apis` mutations and the two spec diffs, per route            | 30               | account  |
+| `GET /api/apis/:id/usage`                                          | 30               | IP       |
+| `POST /api/access-requests`                                        | 10               | account  |
+| `POST /api/access-requests/:id/cancel`                             | 30               | account  |
+| `POST`, `PATCH`, `DELETE` on `/api/applications`, per route        | 30               | account  |
 
 "Account" falls back to the IP for a request without a session. Every other
 route is unlimited.
@@ -365,8 +367,9 @@ _public_ → `201`
 - When verification is not required, the response also sets the session
   cookies and the user is signed in.
 - Errors: `409 CONFLICT` (email taken), `403 FORBIDDEN` (missing or wrong
-  `bootstrap_token`, registration closed, or `role` not in `allowed_roles`),
-  `400 CAPTCHA_FAILED`.
+  `bootstrap_token`, registration closed, `role` not in `allowed_roles`, or
+  the `sso_only` login policy — which never refuses the founding
+  registration), `400 CAPTCHA_FAILED`.
 - Unlike the recovery routes, this one reveals that an address is taken. The
   `409` is returned only after the password has been hashed, so it costs as
   long as a real registration; see
@@ -392,7 +395,9 @@ client need not parse cookies.
 
 Errors: `401 UNAUTHORIZED` (wrong email _or_ password — indistinguishable by
 design), `403 USER_DISABLED`, `403 EMAIL_NOT_VERIFIED`, `400 CAPTCHA_FAILED`,
-`429 RATE_LIMITED`.
+`429 RATE_LIMITED`, `403 FORBIDDEN` under the `sso_only` login policy. With
+`NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN=true` a `super_admin` may still sign in
+there, and any other account gets the `401` a wrong password gets.
 
 ```bash
 curl -sS -c cookies.txt -X POST http://127.0.0.1:8787/api/auth/login \
@@ -489,6 +494,57 @@ render", not "what will login accept": a half-configured portal can report
 `enabled: false` and still refuse sign-in with `400 CAPTCHA_FAILED`, because
 verification fails closed (see
 [`PUT /api/admin/settings`](#put-apiadminsettings)).
+
+### `GET /api/auth/sso`
+
+_public_ — what the sign-in and registration pages offer. Shares the 120/min
+bootstrap budget with `/me` and `/captcha`.
+
+```json
+{
+  "policy": "local_and_sso",
+  "password_login": "enabled",
+  "registration_enabled": true,
+  "providers": [{ "id": "corp", "display_name": "Corporate SSO" }]
+}
+```
+
+- `policy`: `local_only` \| `sso_only` \| `local_and_sso`.
+- `password_login`: `enabled`, `disabled` (`sso_only`), or `break_glass`
+  (`sso_only` with `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN=true`: only a
+  `super_admin` can use a password).
+- `registration_enabled` is `false` under `sso_only`; the founding registration
+  with the bootstrap token is accepted anyway.
+- `providers` lists the enabled providers, empty under `local_only`. Nothing
+  else about a provider is public.
+
+### `GET /api/auth/sso/:provider/start`
+
+_public_, a browser navigation — begins an OpenID Connect sign-in. Optional
+query: `return_to`, a same-origin portal path to land on afterwards (anything
+else, including an absolute URL, `//host`, an `/api` path or `/login`, becomes
+`/`).
+
+→ `302` to the provider's authorization endpoint (authorization code, PKCE
+`S256`, `state`, `nonce`), setting the sealed, `HttpOnly` `nexus_sso` cookie
+(`Path=/api/auth/sso`, 10 minutes). When sign-in cannot start → `302` to
+`/login?sso_error=<reason>`.
+
+### `GET /api/auth/sso/:provider/callback`
+
+_public_, a browser navigation — where the provider returns the browser
+(`code`, `state`, or `error`). Always clears `nexus_sso`.
+
+→ `302` back into the SPA (the `return_to` path) with the session cookies set,
+exactly as `POST /api/auth/login` sets them; or `302` to
+`/login?sso_error=<reason>` with nothing set. `reason` is one of
+`sso_disabled`, `provider_unavailable`, `invalid_state`, `idp_error`,
+`token_invalid`, `email_required`, `email_domain_not_allowed`,
+`email_not_verified`, `account_exists`, `access_denied`, `account_disabled`,
+`signup_disabled`, `server_error` — see
+[`operations.md` §14](operations.md#when-a-sign-in-fails). Provider error text
+is never echoed. Audited as `auth.sso_login`, plus `auth.sso_provision`,
+`auth.sso_link` or `auth.sso_claims_sync` when the sign-in did that too.
 
 ---
 
@@ -639,6 +695,39 @@ for the worker's backoff. Idempotent; audited as `user.gateway_teardown_retry`.
 → `{ "gateway_teardown": "ok" | "no_consumer" | "pending", "job": GatewayTeardownState | null }`
 
 Errors: `409 CONFLICT` (account is not `disabled`), `404 NOT_FOUND`.
+
+### `GET /api/users/:id/identities`
+
+_admin_ — the account's single sign-on links.
+
+```json
+{
+  "items": [
+    {
+      "id": "…",
+      "user_id": "…",
+      "provider_id": "corp",
+      "subject": "248289761001",
+      "email": "ada@example.com",
+      "last_login_at": "2026-09-30T08:12:44.117Z",
+      "created_at": "2026-09-01T10:00:00.000Z",
+      "updated_at": "2026-09-30T08:12:44.117Z"
+    }
+  ]
+}
+```
+
+Errors: `404 NOT_FOUND`.
+
+### `DELETE /api/users/:id/identities/:identityId`
+
+_admin_ (a **_super_admin_** for an `admin` or `super_admin` account), **CSRF
+required** — removes one link; audited as `auth.sso_unlink`. The account keeps
+everything else. Its next sign-in through that provider is matched afresh:
+linked again only under the verified-address rule, or refused. Returns
+`{ "ok": true }`.
+
+Errors: `403 FORBIDDEN`, `404 NOT_FOUND`.
 
 ---
 
@@ -1037,6 +1126,70 @@ curl -sS -b cookies.txt -X PUT http://127.0.0.1:8787/api/admin/settings \
         "site_key":"0x4AAA…","secret_key":"0x4AAA…secret",
         "captcha_token":"<token solved with those values>"}}'
 ```
+
+### `GET /api/admin/sso`
+
+_admin_ — single sign-on settings. Client secrets are never returned.
+
+```json
+{
+  "policy": "local_and_sso",
+  "allowed_email_domains": ["example.com"],
+  "deprovision_on_access_loss": false,
+  "break_glass_local_login": false,
+  "providers": [
+    {
+      "id": "corp",
+      "display_name": "Corporate SSO",
+      "issuer": "https://idp.example.com/realms/corp",
+      "client_id": "nexus",
+      "scopes": ["openid", "email", "profile", "groups"],
+      "enabled": true,
+      "jit_provisioning": true,
+      "link_existing_accounts": true,
+      "require_verified_email": true,
+      "sync_roles": true,
+      "default_role": "client",
+      "role_mappings": [{ "claim": "groups", "value": "nexus-admins", "role": "admin" }],
+      "org_mappings": [],
+      "source": "environment",
+      "client_secret_set": true,
+      "redirect_uri": "https://portal.example.com/api/auth/sso/corp/callback"
+    }
+  ]
+}
+```
+
+- `source`: `environment` (`NEXUS_OIDC_PROVIDERS`, read-only here) or
+  `settings`.
+- `break_glass_local_login` mirrors `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN`; it
+  cannot be set through the API.
+- The fields are described in
+  [`operations.md` §14](operations.md#configure-the-provider-in-nexus).
+
+### `PUT /api/admin/sso`
+
+**_super_admin_** — the role mappings decide who becomes an `admin`. Partial
+update of `policy`, `allowed_email_domains`, `deprovision_on_access_loss` and
+`providers`; omitted fields keep their values. Returns the same shape as `GET`.
+
+- `providers`, when present, **replaces** the list of settings providers; a
+  provider left out is removed together with its secret. Each entry carries
+  every field shown above except `source`, `client_secret_set` and
+  `redirect_uri`, plus an optional write-only `client_secret`: omit it to keep
+  the stored one, `null` to clear it. Environment providers are never part of
+  the list.
+- `role` in a mapping is `client`, `provider` or `admin`; `super_admin` is
+  refused. `default_role` may be `null` (no match → no access).
+- Allowed domains are normalized (`@Example.COM` → `example.com`).
+- Audited as `admin.settings_update` with `target_id: "sso"`, recording key
+  names and provider ids, never a secret.
+
+Errors: `400 VALIDATION_FAILED` (unknown field, an id declared in
+`NEXUS_OIDC_PROVIDERS`, a duplicate id, a non-HTTPS issuer, more than 10
+providers, an invalid domain, or `sso_only` without an enabled provider),
+`403 FORBIDDEN` (not a `super_admin`), `404 NOT_FOUND` (an `org_id` that does
+not exist).
 
 ### `POST /api/admin/settings/smtp-test`
 

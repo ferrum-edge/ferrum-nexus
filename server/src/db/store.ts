@@ -173,6 +173,29 @@ export interface UserRecord extends User {
 /** An `organizations` row. */
 export type OrganizationRecord = Organization;
 
+/**
+ * A `user_identities` row: one account linked to one subject (`sub`) at one
+ * OpenID Connect provider.
+ *
+ * `(provider_id, subject)` is unique — a subject belongs to one account — and
+ * so is `(user_id, provider_id)`: an account holds at most one identity per
+ * provider. A returning sign-in is matched on the pair, never on the email
+ * address, which the provider may change and which is only a hint here.
+ */
+export interface UserIdentityRecord {
+  id: Uuid;
+  user_id: Uuid;
+  /** The provider's configured id (`SsoProviderSettings.id`). */
+  provider_id: string;
+  /** The provider's `sub` claim, compared case-sensitively. */
+  subject: string;
+  /** The email address the provider last asserted. */
+  email: string | null;
+  last_login_at: IsoTimestamp | null;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
 /** A `sessions` row. The plaintext token exists only in the browser cookie. */
 export interface SessionRecord {
   id: Uuid;
@@ -742,6 +765,23 @@ export interface OrganizationRepo {
   update(id: Uuid, patch: UpdateInput<OrganizationRecord>): Promise<OrganizationRecord | null>;
   list(options?: ListOptions & { q?: string }): Promise<Paginated<OrganizationRecord>>;
   /** Members keep their `org_id` unless the caller clears it first. */
+  delete(id: Uuid): Promise<boolean>;
+}
+
+/** Links between portal accounts and identity-provider subjects. */
+export interface UserIdentityRepo {
+  /**
+   * Insert a link. A second link for the same `(provider_id, subject)`, or a
+   * second identity of one account at the same provider, raises `CONFLICT`.
+   */
+  create(input: CreateInput<UserIdentityRecord>): Promise<UserIdentityRecord>;
+  findById(id: Uuid): Promise<UserIdentityRecord | null>;
+  /** The account a returning sign-in belongs to. */
+  findBySubject(providerId: string, subject: string): Promise<UserIdentityRecord | null>;
+  /** Every identity of one account, oldest first. */
+  listByUser(userId: Uuid): Promise<UserIdentityRecord[]>;
+  /** Record a sign-in through the link. Returns `false` when the link is gone. */
+  touchLogin(id: Uuid, email: string | null, at: IsoTimestamp): Promise<boolean>;
   delete(id: Uuid): Promise<boolean>;
 }
 
@@ -1701,6 +1741,7 @@ export interface NexusStore {
   transaction<T>(fn: (tx: NexusStore) => Promise<T>, options?: TransactionOptions): Promise<T>;
 
   readonly users: UserRepo;
+  readonly userIdentities: UserIdentityRepo;
   readonly organizations: OrganizationRepo;
   readonly sessions: SessionRepo;
   readonly applications: ApplicationRepo;

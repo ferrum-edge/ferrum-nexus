@@ -3435,6 +3435,92 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal((await store.emailOutbox.findById(mine?.id ?? ''))?.status, 'pending');
     });
 
+    /* ── identity-provider links ──────────────────────────────────────── */
+
+    it('userIdentities: one account per subject, one identity per provider', async () => {
+      const owner = await makeUser();
+      const other = await makeUser();
+      const provider = `corp-${newId().slice(0, 8)}`;
+      const subject = `subject-${newId()}`;
+
+      const linked = await store.userIdentities.create({
+        user_id: owner.id,
+        provider_id: provider,
+        subject,
+        email: owner.email,
+      });
+      assert.equal(linked.user_id, owner.id);
+      assert.equal(linked.provider_id, provider);
+      assert.equal(linked.subject, subject);
+      assert.equal(linked.email, owner.email);
+      assert.equal(linked.last_login_at, null);
+      assert.deepEqual(await store.userIdentities.findById(linked.id), linked);
+      assert.deepEqual(await store.userIdentities.findBySubject(provider, subject), linked);
+      // Subjects are case-sensitive, and scoped to their provider.
+      assert.equal(await store.userIdentities.findBySubject(provider, subject.toUpperCase()), null);
+      assert.equal(await store.userIdentities.findBySubject(`${provider}-x`, subject), null);
+
+      // The subject cannot be claimed by a second account…
+      await assert.rejects(
+        store.userIdentities.create({ user_id: other.id, provider_id: provider, subject }),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+      // …and the account cannot hold a second identity at the same provider.
+      await assert.rejects(
+        store.userIdentities.create({
+          user_id: owner.id,
+          provider_id: provider,
+          subject: `${subject}-second`,
+        }),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+
+      const elsewhere = await store.userIdentities.create({
+        user_id: owner.id,
+        provider_id: `${provider}-b`,
+        subject,
+      });
+      assert.equal(elsewhere.email, null);
+      assert.deepEqual(
+        (await store.userIdentities.listByUser(owner.id)).map((row) => row.id).sort(),
+        [linked.id, elsewhere.id].sort(),
+      );
+      assert.deepEqual(await store.userIdentities.listByUser(other.id), []);
+
+      const at = nowIso();
+      assert.equal(await store.userIdentities.touchLogin(linked.id, 'new@example.test', at), true);
+      const touched = await store.userIdentities.findById(linked.id);
+      assert.equal(touched?.email, 'new@example.test');
+      assert.equal(touched?.last_login_at, at);
+      assert.equal(await store.userIdentities.touchLogin(newId(), null, at), false);
+
+      // A link written in a transaction that rolls back is not there afterwards.
+      const rolledBack = `subject-${newId()}`;
+      await assert.rejects(
+        store.transaction(async (tx) => {
+          await tx.userIdentities.create({
+            user_id: other.id,
+            provider_id: provider,
+            subject: rolledBack,
+          });
+          throw new Error('roll back');
+        }),
+        /roll back/,
+      );
+      assert.equal(await store.userIdentities.findBySubject(provider, rolledBack), null);
+
+      assert.equal(await store.userIdentities.delete(linked.id), true);
+      assert.equal(await store.userIdentities.delete(linked.id), false);
+      assert.equal(await store.userIdentities.findBySubject(provider, subject), null);
+      // With the link gone the subject can be linked again.
+      const relinked = await store.userIdentities.create({
+        user_id: other.id,
+        provider_id: provider,
+        subject,
+      });
+      assert.equal(relinked.user_id, other.id);
+    });
+
     /* ── gateway identities ───────────────────────────────────────────── */
 
     it('gatewayIdentities: one registration per name, moved by a later claim', async () => {

@@ -6,6 +6,55 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **OpenID Connect single sign-on** (part of #445). Users sign in with any
+  standards-compliant provider — Keycloak, Dex, Entra ID, Okta, Auth0 — through
+  the authorization-code flow with PKCE (`S256`), `state` and `nonce`. ID tokens
+  are verified against the provider's JWKS with an explicit `RS256`/`ES256`
+  allow-list, and `iss`, `aud`/`azp`, `exp`, `nbf`, `iat`, `nonce` and
+  `at_hash` are checked (60 s of clock leeway). Discovery and the key set are
+  fetched over HTTPS only and cached for an hour; a plain-HTTP issuer is
+  accepted only on a loopback host with `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`.
+  - **Providers** come from `NEXUS_OIDC_PROVIDERS` (read-only in the UI; a
+    secret may come from `NEXUS_OIDC_CLIENT_SECRET_<ID>`) or from **Admin →
+    Settings → Single sign-on** (`GET`/`PUT /api/admin/sso`, `super_admin` to
+    edit), where the client secret is write-only and stored AES-256-GCM
+    encrypted like the SMTP password. The sign-in page shows one button per
+    enabled provider (`GET /api/auth/sso`).
+  - **Accounts** are provisioned on first sign-in and matched afterwards by the
+    provider's `sub`, never by address. An existing account is linked only when
+    the provider asserts `email_verified: true` and the portal has proof the
+    holder controls the address — never on an unverified provider address, and
+    never to an account registered while email verification was not required,
+    which would allow account pre-hijacking. Administrators list and remove
+    links at `/api/users/:id/identities`.
+  - **Groups and claims map to roles and organizations.** Mappings can grant
+    `client`, `provider` or `admin` — never `super_admin`, and an account that
+    is one is never changed by claims. Roles and organizations are re-applied
+    on every sign-in and audited as `auth.sso_claims_sync`.
+  - **Login policy per deployment**: `local_and_sso` (default), `local_only` or
+    `sso_only`, which refuses password sign-in and self-registration but never
+    the founding registration with the bootstrap token.
+    `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN=true` keeps password sign-in open to
+    `super_admin` accounts under `sso_only`. An optional allowed-email-domain
+    list restricts every single sign-on.
+  - **Deprovisioning** (opt-in): a sign-in whose claims map to no role
+    disables the account and queues the same durable gateway revocation an
+    administrator's disable does, stripping `nexus-user-<id>` and every
+    `nexus-app-<id>` of their ACL groups and credentials.
+  - New audit events `auth.sso_login`, `auth.sso_provision`, `auth.sso_link`,
+    `auth.sso_unlink`, `auth.sso_claims_sync` and `auth.sso_deprovision`, each
+    committed in the transaction that makes its change; `auth.login` records
+    `break_glass: true`. No token, code or secret is written to the audit log
+    or the server log.
+  - Forward migration `004_user_identities` on all four backends adds the
+    `user_identities` table (unique on provider and subject, and on account and
+    provider). It only adds a table; upgraded databases keep every row.
+  - Setup: [`docs/operations.md` §14](docs/operations.md#14-single-sign-on-openid-connect);
+    threat model:
+    [`docs/security.md`](docs/security.md#single-sign-on-openid-connect).
+
 ### Changed
 
 - **OpenAPI render cost is counted the way the catalog viewer renders**

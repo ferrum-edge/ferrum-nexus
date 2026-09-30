@@ -59,6 +59,41 @@ export const AuditAction = {
   /** A reset link was redeemed: new password set, every session terminated. */
   AUTH_PASSWORD_RESET: 'auth.password_reset',
 
+  /* single sign-on (OpenID Connect) */
+  /**
+   * A single sign-on opened a session. Committed with the session, the
+   * account's `last_login_at` and the link's own sign-in stamp. `details`
+   * names the provider and subject, never a token or a claim value beyond
+   * the email address.
+   */
+  AUTH_SSO_LOGIN: 'auth.sso_login',
+  /**
+   * A first single sign-on created the account (just-in-time provisioning),
+   * with the role and organization its claims mapped to. Never `super_admin`.
+   */
+  AUTH_SSO_PROVISION: 'auth.sso_provision',
+  /**
+   * An identity-provider subject was linked to an existing account: the
+   * provider asserted `email_verified: true` and the account's own address was
+   * verified too.
+   */
+  AUTH_SSO_LINK: 'auth.sso_link',
+  /** An administrator removed an identity-provider link from an account. */
+  AUTH_SSO_UNLINK: 'auth.sso_unlink',
+  /**
+   * A sign-in's claims changed the account's role or organization. `details`
+   * carries `from_role`/`to_role` and `from_org_id`/`to_org_id` and the
+   * matched mapping; a `super_admin` is never changed this way.
+   */
+  AUTH_SSO_CLAIMS_SYNC: 'auth.sso_claims_sync',
+  /**
+   * A sign-in's claims no longer mapped to any role and the deployment
+   * disables such accounts: the account was disabled, its sessions ended and
+   * its gateway revocation queued, exactly as an administrator's disable
+   * does. The revocation's outcome is `user.gateway_teardown_complete`.
+   */
+  AUTH_SSO_DEPROVISION: 'auth.sso_deprovision',
+
   /* users & organizations */
   USER_UPDATE: 'user.update',
   USER_ROLE_CHANGE: 'user.role_change',
@@ -439,6 +474,12 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.AUTH_VERIFICATION_RESEND]: TRANSACTIONAL,
   [AuditAction.AUTH_PASSWORD_RESET_REQUEST]: TRANSACTIONAL,
   [AuditAction.AUTH_PASSWORD_RESET]: TRANSACTIONAL,
+  [AuditAction.AUTH_SSO_LOGIN]: TRANSACTIONAL,
+  [AuditAction.AUTH_SSO_PROVISION]: TRANSACTIONAL,
+  [AuditAction.AUTH_SSO_LINK]: TRANSACTIONAL,
+  [AuditAction.AUTH_SSO_UNLINK]: TRANSACTIONAL,
+  [AuditAction.AUTH_SSO_CLAIMS_SYNC]: TRANSACTIONAL,
+  [AuditAction.AUTH_SSO_DEPROVISION]: TRANSACTIONAL,
   [AuditAction.USER_UPDATE]: TRANSACTIONAL,
   [AuditAction.USER_ROLE_CHANGE]: TRANSACTIONAL,
   [AuditAction.USER_DISABLE]: TRANSACTIONAL,

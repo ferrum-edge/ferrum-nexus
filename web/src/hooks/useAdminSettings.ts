@@ -14,10 +14,13 @@ import type {
   MassEmailResponse,
   SmtpTestRequest,
   SmtpTestResponse,
+  SsoAdminSettingsResponse,
   UpdateEmailTemplateRequest,
   UpdateEmailTemplateResponse,
   UpdateSettingsRequest,
   UpdateSettingsResponse,
+  UpdateSsoSettingsRequest,
+  UpdateSsoSettingsResponse,
 } from '@ferrum-nexus/shared';
 import { adminApi } from '../lib/api';
 import { queryKeys } from './keys';
@@ -43,6 +46,31 @@ export function useUpdateAdminSettings(
       void queryClient.invalidateQueries({ queryKey: queryKeys.adminSettings });
       void queryClient.invalidateQueries({ queryKey: queryKeys.branding });
       void queryClient.invalidateQueries({ queryKey: queryKeys.captcha });
+    },
+  });
+}
+
+/** Single sign-on providers, mappings and the login policy (admin reads, super admin writes). */
+export function useAdminSso(enabled = true): UseQueryResult<SsoAdminSettingsResponse> {
+  return useQuery({
+    queryKey: queryKeys.adminSso,
+    queryFn: () => adminApi.getSso(),
+    enabled,
+  });
+}
+
+/** Persist a partial single sign-on update; `providers`, when sent, replaces the list. */
+export function useUpdateAdminSso(): UseMutationResult<
+  UpdateSsoSettingsResponse,
+  Error,
+  UpdateSsoSettingsRequest
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: UpdateSsoSettingsRequest) => adminApi.updateSso(body),
+    onSuccess: (data) => {
+      queryClient.setQueryData(queryKeys.adminSso, data);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sso });
     },
   });
 }

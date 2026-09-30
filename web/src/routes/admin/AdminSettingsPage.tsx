@@ -44,6 +44,7 @@ import { LoadingPanel } from '../../components/ui/Spinner';
 import { Tabs } from '../../components/ui/Tabs';
 import { FormNotice } from '../../components/auth/AuthShell';
 import { BrandingTab } from './settings/BrandingTab';
+import { SsoTab } from './settings/SsoTab';
 
 /** The provider and site key an in-progress activation self-test belongs to. */
 interface PendingChallenge {
@@ -977,6 +978,7 @@ function SettingsTabs(): ReactElement {
         { value: 'branding', label: 'Branding', content: <BrandingTab settings={settings} /> },
         { value: 'gateway', label: 'Gateway', content: <GatewayTab settings={settings} /> },
         { value: 'captcha', label: 'CAPTCHA', content: <CaptchaTab settings={settings} /> },
+        { value: 'sso', label: 'Single sign-on', content: <SsoTab /> },
         { value: 'email', label: 'Email', content: <EmailTab settings={settings} /> },
         { value: 'templates', label: 'Templates', content: <TemplatesTab /> },
       ]}
@@ -984,7 +986,7 @@ function SettingsTabs(): ReactElement {
   );
 }
 
-/** Portal configuration: branding, CAPTCHA, email and templates. */
+/** Portal configuration: branding, gateway, CAPTCHA, single sign-on, email and templates. */
 export function AdminSettingsPage(): ReactElement {
   return (
     <RoleGuard minRole="admin">

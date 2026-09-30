@@ -168,6 +168,8 @@ import type {
   TransactionOptions,
   UpdateInput,
   UserFilter,
+  UserIdentityRecord,
+  UserIdentityRepo,
   UserRecord,
   UserRepo,
   VerificationTokenPurpose,
@@ -193,6 +195,7 @@ import {
 const COLLECTIONS = {
   organizations: 'organizations',
   users: 'users',
+  userIdentities: 'user_identities',
   sessions: 'sessions',
   applications: 'applications',
   apis: 'apis',
@@ -438,6 +441,19 @@ function mapOrganization(row: Row): OrganizationRecord {
     id: str(row._id),
     name: str(row.name),
     description: strOrNull(row.description),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
+function mapUserIdentity(row: Row): UserIdentityRecord {
+  return {
+    id: str(row._id),
+    user_id: str(row.user_id),
+    provider_id: str(row.provider_id),
+    subject: str(row.subject),
+    email: strOrNull(row.email),
+    last_login_at: strOrNull(row.last_login_at),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -1258,6 +1274,28 @@ export const MESSAGE_THREAD_LATEST_INDEXES: readonly IndexDefinition[] = [
   },
 ];
 
+/**
+ * `004_user_identities`: the two keys of an identity-provider link, which the
+ * SQL dialects declare as unique constraints. `(provider_id, subject)` decides
+ * whose account a returning sign-in opens; `(user_id, provider_id)` keeps an
+ * account to one identity per provider and serves the per-account listing.
+ * The collection needs no creation step; the first insert makes it.
+ */
+export const USER_IDENTITY_INDEXES: readonly IndexDefinition[] = [
+  {
+    collection: 'user_identities',
+    name: 'ux_user_identities_subject',
+    key: { provider_id: 1, subject: 1 },
+    unique: true,
+  },
+  {
+    collection: 'user_identities',
+    name: 'ux_user_identities_user_provider',
+    key: { user_id: 1, provider_id: 1 },
+    unique: true,
+  },
+];
+
 /** The baseline messages index {@link MESSAGE_THREAD_LATEST_INDEXES} supersedes. */
 const SUPERSEDED_MESSAGES_THREAD_INDEX = 'ix_messages_thread';
 
@@ -1323,6 +1361,11 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
     id: '003_messages_thread_latest',
     indexes: MESSAGE_THREAD_LATEST_INDEXES,
     apply: applyMessageThreadLatest,
+  },
+  {
+    id: '004_user_identities',
+    indexes: USER_IDENTITY_INDEXES,
+    apply: (db: Db): Promise<void> => createIndexes(db, USER_IDENTITY_INDEXES),
   },
 ];
 
@@ -1752,6 +1795,68 @@ class MongoStore implements NexusStore {
         .toArray();
       return docs.map((doc) => mapUser(doc as Row));
     },
+  };
+
+  /* ── userIdentities ───────────────────────────────────────────────────── */
+
+  readonly userIdentities: UserIdentityRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapConflict('That identity is already linked to an account', () =>
+        this.col(COLLECTIONS.userIdentities).insertOne(
+          {
+            _id: meta.id,
+            user_id: input.user_id,
+            provider_id: input.provider_id,
+            subject: input.subject,
+            email: input.email ?? null,
+            last_login_at: input.last_login_at ?? null,
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
+          } as NexusDoc,
+          this.opts,
+        ),
+      );
+      const created = await this.userIdentities.findById(meta.id);
+      if (!created) throw new Error('userIdentities.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = asRow(await this.col(COLLECTIONS.userIdentities).findOne({ _id: id }, this.opts));
+      return row ? mapUserIdentity(row) : null;
+    },
+
+    findBySubject: async (providerId, subject) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.userIdentities).findOne(
+          { provider_id: providerId, subject } as Filter<NexusDoc>,
+          this.opts,
+        ),
+      );
+      return row ? mapUserIdentity(row) : null;
+    },
+
+    listByUser: async (userId) => {
+      const docs = await this.col(COLLECTIONS.userIdentities)
+        .find({ user_id: userId } as Filter<NexusDoc>, this.opts)
+        .sort({ created_at: 1, _id: 1 })
+        .toArray();
+      return docs.map((doc) => mapUserIdentity(doc as Row));
+    },
+
+    touchLogin: async (id, email, at) => {
+      const result = await this.col(COLLECTIONS.userIdentities).updateOne(
+        { _id: id },
+        { $set: { email, last_login_at: at, updated_at: nowIso() } },
+        this.opts,
+      );
+      return result.matchedCount > 0;
+    },
+
+    delete: async (id) =>
+      (await this.col(COLLECTIONS.userIdentities).deleteOne({ _id: id }, this.opts))
+        .deletedCount > 0,
   };
 
   /* ── organizations ────────────────────────────────────────────────────── */
