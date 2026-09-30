@@ -176,13 +176,14 @@ export async function sealLegacyBearerRows(
   limit: number = LEGACY_SEAL_BATCH,
 ): Promise<{ sealed: number; more: boolean }> {
   let sealed = 0;
+  let budget = limit;
   for (const prefix of BEARER_IDEMPOTENCY_PREFIXES) {
-    const remaining = limit - sealed;
-    if (remaining <= 0) return { sealed, more: true };
+    if (budget <= 0) return { sealed, more: true };
     const page = await store.emailOutbox.list(
       { idempotency_key_prefix: prefix, sealed: false },
-      { limit: remaining },
+      { limit: budget },
     );
+    budget -= page.items.length;
     for (const entry of page.items) {
       const next = sealMailContent(crypto, entry.id, entry.to_email, {
         subject: entry.subject,

@@ -152,6 +152,7 @@ describe('outbox worker', () => {
     let ms = Date.now();
     const worker = createOutboxWorker({
       store: harness.store,
+      crypto: harness.app.nexus.crypto,
       transportFactory: factory,
       now: () => new Date(ms),
     });
@@ -304,6 +305,7 @@ describe('outbox worker', () => {
     });
     const worker = createOutboxWorker({
       store: harness.store,
+      crypto: harness.app.nexus.crypto,
       transportFactory: async () => ({
         async send(mail) {
           if (delivered.length === 0) {
