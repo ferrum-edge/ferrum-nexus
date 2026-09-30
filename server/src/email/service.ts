@@ -36,6 +36,7 @@ import {
 import type { NexusConfig } from '../config/index.js';
 import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
+import { isBearerTemplate, sealedEnqueueInput } from './sealed-outbox.js';
 import {
   isUrlVariable,
   validateRenderedTextLinks,
@@ -370,7 +371,11 @@ export interface EmailService {
     templateKey: EmailTemplateKey,
     rawHtmlVars?: readonly string[],
   ): Promise<(vars?: TemplateVars) => RenderedEmail>;
-  /** Render and queue one message. Never throws for a duplicate key. */
+  /**
+   * Render and queue one message. Never throws for a duplicate key. A message
+   * rendered from a bearer template (verification, password reset) is stored
+   * sealed, so the returned row's content is the envelope, not the text.
+   */
   enqueue(input: EnqueueEmail): Promise<{ entry: EmailOutboxRecord; created: boolean }>;
   /**
    * Send a probe message straight through SMTP, bypassing the outbox, so the
@@ -608,6 +613,17 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
 
     async enqueue(input) {
       const rendered = await render(input.templateKey, input.vars, input.rawHtmlVars);
+      // A single-use link never reaches the table in plaintext: see
+      // `sealed-outbox.ts`. Everything else is stored as rendered.
+      if (isBearerTemplate(input.templateKey)) {
+        return store.emailOutbox.enqueue(
+          sealedEnqueueInput(crypto, {
+            to: input.to,
+            content: rendered,
+            idempotencyKey: input.idempotencyKey ?? null,
+          }),
+        );
+      }
       return store.emailOutbox.enqueue({
         to_email: input.to,
         subject: rendered.subject,
