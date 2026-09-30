@@ -1,3 +1,4 @@
+import { MAX_OPENAPI_SCHEMA_RENDER_DEPTH } from '@ferrum-nexus/shared';
 import type { ReactElement, ReactNode } from 'react';
 import { cn } from '../../lib/cn';
 import { Badge } from '../ui/Badge';
@@ -14,9 +15,6 @@ import {
   UNRESOLVED_REF,
   type SpecNode,
 } from './parse';
-
-/** Hard stop for pathological documents that nest without a `$ref` cycle. */
-const MAX_DEPTH = 12;
 
 /**
  * Hard stop on total rendered nodes for one page of documentation.
@@ -106,7 +104,13 @@ interface RenderArgs {
   seen: readonly string[];
 }
 
-function TypeLine({ schema }: { schema: SpecNode }): ReactElement | null {
+function TypeLine({
+  schema,
+  budget,
+}: {
+  schema: SpecNode;
+  budget: RenderBudget;
+}): ReactElement | null {
   const type = asString(schema.type);
   const format = asString(schema.format);
   const enumValues = asArray(schema.enum);
@@ -119,6 +123,31 @@ function TypeLine({ schema }: { schema: SpecNode }): ReactElement | null {
 
   // Every `$ref` to this schema repeats these strings, so each is cut per occurrence.
   const typeText = displayText(parts.join(' '), MAX_DISPLAYED_NAME_LENGTH);
+  const enumChips: ReactElement[] = [];
+  for (const [index, value] of (enumValues ?? []).slice(0, 12).entries()) {
+    if (!chargeNode(budget)) {
+      enumChips.push(<TruncationNotice key="__truncated" />);
+      break;
+    }
+    const printable =
+      typeof value === 'string'
+        ? value
+        : Array.isArray(value)
+          ? '[…]'
+          : value !== null && typeof value === 'object'
+            ? '{…}'
+            : String(value);
+    const valueText = displayText(printable, MAX_DISPLAYED_NAME_LENGTH);
+    enumChips.push(
+      <code
+        key={index}
+        className="rounded-xs bg-neutral-soft px-1 font-mono text-[0.7rem] text-fg-muted"
+        title={valueText?.title}
+      >
+        {valueText?.text ?? ''}
+      </code>,
+    );
+  }
   return (
     <span className="flex flex-wrap items-center gap-1.5">
       {typeText ? (
@@ -128,21 +157,7 @@ function TypeLine({ schema }: { schema: SpecNode }): ReactElement | null {
       ) : null}
       {enumValues ? (
         <span className="flex flex-wrap gap-1">
-          {enumValues.slice(0, 12).map((value, index) => {
-            const valueText = displayText(
-              typeof value === 'string' ? value : JSON.stringify(value),
-              MAX_DISPLAYED_NAME_LENGTH,
-            );
-            return (
-              <code
-                key={index}
-                className="rounded-xs bg-neutral-soft px-1 font-mono text-[0.7rem] text-fg-muted"
-                title={valueText?.title}
-              >
-                {valueText?.text ?? ''}
-              </code>
-            );
-          })}
+          {enumChips}
           {enumValues.length > 12 ? (
             <span className="text-xs text-fg-subtle">+{enumValues.length - 12} more</span>
           ) : null}
@@ -150,6 +165,16 @@ function TypeLine({ schema }: { schema: SpecNode }): ReactElement | null {
       ) : null}
     </span>
   );
+}
+
+const requiredNameCache = new WeakMap<unknown[], Set<string>>();
+
+function requiredNames(values: unknown[]): Set<string> {
+  const cached = requiredNameCache.get(values);
+  if (cached) return cached;
+  const names = new Set(values.filter((value): value is string => typeof value === 'string'));
+  requiredNameCache.set(values, names);
+  return names;
 }
 
 /**
@@ -210,7 +235,7 @@ function renderNode(
         </SchemaRow>
       );
     }
-    if (depth > MAX_DEPTH) {
+    if (depth > MAX_OPENAPI_SCHEMA_RENDER_DEPTH) {
       return (
         <SchemaRow name={name} required={required} depth={depth}>
           <span className="text-xs text-fg-subtle">…nested further</span>
@@ -237,7 +262,7 @@ function renderNode(
     );
   }
 
-  if (depth > MAX_DEPTH) {
+  if (depth > MAX_OPENAPI_SCHEMA_RENDER_DEPTH) {
     return (
       <SchemaRow name={name} required={required} depth={depth}>
         <span className="text-xs text-fg-subtle">…nested further</span>
@@ -249,12 +274,7 @@ function renderNode(
   // charges each occurrence as one node whatever its length.
   const description = displayText(asString(node.description), MAX_DISPLAYED_DESCRIPTION_LENGTH);
   const properties = asRecord(node.properties);
-  const requiredNames = new Set<string>();
-  const requiredEntries = asArray(node.required) ?? [];
-  for (let index = 0; index < requiredEntries.length && index < budget.remaining; index += 1) {
-    const entry = asString(requiredEntries[index]);
-    if (entry !== null) requiredNames.add(entry);
-  }
+  const required = requiredNames(asArray(node.required) ?? []);
   const items = node.items;
   const composition =
     (asArray(node.oneOf) && { key: 'oneOf', entries: asArray(node.oneOf) }) ??
@@ -293,13 +313,13 @@ function renderNode(
       break;
     }
     propertyRows.push(
-      <div key={propertyName}>
+      <div key={`p:${propertyName}`}>
         {renderNode(
           {
             schema: properties[propertyName],
             doc,
             name: propertyName,
-            required: requiredNames.has(propertyName),
+            required: required.has(propertyName),
             depth: depth + 1,
             seen,
           },
@@ -312,7 +332,7 @@ function renderNode(
   return (
     <div>
       <SchemaRow name={name} required={required} depth={depth}>
-        <TypeLine schema={node} />
+        <TypeLine schema={node} budget={budget} />
       </SchemaRow>
       {description ? (
         <p className={cn('text-xs text-fg-muted', depth > 0 && 'pl-3')} title={description.title}>

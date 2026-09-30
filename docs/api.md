@@ -1511,10 +1511,17 @@ the Edge proxy and plugins, then stores the API.
   key that names a scalar is accepted.
 - YAML values must be plain objects, arrays or scalars
   (`details.reason: "unsupported_node"`).
-- At most 100 000 render units — schema nodes (including
-  `components.schemas`), parameters, media types and responses together
-  (`details.reason: "too_much_to_render"`, with the counts reached). A local
-  `$ref` is counted once per distinct target.
+- At most 100 000 render units (`details.reason: "too_much_to_render"`, with the
+  counts reached): top-level component schemas; schema nodes, including
+  primitives, reached through parameter and media schemas; each rendered
+  property, `items`, and `oneOf`/`anyOf`/`allOf` entry; up to 12 enum chips per
+  schema occurrence; parameters, media types and responses. A local `$ref` and
+  its resolved schema node are both counted at each rendered occurrence.
+  Descriptions, type/format strings, `required` names, `not`, additional or
+  pattern properties, `prefixItems`, examples and `x-*` extensions are not
+  counted because the viewer does not render them as schema rows or chips.
+  Schema branches stop expanding after 12 nested levels, so deeper descendants
+  are not rendered or counted.
 - A derived upstream URL, after server-variable expansion, must fit 2 000
   characters (`details.limit: 2000`, naming the server).
 - `routes` with no declared operation (`details.reason: "no_operations"`).

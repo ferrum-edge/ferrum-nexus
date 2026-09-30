@@ -59,8 +59,17 @@ Schema correctness and `$ref` resolution are not checked. Size limits:
 | Operations                                          | 3,000   |
 | Schema nodes + parameters + media types + responses | 100,000 |
 
-The last limit protects catalog readers, whose browsers render the document. A
-document past any limit is refused with `SPEC_INVALID` naming the limit.
+The last limit protects catalog readers, whose browsers render the document.
+It counts top-level component schemas; schema nodes (including primitives) in
+parameter and media schemas; each rendered property, `items`, and
+`oneOf`/`anyOf`/`allOf` entry; up to 12 enum chips per schema occurrence; and
+parameters, media types and responses. A local `$ref` and its resolved schema
+node count at each rendered occurrence. Descriptions, type/format strings,
+`required` names, `not`, additional or pattern properties, `prefixItems`,
+examples and `x-*` extensions do not count because the viewer does not render
+them as schema rows or chips. Schema branches stop expanding after 12 nested
+levels, so deeper descendants are not rendered or counted. A document past any
+limit is refused with `SPEC_INVALID` naming the limit.
 
 A minimal document that publishes cleanly:
 

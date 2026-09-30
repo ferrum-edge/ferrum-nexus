@@ -363,6 +363,9 @@ export const MAX_SPEC_BYTES = 2 * 1024 * 1024;
 /** Maximum object/array nesting, counting the document root as level one. */
 export const MAX_SPEC_DEPTH = 200;
 
+/** Maximum schema nesting depth the OpenAPI documentation viewer expands. */
+export const MAX_OPENAPI_SCHEMA_RENDER_DEPTH = 12;
+
 /**
  * Maximum size in UTF-8 bytes of an OpenAPI document's text once its YAML
  * aliases are resolved: every mapping key and scalar, counted at every place it

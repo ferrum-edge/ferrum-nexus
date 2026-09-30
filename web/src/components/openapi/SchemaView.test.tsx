@@ -60,9 +60,9 @@ describe('SchemaView', () => {
       />,
     );
 
-    expect(container.querySelectorAll('p.text-xs.text-fg-subtle').length).toBe(4);
+    expect(container.querySelectorAll('p.text-xs.text-fg-subtle')).toHaveLength(4);
     expect(screen.getAllByText('No schema.')).toHaveLength(3);
-    expect(screen.getByText(/download the specification/)).toBeInTheDocument();
+    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
     expect(budget.remaining).toBe(0);
   });
 
@@ -81,9 +81,9 @@ describe('SchemaView', () => {
 
     expect(screen.getByText('p0')).toBeInTheDocument();
     expect(screen.getByText('string')).toBeInTheDocument();
-    expect(screen.getAllByText('No schema.').length).toBeLessThan(4);
-    expect(screen.getByText(/download the specification/)).toBeInTheDocument();
-    expect(container.querySelectorAll('p.text-xs.text-fg-subtle').length).toBeLessThanOrEqual(4);
+    expect(screen.getAllByText('No schema.')).toHaveLength(2);
+    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
+    expect(container.querySelectorAll('p.text-xs.text-fg-subtle')).toHaveLength(3);
     expect(budget.remaining).toBe(0);
   });
 
@@ -114,9 +114,9 @@ describe('SchemaView', () => {
       />,
     );
     expect(screen.getByText('string')).toBeInTheDocument();
-    expect(screen.getByText(/download the specification/)).toBeInTheDocument();
-    expect(container.querySelectorAll('p.text-xs.text-fg-subtle').length).toBeLessThanOrEqual(3);
-    expect(refBudget.remaining).toBeLessThan(2);
+    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
+    expect(container.querySelectorAll('p.text-xs.text-fg-subtle')).toHaveLength(2);
+    expect(refBudget.remaining).toBe(0);
   });
 
   it('marks a self-referential $ref as circular instead of recursing', () => {
@@ -187,6 +187,72 @@ describe('SchemaView', () => {
       expect(node.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
       expect(node).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
     }
+  });
+
+  it('bounds nested enum values and charges chips at every reference', () => {
+    let enumTraversals = 0;
+    const value = new Proxy(
+      { nested: Array.from({ length: 10_000 }, (_, index) => ({ index })) },
+      {
+        ownKeys(target) {
+          enumTraversals += 1;
+          return Reflect.ownKeys(target);
+        },
+      },
+    );
+    const doc = {
+      components: { schemas: { Wide: { type: 'string', enum: [value] } } },
+    } as SpecNode;
+    const properties = Object.fromEntries(
+      Array.from({ length: 20 }, (_, index) => [
+        `p${index}`,
+        { $ref: '#/components/schemas/Wide' },
+      ]),
+    );
+    const budget = createRenderBudget(21);
+    render(<SchemaView doc={doc} budget={budget} schema={{ type: 'object', properties }} />);
+
+    expect(screen.getAllByText('{…}')).toHaveLength(5);
+    expect(budget.remaining).toBe(0);
+    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
+    expect(enumTraversals).toBe(0);
+  });
+
+  it('marks a required property even when the page budget is low', () => {
+    const required = Array.from({ length: 100 }, (_, index) => `p${index}`);
+    render(
+      <SchemaView
+        doc={{ components: { schemas: {} } } as SpecNode}
+        budget={createRenderBudget(4)}
+        schema={{ type: 'object', required, properties: { p99: { type: 'string' } } }}
+      />,
+    );
+
+    expect(screen.getByText('p99').parentElement).toHaveTextContent('required');
+    expect(screen.getByText('string')).toBeInTheDocument();
+  });
+
+  it('does not read property values after the budget is exhausted', () => {
+    let reads = 0;
+    const properties = new Proxy(
+      { first: { type: 'string' }, second: { type: 'string' }, third: { type: 'string' } },
+      {
+        get(target, property, receiver) {
+          if (typeof property === 'string') reads += 1;
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+    render(
+      <SchemaView
+        doc={{ components: { schemas: {} } } as SpecNode}
+        budget={createRenderBudget(3)}
+        schema={{ type: 'object', properties }}
+      />,
+    );
+
+    expect(reads).toBe(1);
+    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
   });
 
   it('bounds a combinatorial fan-out document instead of hanging', () => {

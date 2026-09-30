@@ -80,6 +80,7 @@ import {
 } from 'yaml';
 
 import {
+  MAX_OPENAPI_SCHEMA_RENDER_DEPTH,
   MAX_SPEC_BYTES,
   MAX_SPEC_DEPTH,
   MAX_SPEC_EXPANDED_BYTES,
@@ -92,6 +93,7 @@ import {
   expandServerUrl,
   firstUsableSpecServerUrl,
   parseAbsoluteHttpUrl,
+  resolveOpenApiPointer,
 } from '@ferrum-nexus/shared';
 
 export { slugify } from '@ferrum-nexus/shared';
@@ -806,17 +808,6 @@ function assertSpecShape(value: unknown, contentType: ParsedSpec['contentType'])
   }
 }
 
-/**
- * Schema nodes in `root`, counting each *occurrence*, including primitive
- * values. The viewer creates a placeholder element for values it cannot render
- * as schema objects, so those values consume the same render allowance.
- *
- * Memoised per node: a YAML document may point many keys at one anchored
- * subtree, and re-walking it for every occurrence is exponential. The memo
- * makes the walk linear while still charging each occurrence what it costs to
- * render, which is the number this limit is about. Cyclic aliases are already
- * rejected by {@link assertSpecShape}, so the walk terminates.
- */
 function* objectValues(value: object): Generator<unknown> {
   for (const key in value) {
     if (Object.prototype.hasOwnProperty.call(value, key)) {
@@ -825,54 +816,66 @@ function* objectValues(value: object): Generator<unknown> {
   }
 }
 
-function countNodes(root: unknown, memo: WeakMap<object, number>, limit: number): number {
-  if (root === undefined) return 0;
-  if (root === null || typeof root !== 'object') return 1;
-  const cached = memo.get(root);
-  if (cached !== undefined) return cached <= limit ? cached : limit + 1;
-  if (limit < 1) return 1;
+/** Count the schema nodes, wrappers, enum chips and ref expansions SchemaView renders. */
+function countNodes(
+  root: unknown,
+  document: Record<string, unknown>,
+  limit: number,
+  seen: readonly string[] = [],
+  depth = 0,
+): number {
+  let total = 0;
+  const add = (value: number): boolean => {
+    if (total + value > limit) {
+      total = limit + 1;
+      return true;
+    }
+    total += value;
+    return false;
+  };
+  const visit = (schema: unknown, refs: readonly string[], currentDepth: number): boolean => {
+    if (schema === undefined) return false;
+    if (add(1)) return true;
+    if (!isRecord(schema) || currentDepth > MAX_OPENAPI_SCHEMA_RENDER_DEPTH) return false;
 
-  interface Frame {
-    value: object;
-    children: Generator<unknown>;
-    total: number;
-  }
-
-  const pending: Frame[] = [];
-  pending.push({ value: root, children: objectValues(root), total: 1 });
-  let rootTotal = 0;
-
-  while (pending.length > 0) {
-    const frame = pending[pending.length - 1]!;
-    const next = frame.children.next();
-    if (!next.done) {
-      const child = next.value;
-      if (child === null || typeof child !== 'object') {
-        frame.total += 1;
-        if (frame.total > limit) return limit + 1;
-        continue;
-      }
-      const cachedChild = memo.get(child);
-      if (cachedChild !== undefined) {
-        frame.total += cachedChild;
-        if (frame.total > limit) return limit + 1;
-        continue;
-      }
-      pending.push({ value: child, children: objectValues(child), total: 1 });
-      continue;
+    const ref = typeof schema.$ref === 'string' ? schema.$ref : null;
+    if (ref) {
+      if (refs.includes(ref)) return false;
+      const resolved = resolveOpenApiPointer(document, ref);
+      return isRecord(resolved) ? visit(resolved, [...refs, ref], currentDepth + 1) : false;
     }
 
-    memo.set(frame.value, frame.total);
-    rootTotal = frame.total;
-    pending.pop();
-    const parent = pending[pending.length - 1];
-    if (parent) {
-      parent.total += frame.total;
-      if (parent.total > limit) return limit + 1;
-    }
-  }
+    const enumValues = Array.isArray(schema.enum) ? Math.min(schema.enum.length, 12) : 0;
+    if (add(enumValues)) return true;
 
-  return rootTotal;
+    const properties = isRecord(schema.properties) ? schema.properties : null;
+    if (properties) {
+      for (const property of objectValues(properties)) {
+        if (add(1) || visit(property, refs, currentDepth + 1)) return true;
+      }
+    }
+    if (
+      schema.items !== undefined &&
+      (add(1) || visit(schema.items, refs, currentDepth + 1))
+    ) {
+      return true;
+    }
+
+    const composition =
+      (Array.isArray(schema.oneOf) && schema.oneOf) ??
+      (Array.isArray(schema.anyOf) && schema.anyOf) ??
+      (Array.isArray(schema.allOf) && schema.allOf) ??
+      null;
+    if (composition) {
+      for (const entry of composition) {
+        if (add(1) || visit(entry, refs, currentDepth + 1)) return true;
+      }
+    }
+    return false;
+  };
+
+  visit(root, seen, depth);
+  return total;
 }
 
 /** The four things the documentation viewer walks, counted separately. */
@@ -901,13 +904,13 @@ interface ContentCost {
 /**
  * Refuse a document that costs more to render than {@link MAX_SPEC_RENDER_UNITS}.
  *
- * Counted over the parts the viewer actually walks — reusable schemas, and the
- * parameters, request bodies and responses of every declared operation — rather
- * than over the document as a whole, so the number in the error means something
- * the provider can act on. Every response entry costs one unit, as it costs the
- * viewer a card, whether or not it declares any `content`: an entry that cost
- * nothing could be repeated without bound, and a YAML alias repeats the whole
- * `responses` map at every operation that names it.
+ * Counted over the parts the viewer actually renders — reusable schemas, the
+ * schema children and enum chips it displays, and the parameters, media types
+ * and responses of every declared operation — rather than over the document as
+ * a whole. Every response entry costs one unit, as it costs the viewer a card,
+ * whether or not it declares any `content`: an entry that cost nothing could
+ * be repeated without bound, and a YAML alias repeats the whole `responses`
+ * map at every operation that names it.
  *
  * A parameter, request body or response written as a `$ref` is followed the way
  * the viewer follows it — one memoised resolver for the document — and each
@@ -927,7 +930,6 @@ export function assertRenderCost(
   paths: Record<string, unknown>,
   stats?: RenderCostStats,
 ): void {
-  const memo = new WeakMap<object, number>();
   const contentCosts = new WeakMap<object, ContentCost>();
   const chargedParameters = new WeakSet<object>();
   const chargedContent = new WeakSet<object>();
@@ -988,7 +990,7 @@ export function assertRenderCost(
   const schemas = components && isRecord(components.schemas) ? components.schemas : null;
   if (schemas) {
     for (const schema of objectValues(schemas)) {
-      charge(countNodes(schema, memo, availableUnits()), 0, 0);
+      charge(countNodes(schema, document, availableUnits()), 0, 0);
     }
   }
 
@@ -997,7 +999,7 @@ export function assertRenderCost(
     charge(0, list.length, 0);
     for (const entry of list) {
       const parameter = chargeable(entry, chargedParameters);
-      if (parameter) charge(countNodes(parameter.schema, memo, availableUnits()), 0, 0);
+      if (parameter) charge(countNodes(parameter.schema, document, availableUnits()), 0, 0);
     }
   };
 
@@ -1016,7 +1018,7 @@ export function assertRenderCost(
       if (isRecord(media)) {
         cost.schemaNodes += countNodes(
           media.schema,
-          memo,
+          document,
           availableUnits() - cost.mediaTypes - cost.schemaNodes,
         );
       }

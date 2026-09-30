@@ -19,6 +19,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- **OpenAPI render cost now matches the catalog viewer** (GHSA-r4wm-2vch-9jxm): the 100,000-unit
+  limit charges schema nodes and rendered property, item and composition entries, plus up to 12
+  enum chips per schema occurrence. It excludes schema keywords and values the viewer does not
+  render, such as descriptions, required names, examples, extensions and unsupported keywords.
 - Upgrade Nodemailer to 10.0.13. This also includes the 10.0.11 CommonJS and
   type compatibility fixes, the 10.0.12 fix that settles sends after connection
   errors, and 10.0.13 address-parsing fixes.
