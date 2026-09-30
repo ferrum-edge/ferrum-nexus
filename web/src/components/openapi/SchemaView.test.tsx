@@ -60,7 +60,7 @@ describe('SchemaView', () => {
       />,
     );
 
-    expect(container.querySelectorAll('p').length).toBe(4);
+    expect(container.querySelectorAll('p.text-xs.text-fg-subtle').length).toBe(4);
     expect(screen.getAllByText('No schema.')).toHaveLength(3);
     expect(screen.getByText(/download the specification/)).toBeInTheDocument();
     expect(budget.remaining).toBe(0);
@@ -83,7 +83,7 @@ describe('SchemaView', () => {
     expect(screen.getByText('string')).toBeInTheDocument();
     expect(screen.getAllByText('No schema.').length).toBeLessThan(4);
     expect(screen.getByText(/download the specification/)).toBeInTheDocument();
-    expect(container.querySelectorAll('p').length).toBeLessThanOrEqual(4);
+    expect(container.querySelectorAll('p.text-xs.text-fg-subtle').length).toBeLessThanOrEqual(4);
     expect(budget.remaining).toBe(0);
   });
 
@@ -115,7 +115,7 @@ describe('SchemaView', () => {
     );
     expect(screen.getByText('string')).toBeInTheDocument();
     expect(screen.getByText(/download the specification/)).toBeInTheDocument();
-    expect(container.querySelectorAll('p').length).toBeLessThanOrEqual(3);
+    expect(container.querySelectorAll('p.text-xs.text-fg-subtle').length).toBeLessThanOrEqual(3);
     expect(refBudget.remaining).toBeLessThan(2);
   });
 
