@@ -2386,6 +2386,7 @@ Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
    requirement on later does not give them one. They are linked only once
    their holder verifies or resets, or explicitly (below). Otherwise the
    sign-in is refused with `account_exists`.
+
 3. Otherwise a new account is created (`jit_provisioning`) with the mapped role
    and organization. It has no usable password: password sign-in fails,
    **Forgot password** sends nothing, and a reset link is refused. The account

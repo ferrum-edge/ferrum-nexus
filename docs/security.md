@@ -334,6 +334,7 @@ or `ES256`, is refused.
    explicitly (below). Anything else that falls short is refused
    (`email_not_verified` or `account_exists`) and nothing is linked. A second
    provider is held to exactly the same rule.
+
 3. **Just-in-time provisioning**: a new account with the mapped role and
    organization and an unusable password hash. That is a well-formed scrypt
    string of random bytes, so a password attempt costs a full derivation and
@@ -450,6 +451,7 @@ Environment secrets stay in the environment. No token, code, verifier, `state`,
 
   Configure only providers you trust with that. For a provider you trust less,
   use the domain lists and `link_existing_accounts: false`.
+
 - A proof records that someone controlled the mailbox once. An address that
   later changes hands (a recycled mailbox) still carries its old proof.
 - The public-address check resolves a name and then connects, so a name whose

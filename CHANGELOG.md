@@ -63,6 +63,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     bound to the session that started it. Users see their links at
     `GET /api/users/me/identities`. Administrators list and remove links at
     `/api/users/:id/identities`.
+
   - **Allowed email domains**: a deployment-wide list, and one per provider for
     linking and provisioning; both apply when both are set, and either
     requires a provider-verified address.
@@ -101,6 +102,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
     It only adds tables. Upgraded databases keep every row, and existing
     accounts start with no recorded proof.
+
   - Setup: [`docs/operations.md` §14](docs/operations.md#14-single-sign-on-openid-connect);
     threat model:
     [`docs/security.md`](docs/security.md#single-sign-on-openid-connect).
