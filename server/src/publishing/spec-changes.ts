@@ -190,19 +190,43 @@ function sends(direction: Direction): boolean {
   return direction !== 'response';
 }
 
+/** The JSON Schema type names; nothing else in a `type` is a type. */
+const SCHEMA_TYPES: ReadonlySet<string> = new Set([
+  'string',
+  'number',
+  'integer',
+  'boolean',
+  'array',
+  'object',
+  'null',
+]);
+
+/**
+ * Most entries of a `type` list read. A list names at most the seven
+ * {@link SCHEMA_TYPES}, so a longer one is junk, and reading it whole would
+ * let a document make every comparison of it as slow as the list is long.
+ */
+const MAX_TYPE_ENTRIES = 32;
+
 /**
  * The types a schema allows, sorted: `type` as written, `null` when OpenAPI
  * 3.0's `nullable` says so, and `object` or `array` when the schema declares
  * only `properties` or `items`, which is what an untyped schema with them is
- * read as. An empty list means any type.
+ * read as. An empty list means any type. Only the {@link SCHEMA_TYPES} count,
+ * and only the first {@link MAX_TYPE_ENTRIES} entries of a list are read, so
+ * the result has at most seven entries whatever the document says.
  */
 function typesOf(schema: Record<string, unknown>): string[] {
   const written = own(schema, 'type');
   const types = new Set<string>();
   if (typeof written === 'string') {
-    types.add(written);
+    if (SCHEMA_TYPES.has(written)) types.add(written);
   } else if (Array.isArray(written)) {
-    for (const entry of written) if (typeof entry === 'string') types.add(entry);
+    const read = Math.min(written.length, MAX_TYPE_ENTRIES);
+    for (let index = 0; index < read; index += 1) {
+      const entry: unknown = written[index];
+      if (typeof entry === 'string' && SCHEMA_TYPES.has(entry)) types.add(entry);
+    }
   }
   if (types.size === 0) {
     if (ownRecord(schema, 'properties')) types.add('object');
@@ -546,8 +570,9 @@ export function compareSpecRevisions(
 
     const fromProperties = entriesOf(ownRecord(left, 'properties'));
     const toProperties = entriesOf(ownRecord(right, 'properties'));
-    if (fromProperties.size === 0 && toProperties.size === 0) return;
     spend(fromProperties.size + toProperties.size);
+    // Read whether or not there are properties: `required` may name members
+    // declared elsewhere, as `allOf: [{ $ref: Base }, { required: [id] }]` does.
     const fromRequired = requiredOf(left);
     const toRequired = requiredOf(right);
     for (const [name, schema] of toProperties) {
@@ -574,6 +599,16 @@ export function compareSpecRevisions(
       // A caller that goes on sending it is at worst ignored; one that reads
       // it stops finding it.
       record(place, 'schema_property_removed', widening, { schemaPath: childPath(path, name) });
+    }
+    // Requiredness of members this schema does not declare itself. Those it
+    // declares were compared above, with the property.
+    for (const name of toRequired) {
+      if (toProperties.has(name) || fromRequired.has(name)) continue;
+      record(place, 'schema_property_required', narrowing, { schemaPath: childPath(path, name) });
+    }
+    for (const name of fromRequired) {
+      if (toRequired.has(name) || fromProperties.has(name) || toProperties.has(name)) continue;
+      record(place, 'schema_property_optional', widening, { schemaPath: childPath(path, name) });
     }
   };
 
@@ -866,6 +901,25 @@ export function compareSpecRevisions(
     truncated: listed.length < total,
     info_changes: info,
   };
+}
+
+/**
+ * {@link compareSpecRevisions} that never throws. A publish or a rollback
+ * must not fail because the comparison it records did: any error is handed to
+ * `onError` and the summary says the comparison is incomplete.
+ */
+export function compareSpecRevisionsSafely(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  onError: (error: unknown) => void,
+  options: SpecChangeOptions = {},
+): SpecChangeReport {
+  try {
+    return compareSpecRevisions(before, after, options);
+  } catch (error) {
+    onError(error);
+    return emptySpecChangeReport(false);
+  }
 }
 
 /**

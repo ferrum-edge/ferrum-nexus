@@ -16,10 +16,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   response schemas, each marked breaking or not. The catalog page has a new
   **Changes** tab listing them newest first, and
   `GET /api/catalog/:slug/changes` (and `…/changes/:revisionId`) serve them to
-  anyone who may read the API's documentation, under the same visibility rules.
+  anyone who may read the API's documentation, under the same visibility rules
+  and the same 60/min per-account limit as `GET /api/catalog/:slug/spec`.
   Summaries outlive `NEXUS_SPEC_HISTORY_LIMIT` pruning; the newest 100 per API
   are kept. A first publish records none, and revisions published before the
-  upgrade have none.
+  upgrade have none. The comparison works within a fixed budget, and one that
+  fails or runs out is recorded as incomplete; it never blocks a publish or a
+  rollback.
 - Forward migration `004_api_spec_changes` adds the `api_spec_changes` table on
   every backend. It copies no data.
 

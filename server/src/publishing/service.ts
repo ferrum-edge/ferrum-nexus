@@ -294,7 +294,7 @@ import {
   type UpstreamResolver,
 } from './oas.js';
 import type { SpecChangeNotifier } from './spec-change-notices.js';
-import { compareSpecRevisions } from './spec-changes.js';
+import { compareSpecRevisionsSafely } from './spec-changes.js';
 import { diffSpecDocuments } from './spec-diff.js';
 import {
   assertRoutesSubmittable,
@@ -843,9 +843,14 @@ function safeSpecDocument(rawSpec: string): Record<string, unknown> {
  * comparison only ever sees a document inside the parse and render budgets. A
  * previous revision that no longer passes them — one stored before a limit
  * tightened — is not compared at all, and the summary says it is incomplete
- * rather than claiming nothing changed.
+ * rather than claiming nothing changed. So does a comparison that failed:
+ * `onError` hears of it, and the revision is published all the same.
  */
-function revisionChanges(previous: ApiSpecRecord, next: ParsedSpec): SpecChangeReport {
+function revisionChanges(
+  previous: ApiSpecRecord,
+  next: ParsedSpec,
+  onError: (error: unknown) => void,
+): SpecChangeReport {
   if (previous.raw_spec === next.raw) return emptySpecChangeReport();
   let before: Record<string, unknown>;
   try {
@@ -853,7 +858,7 @@ function revisionChanges(previous: ApiSpecRecord, next: ParsedSpec): SpecChangeR
   } catch {
     return emptySpecChangeReport(false);
   }
-  return compareSpecRevisions(before, next.document);
+  return compareSpecRevisionsSafely(before, next.document, onError);
 }
 
 /** A thrown value as a string, for a log line or an audit detail. */
@@ -1483,7 +1488,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // replaces as re-read under the lease. Pure and bounded, so it is
       // computed here, once, rather than in a transaction body that may re-run.
       const replaced = previous;
-      const specChanges = replaced ? revisionChanges(replaced, parsed) : null;
+      const onComparisonError = (error: unknown): void => {
+        // The error's kind only: its message could quote the document.
+        deps.log?.(
+          { api_id: api.id, error: error instanceof Error ? error.name : typeof error },
+          'the spec change comparison failed; the revision is published without one',
+        );
+      };
+      const specChanges = replaced ? revisionChanges(replaced, parsed, onComparisonError) : null;
       // A revision that rewrites a live proxy commits its intent first, in a
       // transaction of its own under the lease (so the fence covers it): the
       // completion row below commits with the revision, but a gateway write
