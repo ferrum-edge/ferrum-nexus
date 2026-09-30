@@ -2859,7 +2859,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         const swapped = changed.includes('auth_plugin');
         const revoked: Uuid[] = [];
         const unrevoked: { credential_id: Uuid; error: string }[] = [];
-        const apiOwned = apiOwnedAfterSave;
+        const apiOwned = [...apiOwnedAfterSave].sort(
+          (a, b) => Number(a.status === 'retiring') - Number(b.status === 'retiring'),
+        );
         if (swapped && apiOwned.length > 0) {
           for (const credential of apiOwned) {
             try {

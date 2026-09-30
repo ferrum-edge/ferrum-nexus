@@ -675,6 +675,8 @@ export interface AuditLogFilter {
   actions?: string[];
   target_type?: string;
   target_id?: string;
+  /** Exact scalar matches against fields in the audit details object. */
+  details?: Record<string, string | boolean>;
   /** Inclusive lower bound on `created_at`. */
   from?: IsoTimestamp;
   /** Exclusive upper bound on `created_at`. */

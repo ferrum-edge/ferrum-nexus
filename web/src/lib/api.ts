@@ -557,8 +557,10 @@ export const credentialsApi = {
     post<IssueCredentialResponse>('/credentials', body),
   rotate: (id: string, body: RotateCredentialRequest = {}): Promise<RotateCredentialResponse> =>
     post<RotateCredentialResponse>(`/credentials/${encodeURIComponent(id)}/rotate`, body),
-  remove: (id: string): Promise<DeleteCredentialResponse> =>
-    del<DeleteCredentialResponse>(`/credentials/${encodeURIComponent(id)}`),
+  remove: (id: string, clearType = false): Promise<DeleteCredentialResponse> =>
+    del<DeleteCredentialResponse>(
+      `/credentials/${encodeURIComponent(id)}${clearType ? '?clear_type=true' : ''}`,
+    ),
 };
 
 /* ── Messaging ──────────────────────────────────────────────────────────── */

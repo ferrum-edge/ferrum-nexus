@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_PAGE_SIZE,
+  ERROR_CODES,
   type Application,
   type CredentialMetadata,
   type IssueCredentialResponse,
@@ -11,7 +12,7 @@ import {
 import { API, CREDENTIAL, GRANT } from '../../test/fixtures';
 import { changeField, clearClients, deferred, renderPage } from '../../test/helpers';
 import { queryKeys } from '../hooks/keys';
-import { applicationsApi, credentialsApi, grantsApi } from '../lib/api';
+import { ApiError, applicationsApi, credentialsApi, grantsApi } from '../lib/api';
 import { CredentialsPage } from './CredentialsPage';
 
 vi.mock('../components/ui/Select', async () => {
@@ -263,6 +264,68 @@ describe('credential management', () => {
     await screen.findByText('No credentials yet');
     expect(credentialsApi.remove).toHaveBeenCalledWith(CREDENTIAL.id);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('revokes an HTTP Basic credential on its own first', async () => {
+    credentials = [{ ...CREDENTIAL, credential_type: 'basicauth' }];
+    renderPage(<CredentialsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Revoke' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).queryByText(/every HTTP Basic/)).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke' }));
+    await screen.findByText('Credential revoked');
+    expect(credentialsApi.remove).toHaveBeenCalledTimes(1);
+    expect(credentialsApi.remove).toHaveBeenCalledWith(CREDENTIAL.id);
+  });
+
+  it('offers to clear all HTTP Basic credentials when a position is unconfirmed', async () => {
+    credentials = [{ ...CREDENTIAL, credential_type: 'basicauth' }];
+    vi.mocked(credentialsApi.remove).mockImplementation(async (_id, clearType) => {
+      if (!clearType) {
+        throw new ApiError(ERROR_CODES.CONFLICT, 'unconfirmed', 409, {
+          consumer_id: 'consumer-1',
+          credential_type: 'basicauth',
+          unconfirmed_credentials: 1,
+          active_credentials: 1,
+        });
+      }
+      credentials = [];
+      return { ok: true };
+    });
+    renderPage(<CredentialsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Revoke' }));
+    const first = await screen.findByRole('dialog');
+    fireEvent.click(within(first).getByRole('button', { name: 'Revoke' }));
+
+    const second = await screen.findByRole('dialog', {
+      name: 'Revoke all HTTP Basic credentials?',
+    });
+    expect(within(second).getByText(/removes every HTTP Basic password/)).toBeInTheDocument();
+    expect(credentialsApi.remove).toHaveBeenCalledWith(CREDENTIAL.id);
+    expect(screen.queryByText('Credential revoked')).not.toBeInTheDocument();
+
+    fireEvent.click(
+      within(second).getByRole('button', { name: 'Revoke all HTTP Basic credentials' }),
+    );
+    await screen.findByText('HTTP Basic credentials revoked');
+    expect(credentialsApi.remove).toHaveBeenCalledTimes(2);
+    expect(credentialsApi.remove).toHaveBeenLastCalledWith(CREDENTIAL.id, true);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('does not widen a revoke refused for any other conflict', async () => {
+    credentials = [{ ...CREDENTIAL, credential_type: 'basicauth' }];
+    vi.mocked(credentialsApi.remove).mockRejectedValue(
+      new ApiError(ERROR_CODES.CONFLICT, 'This credential has already been revoked', 409),
+    );
+    renderPage(<CredentialsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Revoke' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke' }));
+    await screen.findByText('This credential has already been revoked');
+    expect(credentialsApi.remove).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('Revoke all HTTP Basic credentials?')).not.toBeInTheDocument();
+    expect(dialog).toBeInTheDocument();
   });
 
   it.each(['Rotate', 'Revoke'] as const)('keeps a failed %s open for retry', async (action) => {

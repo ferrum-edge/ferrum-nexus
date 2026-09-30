@@ -65,6 +65,18 @@ function failNextCreate(harness: TestApp, beforeThrow?: () => void): void {
   };
 }
 
+/**
+ * Make the next `credentials.updateIfStatus` throw: for `basicauth`, the write
+ * that activates a row after Edge acknowledged its append.
+ */
+function failNextActivation(harness: TestApp): void {
+  const real = harness.store.credentials.updateIfStatus.bind(harness.store.credentials);
+  harness.store.credentials.updateIfStatus = async () => {
+    harness.store.credentials.updateIfStatus = real;
+    throw new Error('injected metadata activation failure');
+  };
+}
+
 /** Let `successes` `credentials.update` calls through, then fail the next one. */
 function failUpdateAfter(harness: TestApp, successes: number): void {
   const real = harness.store.credentials.update.bind(harness.store.credentials);
@@ -559,7 +571,9 @@ describe('credential durability across a lost gateway write', () => {
     // pre-restore password rather than at the orphan the append created.
     await harness.store.credentials.update(restored.credential.id, { status: 'revoked' });
 
-    failNextCreate(harness);
+    // A `basicauth` row is written before its append and activated after it,
+    // so the write that fails here is the activation.
+    failNextActivation(harness);
     const issued = await harness.authed(user, {
       method: 'POST',
       url: '/api/credentials',
@@ -571,7 +585,8 @@ describe('credential durability across a lost gateway write', () => {
     assert.equal(passwords.length, 2, 'nothing was deleted on the mirror’s word');
     assert.equal(passwords[0], preRestore[0], 'the pre-restore password survived');
 
-    // What identifies the orphan instead: where it went, and what it ends in.
+    // What identifies the orphan instead: where it went, what it ends in, and
+    // the row that still names it — `retiring`, because its outcome is unproved.
     const rollback = await rowsFor('credential.append_rollback', consumerId);
     assert.equal(rollback.length, 1);
     assert.equal(rollback[0]?.details.withdrawn, false, 'the orphan is recorded, not guessed at');
@@ -579,6 +594,9 @@ describe('credential durability across a lost gateway write', () => {
     assert.equal(rollback[0]?.details.append_index, 0);
     assert.equal(rollback[0]?.details.last4, passwords[1]?.slice(-4));
     assert.equal(rollback[0]?.ip, '127.0.0.1', 'and the address that caused it');
+    const stranded = rollback[0]?.details.stranded_credential_id;
+    assert.ok(typeof stranded === 'string', 'the orphan has a row');
+    assert.equal(await statusOf(stranded), 'retiring');
   });
 
   it('deletes nothing when the array moved under an in-flight append', async () => {

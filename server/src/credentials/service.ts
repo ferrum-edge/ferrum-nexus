@@ -110,6 +110,36 @@
  * at a pre-restore password rather than at the orphan. A `basicauth` append
  * that has to be undone is therefore recorded, not deleted.
  *
+ * ## `basicauth` positions rest on the mirror alone, so they are kept provable
+ *
+ * No read projection shows `basicauth`, so for that type the mirror is the only
+ * word on where an entry sits, and {@link edgeArrayLength} answers with the
+ * mirror's own count. A positional delete is only as good as that word: one
+ * gateway entry the mirror does not know about moves every index after it, and
+ * revoking the credential behind it then deletes a different password and marks
+ * the requested row `revoked` while its own password keeps authenticating.
+ * Three rules keep the word true, or refuse to act on it:
+ *
+ * - **The row comes first.** A `basicauth` append writes its row as `retiring`
+ *   before the `POST` and moves it to `active` only once Edge has acknowledged
+ *   the entry, so no path can leave an entry on the gateway with no row. An
+ *   append whose outcome is unknown — a lost acknowledgement, or a row that
+ *   could not be activated — leaves the row `retiring`: "the gateway entry
+ *   behind this row may or may not exist".
+ * - **An unconfirmed pair is not addressed by position.** A live `retiring`
+ *   row of this type — left by such an append, or by a delete whose outcome was
+ *   never proved — means every position after it is unknown, and nothing on the
+ *   gateway can say which. Issuing, rotating or revoking any single credential
+ *   of the pair is refused ({@link assertPositionsConfirmed}) until the type is
+ *   cleared as a whole.
+ * - **The last confirmed credential takes the type with it.** Revoking a
+ *   `basicauth` credential when no other row of the pair is `active` deletes
+ *   the whole type ({@link revokePosition}), which needs no position at all,
+ *   and settles every `retiring` row of the pair with it: each stood for an
+ *   entry that was either never delivered or already being removed. It is the
+ *   repair an owner can make without an administrator, and it also removes an
+ *   entry an older release appended without a row, which no read can reveal.
+ *
  * ## Ordering is not enough on its own: the retirement is recorded first
  *
  * Ordering settles which side may be written when, but it cannot make a
@@ -187,9 +217,15 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
-import { AuditAction, auditRowCommitted, type AuditService } from '../audit/service.js';
+import {
+  AuditAction,
+  SYSTEM_ACTOR,
+  auditRowCommitted,
+  type AuditService,
+} from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
+  AuditLogRecord,
   CreateInput,
   CredentialFilter,
   CredentialRecord,
@@ -213,6 +249,7 @@ import {
   edgeError,
   forbidden,
   notFound,
+  NexusError,
   userDisabled,
   validationFailed,
 } from '../lib/errors.js';
@@ -242,6 +279,9 @@ export const LIVE_CREDENTIAL_STATUSES = [
   'retiring',
 ] as const satisfies readonly CredentialStatus[];
 const LIVE_STATUSES = new Set<string>(LIVE_CREDENTIAL_STATUSES);
+const LEGACY_BASICAUTH_SCAN_SETTING = 'credentials.legacy_basicauth_scan_v1';
+/** What the owner sees on a placeholder the upgrade scan wrote. Never read back. */
+const LEGACY_PLACEHOLDER_LABEL = 'Unconfirmed HTTP Basic credential from an earlier release';
 
 /** What Edge substitutes for credential material on every ordinary read. */
 const REDACTED_MATERIAL = '[REDACTED]';
@@ -293,6 +333,24 @@ const RECONCILE_MESSAGE =
  */
 const AMBIGUOUS_MESSAGE =
   'The gateway position of this credential cannot be determined: it predates the portal’s position tracking and shares that state with another live credential of the same type. An administrator must reconcile this consumer — clearing the credential type on the gateway and revoking its portal rows — after which new credentials can be issued';
+
+/**
+ * Raised when a `basicauth` pair holds a `retiring` row: an earlier append or
+ * delete of that type whose outcome the gateway never confirmed.
+ *
+ * Edge omits `basicauth` from every read, so nothing can prove whether that
+ * entry exists, and every position after it depends on the answer. Not an Edge
+ * error: the portal refuses to guess. Which repair the owner can make depends
+ * on what the pair still holds, so the message is picked from that state: with
+ * no `active` row left, revoking a `retiring` one clears the type; with active
+ * rows beside it, only an explicit `clear_type=true` revoke does. Either way an
+ * administrator can {@link CredentialsService.reconcile}. See `operations.md`
+ * §12.
+ */
+const UNCONFIRMED_RETIRING_ONLY_MESSAGE =
+  'An earlier HTTP Basic credential change on this consumer was never confirmed by the gateway, which does not list HTTP Basic credentials, so no single one of them can be located safely. No active HTTP Basic credential remains: revoke the retiring credential, which clears every HTTP Basic credential of this consumer on the gateway, or have an administrator reconcile this consumer; then issue a new one';
+const UNCONFIRMED_WITH_ACTIVE_MESSAGE =
+  'An earlier HTTP Basic credential change on this consumer was never confirmed by the gateway, which does not list HTTP Basic credentials, so no single one of them can be located safely. Revoke with clear_type=true, which removes every HTTP Basic credential of this consumer including the active ones, or have an administrator reconcile this consumer; then issue a new one';
 
 /** Outcome of taking back an entry an append had already created on Edge. */
 interface AppendWithdrawal {
@@ -385,10 +443,21 @@ export interface IssueForConsumerInput {
 /** The key {@link CredentialsService.restoreGatewayAccess} uses for the account's own identity. */
 const ACCOUNT_IDENTITY = 'account';
 
+/** Progress of the one-off legacy `basicauth` scan, for startup health. */
+export type LegacyBasicAuthScanState = 'pending' | 'completed' | 'failed';
+
 /** Credential operations. */
 export interface CredentialsService {
   /** Consumer provisioning, shared with the access service. */
   readonly provisioner: ConsumerProvisioner;
+  /**
+   * Idempotently marks pre-fix Basic Auth append orphans as unconfirmed. Runs
+   * once: a completed scan is recorded and later calls return at once. A scan
+   * that throws is not recorded, and runs again on the next call.
+   */
+  initializeLegacyBasicAuthPositions(): Promise<void>;
+  /** Whether that scan has completed, failed, or not yet run in this process. */
+  legacyBasicAuthScanState(): LegacyBasicAuthScanState;
   /** The caller's credentials, or another user's when an admin asks. */
   list(
     actor: UserRecord,
@@ -432,7 +501,12 @@ export interface CredentialsService {
     ip?: string | null,
   ): Promise<RotateCredentialResponse>;
   /** Delete the entry from Edge and mark the row revoked. */
-  revoke(user: UserRecord, credentialId: Uuid, ip?: string | null): Promise<void>;
+  revoke(
+    user: UserRecord,
+    credentialId: Uuid,
+    ip?: string | null,
+    clearType?: boolean,
+  ): Promise<void>;
   /**
    * Revoke a credential an administrative change to an API has already made
    * unusable, on behalf of whoever made that change.
@@ -991,9 +1065,81 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   ): number {
     const entries = credentials?.[type];
     // `basicauth` is omitted from every read projection, so its length is
-    // unknowable from a GET — trust the Nexus mirror for it.
+    // unknowable from a GET — trust the Nexus mirror for it, which is why a
+    // mirror that cannot vouch for itself is refused rather than read
+    // ({@link assertPositionsConfirmed}).
     if (type === 'basicauth') return fallback;
     return Array.isArray(entries) ? entries.length : 0;
+  }
+
+  /**
+   * Refuse to address a `basicauth` credential by position while its pair
+   * holds an outcome the gateway never confirmed.
+   *
+   * `rows` are the pair's live rows. For `basicauth` a `retiring` one is an
+   * entry that may or may not exist — an append whose acknowledgement or row
+   * activation was lost, or a delete that reported failure — and Edge offers no
+   * read that could say which, so every index after it is a guess. Deleting on
+   * a guess is how a revoke removes a different password and reports the
+   * requested one gone, and an append on top of one only buries the guess under
+   * another credential. Every other type is checked against the live array
+   * instead ({@link settleLostRetirement}, {@link resolveCredentialIndex}).
+   */
+  function assertPositionsConfirmed(
+    rows: CredentialRecord[],
+    consumerId: string,
+    type: CredentialType,
+  ): void {
+    if (type !== 'basicauth') return;
+    const unconfirmed = rows.filter((row) => row.status === 'retiring').length;
+    if (unconfirmed === 0) return;
+    const active = rows.filter((row) => row.status === 'active').length;
+    // The repair on offer depends on the pair: with no active row left, a
+    // plain revoke of a retiring one already empties the type
+    // ({@link revokePosition}); with active rows beside it, only an explicit
+    // `clear_type=true` does.
+    const message =
+      active === 0 ? UNCONFIRMED_RETIRING_ONLY_MESSAGE : UNCONFIRMED_WITH_ACTIVE_MESSAGE;
+    throw conflict(message, {
+      consumer_id: consumerId,
+      credential_type: type,
+      unconfirmed_credentials: unconfirmed,
+      active_credentials: active,
+    });
+  }
+
+  /**
+   * Where a revocation of `target` deletes: an index, the whole type, or
+   * nowhere because the target is no longer live.
+   *
+   * Every type but `basicauth` is {@link resolveCredentialIndex}'s answer. A
+   * `basicauth` target deletes the **whole type** whenever no other row of the
+   * pair is `active` — which includes the common case of the only credential
+   * of that type. That delete needs no position, so it cannot land on the
+   * wrong password: it removes the target's entry wherever it sits, any entry
+   * a `retiring` row stood for (never delivered, or already being removed),
+   * and any entry an older release appended without a row, which no read of
+   * the gateway can reveal. The caller settles those `retiring` rows with the
+   * target. With another `active` credential beside it the type cannot simply
+   * be emptied, so a positional delete is made only while the pair's positions
+   * are confirmed ({@link assertPositionsConfirmed}).
+   */
+  function revokePosition(
+    rows: CredentialRecord[],
+    target: CredentialRecord,
+    edgeLength: number,
+    clearType = false,
+  ): number | 'whole-type' | 'not-live' {
+    if (target.credential_type !== 'basicauth') {
+      return resolveCredentialIndex(rows, target, edgeLength);
+    }
+    if (!rows.some((row) => row.id === target.id)) return 'not-live';
+    if (clearType) return 'whole-type';
+    if (rows.every((row) => row.id === target.id || row.status !== 'active')) {
+      return 'whole-type';
+    }
+    assertPositionsConfirmed(rows, target.ferrum_consumer_id, target.credential_type);
+    return resolveCredentialIndex(rows, target, edgeLength);
   }
 
   /**
@@ -1018,10 +1164,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * genuine drift — a consumer edited by hand — and still refuses, because
    * acting on a stale index is how somebody else's live key dies.
    *
-   * `basicauth` never reaches this: Edge omits it from every read, so
+   * `basicauth` must not use this shape: Edge omits it from every read, so
    * {@link edgeArrayLength} answers with the mirror's own count and the
-   * lengths can never differ. Its positions are the mirror's word alone, as
-   * everywhere else in this module.
+   * lengths can never differ. Its positions are checked separately against
+   * retiring rows and legacy placeholders.
    */
   async function settleLostRetirement(input: {
     consumerId: string;
@@ -1415,6 +1561,11 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * than to whoever is making the change. `details` is merged into the
    * `credential.revoke` row so the log says which of the two wrote it.
    *
+   * Where the delete lands is {@link revokePosition}'s answer. A `basicauth`
+   * revoke that has to empty the type settles the pair's `retiring` rows with
+   * the target and names them in `swept_credential_ids`; one that cannot be
+   * placed is refused before anything is written.
+   *
    * Returns `false` when the row was already retired by the time the consumer's
    * queue reached it — a no-op that wrote nothing and audits nothing.
    */
@@ -1423,6 +1574,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     actor: { id: Uuid; role: Role },
     ip: string | null,
     details: Record<string, unknown> = {},
+    clearType = false,
   ): Promise<boolean> {
     const type = target.credential_type;
     const consumerId = target.ferrum_consumer_id;
@@ -1435,6 +1587,11 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       if (!current || !LIVE_STATUSES.has(current.status)) return false;
 
       const consumer = await edge.consumers.get(consumerId);
+      // Other rows of the pair a whole-type delete takes with the target. Only
+      // ever `retiring` ones: {@link revokePosition} empties a type only when
+      // nothing else of it is `active`.
+      let swept: CredentialRecord[] = [];
+      let wholeType = false;
       // A consumer deleted out from under us means the entry is already gone;
       // the row still has to be marked so the UI stops offering it.
       if (consumer) {
@@ -1451,7 +1608,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           actor: { id: actor.id, role: actor.role },
           ip,
         });
-        const position = resolveCredentialIndex(rows, current, length);
+        const position = revokePosition(rows, current, length, clearType);
+        wholeType = position === 'whole-type';
+        if (position === 'whole-type') swept = rows.filter((row) => row.id !== current.id);
         // `not-live` follows the status check above whenever the settlement
         // was this very row — its entry is already gone. Either way, treat it
         // as a completed revoke rather than a whole-type delete.
@@ -1505,15 +1664,49 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // settles before it records the revocation.
       await store.transaction(async (tx) => {
         await tx.credentials.update(current.id, { status: 'revoked' });
-        await audit
-          .forStore(tx)
-          .record(
+        // The whole-type delete removed every swept entry, so every remaining
+        // live mirror row settles with the target and is named in its row.
+        // Conditional on each observed status, and collected inside the body
+        // so a re-run starts from nothing.
+        const sweptIds: Uuid[] = [];
+        for (const row of swept) {
+          const settled = await tx.credentials.updateIfStatus(row.id, row.status, {
+            status: 'revoked',
+          });
+          if (settled) sweptIds.push(row.id);
+        }
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.CREDENTIAL_REVOKE,
+          { type: 'credential', id: target.id },
+          {
+            credential_type: type,
+            consumer_id: consumerId,
+            last4: target.last4,
+            ...(wholeType ? { scope: 'whole-type' } : {}),
+            ...(sweptIds.length > 0 ? { swept_credential_ids: sweptIds } : {}),
+            ...details,
+          },
+          ip,
+        );
+        for (const sweptId of sweptIds) {
+          const sweptRow = swept.find((row) => row.id === sweptId);
+          if (!sweptRow) continue;
+          await audit.forStore(tx).record(
             { id: actor.id, role: actor.role },
             AuditAction.CREDENTIAL_REVOKE,
-            { type: 'credential', id: target.id },
-            { credential_type: type, consumer_id: consumerId, last4: target.last4, ...details },
+            { type: 'credential', id: sweptRow.id },
+            {
+              credential_type: type,
+              consumer_id: consumerId,
+              last4: sweptRow.last4,
+              swept_by: target.id,
+              owner_user_id: sweptRow.user_id,
+              scope: 'whole-type',
+            },
             ip,
           );
+        }
       });
       return true;
     });
@@ -1554,6 +1747,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * otherwise leave a live entry with no row and no audit trail at all, and
    * that drift is the one shape no later call can settle: nothing local
    * records the entry ({@link reclaimUnacknowledgedAppend}).
+   *
+   * `basicauth` takes neither compensation: no read shows it, so neither could
+   * be checked. Its row is written before the `POST` instead and activated
+   * after it, and an outcome that cannot be proved leaves it `retiring`.
    */
   async function appendCredential(input: {
     /** The account the row is attributed to and that the secret belongs to. */
@@ -1590,6 +1787,118 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   }): Promise<{ credential: CredentialRecord; secret: ShowOnceSecret }> {
     const generated = generateCredential(input.type, input.consumerUsername);
     const fingerprint = crypto.fingerprint(generated.material);
+    const row: CreateInput<CredentialRecord> = {
+      user_id: input.ownerId,
+      application_id: input.applicationId ?? null,
+      ferrum_consumer_id: input.consumerId,
+      credential_type: input.type,
+      // Edge assigns credential entries no id of their own; the addressable
+      // resource is the per-type collection, and position is tracked by
+      // `edge_ordinal`, which the store assigns here as the next value for
+      // this consumer and type — under the consumer lease the caller holds,
+      // which is what makes it the entry's true append position.
+      ferrum_credential_id: `${input.consumerId}/credentials/${input.type}`,
+      fingerprint,
+      last4: last4(generated.material),
+      label: input.label,
+      status: 'active',
+      rotated_from_id: input.rotatedFromId ?? null,
+    };
+    const recordWithRow = input.recordWithRow;
+    if (input.type === 'basicauth') {
+      // No read projection shows `basicauth`, so nothing can later prove
+      // whether an append of it landed, or where. The row therefore comes
+      // first, as `retiring`, and only an acknowledged append activates it: no
+      // path leaves an entry on the gateway with no row, the drift that turns
+      // a later positional delete onto somebody else's password. An outcome
+      // that cannot be proved leaves the row `retiring`, holding its slot and
+      // refusing positional operations on the pair until the type is cleared
+      // ({@link assertPositionsConfirmed}). A transaction, so the lease fence
+      // covers it: a holder that stalled past its lease appends nothing.
+      const pending = await store.transaction((tx) =>
+        tx.credentials.create({ ...row, status: 'retiring' }),
+      );
+      // The entry is never deleted by index (see {@link withdrawAppendedEntry}),
+      // so a failure is recorded against the row that now names it.
+      const recordStranded = async (cause: unknown, suspected: boolean): Promise<void> => {
+        if (input.appendIndex === undefined) return;
+        await recordAppendRollback({
+          consumerId: input.consumerId,
+          type: input.type,
+          withdrawn: false,
+          operation: input.operation ?? 'issue',
+          strandedCredentialId: pending.id,
+          retiredCredentialId: input.retiredCredentialId ?? null,
+          last4: pending.last4,
+          appendIndex: input.appendIndex,
+          ...(suspected ? { suspected: true } : {}),
+          ownerId: input.ownerId,
+          actor: { id: input.actorId, role: input.actorRole },
+          cause,
+          ip: input.ip ?? null,
+        });
+      };
+      try {
+        await edge.consumers.addCredential(
+          input.consumerId,
+          input.type,
+          generated.entry,
+          input.actorId,
+        );
+      } catch (error) {
+        const errorDetails =
+          error instanceof NexusError && typeof error.details === 'object' && error.details !== null
+            ? (error.details as { status?: unknown })
+            : {};
+        const status = typeof errorDetails.status === 'number' ? errorDetails.status : null;
+        // A refusal and a lost acknowledgement read the same on the wire,
+        // except a definite 4xx: it proves Edge did not append. A 5xx, a
+        // connection error after send, and a `408` — a timeout, whichever side
+        // gave up first — remain an unknown outcome.
+        if (status !== null && status >= 400 && status < 500 && status !== 408) {
+          await store.transaction((tx) => tx.credentials.delete(pending.id));
+          throw error;
+        }
+        await recordStranded(error, true);
+        throw error;
+      }
+      try {
+        // Only while the row is still `retiring`: one that something else has
+        // moved is not brought back. The caller's audit row commits with it.
+        const credential = await store.transaction(async (tx) => {
+          const activated = await tx.credentials.updateIfStatus(pending.id, 'retiring', {
+            status: 'active',
+          });
+          if (!activated) throw conflict('The credential was revoked while it was being issued');
+          if (recordWithRow) await recordWithRow(tx, activated);
+          return activated;
+        });
+        return { credential, secret: generated.secret };
+      } catch (error) {
+        // A concurrent whole-type revoke may have marked the pending row
+        // revoked while the append was in flight. Its secret was never
+        // delivered, so restore the durable uncertainty marker. If the lease
+        // fence itself was lost, the retrying transaction is refused too.
+        try {
+          await store.transaction((tx) =>
+            tx.credentials.updateIfStatus(pending.id, 'revoked', { status: 'retiring' }),
+          );
+        } catch {
+          // Deliberately outside a transaction, so it skips the lease check:
+          // the one thing it does is move `revoked` back to the more cautious
+          // `retiring`, conditional on the status, and a holder whose lease
+          // lapsed must still be able to leave that marker rather than let an
+          // unconfirmed entry pass for safely revoked. Nothing it could race
+          // with is made less safe by it. If this fails too, the rollback row
+          // below is still written: it is then the only trace of the entry.
+          await store.credentials
+            .updateIfStatus(pending.id, 'revoked', { status: 'retiring' })
+            .catch(() => undefined);
+        }
+        await recordStranded(error, false);
+        throw error;
+      }
+    }
     try {
       await edge.consumers.addCredential(
         input.consumerId,
@@ -1615,24 +1924,6 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       }
       throw error;
     }
-    const row: CreateInput<CredentialRecord> = {
-      user_id: input.ownerId,
-      application_id: input.applicationId ?? null,
-      ferrum_consumer_id: input.consumerId,
-      credential_type: input.type,
-      // Edge assigns credential entries no id of their own; the addressable
-      // resource is the per-type collection, and position is tracked by
-      // `edge_ordinal`, which the store assigns here as the next value for
-      // this consumer and type — under the consumer lease the caller holds,
-      // which is what makes it the entry's true append position.
-      ferrum_credential_id: `${input.consumerId}/credentials/${input.type}`,
-      fingerprint,
-      last4: last4(generated.material),
-      label: input.label,
-      status: 'active',
-      rotated_from_id: input.rotatedFromId ?? null,
-    };
-    const recordWithRow = input.recordWithRow;
     try {
       // The caller's audit row, when it has one, commits with the row: a
       // failed insert is a failed mirror write, and is compensated as one.
@@ -1719,6 +2010,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         actor: { id: input.user.id, role: input.user.role },
         ip: input.ip ?? null,
       });
+      // An append on top of an unconfirmed `basicauth` outcome would take a
+      // position nothing can vouch for, and could then only ever be removed
+      // with the whole type. Refused before the cap, whose count it skews.
+      assertPositionsConfirmed(rows, input.consumerId, input.credentialType);
       // The cap is a portal policy over the *identity's* credentials, so it is
       // counted on the mirror for this consumer; the gateway enforces its own
       // on the append. Per identity rather than per account, because each
@@ -1747,9 +2042,152 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     });
   }
 
+  /** Where {@link CredentialsService.initializeLegacyBasicAuthPositions} got to. */
+  let legacyScanState: LegacyBasicAuthScanState = 'pending';
+
+  /**
+   * Walk every `credential.append_rollback` a release wrote for a `basicauth`
+   * entry it could not take back, and hold each one that may still be on the
+   * gateway without a row ({@link placeLegacyPlaceholder}).
+   *
+   * Paged, so the history is never held in memory; the store filters on the
+   * action and the two detail fields, so unrelated events are never read.
+   */
+  async function scanLegacyBasicAuthAppends(): Promise<void> {
+    let offset = 0;
+    while (true) {
+      const page = await store.auditLogs.list(
+        {
+          action: AuditAction.CREDENTIAL_APPEND_ROLLBACK,
+          details: { credential_type: 'basicauth', withdrawn: false },
+        },
+        { limit: MAX_PAGE_SIZE, offset },
+      );
+      for (const event of page.items) await placeLegacyPlaceholder(event);
+      if (page.items.length < MAX_PAGE_SIZE) return;
+      offset += page.items.length;
+    }
+  }
+
+  /**
+   * Write a `retiring` placeholder for one historical `basicauth` append that
+   * may still be on the gateway with no live row naming it.
+   *
+   * That is the event `v0.2.0` wrote with **no** `stranded_credential_id` — a
+   * lost acknowledgement ({@link reclaimUnacknowledgedAppend}) or a row write
+   * that failed after the append — and one whose stranded row is no longer
+   * live, so nothing still accounts for the entry. An event whose row is live
+   * is already held by that row. Nothing is written when a later reconcile or
+   * whole-type revoke of the consumer's `basicauth` already removed the entry,
+   * or when the placeholder exists: its fingerprint derives from the event id,
+   * so a re-run after a partial scan finds it, in any status.
+   *
+   * The row is attributed to the identity the consumer mapping names, falling
+   * back to the event's owner for a consumer with no mapping (a provider test
+   * consumer).
+   */
+  async function placeLegacyPlaceholder(event: AuditLogRecord): Promise<void> {
+    const details = event.details;
+    const consumerId = details.consumer_id;
+    if (typeof consumerId !== 'string') return;
+    const fingerprint = crypto.fingerprint(`legacy-unconfirmed:${event.id}`);
+    await edge.serializePerKey(consumerId, async () => {
+      if (await store.credentials.findByFingerprint(fingerprint)) return;
+      const stranded = details.stranded_credential_id;
+      if (typeof stranded === 'string') {
+        const row = await store.credentials.findById(stranded);
+        if (row && LIVE_STATUSES.has(row.status)) return;
+      }
+      if (await basicAuthClearedSince(consumerId, event.created_at)) return;
+      const mapping = await store.consumers.findByFerrumId(consumerId);
+      const eventOwner =
+        typeof details.owner_user_id === 'string' ? details.owner_user_id : event.actor_user_id;
+      const ownerId = mapping?.user_id ?? eventOwner;
+      if (!ownerId || !(await store.users.findById(ownerId))) return;
+      const last4Seen = typeof details.last4 === 'string' ? details.last4 : '????';
+      await store.transaction(async (tx) => {
+        const placeholder = await tx.credentials.create({
+          user_id: ownerId,
+          application_id: mapping?.application_id ?? null,
+          ferrum_consumer_id: consumerId,
+          credential_type: 'basicauth',
+          ferrum_credential_id: `${consumerId}/credentials/basicauth`,
+          fingerprint,
+          last4: last4Seen,
+          label: LEGACY_PLACEHOLDER_LABEL,
+          status: 'retiring',
+          rotated_from_id: null,
+        });
+        await audit.forStore(tx).record(
+          SYSTEM_ACTOR,
+          AuditAction.CREDENTIAL_LEGACY_PLACEHOLDER,
+          { type: 'credential', id: placeholder.id },
+          {
+            credential_type: 'basicauth',
+            consumer_id: consumerId,
+            last4: last4Seen,
+            owner_user_id: ownerId,
+            source_event_id: event.id,
+          },
+          null,
+        );
+      });
+    });
+  }
+
+  /**
+   * Whether a reconcile of `consumerId`'s `basicauth`, or a whole-type
+   * `basicauth` revoke on it, was recorded after `since` — either of which
+   * emptied the type on the gateway and took any older orphan with it.
+   *
+   * Each is one filtered, newest-first read of a single row.
+   */
+  async function basicAuthClearedSince(consumerId: string, since: string): Promise<boolean> {
+    const reconciled = await store.auditLogs.list(
+      {
+        action: AuditAction.CREDENTIAL_RECONCILE,
+        from: since,
+        details: { consumer_id: consumerId, credential_type: 'basicauth' },
+      },
+      { limit: 1, offset: 0 },
+    );
+    if (reconciled.items.some((row) => row.created_at > since)) return true;
+    const revoked = await store.auditLogs.list(
+      {
+        action: AuditAction.CREDENTIAL_REVOKE,
+        from: since,
+        details: { consumer_id: consumerId, scope: 'whole-type' },
+      },
+      { limit: 1, offset: 0 },
+    );
+    return revoked.items.some((row) => row.created_at > since);
+  }
+
   return {
     provisioner,
     issueForConsumer,
+
+    async initializeLegacyBasicAuthPositions(): Promise<void> {
+      if (await store.settings.get(LEGACY_BASICAUTH_SCAN_SETTING)) {
+        legacyScanState = 'completed';
+        return;
+      }
+      try {
+        await scanLegacyBasicAuthAppends();
+        // Only a scan that reached the end is recorded: one that failed part
+        // way through runs again from the start on the next boot, and every
+        // placeholder it already wrote is found by its fingerprint.
+        await store.settings.insertIfAbsent(LEGACY_BASICAUTH_SCAN_SETTING, { completed: true });
+        legacyScanState = 'completed';
+      } catch (error) {
+        legacyScanState = 'failed';
+        throw error;
+      }
+    },
+
+    legacyBasicAuthScanState(): LegacyBasicAuthScanState {
+      return legacyScanState;
+    },
 
     async teardownGatewayIdentity(
       username,
@@ -2222,6 +2660,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           actor: { id: user.id, role: user.role },
           ip,
         });
+        // A `basicauth` rotation deletes by position, which an unconfirmed
+        // outcome on the pair has taken away. Revoking the pair's last active
+        // credential still clears it ({@link revokePosition}).
+        assertPositionsConfirmed(rows, consumerId, type);
         const position = resolveCredentialIndex(rows, current, length);
         if (position === 'not-live') {
           throw conflict('This credential has already been revoked');
@@ -2426,14 +2868,19 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
                 // sides, would destroy a state that repairs itself.
                 message =
                   'The gateway did not acknowledge removing the previous credential and no longer holds it; the replacement created in its place is live but its secret was never delivered — revoke the credential named here and issue a new one';
-              } else if (arrayAsAppended || type === 'basicauth') {
+              } else if (arrayAsAppended) {
                 // Every entry the append landed on is still there and each one
                 // has a row, so the two views agree and the owner can finish
-                // this themselves. `basicauth` reads the same way for a
-                // different reason: no projection shows it, so the mirror is
-                // the only word on that type and it holds a live row for each.
+                // this themselves.
                 message =
                   'The previous credential could not be removed from the gateway and the replacement created for it could not be taken back; the portal holds a live row for each — revoke the credential named here and try again';
+              } else if (type === 'basicauth') {
+                // No projection shows `basicauth`, so whether the previous
+                // entry went cannot be proved and its row stays `retiring`.
+                // Where the replacement is the pair's only `active` row,
+                // revoking it clears the type ({@link revokePosition}).
+                message =
+                  'The previous credential could not be confirmed removed from the gateway and the replacement created for it could not be taken back; revoke the credential named here, and the previous one if it is still listed, then issue a new one';
               }
               throw edgeError(message, {
                 credential_type: type,
@@ -2528,10 +2975,29 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       };
     },
 
-    async revoke(user, credentialId, ip = null): Promise<void> {
+    async revoke(user, credentialId, ip = null, clearType = false): Promise<void> {
       const target = await loadOwned(user, credentialId);
+      if (clearType && target.credential_type !== 'basicauth') {
+        // Every other type is located against the live array, so emptying it
+        // is never the repair, and a flag that silently did nothing would let
+        // a client believe it had cleared something.
+        throw validationFailed('clear_type applies only to HTTP Basic (basicauth) credentials', {
+          credential_type: target.credential_type,
+        });
+      }
       if (target.status === 'revoked') return;
-      await revokeCredentialRow(target, { id: user.id, role: user.role }, ip);
+      if (clearType && !roleAtLeast(user.role, 'admin')) {
+        // Clearing the type deletes every entry of the consumer, not only the
+        // caller's own: ownership of one row is not licence to revoke rows the
+        // portal attributes to somebody else.
+        const live = await liveRows(target.ferrum_consumer_id, 'basicauth');
+        if (live.some((row) => row.user_id !== user.id)) {
+          throw forbidden(
+            'This consumer holds HTTP Basic credentials that belong to another account; an administrator must clear them',
+          );
+        }
+      }
+      await revokeCredentialRow(target, { id: user.id, role: user.role }, ip, {}, clearType);
     },
 
     async revokeInvalidated(actor, credentialId, details, ip = null): Promise<boolean> {

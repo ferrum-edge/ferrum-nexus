@@ -6,14 +6,15 @@ import {
   type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
-import type {
-  DeleteCredentialResponse,
-  IssueCredentialRequest,
-  IssueCredentialResponse,
-  ListCredentialsQuery,
-  ListCredentialsResponse,
-  RotateCredentialRequest,
-  RotateCredentialResponse,
+import {
+  ERROR_CODES,
+  type DeleteCredentialResponse,
+  type IssueCredentialRequest,
+  type IssueCredentialResponse,
+  type ListCredentialsQuery,
+  type ListCredentialsResponse,
+  type RotateCredentialRequest,
+  type RotateCredentialResponse,
 } from '@ferrum-nexus/shared';
 import { credentialsApi } from '../lib/api';
 import { queryKeys } from './keys';
@@ -71,11 +72,24 @@ export function useRotateCredential(): UseMutationResult<
   });
 }
 
-/** Revoke and delete a credential. */
-export function useDeleteCredential(): UseMutationResult<DeleteCredentialResponse, Error, string> {
+/**
+ * Revoke and delete a credential. `clearType` asks for every HTTP Basic
+ * credential of the identity to go with it.
+ *
+ * A `CONFLICT` is left to the caller rather than toasted: one of them is the
+ * refusal that asks the owner to confirm clearing the whole HTTP Basic type,
+ * which the credentials page turns into a second confirmation.
+ */
+export function useDeleteCredential(): UseMutationResult<
+  DeleteCredentialResponse,
+  Error,
+  { id: string; clearType?: boolean }
+> {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => credentialsApi.remove(id),
+    mutationFn: ({ id, clearType }: { id: string; clearType?: boolean }) =>
+      clearType ? credentialsApi.remove(id, true) : credentialsApi.remove(id),
+    meta: { handledCodes: [ERROR_CODES.CONFLICT] },
     onSuccess: () => invalidateCredentialViews(queryClient),
   });
 }

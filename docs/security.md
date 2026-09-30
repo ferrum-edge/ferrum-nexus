@@ -620,10 +620,25 @@ and revokes the rows.
   `active`.
 - An append whose row could not be written, or a rotation replacement whose
   delete failed, is withdrawn — but only against an array still exactly one
-  entry longer than before, with the index read from the gateway. `basicauth`
-  is never deleted by index (Edge never shows it); an orphan of that type is
-  recorded for an administrator. Anything not withdrawn is recorded as
-  `credential.append_rollback` with `withdrawn: false`.
+  entry longer than before, with the index read from the gateway. Anything not
+  withdrawn is recorded as `credential.append_rollback` with
+  `withdrawn: false`.
+- **`basicauth` fails closed.** Edge never shows it, so its positions are the
+  portal's rows alone, and an entry those rows do not account for would make a
+  revoke delete a different password while the revoked one kept working. So a
+  `basicauth` row is written (as `retiring`) before its append and activated
+  only once Edge acknowledges it, and is never deleted by index to undo one.
+  While any `basicauth` row of an identity is `retiring` — an append or delete
+  whose outcome was never confirmed — issuing, rotating and revoking any other
+  one are refused with `409 CONFLICT`. Revoking the identity's last `active`
+  `basicauth` credential deletes the whole type, which needs no position, and
+  settles those rows with it. With active rows remaining, the owner can clear
+  the whole type explicitly (`clear_type=true`, refused for a non-admin when
+  the consumer holds another account's row), or an admin reconciles the
+  consumer. On upgrade, appends earlier releases recorded as not taken back get
+  a `retiring` placeholder (`credential.legacy_placeholder`). That scan runs
+  once and does not cover a Nexus database restored on its own; after such a
+  restore, reconcile `basicauth` for every consumer.
 
 The procedures are in
 [`operations.md` §12](operations.md#12-the-credential-mirror) and
@@ -1278,16 +1293,17 @@ credential rows whose owner's derived username (`nexus-user-<user_id>`,
 matches the live consumer. Any other `consumer_id` is `403 FORBIDDEN` before any
 gateway write; a malformed id is `400 VALIDATION_FAILED`.
 
-| Action                       | Target type  | Description                                                                                                                                                                                                                                                                                                    |
-| ---------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `credential.issue`           | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                                                             |
-| `credential.rotate`          | `credential` | Rotation; target is the **new** credential. `details`: type, consumer id, `rotated_from`, `previous_last4`, `owner_user_id` when an admin rotated someone else's.                                                                                                                                              |
-| `credential.revoke_start`    | `credential` | Intent, committed with the row's move to `retiring`, before the gateway delete. `details` as `credential.revoke`; a rotation at the per-type cap writes one with `operation: "rotate"`. Completed by `credential.revoke`, `credential.rotate` or `credential.revoke_rollback`.                                 |
-| `credential.revoke`          | `credential` | Deleted from Edge and marked `revoked`. `details`: type, consumer id, `last4`, and — when caused by an `auth_plugin` change on the API's own test consumer — `reason`, `api_id` and the `auth_plugin` pair.                                                                                                    |
-| `credential.revoke_rollback` | `credential` | A retirement whose gateway delete provably never applied; the row went back to `active`. `details`: `credential_type`, `consumer_id`, `last4`, `operation` (`revoke` \| `rotate`), `cause`, `owner_user_id`.                                                                                                   |
-| `credential.settle`          | `credential` | A retirement Edge applied but the portal never recorded, settled by a later call. `details`: `credential_type`, `consumer_id`, `last4`, `owner_user_id`, `mirror_rows`, `gateway_entries`.                                                                                                                     |
-| `credential.append_rollback` | `consumer`   | An appended entry had to be taken back after an issue or rotation failed. `details`: `credential_type`, `consumer_id`, `operation` (`issue` \| `rotate`), `withdrawn`, `last4`, `append_index`, `owner_user_id`, `cause`, and `stranded_credential_id`, `retired_credential_id`, `suspected` where they apply. |
-| `credential.reconcile`       | `consumer`   | An admin emptied one credential type on a consumer and revoked its rows. `details`: `credential_type`, `consumer_id`, `gateway_cleared`, `revoked_credentials`, `revoked_credential_ids`, `owner_user_ids`, optional `reason`.                                                                                 |
+| Action                          | Target type  | Description                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credential.issue`              | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                                                                                                                                           |
+| `credential.rotate`             | `credential` | Rotation; target is the **new** credential. `details`: type, consumer id, `rotated_from`, `previous_last4`, `owner_user_id` when an admin rotated someone else's.                                                                                                                                                                                                                            |
+| `credential.revoke_start`       | `credential` | Intent, committed with the row's move to `retiring`, before the gateway delete. `details` as `credential.revoke`; a rotation at the per-type cap writes one with `operation: "rotate"`. Completed by `credential.revoke`, `credential.rotate` or `credential.revoke_rollback`.                                                                                                               |
+| `credential.revoke`             | `credential` | Deleted from Edge and marked `revoked`. `details`: type, consumer id, `last4`, optional `scope: "whole-type"`, and — when caused by an `auth_plugin` change on the API's own test consumer — `reason`, `api_id` and the `auth_plugin` pair. The target row lists settled rows in `swept_credential_ids`; each swept row also gets its own event with `swept_by` and `owner_user_id`.         |
+| `credential.revoke_rollback`    | `credential` | A retirement whose gateway delete provably never applied; the row went back to `active`. `details`: `credential_type`, `consumer_id`, `last4`, `operation` (`revoke` \| `rotate`), `cause`, `owner_user_id`.                                                                                                                                                                                 |
+| `credential.settle`             | `credential` | A retirement Edge applied but the portal never recorded, settled by a later call. `details`: `credential_type`, `consumer_id`, `last4`, `owner_user_id`, `mirror_rows`, `gateway_entries`.                                                                                                                                                                                                   |
+| `credential.append_rollback`    | `consumer`   | An appended entry had to be taken back after an issue or rotation failed. `details`: `credential_type`, `consumer_id`, `operation` (`issue` \| `rotate`), `withdrawn`, `last4`, `append_index`, `owner_user_id`, `cause`, and `stranded_credential_id`, `retired_credential_id`, `suspected` where they apply.                                                                               |
+| `credential.reconcile`          | `consumer`   | An admin emptied one credential type on a consumer and revoked its rows. `details`: `credential_type`, `consumer_id`, `gateway_cleared`, `revoked_credentials`, `revoked_credential_ids`, `owner_user_ids`, optional `reason`.                                                                                                                                                               |
+| `credential.legacy_placeholder` | `credential` | The upgrade scan found a `basicauth` append an earlier release recorded as not taken back (`credential.append_rollback`, `withdrawn: false`) that no live row accounts for, and wrote a `retiring` placeholder row that holds the consumer's positions closed until the type is cleared. `details`: `credential_type`, `consumer_id`, `last4`, `owner_user_id`, `source_event_id`. No actor. |
 
 A `credential.revoke_start` with no completion row means one of:
 

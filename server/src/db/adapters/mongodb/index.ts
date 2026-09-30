@@ -885,6 +885,7 @@ function auditFilter(filter: AuditLogFilter): Filter<NexusDoc> {
   combineEqualityAndIn(query, filter.action, filter.actions, 'action');
   if (filter.target_type !== undefined) query.target_type = filter.target_type;
   if (filter.target_id !== undefined) query.target_id = filter.target_id;
+  for (const [key, value] of Object.entries(filter.details ?? {})) query[`details.${key}`] = value;
   if (filter.from !== undefined || filter.to !== undefined) {
     const range: Record<string, unknown> = {};
     if (filter.from !== undefined) range.$gte = filter.from;
