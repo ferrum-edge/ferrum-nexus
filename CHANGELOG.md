@@ -6,6 +6,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- GHSA-r4wm-2vch-9jxm: OpenAPI rendering accounts for primitive schema values during
+  publication checks and charges the page budget before rendering their
+  placeholders or schema wrappers. Exhausted schema branches stop before
+  walking the remaining siblings.
+
 ### Fixed
 
 - Text now meets WCAG AA contrast (4.5:1) throughout the portal, in both themes

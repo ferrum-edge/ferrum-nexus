@@ -49,6 +49,76 @@ describe('SchemaView', () => {
     expect(screen.getByText('number')).toBeInTheDocument();
   });
 
+  it('spends the page budget on primitive schemas and their property wrappers', () => {
+    const doc = { components: { schemas: {} } } as SpecNode;
+    const budget = createRenderBudget(7);
+    const { container } = render(
+      <SchemaView
+        doc={doc}
+        budget={budget}
+        schema={{ type: 'object', oneOf: Array.from({ length: 100 }, () => true) }}
+      />,
+    );
+
+    expect(container.querySelectorAll('p').length).toBe(4);
+    expect(screen.getAllByText('No schema.')).toHaveLength(3);
+    expect(screen.getByText(/download the specification/)).toBeInTheDocument();
+    expect(budget.remaining).toBe(0);
+  });
+
+  it('bounds primitive properties and renders supported object siblings', () => {
+    const doc = { components: { schemas: {} } } as SpecNode;
+    const properties = Object.fromEntries(
+      Array.from({ length: 100 }, (_, index) => [
+        `p${index}`,
+        index === 0 ? { type: 'string' } : false,
+      ]),
+    );
+    const budget = createRenderBudget(7);
+    const { container } = render(
+      <SchemaView doc={doc} budget={budget} schema={{ type: 'object', properties }} />,
+    );
+
+    expect(screen.getByText('p0')).toBeInTheDocument();
+    expect(screen.getByText('string')).toBeInTheDocument();
+    expect(screen.getAllByText('No schema.').length).toBeLessThan(4);
+    expect(screen.getByText(/download the specification/)).toBeInTheDocument();
+    expect(container.querySelectorAll('p').length).toBeLessThanOrEqual(4);
+    expect(budget.remaining).toBe(0);
+  });
+
+  it('charges item schemas and repeated references against the same budget', () => {
+    const doc = {
+      components: { schemas: { Primitive: false, Object: { type: 'string' } } },
+    } as SpecNode;
+    const itemsBudget = createRenderBudget(3);
+    render(<SchemaView doc={doc} budget={itemsBudget} schema={{ type: 'array', items: null }} />);
+    expect(screen.getByText('No schema.')).toBeInTheDocument();
+    expect(itemsBudget.remaining).toBe(0);
+
+    cleanup();
+    const refBudget = createRenderBudget(8);
+    const { container } = render(
+      <SchemaView
+        doc={doc}
+        budget={refBudget}
+        schema={{
+          type: 'object',
+          oneOf: [
+            { $ref: '#/components/schemas/Object' },
+            true,
+            { $ref: '#/components/schemas/Primitive' },
+            false,
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText('string')).toBeInTheDocument();
+    expect(screen.getByText(/download the specification/)).toBeInTheDocument();
+    expect(container.querySelectorAll('p').length).toBeLessThanOrEqual(3);
+    expect(refBudget.remaining).toBeLessThan(2);
+  });
+
   it('marks a self-referential $ref as circular instead of recursing', () => {
     const doc = {
       components: {

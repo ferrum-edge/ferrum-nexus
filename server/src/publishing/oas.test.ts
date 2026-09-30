@@ -423,6 +423,33 @@ describe('OpenAPI parsing', () => {
     });
   });
 
+  it('charges primitive schema entries to the render ceiling', () => {
+    const booleanSchemas = (count: number): Record<string, unknown> => ({
+      oneOf: Array.from({ length: count }, () => true),
+    });
+    const atLimit = {
+      components: { schemas: { Wide: booleanSchemas(MAX_SPEC_RENDER_UNITS - 2) } },
+    };
+    assertRenderCost(atLimit, {});
+
+    const overLimit = {
+      components: { schemas: { Wide: booleanSchemas(MAX_SPEC_RENDER_UNITS - 1) } },
+    };
+    const failure = expectSpecInvalid(() => assertRenderCost(overLimit, {}));
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: MAX_SPEC_RENDER_UNITS + 1,
+      parameters: 0,
+      media_types: 0,
+      responses: 0,
+      units: MAX_SPEC_RENDER_UNITS + 1,
+      limit: MAX_SPEC_RENDER_UNITS,
+    });
+
+    assertRenderCost({ components: { schemas: { Allowed: false } } }, {});
+  });
+
   it('charges a referenced parameter for the object it names, once', () => {
     // Twenty references to one wide component parameter, with nothing inline
     // and no `components.schemas`: the target's schema is charged at the first

@@ -807,7 +807,9 @@ function assertSpecShape(value: unknown, contentType: ParsedSpec['contentType'])
 }
 
 /**
- * Object and array nodes in `root`, counting each *occurrence*.
+ * Schema nodes in `root`, counting each *occurrence*, including primitive
+ * values. The viewer creates a placeholder element for values it cannot render
+ * as schema objects, so those values consume the same render allowance.
  *
  * Memoised per node: a YAML document may point many keys at one anchored
  * subtree, and re-walking it for every occurrence is exponential. The memo
@@ -815,33 +817,48 @@ function assertSpecShape(value: unknown, contentType: ParsedSpec['contentType'])
  * render, which is the number this limit is about. Cyclic aliases are already
  * rejected by {@link assertSpecShape}, so the walk terminates.
  */
-function countNodes(root: unknown, memo: WeakMap<object, number>): number {
-  if (root === null || typeof root !== 'object') return 0;
+function* objectValues(value: object): Generator<unknown> {
+  for (const key in value) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      yield (value as Record<string, unknown>)[key];
+    }
+  }
+}
+
+function countNodes(root: unknown, memo: WeakMap<object, number>, limit: number): number {
+  if (root === undefined) return 0;
+  if (root === null || typeof root !== 'object') return 1;
   const cached = memo.get(root);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) return cached <= limit ? cached : limit + 1;
+  if (limit < 1) return 1;
 
   interface Frame {
     value: object;
-    children: unknown[];
-    childIndex: number;
+    children: Generator<unknown>;
     total: number;
   }
 
   const pending: Frame[] = [];
-  pending.push({ value: root, children: Object.values(root), childIndex: 0, total: 1 });
+  pending.push({ value: root, children: objectValues(root), total: 1 });
   let rootTotal = 0;
 
   while (pending.length > 0) {
     const frame = pending[pending.length - 1]!;
-    if (frame.childIndex < frame.children.length) {
-      const child = frame.children[frame.childIndex++];
-      if (child === null || typeof child !== 'object') continue;
+    const next = frame.children.next();
+    if (!next.done) {
+      const child = next.value;
+      if (child === null || typeof child !== 'object') {
+        frame.total += 1;
+        if (frame.total > limit) return limit + 1;
+        continue;
+      }
       const cachedChild = memo.get(child);
       if (cachedChild !== undefined) {
         frame.total += cachedChild;
+        if (frame.total > limit) return limit + 1;
         continue;
       }
-      pending.push({ value: child, children: Object.values(child), childIndex: 0, total: 1 });
+      pending.push({ value: child, children: objectValues(child), total: 1 });
       continue;
     }
 
@@ -849,7 +866,10 @@ function countNodes(root: unknown, memo: WeakMap<object, number>): number {
     rootTotal = frame.total;
     pending.pop();
     const parent = pending[pending.length - 1];
-    if (parent) parent.total += frame.total;
+    if (parent) {
+      parent.total += frame.total;
+      if (parent.total > limit) return limit + 1;
+    }
   }
 
   return rootTotal;
@@ -943,6 +963,13 @@ export function assertRenderCost(
     );
   };
 
+  const availableUnits = (): number =>
+    MAX_SPEC_RENDER_UNITS -
+    units.schemaNodes -
+    units.parameters -
+    units.mediaTypes -
+    units.responses;
+
   // The object an entry names, or `null` when there is nothing further to
   // charge: an entry that cannot be followed renders as a single placeholder,
   // and a `$ref`'d object already charged costs nothing more.
@@ -960,7 +987,9 @@ export function assertRenderCost(
   const components = isRecord(document.components) ? document.components : null;
   const schemas = components && isRecord(components.schemas) ? components.schemas : null;
   if (schemas) {
-    for (const schema of Object.values(schemas)) charge(countNodes(schema, memo), 0, 0);
+    for (const schema of objectValues(schemas)) {
+      charge(countNodes(schema, memo, availableUnits()), 0, 0);
+    }
   }
 
   const addParameters = (list: unknown): void => {
@@ -968,7 +997,7 @@ export function assertRenderCost(
     charge(0, list.length, 0);
     for (const entry of list) {
       const parameter = chargeable(entry, chargedParameters);
-      if (parameter) charge(countNodes(parameter.schema, memo), 0, 0);
+      if (parameter) charge(countNodes(parameter.schema, memo, availableUnits()), 0, 0);
     }
   };
 
@@ -979,9 +1008,21 @@ export function assertRenderCost(
     if (cached) return cached;
     if (stats) stats.contentWalks += 1;
     const cost: ContentCost = { schemaNodes: 0, mediaTypes: 0 };
-    for (const media of Object.values(content)) {
+    for (const media of objectValues(content)) {
       cost.mediaTypes += 1;
-      if (isRecord(media)) cost.schemaNodes += countNodes(media.schema, memo);
+      if (cost.schemaNodes + cost.mediaTypes > availableUnits()) {
+        charge(cost.schemaNodes, 0, cost.mediaTypes);
+      }
+      if (isRecord(media)) {
+        cost.schemaNodes += countNodes(
+          media.schema,
+          memo,
+          availableUnits() - cost.mediaTypes - cost.schemaNodes,
+        );
+      }
+      if (cost.schemaNodes + cost.mediaTypes > availableUnits()) {
+        charge(cost.schemaNodes, 0, cost.mediaTypes);
+      }
     }
     contentCosts.set(content, cost);
     return cost;

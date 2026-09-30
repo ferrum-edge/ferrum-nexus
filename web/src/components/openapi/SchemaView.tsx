@@ -191,16 +191,15 @@ function renderNode(
   { schema, doc, name, required = false, depth, seen }: RenderArgs,
   budget: RenderBudget,
 ): ReactElement {
+  if (!chargeNode(budget)) {
+    return <TruncationNotice />;
+  }
+
   const node = asRecord(schema);
 
   if (!node) {
     return <p className="text-xs text-fg-subtle">No schema.</p>;
   }
-
-  if (budget.remaining <= 0) {
-    return <TruncationNotice />;
-  }
-  budget.remaining -= 1;
 
   const ref = asString(node.$ref);
   if (ref) {
@@ -250,9 +249,12 @@ function renderNode(
   // charges each occurrence as one node whatever its length.
   const description = displayText(asString(node.description), MAX_DISPLAYED_DESCRIPTION_LENGTH);
   const properties = asRecord(node.properties);
-  const requiredNames = new Set(
-    (asArray(node.required) ?? []).map(asString).filter((entry): entry is string => entry !== null),
-  );
+  const requiredNames = new Set<string>();
+  const required = asArray(node.required) ?? [];
+  for (let index = 0; index < required.length && index < budget.remaining; index += 1) {
+    const entry = asString(required[index]);
+    if (entry !== null) requiredNames.add(entry);
+  }
   const items = node.items;
   const composition =
     (asArray(node.oneOf) && { key: 'oneOf', entries: asArray(node.oneOf) }) ??
@@ -266,7 +268,7 @@ function renderNode(
   // rendered row per entry.
   const compositionRows: ReactElement[] = [];
   for (const entry of composition?.entries ?? []) {
-    if (budget.remaining <= 0) {
+    if (budget.remaining < 2 || !chargeNode(budget)) {
       compositionRows.push(<TruncationNotice key="__truncated" />);
       break;
     }
@@ -277,12 +279,16 @@ function renderNode(
     );
   }
 
-  const itemsRow =
-    items !== undefined ? renderNode({ schema: items, doc, depth: depth + 1, seen }, budget) : null;
+  const canRenderItems = items !== undefined && budget.remaining >= 2 && chargeNode(budget);
+  const itemsRow = canRenderItems
+    ? renderNode({ schema: items, doc, depth: depth + 1, seen }, budget)
+    : null;
+  const itemsTruncated = items !== undefined && !canRenderItems;
 
   const propertyRows: ReactElement[] = [];
-  for (const [propertyName, propertySchema] of Object.entries(properties ?? {})) {
-    if (budget.remaining <= 0) {
+  for (const propertyName in properties ?? {}) {
+    if (!properties || !Object.prototype.hasOwnProperty.call(properties, propertyName)) continue;
+    if (budget.remaining < 2 || !chargeNode(budget)) {
       propertyRows.push(<TruncationNotice key="__truncated" />);
       break;
     }
@@ -290,7 +296,7 @@ function renderNode(
       <div key={propertyName}>
         {renderNode(
           {
-            schema: propertySchema,
+            schema: properties[propertyName],
             doc,
             name: propertyName,
             required: requiredNames.has(propertyName),
@@ -327,6 +333,7 @@ function renderNode(
           {itemsRow}
         </div>
       ) : null}
+      {itemsTruncated ? <TruncationNotice /> : null}
 
       {propertyRows.length > 0 ? (
         <div className="mt-1 ml-3 flex flex-col gap-2 border-l border-border pl-3">

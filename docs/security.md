@@ -792,16 +792,20 @@ strangers allocating gateway resources should remove `provider` from
 A provider's OpenAPI document is rendered in the browser of every account that
 opens the catalog entry. Its rendering cost is bounded in three places:
 
-- **At publish.** Nexus counts what the viewer will walk (schema nodes,
-  parameters, responses, media types and inline schemas, with each `$ref`
-  target charged once) and refuses more than `MAX_SPEC_RENDER_UNITS` (100,000)
-  with `400 SPEC_INVALID`, `details.reason = "too_much_to_render"`.
+- **At publish.** Nexus counts what the viewer will walk (every schema value,
+  including primitive and boolean schemas, parameters, responses, media types
+  and inline schemas; each referenced parameter, request body or response
+  target is charged once) and refuses more than `MAX_SPEC_RENDER_UNITS`
+  (100,000) with `400 SPEC_INVALID`, `details.reason = "too_much_to_render"`.
 - **While following references.** One memoizing resolver per document follows
   parameter, request-body and response `$ref`s; chains stop after 32 hops and a
   pointer deeper than `MAX_SPEC_DEPTH` resolves to nothing.
-- **At render.** The viewer spends one node budget across the whole page; a
-  branch that exhausts it shows a single "truncated" marker and stops mounting
-  DOM. Because the budget counts nodes rather than characters, displayed text
+- **At render.** The viewer spends one node budget across the whole page,
+  charging primitive schema placeholders and the wrappers around schema
+  properties, items and composition entries before constructing them. A branch
+  that exhausts it shows a "truncated" marker and stops walking remaining
+  siblings. Repeated schema references draw on this same per-page budget.
+  Because the budget counts nodes rather than characters, displayed text
   is also capped per occurrence: descriptions at 1,000 characters, and
   summaries, paths, operation IDs, parameter names, media-type keys, property
   names, types and enum values at 200. A cut ends in `…` with a hint to
