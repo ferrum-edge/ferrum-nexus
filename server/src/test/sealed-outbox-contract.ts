@@ -273,6 +273,34 @@ export function runSealedOutboxContract(
       assert.ok(delivered[0]?.includes('/reset-password?token='), 'and it carries the link');
     });
 
+    it('fails rows with only one sealed-content marker', async () => {
+      const subjectOnly = await harness.store.emailOutbox.enqueue({
+        to_email: address('subject-marker'),
+        subject: OUTBOX_SEALED_SUBJECT,
+        body_html: '',
+        body_text: 'ciphertext without its sealed prefix',
+      });
+      const bodyOnly = await harness.store.emailOutbox.enqueue({
+        to_email: address('body-marker'),
+        subject: 'Plain subject',
+        body_html: '',
+        body_text: `${SEALED_BODY_PREFIX}ciphertext without its sealed subject marker`,
+      });
+
+      await drain();
+      for (const { entry } of [subjectOnly, bodyOnly]) {
+        const row = await harness.store.emailOutbox.findById(entry.id);
+        assert.equal(row?.status, 'failed', 'a partial sealed row is failed');
+        assert.equal(row?.attempts, 1, 'and never retried');
+        assert.ok(
+          row?.last_error?.startsWith(`${OUTBOX_SEALED_UNREADABLE}: `),
+          'the failure names the sealed-unreadable condition',
+        );
+      }
+      assert.deepEqual(deliveredTo(subjectOnly.entry.to_email), [], 'no ciphertext was sent');
+      assert.deepEqual(deliveredTo(bodyOnly.entry.to_email), [], 'no ciphertext was sent');
+    });
+
     it('seals bearer rows queued before sealing, in every status', async () => {
       const link = `${harness.config.publicUrl}/reset-password?token=legacy-synthetic-link`;
       const legacy = (email: string, key: string, nextAttemptAt?: string) =>

@@ -1104,8 +1104,28 @@ The worker opens it immediately before handing the message to SMTP. Other mail
 After an upgrade, the worker seals rows queued by an earlier version in place,
 in every status, up to 200 per tick, and stops looking once none are left. It
 logs `Sealed legacy outbox messages` with a `sealed` count while it does. An
-earlier version cannot open a sealed row, which is one more reason an upgrade
-stops every instance before the new release starts.
+earlier version cannot open a sealed row. If a pre-fix instance claims one, it
+emails ciphertext and burns the link. Before downgrading, fail every queued
+sealed row so an older worker cannot claim it:
+
+```sql
+UPDATE email_outbox
+SET status = 'failed', last_error = 'sealed-unreadable: downgrade'
+WHERE subject = 'nexus:sealed:v1' AND status IN ('pending', 'sending');
+```
+
+For MongoDB, run the equivalent update on the `email_outbox` collection:
+
+```javascript
+db.email_outbox.updateMany(
+  { subject: 'nexus:sealed:v1', status: { $in: ['pending', 'sending'] } },
+  { $set: { status: 'failed', last_error: 'sealed-unreadable: downgrade' } },
+);
+```
+
+An older instance still writing during a mixed-version deployment can leave
+plaintext bearer rows; the next restart's legacy sweep seals them. Stop every
+instance before starting the replacement release to avoid both cases.
 
 A `sending` row untouched for five minutes is assumed abandoned and returned to
 `pending`. This sweep runs at the start of every worker tick, on any instance.

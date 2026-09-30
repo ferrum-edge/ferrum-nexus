@@ -507,7 +507,10 @@ describe('CAPTCHA activation admission', () => {
     assert.equal(refusedRegistration.statusCode, 400, refusedRegistration.body);
     assert.equal(refusedRegistration.json<ApiErrorBody>().error.code, 'CAPTCHA_FAILED');
     assert.equal(await harness.store.users.findByEmail('other-site@example.test'), null);
-    assert.deepEqual(calls.map((call) => call.sitekey), ['public-site', 'public-site']);
+    assert.deepEqual(
+      calls.map((call) => call.sitekey),
+      ['public-site', 'public-site'],
+    );
 
     // Positive controls: the portal's own widget signs in and registers.
     const accepted = await login(GOOD_TOKEN);

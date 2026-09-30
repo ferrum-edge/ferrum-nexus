@@ -46,7 +46,7 @@ export const BEARER_TEMPLATE_KEYS: readonly EmailTemplateKey[] = ['verification'
  * (`verify:<token id>`) and a password reset (`reset:<token id>`). The legacy
  * sweep only looks at these.
  */
-export const BEARER_IDEMPOTENCY_PREFIXES: readonly string[] = ['verify:', 'reset:'];
+export const BEARER_IDEMPOTENCY_PREFIXES: readonly string[] = ['reset:', 'verify:'];
 
 /** Leads `body_text` of a sealed row; the envelope follows it. */
 export const SEALED_BODY_PREFIX = 'nexus-sealed-v1:';
@@ -130,7 +130,12 @@ export function isSealedOutboxRecord(entry: EmailOutboxRecord): boolean {
  *   something that is not mail content. The message says which, never what.
  */
 export function openOutboxRecord(crypto: NexusCrypto, entry: EmailOutboxRecord): MailContent {
-  if (!isSealedOutboxRecord(entry)) {
+  const hasSealedSubject = entry.subject === OUTBOX_SEALED_SUBJECT;
+  const hasSealedBody = entry.body_text.startsWith(SEALED_BODY_PREFIX);
+  if (hasSealedSubject !== hasSealedBody) {
+    throw new SealedOutboxError('sealed message has only one of its required markers');
+  }
+  if (!hasSealedSubject) {
     return { subject: entry.subject, html: entry.body_html, text: entry.body_text };
   }
   let opened: unknown;

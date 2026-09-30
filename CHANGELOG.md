@@ -59,7 +59,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   copied onto another row or sealed under a previous key is failed with
   `last_error` `sealed-unreadable: …` and never sent or retried. Rows queued by
   an earlier version are sealed in place by the worker, in every status, a
-  bounded batch per tick. Other mail is stored as before.
+  bounded batch per tick. Downgrading before failing queued sealed rows can
+  make an older instance email ciphertext and burn the link; a mixed-version
+  deployment can leave plaintext rows until the next restart's sweep. Other
+  mail is stored as before.
 - hCaptcha verification on login and registration is bound to the portal's
   configured site key (GHSA-8wv5-62xv-93cg). The site key is now sent as
   `sitekey` on every runtime verification, not only during the activation
