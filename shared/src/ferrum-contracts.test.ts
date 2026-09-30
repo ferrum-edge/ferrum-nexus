@@ -5,10 +5,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import {
-  FERRUM_PROVISIONED_BY_HEADER,
-  FERRUM_PROVISIONED_BY_VALUE,
-} from './constants.js';
+import { FERRUM_PROVISIONED_BY_HEADER, FERRUM_PROVISIONED_BY_VALUE } from './constants.js';
 import {
   FIRST_CLASS_PLUGIN_FIELDS,
   PLUGIN_CATEGORIES,
