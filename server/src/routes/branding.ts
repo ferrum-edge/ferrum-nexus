@@ -15,6 +15,11 @@
  * public `Cache-Control` and an `ETag`, so repeat traffic can be absorbed in
  * front of the server. The route-scoped limiter in `server/src/index.ts` is
  * the ceiling on top of that cache.
+ *
+ * Because a shared cache may keep that response, the route is marked
+ * `sharedCacheable`: the auth plugin never slides a session (and so never
+ * re-issues its cookies) here, and the root `onSend` hook turns any response
+ * that still carries `Set-Cookie` into `private, no-store`, 304s included.
  */
 
 import { createHash } from 'node:crypto';
@@ -192,24 +197,28 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
     auth.bootstrapRequired,
   );
 
-  app.get('/', async (request: FastifyRequest, reply: FastifyReply): Promise<BrandingResponse> => {
-    const [cached, bootstrap_required] = await Promise.all([
-      loadBranding(),
-      loadBootstrapRequired(),
-    ]);
-    const payload: BrandingResponse = { ...cached.value, bootstrap_required };
-    const maxAgeSec =
-      config.brandingCacheMs > 0 ? Math.max(1, Math.ceil(config.brandingCacheMs / 1000)) : 0;
+  app.get(
+    '/',
+    { config: { sharedCacheable: true } },
+    async (request: FastifyRequest, reply: FastifyReply): Promise<BrandingResponse> => {
+      const [cached, bootstrap_required] = await Promise.all([
+        loadBranding(),
+        loadBootstrapRequired(),
+      ]);
+      const payload: BrandingResponse = { ...cached.value, bootstrap_required };
+      const maxAgeSec =
+        config.brandingCacheMs > 0 ? Math.max(1, Math.ceil(config.brandingCacheMs / 1000)) : 0;
 
-    if (maxAgeSec > 0) {
-      const etag = brandingEtag(payload);
-      reply.header('cache-control', `public, max-age=${maxAgeSec}`);
-      reply.header('etag', etag);
-      if (request.headers['if-none-match'] === etag) {
-        return reply.status(304).send();
+      if (maxAgeSec > 0) {
+        const etag = brandingEtag(payload);
+        reply.header('cache-control', `public, max-age=${maxAgeSec}`);
+        reply.header('etag', etag);
+        if (request.headers['if-none-match'] === etag) {
+          return reply.status(304).send();
+        }
       }
-    }
 
-    return payload;
-  });
+      return payload;
+    },
+  );
 };

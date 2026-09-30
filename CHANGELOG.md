@@ -6,6 +6,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- Nodemailer 10.0.12 hardens SMTP message-body line endings by converting bare
+  carriage returns to CRLF, and makes `requireTLS` fail instead of silently
+  downgrading the connection.
+
+### Changed
+
+- Upgrade Nodemailer to 10.0.13. This also includes the 10.0.11 CommonJS and
+  type compatibility fixes, the 10.0.12 fix that settles sends after connection
+  errors, and 10.0.13 address-parsing fixes.
+
 ### Fixed
 
 - Text now meets WCAG AA contrast (4.5:1) throughout the portal, in both themes
@@ -27,6 +39,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Security
 
+- **Responses that set session cookies are never cacheable**
+  (GHSA-pr4m-gv4h-3x72). `GET /api/branding` is served with
+  `Cache-Control: public` so it can be cached in front of the server, but a
+  request carrying an ageing session also slid that session there and
+  re-issued both session cookies on the same public response, `304`s included.
+  The branding route no longer slides sessions (the next request to any other
+  API route does), and every response that sets or clears a cookie — on
+  success, `304` and error paths alike — is now forced to
+  `Cache-Control: private, no-store` with `Vary: Cookie`, overriding whatever
+  directive its route set. Sign-in and other cookie-setting responses change
+  from `no-store` to `private, no-store`.
 - **Revoking an HTTP Basic (`basicauth`) credential removes that credential's
   password** (GHSA-5526-6x2h-9hjw). Edge never lists `basicauth` entries, so
   the portal locates one only by the position its own rows give it. An append

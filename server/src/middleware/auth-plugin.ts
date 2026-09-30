@@ -9,7 +9,9 @@
  *    with a fresh `Max-Age`, so the browser's expiry tracks the database's.
  *    It never rejects: an anonymous request simply carries `null`, and the
  *    route's own guard decides whether that is acceptable. It runs for `/api`
- *    requests only — see {@link needsSession}.
+ *    requests only — see {@link needsSession}. It never slides on a route
+ *    marked `sharedCacheable` (`GET /api/branding`): that response may be kept
+ *    by a shared cache, so it must not carry the caller's session cookies.
  * 2. `onRequest` (after the first) — enforce the double-submit CSRF check on
  *    every mutating `/api` request that carries a session, except the
  *    pre-authentication auth endpoints.
@@ -161,6 +163,11 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (app, options) =
 
     request.session = session;
     request.currentUser = user;
+
+    // A publicly cacheable response must not carry the session cookies a slide
+    // re-issues, or a shared cache could replay them to another client. The
+    // next request to any other API route slides the session instead.
+    if (request.routeOptions.config?.sharedCacheable === true) return;
 
     // Sliding expiration: only write when less than half the TTL remains, so a
     // busy SPA does not issue one UPDATE per request.

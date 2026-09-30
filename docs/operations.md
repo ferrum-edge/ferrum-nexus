@@ -363,7 +363,8 @@ Each message writes a message row and an audit row. A **platform thread** (no
 `GET /api/branding` is unauthenticated. Its payload is cached for
 `NEXUS_BRANDING_CACHE_MS` (5 s) with `Cache-Control: public, max-age=…` and an
 `ETag`, and concurrent callers share one assembly. It is also rate limited
-(120/min per IP).
+(120/min per IP). It never sets cookies, so a CDN or reverse proxy may cache it;
+every response that does set one is `Cache-Control: private, no-store`.
 
 - Any committed settings write invalidates the cache on the instance that made
   it. Other instances catch up within the TTL; browser and CDN copies within
