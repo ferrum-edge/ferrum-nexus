@@ -234,7 +234,10 @@ describe('specification change history in the catalog', () => {
     // Newest first, and paged.
     const second = await changes(client, 'changes-rollback', '?limit=1&offset=1');
     assert.equal(second.total, 3);
-    assert.deepEqual(second.items.map((item) => item.id), [rollback?.id]);
+    assert.deepEqual(
+      second.items.map((item) => item.id),
+      [rollback?.id],
+    );
   });
 
   it('keeps summaries after retention prunes the revisions they describe', async () => {

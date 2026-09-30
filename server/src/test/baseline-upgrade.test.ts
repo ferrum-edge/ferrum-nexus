@@ -1056,7 +1056,10 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
               report: emptySpecChangeReport(),
             });
             const history = await store.apiSpecChanges.listByApi(ID.invoices);
-            assert.deepEqual(history.items.map((row) => row.revision_id), [ID.specV2]);
+            assert.deepEqual(
+              history.items.map((row) => row.revision_id),
+              [ID.specV2],
+            );
             assert.equal(await store.apiSpecChanges.deleteByApi(ID.invoices), 1);
 
             // Re-running in the same process changes nothing.

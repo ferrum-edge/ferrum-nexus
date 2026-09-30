@@ -71,7 +71,9 @@ function RevisionReport({ report }: { report: SpecChangeReport }): ReactElement 
           </p>
           {report.changes.length > 0 ? (
             <ul className="flex flex-col gap-2">
-              {report.changes.map((change, index) => <ChangeRow key={index} change={change} />)}
+              {report.changes.map((change, index) => (
+                <ChangeRow key={index} change={change} />
+              ))}
             </ul>
           ) : null}
           {report.truncated && unlisted > 0 ? (
@@ -159,7 +161,9 @@ export function SpecChangeHistory({ slug }: { slug: string }): ReactElement {
   return (
     <div className="flex flex-col gap-4">
       <ol className="flex flex-col gap-4" aria-label="Specification revisions">
-        {items.map((entry) => <RevisionEntry key={entry.id} entry={entry} />)}
+        {items.map((entry) => (
+          <RevisionEntry key={entry.id} entry={entry} />
+        ))}
       </ol>
       {total > CHANGE_HISTORY_PAGE_SIZE ? (
         <Card>
