@@ -103,6 +103,7 @@ import type {
   Message,
   MessageThread,
   Notification,
+  NotificationPreferences,
   NotificationType,
   Organization,
   Paginated,
@@ -1379,6 +1380,31 @@ export interface NotificationRepo {
   markRead(userId: Uuid, ids: Uuid[], at: IsoTimestamp): Promise<number>;
   /** Mark every unread notification of a user read. Returns the number changed. */
   markAllRead(userId: Uuid, at: IsoTimestamp): Promise<number>;
+  /**
+   * Which of `userIds` already hold an **unread** notification of `type`
+   * pointing at `link`, each once. How a repeated notice is coalesced: one
+   * the recipient has not read yet already says what a new one would.
+   */
+  listUsersWithUnread(userIds: Uuid[], type: NotificationType, link: string): Promise<Uuid[]>;
+}
+
+/**
+ * A `user_notification_preferences` row. An account without one receives
+ * every optional notice; see {@link NotificationPreferences}.
+ */
+export interface NotificationPreferencesRecord extends NotificationPreferences {
+  user_id: Uuid;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
+/** Per-account notification preferences, one row per account that changed one. */
+export interface NotificationPreferenceRepo {
+  find(userId: Uuid): Promise<NotificationPreferencesRecord | null>;
+  /** The rows of those of `userIds` that have one, in no particular order. */
+  findManyByUsers(userIds: Uuid[]): Promise<NotificationPreferencesRecord[]>;
+  /** Write every preference of one account, creating its row on first use. */
+  upsert(userId: Uuid, preferences: NotificationPreferences): Promise<NotificationPreferencesRecord>;
 }
 
 /** Payload accepted by {@link EmailOutboxRepo.enqueue}. */
@@ -1761,6 +1787,7 @@ export interface NexusStore {
   readonly threads: ThreadRepo;
   readonly messages: MessageRepo;
   readonly notifications: NotificationRepo;
+  readonly notificationPreferences: NotificationPreferenceRepo;
   readonly emailOutbox: EmailOutboxRepo;
   readonly gatewayTeardownJobs: GatewayTeardownJobRepo;
   readonly auditLogs: AuditLogRepo;

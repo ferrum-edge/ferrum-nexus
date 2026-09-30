@@ -93,6 +93,7 @@ describe('email template keys', () => {
       'mass',
       'message_received',
       'password_reset',
+      'spec_updated',
       'verification',
     ]);
   });

@@ -560,7 +560,22 @@ export type NotificationType =
   | 'message_received'
   | 'credential_rotated'
   | 'api_published'
+  | 'api_spec_updated'
   | 'system';
+
+/**
+ * Which optional notices an account receives. Every account starts with all of
+ * them on; the record exists only once the account changes one.
+ */
+export interface NotificationPreferences {
+  /**
+   * An in-app notice when an API the account holds a grant on publishes a new
+   * specification revision (or rolls one back).
+   */
+  api_spec_updated_in_app: boolean;
+  /** The same notice by email, at most one per API per hour. */
+  api_spec_updated_email: boolean;
+}
 
 /** An in-app notification for a single user. */
 export interface Notification {
