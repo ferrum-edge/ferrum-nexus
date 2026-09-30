@@ -10,6 +10,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ERROR_CODES, type SsoPublicConfigResponse } from '@ferrum-nexus/shared';
+import { SSO_ERROR_MESSAGES } from './LoginPage';
 
 const CAPTCHA = { enabled: false, provider: 'none', site_key: null };
 
@@ -111,7 +112,7 @@ describe('LoginPage single sign-on', () => {
     expect(screen.getByText(/open to super admins only/)).toBeInTheDocument();
   });
 
-  it('explains a refused single sign-on, and ignores reasons it does not know', async () => {
+  it('explains a refused single sign-on', async () => {
     await renderLogin(
       {
         policy: 'local_and_sso',
@@ -121,12 +122,10 @@ describe('LoginPage single sign-on', () => {
       },
       '/login?sso_error=email_not_verified',
     );
-    expect(
-      await screen.findByText('The identity provider has not verified your email address.'),
-    ).toBeInTheDocument();
-    cleanup();
-    vi.unstubAllGlobals();
+    expect(await screen.findByText(SSO_ERROR_MESSAGES.email_not_verified)).toBeInTheDocument();
+  });
 
+  it('shows nothing for a reason it does not know', async () => {
     await renderLogin(
       {
         policy: 'local_and_sso',
@@ -134,8 +133,12 @@ describe('LoginPage single sign-on', () => {
         registration_enabled: true,
         providers: PROVIDERS,
       },
-      '/login?sso_error=%3Cscript%3E',
+      '/login?sso_error=not-a-reason',
     );
+    await screen.findByRole('link', { name: /Continue with Corporate SSO/ });
+    for (const message of Object.values(SSO_ERROR_MESSAGES)) {
+      expect(screen.queryByText(message)).not.toBeInTheDocument();
+    }
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

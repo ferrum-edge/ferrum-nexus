@@ -1,6 +1,6 @@
 import { Link, useNavigate, useSearch } from '@tanstack/react-router';
 import { useCallback, useEffect, useState, type FormEvent, type ReactElement } from 'react';
-import { ERROR_CODES, type SsoErrorReason } from '@ferrum-nexus/shared';
+import { ERROR_CODES, isSsoErrorReason, type SsoErrorReason } from '@ferrum-nexus/shared';
 import { AuthShell, FormNotice } from '../components/auth/AuthShell';
 import { CaptchaWidget } from '../components/auth/CaptchaWidget';
 import { PasswordField } from '../components/auth/PasswordField';
@@ -66,6 +66,9 @@ export function LoginPage(): ReactElement {
     if (status === 'authenticated') void navigate({ to: '/', replace: true });
   }, [status, navigate]);
 
+  // Checked again here rather than trusting the route's search validation:
+  // the value comes from a URL anyone can craft.
+  const ssoMessage = isSsoErrorReason(ssoError) ? SSO_ERROR_MESSAGES[ssoError] : null;
   const providers = sso?.providers ?? [];
   // Until the policy is known the form is offered, as it always was.
   const passwordLogin = sso?.password_login ?? 'enabled';
@@ -109,9 +112,7 @@ export function LoginPage(): ReactElement {
       }
     >
       <div className="flex flex-col gap-4">
-        {ssoError && !error ? (
-          <FormNotice tone="danger">{SSO_ERROR_MESSAGES[ssoError]}</FormNotice>
-        ) : null}
+        {ssoMessage && !error ? <FormNotice tone="danger">{ssoMessage}</FormNotice> : null}
 
         {/* Full navigations, not fetches: the server answers with a redirect. */}
         {providers.length > 0 ? (
