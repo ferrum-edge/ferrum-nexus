@@ -6,6 +6,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- Nodemailer 10.0.12 hardens SMTP message-body line endings by converting bare
+  carriage returns to CRLF, and makes `requireTLS` fail instead of silently
+  downgrading the connection.
+
+### Changed
+
+- Upgrade Nodemailer to 10.0.13. This also includes the 10.0.11 CommonJS and
+  type compatibility fixes, the 10.0.12 fix that settles sends after connection
+  errors, and 10.0.13 address-parsing fixes.
+
 ### Fixed
 
 - Text now meets WCAG AA contrast (4.5:1) throughout the portal, in both themes
