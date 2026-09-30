@@ -575,18 +575,20 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
     );
     try {
       await store.transaction(async (tx) => {
-        await audit.forStore(tx).record(
-          run.actor,
-          AuditAction.API_SPEC_NOTIFY,
-          { type: 'api', id: run.api.id },
-          {
-            spec_id: run.change.revision_id,
-            kind: run.change.kind,
-            discarded: true,
-            superseded_spec_ids: run.supersededIds,
-          },
-          run.ip,
-        );
+        await audit
+          .forStore(tx)
+          .record(
+            run.actor,
+            AuditAction.API_SPEC_NOTIFY,
+            { type: 'api', id: run.api.id },
+            {
+              spec_id: run.change.revision_id,
+              kind: run.change.kind,
+              discarded: true,
+              superseded_spec_ids: run.supersededIds,
+            },
+            run.ip,
+          );
       });
     } catch (error) {
       log(
