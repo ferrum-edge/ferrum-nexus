@@ -25,6 +25,20 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   Administration › All APIs — in the header's location bar, the sidebar and the
   page's breadcrumb — instead of Publishing › My APIs.
 
+### Security
+
+- **Responses that set session cookies are never cacheable**
+  (GHSA-pr4m-gv4h-3x72). `GET /api/branding` is served with
+  `Cache-Control: public` so it can be cached in front of the server, but a
+  request carrying an ageing session also slid that session there and
+  re-issued both session cookies on the same public response, `304`s included.
+  The branding route no longer slides sessions (the next request to any other
+  API route does), and every response that sets or clears a cookie — on
+  success, `304` and error paths alike — is now forced to
+  `Cache-Control: private, no-store` with `Vary: Cookie`, overriding whatever
+  directive its route set. Sign-in and other cookie-setting responses change
+  from `no-store` to `private, no-store`.
+
 ## [0.2.0] - 2026-09-27
 
 Paired with Ferrum Edge `v0.9.8`. Upgrades a `v0.1.0` database in place with

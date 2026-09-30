@@ -116,6 +116,8 @@ route is unlimited.
   additionally capped at 2 MiB and by structural limits (see
   [`POST /api/apis`](#post-apiapis)).
 - All `/api` responses carry `cache-control: no-store` unless stated otherwise.
+  Any response that sets or clears a cookie carries
+  `cache-control: private, no-store` and `vary: Cookie`, with no exception.
   An unmatched `/api/*` path answers a JSON `404 NOT_FOUND`.
 
 ---
@@ -498,7 +500,8 @@ _public_ — drives the sign-in page before a session exists.
 
 The payload is cached for `NEXUS_BRANDING_CACHE_MS` (default 5 s; `0` disables)
 and, when the cache is on, served with `Cache-Control: public, max-age=…` and an
-`ETag`; send `If-None-Match` to get `304 Not Modified`. A settings write clears
+`ETag`; send `If-None-Match` to get `304 Not Modified`. It never sets cookies:
+a request carrying a session does not slide it here. A settings write clears
 the cache on the instance that handled it; other instances catch up within the
 TTL. `bootstrap_required: true` is never cached, so a founder seated on any
 instance is reflected at once.

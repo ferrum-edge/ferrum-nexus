@@ -6,13 +6,87 @@
  * and the auth plugin's sliding-expiration hook, which re-stamps the pair
  * whenever it extends the session row. Keeping the flags in a single module is
  * what makes "the cookie lifetime always matches the row" checkable.
+ *
+ * It also owns the rule that keeps those cookies out of shared caches: a
+ * response carrying `Set-Cookie` is never cacheable. The pair is a bearer
+ * credential, so a proxy or CDN that stored one response and replayed it to
+ * another client would hand that client the session. {@link setSessionCookies}
+ * and {@link clearSessionCookies} mark their reply at once, and
+ * {@link responseCachingHook}, the root `onSend` hook, re-applies the rule to
+ * every response as it leaves, whatever directive a handler wrote meanwhile.
  */
 
-import type { FastifyReply } from 'fastify';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import { CSRF_COOKIE, SESSION_COOKIE } from '@ferrum-nexus/shared';
 
 import type { NexusConfig } from '../config/index.js';
+import { isApiRequest } from './api-route.js';
+
+declare module 'fastify' {
+  interface FastifyContextConfig {
+    /**
+     * The route answers with a response shared caches may store (it sets its
+     * own `Cache-Control: public`). The auth plugin never slides the session on
+     * such a route, so the handler's response carries no session cookies; if a
+     * cookie is set anyway, {@link responseCachingHook} makes it uncacheable.
+     */
+    sharedCacheable?: boolean;
+  }
+}
+
+/** The `Cache-Control` of every response that sets or clears a cookie. */
+export const COOKIE_RESPONSE_CACHE_CONTROL = 'private, no-store';
+
+/** The `Cache-Control` of every other `/api` response that does not set its own. */
+export const API_DEFAULT_CACHE_CONTROL = 'no-store';
+
+/** Append `Cookie` to the reply's `Vary` unless it is already covered. */
+function varyOnCookie(reply: FastifyReply): void {
+  const current = reply.getHeader('vary');
+  const joined = Array.isArray(current) ? current.join(',') : String(current ?? '');
+  const values = joined
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  if (values.some((value) => value === '*' || value.toLowerCase() === 'cookie')) return;
+  reply.header('vary', [...values, 'Cookie'].join(', '));
+}
+
+/**
+ * Make the reply unstorable by any cache: `private, no-store`, overriding any
+ * directive already set (a `public` one included), plus `Vary: Cookie`.
+ */
+export function forbidResponseCaching(reply: FastifyReply): void {
+  reply.header('cache-control', COOKIE_RESPONSE_CACHE_CONTROL);
+  varyOnCookie(reply);
+}
+
+/**
+ * Root `onSend` hook: the final say on a response's cacheability.
+ *
+ * - Any response carrying `Set-Cookie` (200, 304 and errors alike) is forced to
+ *   {@link COOKIE_RESPONSE_CACHE_CONTROL}, replacing whatever the handler set.
+ * - Any other `/api` response without its own directive gets
+ *   {@link API_DEFAULT_CACHE_CONTROL}.
+ *
+ * It must be added after `@fastify/cookie` is registered: that plugin
+ * serializes `reply.setCookie` calls into the `Set-Cookie` header in its own
+ * root `onSend` hook, and Fastify runs hooks in registration order, so by the
+ * time this one runs every cookie the request set is visible as a header.
+ */
+export async function responseCachingHook(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  payload: unknown,
+): Promise<unknown> {
+  if (reply.hasHeader('set-cookie')) {
+    forbidResponseCaching(reply);
+  } else if (isApiRequest(request) && !reply.hasHeader('cache-control')) {
+    reply.header('cache-control', API_DEFAULT_CACHE_CONTROL);
+  }
+  return payload;
+}
 
 /**
  * The material written to the cookie pair. `IssuedSession` satisfies this
@@ -50,6 +124,7 @@ export function setSessionCookies(
   };
   reply.setCookie(SESSION_COOKIE, issued.token, { ...base, httpOnly: true });
   reply.setCookie(CSRF_COOKIE, issued.csrfToken, { ...base, httpOnly: false });
+  forbidResponseCaching(reply);
 }
 
 /** Clear the session pair on sign-out. */
@@ -57,4 +132,5 @@ export function clearSessionCookies(reply: FastifyReply, config: NexusConfig): v
   const base = { path: '/', sameSite: 'lax' as const, secure: config.cookieSecure };
   reply.clearCookie(SESSION_COOKIE, { ...base, httpOnly: true });
   reply.clearCookie(CSRF_COOKIE, { ...base, httpOnly: false });
+  forbidResponseCaching(reply);
 }
