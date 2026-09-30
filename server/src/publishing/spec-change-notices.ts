@@ -33,10 +33,11 @@
  * wait for it: {@link SpecChangeNotifier.notify} is started and left to run,
  * and never rejects. A failure is logged, and a batch that fails does not stop
  * the next. Fan-outs of one API run one at a time, and of several waiting only
- * the newest runs. On a graceful stop no further batch starts and the wait is
- * bounded; a crash loses what is left. Nothing retries it. The notices and emails of one batch commit together with the
- * `api.spec_notify` audit row that counts them, so a batch is never half
- * recorded. Each body is plain text built from the stored change summary, with
+ * the newest runs, carrying whether any it replaced broke something. On a
+ * graceful stop no further batch starts and the wait is bounded; a crash loses
+ * what is left. Nothing retries it. The notices and emails of one batch commit
+ * together with the `api.spec_notify` audit row that counts them, so a batch
+ * is never half recorded. Each body is plain text built from the stored change summary, with
  * every provider-written value made inert as a link; the email template escapes
  * it like every other value.
  */
@@ -287,9 +288,26 @@ interface FanOut {
   api: ApiRecord;
   change: ApiSpecChangeEntry;
   ip: string | null;
-  /** Earlier waiting fan-outs of the same API this one replaced. */
-  superseded: number;
+  /** Revisions of the same API whose waiting fan-outs this one replaced, oldest first. */
+  supersededIds: Uuid[];
+  /** Whether any of those revisions included a breaking change. */
+  supersededBreaking: boolean;
 }
+
+/** What a waiting fan-out passes on to the one that replaces it. */
+function carriedFrom(
+  previous: FanOut | null,
+): Pick<FanOut, 'supersededIds' | 'supersededBreaking'> {
+  if (previous === null) return { supersededIds: [], supersededBreaking: false };
+  return {
+    supersededIds: [...previous.supersededIds, previous.change.revision_id],
+    supersededBreaking: previous.supersededBreaking || previous.change.report.counts.breaking > 0,
+  };
+}
+
+/** What an email adds when a replaced revision broke something and this one did not. */
+const SUPERSEDED_BREAKING_NOTE =
+  'A revision published just before this one included breaking changes; see the Changes tab.';
 
 /** Build the spec-change notifier. */
 export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChangeNotifier {
@@ -320,12 +338,19 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
     const type = 'api_spec_updated' as const;
     const link = `/catalog/${encodeURIComponent(api.slug)}?tab=changes`;
     const notice = summarizeSpecChange(api.name, change);
+    // A replaced revision that broke something is still news: it marks every
+    // notice, fresh or rewritten, and the email says so.
+    const carried = run.supersededBreaking && !notice.breaking;
+    const freshContent = carried
+      ? rewrittenNotice(notice, true)
+      : { title: notice.title, body: notice.body };
+    const summary = carried ? `${notice.summary} ${SUPERSEDED_BREAKING_NOTE}` : notice.summary;
     const vars = {
       api_name: inertText(oneLine(api.name)),
       api_slug: api.slug,
       version: inertText(oneLine(change.version)),
       headline: inertText(notice.headline),
-      summary: inertText(notice.summary),
+      summary: inertText(summary),
       changes: notice.lines.map(specChangeEmailLine).join('\n'),
       changes_url: `${config.publicUrl}${link}`,
     };
@@ -352,7 +377,9 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
       spec_id: change.revision_id,
       kind: change.kind,
       version: oneLine(change.version),
-      superseded: run.superseded,
+      superseded: run.supersededIds.length,
+      superseded_spec_ids: run.supersededIds,
+      superseded_breaking: run.supersededBreaking,
       batches,
       failed_batches: failedBatches,
     });
@@ -397,18 +424,20 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
               fresh.map((userId) => ({
                 user_id: userId,
                 type,
-                title: notice.title,
-                body: notice.body,
+                title: freshContent.title,
+                body: freshContent.body,
                 link,
               })),
             );
           }
-          // A rewritten notice keeps saying an earlier revision was breaking.
-          const earlierBreaking: Uuid[] = [];
-          const plain: Uuid[] = [];
-          for (const row of unreadBy.values()) {
-            (row.title.endsWith(BREAKING_TITLE_MARK) ? earlierBreaking : plain).push(row.user_id);
+          // A rewritten notice keeps saying an earlier revision was breaking,
+          // whichever of an account's unread notices said it.
+          const marked = new Set<Uuid>();
+          for (const row of unread) {
+            if (carried || row.title.endsWith(BREAKING_TITLE_MARK)) marked.add(row.user_id);
           }
+          const earlierBreaking = [...unreadBy.keys()].filter((userId) => marked.has(userId));
+          const plain = [...unreadBy.keys()].filter((userId) => !marked.has(userId));
           await tx.notifications.updateUnread(
             earlierBreaking,
             type,
@@ -418,13 +447,15 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
           await tx.notifications.updateUnread(plain, type, link, rewrittenNotice(notice, false));
           counts.notified = fresh.length;
           counts.already_notified = unreadBy.size;
-          await audit.forStore(tx).record(
-            actor,
-            AuditAction.API_SPEC_NOTIFY,
-            { type: 'api', id: api.id },
-            { ...details(), batch: batch + 1, ...counts },
-            ip,
-          );
+          await audit
+            .forStore(tx)
+            .record(
+              actor,
+              AuditAction.API_SPEC_NOTIFY,
+              { type: 'api', id: api.id },
+              { ...details(), batch: batch + 1, ...counts },
+              ip,
+            );
         });
       } catch (error) {
         failedBatches += 1;
@@ -443,13 +474,15 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
     if (failedBatches > 0 || skippedBatches > 0) {
       // Batches that failed or were skipped recorded nothing, so one row says so.
       await store.transaction(async (tx) => {
-        await audit.forStore(tx).record(
-          actor,
-          AuditAction.API_SPEC_NOTIFY,
-          { type: 'api', id: api.id },
-          { ...details(), skipped_batches: skippedBatches },
-          ip,
-        );
+        await audit
+          .forStore(tx)
+          .record(
+            actor,
+            AuditAction.API_SPEC_NOTIFY,
+            { type: 'api', id: api.id },
+            { ...details(), skipped_batches: skippedBatches },
+            ip,
+          );
       });
     }
 
@@ -533,6 +566,36 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
     }
   };
 
+  /** A waiting fan-out a graceful stop will not run: logged, and recorded if it can be. */
+  const recordDiscarded = async (run: FanOut): Promise<void> => {
+    const specIds = [...run.supersededIds, run.change.revision_id];
+    log(
+      { api_id: run.api.id, spec_ids: specIds },
+      'Stopping: a waiting spec change fan-out was not sent',
+    );
+    try {
+      await store.transaction(async (tx) => {
+        await audit.forStore(tx).record(
+          run.actor,
+          AuditAction.API_SPEC_NOTIFY,
+          { type: 'api', id: run.api.id },
+          {
+            spec_id: run.change.revision_id,
+            kind: run.change.kind,
+            discarded: true,
+            superseded_spec_ids: run.supersededIds,
+          },
+          run.ip,
+        );
+      });
+    } catch (error) {
+      log(
+        { api_id: run.api.id, error: error instanceof Error ? error.message : String(error) },
+        'Could not record a discarded spec change fan-out',
+      );
+    }
+  };
+
   const idle = async (): Promise<void> => {
     while (lanes.size > 0) await Promise.all([...lanes.values()].map((lane) => lane.done));
   };
@@ -544,13 +607,7 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
       if (!change.report.changed || stopping) return Promise.resolve();
       const lane = lanes.get(api.id);
       if (lane) {
-        lane.waiting = {
-          actor,
-          api,
-          change,
-          ip,
-          superseded: lane.waiting ? lane.waiting.superseded + 1 : 0,
-        };
+        lane.waiting = { actor, api, change, ip, ...carriedFrom(lane.waiting) };
         return lane.done;
       }
       const created: { waiting: FanOut | null; done: Promise<void> } = {
@@ -559,11 +616,17 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
       };
       lanes.set(api.id, created);
       created.done = (async (): Promise<void> => {
-        let next: FanOut | null = { actor, api, change, ip, superseded: 0 };
+        let next: FanOut | null = { actor, api, change, ip, ...carriedFrom(null) };
         while (next !== null) {
           await runSafely(next);
-          next = stopping ? null : created.waiting;
+          const waiting: FanOut | null = created.waiting;
           created.waiting = null;
+          if (waiting !== null && stopping) {
+            await recordDiscarded(waiting);
+            next = null;
+          } else {
+            next = waiting;
+          }
         }
         lanes.delete(api.id);
       })();

@@ -31,6 +31,7 @@ import {
   type ListNotificationsResponse,
   type Notification,
   type PublishApiResponse,
+  type SpecChangeReport,
 } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
@@ -503,6 +504,7 @@ describe('spec change notifications', () => {
       assert.deepEqual(ran.map((details) => details.spec_id).sort(), ['quick-1', 'quick-3']);
       const newest = ran.find((details) => details.spec_id === 'quick-3');
       assert.equal(newest?.superseded, 1, 'quick-2 was folded into it');
+      assert.deepEqual(newest?.superseded_spec_ids, ['quick-2']);
       assert.equal((await quickNotices()).length, 1, 'and still one notice');
     });
 
@@ -536,6 +538,75 @@ describe('spec change notifications', () => {
       assert.equal(fresh?.read_at, null, 'a new, unread notice');
       assert.equal(fresh?.title, 'Notify Quick spec updated to 9.0.0');
       assert.ok(read?.read_at, 'beside the one they read');
+    });
+
+    it('keeps a replaced breaking revision in the notice that replaces it', async () => {
+      const api = await harness.store.apis.findById(quickId);
+      assert.ok(api);
+      let batchCalls = 0;
+      const notifier = createSpecChangeNotifier({
+        store: harness.store,
+        email: harness.services.email,
+        audit: harness.services.audit,
+        config: harness.config,
+        // By the time C runs, erin has read everything, so C's notice is new.
+        onBatch: async () => {
+          batchCalls += 1;
+          if (batchCalls !== 2) return;
+          await harness.store.notifications.markAllRead(erin.user.id, new Date().toISOString());
+        },
+      });
+      const breakingReport: SpecChangeReport = {
+        ...emptySpecChangeReport(),
+        changed: true,
+        changes: [
+          {
+            kind: 'operation_removed',
+            severity: 'breaking',
+            operation: { method: 'DELETE', path: '/orders/{id}' },
+            section: 'operation',
+            location: null,
+            schema_path: null,
+            from: null,
+            to: null,
+          },
+        ],
+        counts: { ...emptySpecChangeReport().counts, breaking: 1, operations_removed: 1 },
+      };
+      const harmlessReport: SpecChangeReport = {
+        ...emptySpecChangeReport(),
+        changed: true,
+        info_changes: ['version'],
+      };
+      const entry = (revision: string, breaking: boolean): ApiSpecChangeEntry => ({
+        id: `${revision}-change`,
+        api_id: quickId,
+        revision_id: revision,
+        previous_revision_id: null,
+        kind: 'update',
+        version: revision,
+        previous_version: null,
+        report: breaking ? breakingReport : harmlessReport,
+        created_at: new Date().toISOString(),
+      });
+      const actor = { id: provider.user.id, role: provider.user.role };
+      // A runs; B, which breaks something, waits; C, which does not, replaces it.
+      void notifier.notify(actor, api, entry('abc-a', false), null);
+      void notifier.notify(actor, api, entry('abc-b', true), null);
+      void notifier.notify(actor, api, entry('abc-c', false), null);
+      await notifier.idle();
+
+      const audited = await notifyRows();
+      const ran = audited.filter((details) => String(details.spec_id).startsWith('abc-'));
+      assert.deepEqual(ran.map((details) => details.spec_id).sort(), ['abc-a', 'abc-c']);
+      const last = ran.find((details) => details.spec_id === 'abc-c');
+      assert.deepEqual(last?.superseded_spec_ids, ['abc-b'], 'B is named, not just counted');
+      assert.equal(last?.superseded_breaking, true);
+
+      const [newest] = await quickNotices();
+      assert.equal(newest?.read_at, null);
+      assert.equal(newest?.title, 'Notify Quick spec updated to abc-c (breaking changes)');
+      assert.match(newest?.body ?? '', /An earlier revision since you last read included breaking/);
     });
   });
 
