@@ -139,7 +139,7 @@ describe('responses that set cookies are never shared-cacheable', () => {
 
     assert.ok(response.headers['set-cookie'] !== undefined);
     assert.equal(response.headers['cache-control'], COOKIE_RESPONSE_CACHE_CONTROL);
-    assert.equal(response.headers.vary, 'Accept-Encoding, cookie');
+    assert.deepEqual(response.headers.vary, ['Accept-Encoding', 'cookie']);
   });
 
   it('preserves Vary: * when making a cookie response uncacheable', async () => {
