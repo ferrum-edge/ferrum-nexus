@@ -2309,7 +2309,7 @@ it. So:
   (listed in the `credential.revoke` row's `swept_credential_ids`).
 - While any `basicauth` row of the identity is `retiring` — an append or delete
   whose outcome the gateway never confirmed — issuing or rotating is `409
-  CONFLICT`. A revoke without the query parameter can revoke a retiring row
+CONFLICT`. A revoke without the query parameter can revoke a retiring row
   only when no active row remains; otherwise it returns `409 CONFLICT`.
 - `DELETE /api/credentials/:id?clear_type=true` explicitly deletes every Basic
   Auth credential for that consumer identity, settles every live row, and

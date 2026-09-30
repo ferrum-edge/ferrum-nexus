@@ -2055,9 +2055,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
                 { limit: MAX_PAGE_SIZE, offset: changeOffset },
               );
               alreadyCleared = changes.items.some(
-                (row) =>
-                  row.created_at > event.created_at &&
-                  row.target_id === consumerId,
+                (row) => row.created_at > event.created_at && row.target_id === consumerId,
               );
               if (alreadyCleared || changes.items.length < MAX_PAGE_SIZE) break;
               changeOffset += changes.items.length;

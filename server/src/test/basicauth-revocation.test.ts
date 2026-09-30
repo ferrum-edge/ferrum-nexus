@@ -565,10 +565,7 @@ describe('basicauth recovery above the default credential cap', () => {
       });
       assert.equal(cleared.statusCode, 200, cleared.body);
       for (const credential of issued) {
-        assert.equal(
-          (await harness.store.credentials.findById(credential.id))?.status,
-          'revoked',
-        );
+        assert.equal((await harness.store.credentials.findById(credential.id))?.status, 'revoked');
       }
     } finally {
       await harness.close();
