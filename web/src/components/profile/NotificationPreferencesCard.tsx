@@ -7,8 +7,9 @@ import { Checkbox } from '../ui/Input';
 import { LoadingPanel } from '../ui/Spinner';
 
 /**
- * The optional notices an account can turn off: today, the two channels of
- * the spec-change notice (issue #447). Each box saves on its own.
+ * The optional notices an account chooses: today, the two channels of the
+ * spec-change notice (issue #447) — in-app, on by default, and email, off
+ * until the account turns it on. Each box saves on its own.
  */
 export function NotificationPreferencesCard(): ReactElement {
   const query = useNotificationPreferences();
@@ -45,7 +46,7 @@ export function NotificationPreferencesCard(): ReactElement {
             />
             <Checkbox
               label="Email me when an API I use changes its specification"
-              description="At most one email an hour for each API."
+              description="Off until you turn it on. At most one email an hour for each API."
               checked={preferences.api_spec_updated_email}
               disabled={update.isPending}
               onChange={(event) => save({ api_spec_updated_email: event.target.checked })}

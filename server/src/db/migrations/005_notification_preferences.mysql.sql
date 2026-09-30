@@ -6,7 +6,7 @@
 CREATE TABLE IF NOT EXISTS user_notification_preferences (
   user_id                 VARCHAR(64) NOT NULL,
   api_spec_updated_in_app TINYINT     NOT NULL DEFAULT 1,
-  api_spec_updated_email  TINYINT     NOT NULL DEFAULT 1,
+  api_spec_updated_email  TINYINT     NOT NULL DEFAULT 0,
   created_at              VARCHAR(32) NOT NULL,
   updated_at              VARCHAR(32) NOT NULL,
   PRIMARY KEY (user_id),

@@ -564,16 +564,19 @@ export type NotificationType =
   | 'system';
 
 /**
- * Which optional notices an account receives. Every account starts with all of
- * them on; the record exists only once the account changes one.
+ * Which optional notices an account receives. The record exists only once the
+ * account changes one; until then each has the default documented below.
  */
 export interface NotificationPreferences {
   /**
    * An in-app notice when an API the account holds a grant on publishes a new
-   * specification revision (or rolls one back).
+   * specification revision (or rolls one back). On by default.
    */
   api_spec_updated_in_app: boolean;
-  /** The same notice by email, at most one per API per hour. */
+  /**
+   * The same notice by email, at most one per API per hour. **Off** by
+   * default: the account opts in.
+   */
   api_spec_updated_email: boolean;
 }
 

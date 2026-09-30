@@ -120,10 +120,10 @@ behaves, so a change it does not list can still affect you. The history is
 readable by everyone who can read the documentation.
 
 If you have access to an API, you are told when a new revision changes it: a
-notice in the bell and an email, both linking to the **Changes** tab. You get
-one notice until you read it and at most one email an hour per API, however
-many revisions the provider publishes. Turn either off under **Profile →
-Notifications**.
+notice in the bell that links to the **Changes** tab. You get one until you
+read it, however many revisions the provider publishes. Under **Profile →
+Notifications** you can turn the notice off, or turn on an email as well, sent
+at most once an hour per API.
 
 ### "I was sent a link but cannot find the API in the catalog"
 

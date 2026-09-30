@@ -14,6 +14,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import {
+  MAX_TYPE_ENTRIES,
   compareSpecRevisions,
   compareSpecRevisionsSafely,
   type SpecChangeStats,
@@ -69,7 +70,7 @@ function hostile(properties: string, extraResponses = ''): Document {
 }
 
 function stats(): SpecChangeStats {
-  return { units: 0, schemaPairs: 0, componentPairs: 0 };
+  return { units: 0, schemaPairs: 0, componentPairs: 0, typeEntries: 0 };
 }
 
 describe('consumer-facing revision comparison', () => {
@@ -463,7 +464,8 @@ describe('consumer-facing revision comparison', () => {
     assert.doesNotMatch(text, /SECRET|internal\.example/);
   });
 
-  it('reads at most a bounded prefix of a `type` list, however long', () => {
+  // A regression here would hang rather than fail, so it is given a deadline.
+  it('reads at most a bounded prefix of a `type` list, however long', { timeout: 10_000 }, () => {
     // Junk names are not types, so the only ones that count are the seven
     // JSON Schema ones, and a list is read no further than a type list can be.
     const junk = Array.from({ length: 100_000 }, (_, index) => `t${index}`);
@@ -485,6 +487,12 @@ describe('consumer-facing revision comparison', () => {
     assert.equal(report.complete, true);
     assert.equal(report.counts.breaking + report.counts.non_breaking, 0);
     assert.ok(counters.units < 2_000, `spent ${counters.units}`);
+    // Two lists per schema pair, each read no further than the bound.
+    assert.equal(counters.schemaPairs, 200);
+    assert.ok(
+      counters.typeEntries <= counters.schemaPairs * 2 * MAX_TYPE_ENTRIES,
+      `read ${counters.typeEntries} type entries`,
+    );
 
     // A real list still compares.
     const widened = compareSpecRevisions(

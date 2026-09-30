@@ -159,11 +159,14 @@ const NOTIFICATION_PREFERENCE_KEYS = [
   'api_spec_updated_email',
 ] as const satisfies readonly (keyof NotificationPreferences)[];
 
-/** An account's preferences, from its row or, without one, every notice on. */
+/**
+ * An account's preferences, from its row or, without one, the defaults: the
+ * in-app spec-change notice on, its email off until the account asks for it.
+ */
 function preferencesOf(record: NotificationPreferencesRecord | null): NotificationPreferences {
   return {
     api_spec_updated_in_app: record?.api_spec_updated_in_app ?? true,
-    api_spec_updated_email: record?.api_spec_updated_email ?? true,
+    api_spec_updated_email: record?.api_spec_updated_email ?? false,
   };
 }
 
@@ -181,7 +184,7 @@ export interface UsersService {
     patch: UpdateMeInput,
     context?: RequestContext,
   ): Promise<UpdateMeResult>;
-  /** The caller's notification preferences: every notice on until it changes one. */
+  /** The caller's notification preferences, or the defaults until it changes one. */
   getNotificationPreferences(user: UserRecord): Promise<NotificationPreferences>;
   /** Change the preferences named in `patch`, and only those. Audited when one changes. */
   updateNotificationPreferences(

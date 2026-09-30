@@ -773,8 +773,10 @@ export async function buildServer(
 
   await app.register(
     async (scope) => {
-      // `global: false` so only the spec route — the one read that parses a
-      // whole document — carries a limit, bucketed per account.
+      // `global: false` so only the routes that ask for one carry a limit,
+      // bucketed per account: the spec route, the one read that parses a whole
+      // document, and the change history routes, which share its budget shape
+      // so one account cannot walk every API's history unthrottled.
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
       }

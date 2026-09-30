@@ -9,7 +9,8 @@
  * - an identical re-upload tells nobody anything;
  * - a burst of revisions is coalesced: no second notice while the first is
  *   unread, no second email inside the hour;
- * - each channel can be turned off per account;
+ * - each channel is chosen per account: the notice is on until turned off,
+ *   the email off until turned on;
  * - provider-written names are escaped in the email's HTML;
  * - a notification failure never fails the publish, and a failed publish
  *   notifies nobody;
@@ -125,6 +126,16 @@ describe('spec change notifications', () => {
     );
   }
 
+  async function turnEmailOn(session: TestSession): Promise<void> {
+    const response = await harness.authed(session, {
+      method: 'PATCH',
+      url: '/api/users/me/notification-preferences',
+      payload: { api_spec_updated_email: true },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+  }
+
+  /** The fan-out's audit rows, newest first, as the store lists them. */
   async function notifyRows(): Promise<Record<string, unknown>[]> {
     return (await harness.auditRows(AuditAction.API_SPEC_NOTIFY)).map((row) => row.details);
   }
@@ -159,12 +170,10 @@ describe('spec change notifications', () => {
     await grant(bob, apiId);
     await grant(admin, apiId);
 
-    const optedOut = await harness.authed(bob, {
-      method: 'PATCH',
-      url: '/api/users/me/notification-preferences',
-      payload: { api_spec_updated_email: false },
-    });
-    assert.equal(optedOut.statusCode, 200, optedOut.body);
+    // Email is opt-in: bob never turns it on.
+    await turnEmailOn(alice);
+    await turnEmailOn(admin);
+    await turnEmailOn(carol);
   });
 
   after(async () => {
@@ -196,7 +205,7 @@ describe('spec change notifications', () => {
     const history = `${harness.config.publicUrl}/catalog/notify-billing?tab=changes`;
     assert.ok(mail.body_text.includes(history), 'it links to the change history');
     assert.match(mail.body_text, /Removed: POST \/invoices/);
-    assert.deepEqual(await mails(bob), [], 'bob turned email off');
+    assert.deepEqual(await mails(bob), [], 'bob never turned email on');
     assert.deepEqual(await mails(admin), []);
 
     const rows = await notifyRows();
@@ -204,7 +213,7 @@ describe('spec change notifications', () => {
     assert.equal(rows[0]?.recipients, 2);
     assert.equal(rows[0]?.notified, 2);
     assert.equal(rows[0]?.emailed, 1);
-    assert.equal(rows[0]?.opted_out_email, 1);
+    assert.equal(rows[0]?.email_off, 1);
     assert.equal(rows[0]?.kind, 'update');
   });
 
@@ -218,7 +227,9 @@ describe('spec change notifications', () => {
     assert.equal((await notices(admin)).length, 1);
     assert.equal((await mails(admin)).length, 1);
 
-    const row = (await notifyRows()).at(-1);
+    // Found by the revision it describes, not by position: rows written in
+    // one millisecond have no order between them.
+    const row = (await notifyRows()).find((details) => details.version === '3.0.0');
     assert.equal(row?.recipients, 3);
     assert.equal(row?.notified, 1);
     assert.equal(row?.already_notified, 2);
@@ -255,7 +266,9 @@ describe('spec change notifications', () => {
     assert.equal((await notices(alice)).length, 2);
     assert.equal((await notices(bob)).length, 1, 'bob has still not read his');
     assert.equal((await mails(alice)).length, 2, 'a new hour, a new email');
-    assert.equal((await notifyRows()).at(-1)?.kind, 'rollback');
+    const rollback = (await notifyRows()).find((details) => details.kind === 'rollback');
+    assert.equal(rollback?.version, '1.0.0');
+    assert.equal(rollback?.notified, 1, 'alice, whose last notice was read');
   });
 
   it('says nothing about an identical re-upload', async () => {
@@ -311,39 +324,40 @@ describe('spec change notifications', () => {
   });
 
   it('keeps preferences per account, and audits a change', async () => {
-    const read = await harness.authed(carol, {
-      method: 'GET',
-      url: '/api/users/me/notification-preferences',
-    });
-    assert.equal(read.statusCode, 200, read.body);
-    assert.deepEqual(read.json<GetNotificationPreferencesResponse>().preferences, {
+    const dave = await harness.registerUser({ email: 'notify-dave@example.test' });
+    const read = async (): Promise<unknown> => {
+      const response = await harness.authed(dave, {
+        method: 'GET',
+        url: '/api/users/me/notification-preferences',
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      return response.json<GetNotificationPreferencesResponse>().preferences;
+    };
+    // The notice is on and the email off until the account says otherwise.
+    assert.deepEqual(await read(), {
       api_spec_updated_in_app: true,
-      api_spec_updated_email: true,
+      api_spec_updated_email: false,
     });
 
     const change = async (payload: Record<string, unknown>): Promise<number> => {
-      const response = await harness.authed(carol, {
+      const response = await harness.authed(dave, {
         method: 'PATCH',
         url: '/api/users/me/notification-preferences',
         payload,
       });
       return response.statusCode;
     };
-    assert.equal(await change({ api_spec_updated_in_app: false }), 200);
-    assert.equal(await change({ api_spec_updated_in_app: false }), 200, 'a no-op is fine');
+    assert.equal(await change({ api_spec_updated_email: true }), 200);
+    assert.equal(await change({ api_spec_updated_email: true }), 200, 'a no-op is fine');
     assert.equal(await change({ unknown: true }), 400);
-
-    const after = await harness.authed(carol, {
-      method: 'GET',
-      url: '/api/users/me/notification-preferences',
-    });
-    assert.deepEqual(after.json<GetNotificationPreferencesResponse>().preferences, {
-      api_spec_updated_in_app: false,
+    assert.deepEqual(await read(), {
+      api_spec_updated_in_app: true,
       api_spec_updated_email: true,
     });
+
     const audited = await harness.auditRows(AuditAction.USER_NOTIFICATION_PREFERENCES_UPDATE);
-    const rows = audited.filter((row) => row.target_id === carol.user.id);
+    const rows = audited.filter((row) => row.target_id === dave.user.id);
     assert.equal(rows.length, 1, 'only the change is audited');
-    assert.deepEqual(rows[0]?.details.changed, ['api_spec_updated_in_app']);
+    assert.deepEqual(rows[0]?.details.changed, ['api_spec_updated_email']);
   });
 });

@@ -275,7 +275,8 @@ the message that opened the window. In-app notifications are not batched.
 `spec_updated` is sent at most once per API, per recipient, per **hour**, for
 the first revision in that hour; it links to the API's Changes tab, which lists
 every revision. `{{summary}}` and `{{changes}}` quote names from the provider's
-document as plain text. Users can turn it off on their profile page.
+document as plain text. It is off by default: users turn it on on their
+profile page.
 
 Handle three templates with care:
 

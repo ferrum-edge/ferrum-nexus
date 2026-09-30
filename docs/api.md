@@ -574,12 +574,12 @@ account).
 ### `GET /api/users/me/notification-preferences`
 
 _session_ → `{ "preferences": NotificationPreferences }`. An account that never
-changed one has every notice on.
+changed one gets the defaults below: the in-app notice on, the email off.
 
 | Field                     | Default | Controls                                                                                     |
 | ------------------------- | ------- | -------------------------------------------------------------------------------------------- |
 | `api_spec_updated_in_app` | `true`  | the in-app notice when an API the account holds a grant on publishes a changed spec revision |
-| `api_spec_updated_email`  | `true`  | the same notice by email                                                                     |
+| `api_spec_updated_email`  | `false` | the same notice by email: off until the account turns it on                                  |
 
 ### `PATCH /api/users/me/notification-preferences`
 
@@ -1932,9 +1932,9 @@ _provider_, owner or admin — publish a new spec revision. Body: `spec`
   `spec_changes: { breaking, non_breaking, complete }`.
 - **Grantees are told.** Once the revision has committed, when the comparison
   found a change, every account holding an active grant on the API gets an
-  `api_spec_updated` notification and a `spec_updated` email, once per account
-  however many of its identities hold a grant, and never the account that
-  published. Each channel follows the account's
+  `api_spec_updated` notification, and a `spec_updated` email if it turned
+  email on, once per account however many of its identities hold a grant, and
+  never the account that published. Each channel follows the account's
   [notification preferences](#get-apiusersmenotification-preferences). A
   second notice waits until the first is read, and at most one email per API
   per account goes out per hour (the outbox idempotency key

@@ -375,13 +375,13 @@ Each message writes a message row and an audit row. A **platform thread** (no
 - **A spec change reaches each grantee account once.** When a revision that
   changes something is published, every account holding an active grant on the
   API (once, whatever its identities hold) except the publisher gets an
-  `api_spec_updated` notice and a `spec_updated` email, as its notification
-  preferences allow. A provider publishing many revisions sends each account
+  `api_spec_updated` notice and, if the account turned email on (it is off by
+  default), a `spec_updated` email. A provider publishing many revisions sends each account
   one email per API per hour and one notice until it is read; both link to the
   API's Changes tab, which lists every revision. The fan-out runs after the
   revision commits, in transactions of 200 accounts, each with an
   `api.spec_notify` audit row counting who was notified, emailed, coalesced or
-  opted out. A failure is logged at `warn` and never fails the publish.
+  had the channel off. A failure is logged at `warn` and never fails the publish.
 
 #### Branding
 
@@ -568,7 +568,8 @@ owns. It copies no data:
 `005_notification_preferences` (pending; ships in the next release) adds the
 `user_notification_preferences` table: one row per account that changed a
 notification preference, keyed by the account. It copies no data, so every
-existing account keeps receiving every notice until it opts out. On MongoDB
+existing account gets the defaults (the spec-change notice in-app, no email)
+until it changes one. On MongoDB
 the collection is keyed by `_id` and the step declares no index.
 
 `004_api_spec_changes` (pending; ships in the next release) adds the

@@ -101,9 +101,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
     // Pending: ships with the next release, which sets `release`.
     release: null,
     sha256: {
-      sqlite: 'b26e8fc1197a503559de192683df702eb52dc0c04d33f623d20579025e2e140e',
-      pg: 'cea3d055637e66e4a4f2483ad89ad6589507296fcca3f09b4f23a6a50ca36517',
-      mysql: 'aabda4941d0c09af4abfd5b0cf8ad6f1ea2ae7ada6dc899f861322953c610e10',
+      sqlite: '96d6a280449b306703c388e57f1a53b313718874cc06a042626231f38373fce4',
+      pg: 'f138bdc749c7c27154ae6b1ea446c4c8913f15561186bdf609a3517bb9956cc7',
+      mysql: '7776d9ee44ab8dd4897a8c9d31a90dd81a697d02bacf3447a270c5863b1ed2e0',
       mongodb: '1a719fae713931afb77416cd2dd59b2f43ef86cfe463351e0fe55a285424baf9',
     },
   },

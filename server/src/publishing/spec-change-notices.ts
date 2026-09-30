@@ -11,8 +11,10 @@
  *
  * - **Only real changes.** An identical re-upload changes nothing and sends
  *   nothing.
- * - **Preferences.** Each channel can be turned off per account
- *   (`user_notification_preferences`); an account with no row gets both.
+ * - **Preferences.** Each channel is chosen per account
+ *   (`user_notification_preferences`). An account with no row gets the in-app
+ *   notice and no email: email is opt-in, since #447 asked for the in-app
+ *   channel and an email per revision is the noisier one.
  * - **Coalescing.** An account that still has an unread notice for the API's
  *   history is not given a second one: the one it has already links to every
  *   revision since. Email is coalesced by time instead, because a sent email
@@ -209,8 +211,9 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
       const wantsInApp = users.filter(
         (user) => preferences.get(user.id)?.api_spec_updated_in_app !== false,
       );
+      // Opt-in: only an account that turned email on gets one.
       const wantsEmail = users.filter(
-        (user) => preferences.get(user.id)?.api_spec_updated_email !== false,
+        (user) => preferences.get(user.id)?.api_spec_updated_email === true,
       );
       const toldIds = await store.notifications.listUsersWithUnread(
         wantsInApp.map((user) => user.id),
@@ -274,10 +277,10 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
             recipients: users.length,
             notified: inApp.length,
             already_notified: alreadyTold.size,
-            opted_out_in_app: users.length - wantsInApp.length,
+            in_app_off: users.length - wantsInApp.length,
             emailed,
             email_coalesced: mails.length - emailed,
-            opted_out_email: users.length - wantsEmail.length,
+            email_off: users.length - wantsEmail.length,
           },
           ip,
         );
