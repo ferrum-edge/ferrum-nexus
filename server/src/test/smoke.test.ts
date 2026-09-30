@@ -3258,6 +3258,62 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.ok(await store.notifications.findById(target));
     });
 
+    it('notifications: finds who already holds an unread notice for one link', async () => {
+      const [a, b, c] = [await makeUser(), await makeUser(), await makeUser()];
+      const link = '/catalog/billing?tab=changes';
+      await store.notifications.createMany([
+        { user_id: a.id, type: 'api_spec_updated', title: 'Billing', body: 'x', link },
+        { user_id: a.id, type: 'api_spec_updated', title: 'Billing', body: 'y', link },
+        { user_id: b.id, type: 'api_spec_updated', title: 'Other', body: 'x', link: '/catalog/x' },
+        { user_id: c.id, type: 'system', title: 'Same link', body: 'x', link },
+      ]);
+      const holders = async (): Promise<string[]> => {
+        const found = await store.notifications.listUsersWithUnread(
+          [a.id, b.id, c.id],
+          'api_spec_updated',
+          link,
+        );
+        return found.sort();
+      };
+      assert.deepEqual(await holders(), [a.id], 'once, however many it holds');
+      assert.deepEqual(
+        await store.notifications.listUsersWithUnread([], 'api_spec_updated', link),
+        [],
+      );
+      await store.notifications.markAllRead(a.id, nowIso());
+      assert.deepEqual(await holders(), [], 'a read notice no longer counts');
+    });
+
+    it('notificationPreferences: defaults by absence, upserts and keeps created_at', async () => {
+      const user = await makeUser();
+      const other = await makeUser();
+      assert.equal(await store.notificationPreferences.find(user.id), null);
+      assert.deepEqual(await store.notificationPreferences.findManyByUsers([user.id]), []);
+
+      const first = await store.notificationPreferences.upsert(user.id, {
+        api_spec_updated_in_app: true,
+        api_spec_updated_email: false,
+      });
+      assert.equal(first.user_id, user.id);
+      assert.equal(first.api_spec_updated_in_app, true);
+      assert.equal(first.api_spec_updated_email, false);
+
+      const second = await store.notificationPreferences.upsert(user.id, {
+        api_spec_updated_in_app: false,
+        api_spec_updated_email: true,
+      });
+      assert.equal(second.api_spec_updated_in_app, false);
+      assert.equal(second.api_spec_updated_email, true);
+      assert.equal(second.created_at, first.created_at, 'created once');
+
+      const many = await store.notificationPreferences.findManyByUsers([user.id, other.id]);
+      assert.deepEqual(
+        many.map((row) => row.user_id),
+        [user.id],
+      );
+      assert.deepEqual(await store.notificationPreferences.findManyByUsers([]), []);
+    });
+
     it('messaging: stores the full 300-character broadcast subject', async () => {
       // The god.broadcast route accepts a subject up to 300 chars and writes it
       // into both `notifications.title` and `message_threads.subject`; MySQL

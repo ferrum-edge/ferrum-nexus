@@ -74,6 +74,7 @@ export const queryKeys = {
     list: (params: unknown) => ['users', 'list', params] as const,
     detail: (id: string) => ['users', 'detail', id] as const,
     me: ['users', 'me'] as const,
+    notificationPreferences: ['users', 'me', 'notification-preferences'] as const,
   },
 
   organizations: {

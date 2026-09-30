@@ -260,6 +260,34 @@ export const DEFAULT_EMAIL_TEMPLATES: Readonly<Record<EmailTemplateKey, EmailTem
       '{{credentials_url}}\n\n' +
       'If this was not you, contact an administrator immediately.\n',
   },
+
+  // At most one per API per recipient per `SPEC_CHANGE_EMAIL_WINDOW_MS`: a burst
+  // of revisions sends the first, and the link is to the history of all of
+  // them. `summary` and `changes` quote provider-written names, so they are
+  // plain text here like every other value — escaped in the HTML body.
+  spec_updated: {
+    subject: '{{api_name}} spec {{headline}}',
+    body_html: htmlDocument(
+      '<p>Hello {{recipient_name}},</p>' +
+        '<p>The specification of <strong>{{api_name}}</strong>, an API you have access to, ' +
+        'was {{headline}}.</p>' +
+        '<p>{{summary}}</p>' +
+        '<p style="white-space:pre-line">{{changes}}</p>' +
+        '<p><a href="{{changes_url}}">See what changed</a></p>' +
+        '<p>This compares the structure of the two documents, so a change it does not list ' +
+        'can still affect you. You get at most one of these an hour for each API, and you ' +
+        'can turn them off on your profile page.</p>',
+    ),
+    body_text:
+      'Hello {{recipient_name}},\n\n' +
+      'The specification of {{api_name}}, an API you have access to, was {{headline}}.\n\n' +
+      '{{summary}}\n\n' +
+      '{{changes}}\n\n' +
+      'See what changed: {{changes_url}}\n\n' +
+      'This compares the structure of the two documents, so a change it does not list can ' +
+      'still affect you. You get at most one of these an hour for each API, and you can turn ' +
+      'them off on your profile page.\n',
+  },
 };
 
 /**
@@ -304,6 +332,16 @@ export const TEMPLATE_VARIABLES: Readonly<Record<EmailTemplateKey, readonly stri
     'credential_label',
     'credential_last4',
     'credentials_url',
+  ],
+  spec_updated: [
+    ...COMMON_TEMPLATE_VARIABLES,
+    'api_name',
+    'api_slug',
+    'version',
+    'headline',
+    'summary',
+    'changes',
+    'changes_url',
   ],
 };
 

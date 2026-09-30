@@ -159,6 +159,8 @@ import type {
   MessageRecord,
   MessageRepo,
   NexusStore,
+  NotificationPreferenceRepo,
+  NotificationPreferencesRecord,
   NotificationRecord,
   NotificationRepo,
   OrganizationRecord,
@@ -214,6 +216,7 @@ const COLLECTIONS = {
   threads: 'message_threads',
   messages: 'messages',
   notifications: 'notifications',
+  notificationPreferences: 'user_notification_preferences',
   emailOutbox: 'email_outbox',
   gatewayTeardownJobs: 'gateway_teardown_jobs',
   auditLogs: 'audit_logs',
@@ -691,6 +694,16 @@ function mapNotification(row: Row): NotificationRecord {
     body: str(row.body),
     link: strOrNull(row.link),
     read_at: strOrNull(row.read_at),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
+function mapNotificationPreferences(row: Row): NotificationPreferencesRecord {
+  return {
+    user_id: str(row._id),
+    api_spec_updated_in_app: flag(row.api_spec_updated_in_app),
+    api_spec_updated_email: flag(row.api_spec_updated_email),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -1372,6 +1385,14 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
     id: '004_api_spec_changes',
     indexes: API_SPEC_CHANGE_INDEXES,
     apply: (db: Db): Promise<void> => createIndexes(db, API_SPEC_CHANGE_INDEXES),
+  },
+  {
+    // `user_notification_preferences` is keyed by the account id in `_id`, so
+    // it declares no index; the step exists so every backend applies the same
+    // migration ids.
+    id: '005_notification_preferences',
+    indexes: [],
+    apply: async (): Promise<void> => {},
   },
 ];
 
@@ -3414,6 +3435,57 @@ class MongoStore implements NexusStore {
         this.opts,
       );
       return result.modifiedCount;
+    },
+
+    listUsersWithUnread: async (userIds, type, link) => {
+      if (userIds.length === 0) return [];
+      const found = await this.col(COLLECTIONS.notifications).distinct(
+        'user_id',
+        { type, link, read_at: null, user_id: { $in: [...userIds] } } as Filter<NexusDoc>,
+        this.opts,
+      );
+      return found.map((userId) => str(userId));
+    },
+  };
+
+  /* ── notificationPreferences ──────────────────────────────────────────── */
+
+  // Keyed by the account id itself, so the one row per account needs no index
+  // beyond `_id`.
+  readonly notificationPreferences: NotificationPreferenceRepo = {
+    find: async (userId) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.notificationPreferences).findOne({ _id: userId }, this.opts),
+      );
+      return row ? mapNotificationPreferences(row) : null;
+    },
+
+    findManyByUsers: async (userIds) => {
+      if (userIds.length === 0) return [];
+      return (
+        await this.col(COLLECTIONS.notificationPreferences)
+          .find({ _id: { $in: [...userIds] } } as Filter<NexusDoc>, this.opts)
+          .toArray()
+      ).map((doc) => mapNotificationPreferences(doc as Row));
+    },
+
+    upsert: async (userId, preferences) => {
+      const at = nowIso();
+      await this.col(COLLECTIONS.notificationPreferences).updateOne(
+        { _id: userId },
+        {
+          $set: {
+            api_spec_updated_in_app: preferences.api_spec_updated_in_app,
+            api_spec_updated_email: preferences.api_spec_updated_email,
+            updated_at: at,
+          },
+          $setOnInsert: { created_at: at },
+        } as UpdateFilter<NexusDoc>,
+        { ...this.opts, upsert: true },
+      );
+      const saved = await this.notificationPreferences.find(userId);
+      if (!saved) throw new Error('notificationPreferences.upsert: row vanished after write');
+      return saved;
     },
   };
 

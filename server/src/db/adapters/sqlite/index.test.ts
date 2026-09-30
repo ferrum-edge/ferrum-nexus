@@ -1276,6 +1276,7 @@ describe('sqlite store', () => {
         threads: true,
         messages: true,
         notifications: true,
+        notificationPreferences: true,
         emailOutbox: true,
         gatewayTeardownJobs: true,
         auditLogs: true,

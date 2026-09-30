@@ -14,12 +14,14 @@ import {
   ROLE_ORDER,
   type CreateOrganizationResponse,
   type GetMeUserResponse,
+  type GetNotificationPreferencesResponse,
   type GetOrganizationResponse,
   type GetUserResponse,
   type ListOrganizationsResponse,
   type ListUsersResponse,
   type RetryGatewayTeardownResponse,
   type UpdateMeResponse,
+  type UpdateNotificationPreferencesResponse,
   type UpdateUserResponse,
 } from '@ferrum-nexus/shared';
 
@@ -58,6 +60,13 @@ const updateMeBody = z.object({
  * person editing their own profile needs.
  */
 export const UPDATE_ME_RATE_LIMIT = { max: 10, timeWindow: '1 minute' } as const;
+
+const updateNotificationPreferencesBody = z
+  .object({
+    api_spec_updated_in_app: z.boolean().optional(),
+    api_spec_updated_email: z.boolean().optional(),
+  })
+  .strict();
 
 const listUsersQuery = listQuerySchema.extend({
   role: z.enum(ROLE_ORDER).optional(),
@@ -105,6 +114,24 @@ export const usersRoutes: FastifyPluginAsync<UsersRoutesOptions> = async (app, o
       // the replacement has to reach the browser or the caller is signed out.
       if (result.reissued) setSessionCookies(reply, config, result.reissued);
       return { user: result.user };
+    },
+  );
+
+  app.get(
+    '/me/notification-preferences',
+    async (request): Promise<GetNotificationPreferencesResponse> => {
+      const { user } = requireAuth(request);
+      return { preferences: await users.getNotificationPreferences(user) };
+    },
+  );
+
+  app.patch(
+    '/me/notification-preferences',
+    async (request): Promise<UpdateNotificationPreferencesResponse> => {
+      const { user } = requireAuth(request);
+      const input = parseOrThrow(updateNotificationPreferencesBody, request.body);
+      const preferences = await users.updateNotificationPreferences(user, input, clientIp(request));
+      return { preferences };
     },
   );
 

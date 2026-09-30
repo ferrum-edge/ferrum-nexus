@@ -1404,7 +1404,10 @@ export interface NotificationPreferenceRepo {
   /** The rows of those of `userIds` that have one, in no particular order. */
   findManyByUsers(userIds: Uuid[]): Promise<NotificationPreferencesRecord[]>;
   /** Write every preference of one account, creating its row on first use. */
-  upsert(userId: Uuid, preferences: NotificationPreferences): Promise<NotificationPreferencesRecord>;
+  upsert(
+    userId: Uuid,
+    preferences: NotificationPreferences,
+  ): Promise<NotificationPreferencesRecord>;
 }
 
 /** Payload accepted by {@link EmailOutboxRepo.enqueue}. */

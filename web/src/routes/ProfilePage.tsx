@@ -11,6 +11,7 @@ import { LabeledInput } from '../components/ui/Input';
 import { RoleBadge, StatusPill } from '../components/ui/StatusPill';
 import { FormNotice } from '../components/auth/AuthShell';
 import { PasswordField } from '../components/auth/PasswordField';
+import { NotificationPreferencesCard } from '../components/profile/NotificationPreferencesCard';
 
 /** Initials for the identity tile: first letters of up to two words. */
 function initials(name: string): string {
@@ -210,6 +211,10 @@ export function ProfilePage(): ReactElement {
             </form>
           </CardBody>
         </Card>
+      </div>
+
+      <div className="mt-6">
+        <NotificationPreferencesCard />
       </div>
     </>
   );

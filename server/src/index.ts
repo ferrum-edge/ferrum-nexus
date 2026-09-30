@@ -84,6 +84,7 @@ import { createApiViewersService, type ApiViewersService } from './publishing/vi
 import { createApplicationsService, type ApplicationsService } from './applications/service.js';
 import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
+import { createSpecChangeNotifier } from './publishing/spec-change-notices.js';
 import { accessRequestRoutes, grantRoutes } from './routes/access.js';
 import { applicationRoutes } from './routes/applications.js';
 import { adminRoutes } from './routes/admin.js';
@@ -454,6 +455,13 @@ export async function buildServer(
     settings,
     log: (obj, message) => app.log.error(obj, message),
     upstreamResolver: deps.upstreamResolver ?? createUpstreamResolver(),
+    specChangeNotifier: createSpecChangeNotifier({
+      store: deps.store,
+      email,
+      audit,
+      config,
+      log: warn,
+    }),
   });
   const usage = createUsageService({ store: deps.store, edge: deps.edge, publishing });
   // Composed after publishing: the palette reuses its owner-or-admin check, so

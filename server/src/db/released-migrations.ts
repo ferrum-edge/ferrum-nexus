@@ -96,4 +96,15 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
       mongodb: '42aa5064cff7a2841c149229816fa7137f04eef4da2e418fb188202d948d1d1a',
     },
   },
+  {
+    id: '005_notification_preferences',
+    // Pending: ships with the next release, which sets `release`.
+    release: null,
+    sha256: {
+      sqlite: 'b26e8fc1197a503559de192683df702eb52dc0c04d33f623d20579025e2e140e',
+      pg: 'cea3d055637e66e4a4f2483ad89ad6589507296fcca3f09b4f23a6a50ca36517',
+      mysql: 'aabda4941d0c09af4abfd5b0cf8ad6f1ea2ae7ada6dc899f861322953c610e10',
+      mongodb: '1a719fae713931afb77416cd2dd59b2f43ef86cfe463351e0fe55a285424baf9',
+    },
+  },
 ];
