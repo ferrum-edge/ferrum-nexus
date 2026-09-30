@@ -192,7 +192,8 @@ describe('spec change notifications', () => {
     const [notice, ...extra] = await notices(alice);
     assert.ok(notice, 'alice is told');
     assert.deepEqual(extra, [], 'once, however many of her identities hold a grant');
-    assert.equal(notice.title, 'Notify Billing spec updated to 2.0.0');
+    // POST /invoices is gone: a breaking change, and the title says so.
+    assert.equal(notice.title, 'Notify Billing spec updated to 2.0.0 (breaking changes)');
     assert.equal(notice.link, '/catalog/notify-billing?tab=changes');
     assert.match(
       notice.body,
@@ -227,7 +228,12 @@ describe('spec change notifications', () => {
     assert.equal(await revise(provider, apiId, V3), 200);
     const unread = await notices(alice);
     assert.equal(unread.length, 1, 'no second notice while the first is unread');
-    assert.equal(unread[0]?.title, 'Notify Billing spec updated to 3.0.0', 'rewritten in place');
+    // Rewritten with the newest revision, which broke nothing, but still
+    // marked breaking: the one before it did, and it was never read.
+    assert.equal(unread[0]?.title, 'Notify Billing spec updated to 3.0.0 (breaking changes)');
+    assert.match(unread[0]?.body ?? '', /An earlier revision since you last read included/);
+    const [adminNotice] = await notices(admin);
+    assert.equal(adminNotice?.title, 'Notify Billing spec updated to 3.0.0', 'nothing breaking');
     assert.equal((await notices(bob)).length, 1);
     assert.equal((await mails(alice)).length, 1, 'no second email inside the hour');
     // The administrator did not publish this one, so it is told now.
@@ -269,12 +275,12 @@ describe('spec change notifications', () => {
     await harness.services.specChanges.idle();
 
     const [newest] = await notices(alice);
-    assert.equal(newest?.title, 'Notify Billing spec rolled back to 1.0.0');
+    assert.equal(newest?.title, 'Notify Billing spec rolled back to 1.0.0 (breaking changes)');
     assert.equal(newest?.read_at, null);
     assert.equal((await notices(alice)).length, 2);
     const bobs = await notices(bob);
     assert.equal(bobs.length, 1, 'bob has still not read his');
-    assert.equal(bobs[0]?.title, 'Notify Billing spec rolled back to 1.0.0', 'it says the latest');
+    assert.equal(bobs[0]?.title, 'Notify Billing spec rolled back to 1.0.0 (breaking changes)');
     assert.equal((await mails(alice)).length, 2, 'a new hour, a new email');
     const rollback = (await notifyRows()).find((details) => details.kind === 'rollback');
     assert.equal(rollback?.version, '1.0.0');
@@ -373,12 +379,21 @@ describe('spec change notifications', () => {
       ids.push(user.id);
     }
 
-    // At most three emails for this fan-out.
+    // At most three emails for this fan-out; and once the first batch is
+    // planned, a grant in the second one is revoked, which that batch must see.
+    const late: { id?: string } = {};
     const notifier = createSpecChangeNotifier({
       store: harness.store,
       email: harness.services.email,
       audit: harness.services.audit,
       config: { publicUrl: harness.config.publicUrl, maxMassEmailRecipients: 3 },
+      onBatch: async (batch, batchIds) => {
+        if (batch !== 1) return;
+        late.id = ids.find((id, index) => index >= 8 && index < 204 && !batchIds.includes(id));
+        if (late.id === undefined) return;
+        const held = await harness.store.grants.list({ api_id: bulkId, user_id: late.id });
+        await harness.store.grants.update(held.items[0]!.id, { status: 'revoked' });
+      },
     });
     const change: ApiSpecChangeEntry = {
       id: 'bulk-change',
@@ -401,8 +416,9 @@ describe('spec change notifications', () => {
       rows.map((details) => details.batches),
       [2, 2],
     );
-    assert.equal(total('recipients'), 203, 'not the disabled account nor the revoked grant');
-    assert.equal(total('notified'), 202);
+    assert.ok(late.id, 'a second-batch account was revoked mid fan-out');
+    assert.equal(total('recipients'), 202, 'not the disabled account nor either revoked grant');
+    assert.equal(total('notified'), 201);
     assert.equal(total('in_app_off'), 1);
     assert.equal(total('emailed'), 3);
     assert.equal(total('email_capped'), 2, 'past the cap, in-app only');
@@ -420,7 +436,107 @@ describe('spec change notifications', () => {
     assert.equal(await bulkNotices(1), 0, 'revoked');
     assert.equal(await bulkNotices(2), 0, 'turned off');
     assert.equal(await bulkNotices(3), 1);
+    assert.equal(await bulkNotices(ids.indexOf(late.id)), 0, 'revoked between batches');
     assert.equal(await bulkNotices(204), 1, 'the second batch too');
+  });
+
+  describe('fan-outs of one API', () => {
+    let quickId: string;
+    let erin: TestSession;
+    const quickLink = '/catalog/notify-quick?tab=changes';
+
+    const quickNotices = async (): Promise<Notification[]> =>
+      (await notices(erin)).filter((row) => row.link === quickLink);
+
+    before(async () => {
+      quickId = await publish('Notify Quick', 'notify-quick', V1);
+      erin = await harness.registerUser({ email: 'notify-erin@example.test' });
+      await grant(erin, quickId);
+    });
+
+    it('give one notice for revisions published in quick succession', async () => {
+      const put = async (document: string): Promise<number> => {
+        const response = await harness.authed(provider, {
+          method: 'PUT',
+          url: `/api/apis/${quickId}/spec`,
+          payload: { spec: document },
+        });
+        return response.statusCode;
+      };
+      // Neither publish waits for its fan-out.
+      assert.equal(await put(V2), 200);
+      assert.equal(await put(V3), 200);
+      await harness.services.specChanges.idle();
+      const [notice, ...extra] = await quickNotices();
+      assert.deepEqual(extra, [], 'one notice, however many revisions');
+      assert.match(notice?.title ?? '', /^Notify Quick spec updated to 3\.0\.0/);
+    });
+
+    it('run one at a time, and only the newest of those waiting', async () => {
+      const api = await harness.store.apis.findById(quickId);
+      assert.ok(api);
+      const notifier = createSpecChangeNotifier({
+        store: harness.store,
+        email: harness.services.email,
+        audit: harness.services.audit,
+        config: harness.config,
+      });
+      const entry = (revision: string): ApiSpecChangeEntry => ({
+        id: `${revision}-change`,
+        api_id: quickId,
+        revision_id: revision,
+        previous_revision_id: null,
+        kind: 'update',
+        version: revision,
+        previous_version: null,
+        report: { ...emptySpecChangeReport(), changed: true, info_changes: ['version'] },
+        created_at: new Date().toISOString(),
+      });
+      const actor = { id: provider.user.id, role: provider.user.role };
+      void notifier.notify(actor, api, entry('quick-1'), null);
+      void notifier.notify(actor, api, entry('quick-2'), null);
+      void notifier.notify(actor, api, entry('quick-3'), null);
+      await notifier.idle();
+
+      const audited = await notifyRows();
+      const ran = audited.filter((details) => String(details.spec_id).startsWith('quick-'));
+      assert.deepEqual(ran.map((details) => details.spec_id).sort(), ['quick-1', 'quick-3']);
+      const newest = ran.find((details) => details.spec_id === 'quick-3');
+      assert.equal(newest?.superseded, 1, 'quick-2 was folded into it');
+      assert.equal((await quickNotices()).length, 1, 'and still one notice');
+    });
+
+    it('gives a fresh notice to someone who read theirs while the batch was planned', async () => {
+      const api = await harness.store.apis.findById(quickId);
+      assert.ok(api);
+      const notifier = createSpecChangeNotifier({
+        store: harness.store,
+        email: harness.services.email,
+        audit: harness.services.audit,
+        config: harness.config,
+        // Between the batch's reads and its transaction, erin reads everything.
+        onBatch: async () => {
+          await harness.store.notifications.markAllRead(erin.user.id, new Date().toISOString());
+        },
+      });
+      const change: ApiSpecChangeEntry = {
+        id: 'quick-read-change',
+        api_id: quickId,
+        revision_id: 'quick-read',
+        previous_revision_id: null,
+        kind: 'update',
+        version: '9.0.0',
+        previous_version: null,
+        report: { ...emptySpecChangeReport(), changed: true, info_changes: ['version'] },
+        created_at: new Date().toISOString(),
+      };
+      await notifier.notify({ id: provider.user.id, role: provider.user.role }, api, change, null);
+      const [fresh, read, ...extra] = await quickNotices();
+      assert.deepEqual(extra, []);
+      assert.equal(fresh?.read_at, null, 'a new, unread notice');
+      assert.equal(fresh?.title, 'Notify Quick spec updated to 9.0.0');
+      assert.ok(read?.read_at, 'beside the one they read');
+    });
   });
 
   it('never fails the publish when notifying fails', async () => {

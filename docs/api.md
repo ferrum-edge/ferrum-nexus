@@ -800,7 +800,9 @@ publishes a revision that changes something (see
 the changes and names up to five, removed operations first, and its `link` is
 `/catalog/<slug>?tab=changes`. An account that still has an unread one for the
 API gets no second one: its unread one is rewritten to describe the newest
-revision, and links to every revision since.
+revision, moved to the top of the list, and says earlier revisions are on the
+Changes tab. A title ending `(breaking changes)` keeps that ending through a
+rewrite by a revision that broke nothing.
 
 ### `POST /api/notifications/read`
 
@@ -1944,9 +1946,12 @@ _provider_, owner or admin — publish a new spec revision. Body: `spec`
   queues at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` emails; past that, accounts
   get the in-app notice only. The fan-out commits in batches of 200 accounts,
   each with an `api.spec_notify` audit row, and a batch that fails does not
-  stop the next. It is **detached and best-effort**: the response does not
-  wait for it, a failure is logged and never fails the publish, and a fan-out
-  still running when the process stops is lost, not retried.
+  stop the next. Fan-outs of one API run one at a time: one published while
+  another is running waits, and of several waiting only the newest runs. It is
+  **detached and best-effort**: the response does not wait for it, a failure
+  is logged and never fails the publish, and on a graceful stop the server
+  waits at most 10 seconds for it and skips the batches left; nothing retries
+  them.
 - **Backend following.** The proxy is re-pointed at the new document's
   `servers[0]` only when the API's `upstream_url` still equals the normalized
   `servers[0]` of the previous revision (scheme, host, port and base path).

@@ -2091,6 +2091,18 @@ class SqliteStore implements NexusStore {
         mapGrant,
       ),
 
+    listActiveHolders: async (apiId, userIds) => {
+      if (userIds.length === 0) return [];
+      const rows = queryAll(
+        this.db,
+        `SELECT DISTINCT user_id FROM grants
+          WHERE api_id = ? AND status = 'active'
+            AND user_id IN (${userIds.map(() => '?').join(', ')})`,
+        [apiId, ...userIds],
+      );
+      return rows.map((row) => text(row.user_id));
+    },
+
     count: async (filter) => {
       const where = grantWhere(filter).build();
       return queryCount(this.db, `SELECT COUNT(*) AS count FROM grants${where.sql}`, where.params);
@@ -2754,26 +2766,27 @@ class SqliteStore implements NexusStore {
         [at, nowIso(), userId],
       ),
 
-    listUsersWithUnread: async (userIds, type, link) => {
+    listUnread: async (userIds, type, link) => {
       if (userIds.length === 0) return [];
       const rows = queryAll(
         this.db,
-        `SELECT DISTINCT user_id FROM notifications
+        `SELECT * FROM notifications
           WHERE type = ? AND link = ? AND read_at IS NULL
             AND user_id IN (${userIds.map(() => '?').join(', ')})`,
         [type, link, ...userIds],
       );
-      return rows.map((row) => text(row.user_id));
+      return rows.map(mapNotification);
     },
 
     updateUnread: async (userIds, type, link, content) => {
       if (userIds.length === 0) return 0;
+      const at = nowIso();
       return execute(
         this.db,
-        `UPDATE notifications SET title = ?, body = ?, updated_at = ?
+        `UPDATE notifications SET title = ?, body = ?, created_at = ?, updated_at = ?
           WHERE type = ? AND link = ? AND read_at IS NULL
             AND user_id IN (${userIds.map(() => '?').join(', ')})`,
-        [content.title, content.body, nowIso(), type, link, ...userIds],
+        [content.title, content.body, at, at, type, link, ...userIds],
       );
     },
   };

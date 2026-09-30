@@ -390,9 +390,14 @@ Each message writes a message row and an audit row. A **platform thread** (no
   counted as `failed_batches`, and does not stop the next. One fan-out queues
   at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` emails (`0` = unlimited), so a
   large API cannot crowd verification and password-reset mail out of the
-  outbox, which delivers in the order rows were queued; accounts past the cap
-  get the in-app notice only. **It is best-effort:** a fan-out still running
-  when the process stops is lost and nothing retries it.
+  outbox, which delivers in the order rows were queued; accounts past the cap,
+  the ones latest in the API's grant list, get the in-app notice only.
+  Fan-outs of one API run one at a time, and of several waiting only the
+  newest runs (its audit rows count the others as `superseded`). **It is
+  best-effort:** on a graceful stop the server stops starting batches and
+  waits at most 10 seconds for the running ones; the batches left are skipped
+  and recorded as `skipped_batches`, and a crash loses the whole fan-out.
+  Nothing retries either.
 - **Outbox and notification rows accumulate.** Sent `email_outbox` rows and
   `notifications` are kept, and each spec-change fan-out adds up to one
   notification per grantee account (fewer while notices are unread) and up to

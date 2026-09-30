@@ -15,7 +15,13 @@ import {
   type SpecChangeReport,
 } from '@ferrum-nexus/shared';
 
-import { inertText, specChangeEmailLine, summarizeSpecChange } from './spec-change-notices.js';
+import {
+  BREAKING_TITLE_MARK,
+  inertText,
+  rewrittenNotice,
+  specChangeEmailLine,
+  summarizeSpecChange,
+} from './spec-change-notices.js';
 
 function change(overrides: Partial<SpecChange>): SpecChange {
   return {
@@ -86,7 +92,8 @@ describe('spec change notices', () => {
         truncated: true,
       }),
     );
-    assert.equal(notice.title, 'Billing spec updated to 2.0.0');
+    assert.equal(notice.title, 'Billing spec updated to 2.0.0 (breaking changes)');
+    assert.equal(notice.breaking, true);
     assert.equal(notice.headline, 'updated to 2.0.0');
     assert.deepEqual(notice.lines, [
       'Removed: DELETE /orders/{id} (requests to removed operations may now fail)',
@@ -104,6 +111,20 @@ describe('spec change notices', () => {
     assert.match(notice.summary, /a change it does not list can still affect you\.$/);
     assert.match(notice.body, /Removed: DELETE \/orders\/\{id\}.*; GET \/a: /);
     assert.match(notice.body, /can still affect you\.$/);
+  });
+
+  it('keeps a rewritten notice marked breaking once an earlier revision was', () => {
+    const harmless = summarizeSpecChange(
+      'Billing',
+      entry({ changes: [change({})], counts: { ...counts, non_breaking: 1, operations_added: 1 } }),
+    );
+    assert.equal(harmless.breaking, false);
+    const kept = rewrittenNotice(harmless, true);
+    assert.equal(kept.title, `Billing spec updated to 2.0.0${BREAKING_TITLE_MARK}`);
+    assert.match(kept.body, /An earlier revision since you last read included breaking changes/);
+    const plain = rewrittenNotice(harmless, false);
+    assert.equal(plain.title, 'Billing spec updated to 2.0.0');
+    assert.match(plain.body, /Earlier revisions since you last read are on the Changes tab too\.$/);
   });
 
   it('labels a rollback', () => {

@@ -34,12 +34,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   An account is told once however many of its identities hold a grant, and the
   publisher is not told. A burst of revisions sends at most one email per API
   per clock hour and no second notice while the first is unread; the unread
-  one is rewritten with the latest summary. One fan-out queues at most
-  `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` emails, and past that sends in-app only.
-  The fan-out runs detached from the publish, in batches of 200 audited as
-  `api.spec_notify`; it never fails or delays the publish, and work in flight
-  at shutdown is lost. Provider-written text in the email is made inert as a
-  link. Notifications now show an icon for their type.
+  one is rewritten with the latest summary, moved to the top and still marked
+  `(breaking changes)` if an earlier revision was. Fan-outs of one API run one
+  at a time, and only the newest of those waiting runs. One fan-out queues at
+  most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` emails, and past that sends in-app
+  only. The fan-out runs detached from the publish, in batches of 200 audited
+  as `api.spec_notify`; it never fails or delays the publish. A graceful stop
+  waits at most 10 seconds and skips the batches left; a crash loses them.
+  Provider-written text in the email is made inert as a link. Notifications
+  now show an icon for their type.
 - **Notification preferences.** `GET` and `PATCH /api/users/me/notification-preferences`,
   and a **Notifications** card on the profile page, choose the spec-change
   notice per channel: in-app is on and email off until changed. Changes are

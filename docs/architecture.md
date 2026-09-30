@@ -680,11 +680,14 @@ it under the detail page's visibility rule
 released, `publishing/spec-change-notices.ts` tells the API's grantees what
 changed: an in-app notice and an outbox email per account, as each account's
 `user_notification_preferences` allow. The publish starts it and does not wait
-for it; it never rejects, so it can neither slow the publish nor fail it, and
-work in flight at shutdown is lost. It is coalesced two ways: an unread notice
-for the API is rewritten rather than repeated, and one email per API per
-account per clock hour goes out through the outbox idempotency key. One
-fan-out queues at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` emails. Each batch of
+for it; it never rejects, so it can neither slow the publish nor fail it. Its
+fan-outs run one at a time per API, and of several waiting only the newest
+runs. On a graceful stop no further batch starts and the server waits at most
+10 seconds; what is left is skipped. It is coalesced two ways: an unread notice
+for the API is rewritten rather than repeated, keeping a breaking mark, and one
+email per API per account per clock hour goes out through the outbox
+idempotency key. One fan-out queues at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`
+emails. Each batch of
 200 accounts re-reads grants and account status, and commits its notices,
 emails and `api.spec_notify` audit row together; a failed batch does not stop
 the next.

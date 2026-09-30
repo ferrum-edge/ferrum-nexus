@@ -1151,6 +1151,11 @@ export interface GrantRepo {
   listActiveByUser(userId: Uuid, applicationId?: Uuid | null): Promise<GrantRecord[]>;
   /** Every active grant on an API — used by god-mode delete and bulk revoke. */
   listActiveByApi(apiId: Uuid): Promise<GrantRecord[]>;
+  /**
+   * Which of `userIds` hold an active grant on `apiId` through any of their
+   * identities, each once: one query for a batch of accounts.
+   */
+  listActiveHolders(apiId: Uuid, userIds: Uuid[]): Promise<Uuid[]>;
   count(filter: GrantFilter): Promise<number>;
   /**
    * Grants in `status` per application, for a whole page of applications in
@@ -1381,15 +1386,16 @@ export interface NotificationRepo {
   /** Mark every unread notification of a user read. Returns the number changed. */
   markAllRead(userId: Uuid, at: IsoTimestamp): Promise<number>;
   /**
-   * Which of `userIds` already hold an **unread** notification of `type`
-   * pointing at `link`, each once. How a repeated notice is coalesced: one
-   * the recipient has not read yet already says what a new one would.
+   * The **unread** notifications of `type` pointing at `link` held by any of
+   * `userIds`. How a repeated notice is coalesced: one the recipient has not
+   * read yet is rewritten rather than repeated.
    */
-  listUsersWithUnread(userIds: Uuid[], type: NotificationType, link: string): Promise<Uuid[]>;
+  listUnread(userIds: Uuid[], type: NotificationType, link: string): Promise<NotificationRecord[]>;
   /**
    * Rewrite the title and body of every **unread** notification of `type`
    * pointing at `link` held by one of `userIds`, so a coalesced notice says
-   * what the newest event said. Read ones are left as they were read.
+   * what the newest event said, and move its `created_at` to now so it lists
+   * as new. Read ones are left as they were read.
    *
    * @returns the number of notifications changed
    */

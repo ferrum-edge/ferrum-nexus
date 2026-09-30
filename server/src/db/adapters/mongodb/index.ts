@@ -2843,6 +2843,16 @@ class MongoStore implements NexusStore {
       return docs.map((doc) => mapGrant(doc as Row));
     },
 
+    listActiveHolders: async (apiId, userIds) => {
+      if (userIds.length === 0) return [];
+      const found = await this.col(COLLECTIONS.grants).distinct(
+        'user_id',
+        { api_id: apiId, status: 'active', user_id: { $in: [...userIds] } } as Filter<NexusDoc>,
+        this.opts,
+      );
+      return found.map((userId) => str(userId));
+    },
+
     count: async (filter) =>
       this.col(COLLECTIONS.grants).countDocuments(grantFilter(filter), this.opts),
 
@@ -3437,21 +3447,23 @@ class MongoStore implements NexusStore {
       return result.modifiedCount;
     },
 
-    listUsersWithUnread: async (userIds, type, link) => {
+    listUnread: async (userIds, type, link) => {
       if (userIds.length === 0) return [];
-      const found = await this.col(COLLECTIONS.notifications).distinct(
-        'user_id',
-        { type, link, read_at: null, user_id: { $in: [...userIds] } } as Filter<NexusDoc>,
-        this.opts,
-      );
-      return found.map((userId) => str(userId));
+      const docs = await this.col(COLLECTIONS.notifications)
+        .find(
+          { type, link, read_at: null, user_id: { $in: [...userIds] } } as Filter<NexusDoc>,
+          this.opts,
+        )
+        .toArray();
+      return docs.map((doc) => mapNotification(doc as Row));
     },
 
     updateUnread: async (userIds, type, link, content) => {
       if (userIds.length === 0) return 0;
+      const at = nowIso();
       const result = await this.col(COLLECTIONS.notifications).updateMany(
         { type, link, read_at: null, user_id: { $in: [...userIds] } } as Filter<NexusDoc>,
-        { $set: { title: content.title, body: content.body, updated_at: nowIso() } },
+        { $set: { title: content.title, body: content.body, created_at: at, updated_at: at } },
         this.opts,
       );
       return result.modifiedCount;

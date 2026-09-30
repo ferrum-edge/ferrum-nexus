@@ -843,8 +843,9 @@ export async function buildServer(
   }
 
   app.addHook('onClose', async () => {
-    // A fan-out still running finishes before the store it writes to closes.
-    await specChanges.idle();
+    // A fan-out still running gets a bounded wait, and sends no further
+    // batches, before the store it writes to closes.
+    await specChanges.stop();
     await outbox.stop();
     await teardown.stop();
     await expirySweep.stop();
