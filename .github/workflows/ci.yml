@@ -204,6 +204,8 @@ jobs:
       - name: Install the suite's dependencies
         working-directory: e2e
         run: npm ci --no-audit --no-fund
+      - name: Type-check the acceptance suite
+        run: npm --prefix e2e run typecheck
       - name: Install Chromium
         working-directory: e2e
         run: npx playwright install --with-deps chromium
