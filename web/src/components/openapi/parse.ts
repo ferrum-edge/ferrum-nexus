@@ -15,6 +15,7 @@
  */
 
 import {
+  MAX_OPENAPI_REF_LENGTH,
   MAX_SPEC_BYTES,
   MAX_SPEC_EXPANDED_BYTES,
   createOpenApiRefResolver,
@@ -444,13 +445,14 @@ const resolvedRefs = new WeakMap<SpecNode, Map<string, SpecNode | typeof UNRESOL
 /**
  * Resolve a local `#/a/b/c` reference against `doc`.
  *
- * External references (anything not starting with `#/`) and dangling pointers
- * return {@link UNRESOLVED_REF} so the caller can render a placeholder instead
- * of pretending the schema is empty. Only own members are followed. Memoised
- * per document, so a schema `$ref` used across a page is walked once.
+ * External references (anything not starting with `#/`), pointers longer than
+ * `MAX_OPENAPI_REF_LENGTH` and dangling pointers return {@link UNRESOLVED_REF}
+ * so the caller can render a placeholder instead of pretending the schema is
+ * empty. Only own members are followed. Memoised per document, so a schema
+ * `$ref` used across a page is walked once.
  */
 export function resolveRef(doc: SpecNode, ref: string): SpecNode | typeof UNRESOLVED_REF {
-  if (!ref.startsWith('#/')) return UNRESOLVED_REF;
+  if (!ref.startsWith('#/') || ref.length > MAX_OPENAPI_REF_LENGTH) return UNRESOLVED_REF;
   let known = resolvedRefs.get(doc);
   if (!known) {
     known = new Map();

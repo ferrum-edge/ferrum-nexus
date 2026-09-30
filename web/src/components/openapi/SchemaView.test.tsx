@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { MAX_OPENAPI_REF_LENGTH } from '@ferrum-nexus/shared';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createRenderBudget, MAX_PAGE_NODES, SchemaView } from './SchemaView';
@@ -10,6 +13,27 @@ import {
 } from './parse';
 
 afterEach(cleanup);
+
+/** The table `server/src/publishing/oas.test.ts` checks the server's count against. */
+interface RenderUnitsFixture {
+  document: SpecNode;
+  cases: Array<{ name: string; schema: unknown; units: number }>;
+  divergences: Array<{ name: string; schema: unknown; server: number; viewer: number }>;
+}
+
+const fixturePath = join(
+  import.meta.dirname,
+  '../../../../shared/test-fixtures/openapi-schema-render-units.json',
+);
+const renderUnits = JSON.parse(readFileSync(fixturePath, 'utf8')) as RenderUnitsFixture;
+
+/** What SchemaView spends rendering one occurrence of `schema` with room to spare. */
+function spentOn(schema: unknown): number {
+  const budget = createRenderBudget(MAX_PAGE_NODES);
+  render(<SchemaView doc={renderUnits.document} budget={budget} schema={schema} />);
+  cleanup();
+  return MAX_PAGE_NODES - budget.remaining;
+}
 
 /**
  * A document that is only a few KB but expands combinatorially: each level has
@@ -47,6 +71,88 @@ describe('SchemaView', () => {
     expect(screen.getByText('required')).toBeInTheDocument();
     expect(screen.getByText('string <uuid>')).toBeInTheDocument();
     expect(screen.getByText('number')).toBeInTheDocument();
+  });
+
+  it('spends the page budget on primitive schemas and their property wrappers', () => {
+    const doc = { components: { schemas: {} } } as SpecNode;
+    const budget = createRenderBudget(7);
+    const { container } = render(
+      <SchemaView
+        doc={doc}
+        budget={budget}
+        schema={{ type: 'object', oneOf: Array.from({ length: 100 }, () => true) }}
+      />,
+    );
+
+    expect(container.querySelectorAll('p.text-xs.text-fg-subtle')).toHaveLength(4);
+    expect(screen.getAllByText('No schema.')).toHaveLength(3);
+    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
+    expect(budget.remaining).toBe(0);
+  });
+
+  it('bounds primitive properties and renders supported object siblings', () => {
+    const doc = { components: { schemas: {} } } as SpecNode;
+    const properties = Object.fromEntries(
+      Array.from({ length: 100 }, (_, index) => [
+        `p${index}`,
+        index === 0 ? { type: 'string' } : false,
+      ]),
+    );
+    const budget = createRenderBudget(7);
+    const { container } = render(
+      <SchemaView doc={doc} budget={budget} schema={{ type: 'object', properties }} />,
+    );
+
+    expect(screen.getByText('p0')).toBeInTheDocument();
+    expect(screen.getByText('string')).toBeInTheDocument();
+    expect(screen.getAllByText('No schema.')).toHaveLength(2);
+    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
+    expect(container.querySelectorAll('p.text-xs.text-fg-subtle')).toHaveLength(3);
+    expect(budget.remaining).toBe(0);
+  });
+
+  it('charges item schemas and repeated references against the same budget', () => {
+    const doc = {
+      components: { schemas: { Primitive: false, Object: { type: 'string' } } },
+    } as SpecNode;
+    const itemsBudget = createRenderBudget(3);
+    render(<SchemaView doc={doc} budget={itemsBudget} schema={{ type: 'array', items: null }} />);
+    expect(screen.getByText('No schema.')).toBeInTheDocument();
+    expect(itemsBudget.remaining).toBe(0);
+
+    cleanup();
+    const refBudget = createRenderBudget(8);
+    const { container } = render(
+      <SchemaView
+        doc={doc}
+        budget={refBudget}
+        schema={{
+          type: 'object',
+          oneOf: [
+            { $ref: '#/components/schemas/Object' },
+            true,
+            { $ref: '#/components/schemas/Primitive' },
+            false,
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText('string')).toBeInTheDocument();
+    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
+    expect(container.querySelectorAll('p.text-xs.text-fg-subtle')).toHaveLength(2);
+    expect(refBudget.remaining).toBe(0);
+  });
+
+  it('spends on every shared fixture schema what the server counts for it', () => {
+    for (const { name, schema, units } of renderUnits.cases) {
+      expect(spentOn(schema), name).toBe(units);
+    }
+  });
+
+  it('spends what the shared fixture records where the server counts differently', () => {
+    for (const { name, schema, viewer } of renderUnits.divergences) {
+      expect(spentOn(schema), name).toBe(viewer);
+    }
   });
 
   it('marks a self-referential $ref as circular instead of recursing', () => {
@@ -119,6 +225,72 @@ describe('SchemaView', () => {
     }
   });
 
+  it('bounds nested enum values and charges chips at every reference', () => {
+    let enumTraversals = 0;
+    const value = new Proxy(
+      { nested: Array.from({ length: 10_000 }, (_, index) => ({ index })) },
+      {
+        ownKeys(target) {
+          enumTraversals += 1;
+          return Reflect.ownKeys(target);
+        },
+      },
+    );
+    const doc = {
+      components: { schemas: { Wide: { type: 'string', enum: [value] } } },
+    } as SpecNode;
+    const properties = Object.fromEntries(
+      Array.from({ length: 20 }, (_, index) => [
+        `p${index}`,
+        { $ref: '#/components/schemas/Wide' },
+      ]),
+    );
+    const budget = createRenderBudget(21);
+    render(<SchemaView doc={doc} budget={budget} schema={{ type: 'object', properties }} />);
+
+    expect(screen.getAllByText('{…}')).toHaveLength(5);
+    expect(budget.remaining).toBe(0);
+    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
+    expect(enumTraversals).toBe(0);
+  });
+
+  it('marks a required property even when the page budget is low', () => {
+    const required = Array.from({ length: 100 }, (_, index) => `p${index}`);
+    render(
+      <SchemaView
+        doc={{ components: { schemas: {} } } as SpecNode}
+        budget={createRenderBudget(4)}
+        schema={{ type: 'object', required, properties: { p99: { type: 'string' } } }}
+      />,
+    );
+
+    expect(screen.getByText('p99').parentElement).toHaveTextContent('required');
+    expect(screen.getByText('string')).toBeInTheDocument();
+  });
+
+  it('does not read property values after the budget is exhausted', () => {
+    let reads = 0;
+    const properties = new Proxy(
+      { first: { type: 'string' }, second: { type: 'string' }, third: { type: 'string' } },
+      {
+        get(target, property, receiver) {
+          if (typeof property === 'string') reads += 1;
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+    render(
+      <SchemaView
+        doc={{ components: { schemas: {} } } as SpecNode}
+        budget={createRenderBudget(3)}
+        schema={{ type: 'object', properties }}
+      />,
+    );
+
+    expect(reads).toBe(1);
+    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
+  });
+
   it('bounds a combinatorial fan-out document instead of hanging', () => {
     // 14 levels x 8 properties = ~5 KB of JSON but 8^13 nodes unbounded.
     const doc = fanOutDoc(14, 8);
@@ -156,8 +328,10 @@ describe('SchemaView', () => {
   });
 
   it('shortens long schema references in its badges', () => {
-    const name = 'x'.repeat(5_000);
+    // Far past the displayed length, and still short enough to be followed.
+    const name = 'x'.repeat(1_000);
     const ref = `#/components/schemas/${name}`;
+    expect(`${ref}-missing`.length).toBeLessThanOrEqual(MAX_OPENAPI_REF_LENGTH);
     const doc = {
       components: {
         schemas: { [name]: { type: 'object', properties: { self: { $ref: ref } } } },
@@ -180,6 +354,19 @@ describe('SchemaView', () => {
       screen.getByText(/^unresolved \$ref #\/components\/schemas\/x+…$/),
     ];
     for (const badge of badges) expect(badge.textContent?.length).toBeLessThan(250);
+  });
+
+  it('shows a reference longer than the reference length limit as unresolved', () => {
+    const name = 'x'.repeat(MAX_OPENAPI_REF_LENGTH);
+    const ref = `#/components/schemas/${name}`;
+    const doc = { components: { schemas: { [name]: { type: 'string' } } } } as SpecNode;
+    const budget = createRenderBudget();
+    render(<SchemaView doc={doc} budget={budget} schema={{ $ref: ref }} />);
+
+    const badge = screen.getByText(/^unresolved \$ref #\/components\/schemas\/x+…$/);
+    expect(badge.textContent?.length).toBeLessThan(250);
+    expect(screen.queryByText('string')).not.toBeInTheDocument();
+    expect(MAX_PAGE_NODES - budget.remaining).toBe(1);
   });
 });
 
