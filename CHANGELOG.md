@@ -25,6 +25,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- Vendor and pin Ferrum contracts `contracts-edge-0.9.8`; shared tests now check the local plugin
+  names and provisioning attribution against the pinned vocabularies.
 - **OpenAPI render cost is counted the way the catalog viewer renders**
   (GHSA-r4wm-2vch-9jxm): the 100,000-unit limit charges every schema node,
   primitive or not, each rendered property, item and composition entry, and up
@@ -63,6 +65,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Security
 
+- Basic Auth scan failures now remain visible in administrator health details,
+  and revocation checks ownership under the consumer lock, including retiring
+  rows swept when a plain revoke clears the last active credential.
+- Cookie cache protection applies to cookies set through Fastify's reply API;
+  raw response headers and hijacked replies must not set cookies.
 - GHSA-r4wm-2vch-9jxm: OpenAPI rendering accounts for primitive schema values during
   publication checks and charges the page budget before rendering their
   placeholders or schema wrappers. Exhausted schema branches stop before

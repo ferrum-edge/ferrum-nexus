@@ -62,6 +62,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 
 import { jwtVerify } from 'jose';
+import { FERRUM_PROVISIONED_BY_HEADER } from '@ferrum-nexus/shared';
 
 /** One recorded Admin API call. */
 export interface RecordedRequest {
@@ -2727,11 +2728,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     const verified = await verifyToken(req);
     const claims = verified instanceof Error ? null : verified;
+    const provisionedBy = req.headers[FERRUM_PROVISIONED_BY_HEADER.toLowerCase()];
     requests.push({
-      provisionedBy:
-        typeof req.headers['x-ferrum-provisioned-by'] === 'string'
-          ? req.headers['x-ferrum-provisioned-by']
-          : undefined,
+      provisionedBy: typeof provisionedBy === 'string' ? provisionedBy : undefined,
       method,
       path: url.pathname,
       query: Object.fromEntries(url.searchParams),

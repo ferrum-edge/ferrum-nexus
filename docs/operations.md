@@ -1882,6 +1882,10 @@ reconcile or whole-type revoke of the consumer has cleared, it writes a
 `source_event_id`. The placeholder holds that consumer's positions closed, as
 above, until the type is cleared. Completion is recorded in `app_settings`
 (`credentials.legacy_basicauth_scan_v1`), and later starts skip the scan.
+Affected identities may need to re-issue their Basic Auth credentials after
+the type is cleared, especially when a replacement from an earlier v0.2.0
+rotate was later revoked normally and the scan conservatively restores its
+placeholder.
 
 If the scan fails, startup continues and logs `Could not scan for HTTP Basic
 credentials left unconfirmed by an earlier release`; nothing is recorded, so

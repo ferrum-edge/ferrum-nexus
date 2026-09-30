@@ -665,6 +665,7 @@ export async function buildServer(
         config,
         store: deps.store,
         edge: deps.edge,
+        credentials,
         reconciliation,
       });
     },
