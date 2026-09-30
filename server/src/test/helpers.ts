@@ -23,6 +23,7 @@ import { createStore } from '../db/index.js';
 import type { AuditLogRecord, EmailOutboxRecord, NexusStore } from '../db/store.js';
 import type { MailTransport, MailTransportFactory, OutboundMail } from '../email/service.js';
 import type { OutboxTickResult } from '../email/outbox-worker.js';
+import { openOutboxRecord } from '../email/sealed-outbox.js';
 import { createFerrumAdminClient, type FerrumAdminClient } from '../ferrum-admin/index.js';
 import type { ResolvedAddress, UpstreamResolver } from '../publishing/oas.js';
 import { buildServer, type BuildServerDeps, type NexusServices } from '../index.js';
@@ -239,7 +240,11 @@ export interface TestApp {
   mailbox: TestMailbox;
   /** Run exactly one outbox poll cycle. */
   tick(): Promise<OutboxTickResult>;
-  /** Current `email_outbox` rows, oldest first. */
+  /**
+   * Current `email_outbox` rows, oldest first, with sealed content opened — the
+   * subject and bodies the worker would hand to SMTP. Read `store.emailOutbox`
+   * for the bytes actually at rest.
+   */
   outbox(): Promise<EmailOutboxRecord[]>;
   /** Audit rows, optionally filtered to one action, newest first. */
   auditRows(action?: string): Promise<AuditLogRecord[]>;
@@ -355,7 +360,16 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
 
     async outbox(): Promise<EmailOutboxRecord[]> {
       const page = await store.emailOutbox.list({}, { limit: MAX_PAGE_SIZE });
-      return [...page.items].sort((a, b) => a.created_at.localeCompare(b.created_at));
+      const rows = [...page.items].sort((a, b) => a.created_at.localeCompare(b.created_at));
+      return rows.map((row) => {
+        const content = openOutboxRecord(app.nexus.crypto, row);
+        return {
+          ...row,
+          subject: content.subject,
+          body_html: content.html,
+          body_text: content.text,
+        };
+      });
     },
 
     async auditRows(action?: string): Promise<AuditLogRecord[]> {

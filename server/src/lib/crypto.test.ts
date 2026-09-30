@@ -135,6 +135,21 @@ describe('createCrypto', () => {
     const blob = crypto.encryptJson({ host: 'smtp.example.com', password: 'hunter2' });
     assert.deepEqual(crypto.decryptJson(blob), { host: 'smtp.example.com', password: 'hunter2' });
   });
+
+  it('seals outbox content under its own key, bound to the message identity', () => {
+    const crypto = createCrypto(SECRET);
+    const content = { subject: 'Reset', html: '<p>link</p>', text: 'link' };
+    const blob = crypto.sealOutbox(content, 'message-a');
+    assert.deepEqual(crypto.openOutbox(blob, 'message-a'), content);
+
+    const refused = (error: unknown): boolean => isNexusError(error) && error.code === 'INTERNAL';
+    // Another message's identity, another master key, or the settings key: none opens it.
+    assert.throws(() => crypto.openOutbox(blob, 'message-b'), refused);
+    const other = createCrypto('another-master-secret-0123456789abcdefgh');
+    assert.throws(() => other.openOutbox(blob, 'message-a'), refused);
+    assert.throws(() => crypto.decryptJson(blob), refused);
+    assert.throws(() => crypto.openOutbox(crypto.encryptJson(content), 'message-a'), refused);
+  });
 });
 
 describe('constantTimeEqual', () => {

@@ -177,6 +177,7 @@ import type {
 import {
   API_GATEWAY_PLUGIN_ROLES,
   assertLeaseKeyLength,
+  OUTBOX_SEALED_SUBJECT,
   SPEC_HISTORY_PRUNE_BATCH,
 } from '../../store.js';
 import {
@@ -3444,6 +3445,13 @@ class MongoStore implements NexusStore {
       const query: Record<string, unknown> = {};
       if (filter.status !== undefined) query.status = filter.status;
       if (filter.to_email !== undefined) query.to_email = equalsInsensitive(filter.to_email);
+      if (filter.idempotency_key_prefix !== undefined) {
+        // Anchored and escaped, so the prefix matches as literal text.
+        query.idempotency_key = { $regex: `^${escapeRegex(filter.idempotency_key_prefix)}` };
+      }
+      if (filter.sealed !== undefined) {
+        query.subject = filter.sealed ? OUTBOX_SEALED_SUBJECT : { $ne: OUTBOX_SEALED_SUBJECT };
+      }
       return this.paginate(
         COLLECTIONS.emailOutbox,
         query as Filter<NexusDoc>,
@@ -3451,6 +3459,21 @@ class MongoStore implements NexusStore {
         options,
         mapOutbox,
       );
+    },
+
+    sealContent: async (id, sealed) => {
+      const result = await this.col(COLLECTIONS.emailOutbox).updateOne(
+        { _id: id, subject: { $ne: OUTBOX_SEALED_SUBJECT } } as Filter<NexusDoc>,
+        {
+          $set: {
+            subject: OUTBOX_SEALED_SUBJECT,
+            body_html: sealed.body_html,
+            body_text: sealed.body_text,
+          },
+        },
+        this.opts,
+      );
+      return result.modifiedCount > 0;
     },
   };
 

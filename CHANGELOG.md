@@ -50,6 +50,24 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `Cache-Control: private, no-store` with `Vary: Cookie`, overriding whatever
   directive its route set. Sign-in and other cookie-setting responses change
   from `no-store` to `private, no-store`.
+- Queued mail carrying a single-use link is no longer readable from the
+  database (GHSA-cx8j-q289-8w35). Verification, re-sent verification and
+  password-reset messages are sealed with AES-256-GCM before they reach
+  `email_outbox`, under a key derived from `NEXUS_SECRET_KEY` (HKDF info
+  `nexus-outbox-v1`) and bound to the row id and recipient. Only the outbox
+  worker opens them, immediately before delivery; an envelope that was altered,
+  copied onto another row or sealed under a previous key is failed with
+  `last_error` `sealed-unreadable: …` and never sent or retried. Rows queued by
+  an earlier version are sealed in place by the worker, in every status, a
+  bounded batch per tick. Downgrading before failing queued sealed rows can
+  make an older instance email ciphertext and burn the link; a mixed-version
+  deployment can leave plaintext rows until the next restart's sweep. Other
+  mail is stored as before.
+- hCaptcha verification on login and registration is bound to the portal's
+  configured site key (GHSA-8wv5-62xv-93cg). The site key is now sent as
+  `sitekey` on every runtime verification, not only during the activation
+  self-test, so a token solved on another site of the same hCaptcha account is
+  refused. Turnstile and reCAPTCHA requests are unchanged.
 
 ## [0.2.0] - 2026-09-27
 

@@ -992,6 +992,11 @@ service ──enqueue──> email_outbox(pending) ──claim──> sending �
   `email_outbox.idempotency_key`). For example, registration uses
   `verify:<user_id>` and mass email `mass:<batch>:<user_id>`.
 - SMTP settings are read on **every** tick, so edits apply without a restart.
+- Messages rendered from the `verification` and `password_reset` templates
+  carry a single-use link, so they are stored **sealed** (`email/sealed-outbox.ts`):
+  one AES-256-GCM envelope bound to the row id and recipient, opened only by the
+  worker just before it sends. See
+  [security.md](security.md#queued-single-use-links-are-sealed).
 
 Templates: eight keys (`EMAIL_TEMPLATE_KEYS` in `shared/src/constants.ts`),
 each with a built-in default in `email/templates.ts` and an optional admin

@@ -23,8 +23,6 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyInstance } from 'fastify';
 
-import type { EmailTemplateKey } from '@ferrum-nexus/shared';
-
 import { createAccessService, type AccessService } from './access/service.js';
 import {
   createGatewayReconciliationService,
@@ -40,12 +38,7 @@ import {
   type CaptchaTransport,
 } from './auth/captcha.js';
 import { createExpirySweepWorker, type ExpirySweepWorker } from './auth/expiry-sweep.js';
-import {
-  createAuthService,
-  type AuthService,
-  type OnRegistered,
-  type PrepareEmailToken,
-} from './auth/service.js';
+import { createAuthService, type AuthService, type OnRegistered } from './auth/service.js';
 import { createCatalogService, type CatalogService } from './catalog/service.js';
 import { environmentWithEnvFile, type EnvOverride } from './config/env-file.js';
 import { loadConfig, type NexusConfig } from './config/index.js';
@@ -61,6 +54,7 @@ import {
   type MailTransportFactory,
 } from './email/service.js';
 import { createOutboxWorker, type OutboxWorker } from './email/outbox-worker.js';
+import { emailTokenPreparer, PASSWORD_RESET, VERIFICATION_RESEND } from './email/token-mail.js';
 import {
   createFerrumAdmin,
   type EdgeLogger,
@@ -377,18 +371,8 @@ export async function buildServer(
     locks,
     log: warn,
     onRegistered: deps.onRegistered ?? defaultOnRegistered(config, email, notifications, warn),
-    prepareVerificationResend: emailTokenPreparer(config, email, {
-      templateKey: 'verification',
-      keyPrefix: 'verify',
-      path: '/verify-email',
-      urlVar: 'verification_url',
-    }),
-    preparePasswordReset: emailTokenPreparer(config, email, {
-      templateKey: 'password_reset',
-      keyPrefix: 'reset',
-      path: '/reset-password',
-      urlVar: 'reset_url',
-    }),
+    prepareVerificationResend: emailTokenPreparer(config, email, crypto, VERIFICATION_RESEND),
+    preparePasswordReset: emailTokenPreparer(config, email, crypto, PASSWORD_RESET),
   });
   const settings = createSettingsService({
     config,
@@ -520,6 +504,7 @@ export async function buildServer(
   // on the next poll without a restart.
   const outbox = createOutboxWorker({
     store: deps.store,
+    crypto,
     log: warn,
     transportFactory:
       deps.mailTransportFactory ??
@@ -833,60 +818,6 @@ export async function buildServer(
   if (deps.startReconciliationWorker ?? config.env !== 'test') reconciliation.start();
 
   return app;
-}
-
-/** How one flavour of single-use link is turned into a queued message. */
-interface EmailTokenDelivery {
-  templateKey: EmailTemplateKey;
-  /** Outbox idempotency keys are `<keyPrefix>:<token id>` — one message per token. */
-  keyPrefix: string;
-  /** SPA path the link points at, e.g. `/reset-password`. */
-  path: string;
-  /** Template variable carrying the full link. */
-  urlVar: string;
-}
-
-/**
- * Build the hook that prepares a minted link's message — a password reset, or a
- * re-sent verification.
- *
- * The message is rendered here, before the auth service claims anything, and
- * the returned function queues it through the mint's own transaction. That
- * split is the point (issue #342): delivery used to run after the claim had
- * committed and swallow its own failures, so a broken template or a failed
- * outbox insert spent the recipient's throttle window on a link nobody was ever
- * sent, and every retry for the next ten minutes answered `200` and sent
- * nothing. Now a render failure happens with nothing claimed, and an insert
- * failure rolls the claim back with it. Either failure propagates to the auth
- * service, which logs it and still answers uniformly — the endpoint's contract
- * is that its answer never varies.
- *
- * The idempotency key is bound to the *token*, not the user, so a second
- * request that mints a second token can still be delivered while one minted
- * token stays at most one message.
- */
-function emailTokenPreparer(
-  config: NexusConfig,
-  email: EmailService,
-  delivery: EmailTokenDelivery,
-): PrepareEmailToken {
-  return async ({ user, token }) => {
-    const url = `${config.publicUrl}${delivery.path}?token=${encodeURIComponent(token)}`;
-    const rendered = await email.render(delivery.templateKey, {
-      recipient_name: user.display_name,
-      recipient_email: user.email,
-      [delivery.urlVar]: url,
-    });
-    return async (tx, tokenId) => {
-      await tx.emailOutbox.enqueue({
-        to_email: user.email,
-        subject: rendered.subject,
-        body_html: rendered.html,
-        body_text: rendered.text,
-        idempotency_key: `${delivery.keyPrefix}:${tokenId}`,
-      });
-    };
-  };
 }
 
 /**

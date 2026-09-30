@@ -12,9 +12,14 @@
  * 3. **Session token hashing** — HMAC-SHA-256 under a *separate* HKDF-derived
  *    key (info `nexus-session-hmac-v1`), so a leaked settings key cannot be
  *    used to forge session lookups and vice versa.
+ * 4. **Outbox sealing** — AES-256-GCM under a third HKDF-derived key (info
+ *    `nexus-outbox-v1`), with the message's identity as additional
+ *    authenticated data. It keeps the single-use links in queued mail out of
+ *    the database's plaintext; see `email/sealed-outbox.ts`.
  *
- * Rotating `NEXUS_SECRET_KEY` invalidates every encrypted setting and every
- * live session — see docs/operations.md for the re-encrypt flow.
+ * Rotating `NEXUS_SECRET_KEY` invalidates every encrypted setting, every live
+ * session and every sealed outbox message — see docs/operations.md for the
+ * re-encrypt flow.
  */
 
 import {
@@ -169,6 +174,9 @@ export const SETTINGS_KEY_INFO = 'nexus-settings-v1';
 /** HKDF `info` label for the HMAC-SHA-256 key that hashes session tokens at rest. */
 export const SESSION_HMAC_KEY_INFO = 'nexus-session-hmac-v1';
 
+/** HKDF `info` label for the AES-256-GCM key that seals queued `email_outbox` content. */
+export const OUTBOX_KEY_INFO = 'nexus-outbox-v1';
+
 /** Fixed HKDF salt. The master secret supplies the entropy; the salt only separates domains. */
 const HKDF_SALT = Buffer.from('ferrum-nexus-hkdf-salt-v1', 'utf8');
 
@@ -185,10 +193,15 @@ const GCM_IV_BYTES = 12;
 /**
  * Encrypt a JSON-serialisable value under `key` (32 bytes).
  * Output: `v1:<iv b64>:<ciphertext b64>:<tag b64>`.
+ *
+ * `aad`, when given, is authenticated but not stored: the blob then opens only
+ * with the same `aad`, which is how a ciphertext is bound to the row it was
+ * written for.
  */
-export function encryptJsonWithKey(key: Buffer, value: unknown): string {
+export function encryptJsonWithKey(key: Buffer, value: unknown, aad?: string): string {
   const iv = randomBytes(GCM_IV_BYTES);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
+  if (aad !== undefined) cipher.setAAD(Buffer.from(aad, 'utf8'));
   const plaintext = Buffer.from(JSON.stringify(value ?? null), 'utf8');
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const tag = cipher.getAuthTag();
@@ -204,9 +217,10 @@ export function encryptJsonWithKey(key: Buffer, value: unknown): string {
  * Decrypt a blob produced by {@link encryptJsonWithKey}.
  *
  * Throws `NexusError(INTERNAL)` when the blob is malformed or the
- * authentication tag does not verify (wrong key, or tampering).
+ * authentication tag does not verify (wrong key, a different `aad`, or
+ * tampering).
  */
-export function decryptJsonWithKey<T = unknown>(key: Buffer, blob: string): T {
+export function decryptJsonWithKey<T = unknown>(key: Buffer, blob: string, aad?: string): T {
   const parts = blob.split(':');
   if (parts.length !== 4 || parts[0] !== ENCRYPTED_PREFIX) {
     throw internal('Encrypted value has an unrecognised format');
@@ -219,6 +233,7 @@ export function decryptJsonWithKey<T = unknown>(key: Buffer, blob: string): T {
       throw internal('Encrypted value has an unrecognised format');
     }
     const decipher = createDecipheriv('aes-256-gcm', key, iv);
+    if (aad !== undefined) decipher.setAAD(Buffer.from(aad, 'utf8'));
     decipher.setAuthTag(tag);
     const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     return JSON.parse(plaintext.toString('utf8')) as T;
@@ -245,6 +260,16 @@ export interface NexusCrypto {
   encryptJson(value: unknown): string;
   /** Decrypt an `app_settings` blob. Throws on tampering or a rotated key. */
   decryptJson<T = unknown>(blob: string): T;
+  /**
+   * Seal a JSON value for an `email_outbox` row under the outbox key, bound to
+   * `aad` (the message's identity).
+   */
+  sealOutbox(value: unknown, aad: string): string;
+  /**
+   * Open a blob from {@link NexusCrypto.sealOutbox}. Throws on tampering, a
+   * different `aad` or a rotated key.
+   */
+  openOutbox<T = unknown>(blob: string, aad: string): T;
   /** Mint a fresh opaque session token (returned to the browser in a cookie). */
   newSessionToken(): string;
   /** HMAC-SHA-256 of a session/verification token — this is what the DB stores. */
@@ -257,11 +282,14 @@ export interface NexusCrypto {
 export function createCrypto(secretKey: string): NexusCrypto {
   const settingsKey = deriveKey(secretKey, SETTINGS_KEY_INFO);
   const sessionKey = deriveKey(secretKey, SESSION_HMAC_KEY_INFO);
+  const outboxKey = deriveKey(secretKey, OUTBOX_KEY_INFO);
   return {
     hashPassword,
     verifyPassword,
     encryptJson: (value) => encryptJsonWithKey(settingsKey, value),
     decryptJson: <T>(blob: string) => decryptJsonWithKey<T>(settingsKey, blob),
+    sealOutbox: (value, aad) => encryptJsonWithKey(outboxKey, value, aad),
+    openOutbox: <T>(blob: string, aad: string) => decryptJsonWithKey<T>(outboxKey, blob, aad),
     newSessionToken: () => randomToken(32),
     hashToken: (token) => createHmac('sha256', sessionKey).update(token).digest('hex'),
     fingerprint,

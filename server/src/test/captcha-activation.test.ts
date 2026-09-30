@@ -32,7 +32,8 @@ import type { ApiErrorBody, UpdateSettingsRequest } from '@ferrum-nexus/shared';
 
 import type { CaptchaTransport } from '../auth/captcha.js';
 import type { AuditLogRecord, SettingRecord } from '../db/store.js';
-import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
+import { isNexusError } from '../lib/errors.js';
+import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './helpers.js';
 
 /** A token the stub vendor accepts for any secret. */
 const GOOD_TOKEN = 'solved-challenge';
@@ -426,5 +427,106 @@ describe('CAPTCHA activation admission', () => {
     assert.deepEqual(calls, [
       { secret: 'private-captcha', response: GOOD_TOKEN, remoteip: null, sitekey: null },
     ]);
+  });
+
+  /* ── Runtime site binding ─────────────────────────────────────────────── */
+
+  /** A token solved on a different site of the same hCaptcha account. */
+  const OTHER_SITE_TOKEN = 'solved-on-another-site';
+
+  /**
+   * One hCaptcha account holding two sites under one secret: the portal's
+   * `public-site`, and another whose token the vendor accepts unless the
+   * request names the site the token must belong to.
+   */
+  function accountWideVendor(): void {
+    accept = (_secret, token) => {
+      const sitekey = calls.at(-1)?.sitekey ?? null;
+      if (token === GOOD_TOKEN) return sitekey === null || sitekey === 'public-site';
+      if (token === OTHER_SITE_TOKEN) return sitekey === null;
+      return false;
+    };
+  }
+
+  function isCaptchaFailure(error: unknown): boolean {
+    return isNexusError(error) && error.code === 'CAPTCHA_FAILED';
+  }
+
+  it('binds every hCaptcha verification to the configured site key', async () => {
+    accountWideVendor();
+    assert.equal((await save({ ...complete, provider: 'hcaptcha' })).statusCode, 200);
+    calls = [];
+
+    await assert.rejects(harness.services.captcha.verify(OTHER_SITE_TOKEN), isCaptchaFailure);
+    assert.deepEqual(calls, [
+      {
+        secret: 'private-captcha',
+        response: OTHER_SITE_TOKEN,
+        remoteip: null,
+        sitekey: 'public-site',
+      },
+    ]);
+
+    // The portal's own widget still verifies.
+    calls = [];
+    assert.equal(await harness.services.captcha.verify(GOOD_TOKEN), 'verified');
+    assert.deepEqual(calls, [
+      { secret: 'private-captcha', response: GOOD_TOKEN, remoteip: null, sitekey: 'public-site' },
+    ]);
+  });
+
+  it('refuses another site’s hCaptcha token on login and registration', async () => {
+    accountWideVendor();
+    assert.equal((await save({ ...complete, provider: 'hcaptcha' })).statusCode, 200);
+    async function login(captcha_token: string) {
+      return harness.app.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        payload: { email: founder.user.email, password: TEST_PASSWORD, captcha_token },
+      });
+    }
+    async function register(email: string, captcha_token: string) {
+      return harness.app.inject({
+        method: 'POST',
+        url: '/api/auth/register',
+        payload: {
+          email,
+          password: TEST_PASSWORD,
+          display_name: 'Site Bound',
+          role: 'client',
+          captcha_token,
+        },
+      });
+    }
+
+    calls = [];
+    const refusedLogin = await login(OTHER_SITE_TOKEN);
+    assert.equal(refusedLogin.statusCode, 400, refusedLogin.body);
+    assert.equal(refusedLogin.json<ApiErrorBody>().error.code, 'CAPTCHA_FAILED');
+    const refusedRegistration = await register('other-site@example.test', OTHER_SITE_TOKEN);
+    assert.equal(refusedRegistration.statusCode, 400, refusedRegistration.body);
+    assert.equal(refusedRegistration.json<ApiErrorBody>().error.code, 'CAPTCHA_FAILED');
+    assert.equal(await harness.store.users.findByEmail('other-site@example.test'), null);
+    assert.deepEqual(
+      calls.map((call) => call.sitekey),
+      ['public-site', 'public-site'],
+    );
+
+    // Positive controls: the portal's own widget signs in and registers.
+    const accepted = await login(GOOD_TOKEN);
+    assert.equal(accepted.statusCode, 200, accepted.body);
+    const registered = await register('own-site@example.test', GOOD_TOKEN);
+    assert.equal(registered.statusCode, 201, registered.body);
+  });
+
+  it('keeps Turnstile and reCAPTCHA verification free of the hCaptcha-only field', async () => {
+    for (const provider of ['turnstile', 'recaptcha'] as const) {
+      assert.equal((await save({ ...complete, provider })).statusCode, 200);
+      calls = [];
+      assert.equal(await harness.services.captcha.verify(GOOD_TOKEN), 'verified');
+      assert.deepEqual(calls, [
+        { secret: 'private-captcha', response: GOOD_TOKEN, remoteip: null, sitekey: null },
+      ]);
+    }
   });
 });
