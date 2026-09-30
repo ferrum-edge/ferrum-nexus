@@ -22,7 +22,7 @@
     "@ferrum-nexus/shared": "*",
     "better-sqlite3": "^13.0.3",
     "fastify": "^5.12.3",
-    "jose": "^5.10.0",
+    "jose": "^6.2.12",
     "mongodb": "^6.13.0",
     "mysql2": "^3.12.0",
     "nodemailer": "^9.1.1",
