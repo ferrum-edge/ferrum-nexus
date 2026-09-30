@@ -22,7 +22,7 @@
     "@radix-ui/react-toast": "^1.2.6",
     "@radix-ui/react-tooltip": "^1.1.8",
     "@tanstack/react-query": "^5.104.0",
-    "@tanstack/react-router": "^1.170.39",
+    "@tanstack/react-router": "^1.170.40",
     "@tanstack/react-table": "^8.21.2",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
