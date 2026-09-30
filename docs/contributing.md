@@ -4,6 +4,13 @@ Start with [`../CONTRIBUTING.md`](../CONTRIBUTING.md) for prerequisites, setup, 
 before a PR, and the ground rules. This page explains how the test suites work and lists the steps
 for common changes.
 
+## Dependency updates
+
+The root `package.json` `allowScripts` map uses version-qualified keys for `esbuild`. When an
+esbuild update changes a version, update its matching `esbuild@<version>` key as part of the same
+change. Grouped Dependabot updates may require this manual refresh because the allowlist is separate
+from the dependency manifest.
+
 ## Where things are documented
 
 | Question                                           | Document                                   |
