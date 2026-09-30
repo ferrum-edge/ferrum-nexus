@@ -1,0 +1,62 @@
+# The OpenID Connect provider the single sign-on case signs in through
+# (issue #445). Test-only: an in-memory Dex with one static client and two
+# static password users, published on loopback only.
+#
+# The Dex image's entrypoint renders a `.yaml` config with gomplate before Dex
+# reads it, which is how the ports below follow `DEX_PORT` and `NEXUS_PORT`.
+# Every template expression sits inside a quoted string, so this file is plain
+# YAML before rendering as well as after it.
+#
+# The issuer is plain HTTP on `127.0.0.1`. Nexus accepts that only with
+# NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true, and the compose file runs the portal in
+# this container's network namespace so that `127.0.0.1` is Dex for the portal
+# as well as for the test runner; see e2e/docker-compose.yml.
+issuer: 'http://127.0.0.1:{{ getenv "DEX_PORT" "5556" }}/dex'
+
+storage:
+  type: memory
+
+web:
+  http: '0.0.0.0:{{ getenv "DEX_PORT" "5556" }}'
+
+oauth2:
+  responseTypes: ['code']
+  # The consent screen is Dex's, not the portal's; skipping it keeps the flow
+  # to the login form and the redirect back.
+  skipApprovalScreen: true
+
+logger:
+  level: info
+  format: text
+
+enablePasswordDB: true
+
+staticClients:
+  - id: ferrum-nexus-e2e
+    name: Ferrum Nexus (e2e)
+    # Minted per run by run.sh into e2e/.env; the portal gets the same value
+    # through NEXUS_OIDC_CLIENT_SECRET_DEX.
+    secretEnv: DEX_CLIENT_SECRET
+    redirectURIs:
+      - '{{ getenv "NEXUS_PUBLIC_URL" }}/api/auth/sso/dex/callback'
+
+# Both users sign in with the password `password`. The hash is the bcrypt one
+# Dex's own example configuration documents for that string. Throwaway: this
+# provider exists only for the length of a run, on loopback.
+staticPasswords:
+  # Maps to `provider` through the portal's `groups` role mapping.
+  - email: sso-provider@example.test
+    hash: '$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W'
+    username: sso-provider
+    name: SSO Provider
+    userID: 4f0a7c52-6a0e-4b8e-9f0d-5f3b1d2c9a01
+    emailVerified: true
+    groups:
+      - nexus-providers
+  # In no mapped group, so the provider's default role applies: `client`.
+  - email: sso-client@example.test
+    hash: '$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W'
+    username: sso-client
+    name: SSO Client
+    userID: 9b3e2d71-0c4f-4a6b-8e5d-2a7f1c3b6d02
+    emailVerified: true

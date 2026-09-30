@@ -121,6 +121,7 @@ to the gateway's **data-plane listener** and checking whether they reached the b
 ```bash
 ./e2e/run.sh              # stack up, suite, teardown
 ./e2e/run.sh dataplane    # the gateway matrix only
+./e2e/run.sh sso          # single sign-on through a real Dex only
 E2E_KEEP=1 ./e2e/run.sh   # leave the stack up afterwards
 ```
 
@@ -129,8 +130,9 @@ check. Run it locally for anything that changes what Nexus writes to Edge, the a
 credential contract, or the container image.
 
 The Edge image is pinned by digest in one place, `release/compatibility.env`, so moving to a newer
-Edge is a one-line change. See [e2e/README.md](../e2e/README.md) for overrides and what each half of
-the suite asserts.
+Edge is a one-line change. The stack also runs a digest-pinned Dex, which the `sso` part signs in
+through. See [e2e/README.md](../e2e/README.md) for overrides and what each part of the suite
+asserts.
 
 ## The verbatim quickstart gate
 

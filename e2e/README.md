@@ -5,22 +5,23 @@ to fail in ways a real gateway cannot, but it can only confirm that Nexus sent t
 meant to send. It cannot tell you whether a real gateway would then let the request through.
 
 This suite answers that question. It runs the **production container image** against a **pinned
-Ferrum Edge release**, PostgreSQL, a deterministic upstream, and a real SMTP sink (Mailpit). Every
-access assertion sends a request to the gateway's **data-plane listener** and checks whether it
-reached the backend. The Admin API is called exactly once: to delete a proxy, the operator mistake
-the restore test recovers from.
+Ferrum Edge release**, PostgreSQL, a deterministic upstream, a real SMTP sink (Mailpit), and a real
+OpenID Connect provider (Dex). Every access assertion sends a request to the gateway's
+**data-plane listener** and checks whether it reached the backend. The Admin API is called exactly
+once: to delete a proxy, the operator mistake the restore test recovers from.
 
 ## Running it
 
 ```bash
 ./e2e/run.sh              # everything
 ./e2e/run.sh dataplane    # the gateway matrix only
+./e2e/run.sh sso          # single sign-on through Dex only
 ./e2e/run.sh browser      # the portal journey only
 E2E_KEEP=1 ./e2e/run.sh   # leave the stack up afterwards
 ```
 
-The only accepted argument is `all` (the default), `dataplane`, or `browser`; anything else is
-rejected before Docker starts.
+The only accepted argument is `all` (the default), `dataplane`, `sso`, or `browser`; anything else
+is rejected before Docker starts.
 
 You need Docker with `docker compose` (or `docker-compose`) and about 3 GB of free image space. By
 default `run.sh` rebuilds the portal image from the current checkout (using Docker's build cache),
@@ -47,7 +48,11 @@ image. Moving to a newer Edge is a one-line edit to the compatibility record.
 Each run logs the Nexus image ID, and the Edge image ID and repository digest, that it actually
 used.
 
-## The two halves
+Dex is pinned by digest in [`docker-compose.yml`](docker-compose.yml), with its release tag
+alongside. Its configuration is [`dex/config.yaml`](dex/config.yaml): in-memory storage, one static
+client, and two static password users, one in the `nexus-providers` group.
+
+## The three parts
 
 **`src/dataplane.test.ts`** — what the gateway permits:
 
@@ -66,6 +71,25 @@ used.
 - The Nexus and Edge databases are backed up together, both lost, and both restored from that
   backup ([runbook](../docs/operations.md#5-backup-and-restore)). An approved client's pre-backup
   credential still works, and a client revoked before the backup is still refused.
+
+**`src/sso.test.ts`** — single sign-on through a real OpenID Connect provider. An HTTP client that
+keeps cookies starts at `GET /api/auth/sso/dex/start`, follows the portal's redirect to Dex, submits
+Dex's own login form, follows Dex back to the portal's callback, and then reads the session it got:
+
+- The authorization request carries a PKCE `S256` challenge, `state` and `nonce`. Dex redeems the
+  code only with the matching verifier, so a completed sign-in proves PKCE end to end. The nonce
+  round-trips through Dex into the ID token; the portal's refusal of a mismatched one is covered by
+  `server/src/sso/oidc.test.ts`.
+- Dex's `groups` claim maps the account to `provider`; a user in no mapped group gets `client`. A
+  second sign-in opens the same account, matched by the linked subject.
+- A callback with a tampered `state` is refused (`/login?sso_error=invalid_state`) and opens no
+  session, and the genuine callback cannot be replayed afterwards.
+
+The issuer is `http://127.0.0.1:5556/dex`. The portal accepts a plain-HTTP issuer only on a literal
+loopback host and only with `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`, so the stack sets that flag and
+runs the portal in Dex's network namespace, where `127.0.0.1` is Dex for the portal as well as for
+the test runner. That is why the portal's port is published on the `dex` service.
+`NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES` stays off: the loopback flag is all a local provider needs.
 
 **`src/journey.spec.ts`** — what a person can do, in a real browser (Playwright): register, verify
 by following the link in a real email, sign in, find the API, read its **rendered** documentation,

@@ -2507,6 +2507,14 @@ exactly `localhost`, `127.0.0.1` or `::1`, such as a Dex or Keycloak on the
 same machine, and exempts those hosts from the public-address check. Every
 other issuer must be HTTPS whatever it says. Never set it in production.
 
+The acceptance suite signs in through a real Dex this way
+([`e2e/src/sso.test.ts`](../e2e/src/sso.test.ts), `./e2e/run.sh sso`): issuer
+`http://127.0.0.1:5556/dex`, `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`, and
+`NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES` left off. Because the issuer must be the
+same URL for the browser and for the portal's own calls to the provider, the
+portal container shares Dex's network namespace there. A containerized portal
+in development needs the same arrangement, or an HTTPS issuer both can reach.
+
 ## Gateway resource attribution
 
 Every Admin API call sends `X-Ferrum-Provisioned-By: ferrum-nexus`. A gateway

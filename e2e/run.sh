@@ -6,6 +6,7 @@
 #
 #   ./e2e/run.sh            # everything
 #   ./e2e/run.sh dataplane  # the gateway matrix only
+#   ./e2e/run.sh sso        # single sign-on through a real Dex only
 #   ./e2e/run.sh browser    # the portal journey only
 #   E2E_KEEP=1 ./e2e/run.sh # leave the stack up to poke at afterwards
 #
@@ -19,13 +20,13 @@ ROOT="$(cd "$HERE/.." && pwd)"
 ARTIFACTS="${E2E_ARTIFACTS:-$HERE/artifacts}"
 SUITE="${1:-all}"
 if [[ $# -gt 1 ]]; then
-  printf 'Usage: %s [all|dataplane|browser]\n' "$0" >&2
+  printf 'Usage: %s [all|dataplane|sso|browser]\n' "$0" >&2
   exit 2
 fi
 case "$SUITE" in
-  all|dataplane|browser) ;;
+  all|dataplane|sso|browser) ;;
   *)
-    printf 'Usage: %s [all|dataplane|browser]\n' "$0" >&2
+    printf 'Usage: %s [all|dataplane|sso|browser]\n' "$0" >&2
     exit 2
     ;;
 esac
@@ -58,13 +59,21 @@ IMAGE_OVERRIDE="${NEXUS_IMAGE:-}"
 if [[ ! -f .env ]]; then
   echo "==> generating e2e/.env"
   {
-    grep -E '^(NEXUS_IMAGE|NEXUS_PORT|FERRUM_PROXY_PORT|FERRUM_ADMIN_PORT|MAILPIT_HTTP_PORT)=' .env.example
+    grep -E '^(NEXUS_IMAGE|NEXUS_PORT|FERRUM_PROXY_PORT|FERRUM_ADMIN_PORT|MAILPIT_HTTP_PORT|DEX_PORT)=' .env.example
     echo "NEXUS_SECRET_KEY=$(openssl rand -hex 32)"
     echo "NEXUS_BOOTSTRAP_TOKEN=$(openssl rand -hex 32)"
     echo "NEXUS_DB_PASSWORD=$(openssl rand -hex 16)"
     echo "FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)"
     echo "FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)"
+    echo "DEX_CLIENT_SECRET=$(openssl rand -hex 32)"
   } > .env
+fi
+# An e2e/.env generated before the Dex service existed has no client secret
+# for it; add one rather than make the developer delete their environment.
+if ! grep -q '^DEX_CLIENT_SECRET=' .env; then
+  # Do not glue the new line onto a last line that has no newline.
+  if [[ -s .env && -n "$(tail -c1 .env)" ]]; then echo >> .env; fi
+  echo "DEX_CLIENT_SECRET=$(openssl rand -hex 32)" >> .env
 fi
 # Only an image supplied by the caller is treated as a prebuilt image. The
 # value in .env is a convenient tag for the image built from this checkout.
@@ -94,7 +103,7 @@ cleanup() {
   # Container logs only. They carry request lines and gateway decisions, which
   # is what a failure needs; they do not carry the credentials, which are
   # show-once in the responses and never logged.
-  for service in nexus ferrum-edge postgres upstream mail; do
+  for service in nexus ferrum-edge postgres upstream mail dex; do
     "${COMPOSE[@]}" logs --no-color --timestamps "$service" \
       > "$ARTIFACTS/$service.log" 2>&1 || true
   done
@@ -137,6 +146,7 @@ export E2E_PORTAL_URL="http://127.0.0.1:${NEXUS_PORT:-8787}"
 export E2E_GATEWAY_URL="http://127.0.0.1:${FERRUM_PROXY_PORT:-8000}"
 export E2E_ADMIN_URL="http://127.0.0.1:${FERRUM_ADMIN_PORT:-9000}"
 export E2E_MAIL_URL="http://127.0.0.1:${MAILPIT_HTTP_PORT:-8025}"
+export E2E_DEX_ISSUER="http://127.0.0.1:${DEX_PORT:-5556}/dex"
 export E2E_COMPOSE="${COMPOSE[*]}"
 export E2E_PROJECT_DIR="$HERE"
 
@@ -155,6 +165,11 @@ npx tsx src/prepare.ts
 if [[ "$SUITE" == "all" || "$SUITE" == "dataplane" ]]; then
   echo "==> data-plane acceptance suite"
   npx tsx --test src/dataplane.test.ts
+fi
+
+if [[ "$SUITE" == "all" || "$SUITE" == "sso" ]]; then
+  echo "==> single sign-on through Dex"
+  npx tsx --test src/sso.test.ts
 fi
 
 if [[ "$SUITE" == "all" || "$SUITE" == "browser" ]]; then

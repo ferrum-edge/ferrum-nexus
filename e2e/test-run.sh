@@ -102,25 +102,53 @@ NEXUS_IMAGE=ci/nexus:built FERRUM_EDGE_IMAGE=example/edge:override \
 not_contains "$FIXTURE/trace" 'docker build -t'
 contains "$FIXTURE/trace" 'nexus=ci/nexus:built edge=example/edge:override'
 
-# Each valid suite selects exactly its suite; all and the default select both.
-for suite in all dataplane browser; do
+# Each valid suite selects exactly its suite; all and the default select every one.
+for suite in all dataplane sso browser; do
   new_fixture "suite_$suite"
   run_fixture bash ./run.sh "$suite"
   if [[ "$suite" == all ]]; then
     contains "$FIXTURE/trace" 'npx tsx --test src/dataplane.test.ts'
+    contains "$FIXTURE/trace" 'npx tsx --test src/sso.test.ts'
     contains "$FIXTURE/trace" 'npx playwright test'
   elif [[ "$suite" == dataplane ]]; then
     contains "$FIXTURE/trace" 'npx tsx --test src/dataplane.test.ts'
+    not_contains "$FIXTURE/trace" 'npx tsx --test src/sso.test.ts'
+    not_contains "$FIXTURE/trace" 'npx playwright test'
+  elif [[ "$suite" == sso ]]; then
+    contains "$FIXTURE/trace" 'npx tsx --test src/sso.test.ts'
+    not_contains "$FIXTURE/trace" 'npx tsx --test src/dataplane.test.ts'
     not_contains "$FIXTURE/trace" 'npx playwright test'
   else
     contains "$FIXTURE/trace" 'npx playwright test'
     not_contains "$FIXTURE/trace" 'npx tsx --test src/dataplane.test.ts'
+    not_contains "$FIXTURE/trace" 'npx tsx --test src/sso.test.ts'
   fi
 done
 new_fixture suite_default
 run_fixture bash ./run.sh
 contains "$FIXTURE/trace" 'npx tsx --test src/dataplane.test.ts'
+contains "$FIXTURE/trace" 'npx tsx --test src/sso.test.ts'
 contains "$FIXTURE/trace" 'npx playwright test'
+
+# A fresh environment gets a Dex client secret, and one generated before the
+# Dex service existed gains one without losing its other secrets.
+new_fixture dex_secret
+run_fixture bash ./run.sh
+contains "$FIXTURE/e2e/.env" 'DEX_CLIENT_SECRET=test-secret'
+contains "$FIXTURE/e2e/.env" 'DEX_PORT=5556'
+new_fixture dex_secret_backfill
+printf 'NEXUS_SECRET_KEY=preserved-secret\n' > "$FIXTURE/e2e/.env"
+run_fixture bash ./run.sh
+contains "$FIXTURE/e2e/.env" 'NEXUS_SECRET_KEY=preserved-secret'
+contains "$FIXTURE/e2e/.env" 'DEX_CLIENT_SECRET=test-secret'
+[[ "$(grep -c '^DEX_CLIENT_SECRET=' "$FIXTURE/e2e/.env")" == 1 ]] || fail 'Dex secret duplicated'
+run_fixture bash ./run.sh
+[[ "$(grep -c '^DEX_CLIENT_SECRET=' "$FIXTURE/e2e/.env")" == 1 ]] || fail 'Dex secret re-added'
+new_fixture dex_secret_no_newline
+printf 'NEXUS_SECRET_KEY=preserved-secret' > "$FIXTURE/e2e/.env"
+run_fixture bash ./run.sh
+grep -qx 'NEXUS_SECRET_KEY=preserved-secret' "$FIXTURE/e2e/.env" || fail 'last line was corrupted'
+grep -qx 'DEX_CLIENT_SECRET=test-secret' "$FIXTURE/e2e/.env" || fail 'Dex secret glued to last line'
 
 # Invalid or extra arguments fail before environment creation or Docker calls.
 for args in 'unknown' 'all extra'; do

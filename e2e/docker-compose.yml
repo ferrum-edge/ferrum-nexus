@@ -1,5 +1,6 @@
 # The end-to-end stack: the packaged Nexus image, a pinned Ferrum Edge release,
-# PostgreSQL, a deterministic upstream and a local mail sink (issue #285).
+# PostgreSQL, a deterministic upstream, a local mail sink (issue #285) and an
+# OpenID Connect provider (Dex, issue #445).
 #
 # Everything here is **pinned by digest**. A suite whose job is to prove that
 # the portal's access decisions match what a real gateway permits cannot float
@@ -53,6 +54,43 @@ services:
     ports:
       - '127.0.0.1:${MAILPIT_HTTP_PORT:-8025}:8025'
 
+  # The identity provider the single sign-on case signs in through: Dex with
+  # one static client and static password users (e2e/dex/config.yaml).
+  #
+  # Its issuer is `http://127.0.0.1:<DEX_PORT>/dex`, and that one URL has to
+  # work for both parties that use it: the test runner on the host follows the
+  # authorization redirect to it, and the portal fetches discovery, the key set
+  # and the token endpoint from it. So the portal runs in this container's
+  # network namespace (`network_mode: service:dex` below), where `127.0.0.1`
+  # is Dex, and Dex listens on the same port inside as it is published on.
+  # That is also why the portal's own port is published here.
+  #
+  # Restarting dex requires restarting nexus (it shares dex's network
+  # namespace); `docker compose up -d` recreates both.
+  dex:
+    # Dex v2.45.1, the current stable release, pinned by its multi-arch index
+    # digest like everything else here.
+    image: ghcr.io/dexidp/dex:v2.45.1@sha256:8499afd690c437f52301efd2b05b2455da5bd2dfc20332cd697dc9937f808462
+    command: ['dex', 'serve', '/etc/dex/e2e.yaml']
+    environment:
+      DEX_PORT: ${DEX_PORT:-5556}
+      NEXUS_PUBLIC_URL: http://127.0.0.1:${NEXUS_PORT:-8787}
+      DEX_CLIENT_SECRET: ${DEX_CLIENT_SECRET:?set DEX_CLIENT_SECRET}
+    volumes:
+      - ./dex/config.yaml:/etc/dex/e2e.yaml:ro
+    # Relies on the Alpine-based image's busybox wget; a -distroless tag has
+    # no wget and would never report healthy.
+    healthcheck:
+      test:
+        ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:${DEX_PORT:-5556}/dex/healthz']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports:
+      - '127.0.0.1:${DEX_PORT:-5556}:${DEX_PORT:-5556}'
+      # The portal's listener, which lives in this network namespace.
+      - '127.0.0.1:${NEXUS_PORT:-8787}:8787'
+
   ferrum-edge:
     image: ${FERRUM_EDGE_IMAGE:?set FERRUM_EDGE_IMAGE}
     command: run -m database
@@ -93,6 +131,9 @@ services:
 
   nexus:
     image: ${NEXUS_IMAGE:-ferrum-nexus:e2e}
+    # Dex's network namespace: see the `dex` service. The portal still reaches
+    # every other service by name, and its port is published there.
+    network_mode: service:dex
     environment:
       NEXUS_SECRET_KEY: ${NEXUS_SECRET_KEY:?set NEXUS_SECRET_KEY}
       NEXUS_BOOTSTRAP_TOKEN: ${NEXUS_BOOTSTRAP_TOKEN:?set NEXUS_BOOTSTRAP_TOKEN}
@@ -115,9 +156,23 @@ services:
       NEXUS_SMTP_PORT: '1025'
       NEXUS_SMTP_SECURE: 'false'
       NEXUS_SMTP_FROM: nexus@example.test
-    ports:
-      - '127.0.0.1:${NEXUS_PORT:-8787}:8787'
+      # Single sign-on through the `dex` service. The issuer is plain HTTP on
+      # 127.0.0.1, which the portal refuses unless the loopback development
+      # flag is on. That flag also exempts the literal loopback hosts from the
+      # public-address check, so private addresses stay refused: the suite
+      # proves the loopback flag alone is enough for a local provider. Both are
+      # test-only settings; see docs/operations.md §14.
+      NEXUS_OIDC_ALLOW_HTTP_LOOPBACK: 'true'
+      NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES: 'false'
+      NEXUS_OIDC_PROVIDERS: >-
+        [{"id": "dex", "display_name": "Dex (e2e)",
+        "issuer": "http://127.0.0.1:${DEX_PORT:-5556}/dex", "client_id": "ferrum-nexus-e2e",
+        "scopes": ["openid", "email", "profile", "groups"],
+        "role_mappings": [{"claim": "groups", "value": "nexus-providers", "role": "provider"}]}]
+      NEXUS_OIDC_CLIENT_SECRET_DEX: ${DEX_CLIENT_SECRET:?set DEX_CLIENT_SECRET}
     depends_on:
+      dex:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       ferrum-edge:

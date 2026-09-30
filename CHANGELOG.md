@@ -135,6 +135,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   - Setup: [`docs/operations.md` §14](docs/operations.md#14-single-sign-on-openid-connect);
     threat model:
     [`docs/security.md`](docs/security.md#single-sign-on-openid-connect).
+- The acceptance suite signs in through a real Dex (closes #445). A new `sso`
+  part (`./e2e/run.sh sso`, also run by default and in CI's `acceptance` job)
+  starts a sign-in at the packaged portal, submits Dex's login form over HTTP,
+  follows Dex back to the callback, and checks the session it opens: PKCE
+  `S256` proven end to end by Dex redeeming the code, `state` and a `nonce`
+  that round-trips through Dex (a mismatched nonce's refusal stays covered by
+  `server/src/sso/oidc.test.ts`), the `provider` role mapped from Dex's
+  `groups` claim, the default `client` role without it, and the same account
+  on a second sign-in. A callback with a tampered `state` is
+  refused with `invalid_state`, opens no session and spends the attempt. Dex
+  (`v2.45.1`) is pinned by digest and configured statically in
+  `e2e/dex/config.yaml`; its client secret is minted per run into `e2e/.env`.
 
 ### Changed
 
