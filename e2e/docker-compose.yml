@@ -15,7 +15,7 @@ name: ferrum-nexus-e2e
 
 services:
   postgres:
-    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
     environment:
       POSTGRES_USER: nexus
       POSTGRES_PASSWORD: ${NEXUS_DB_PASSWORD:?set NEXUS_DB_PASSWORD}
@@ -47,7 +47,7 @@ services:
   # The mail sink. Verification mail is part of the journey under test, so it
   # has to be delivered somewhere a test can read it — not stubbed out.
   mail:
-    image: axllent/mailpit:v1.21@sha256:81370195cd4a0eab9604d17c2617a7525b0486f9365555253b6c5376c6350f1a
+    image: axllent/mailpit:v1.31@sha256:ed9b00c609e77e99c79b93f1178255ebc271868920f2c69a8d166bd5634ed10d
     environment:
       MP_SMTP_AUTH_ACCEPT_ANY: '1'
       MP_SMTP_AUTH_ALLOW_INSECURE: '1'
