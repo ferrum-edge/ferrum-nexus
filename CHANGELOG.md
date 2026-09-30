@@ -48,6 +48,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Security
 
+- Basic Auth scan failures now remain visible in administrator health details,
+  and revocation checks ownership under the consumer lock, including retiring
+  rows swept when a plain revoke clears the last active credential.
 - Cookie cache protection applies to cookies set through Fastify's reply API;
   raw response headers and hijacked replies must not set cookies.
 - GHSA-r4wm-2vch-9jxm: OpenAPI rendering accounts for primitive schema values during

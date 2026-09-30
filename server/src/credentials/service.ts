@@ -1587,6 +1587,19 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       if (!current || !LIVE_STATUSES.has(current.status)) return false;
 
       const consumer = await edge.consumers.get(consumerId);
+      const live = await liveRows(consumerId, type);
+      // A whole-type clear affects every row on this consumer. Check ownership
+      // only after taking the same key as the delete, so a concurrent issue
+      // cannot add another user's row between the check and the write.
+      if (
+        clearType &&
+        !roleAtLeast(actor.role, 'admin') &&
+        live.some((row) => row.user_id !== actor.id)
+      ) {
+        throw forbidden(
+          'This consumer holds HTTP Basic credentials that belong to another account; an administrator must clear them',
+        );
+      }
       // Other rows of the pair a whole-type delete takes with the target. Only
       // ever `retiring` ones: {@link revokePosition} empties a type only when
       // nothing else of it is `active`.
@@ -1595,7 +1608,6 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // A consumer deleted out from under us means the entry is already gone;
       // the row still has to be marked so the UI stops offering it.
       if (consumer) {
-        const live = await liveRows(consumerId, type);
         const length = edgeArrayLength(consumer.credentials, type, live.length);
         // Settle a retirement Edge applied but never acknowledged before
         // resolving anything: the drift it leaves used to refuse this very
@@ -1611,6 +1623,16 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         const position = revokePosition(rows, current, length, clearType);
         wholeType = position === 'whole-type';
         if (position === 'whole-type') swept = rows.filter((row) => row.id !== current.id);
+        if (
+          wholeType &&
+          !clearType &&
+          !roleAtLeast(actor.role, 'admin') &&
+          swept.some((row) => row.user_id !== actor.id)
+        ) {
+          throw forbidden(
+            'This consumer holds HTTP Basic credentials that belong to another account; an administrator must clear them',
+          );
+        }
         // `not-live` follows the status check above whenever the settlement
         // was this very row — its entry is already gone. Either way, treat it
         // as a completed revoke rather than a whole-type delete.
@@ -2168,11 +2190,11 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     issueForConsumer,
 
     async initializeLegacyBasicAuthPositions(): Promise<void> {
-      if (await store.settings.get(LEGACY_BASICAUTH_SCAN_SETTING)) {
-        legacyScanState = 'completed';
-        return;
-      }
       try {
+        if (await store.settings.get(LEGACY_BASICAUTH_SCAN_SETTING)) {
+          legacyScanState = 'completed';
+          return;
+        }
         await scanLegacyBasicAuthAppends();
         // Only a scan that reached the end is recorded: one that failed part
         // way through runs again from the start on the next boot, and every
@@ -2986,17 +3008,6 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         });
       }
       if (target.status === 'revoked') return;
-      if (clearType && !roleAtLeast(user.role, 'admin')) {
-        // Clearing the type deletes every entry of the consumer, not only the
-        // caller's own: ownership of one row is not licence to revoke rows the
-        // portal attributes to somebody else.
-        const live = await liveRows(target.ferrum_consumer_id, 'basicauth');
-        if (live.some((row) => row.user_id !== user.id)) {
-          throw forbidden(
-            'This consumer holds HTTP Basic credentials that belong to another account; an administrator must clear them',
-          );
-        }
-      }
       await revokeCredentialRow(target, { id: user.id, role: user.role }, ip, {}, clearType);
     },
 

@@ -808,6 +808,10 @@ export interface AppHealth {
   checked_at: IsoTimestamp;
   database: DependencyHealth & { driver: DbDriver };
   edge: EdgeHealth;
+  /** Credential-maintenance detail, shown only to administrators. */
+  credentials: {
+    legacy_basicauth_scan: 'pending' | 'completed' | 'failed' | null;
+  };
 }
 
 /** Supported persistence backends. */

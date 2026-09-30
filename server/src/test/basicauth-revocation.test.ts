@@ -639,6 +639,30 @@ describe('basicauth revocation removes the selected password', () => {
     assert.equal(await statusOf(own.credential.id), 'revoked');
     assert.equal(await statusOf(foreign.id), 'revoked');
   });
+
+  it('keeps a plain last revoke from sweeping another account’s retiring row', async () => {
+    const user = await client();
+    const other = await client();
+    const own = await issue(user);
+    const foreign = await harness.store.credentials.create({
+      user_id: other.user.id,
+      application_id: null,
+      ferrum_consumer_id: own.credential.ferrum_consumer_id,
+      credential_type: 'basicauth',
+      ferrum_credential_id: `${own.credential.ferrum_consumer_id}/credentials/basicauth`,
+      fingerprint: `test-foreign-retiring-row-${nonce}`,
+      last4: 'frgn',
+      label: null,
+      status: 'retiring',
+      rotated_from_id: null,
+    });
+
+    const refused = await revoke(user, own.credential.id);
+    assert.equal(refused.statusCode, 403, refused.body);
+    assert.equal(authenticates(user, own), true, 'nothing was deleted');
+    assert.equal(await statusOf(own.credential.id), 'active');
+    assert.equal(await statusOf(foreign.id), 'retiring');
+  });
 });
 
 /* ── The upgrade scan: appends an earlier release left without a row ───── */
