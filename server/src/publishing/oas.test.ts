@@ -409,7 +409,10 @@ describe('OpenAPI parsing', () => {
     const overLimit = renderCostSpec((MAX_SPEC_RENDER_UNITS - 14) / 2 + 1);
     assert.ok(Buffer.byteLength(overLimit, 'utf8') < MAX_SPEC_BYTES);
     const failure = expectSpecInvalid(() => parseOpenApiSpec(overLimit));
-    assert.match(failure.message, /99989 schema nodes, 6 parameters, 5 media types and 1 responses/);
+    assert.match(
+      failure.message,
+      /99989 schema nodes, 6 parameters, 5 media types and 1 responses/,
+    );
     assert.match(failure.message, /more than the 100000 the documentation viewer can render/);
     assert.deepEqual(failure.details, {
       field: 'paths',

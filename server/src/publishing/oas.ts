@@ -854,10 +854,7 @@ function countNodes(
         if (add(1) || visit(property, refs, currentDepth + 1)) return true;
       }
     }
-    if (
-      schema.items !== undefined &&
-      (add(1) || visit(schema.items, refs, currentDepth + 1))
-    ) {
+    if (schema.items !== undefined && (add(1) || visit(schema.items, refs, currentDepth + 1))) {
       return true;
     }
 
