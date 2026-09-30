@@ -393,7 +393,8 @@ Each message writes a message row and an audit row. A **platform thread** (no
   outbox, which delivers in the order rows were queued; accounts past the cap,
   the ones latest in the API's grant list, get the in-app notice only.
   Fan-outs of one API run one at a time, and of several waiting only the
-  newest runs (its audit rows count the others as `superseded`). **It is
+  newest runs: its audit rows name the others (`superseded_spec_ids`), and if
+  any of them broke something, its notices and email say so. **It is
   best-effort:** on a graceful stop the server stops starting batches and
   waits at most 10 seconds for the running ones; the batches left are skipped
   and recorded as `skipped_batches`, and a crash loses the whole fan-out.

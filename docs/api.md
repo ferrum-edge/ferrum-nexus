@@ -1947,7 +1947,8 @@ _provider_, owner or admin — publish a new spec revision. Body: `spec`
   get the in-app notice only. The fan-out commits in batches of 200 accounts,
   each with an `api.spec_notify` audit row, and a batch that fails does not
   stop the next. Fan-outs of one API run one at a time: one published while
-  another is running waits, and of several waiting only the newest runs. It is
+  another is running waits, and of several waiting only the newest runs, still
+  marking its notices breaking if one it replaced was. It is
   **detached and best-effort**: the response does not wait for it, a failure
   is logged and never fails the publish, and on a graceful stop the server
   waits at most 10 seconds for it and skips the batches left; nothing retries
