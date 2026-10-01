@@ -224,24 +224,21 @@ describe('provider access pagination', () => {
   it.each([
     { status: 403, code: 'FORBIDDEN' as const },
     { status: 500, code: 'INTERNAL' as const },
-  ])(
-    'keeps failed grants visible and retries after HTTP $status',
-    async ({ status, code }) => {
-      vi.mocked(grantsApi.list)
-        .mockRejectedValueOnce(new ApiError(code, 'QA read failure', status))
-        .mockResolvedValueOnce({ items: [], total: 0 });
-      renderTab(<GrantsTab apiId="api-1" />);
+  ])('keeps failed grants visible and retries after HTTP $status', async ({ status, code }) => {
+    vi.mocked(grantsApi.list)
+      .mockRejectedValueOnce(new ApiError(code, 'QA read failure', status))
+      .mockResolvedValueOnce({ items: [], total: 0 });
+    renderTab(<GrantsTab apiId="api-1" />);
 
-      expect(await screen.findByText('Could not load data')).toBeInTheDocument();
-      expect(screen.queryByText('No matching grants')).not.toBeInTheDocument();
-      expect(screen.queryByText('Loading count…')).not.toBeInTheDocument();
+    expect(await screen.findByText('Could not load data')).toBeInTheDocument();
+    expect(screen.queryByText('No matching grants')).not.toBeInTheDocument();
+    expect(screen.queryByText('Loading count…')).not.toBeInTheDocument();
 
-      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
 
-      expect(await screen.findByText('No matching grants')).toBeInTheDocument();
-      expect(grantsApi.list).toHaveBeenCalledTimes(2);
-    },
-  );
+    expect(await screen.findByText('No matching grants')).toBeInTheDocument();
+    expect(grantsApi.list).toHaveBeenCalledTimes(2);
+  });
 
   it.each(['Approve', 'Deny'] as const)(
     'reaches an old pending request behind 51 decisions and can %s it',
