@@ -317,7 +317,7 @@ or `ES256`, is refused.
      - redeeming a verification link;
      - completing a password reset;
      - an identity provider asserting the verified address when it provisioned
-       the account or linked it.
+       the account or linked it automatically. An explicit link records none.
 
    Nothing else counts. The policy in force does not, and `users.email_verified`
    does not. With `require_email_verification` off, a registration is marked
@@ -349,9 +349,31 @@ attempt records the account and the session that started it, and the callback
 attaches the identity only when it returns to that same session
 (`link_session_mismatch` otherwise). This is the only way an administrator's
 account is ever linked. The identity's email address plays no part, because
-the holder is present and chose it. The provider's own domain list still
-applies, and a subject already linked to another account is refused
-(`already_linked`). A refused link returns to `/profile?sso_error=<reason>`.
+the holder is present and chose it.
+
+A session is not proof that its holder owns the account's address, though.
+With `require_email_verification` off, anyone can register a victim's address,
+sign in, and link an identity of their own. That link is keyed on `sub`, so it
+would keep opening the account after the victim resets the password and takes
+the account back. An explicit link therefore needs the portal's **recorded
+proof** of the account's current address, the same proof the automatic rule
+needs, and is refused with `address_unproven` without it. The provider's
+`email_verified` is not trusted here, even for the account's own address: the
+attacker chooses the provider account, and a provider whose users can set or
+claim an address, or that verifies addresses loosely, would let them assert
+the victim's. Accepting an explicit link records no proof, so a link never
+turns the provider's word into the portal's proof. The one exception is the
+**founding `super_admin`**, the account recorded under
+`bootstrap.super_admin_claimed` when it was seated with the bootstrap token.
+That token is the operator's proof of ownership, so the founder links without
+an address proof, which keeps a portal with no SMTP able to move to `sso_only`. The exemption
+also requires the account to still hold `super_admin`. A claim written before
+the founder's seat became atomic can name an account that was never promoted;
+if a `super_admin` later promotes that account, it gains the exemption too.
+
+The provider's own domain list still applies, and a subject already linked to
+another account is refused (`already_linked`). A refused link returns to
+`/profile?sso_error=<reason>`.
 
 **Allowed domains.** There are two lists:
 

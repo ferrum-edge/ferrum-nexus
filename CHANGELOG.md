@@ -85,7 +85,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     The registration policy in force never counts as proof, which closes
     account pre-hijacking. Administrators, and anyone else, link explicitly
     from **Profile → Linked sign-in** (`POST /api/auth/sso/:provider/link`),
-    bound to the session that started it. Users see their links at
+    bound to the session that started it. An explicit link needs the same
+    recorded proof of the account's address, whatever the provider asserts,
+    and is refused with the new reason `address_unproven` without it;
+    accepting one records no proof. Otherwise whoever registered an address
+    first could link their own identity and keep it after the rightful holder
+    resets the password. The founding `super_admin`, seated with the bootstrap
+    token, is exempt. With `require_email_verification` off and no SMTP,
+    nothing records a proof, so only the founder can link explicitly:
+    configure SMTP and have holders verify or reset, or use provisioning and
+    automatic linking. Users see their links at
     `GET /api/users/me/identities`. Administrators list and remove links at
     `/api/users/:id/identities`.
 
