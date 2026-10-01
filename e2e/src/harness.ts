@@ -19,6 +19,15 @@ export const UPSTREAM_MARKER = 'x-upstream';
 export const PORTAL_URL = process.env.E2E_PORTAL_URL ?? 'http://127.0.0.1:8787';
 export const GATEWAY_URL = process.env.E2E_GATEWAY_URL ?? 'http://127.0.0.1:8000';
 export const MAIL_URL = process.env.E2E_MAIL_URL ?? 'http://127.0.0.1:8025';
+
+/**
+ * The sender the stack is configured with (`NEXUS_EMAIL_FROM` in
+ * `docker-compose.yml`, or a stored override). Asserting a delivered message's
+ * `From` against it is what catches an ignored or renamed sender variable: with
+ * the wrong key the portal silently falls back to its built-in default and the
+ * journey would otherwise pass on the wrong sender.
+ */
+export const MAIL_FROM = process.env.E2E_MAIL_FROM ?? 'nexus@example.test';
 export const BOOTSTRAP_TOKEN = process.env.NEXUS_BOOTSTRAP_TOKEN ?? '';
 
 /**
@@ -174,7 +183,9 @@ interface MailpitMessage {
  * deliver it cannot onboard anybody — so the suite reads the real message out
  * of a real SMTP sink rather than reaching into the database for the token.
  */
-export async function latestMailTo(address: string): Promise<{ subject: string; text: string }> {
+export async function latestMailTo(
+  address: string,
+): Promise<{ subject: string; text: string; from: string }> {
   let found: MailpitMessage | undefined;
   await waitFor(`mail delivered to ${address}`, async () => {
     const response = await fetch(`${MAIL_URL}/api/v1/messages?limit=50`);
@@ -187,8 +198,17 @@ export async function latestMailTo(address: string): Promise<{ subject: string; 
   });
   if (!found) throw new Error(`No message for ${address}`);
   const detail = await fetch(`${MAIL_URL}/api/v1/message/${found.ID}`);
-  const body = (await detail.json()) as { Subject: string; Text?: string; HTML?: string };
-  return { subject: body.Subject, text: `${body.Text ?? ''}\n${body.HTML ?? ''}` };
+  const body = (await detail.json()) as {
+    Subject: string;
+    Text?: string;
+    HTML?: string;
+    From?: { Address: string };
+  };
+  return {
+    subject: body.Subject,
+    text: `${body.Text ?? ''}\n${body.HTML ?? ''}`,
+    from: body.From?.Address ?? '',
+  };
 }
 
 /** Forget every delivered message, so a later wait cannot match an old one. */

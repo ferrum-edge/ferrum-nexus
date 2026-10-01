@@ -120,9 +120,9 @@ carry no permissions: access is always decided per account, per API.
 
 ## Settings
 
-**Administration → Settings** has five tabs: **Branding**, **Gateway**,
-**CAPTCHA** (which also holds the registration policy), **Email** and
-**Templates**.
+**Administration → Settings** has six tabs: **Branding**, **Gateway**,
+**CAPTCHA** (which also holds the registration policy), **Single sign-on**,
+**Email** and **Templates**.
 
 ### Branding
 
@@ -220,6 +220,48 @@ can register; turn registration off instead so the form says so plainly.
 Verification links expire after 24 hours. Users can request a new one from the
 confirmation screen or the sign-in page. There is no admin control to mark an
 address verified; if mail is broken, turn verification off until it is fixed.
+
+### Single sign-on (super admin)
+
+Nexus signs users in with any standards-compliant OpenID Connect provider. Every
+admin can read this tab; only a **super admin** can save it, because a role
+mapping decides who becomes an `admin`.
+
+The **Sign-in policy** card sets the deployment-wide contract:
+
+- **Login policy** — **Passwords and single sign-on**, **Passwords only**, or
+  **Single sign-on only**. The last refuses passwords and self-registration; the
+  founding registration with the bootstrap token still works.
+- **Allowed email domains** — one per line. Every single sign-on, returning
+  users included, must present an address the provider marked verified in one of
+  these domains. Leave empty to allow any.
+- **Disable accounts whose claims no longer map to a role** — off by default.
+  When on, a sign-in that maps to no role disables the account, ends its
+  sessions and revokes its gateway access, exactly as disabling by hand does.
+  This is checked at sign-in; the portal receives no events from the provider.
+- **Break-glass password sign-in** — read-only. An operator sets
+  `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN=true` so super admins can still use a
+  password under **Single sign-on only**.
+
+The **Identity providers** card adds OpenID Connect providers. For each you give
+an **id** (part of the redirect URI, so it cannot change once saved), a button
+label, the **issuer** exactly as its discovery document states it, a client id,
+a write-only client secret and the **scopes** (must include `openid`), plus an
+optional per-provider allowed-domain list. The behaviour checkboxes create an
+account on first sign-in, link an existing non-admin account by a proven
+address, require a provider-verified address, re-apply the mapped role on every
+sign-in and refuse password sign-in for linked accounts. A **default role**
+applies when no mapping matches (**No access** refuses the sign-in). **Role
+mappings** map a claim and value to `client`, `provider` or `admin` (the highest
+match wins; `super_admin` cannot be mapped), and **organization mappings** map a
+claim to an organization id. Register each provider's redirect URI, shown on its
+card, at that provider.
+
+Providers declared in `NEXUS_OIDC_PROVIDERS` appear read-only. A saved provider
+with the id of an environment provider is shadowed by it; saving removes the
+saved one and keeps the environment provider's links. The full procedure and the
+account-matching rules are in
+[`../operations.md`](../operations.md#14-single-sign-on-openid-connect).
 
 ### Email (super admin for SMTP)
 

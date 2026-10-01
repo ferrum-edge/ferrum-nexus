@@ -418,10 +418,13 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
     category: 'protection',
     label: 'Response size limit',
     summary:
-      'Refuses to relay a backend response larger than the ceiling you set, answering the ' +
-      'consumer with 502 instead.',
+      'A backend response larger than the ceiling you set is stopped: one with a declared ' +
+      'length is refused with 502 before any body is sent, while an unknown-length stream ' +
+      'starts 200 and is cut off at the limit.',
     consumer_recipe:
-      'A response your backend produces over the limit reaches the consumer as 502 Bad Gateway. ' +
+      'A response that declares a length over the limit reaches the consumer as 502 Bad ' +
+      'Gateway before any bytes. A streamed response with no declared length starts 200 and ' +
+      'is aborted once its body passes the ceiling, so the consumer sees a truncated stream. ' +
       'Paginate anything that can grow without bound.',
     supports_trigger: false,
     fields: [

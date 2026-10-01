@@ -17,6 +17,7 @@ import { expect, test, type Page } from '@playwright/test';
 import {
   ADMIN_EMAIL,
   ADMIN_PASSWORD,
+  MAIL_FROM,
   adminSession,
   clearMail,
   latestMailTo,
@@ -90,6 +91,7 @@ test('a client registers, verifies by email, finds an API and is approved', asyn
   /* ── Verify by following the real link ────────────────────────────────── */
 
   const mail = await latestMailTo(CLIENT);
+  expect(mail.from, 'the configured NEXUS_EMAIL_FROM sender').toBe(MAIL_FROM);
   const link = /https?:\/\/[^\s"'<>]*verify-email\?token=[A-Za-z0-9._~-]+/.exec(mail.text)?.[0];
   expect(link, `no verification link in the mail to ${CLIENT}`).toBeTruthy();
   await page.goto(link as string);
