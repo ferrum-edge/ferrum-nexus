@@ -19,7 +19,7 @@ import {
   type FerrumAdminClient,
 } from './client.js';
 import type { AdminTokenMinter } from './jwt.js';
-import type { EdgeApiSpecDocument } from './types.js';
+import type { EdgeApiSpecDocument, EdgeProxyWrite } from './types.js';
 
 const SECRET = 'ferrum-admin-client-test-secret-0123456789';
 
@@ -300,6 +300,34 @@ describe('ferrum admin client', () => {
     // still returns every config in the namespace.
     assert.deepEqual(await client.pluginConfigs.listByProxy('proxy-missing'), []);
     assert.equal((await client.pluginConfigs.list()).pagination.total, 3);
+  });
+
+  it('meets the listen-path admission rules of Edge v0.9.9', async () => {
+    // Nexus only writes `/<namespace>/<slug>` and staging paths, which pass;
+    // the mock refuses what the pinned gateway refuses, so a regression that
+    // wrote one of these would fail here as it would against Edge.
+    for (const listenPath of ['/nexus//empty', '/nexus/..;x/dot', '/nexus/matrix;v=1']) {
+      await assert.rejects(
+        () =>
+          client.proxies.create({
+            listen_path: listenPath,
+            backend_host: 'billing.internal',
+            backend_port: 443,
+          }),
+        (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
+        listenPath,
+      );
+    }
+    assert.equal((await client.proxies.list()).pagination.total, 0);
+
+    // A `;` is admitted on a proxy that opts in to path parameters.
+    const optedIn = await client.proxies.create({
+      listen_path: '/nexus/matrix;v=1',
+      backend_host: 'billing.internal',
+      backend_port: 443,
+      allow_path_parameters: true,
+    } as EdgeProxyWrite);
+    assert.equal(optedIn.listen_path, '/nexus/matrix;v=1');
   });
 
   it('refuses incomplete HTTP proxy snapshots before replacing security associations', async (t) => {

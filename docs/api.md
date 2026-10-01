@@ -237,7 +237,7 @@ Example for an admin session:
 ```json
 {
   "status": "ok",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "uptime_seconds": 1284,
   "checked_at": "2026-08-31T09:12:44.117Z",
   "database": { "status": "ok", "latency_ms": 1, "error": null, "driver": "postgres" },
@@ -2413,8 +2413,14 @@ The palette itself — which plugins exist and what each accepts — is the stat
 `ApiPluginTrigger` is `{ methods?: HttpMethod[], path_prefix?: string }`; at
 least one is required, and both together are ANDed. `path_prefix` matches the
 canonical request path, which **includes the `listen_path`**. It must start
-with `/` and contain no whitespace, percent escape, backslash or `.`/`..`
-segment.
+with `/` and contain no whitespace, percent escape, backslash, `.`/`..` segment
+or empty segment other than a trailing slash, each segment judged on its text
+before any `;` parameter (`/..;x`, `/a//b` and `/;x/b` are refused, as Edge
+`v0.9.9` refuses them).
+
+A `correlation_id` or `request_deduplication` `header_name` in the
+gateway-owned `x-consumer-*` namespace (any case, `_` and `-` alike) is
+`400 VALIDATION_FAILED`: Edge strips those headers from every client request.
 
 Plugins whose descriptor has `supports_trigger: false` — `security_headers`,
 `request_size_limiting`, `response_size_limiting`, `compression`,

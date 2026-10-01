@@ -114,8 +114,13 @@ function pathPrefixError(prefix: string): string | null {
   if (/[\s%\\]/.test(value)) {
     return 'No whitespace, percent escapes or backslashes — the gateway compares the canonical path, which never contains them';
   }
-  if (value.split('/').some((segment) => segment === '.' || segment === '..')) {
-    return 'A path prefix cannot contain a . or .. segment';
+  // Edge judges a segment by its text before any `;` path parameter.
+  const names = value.split('/').map((segment) => segment.split(';', 1)[0] ?? '');
+  if (names.some((name) => name === '.' || name === '..')) {
+    return 'A path prefix cannot contain a . or .. segment, with or without a ; parameter';
+  }
+  if (names.slice(1, -1).some((name) => name === '')) {
+    return 'A path prefix cannot contain an empty segment (//), with or without a ; parameter';
   }
   return null;
 }

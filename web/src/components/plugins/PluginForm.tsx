@@ -25,6 +25,7 @@
 import { useId, type ReactElement } from 'react';
 import {
   CORRELATION_ID_RESERVED_HEADERS,
+  isGatewayOwnedConsumerHeader,
   type PluginFieldSpec,
   type ProviderPluginDescriptor,
 } from '@ferrum-nexus/shared';
@@ -256,6 +257,18 @@ export function validateDraft(
       errors.header_name =
         `The gateway owns '${header}' and rejects it as a correlation header; ` +
         'choose a name of your own, such as x-request-id';
+    } else if (isGatewayOwnedConsumerHeader(header)) {
+      errors.header_name =
+        `The gateway owns every x-consumer-* header and rejects '${header}' as a correlation ` +
+        'header; choose a name of your own, such as x-request-id';
+    }
+  }
+  if (descriptor.name === 'request_deduplication') {
+    const header = String(draft.header_name ?? '').trim();
+    if (isGatewayOwnedConsumerHeader(header)) {
+      errors.header_name =
+        `The gateway strips every x-consumer-* header from client requests, so '${header}' ` +
+        'could never carry an idempotency key; choose a name of your own, such as Idempotency-Key';
     }
   }
   return errors;

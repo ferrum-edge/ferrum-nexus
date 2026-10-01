@@ -649,7 +649,17 @@ describe('provider plugin palette', () => {
     });
 
     it('rejects a path prefix the canonical path could never match', async () => {
-      for (const prefix of ['invoices', '/api%2Fadmin', '/api/../admin', '/api\\admin']) {
+      for (const prefix of [
+        'invoices',
+        '/api%2Fadmin',
+        '/api/../admin',
+        '/api\\admin',
+        // Edge v0.9.9 judges a segment before its `;` parameter, and refuses
+        // a non-final empty segment.
+        '/api/..;x/admin',
+        '/api//admin',
+        '/api/;x/admin',
+      ]) {
         const response = await setPlugin('request_termination', {
           config: { status_code: 503 },
           trigger: { path_prefix: prefix },
@@ -796,6 +806,19 @@ describe('provider plugin palette', () => {
       });
       assert.equal(response.statusCode, 400);
       assert.match(errorMessage(response.body), /Correlation ID configuration is not valid/i);
+    });
+
+    it('refuses a header name in the gateway-owned x-consumer-* namespace', async () => {
+      for (const [name, header] of [
+        ['correlation_id', 'X-Consumer-Trace'],
+        ['correlation_id', 'x_consumer-trace'],
+        ['request_deduplication', 'X-Consumer-Idempotency-Key'],
+      ] as const) {
+        const response = await setPlugin(name, { config: { header_name: header } });
+        assert.equal(response.statusCode, 400, `${name} should refuse ${header}`);
+        assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
+        assert.equal(harness.edge.pluginForProxy(proxyId, name), undefined);
+      }
     });
 
     it('validates the body even when the plugin is being saved switched off', async () => {
