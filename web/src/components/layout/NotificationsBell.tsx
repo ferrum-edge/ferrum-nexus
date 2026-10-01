@@ -9,16 +9,17 @@ import { useMarkNotificationsRead, useNotifications } from '../../hooks/useNotif
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { Icon } from '../ui/Icon';
+import { QueryErrorState } from '../ui/QueryErrorState';
 
 /** Header bell: unread badge plus a dropdown of the latest notifications. */
 export function NotificationsBell(): ReactElement {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
-  const { data } = useNotifications({ limit: 10 });
+  const query = useNotifications({ limit: 10 });
   const markRead = useMarkNotificationsRead();
 
-  const unread = data?.unread_count ?? 0;
-  const items: Notification[] = data?.items ?? [];
+  const unread = query.data?.unread_count ?? 0;
+  const items: Notification[] = query.data?.items ?? [];
 
   const openNotification = (notification: Notification): void => {
     markRead.mutate({ ids: [notification.id] });
@@ -54,7 +55,9 @@ export function NotificationsBell(): ReactElement {
         >
           <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
             <p className="text-sm font-semibold text-fg">Notifications</p>
-            {unread > 0 ? (
+            {query.isError ? (
+              <span className="text-xs text-danger">Count unavailable</span>
+            ) : unread > 0 ? (
               <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[0.7rem] font-medium text-accent-text tabular-nums">
                 {unread} unread
               </span>
@@ -64,7 +67,15 @@ export function NotificationsBell(): ReactElement {
           </div>
 
           <div className="max-h-96 overflow-y-auto">
-            {items.length === 0 ? (
+            {query.isError ? (
+              <QueryErrorState
+                compact
+                title="Notifications unavailable"
+                description="Notifications could not be loaded."
+                onRetry={() => query.refetch()}
+                retrying={query.isFetching}
+              />
+            ) : items.length === 0 ? (
               <EmptyState
                 compact
                 icon="bell"

@@ -18,6 +18,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Failed list and detail reads no longer look empty** (#486). A persistent
+  unavailable state with a Retry action now replaces the empty state when
+  credentials, messages, APIs, users, organizations, notifications, audit
+  entries, access requests or grants fail to load. Settings, API specifications,
+  plugin state, authorized viewers and usage also expose retryable read errors;
+  successful empty responses keep their existing empty states.
 - **A `correlation_id` header name now has the whole gateway-reserved set
   refused in the portal** (#483). The portal's list was missing eleven names
   Ferrum Edge `v0.9.9` refuses: `grpc-message`, `grpc-status`,

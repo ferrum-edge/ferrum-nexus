@@ -12,6 +12,7 @@ import { EmptyState } from '../components/ui/EmptyState';
 import { Icon } from '../components/ui/Icon';
 import { Checkbox } from '../components/ui/Input';
 import { LoadingPanel } from '../components/ui/Spinner';
+import { QueryErrorState } from '../components/ui/QueryErrorState';
 
 const PAGE_SIZE = 10;
 
@@ -72,10 +73,14 @@ export function NotificationsPage(): ReactElement {
               setOffset(0);
             }}
           />
-          <span className="text-xs text-fg-muted tabular-nums">{unreadCount} unread</span>
+          <span className="text-xs text-fg-muted tabular-nums">
+            {query.isError ? 'Unread count unavailable' : `${unreadCount} unread`}
+          </span>
         </div>
         {query.isLoading ? (
           <LoadingPanel label="Loading notifications" />
+        ) : query.isError ? (
+          <QueryErrorState onRetry={() => query.refetch()} retrying={query.isFetching} />
         ) : items.length === 0 ? (
           <EmptyState
             icon="bell"

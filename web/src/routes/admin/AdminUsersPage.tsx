@@ -29,6 +29,7 @@ import { RoleBadge, StatusPill } from '../../components/ui/StatusPill';
 import { Tooltip } from '../../components/ui/Tooltip';
 import { AsyncSelect } from '../../components/ui/AsyncSelect';
 import { Select } from '../../components/ui/Select';
+import { QueryErrorState } from '../../components/ui/QueryErrorState';
 import { queryKeys } from '../../hooks/keys';
 import { organizationsApi } from '../../lib/api';
 
@@ -458,6 +459,11 @@ function UsersTable(): ReactElement {
         limit={limit}
         onOffsetChange={setOffset}
         loading={query.isLoading}
+        error={
+          query.isError ? (
+            <QueryErrorState onRetry={() => query.refetch()} retrying={query.isFetching} />
+          ) : undefined
+        }
         toolbar={
           // Its own wrapping row, top-aligned, so opening the organization
           // picker (which unfolds in place) grows the bar downwards instead of

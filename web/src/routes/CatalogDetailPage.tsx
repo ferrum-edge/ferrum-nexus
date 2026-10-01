@@ -30,6 +30,7 @@ import { EmptyState } from '../components/ui/EmptyState';
 import { Icon, type IconName } from '../components/ui/Icon';
 import { LabeledTextarea } from '../components/ui/Input';
 import { LoadingPanel } from '../components/ui/Spinner';
+import { QueryErrorState } from '../components/ui/QueryErrorState';
 import { StatusPill, visibilityLabel } from '../components/ui/StatusPill';
 import { Tabs } from '../components/ui/Tabs';
 
@@ -174,10 +175,11 @@ function Documentation({ slug, hasSpec }: { slug: string; hasSpec: boolean }): R
   if (specQuery.isError || !specQuery.data) {
     return (
       <Card>
-        <EmptyState
-          icon="alert"
+        <QueryErrorState
           title="Specification unavailable"
-          description="The document could not be loaded. Try again in a moment."
+          description="The document could not be loaded."
+          onRetry={() => specQuery.refetch()}
+          retrying={specQuery.isFetching}
         />
       </Card>
     );

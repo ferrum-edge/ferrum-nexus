@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_PAGE_SIZE, type ListThreadsResponse } from '@ferrum-nexus/shared';
 import { THREAD, THREAD_RESPONSE } from '../../test/fixtures';
 import { changeField, clearClients, deferred, renderPage } from '../../test/helpers';
-import { threadsApi } from '../lib/api';
+import { ApiError, threadsApi } from '../lib/api';
 import { MessagesPage } from './MessagesPage';
 
 const navigate = vi.hoisted(() => vi.fn());
@@ -31,6 +31,29 @@ function compose(): void {
 }
 
 describe('conversation inbox', () => {
+  it.each([
+    { status: 403, code: 'FORBIDDEN' as const },
+    { status: 500, code: 'INTERNAL' as const },
+  ])(
+    'keeps a failed list read visible and retries after HTTP $status',
+    async ({ status, code }) => {
+      vi.mocked(threadsApi.list)
+        .mockRejectedValueOnce(new ApiError(code, 'QA read failure', status))
+        .mockResolvedValueOnce({ items: [THREAD], total: 1 });
+
+      renderPage(<MessagesPage />);
+
+      expect(await screen.findByText('Could not load data')).toBeInTheDocument();
+      expect(screen.queryByText('No conversations yet')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+      expect(await screen.findByText('Invoice question')).toBeInTheDocument();
+      expect(screen.queryByText('Could not load data')).not.toBeInTheDocument();
+      expect(threadsApi.list).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it('loads conversations with their counterpart, API, preview, and destination', async () => {
     const pending = deferred<ListThreadsResponse>();
     vi.mocked(threadsApi.list).mockImplementationOnce(() => pending.promise);

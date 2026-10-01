@@ -11,6 +11,7 @@ import { Dialog } from '../../components/ui/Dialog';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Icon } from '../../components/ui/Icon';
 import { LabeledInput, LabeledTextarea } from '../../components/ui/Input';
+import { QueryErrorState } from '../../components/ui/QueryErrorState';
 
 /** The create dialog, mounted only while it is open so its fields start empty. */
 function CreateOrgDialog({ onClose }: { onClose: () => void }): ReactElement {
@@ -131,6 +132,11 @@ function OrgsTable({ onCreate }: { onCreate: () => void }): ReactElement {
       limit={limit}
       onOffsetChange={setOffset}
       loading={query.isLoading}
+      error={
+        query.isError ? (
+          <QueryErrorState onRetry={() => query.refetch()} retrying={query.isFetching} />
+        ) : undefined
+      }
       empty={
         <EmptyState
           icon="building"

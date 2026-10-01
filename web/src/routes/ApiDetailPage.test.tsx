@@ -10,7 +10,7 @@ import type {
   Paginated,
   UserSummary,
 } from '@ferrum-nexus/shared';
-import { accessRequestsApi, grantsApi, threadsApi } from '../lib/api';
+import { ApiError, accessRequestsApi, grantsApi, threadsApi } from '../lib/api';
 import { ToastProvider } from '../stores/toast';
 import { GrantsTab, RequestsTab } from './ApiDetailPage';
 
@@ -197,6 +197,47 @@ describe('provider access pagination', () => {
     clients.splice(0).forEach((client) => client.clear());
     vi.restoreAllMocks();
     Reflect.deleteProperty(Element.prototype, 'scrollIntoView');
+  });
+
+  it.each([
+    { status: 403, code: 'FORBIDDEN' as const },
+    { status: 500, code: 'INTERNAL' as const },
+  ])(
+    'keeps failed access requests visible and retries after HTTP $status',
+    async ({ status, code }) => {
+      vi.mocked(accessRequestsApi.list)
+        .mockRejectedValueOnce(new ApiError(code, 'QA read failure', status))
+        .mockResolvedValueOnce({ items: [], total: 0 });
+      renderTab(<RequestsTab apiId="api-1" />);
+
+      expect(await screen.findByText('Could not load data')).toBeInTheDocument();
+      expect(screen.queryByText('No matching access requests')).not.toBeInTheDocument();
+      expect(screen.queryByText('Loading count…')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+      expect(await screen.findByText('No matching access requests')).toBeInTheDocument();
+      expect(accessRequestsApi.list).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([
+    { status: 403, code: 'FORBIDDEN' as const },
+    { status: 500, code: 'INTERNAL' as const },
+  ])('keeps failed grants visible and retries after HTTP $status', async ({ status, code }) => {
+    vi.mocked(grantsApi.list)
+      .mockRejectedValueOnce(new ApiError(code, 'QA read failure', status))
+      .mockResolvedValueOnce({ items: [], total: 0 });
+    renderTab(<GrantsTab apiId="api-1" />);
+
+    expect(await screen.findByText('Could not load data')).toBeInTheDocument();
+    expect(screen.queryByText('No matching grants')).not.toBeInTheDocument();
+    expect(screen.queryByText('Loading count…')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByText('No matching grants')).toBeInTheDocument();
+    expect(grantsApi.list).toHaveBeenCalledTimes(2);
   });
 
   it.each(['Approve', 'Deny'] as const)(

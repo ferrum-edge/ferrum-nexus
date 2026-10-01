@@ -11,6 +11,7 @@ import { PageHeader } from '../../components/ui/Card';
 import { DataTable, type Columns } from '../../components/ui/DataTable';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Input, SearchInput } from '../../components/ui/Input';
+import { QueryErrorState } from '../../components/ui/QueryErrorState';
 
 interface Filters {
   action: string;
@@ -186,6 +187,11 @@ function AuditTable(): ReactElement {
       limit={limit}
       onOffsetChange={setOffset}
       loading={query.isLoading}
+      error={
+        query.isError ? (
+          <QueryErrorState onRetry={() => query.refetch()} retrying={query.isFetching} />
+        ) : undefined
+      }
       toolbar={
         <form
           className="flex w-full flex-wrap items-center gap-2"
