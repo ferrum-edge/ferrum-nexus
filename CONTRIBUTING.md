@@ -89,7 +89,9 @@ The full list of architecture rules is in [CLAUDE.md](CLAUDE.md).
 - Small, focused PRs with a clear description of behavior changes.
 - Add or update tests for anything you change.
 - Update `CHANGELOG.md` under `[Unreleased]` for user-visible changes.
-- Ferrum Edge vocabularies adopted by Nexus are vendored under
+- Ferrum's shared contracts — vocabularies, JSON schemas and fixtures — live in the org
+  [contract store](https://github.com/ferrum-edge/ferrum-contracts). Ferrum Edge vocabularies
+  adopted by Nexus are vendored under
   [`contracts/ferrum-contracts/`](contracts/ferrum-contracts/) and pinned in its `PIN` file. To
   bump the pin, download the adopted vocabulary files from the new immutable
   `contracts-edge-*` tag, update the tag, peeled commit SHA and each file's SHA-256 in `PIN`, then

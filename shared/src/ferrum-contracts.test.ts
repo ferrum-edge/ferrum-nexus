@@ -5,9 +5,15 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { FERRUM_PROVISIONED_BY_HEADER, FERRUM_PROVISIONED_BY_VALUE } from './constants.js';
+import {
+  FERRUM_NAMESPACE_HEADER,
+  FERRUM_NAMESPACE_UNSERVED_HEADER,
+  FERRUM_PROVISIONED_BY_HEADER,
+  FERRUM_PROVISIONED_BY_VALUE,
+} from './constants.js';
 import {
   FIRST_CLASS_PLUGIN_FIELDS,
+  isGatewayOwnedConsumerHeader,
   PLUGIN_CATEGORIES,
   PROVIDER_PLUGINS,
   RETIRED_RESPONSE_CACHING,
@@ -21,6 +27,10 @@ interface PluginCatalogContract {
 interface ProvisionedByContract {
   header: { name: string };
   values: { value: string; product: string; sets: string }[];
+}
+
+interface GatewayHeadersContract {
+  headers: { name: string }[];
 }
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -57,7 +67,11 @@ describe('pinned Ferrum contracts', () => {
 
     assert.deepEqual(
       digestLines.map((line) => line.replace(/^sha256: [a-f0-9]{64}  /, '')).sort(),
-      ['vocabularies/plugin-catalog.json', 'vocabularies/provisioned-by.json'],
+      [
+        'vocabularies/gateway-headers.json',
+        'vocabularies/plugin-catalog.json',
+        'vocabularies/provisioned-by.json',
+      ],
       'PIN must cover exactly the vendored contracts adopted by Nexus',
     );
   });
@@ -112,6 +126,25 @@ describe('pinned Ferrum contracts', () => {
           value === FERRUM_PROVISIONED_BY_VALUE && product === 'Nexus' && sets === 'header',
       ),
       `Nexus value '${FERRUM_PROVISIONED_BY_VALUE}' is absent from the pinned header values`,
+    );
+  });
+
+  it('keeps the gateway headers Nexus speaks in the pinned vocabulary', () => {
+    const { headers } = readContract<GatewayHeadersContract>('vocabularies/gateway-headers.json');
+    const names = headers.map(({ name }) => name.toLowerCase());
+
+    for (const header of [FERRUM_NAMESPACE_HEADER, FERRUM_NAMESPACE_UNSERVED_HEADER]) {
+      assert.ok(
+        names.includes(header.toLowerCase()),
+        `Nexus header '${header}' is absent from the pinned gateway-headers vocabulary`,
+      );
+    }
+
+    // The gateway owns the whole `x-consumer-*` namespace. The vocabulary
+    // records it as a `prefix` entry that the shared matcher must recognize.
+    assert.ok(
+      headers.some(({ name }) => isGatewayOwnedConsumerHeader(name)),
+      'The pinned gateway-headers vocabulary declares no gateway-owned x-consumer-* header',
     );
   });
 });

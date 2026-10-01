@@ -38,6 +38,7 @@ import { TextDecoder } from 'node:util';
 import { Agent, request, type Dispatcher } from 'undici';
 
 import {
+  FERRUM_NAMESPACE_HEADER,
   FERRUM_PROVISIONED_BY_HEADER,
   FERRUM_PROVISIONED_BY_VALUE,
   type EdgeCredentialType,
@@ -927,7 +928,7 @@ export function createFerrumAdminClient(
     const url = urlFor(path, options.query);
     const headers: Record<string, string> = {
       authorization: `Bearer ${token}`,
-      'x-ferrum-namespace': namespace,
+      [FERRUM_NAMESPACE_HEADER.toLowerCase()]: namespace,
       [FERRUM_PROVISIONED_BY_HEADER.toLowerCase()]: FERRUM_PROVISIONED_BY_VALUE,
       accept: 'application/json',
     };
@@ -1202,7 +1203,7 @@ export function createFerrumAdminClient(
         method: 'GET',
         headers: {
           authorization: `Bearer ${token}`,
-          'x-ferrum-namespace': namespace,
+          [FERRUM_NAMESPACE_HEADER.toLowerCase()]: namespace,
           [FERRUM_PROVISIONED_BY_HEADER.toLowerCase()]: FERRUM_PROVISIONED_BY_VALUE,
           accept,
         },

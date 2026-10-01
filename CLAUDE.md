@@ -44,6 +44,10 @@ npm workspaces, in build-dependency order:
 Also: `e2e/` (acceptance suite), `docker/` (image and Compose files), `release/` (the Edge
 compatibility pin), `ci/` (CI scripts), `docs/` (design docs and user guides).
 
+Shared cross-repo contracts live in the org
+[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) store; this repo re-vendors the
+Edge ones under `contracts/ferrum-contracts/` (pinned in its `PIN`) and never edits them locally.
+
 ## Commands
 
 Run from the repo root unless noted.

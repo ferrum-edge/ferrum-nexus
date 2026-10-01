@@ -30,12 +30,16 @@
  * the namespace *is* served.
  */
 
-import type { EdgeHealthReason, EdgeNamespaceRouting } from '@ferrum-nexus/shared';
+import {
+  FERRUM_NAMESPACE_UNSERVED_HEADER,
+  type EdgeHealthReason,
+  type EdgeNamespaceRouting,
+} from '@ferrum-nexus/shared';
 
 import { NexusError } from '../lib/errors.js';
 
 /** Response header Edge stamps on an accepted write it will not route. */
-export const NAMESPACE_UNSERVED_HEADER = 'x-ferrum-namespace-unserved';
+export const NAMESPACE_UNSERVED_HEADER = FERRUM_NAMESPACE_UNSERVED_HEADER.toLowerCase();
 
 /** The only value {@link NAMESPACE_UNSERVED_HEADER} ever carries. */
 export const NAMESPACE_UNSERVED_HEADER_VALUE = 'true';
