@@ -19,10 +19,11 @@
  * read from the manifest — the entries up to its last one, never the pending
  * ones — and the current schema is whatever `store.migrate()` builds, so every
  * forward migration a release has not shipped (from `v0.1.0`,
- * `002_api_gateway_plugins` and `003_messages_thread_latest`; from every
- * release, `004_api_spec_changes`, `005_notification_preferences` and
+ * `002_api_gateway_plugins` and `003_messages_thread_latest`; from `v0.1.0`
+ * and `v0.2.0`, `004_api_spec_changes`, `005_notification_preferences` and
  * `006_user_identities`) is applied here on top of a populated database with
- * no change to the harness.
+ * no change to the harness. From the newest release (`v0.3.0`) nothing is
+ * pending, so its run proves the current code opens that database unchanged.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,

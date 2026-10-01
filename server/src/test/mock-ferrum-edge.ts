@@ -508,6 +508,11 @@ const PROXY_KEYS = new Set([
   'udp_max_response_amplification_factor',
   'allowed_methods',
   'allowed_ws_origins',
+  // Edge v0.9.9: the WebSocket `permessage-deflate` mode and the `;` path
+  // parameter opt-in. Both are read back on every proxy, so a read-modify-write
+  // replace carries them.
+  'websocket_permessage_deflate',
+  'allow_path_parameters',
   'created_at',
   'updated_at',
 ]);
@@ -928,6 +933,9 @@ const PROXY_HTTP_METHODS = new Set([
  * a permissive fake would let a broken publish look healthy.
  */
 function validateProxySettings(body: Record<string, unknown>): string | null {
+  const listenPathProblem = literalListenPathProblem(body);
+  if (listenPathProblem) return listenPathProblem;
+
   const methods = body.allowed_methods;
   if (methods !== undefined && methods !== null) {
     if (!Array.isArray(methods)) return 'allowed_methods must be an array of HTTP methods or null';
@@ -956,6 +964,48 @@ function validateProxySettings(body: Record<string, unknown>): string | null {
   }
 
   return null;
+}
+
+/** The part of a path segment before its first `;` path parameter. */
+function pathSegmentName(segment: string): string {
+  return segment.split(';', 1)[0] ?? '';
+}
+
+/**
+ * Edge v0.9.9's admission rule for a literal path (GHSA-fcqw-793q-wg5x,
+ * GHSA-5mrg-vq2h-6j3w): no dot segment and no non-final empty segment, each
+ * judged on the text before a `;` path parameter. A trailing slash is fine.
+ */
+function nonCanonicalPathReason(path: string): string | null {
+  const names = path.split('/').slice(1).map(pathSegmentName);
+  if (names.some((name) => name === '.' || name === '..')) return 'dot segment';
+  if (names.slice(0, -1).some((name) => name === '')) return 'empty segment';
+  return null;
+}
+
+/**
+ * A literal `listen_path` (prefix or `=` exact) must be canonical, and one
+ * containing `;` needs `allow_path_parameters: true` (Edge v0.9.9). A `~` regex
+ * is a pattern, not a literal, and is not checked here.
+ */
+function literalListenPathProblem(body: Record<string, unknown>): string | null {
+  const listenPath = body.listen_path;
+  if (typeof listenPath !== 'string' || listenPath.startsWith('~')) return null;
+  const literal = listenPath.startsWith('=') ? listenPath.slice(1) : listenPath;
+  const reason = nonCanonicalPathReason(literal);
+  if (reason) return `listen_path must be a canonical request path: ${reason}`;
+  if (literal.includes(';') && body.allow_path_parameters !== true) {
+    return "listen_path contains ';', which requires allow_path_parameters: true";
+  }
+  return null;
+}
+
+/**
+ * Edge v0.9.9 owns the whole `x-consumer-*` request-header namespace, ignoring
+ * case and treating `_` and `-` alike in the prefix (`is_consumer_assertion_header`).
+ */
+function isConsumerAssertionHeader(name: unknown): boolean {
+  return typeof name === 'string' && /^x[-_]consumer[-_]/i.test(name.trim());
 }
 
 function nowIso(): string {
@@ -1193,7 +1243,17 @@ function palettePluginError(pluginName: string, config: Record<string, unknown>)
       return null;
     }
 
+    case 'correlation_id': {
+      if (isConsumerAssertionHeader(config.header_name)) {
+        return 'correlation_id: `header_name` is in the gateway-owned `x-consumer-*` consumer assertion namespace and cannot be used for correlation IDs';
+      }
+      return null;
+    }
+
     case 'request_deduplication': {
+      if (isConsumerAssertionHeader(config.header_name)) {
+        return 'request_deduplication: `header_name` is in the gateway-owned `x-consumer-*` consumer assertion namespace, which the gateway strips from every client request';
+      }
       if (
         config.sync_mode !== undefined &&
         !['local', 'redis'].includes(String(config.sync_mode))
@@ -1354,6 +1414,15 @@ function triggerNodeError(node: unknown, path: string): string | null {
     const forms = Object.keys(leaf.path).filter((key) => key !== 'case_insensitive');
     if (forms.length !== 1 || !['exact', 'prefix', 'regex'].includes(String(forms[0]))) {
       return `${path}.match.path must set exactly one of exact, prefix or regex`;
+    }
+    // Edge v0.9.9 refuses an exact or prefix entry the canonical request path
+    // could never equal, rather than publishing a trigger that never fires.
+    const literals = [leaf.path.exact, leaf.path.prefix].flatMap((entries) =>
+      Array.isArray(entries) ? entries : [],
+    );
+    for (const entry of literals) {
+      const reason = typeof entry === 'string' ? nonCanonicalPathReason(entry) : null;
+      if (reason) return `trigger: \`path\` exact/prefix must be canonical: ${reason}`;
     }
   }
   return null;

@@ -1,41 +1,52 @@
-# Ferrum Nexus v0.2.0 — release notes
+# Ferrum Nexus v0.3.0 — release notes
 
-**Released 2026-09-27.** Paired with Ferrum Edge `v0.9.8`. The pair is recorded
+**Released 2026-10-01.** Paired with Ferrum Edge `v0.9.9`. The pair is recorded
 in [`release/compatibility.env`](../release/compatibility.env), which the
 README quickstart, the Compose example, the getting-started walkthrough and the
 real-stack `acceptance` CI job all read, so every one of them runs the same
-gateway build. `v0.2.0` is the first release that upgrades a retained database:
-it applies two forward migrations to a `v0.1.0` database in place (see
-[upgrading from `v0.1.0`](#upgrading-from-v010)). The full list of changes is in
-the [changelog](../CHANGELOG.md#020---2026-09-27).
+gateway build. `v0.3.0` adds OpenID Connect single sign-on, a consumer-facing
+history of specification changes and spec-change notifications, and fixes six
+security advisories that affect `v0.2.0`. It upgrades a `v0.2.0` database in
+place with three forward migrations, but **the gateway's database has to be
+exported and re-imported**: Edge `v0.9.9` does not open a SQL database an
+earlier Edge created (see [upgrading from `v0.2.0`](#upgrading-from-v020)). The
+full list of changes is in the [changelog](../CHANGELOG.md#030---2026-10-01).
 
 ## Supported combination
 
 | Component      | Version                        | Pinned as                                                                                               |
 | -------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| Ferrum Nexus   | `v0.2.0`                       | Git tag `v0.2.0`; build `docker/Dockerfile` from that checkout                                          |
-| Ferrum Edge    | `v0.9.8`                       | `ferrumedge/ferrum-edge:v0.9.8@sha256:e5b204f9448d4ec210a57dbd2badece5f4359d5d544522fa48dcdfeef033b385` |
+| Ferrum Nexus   | `v0.3.0`                       | Git tag `v0.3.0`; build `docker/Dockerfile` from that checkout                                          |
+| Ferrum Edge    | `v0.9.9`                       | `ferrumedge/ferrum-edge:v0.9.9@sha256:83bb4de2ea264d5bed18d8f01f94e0e17a29b43aa1458b8984a0e9e1e784ede6` |
 | Nexus database | PostgreSQL 17 (Compose sample) | Also supported: SQLite, MySQL, MongoDB replica set — see [schema and upgrades](#schema-and-upgrades)    |
 
-- **Ferrum Edge `v0.9.8`** is the
-  [published release](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.8)
-  (tag commit `e27f2109216352c3fe9e67a7014611f3f66daa91`). The digest above is
+- **Ferrum Edge `v0.9.9`** is the
+  [published release](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.9)
+  (tag commit `234717ce41965cd1e2b5c6c761a25475c5d7628c`). The digest above is
   the multi-architecture image index; it resolves to
-  `sha256:0e629633ad55368002c415bbf76d4c91f3741519a33dd310045531d791d9a592` on
+  `sha256:558fba9a1a9d7826e5ff9d84a1c80f24903c202a3a755072f45af0372ce1b477` on
   `linux/amd64` and
-  `sha256:1e900bd537814fdc864ee1830bbd7a1e1f2785074a5da088a3d9cdd738b532f9` on
+  `sha256:33a8acceab1bee27e999b235cb24311619e44209b865cd68971cd9f3928a8379` on
   `linux/arm64`. Both were checked against the Docker Hub registry on
-  2026-09-27. Edge's `latest` tag is not refreshed for releases.
-- **What changed on the Edge side.** Edge `v0.9.8` changes its data plane
-  (HTTP/3, gRPC-Web, the AI stream inspectors), its mesh and its Workload API,
-  but none of the Admin API resources Nexus writes. Its database baseline is the
-  one `v0.9.7` created, so it opens a `v0.9.7` gateway database as it is. Read
-  Edge's
-  [Upgrading to 0.9.8](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.8/docs/upgrade_guide.md#upgrading-to-098)
-  for the data-plane behaviour changes your clients may notice, such as the new
-  `X-Gateway-Error: request_timeout` token.
-- **Other Edge versions are unverified.** Nexus `v0.2.0` has not been tested
-  against Edge `v0.9.7` or older; upgrade the gateway together with the portal.
+  2026-10-01. Edge's `latest` tag is not refreshed for releases.
+- **What changed on the Edge side.** None of the Admin API resources Nexus
+  writes change shape. Nexus signs `admin` tokens, which read secrets
+  unmasked, so Edge's new refusal to write a masked placeholder back into a
+  plugin config or upstream never applies to it; the viewer-key namespace
+  ceiling and the MCP tool catalog are features Nexus does not use; and the
+  listen paths Nexus publishes (`/<namespace>/<slug>`) contain no `;`, so
+  `allow_path_parameters` is not needed. Edge now refuses some plugin settings
+  it used to accept, which Nexus checks first (see
+  [behaviour changes](#behaviour-changes-to-plan-for)), and its canonical
+  request path refuses `;` path parameters and empty segments (`//`) on every
+  proxy that does not opt in, so a client calling a published API with such a
+  path now gets `400`. Read Edge's
+  [Upgrading to 0.9.9](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.9/docs/upgrade_guide.md#upgrading-to-099)
+  and its [changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.9/CHANGELOG.md)
+  for the data-plane changes your clients may notice, such as the whole
+  `x-consumer-*` request-header namespace becoming gateway-owned.
+- **Other Edge versions are unverified.** Nexus `v0.3.0` has not been tested
+  against Edge `v0.9.8` or older; upgrade the gateway together with the portal.
 - **No prebuilt Nexus image.** The release is a tagged source build: the
   Dockerfile uses a digest-pinned Node 22 base in both stages and `npm ci`
   against the committed lockfile. The tag, the base digest and the lockfile are
@@ -44,27 +55,27 @@ the [changelog](../CHANGELOG.md#020---2026-09-27).
 
 ## Highlights
 
-- **API settings touch only the gateway plugin configs the portal created.**
-  Nexus records the Edge config id of each auth, `access_control`,
-  `rate_limiting` and `cors` config it creates (migration
-  `002_api_gateway_plugins`) and never rewrites or deletes an operator's config
-  of the same name. A plugin-config write whose acknowledgement is lost is now
-  compensated.
-- **Audit rows commit with the change they describe.** Approvals, revocations,
-  credential operations, publishes, API edits, deletions, account changes and
-  specification updates write their audit row in the same transaction; gateway
-  work that cannot be undone first commits an intent row. Every audit action is
-  classified in `AUDIT_COMMIT_CLASSES`, and a source scan enforces it.
-- **Cross-instance leases are fenced.** A holder that stalled past the lease TTL
-  gets `409 CONFLICT` and rolls back instead of committing over the new holder's
-  work.
-- **Faster conversation lists.** Each thread's newest message is one index seek
-  (migration `003_messages_thread_latest`).
-- **OpenAPI hardening.** Documents are bounded by their alias-resolved size
-  (`MAX_SPEC_EXPANDED_BYTES`), YAML is read with the YAML 1.2 core schema, and
-  the viewer follows parameter inheritance and local `$ref`s.
-- **The verbatim quickstart gate** runs the README's full-stack block in a clean
-  runner for every release tag (see [release step](#release-step)).
+- **OpenID Connect single sign-on.** Users sign in with Keycloak, Dex, Entra
+  ID, Okta, Auth0 or any standards-compliant provider (authorization code with
+  PKCE). Providers come from `NEXUS_OIDC_PROVIDERS` or **Admin → Settings →
+  Single sign-on**; groups and claims map to roles and organizations; each
+  deployment chooses `local_and_sso`, `local_only` or `sso_only`. Existing
+  accounts are linked only on a recorded proof of their address (see
+  [single sign-on and existing accounts](#single-sign-on-and-existing-accounts)).
+  The `acceptance` job signs in through a real, digest-pinned Dex. Setup is in
+  [`operations.md` §14](operations.md#14-single-sign-on-openid-connect).
+- **Consumers see what changed in an API's specification.** Each revision that
+  replaces another records a summary of its changes, each marked breaking or
+  not; the catalog has a **Changes** tab and
+  `GET /api/catalog/:slug/changes` serves the same history.
+- **Grantees are told when a specification changes**, in-app by default and by
+  email if they opt in on the new **Notifications** card of their profile.
+- **Specification reviews say when they are incomplete.** The comparison shown
+  before a replace or rollback works within a fixed budget and reports
+  `complete: false` when it runs out, instead of blocking the server.
+- **Six security fixes**, listed under [security](#security).
+- **Text meets WCAG AA contrast** throughout the portal, in both themes and
+  with any branding colour.
 
 ## Install
 
@@ -73,7 +84,7 @@ From a clean shell, with Docker Compose v2 and `openssl`:
 ```bash
 git clone https://github.com/ferrum-edge/ferrum-nexus.git
 cd ferrum-nexus
-git checkout --detach v0.2.0
+git checkout --detach v0.3.0
 cp docker/docker-compose.example.yml docker-compose.yml
 set -a
 . ./release/compatibility.env
@@ -91,95 +102,321 @@ restore needs the same values. The portal is at <http://127.0.0.1:8787> and
 [getting-started walkthrough](getting-started.md) continues from there to a
 published API and an authenticated request through the gateway.
 
-## Upgrading from v0.1.0
+## Upgrading from v0.2.0
 
-`v0.1.0` is the only supported upgrade source. Upgrade Nexus and Edge together,
-following the [production upgrade procedure](operations.md#production-upgrade-procedure):
+`v0.2.0` is the supported upgrade source. A `v0.1.0` database also upgrades in
+one run (CI covers both); read the
+[`v0.2.0` notes](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.2.0/docs/release-notes.md#upgrading-from-v010)
+first for what `002_api_gateway_plugins` and `003_messages_thread_latest` do.
+Upgrade Nexus and Edge together, following the
+[production upgrade procedure](operations.md#production-upgrade-procedure):
 
 1. **Back up Nexus and Edge together**, as one point in time, following the
-   [backup and restore runbook](operations.md#5-backup-and-restore). This backup
-   is your rollback.
+   [backup and restore runbook](operations.md#5-backup-and-restore). Take the
+   Edge half with Edge's Admin API `GET /backup`, not as a copy of its database
+   file: step 3 needs that export. This backup is your rollback.
 2. **Stop every Nexus instance.**
-3. **Move the gateway to Edge `v0.9.8`** on the same data. It starts on the
-   `v0.9.7` database unchanged.
+3. **Move the gateway to Edge `v0.9.9` on a new database.** Edge `v0.9.9`
+   changed its SQL `V001` baseline, so it refuses to start on a SQLite,
+   PostgreSQL or MySQL gateway database created by `v0.9.8` or earlier (a `V001`
+   checksum mismatch); Edge's changelog says to recreate the database and
+   re-import the configuration. A MongoDB gateway database is unaffected and
+   skips this step.
+   1. Export the Nexus namespace from the running `v0.9.8` gateway with
+      `GET /backup`, sending `X-Ferrum-Namespace` set to Nexus's
+      `FERRUM_NAMESPACE` and an HS256 admin JWT signed with
+      `FERRUM_ADMIN_JWT_SECRET`. Nexus's own signer stamps the claims Edge
+      requires, listed below, and the Compose commands further down use it. Before
+      going on, check that the export is non-empty, reports
+      `source: "database"` (a `cached` export carries no API spec documents)
+      and lists your proxies, consumers and plugin configs. The export from
+      step 1 serves if nothing has written to the gateway since. See Edge's
+      [backup and restore reference](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.9/docs/admin_backup_restore.md).
+      The token's claims:
+      - `iss` equal to the gateway's `FERRUM_ADMIN_JWT_ISSUER` (default
+        `ferrum-edge`);
+      - `sub`, any non-empty actor name for Edge's audit log;
+      - `iat`, `nbf` and `exp`, with `exp - iat` positive and at most
+        `FERRUM_ADMIN_JWT_MAX_TTL` (default 3,600 seconds);
+      - `jti`, a unique token id;
+      - `role: "admin"`, since `GET /backup` and `POST /restore` are
+        admin-only;
+      - `aud` only if the gateway sets `FERRUM_ADMIN_JWT_AUDIENCE` (a token
+        carrying `aud` is refused otherwise), and `ns` naming the namespace if
+        it requires namespace claims.
+   2. Stop the gateway and set its database aside unchanged: it is the gateway
+      half of your rollback.
+   3. Start `v0.9.9` on an empty database with the same Edge secrets
+      (`FERRUM_ADMIN_JWT_SECRET`, `FERRUM_BASIC_AUTH_HMAC_SECRET`) and import
+      the export into the same namespace with `POST /restore?confirm=true`,
+      with the same header and the same kind of token. Restore keeps every
+      resource id, so the consumer, proxy and plugin-config ids Nexus recorded
+      still resolve, and issued credentials keep working. It validates the
+      whole export against `v0.9.9`'s rules first: a refusal (`400`) names what
+      it refused and writes nothing. Fix that resource in the export and import
+      again.
 4. **Run the migrations once from the new Nexus image**
-   (`node server/dist/db/migrate-cli.js`). It applies
-   `002_api_gateway_plugins` and `003_messages_thread_latest`; re-running it is
+   (`node server/dist/db/migrate-cli.js`). It applies `004_api_spec_changes`,
+   `005_notification_preferences` and `006_user_identities`; re-running it is
    safe. Nexus also migrates at startup, so a single-instance deployment may
    skip this step.
-5. **Start `v0.2.0`** on every instance and verify it as the procedure says:
-   `schema_migrations` lists `001_initial`, `002_api_gateway_plugins` and
-   `003_messages_thread_latest`.
+5. **Start `v0.3.0`** on every instance and verify it as the procedure says:
+   `schema_migrations` lists `001_initial` through `006_user_identities`, and a
+   known client still calls an API through the gateway with its existing
+   credential.
 
-On the Compose stack, from the checkout you installed from, with the four
-secrets you saved at install time exported again (never newly generated values)
-and `docker-compose.yml` unchanged:
+On the Compose stack, run the commands below from the checkout you installed
+from, with the four secrets you saved at install time exported again (never
+newly generated values) and `docker-compose.yml` unchanged. The gateway's
+database is `/data/ferrum.db` in the `ferrumdata` volume. Its Admin API listens
+only on the Compose network, at `http://ferrum-edge:9000`, so the export and
+the import run in one-off containers of the `nexus` service. Those containers
+have the `nexus` service's `FERRUM_ADMIN_URL`, `FERRUM_ADMIN_JWT_SECRET` and
+`FERRUM_NAMESPACE`, and they sign with Nexus's own `signAdminJwt`
+(`server/dist/ferrum-admin/jwt.js`, unchanged since `v0.2.0`). Nothing else in
+the image runs.
+
+Stop the portal and export the `nexus` namespace into `edge-backup.json`
+(step 3.1). The file holds live credentials, so it is created readable by you
+only. Keep it with your other backups.
 
 ```bash
 docker compose stop nexus
+(umask 077 && docker compose run --rm -T --no-deps nexus node --input-type=module -e '
+import { signAdminJwt } from "./server/dist/ferrum-admin/jwt.js";
+const env = process.env;
+const token = await signAdminJwt({
+  secret: env.FERRUM_ADMIN_JWT_SECRET,
+  issuer: env.FERRUM_ADMIN_JWT_ISSUER || "ferrum-edge",
+  subject: "nexus-v0.3.0-upgrade",
+  role: "admin",
+  namespace: env.FERRUM_NAMESPACE,
+  audience: env.FERRUM_ADMIN_JWT_AUDIENCE,
+  ttlSeconds: 300,
+});
+const res = await fetch(`${env.FERRUM_ADMIN_URL}/backup`, {
+  headers: { authorization: `Bearer ${token}`, "x-ferrum-namespace": env.FERRUM_NAMESPACE },
+});
+if (!res.ok) throw new Error(`GET /backup answered ${res.status}: ${await res.text()}`);
+process.stdout.write(await res.text());
+' > edge-backup.json)
+```
+
+Check the export before you touch the old database. It must say
+`source: database` and count your resources; `api_specs` must be a number,
+not `missing`:
+
+```bash
+docker compose run --rm -T --no-deps nexus node -e '
+const backup = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+console.log("source:", backup.source);
+for (const key of ["proxies", "consumers", "plugin_configs", "upstreams"]) {
+  console.log(`${key}:`, backup[key]?.length ?? 0);
+}
+console.log("api_specs:", backup.api_specs?.items?.length ?? "missing");
+' < edge-backup.json
+```
+
+Stop the gateway, set its database aside (step 3.2), move to the new release
+and start Edge `v0.9.9` on an empty database:
+
+```bash
+docker compose stop ferrum-edge
+docker compose run --rm --no-deps ferrum-edge-init \
+  sh -c 'mkdir /data/edge-v0.9.8 && mv /data/ferrum.db* /data/edge-v0.9.8/'
 git fetch --tags origin
-git checkout --detach v0.2.0
+git checkout --detach v0.3.0
 set -a
 . ./release/compatibility.env
 set +a
+docker compose up -d ferrum-edge
+```
+
+Import the export (step 3.3). The command waits up to a minute for the gateway
+to be ready, then prints Edge's answer and exits non-zero on a refusal:
+
+```bash
+docker compose run --rm -T --no-deps nexus node --input-type=module -e '
+import { readFileSync } from "node:fs";
+import { signAdminJwt } from "./server/dist/ferrum-admin/jwt.js";
+const env = process.env;
+const body = readFileSync(0, "utf8");
+for (let attempt = 0; ; attempt++) {
+  const health = await fetch(`${env.FERRUM_ADMIN_URL}/health`).catch(() => null);
+  if (health?.ok) break;
+  if (attempt === 60) throw new Error("the gateway was not ready within 60 seconds");
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+}
+const token = await signAdminJwt({
+  secret: env.FERRUM_ADMIN_JWT_SECRET,
+  issuer: env.FERRUM_ADMIN_JWT_ISSUER || "ferrum-edge",
+  subject: "nexus-v0.3.0-upgrade",
+  role: "admin",
+  namespace: env.FERRUM_NAMESPACE,
+  audience: env.FERRUM_ADMIN_JWT_AUDIENCE,
+  ttlSeconds: 300,
+});
+const res = await fetch(`${env.FERRUM_ADMIN_URL}/restore?confirm=true`, {
+  method: "POST",
+  headers: {
+    authorization: `Bearer ${token}`,
+    "x-ferrum-namespace": env.FERRUM_NAMESPACE,
+    "content-type": "application/json",
+  },
+  body,
+});
+console.log(`POST /restore answered ${res.status}: ${await res.text()}`);
+if (!res.ok) process.exit(1);
+' < edge-backup.json
+```
+
+Then rebuild and start Nexus:
+
+```bash
 docker compose up -d --build
 ```
 
-`--build` rebuilds the Nexus image from the new checkout; the new
-`FERRUM_EDGE_IMAGE` replaces the gateway container on the retained `ferrumdata`
-volume, and Nexus migrates the retained `pgdata` database when it starts.
+The `mv` keeps the old database in the same volume, under `edge-v0.9.8/`.
+Start Nexus only after the import succeeds, so it never works against an empty
+gateway. The one-off containers above use the Nexus image you already built;
+`--build` then rebuilds it from the new checkout, and Nexus migrates the
+retained `pgdata` database when it starts.
 
-What the migrations do:
+What the migrations do (all three only add tables, on every backend, and copy
+no data):
 
-- **`002_api_gateway_plugins`** adds the `api_gateway_plugins` table on every
-  backend (an index on MongoDB) and copies no data. An API published under
-  `v0.1.0` has its configs recognised role by role, by the values the portal
-  wrote, on its first gateway-touching change. A `PATCH` to a setting whose
-  proxy carries two matching configs for a role, or an auth, `access_control` or
-  `cors` config that no longer matches the API's settings, answers
-  `409 CONFLICT` naming the plugin until the operator removes or fixes that
-  config; other settings keep working. See
-  [released forward migrations](operations.md#schema-versioning-and-upgrades).
-- **`003_messages_thread_latest`** replaces the messages index
-  `ix_messages_thread` with `ix_messages_thread_latest`, which adds the message
-  id. It changes no data. **On PostgreSQL and SQLite, building the index blocks
-  writes to `messages` until it finishes**, which on a large table can take a
-  while; a rolling deploy that migrates while an old instance still serves
-  stalls message sends until it completes. On MongoDB the step builds the new
-  index and then drops the old one. On MySQL it is a no-op: InnoDB already
-  appends the primary key to the existing index.
-- **MySQL needs no runner change.** `002` is a single
-  `CREATE TABLE IF NOT EXISTS` and `003` has no statements, so both are
-  replay-safe under the existing runner.
+- **`004_api_spec_changes`** adds `api_spec_changes`, one change summary per
+  published revision. Revisions published before the upgrade have none, so
+  each API's **Changes** tab starts with its first revision after it.
+- **`005_notification_preferences`** adds `user_notification_preferences`.
+  Every existing account gets the defaults: the spec-change notice in-app, no
+  email.
+- **`006_user_identities`** adds `user_identities`, `user_email_proofs` and
+  `user_password_locks`. No upgraded account is linked to a provider, holds a
+  recorded address proof or is barred from its password.
+- **MySQL needs no runner change.** Each is `CREATE TABLE IF NOT EXISTS` only,
+  so all three are replay-safe under the existing runner.
 
-Behaviour changes to plan for, all listed in the
-[changelog](../CHANGELOG.md#020---2026-09-27):
+### Single sign-on and existing accounts
 
-- The daily access-request budget
-  (`NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY`) counts `access.request` audit
-  rows, so a deleted application's requests stay charged for 24 hours.
-- New audit actions record intent before irreversible gateway work (for example
-  `application.delete_start`, `api.delete_start`, `credential.revoke_start`,
-  `api.plugin_remove_start`, `api.spec_revision_start`) and outcomes after it
-  (`god.disable_user_complete`, `api.plugin_rollback`,
-  `credential.revoke_rollback`). Update any tooling that reads the audit log.
-- OpenAPI uploads larger than `MAX_SPEC_EXPANDED_BYTES` (4 MiB) once aliases are
-  resolved answer `400 SPEC_INVALID` with `details.reason = "expanded_too_large"`,
-  and YAML is read with the YAML 1.2 core schema: `yes`, `no`, `on` and `off`
-  stay strings. Stored revisions are re-read with the same rules.
+Nothing changes until an administrator configures a provider; the default
+login policy, `local_and_sso`, keeps password sign-in. Once one is configured:
+
+- **An existing account is linked only on a recorded proof of its address**: a
+  redeemed verification link, a completed password reset, or an earlier
+  provider-verified provisioning or link. The registration policy never counts,
+  whatever `email_verified` says, and upgraded accounts start with no proof.
+  An automatic link without one is refused with `account_exists`; `admin` and
+  `super_admin` accounts are never linked automatically.
+- **Explicit links need the same proof.** A user links their own account from
+  **Profile → Linked sign-in**; without a recorded proof the link is refused
+  with `address_unproven`, even when the provider asserts the address verified,
+  and accepting a link records no proof of its own. Otherwise whoever
+  registered an address first could link their own identity and keep it after
+  the rightful holder resets the password.
+- **The founding `super_admin` is exempt.** The account seated with the
+  bootstrap token links without a proof, because the token already proves the
+  operator owns it. Earlier releases recorded that seat too, so an upgraded
+  portal's founder keeps the exemption.
+- **Without SMTP only the founder can link.** With `require_email_verification`
+  off and no SMTP configured, nothing can record a proof, since verification
+  and reset mail stays queued. To offer single sign-on to existing accounts,
+  configure SMTP and have their holders verify or use **Forgot password**, or
+  let the provider create accounts (`jit_provisioning`) instead.
+- **`sso_only`** can be saved only by a `super_admin` who has linked their own
+  account to an enabled provider. `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN=true` keeps
+  password sign-in open to `super_admin` accounts under it.
+
+The full rules are in
+[`operations.md`, "How accounts are matched"](operations.md#how-accounts-are-matched).
+
+### Behaviour changes to plan for
+
+All are listed in the [changelog](../CHANGELOG.md#030---2026-10-01).
+
+- **Parameter `name` is limited to 1,024 characters and `in` to 64**, counted
+  in UTF-16 code units (GHSA-qw45-p9g8-rprj). An upload whose path items or
+  operations list a longer one, inline or behind a `$ref`, answers
+  `400 SPEC_INVALID` with `details.reason` `"parameter_name_too_long"` or
+  `"parameter_in_too_long"`. The limits also apply when a stored revision is
+  read back, so **a revision stored under `v0.2.0` past either limit stops being
+  served from the catalog**, and a review comparing it reports
+  `complete: false`, until its provider publishes a revision within the limits.
+- **The documentation render budget counts what the viewer renders**
+  (GHSA-r4wm-2vch-9jxm). Some documents accepted before are now refused, chiefly
+  ones with many primitive schemas, wide `oneOf`, `anyOf` or `allOf` lists or
+  long enums, and ones using a `$ref` longer than 2,048 characters. A published
+  document over the limit is no longer served from the catalog until a revision
+  within it replaces it.
+- **Revision comparisons gain `complete`.** `SpecDiff.complete: false` means
+  the comparison ran out of budget, or a stored side no longer passes the
+  upload checks: it lists added and removed operations but no changed ones.
+- **Plugin settings Edge `v0.9.9` refuses are refused first.** A
+  `correlation_id` or `request_deduplication` header name in the gateway-owned
+  `x-consumer-*` namespace (any case, `_` and `-` alike) and an execution
+  trigger path prefix with an empty segment (`/a//b`, `/;x/b`) or a dot segment
+  carrying a `;` parameter (`/..;x/b`) answer `400 VALIDATION_FAILED`. A plugin
+  configured this way under `v0.2.0` fails the gateway import in step 3: change
+  it in the export (and then in the portal), or remove it before exporting.
+- **Responses that set cookies are never cacheable.** Sign-in and other
+  cookie-setting responses change from `Cache-Control: no-store` to
+  `private, no-store`, and `GET /api/branding` no longer slides the session.
+- **Queued mail with a single-use link is sealed.** Rows an earlier version
+  queued are sealed in place by the outbox worker. Do not downgrade before
+  failing queued sealed rows: an older instance would email the ciphertext.
+- **HTTP Basic changes stop while one is unconfirmed.** While any `basicauth`
+  change on an identity is unconfirmed, issuing, rotating or revoking a single
+  one answers `409 CONFLICT`; the owner can revoke all of that identity's HTTP
+  Basic credentials at once, or an administrator can reconcile the consumer.
+- **New audit actions** record single sign-on (`auth.sso_login`,
+  `auth.sso_provision`, `auth.sso_link`, `auth.sso_unlink`,
+  `auth.sso_claims_sync`, `auth.sso_deprovision`), spec-change notices
+  (`api.spec_notify`) and notification preferences
+  (`user.notification_preferences_update`); `auth.login` records
+  `break_glass: true`. Update any tooling that reads the audit log.
 
 **Rollback** is a restore of the backup taken in step 1, Nexus and Edge
-together. Never run `v0.1.0` over a database `v0.2.0` migrated.
+together: put the set-aside gateway database back and run Edge `v0.9.8` on it,
+and restore the Nexus database. Never run `v0.2.0` over a database `v0.3.0`
+migrated.
+
+## Security
+
+`v0.3.0` fixes these advisories, each of which affects `v0.2.0`:
+
+- **GHSA-qw45-p9g8-rprj** (medium): a provider could make the specification
+  review comparison, and the catalog's documentation viewer, spend CPU in
+  proportion to a parameter name's length at every place the parameter was
+  listed, blocking the server's event loop on one request. Each parameter's
+  identity is now read once per document, the comparison works within a fixed
+  budget, and parameter names and `in` are capped (see
+  [behaviour changes](#behaviour-changes-to-plan-for)).
+- **GHSA-r4wm-2vch-9jxm** (low): primitive schema entries bypassed the
+  documentation render budget.
+- **GHSA-pr4m-gv4h-3x72** (medium): a shared cache in front of the portal could
+  replay session cookies from `GET /api/branding`.
+- **GHSA-5526-6x2h-9hjw** (medium): revoking an HTTP Basic credential could
+  report success while leaving it working.
+- **GHSA-cx8j-q289-8w35** (medium): a reader of the queued mail could take over
+  accounts with reset links.
+- **GHSA-8wv5-62xv-93cg** (low): hCaptcha tokens were not bound to the portal's
+  configured site key.
+
+Upgrade any deployment running `v0.2.0`.
 
 ## Schema and upgrades
 
-- **`v0.2.0` freezes `002_api_gateway_plugins` and
-  `003_messages_thread_latest`** on every backend.
-  `server/src/db/released-migrations.ts` lists them with `release: 'v0.2.0'`
-  beside `001_initial` (`release: 'v0.1.0'`), each with a SHA-256 checksum per
-  backend, and CI fails on any edit to them. Later releases change the schema
-  only with forward migrations that upgrade a `v0.2.0` database in place; see
+- **`v0.3.0` freezes `004_api_spec_changes`, `005_notification_preferences`
+  and `006_user_identities`** on every backend.
+  `server/src/db/released-migrations.ts` lists them with `release: 'v0.3.0'`
+  beside `001_initial` (`v0.1.0`) and `002`/`003` (`v0.2.0`), each with a SHA-256
+  checksum per backend, and CI fails on any edit to them. Later releases change
+  the schema only with forward migrations that upgrade a `v0.3.0` database in
+  place; see
   [schema versioning and upgrades](operations.md#schema-versioning-and-upgrades).
+- **Every release is an upgrade source.** The released-baseline upgrade test
+  builds a database as `v0.1.0`, `v0.2.0` and `v0.3.0` each left it, migrates it
+  with the current code and reads every value back.
 - **No upgrade from pre-release checkouts.** Databases created by buildout
   checkouts before `v0.1.0` are not supported; recreate them
   ([development reset](operations.md#buildout-schema-policy)).
@@ -198,7 +435,8 @@ together. Never run `v0.1.0` over a database `v0.2.0` migrated.
   `ferrumdata` volumes together. Keep `NEXUS_SECRET_KEY`,
   `FERRUM_ADMIN_JWT_SECRET`, `FERRUM_BASIC_AUTH_HMAC_SECRET` and the database
   password stable across restarts, upgrades and restores, and store them
-  outside the source tree.
+  outside the source tree. A provider's client secret saved in the portal is
+  encrypted under `NEXUS_SECRET_KEY`, like the SMTP password.
 - **Backup and restore.** Back up Nexus and Edge together, as one point in
   time, following the [backup and restore runbook](operations.md#5-backup-and-restore).
   The `acceptance` job backs up, destroys and restores both databases and then
@@ -215,35 +453,37 @@ together. Never run `v0.1.0` over a database `v0.2.0` migrated.
 - **Topology.** Run one active Nexus writer. An active/passive standby must
   serve no requests and run no gateway-mutating background work until it is
   promoted. Active-active Nexus is unsupported; see
-  [supported topologies](operations.md#supported-topologies). Leases are now
-  fenced at commit, but Edge still cannot reject a stale holder's gateway
-  write, so the single gateway-writing instance guidance is unchanged.
+  [supported topologies](operations.md#supported-topologies).
 
 ## Known limitations
 
 - Edge serves one data-plane namespace per process: keep `FERRUM_NAMESPACE`
   equal on both sides.
-- SMTP must be configured for real email delivery.
+- SMTP must be configured for real email delivery, and, unless the provider
+  creates the accounts, for any account but the founder to link a single
+  sign-on identity.
 - Rate limits are enforced per gateway process unless
   `FERRUM_RATE_LIMIT_SYNC_MODE=redis` is set.
 - Compensation for a gateway write is held in memory: a process that dies
   between Edge applying a change and its undo running leaves no record, and
   recovery is operational (`docs/security.md`).
-- A `ferrumdata` volume kept from a pre-release stack on an Edge older than
-  `v0.9.7` must go through Edge's
-  [Upgrading to 0.9.7](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.8/docs/upgrade_guide.md#upgrading-to-097)
-  guide before `v0.9.8` starts on it. Its Nexus database has to be recreated in
-  any case, so starting both volumes fresh is simpler.
+- The gateway database cannot be carried across this Edge upgrade as it is;
+  step 3 of the [upgrade](#upgrading-from-v020) re-imports it, and nothing in
+  CI exercises that import from a `v0.9.8` export. Rehearse it on a copy.
+- A `ferrumdata` volume kept from a pre-release stack has to be recreated, and
+  its Nexus database with it, so starting both volumes fresh is simpler.
 
 ## Release step
 
-This file is published as the GitHub release notes for tag `v0.2.0`. The
-`v0.1.0` notes are kept at that tag:
-[`docs/release-notes.md` at `v0.1.0`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.1.0/docs/release-notes.md).
+This file is published as the GitHub release notes for tag `v0.3.0`. Earlier
+notes are kept at their tags:
+[`v0.2.0`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.2.0/docs/release-notes.md)
+and
+[`v0.1.0`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.1.0/docs/release-notes.md).
 
 1. Merge the release change and require every check, `acceptance` included,
    to pass on the merge commit.
-2. Create tag `v0.2.0` at that commit and publish a GitHub release for it with
+2. Create tag `v0.3.0` at that commit and publish a GitHub release for it with
    these notes.
 3. Require a green run of the **verbatim quickstart gate** for the tag
    (`.github/workflows/quickstart-gate.yml`, run by the tag push). In a clean

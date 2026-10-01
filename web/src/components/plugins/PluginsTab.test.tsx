@@ -141,6 +141,31 @@ describe('<PluginsTab>', () => {
     expect(screen.getAllByLabelText('Only run on some requests')).toHaveLength(1);
   });
 
+  it('refuses a trigger path prefix the gateway would refuse', async () => {
+    renderTab();
+    await screen.findByText('Paused');
+
+    // `ip_restriction` is the one open card; switch its trigger on.
+    fireEvent.click(screen.getByLabelText('Only run on some requests'));
+    const prefix = screen.getByLabelText('Path prefix');
+
+    // Edge v0.9.9 judges a segment by its text before any `;` parameter.
+    for (const [value, message] of [
+      ['/a//b', /empty segment/],
+      ['/;x/b', /empty segment/],
+      ['/..;x/b', /\. or \.\. segment/],
+    ] as const) {
+      fireEvent.change(prefix, { target: { value } });
+      expect(screen.getByText(message)).toBeInTheDocument();
+    }
+
+    // A trailing slash and a `;` parameter on an ordinary segment are fine.
+    for (const value of ['/nexus/billing/', '/nexus/billing;v=1/invoices']) {
+      fireEvent.change(prefix, { target: { value } });
+      expect(screen.queryByText(/segment/)).toBeNull();
+    }
+  });
+
   it('points at the Settings tab for the first-class gateway controls', async () => {
     renderTab();
     await waitFor(() =>

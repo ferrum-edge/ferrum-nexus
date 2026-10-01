@@ -6,6 +6,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
+Paired with Ferrum Edge `v0.9.9`. Upgrades a `v0.2.0` database in place with
+the forward migrations `004_api_spec_changes`, `005_notification_preferences`
+and `006_user_identities`. Edge `v0.9.9` does not open a SQL gateway database
+an earlier Edge created, so the upgrade exports the gateway's configuration and
+imports it into a new one. See [`docs/release-notes.md`](docs/release-notes.md)
+for the supported combination and the upgrade steps.
+
 ### Added
 
 - **Consumers can see what changed in an API's specification** (#448). Each
@@ -162,8 +171,39 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
-- Vendor and pin Ferrum contracts `contracts-edge-0.9.8`; shared tests now check the local plugin
-  names and provisioning attribution against the pinned vocabularies.
+- **Ferrum Edge `v0.9.9` is the supported gateway.** `release/compatibility.env`
+  pins
+  `ferrumedge/ferrum-edge:v0.9.9@sha256:83bb4de2ea264d5bed18d8f01f94e0e17a29b43aa1458b8984a0e9e1e784ede6`
+  (the multi-architecture index) and names `NEXUS_RELEASE_TAG=v0.3.0`; the
+  README quickstart, the Compose example, the getting-started walkthrough and
+  the `acceptance` job all read it. None of the Admin API resources Nexus
+  writes change shape: Nexus signs `admin` tokens, so Edge's new refusal to
+  write a masked secret placeholder back never applies to it, and the listen
+  paths it publishes need no `allow_path_parameters`. Edge `v0.9.9` changes its
+  SQL `V001` baseline and refuses to start on a gateway database `v0.9.8` or
+  earlier created; the release notes give the export-and-import upgrade.
+- **Plugin settings follow Edge `v0.9.9`'s admission rules.** A
+  `correlation_id` or `request_deduplication` header name in the gateway-owned
+  `x-consumer-*` namespace (any case, `_` and `-` alike), and an execution
+  trigger path prefix with an empty segment (`/a//b`, `/;x/b`) or a dot segment
+  carrying a `;` parameter (`/..;x/b`), are refused with
+  `400 VALIDATION_FAILED` before any gateway write, in the portal form as well.
+  Edge `v0.9.9` refuses them at admission. The mock Edge refuses them too, and
+  a non-canonical literal `listen_path` or one containing `;` without
+  `allow_path_parameters`, and it accepts the new proxy fields
+  `allow_path_parameters` and `websocket_permessage_deflate`.
+- **`004_api_spec_changes`, `005_notification_preferences` and
+  `006_user_identities` are frozen.** The released-migration manifest records
+  them with `release: 'v0.3.0'`, so CI now rejects any edit to them on every
+  backend, and the released-baseline upgrade test also starts from a `v0.3.0`
+  database. The workspace packages and the `version` fallback of
+  `GET /api/health` are `0.3.0`.
+- Vendor and pin Ferrum contracts `contracts-edge-0.9.9` (first vendored at
+  `contracts-edge-0.9.8` in this release cycle); shared tests check the local
+  plugin names and provisioning attribution against the pinned vocabularies.
+  `0.9.9` adds the optional `websocket_framing_plugins` list and `mcp_gateway`
+  phase changes, which Nexus does not consume; plugin names and the
+  provisioning attribution are unchanged.
 - **OpenAPI render cost is counted the way the catalog viewer renders**
   (GHSA-r4wm-2vch-9jxm): the 100,000-unit limit charges every schema node,
   primitive or not, each rendered property, item and composition entry, and up

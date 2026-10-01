@@ -149,6 +149,17 @@ describe('validateDraft', () => {
     expect(errors.header_name).toMatch(/gateway owns 'AUTHORIZATION'/);
   });
 
+  it('reports a header name in the gateway-owned x-consumer-* namespace', () => {
+    for (const name of ['correlation_id', 'request_deduplication']) {
+      const spec = descriptor(name);
+      for (const header of ['X-Consumer-Trace', 'x_consumer-a']) {
+        const errors = validateDraft(spec, { ...draftFor(spec, null), header_name: header });
+        expect(errors.header_name).toMatch(/x-consumer-\*/);
+      }
+      expect(validateDraft(spec, draftFor(spec, null)).header_name).toBeUndefined();
+    }
+  });
+
   it('reports ip_restriction with both lists empty as a whole-plugin problem', () => {
     const errors = validateDraft(descriptor('ip_restriction'), {
       allow: '',

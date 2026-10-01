@@ -32,6 +32,7 @@ import { z } from 'zod';
 import {
   CORRELATION_ID_RESERVED_HEADERS,
   MAX_PLUGIN_TRIGGER_PATH_LENGTH,
+  isGatewayOwnedConsumerHeader,
   type ApiPluginTrigger,
   type PluginFieldSpec,
   type ProviderPluginDescriptor,
@@ -215,6 +216,22 @@ const PLUGIN_INVARIANTS: Readonly<
     if (header !== '' && CORRELATION_ID_RESERVED_HEADERS.includes(header.toLowerCase())) {
       return `The gateway owns '${header}' and rejects it as a correlation header; choose a name of your own, such as x-request-id`;
     }
+    if (header !== '' && isGatewayOwnedConsumerHeader(header)) {
+      return `The gateway owns every x-consumer-* header and rejects '${header}' as a correlation header; choose a name of your own, such as x-request-id`;
+    }
+    return null;
+  },
+
+  /**
+   * `RequestDeduplicationConfig.header_name` may not be in the gateway-owned
+   * `x-consumer-*` namespace (Edge `v0.9.9`): the gateway strips those headers
+   * from every client request, so the key could never arrive.
+   */
+  request_deduplication: (config) => {
+    const header = typeof config.header_name === 'string' ? config.header_name.trim() : '';
+    if (header !== '' && isGatewayOwnedConsumerHeader(header)) {
+      return `The gateway strips every x-consumer-* header from client requests, so '${header}' could never carry an idempotency key; choose a name of your own, such as Idempotency-Key`;
+    }
     return null;
   },
 };
@@ -226,12 +243,32 @@ function asArray(value: unknown): unknown[] {
 /* ── Triggers ───────────────────────────────────────────────────────────── */
 
 /**
+ * The part of a path segment before its first `;` path parameter.
+ *
+ * Edge `v0.9.9` judges dot and empty segments on this part, so `..;x` is a dot
+ * segment and `;x` is empty (GHSA-5mrg-vq2h-6j3w, GHSA-fcqw-793q-wg5x).
+ */
+function segmentName(segment: string): string {
+  return segment.split(';', 1)[0] ?? '';
+}
+
+function isDotSegment(segment: string): boolean {
+  const name = segmentName(segment);
+  return name === '.' || name === '..';
+}
+
+function isEmptySegment(segment: string): boolean {
+  return segmentName(segment) === '';
+}
+
+/**
  * A path prefix Edge can actually match.
  *
  * The predicate compares the **canonical policy path**, which is produced by
- * rejecting every percent escape, backslash and dot segment at the frontend
- * boundary. A prefix containing any of those can therefore never match a
- * request, so it is refused here rather than silently never firing.
+ * rejecting every percent escape, backslash, dot segment and non-final empty
+ * segment at the frontend boundary. A prefix containing any of those can
+ * therefore never match a request, and Edge `v0.9.9` refuses it at admission,
+ * so it is refused here first. A trailing slash is not an empty segment.
  */
 const pathPrefixSchema = z
   .string()
@@ -244,8 +281,11 @@ const pathPrefixSchema = z
       'A path prefix cannot contain whitespace, a percent escape or a backslash — the gateway ' +
       'compares the canonical request path, which never contains them',
   })
-  .refine((value) => !value.split('/').some((segment) => segment === '.' || segment === '..'), {
-    message: 'A path prefix cannot contain a . or .. segment',
+  .refine((value) => !value.split('/').some(isDotSegment), {
+    message: 'A path prefix cannot contain a . or .. segment, with or without a ; parameter',
+  })
+  .refine((value) => !value.split('/').slice(1, -1).some(isEmptySegment), {
+    message: 'A path prefix cannot contain an empty segment (//), with or without a ; parameter',
   });
 
 /**

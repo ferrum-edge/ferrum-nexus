@@ -1,6 +1,6 @@
 # Operations
 
-Deployment reference for Ferrum Nexus (current release: `v0.2.0`; first
+Deployment reference for Ferrum Nexus (current release: `v0.3.0`; first
 supported release: `v0.1.0`): configuration, databases and upgrades, containers,
 TLS, backup and restore, key rotation, the email outbox, scaling limits, health
 checks, metrics and gateway recovery.
@@ -561,9 +561,11 @@ development-only reset that destroys data.
 `server/src/db/migrations/` plus the MongoDB step of the same id in
 `server/src/db/adapters/mongodb/index.ts`) is frozen in `v0.1.0`.
 `server/src/db/released-migrations.ts` records it with per-backend SHA-256
-checksums and `release: 'v0.1.0'`, and the forward migrations
+checksums and `release: 'v0.1.0'`, the forward migrations
 `002_api_gateway_plugins` and `003_messages_thread_latest` with
-`release: 'v0.2.0'`.
+`release: 'v0.2.0'`, and `004_api_spec_changes`,
+`005_notification_preferences` and `006_user_identities` with
+`release: 'v0.3.0'`.
 
 **A released migration never changes.** A database only applies migrations its
 ledger lacks, so editing an applied one would make fresh and upgraded installs
@@ -602,19 +604,28 @@ owns. It copies no data:
 - A leftover auth config beside the portal's stays attached after an
   `auth_plugin` change and is listed under `outgoing_auth_configs_remaining`.
 
-`005_notification_preferences` (pending; ships in the next release) adds the
+`005_notification_preferences` (shipped in `v0.3.0`) adds the
 `user_notification_preferences` table: one row per account that changed a
 notification preference, keyed by the account. It copies no data, so every
 existing account gets the defaults (the spec-change notice in-app, no email)
 until it changes one. On MongoDB
 the collection is keyed by `_id` and the step declares no index.
 
-`004_api_spec_changes` (pending; ships in the next release) adds the
+`004_api_spec_changes` (shipped in `v0.3.0`) adds the
 `api_spec_changes` table: one consumer-facing change summary per published
 revision, keyed by revision and by publication order, with no foreign key to
 `api_specs` so that it outlives retention. It copies no data. Revisions
 published before the upgrade have no summary, so each API's change history
 starts with its first revision after it.
+
+`006_user_identities` (shipped in `v0.3.0`) adds the single sign-on tables:
+`user_identities` (one row per linked provider subject, unique on provider,
+issuer and subject, and on account and provider), `user_email_proofs` (the
+recorded proof of an account's address) and `user_password_locks` (accounts
+that may not use a password). It only adds tables and copies no data, so an
+upgraded account has no linked identity, no recorded address proof and no
+password lock. See [§14](#14-single-sign-on-openid-connect) for what a missing
+proof means for linking.
 
 `003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
 `ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,
@@ -634,11 +645,11 @@ before a released one, when backends disagree on ids, or when a released MongoDB
 step's indexes drift. Never update a released checksum to make it pass.
 
 **Upgrade coverage.** `server/src/test/baseline-upgrade.test.ts` builds a
-database as each release in the manifest left it (`v0.1.0`, then `v0.2.0`; every
-release is a supported upgrade source), seeds it with baseline-shaped rows,
-migrates with the current code, reads every value back, and migrates again to
-prove the re-run is a no-op. SQLite runs in every CI job; PostgreSQL, MySQL
-and MongoDB run in the `store-contracts` job. Per backend:
+database as each release in the manifest left it (`v0.1.0`, `v0.2.0`, then
+`v0.3.0`; every release is a supported upgrade source), seeds it with
+baseline-shaped rows, migrates with the current code, reads every value back,
+and migrates again to prove the re-run is a no-op. SQLite runs in every CI job;
+PostgreSQL, MySQL and MongoDB run in the `store-contracts` job. Per backend:
 
 - **SQLite, PostgreSQL:** each migration and its ledger row commit in one
   transaction. A failed migration leaves no trace; earlier ones stay applied.
@@ -907,7 +918,7 @@ docker compose up -d
 
 The four secrets and `FERRUM_EDGE_IMAGE` are required (`${VAR:?…}`); keep the
 secrets stable across restarts. [`release/compatibility.env`](../release/compatibility.env)
-pins the Edge image by digest: Ferrum Edge `v0.9.8` for Nexus `v0.2.0`. That is
+pins the Edge image by digest: Ferrum Edge `v0.9.9` for Nexus `v0.3.0`. That is
 the release the acceptance suite ([`e2e/`](../e2e/README.md)) tests against;
 other Edge versions are unverified.
 
@@ -1002,7 +1013,7 @@ nothing about accounts, approvals or audit history.
    credentials and ACL groups, plugin configs, upstreams and API specs. Back up
    Edge's database with its own tooling, or use Edge's Admin API `GET /backup`
    (restore with `POST /restore?confirm=true`; see Edge's
-   [backup and restore reference](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.8/docs/admin_backup_restore.md)).
+   [backup and restore reference](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.9/docs/admin_backup_restore.md)).
 4. **Edge secrets**, especially `FERRUM_BASIC_AUTH_HMAC_SECRET`. Basic-auth
    credentials are stored as HMACs under it, so a different value rejects every
    basic-auth client.

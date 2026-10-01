@@ -87,8 +87,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
   },
   {
     id: '004_api_spec_changes',
-    // Pending: ships with the next release, which sets `release`.
-    release: null,
+    // Frozen: shipped in v0.3.0. Never edit these checksums; a schema change
+    // is a new forward migration.
+    release: 'v0.3.0',
     sha256: {
       sqlite: '76dc7de8351ff69555130094a29622fe7f4c1d3b8cc63698e5270e608af2109f',
       pg: '80b9248fea72c1e0f1f9468bcf76a85ec3050bcffc5ad0f81c4b462cb6274a97',
@@ -98,8 +99,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
   },
   {
     id: '005_notification_preferences',
-    // Pending: ships with the next release, which sets `release`.
-    release: null,
+    // Frozen: shipped in v0.3.0. Never edit these checksums; a schema change
+    // is a new forward migration.
+    release: 'v0.3.0',
     sha256: {
       sqlite: '96d6a280449b306703c388e57f1a53b313718874cc06a042626231f38373fce4',
       pg: 'f138bdc749c7c27154ae6b1ea446c4c8913f15561186bdf609a3517bb9956cc7',
@@ -109,8 +111,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
   },
   {
     id: '006_user_identities',
-    // Pending: ships with the next release, which sets `release`.
-    release: null,
+    // Frozen: shipped in v0.3.0. Never edit these checksums; a schema change
+    // is a new forward migration.
+    release: 'v0.3.0',
     sha256: {
       sqlite: 'ba9869babb2b77996d199e56eff0312e36bbe7874d086cb28cd2e3da8a4e7c80',
       pg: '651405188176fc2b371abd78c43c2a4bbd69712ceca9a71c094cb30d032d1307',

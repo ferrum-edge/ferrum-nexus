@@ -275,6 +275,19 @@ export const CORRELATION_ID_RESERVED_HEADERS: readonly string[] = [
   'x-xsrf-token',
 ];
 
+/**
+ * Whether `name` is in the request-header namespace Edge owns.
+ *
+ * Since Ferrum Edge `v0.9.9` the gateway strips every client header whose name
+ * starts with `x-consumer-` and refuses a `correlation_id` or
+ * `request_deduplication` `header_name` beneath it. Case is ignored, and `_`
+ * and `-` are equivalent in the prefix, as in Edge's
+ * `is_consumer_assertion_header`.
+ */
+export function isGatewayOwnedConsumerHeader(name: string): boolean {
+  return /^x[-_]consumer[-_]/i.test(name.trim());
+}
+
 /* ── The palette ────────────────────────────────────────────────────────── */
 
 /**
