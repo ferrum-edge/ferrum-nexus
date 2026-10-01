@@ -31,6 +31,7 @@ import { Card, CardBody, CardHeader } from '../ui/Card';
 import { Icon, type IconName } from '../ui/Icon';
 import { Checkbox, Field, Input } from '../ui/Input';
 import { LoadingPanel } from '../ui/Spinner';
+import { QueryErrorState } from '../ui/QueryErrorState';
 import {
   FORM_ERROR_KEY,
   PluginForm,
@@ -395,6 +396,16 @@ export function PluginsTab({ api }: { api: Api }): ReactElement {
   }, [query.data]);
 
   if (query.isLoading) return <LoadingPanel label="Loading plugins…" />;
+  if (query.isError) {
+    return (
+      <QueryErrorState
+        title="Plugin settings unavailable"
+        description="The gateway plugin state could not be loaded."
+        onRetry={() => query.refetch()}
+        retrying={query.isFetching}
+      />
+    );
+  }
 
   const categories = PLUGIN_CATEGORIES.filter((category) =>
     PROVIDER_PLUGINS.some((plugin) => plugin.category === category),

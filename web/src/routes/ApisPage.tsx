@@ -9,6 +9,7 @@ import { buttonClassName } from '../components/ui/Button';
 import { PageHeader } from '../components/ui/Card';
 import { DataTable, type Columns } from '../components/ui/DataTable';
 import { EmptyState } from '../components/ui/EmptyState';
+import { QueryErrorState } from '../components/ui/QueryErrorState';
 import { Icon } from '../components/ui/Icon';
 import { AccessModeBadge, StatusPill } from '../components/ui/StatusPill';
 
@@ -88,6 +89,11 @@ function MyApisTable(): ReactElement {
       limit={limit}
       onOffsetChange={setOffset}
       loading={query.isLoading}
+      error={
+        query.isError ? (
+          <QueryErrorState onRetry={() => query.refetch()} retrying={query.isFetching} />
+        ) : undefined
+      }
       onRowClick={(api) => void navigate({ to: '/apis/$apiId', params: { apiId: api.id } })}
       empty={
         <EmptyState

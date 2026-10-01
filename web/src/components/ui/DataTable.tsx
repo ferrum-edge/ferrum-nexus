@@ -20,6 +20,7 @@ export interface DataTableProps<TData> {
   onOffsetChange?: (offset: number) => void;
   loading?: boolean;
   empty?: ReactNode;
+  error?: ReactNode;
   /** Row click handler; makes rows keyboard-activatable when provided. */
   onRowClick?: (row: TData) => void;
   className?: string;
@@ -68,6 +69,7 @@ export function DataTable<TData>({
   onOffsetChange,
   loading = false,
   empty,
+  error,
   onRowClick,
   className,
   bare = false,
@@ -113,6 +115,10 @@ export function DataTable<TData>({
           <tbody>
             {loading ? (
               <SkeletonRows columns={columns.length} />
+            ) : error ? (
+              <tr>
+                <td colSpan={columns.length}>{error}</td>
+              </tr>
             ) : rows.length === 0 ? (
               <tr>
                 <td colSpan={columns.length}>{empty}</td>

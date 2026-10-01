@@ -5,6 +5,7 @@ import { useCatalog } from '../hooks/useCatalog';
 import { Badge } from '../components/ui/Badge';
 import { Card, PageHeader } from '../components/ui/Card';
 import { EmptyState } from '../components/ui/EmptyState';
+import { QueryErrorState } from '../components/ui/QueryErrorState';
 import { SearchInput } from '../components/ui/Input';
 import { PaginationBar } from '../components/ui/DataTable';
 import { StatusPill, VisibilityBadge } from '../components/ui/StatusPill';
@@ -115,7 +116,7 @@ export function CatalogPage(): ReactElement {
             setOffset(0);
           }}
         />
-        {query.isLoading ? null : (
+        {query.isLoading || query.isError ? null : (
           <p className="text-xs text-fg-subtle tabular-nums">
             {total} {total === 1 ? 'API' : 'APIs'}
             {search.trim() ? ' matching' : null}
@@ -134,6 +135,10 @@ export function CatalogPage(): ReactElement {
             ))}
           </div>
         </>
+      ) : query.isError ? (
+        <Card>
+          <QueryErrorState onRetry={() => query.refetch()} retrying={query.isFetching} />
+        </Card>
       ) : items.length === 0 ? (
         <Card>
           <EmptyState

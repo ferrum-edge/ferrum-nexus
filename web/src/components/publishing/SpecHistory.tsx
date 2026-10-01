@@ -16,6 +16,7 @@ import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { EmptyState } from '../ui/EmptyState';
 import { Icon } from '../ui/Icon';
 import { LoadingPanel } from '../ui/Spinner';
+import { QueryErrorState } from '../ui/QueryErrorState';
 import { SpecDiffView } from './SpecDiffView';
 
 /**
@@ -178,9 +179,12 @@ export function SpecHistory({ api }: { api: Api }): ReactElement {
       {query.isLoading ? (
         <LoadingPanel label="Loading revision history" />
       ) : query.isError ? (
-        <CardBody>
-          <p className="text-sm text-danger">The revision history could not be loaded.</p>
-        </CardBody>
+        <QueryErrorState
+          title="Revision history unavailable"
+          description="The revision history could not be loaded."
+          onRetry={() => query.refetch()}
+          retrying={query.isFetching}
+        />
       ) : total === 0 ? (
         <EmptyState
           icon="spec"

@@ -30,6 +30,7 @@ import { Dialog } from '../components/ui/Dialog';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Icon, type IconName } from '../components/ui/Icon';
 import { LabeledInput } from '../components/ui/Input';
+import { QueryErrorState } from '../components/ui/QueryErrorState';
 import { LabeledSelect } from '../components/ui/Select';
 import { StatusPill } from '../components/ui/StatusPill';
 
@@ -137,7 +138,25 @@ function MyAccessCard(): ReactElement {
     }
   }, [grants.data, items.length, offset, limit]);
 
-  if (grants.isLoading || total === 0) return <></>;
+  if (grants.isLoading || (grants.isSuccess && total === 0)) return <></>;
+
+  if (grants.isError) {
+    return (
+      <Card className="mt-6">
+        <CardHeader
+          title="Your API access"
+          icon="grant"
+          description="The APIs your account and its applications hold active grants for."
+        />
+        <QueryErrorState
+          title="API access unavailable"
+          description="Your API grants could not be loaded."
+          onRetry={() => grants.refetch()}
+          retrying={grants.isFetching}
+        />
+      </Card>
+    );
+  }
 
   return (
     <Card className="mt-6">
@@ -350,6 +369,11 @@ export function CredentialsPage(): ReactElement {
         limit={limit}
         onOffsetChange={setOffset}
         loading={query.isLoading}
+        error={
+          query.isError ? (
+            <QueryErrorState onRetry={() => query.refetch()} retrying={query.isFetching} />
+          ) : undefined
+        }
         empty={
           <EmptyState
             icon="key"

@@ -11,6 +11,7 @@ import { PaginationBar } from '../components/ui/DataTable';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Icon } from '../components/ui/Icon';
 import { LoadingPanel } from '../components/ui/Spinner';
+import { QueryErrorState } from '../components/ui/QueryErrorState';
 
 /** Initials for a counterpart tile: first letters of up to two words. */
 function initials(name: string): string {
@@ -48,6 +49,8 @@ export function MessagesPage(): ReactElement {
       <Card className="overflow-hidden">
         {query.isLoading ? (
           <LoadingPanel label="Loading conversations" />
+        ) : query.isError ? (
+          <QueryErrorState onRetry={() => query.refetch()} retrying={query.isFetching} />
         ) : threads.length === 0 ? (
           <EmptyState
             icon="mail"

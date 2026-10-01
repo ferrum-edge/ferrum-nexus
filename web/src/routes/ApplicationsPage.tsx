@@ -19,6 +19,7 @@ import { EmptyState } from '../components/ui/EmptyState';
 import { Icon } from '../components/ui/Icon';
 import { LabeledInput, LabeledTextarea } from '../components/ui/Input';
 import { LoadingPanel } from '../components/ui/Spinner';
+import { QueryErrorState } from '../components/ui/QueryErrorState';
 
 /**
  * The account's application identities (issue #289).
@@ -220,7 +221,12 @@ function ApplicationsList(): ReactElement {
           <LoadingPanel label="Loading applications" />
         ) : query.isError ? (
           <CardBody>
-            <p className="text-sm text-danger">Your applications could not be loaded.</p>
+            <QueryErrorState
+              title="Applications unavailable"
+              description="Your applications could not be loaded."
+              onRetry={() => query.refetch()}
+              retrying={query.isFetching}
+            />
           </CardBody>
         ) : (query.data?.total ?? 0) === 0 && offset === 0 ? (
           <EmptyState

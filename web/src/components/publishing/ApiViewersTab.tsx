@@ -11,6 +11,7 @@ import { EmptyState } from '../ui/EmptyState';
 import { Icon } from '../ui/Icon';
 import { LabeledInput } from '../ui/Input';
 import { LoadingPanel } from '../ui/Spinner';
+import { QueryErrorState } from '../ui/QueryErrorState';
 
 /**
  * Who may read a private API's documentation (issue #288).
@@ -140,7 +141,12 @@ export function ApiViewersTab({ api }: { api: Api }): ReactElement {
           <LoadingPanel label="Loading viewers" />
         ) : query.isError ? (
           <CardBody>
-            <p className="text-sm text-danger">The viewer list could not be loaded.</p>
+            <QueryErrorState
+              title="Viewers unavailable"
+              description="The viewer list could not be loaded."
+              onRetry={() => query.refetch()}
+              retrying={query.isFetching}
+            />
           </CardBody>
         ) : total === 0 ? (
           <EmptyState

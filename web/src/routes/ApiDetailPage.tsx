@@ -78,6 +78,7 @@ import { Checkbox, LabeledInput, LabeledTextarea } from '../components/ui/Input'
 import { LabeledSelect } from '../components/ui/Select';
 import { SpecEnforcementSelect } from '../components/publishing/SpecEnforcementSelect';
 import { LoadingPanel } from '../components/ui/Spinner';
+import { QueryErrorState } from '../components/ui/QueryErrorState';
 import { AccessModeBadge, StatusPill, VisibilityBadge } from '../components/ui/StatusPill';
 import { Tabs } from '../components/ui/Tabs';
 
@@ -660,6 +661,18 @@ function SpecTab({ api }: { api: Api }): ReactElement {
       </Card>
     );
   }
+  if (specQuery.isError || !specQuery.data) {
+    return (
+      <Card>
+        <QueryErrorState
+          title="Specification unavailable"
+          description="The provider specification could not be loaded."
+          onRetry={() => specQuery.refetch()}
+          retrying={specQuery.isFetching}
+        />
+      </Card>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -849,6 +862,8 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
         />
         {query.isLoading ? (
           <LoadingPanel />
+        ) : query.isError ? (
+          <QueryErrorState onRetry={() => query.refetch()} retrying={query.isFetching} />
         ) : requests.length === 0 ? (
           <EmptyState
             icon="grant"
@@ -943,12 +958,14 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
             ))}
           </ul>
         )}
-        <AccessPagination
-          page={page}
-          total={query.data?.total}
-          fetching={query.isFetching}
-          onPageChange={setPage}
-        />
+        {query.isError ? null : (
+          <AccessPagination
+            page={page}
+            total={query.data?.total}
+            fetching={query.isFetching}
+            onPageChange={setPage}
+          />
+        )}
       </Card>
 
       <ConfirmDialog
@@ -1054,6 +1071,8 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
         />
         {query.isLoading ? (
           <LoadingPanel />
+        ) : query.isError ? (
+          <QueryErrorState onRetry={() => query.refetch()} retrying={query.isFetching} />
         ) : grants.length === 0 ? (
           <EmptyState
             icon="grant"
@@ -1112,12 +1131,14 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
             ))}
           </ul>
         )}
-        <AccessPagination
-          page={page}
-          total={query.data?.total}
-          fetching={query.isFetching}
-          onPageChange={setPage}
-        />
+        {query.isError ? null : (
+          <AccessPagination
+            page={page}
+            total={query.data?.total}
+            fetching={query.isFetching}
+            onPageChange={setPage}
+          />
+        )}
       </Card>
 
       <ConfirmDialog
@@ -1380,7 +1401,12 @@ function UsageCard({ apiId }: { apiId: string }): ReactElement {
         <LoadingPanel label="Loading usage" />
       ) : query.isError || !query.data ? (
         <CardBody>
-          <p className="text-sm text-fg-muted">Usage could not be loaded for this API.</p>
+          <QueryErrorState
+            title="Usage unavailable"
+            description="Usage could not be loaded for this API."
+            onRetry={() => query.refetch()}
+            retrying={query.isFetching}
+          />
         </CardBody>
       ) : (
         <UsageDetails usage={query.data} />

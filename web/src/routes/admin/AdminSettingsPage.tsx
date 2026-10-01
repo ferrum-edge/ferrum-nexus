@@ -41,6 +41,7 @@ import {
 } from '../../components/ui/Input';
 import { LabeledSelect } from '../../components/ui/Select';
 import { LoadingPanel } from '../../components/ui/Spinner';
+import { QueryErrorState } from '../../components/ui/QueryErrorState';
 import { Tabs } from '../../components/ui/Tabs';
 import { FormNotice } from '../../components/auth/AuthShell';
 import { BrandingTab } from './settings/BrandingTab';
@@ -967,7 +968,17 @@ function SettingsTabs(): ReactElement {
   const query = useAdminSettings();
   const [tab, setTab] = useState('branding');
 
-  if (query.isLoading || !query.data) return <LoadingPanel label="Loading settings" />;
+  if (query.isLoading) return <LoadingPanel label="Loading settings" />;
+  if (query.isError || !query.data) {
+    return (
+      <QueryErrorState
+        title="Settings unavailable"
+        description="Portal settings could not be loaded."
+        onRetry={() => query.refetch()}
+        retrying={query.isFetching}
+      />
+    );
+  }
   const settings = query.data;
 
   return (
