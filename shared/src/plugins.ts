@@ -234,14 +234,17 @@ const HEADER_VALUE_PATTERN = '[\\t\\u0020-\\u007E]*';
 /**
  * Header names Edge rejects for `correlation_id.header_name`.
  *
- * The gateway's list is longer (and partly deployment-specific, since it also
- * refuses the effective `FERRUM_REAL_IP_HEADER`), but these are the ones a
- * provider plausibly types. Catching them here turns a gateway `400` mid-write
- * into a field-level validation message.
+ * An exact copy of Edge's closed `RESERVED_HEADER_NAMES` set at `v0.9.9`,
+ * lowercased in Edge's own order (`src/plugins/correlation_id.rs:18-63`).
+ * {@link isGatewayOwnedConsumerHeader} covers the separate `x-consumer-*`
+ * prefix rule. Edge also refuses the effective `FERRUM_REAL_IP_HEADER`, which
+ * is deployment-specific and so unknown to the portal; everything else is
+ * caught here, turning a gateway `400` mid-write into a field-level message.
  */
 export const CORRELATION_ID_RESERVED_HEADERS: readonly string[] = [
-  'authorization',
+  'api-key',
   'authentication-info',
+  'authorization',
   'connection',
   'content-encoding',
   'content-length',
@@ -249,11 +252,20 @@ export const CORRELATION_ID_RESERVED_HEADERS: readonly string[] = [
   'early-data',
   'expect',
   'forwarded',
+  'grpc-message',
+  'grpc-status',
+  'grpc-status-details-bin',
   'host',
   'keep-alive',
   'proxy-authenticate',
+  'proxy-authentication-info',
   'proxy-authorization',
   'proxy-connection',
+  'sec-websocket-accept',
+  'sec-websocket-extensions',
+  'sec-websocket-key',
+  'sec-websocket-protocol',
+  'sec-websocket-version',
   'set-cookie',
   'te',
   'traceparent',
@@ -264,14 +276,15 @@ export const CORRELATION_ID_RESERVED_HEADERS: readonly string[] = [
   'via',
   'www-authenticate',
   'x-api-key',
-  'api-key',
   'x-auth-token',
   'x-csrf-token',
+  'x-ferrum-original-content-encoding',
   'x-forwarded-authorization',
   'x-forwarded-for',
   'x-forwarded-host',
   'x-forwarded-proto',
   'x-goog-api-key',
+  'x-grpc-web-mode',
   'x-xsrf-token',
 ];
 
