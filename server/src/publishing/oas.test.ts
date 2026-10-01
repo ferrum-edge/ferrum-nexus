@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
+  MAX_OPENAPI_PARAMETER_IN_LENGTH,
+  MAX_OPENAPI_PARAMETER_NAME_LENGTH,
   MAX_OPENAPI_REF_LENGTH,
   MAX_SPEC_BYTES,
   MAX_SPEC_DEPTH,
@@ -783,6 +785,58 @@ describe('OpenAPI parsing', () => {
       expectSpecInvalid(() => assertRenderCost({ paths: inParameter }, inParameter)).details,
       expected,
     );
+  });
+
+  it('refuses a parameter name longer than the limit, wherever it is listed', () => {
+    const limit = MAX_OPENAPI_PARAMETER_NAME_LENGTH;
+    const atLimit = 'n'.repeat(limit);
+    const tooLong = `${atLimit}n`;
+    const components = { parameters: { Long: { name: tooLong, in: 'header' } } };
+    const accepted = { '/a': { get: { parameters: [{ name: atLimit, in: 'query' }] } } };
+    assertRenderCost({ paths: accepted, components }, accepted);
+
+    // In an operation's list, behind a reference, and on a path item with no
+    // operation beneath it.
+    const refused: Record<string, unknown>[] = [
+      { '/a': { get: { parameters: [{ name: tooLong, in: 'query' }] } } },
+      { '/a': { get: { parameters: [{ $ref: '#/components/parameters/Long' }] } } },
+      { '/a': { parameters: [{ name: tooLong, in: 'query' }] } },
+    ];
+    for (const paths of refused) {
+      const failure = expectSpecInvalid(() => assertRenderCost({ paths, components }, paths));
+      assert.match(failure.message, /1025 characters long, more than the 1024/);
+      assert.deepEqual(failure.details, {
+        field: 'paths',
+        reason: 'parameter_name_too_long',
+        length: limit + 1,
+        limit,
+      });
+    }
+  });
+
+  it('refuses a parameter `in` longer than the limit, wherever it is listed', () => {
+    const limit = MAX_OPENAPI_PARAMETER_IN_LENGTH;
+    const atLimit = 'q'.repeat(limit);
+    const tooLong = `${atLimit}q`;
+    const components = { parameters: { Odd: { name: 'id', in: tooLong } } };
+    const accepted = { '/a': { get: { parameters: [{ name: 'id', in: atLimit }] } } };
+    assertRenderCost({ paths: accepted, components }, accepted);
+
+    const refused: Record<string, unknown>[] = [
+      { '/a': { get: { parameters: [{ name: 'id', in: tooLong }] } } },
+      { '/a': { get: { parameters: [{ $ref: '#/components/parameters/Odd' }] } } },
+      { '/a': { parameters: [{ name: 'id', in: tooLong }] } },
+    ];
+    for (const paths of refused) {
+      const failure = expectSpecInvalid(() => assertRenderCost({ paths, components }, paths));
+      assert.match(failure.message, /'in' is 65 characters long, more than the 64/);
+      assert.deepEqual(failure.details, {
+        field: 'paths',
+        reason: 'parameter_in_too_long',
+        length: limit + 1,
+        limit,
+      });
+    }
   });
 
   it('charges path-item parameter rows under every operation and their schemas once', () => {

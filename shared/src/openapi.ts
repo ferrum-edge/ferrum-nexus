@@ -36,6 +36,24 @@ export const MAX_OPENAPI_POINTER_SEGMENTS = MAX_SPEC_DEPTH;
  */
 export const MAX_OPENAPI_REF_LENGTH = 2_048;
 
+/**
+ * Longest parameter `name` a document may give, in UTF-16 code units. A
+ * parameter's name is part of its identity, which every reader keys and
+ * compares wherever the parameter is listed, so an unbounded one makes every
+ * listing of it cost its length. Real names are a few dozen characters; the
+ * server refuses a document that gives a longer one, at upload and whenever a
+ * stored document is read back.
+ */
+export const MAX_OPENAPI_PARAMETER_NAME_LENGTH = 1_024;
+
+/**
+ * Longest parameter `in` a document may give, in UTF-16 code units. OpenAPI
+ * names four locations, none longer than six; `in` is part of a parameter's
+ * identity just as `name` is, so it is bounded for the same reason, with room
+ * to spare for documents that spell something odd but harmless there.
+ */
+export const MAX_OPENAPI_PARAMETER_IN_LENGTH = 64;
+
 /** Why a Reference Object could not be followed. */
 export type OpenApiRefFailure = 'external' | 'missing' | 'cycle' | 'depth';
 
@@ -319,13 +337,23 @@ export function resolveOpenApiObject(
  * parameter without an identity is never merged with another one.
  *
  * `in` is compared as written; `name` is compared case-insensitively for
- * headers only, since HTTP header names are.
+ * headers only, since HTTP header names are. The key spells `in` with its
+ * length first, so no `in` and `name` can run together into another pair's
+ * key, whatever characters they hold.
  */
-function parameterKeyOf(resolution: OpenApiRefResolution | null): string | null {
+function parameterKeyOf(
+  resolution: OpenApiRefResolution | null,
+  options: OpenApiParameterKeyerOptions = {},
+): string | null {
   if (resolution === null || !resolution.ok) return null;
   const { name, in: location } = resolution.value;
   if (typeof name !== 'string' || typeof location !== 'string') return null;
-  return `${location}\u0000${location === 'header' ? name.toLowerCase() : name}`;
+  // Charged before either string is read, folded or copied.
+  options.onKey?.(location.length + name.length);
+  const folded = location === 'header' ? name.toLowerCase() : name;
+  const { compact } = options;
+  const where = compact ? compact(location) : location;
+  return `${where.length}:${where}\u0000${compact ? compact(folded) : folded}`;
 }
 
 /** See {@link parameterKeyOf}; `parameter` is followed through `resolver`. */
@@ -334,6 +362,51 @@ export function openApiParameterKey(
   parameter: unknown,
 ): string | null {
   return parameterKeyOf(isPlainRecord(parameter) ? resolver.resolve(parameter) : null);
+}
+
+/** How an {@link OpenApiParameterKeyer} reads and spells identities. */
+export interface OpenApiParameterKeyerOptions {
+  /**
+   * Called once per parameter object, before its identity is first read, with
+   * the UTF-16 code units of its `in` and `name`, so a caller working to a
+   * budget can charge for them once.
+   */
+  onKey?: (codeUnits: number) => void;
+  /**
+   * Rewrites `in` and the case-folded `name` before they are joined into a
+   * key. Two texts must be rewritten to the same string exactly when they are
+   * equal. A caller that holds many keys in maps and sets can map a long text
+   * onto a short collision-resistant digest here, so hashing and comparing a
+   * key costs the same however long the name is.
+   */
+  compact?: (text: string) => string;
+}
+
+/**
+ * Identities of the parameters of one document, read once per parameter
+ * object however many lists reach it. A component parameter referenced from
+ * every operation is keyed once, not once per reference.
+ */
+export interface OpenApiParameterKeyer {
+  /** See {@link openApiParameterKey}, for a parameter already resolved. */
+  keyOf(resolution: OpenApiRefResolution | null): string | null;
+}
+
+/** A {@link OpenApiParameterKeyer}; create one per document, or per comparison. */
+export function createOpenApiParameterKeyer(
+  options: OpenApiParameterKeyerOptions = {},
+): OpenApiParameterKeyer {
+  const keys = new WeakMap<Record<string, unknown>, string | null>();
+  return {
+    keyOf(resolution) {
+      if (resolution === null || !resolution.ok) return null;
+      const known = keys.get(resolution.value);
+      if (known !== undefined) return known;
+      const key = parameterKeyOf(resolution, options);
+      keys.set(resolution.value, key);
+      return key;
+    },
+  };
 }
 
 /** One parameter of an operation's effective list, with its identity. */
@@ -345,7 +418,10 @@ export interface KeyedOpenApiParameter {
    * never follows the reference a second time; `null` for a non-object entry.
    */
   resolution: OpenApiRefResolution | null;
-  /** See {@link openApiParameterKey}; `null` for an entry with no identity. */
+  /**
+   * See {@link openApiParameterKey}, spelled as the keyer's `compact` rewrites
+   * it; `null` for an entry with no identity.
+   */
   key: string | null;
   /** Declared on the path item rather than the operation. */
   inherited: boolean;
@@ -354,15 +430,19 @@ export interface KeyedOpenApiParameter {
 /**
  * Resolve each parameter of one `parameters` list and attach its identity.
  * Path-item lists are keyed once and reused for every operation beneath them.
+ * A caller keying several lists of one document passes one `keyer` to all of
+ * them, so a parameter they share is keyed once; without one, each call keys
+ * its own entries afresh.
  */
 export function keyOpenApiParameters(
   resolver: OpenApiRefResolver,
   parameters: readonly unknown[],
   inherited: boolean,
+  keyer: OpenApiParameterKeyer = createOpenApiParameterKeyer(),
 ): KeyedOpenApiParameter[] {
   return parameters.map((parameter) => {
     const resolution = isPlainRecord(parameter) ? resolver.resolve(parameter) : null;
-    return { parameter, resolution, key: parameterKeyOf(resolution), inherited };
+    return { parameter, resolution, key: keyer.keyOf(resolution), inherited };
   });
 }
 

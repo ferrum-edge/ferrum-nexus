@@ -60,7 +60,11 @@ function Section({
 
 /** Render one {@link SpecDiff}. */
 export function SpecDiffView({ diff }: { diff: SpecDiff }): ReactElement {
-  if (!diff.changed) {
+  // `complete` is checked against `false`, not for truth: a server from
+  // before the field existed omits it, and its comparisons always finished.
+  const incomplete = diff.complete === false;
+
+  if (!diff.changed && !incomplete) {
     return (
       <p className="text-sm text-fg-muted">
         This document declares the same paths, methods and operations as the current revision.
@@ -70,6 +74,21 @@ export function SpecDiffView({ diff }: { diff: SpecDiff }): ReactElement {
 
   return (
     <div className="flex flex-col gap-5">
+      {incomplete ? (
+        <div className="flex items-start gap-3 rounded-md border border-warning/40 bg-warning-soft/40 p-3">
+          <span className="mt-0.5 text-warning">
+            <Icon name="alert" className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-fg">This comparison is incomplete</p>
+            <p className="mt-1 text-sm leading-relaxed text-fg-muted">
+              The documents were too large to compare operation by operation, so changed operations
+              are not listed. Review the document itself before publishing.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       {diff.potentially_breaking.length > 0 ? (
         <div className="flex items-start gap-3 rounded-md border border-danger/40 bg-danger-soft/40 p-3">
           <span className="mt-0.5 text-danger">

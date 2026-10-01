@@ -1764,8 +1764,17 @@ It is bounded however large the documents are:
   direction and what differs is reported once under the component's `$ref`,
   with `operation: null`, rather than again at every operation that uses it.
 - Every other pair of schema objects is compared once, and every step spends
-  from a budget of twice `MAX_SPEC_RENDER_UNITS`. A comparison that runs out
-  stops and reports `complete: false`.
+  from a fixed budget of 244 768 units: twice (100 000 render units, two per
+  operation for the operation and its request body, and 16 384 for keyed
+  text). Enum values, property and `required` names and parameter `in` and
+  `name` are keyed once per enum, schema or parameter, a unit per 256
+  characters of their total. Two documents of the same shape fit it, however
+  large. Three accepted shapes can still run out, since the render count
+  charges them less than the comparison reads them: a component reached from
+  more than one of parameters, request bodies and responses; a request body or
+  response written as a `$ref` and named by many operations; and enums longer
+  than 12 values. A comparison that runs out stops and reports
+  `complete: false`; it never blocks the publish.
 - Provider-written strings in a change are cut to 200 characters.
 - A previous revision whose stored document no longer passes the upload checks
   is not compared at all: its summary is empty with `complete: false`.
@@ -1901,6 +1910,19 @@ the Edge proxy and plugins, then stores the API.
   extensions are not counted.
 - A `$ref` in a parameter, request body, response or schema longer than 2 048
   characters (`details.reason: "ref_too_long"`, `details.limit: 2048`).
+- A parameter `name` longer than 1 024 characters, or an `in` longer than 64,
+  in any path item's or operation's `parameters` list, inline or behind a
+  `$ref` (`details.reason: "parameter_name_too_long"` or
+  `"parameter_in_too_long"`, with `details.length` and `details.limit`).
+  Lengths here count UTF-16 code units, which is what "characters" means in
+  the error message; a character outside the Basic Multilingual Plane counts
+  as two. A revision stored before these limits and past one is handled like
+  any stored document that no longer passes these checks: the catalog does
+  not serve it, the change summary of the revision replacing it is recorded as
+  incomplete, and a review comparison with it on either side is
+  `complete: false` and `changed: true`, listing the operations each document
+  declares but no changed ones (or no operations at all when a stored document
+  cannot be read even as data, for example one over the stored size limit).
 - A derived upstream URL, after server-variable expansion, must fit 2 000
   characters (`details.limit: 2000`, naming the server).
 - `routes` with no declared operation (`details.reason: "no_operations"`).
@@ -2248,7 +2270,8 @@ portal would refuse to publish.
 | `info_changes`                            | `title`, `version` or `description` differences as `{ field, from, to }`                                                                                                                                                                    |
 | `servers_changed`                         | whether the `servers` block differs                                                                                                                                                                                                         |
 | `potentially_breaking`                    | every removed operation                                                                                                                                                                                                                     |
-| `changed`                                 | whether the documents differ at all                                                                                                                                                                                                         |
+| `complete`                                | `false` when it ran out of its work budget, or a stored revision compared no longer passes the upload checks: added and removed operations still listed, changed ones not                                                                   |
+| `changed`                                 | whether the documents differ at all; also `true` when `complete` is `false`                                                                                                                                                                 |
 
 The comparison is **structural**: it does not resolve `$ref`s, walk schemas or
 reason about semantics. A response schema can lose a required field with every
@@ -2257,6 +2280,14 @@ comparison found nothing, not that the change is compatible. Path-level
 `parameters` are folded into each operation (an operation parameter with the
 same `name` and `in` overrides) and compared in canonical order, so moving or
 reordering parameters is not a change.
+
+Folding parameters spends from a fixed work budget of 500 000 units, with each
+parameter's identity read once per document: a unit per operation, per
+parameter entry keyed and per entry merged, plus a unit per 256 characters of
+`in` and `name` keyed, counted over the whole comparison. Under the document
+limits above a pair of documents costs at most 438 768, so any pair the portal
+accepted fits it; a comparison that runs out returns `complete: false` rather
+than a partial list that would read as "nothing else changed".
 
 ### `POST /api/apis/:id/revisions/:revisionId/rollback`
 

@@ -22,7 +22,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   are kept. A first publish records none, and revisions published before the
   upgrade have none. The comparison works within a fixed budget, and one that
   fails or runs out is recorded as incomplete; it never blocks a publish or a
-  rollback.
+  rollback. Each step it takes is charged at every comparison that takes it,
+  while enum values, property and `required` names and parameter names are
+  made into comparison keys once per enum, schema or parameter, however many
+  operations share it, and charged by their total length.
 - Forward migration `004_api_spec_changes` adds the `api_spec_changes` table on
   every backend. It copies no data.
 - **Grantees are told when an API's specification changes** (#447). When a
@@ -174,6 +177,29 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   characters. The limit applies to revisions, revision comparisons and catalog
   reads too, so an already published document over it can no longer be read
   from the catalog until a revision within the limit replaces it.
+- **Revision comparisons say when they are incomplete.** The review shown
+  before replacing or rolling back a specification
+  (`GET /api/apis/:id/revisions/:revisionId/diff`, `POST /api/apis/:id/spec/diff`)
+  now reads each parameter's identity once per document and folds parameters
+  within a fixed work budget that any pair of accepted documents fits.
+  `SpecDiff` gains `complete`; one that ran out lists added and removed
+  operations but no changed ones, reports `changed`, and the review says so.
+  A stored revision on either side that no longer passes the upload checks is
+  no longer compared as an empty document, which read as a complete and
+  harmless change: the comparison is `complete: false` and `changed: true`
+  and lists the operations each side declares (none, when a stored side
+  cannot be read even as data). A publish that fails at the
+  gateway now puts such a previous revision back as its stored document
+  rather than as an empty one.
+- **Parameter names are limited to 1,024 characters, and `in` to 64**
+  (GHSA-qw45-p9g8-rprj), counted in UTF-16 code units. A document whose path
+  items or operations list a parameter, inline or behind a `$ref`, with a
+  longer `name` or `in` is refused with `400 SPEC_INVALID`
+  (`details.reason: "parameter_name_too_long"` or `"parameter_in_too_long"`).
+  The limits also apply when a stored revision is read back, so **a revision
+  published before them past either is no longer served from the catalog**
+  until a revision within the limits replaces it, as for the other document
+  limits.
 - Upgrade Nodemailer to 10.0.13. This also includes the 10.0.11 CommonJS and
   type compatibility fixes, the 10.0.12 fix that settles sends after connection
   errors, and 10.0.13 address-parsing fixes.
@@ -210,6 +236,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   walking the remaining siblings. The publication check walks each schema
   object once and resolves each `$ref` string once, and refuses a `$ref` longer
   than 2,048 characters, which the viewer now shows as unresolved.
+- GHSA-qw45-p9g8-rprj: a provider could make the specification review
+  comparison, and the catalog's documentation viewer, spend CPU in proportion
+  to a parameter name's length at every place the parameter was listed: one
+  very long header name, referenced from every operation, could block the
+  server's event loop for a long time on one review request in v0.2.0. Each
+  parameter's identity is now read once per document and long names are keyed
+  by digest, the review comparison works within a fixed budget and says when
+  it ran out (`SpecDiff.complete`), and parameter names are limited to 1,024
+  characters and `in` to 64, at upload and when stored revisions are read
+  back.
 
 - Nodemailer 10.0.12 hardens SMTP message-body line endings by converting bare
   carriage returns to CRLF, and makes `requireTLS` fail instead of silently

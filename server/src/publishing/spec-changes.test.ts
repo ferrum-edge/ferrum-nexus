@@ -8,11 +8,15 @@ import { describe, it } from 'node:test';
 
 import {
   MAX_SPEC_CHANGE_TEXT,
+  MAX_SPEC_CHANGE_UNITS,
+  MAX_SPEC_OPERATIONS,
+  MAX_SPEC_RENDER_UNITS,
   emptySpecChangeReport,
   type SpecChange,
   type SpecChangeReport,
 } from '@ferrum-nexus/shared';
 
+import { assertRenderCost } from './oas.js';
 import {
   MAX_TYPE_ENTRIES,
   compareSpecRevisions,
@@ -70,7 +74,7 @@ function hostile(properties: string, extraResponses = ''): Document {
 }
 
 function stats(): SpecChangeStats {
-  return { units: 0, schemaPairs: 0, componentPairs: 0, typeEntries: 0 };
+  return { units: 0, schemaPairs: 0, componentPairs: 0, typeEntries: 0, keyCodeUnits: 0 };
 }
 
 describe('consumer-facing revision comparison', () => {
@@ -562,5 +566,246 @@ describe('consumer-facing revision comparison', () => {
       '/c': { get: { responses: { '200': {} } } },
     });
     assert.deepEqual(compareSpecRevisions(before, after), compareSpecRevisions(before, after));
+  });
+
+  it('still names a small enum change between a reference and an inline schema', () => {
+    const before = document(
+      {
+        '/orders': {
+          get: {
+            responses: {
+              '200': jsonResponse({
+                type: 'object',
+                properties: { status: { $ref: '#/components/schemas/Status' } },
+              }),
+            },
+          },
+        },
+      },
+      { schemas: { Status: { type: 'string', enum: ['open', 'closed'] } } },
+    );
+    const after = document({
+      '/orders': {
+        get: {
+          responses: {
+            '200': jsonResponse({
+              type: 'object',
+              properties: { status: { type: 'string', enum: ['open', 'void'] } },
+            }),
+          },
+        },
+      },
+    });
+    const report = compareSpecRevisions(before, after);
+    const at = 'GET /orders | response | 200 application/json';
+    assert.deepEqual(lines(report), [
+      `breaking | schema_enum_values_added | ${at} | status`,
+      `non_breaking | schema_enum_values_removed | ${at} | status`,
+    ]);
+    assert.equal(report.changes[0]?.to, '"void"');
+    assert.equal(report.changes[1]?.from, '"closed"');
+    assert.equal(report.complete, true);
+  });
+
+  it('keys a shared enum once, however many inline enums it is compared with', () => {
+    const operations = 50;
+    const run = (length: number): { report: SpecChangeReport; counters: SpecChangeStats } => {
+      const values = Array.from({ length: 64 }, (_, index) => String(index).padStart(length, 'v'));
+      const beforePaths: Document = {};
+      const afterPaths: Document = {};
+      for (let index = 0; index < operations; index += 1) {
+        beforePaths[`/p${index}`] = {
+          get: { responses: { '200': jsonResponse({ $ref: '#/components/schemas/Shared' }) } },
+        };
+        afterPaths[`/p${index}`] = {
+          get: { responses: { '200': jsonResponse({ type: 'string', enum: ['x'] }) } },
+        };
+      }
+      const before = document(beforePaths, {
+        schemas: { Shared: { type: 'string', enum: values } },
+      });
+      const counters = stats();
+      const report = compareSpecRevisions(before, document(afterPaths), { stats: counters });
+      return { report, counters };
+    };
+    const short = run(2);
+    const long = run(16_000);
+
+    // Every pair is compared, and finds the same thing whatever the length.
+    assert.equal(long.report.complete, true);
+    assert.deepEqual(long.report.counts, short.report.counts);
+    assert.equal(long.report.counts.operations_changed, operations);
+    // The shared array's strings are read once, each inline `x` once.
+    assert.equal(long.counters.keyCodeUnits, 64 * 16_000 + operations);
+    // And charged once, on the comparison's running total of keyed text.
+    assert.equal(
+      long.counters.units - short.counters.units,
+      Math.ceil((64 * 16_000 + operations) / 256) - Math.ceil((64 * 2 + operations) / 256),
+    );
+  });
+
+  it('tells long enum values of one length apart', () => {
+    const values = (changed: string | null): string[] =>
+      Array.from({ length: 40 }, (_, index) =>
+        (index === 7 && changed !== null ? changed : String(index)).padStart(20_000, 'w'),
+      );
+    const component = (enumValues: string[]): Document => ({
+      schemas: { Shared: { type: 'string', enum: enumValues } },
+    });
+    const paths: Document = {
+      '/x': {
+        get: {
+          responses: {
+            '200': jsonResponse({
+              type: 'object',
+              properties: { value: { $ref: '#/components/schemas/Shared' } },
+            }),
+          },
+        },
+      },
+    };
+    const counters = stats();
+    const report = compareSpecRevisions(
+      document(paths, component(values(null))),
+      document(structuredClone(paths), component(values('z'))),
+      { stats: counters },
+    );
+    assert.deepEqual(
+      report.changes.map((change) => `${change.severity} ${change.kind}`),
+      ['breaking schema_enum_values_added', 'non_breaking schema_enum_values_removed'],
+    );
+    assert.equal(report.complete, true);
+    // Each document's array once, plus the `value` property names.
+    assert.equal(counters.keyCodeUnits, 2 * 40 * 20_000 + 2 * 'value'.length);
+  });
+
+  it('keeps a realistic inlined enum within the budget', () => {
+    // About the size of the IANA time zone list, inlined in every operation.
+    const zones = (): string[] =>
+      Array.from({ length: 600 }, (_, index) => `Zone/City_Name_${String(index).padStart(3, '0')}`);
+    assert.equal(zones().join('').length, 10_800);
+    const paths: Document = {};
+    for (let index = 0; index < 75; index += 1) {
+      paths[`/p${index}`] = {
+        get: { responses: { '200': jsonResponse({ type: 'string', enum: zones() }) } },
+      };
+    }
+    const before = document(paths);
+    const counters = stats();
+    const report = compareSpecRevisions(before, structuredClone(before), { stats: counters });
+
+    assert.deepEqual(report, emptySpecChangeReport());
+    // Each of the 150 arrays is keyed once.
+    assert.equal(counters.keyCodeUnits, 150 * 10_800);
+  });
+
+  it('keys the long property and required names of a shared schema once', () => {
+    const operations = 40;
+    const run = (name: string): { report: SpecChangeReport; counters: SpecChangeStats } => {
+      const beforePaths: Document = {};
+      const afterPaths: Document = {};
+      for (let index = 0; index < operations; index += 1) {
+        beforePaths[`/p${index}`] = {
+          get: { responses: { '200': jsonResponse({ $ref: '#/components/schemas/Shared' }) } },
+        };
+        afterPaths[`/p${index}`] = {
+          get: {
+            responses: {
+              '200': jsonResponse({
+                type: 'object',
+                properties: { id: { type: 'string' } },
+                required: ['id'],
+              }),
+            },
+          },
+        };
+      }
+      const before = document(beforePaths, {
+        schemas: {
+          Shared: { type: 'object', properties: { [name]: { type: 'string' } }, required: [name] },
+        },
+      });
+      const counters = stats();
+      const report = compareSpecRevisions(before, document(afterPaths), { stats: counters });
+      return { report, counters };
+    };
+    const short = run('n');
+    const long = run('n'.repeat(20_000));
+
+    assert.equal(long.report.complete, true);
+    assert.deepEqual(long.report.counts, short.report.counts);
+    // The shared names once, each inline `id` twice (property and required).
+    assert.equal(long.counters.keyCodeUnits, 2 * 20_000 + operations * 4);
+    assert.equal(
+      long.counters.units - short.counters.units,
+      Math.ceil((2 * 20_000 + operations * 4) / 256) - Math.ceil((2 + operations * 4) / 256),
+    );
+  });
+
+  it('keys a shared parameter once, however many operations reference it', () => {
+    const run = (name: string): { report: SpecChangeReport; counters: SpecChangeStats } => {
+      const paths: Document = {};
+      for (let index = 0; index < 100; index += 1) {
+        paths[`/p${index}`] = {
+          get: {
+            parameters: [{ $ref: '#/components/parameters/Trace' }],
+            responses: { '200': {} },
+          },
+        };
+      }
+      const components: Document = {
+        parameters: { Trace: { name, in: 'header', schema: { type: 'string' } } },
+      };
+      const counters = stats();
+      const report = compareSpecRevisions(
+        document(paths, components),
+        document(structuredClone(paths), structuredClone(components)),
+        { stats: counters },
+      );
+      return { report, counters };
+    };
+    const short = run('X-Trace');
+    const long = run('X-'.padEnd(20_000, 'a'));
+
+    assert.deepEqual(long.report, emptySpecChangeReport());
+    // `in` and `name`, once per document.
+    assert.equal(long.counters.keyCodeUnits, 2 * ('header'.length + 20_000));
+    assert.equal(
+      long.counters.units - short.counters.units,
+      Math.ceil((2 * 20_006) / 256) - Math.ceil((2 * 13) / 256),
+    );
+  });
+
+  it('fits a pair of the largest accepted documents of small inline parameters', () => {
+    // As many parameter rows as the render limit allows, over as many
+    // operations as a document may declare, each its own small inline object.
+    const operations = MAX_SPEC_OPERATIONS;
+    const methods = ['get', 'put', 'post'] as const;
+    const paths: Document = {};
+    let rows = 0;
+    for (let index = 0; index < operations; index += 1) {
+      const count = Math.floor(MAX_SPEC_RENDER_UNITS / operations) + (index < 1_000 ? 1 : 0);
+      const parameters = Array.from({ length: count }, (_, position) => ({
+        name: `p${position}`,
+        in: 'query',
+      }));
+      rows += count;
+      const path = `/p${Math.floor(index / methods.length)}`;
+      const item = (paths[path] ??= {}) as Document;
+      item[methods[index % methods.length]!] = { parameters };
+    }
+    assert.equal(rows, MAX_SPEC_RENDER_UNITS);
+    const before = document(paths);
+    // Accepted: exactly at the render limit.
+    assertRenderCost(before, paths);
+
+    const counters = stats();
+    const report = compareSpecRevisions(before, structuredClone(before), { stats: counters });
+
+    assert.deepEqual(report, emptySpecChangeReport());
+    // One unit per operation and per parameter of each document, and the
+    // keyed text by its total length rather than a unit per parameter.
+    assert.equal(counters.units, operations + 2 * rows + Math.ceil(counters.keyCodeUnits / 256));
+    assert.ok(counters.units <= MAX_SPEC_CHANGE_UNITS);
   });
 });
