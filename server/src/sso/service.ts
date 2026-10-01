@@ -22,8 +22,9 @@
  *   opens its account. The email address plays no part: a provider that
  *   changes it does not move the sign-in to another account.
  * - **An explicit link** — started from the profile of a signed-in account —
- *   attaches the identity to that account, and only when the callback comes
- *   back to the same session.
+ *   attaches the identity to that account only when the callback comes back
+ *   to the same session and the portal already holds proof of the account's
+ *   address (or the provider verifies that same address).
  * - **Otherwise an existing account with the same address is linked only
  *   when both sides have proven it**: the provider asserts
  *   `email_verified: true` (the JSON boolean) *and* the portal holds a proof
@@ -513,6 +514,11 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     const links = await store.userIdentities.listByUser(account.id);
     if (links.some((link) => link.provider_id === settings.id)) {
       throw new OidcError('already_linked', 'The account is already linked at this provider');
+    }
+    const providerProvesAccountAddress =
+      emailVerified && email !== null && email === account.email.trim().toLowerCase();
+    if (!providerProvesAccountAddress && !(await addressProven(account))) {
+      throw new OidcError('account_exists', 'The portal holds no proof of the address');
     }
     if (mapping.role === null && account.role !== 'super_admin') {
       throw new OidcError('access_denied', 'The claims map to no role');

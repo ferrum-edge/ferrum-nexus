@@ -633,8 +633,8 @@ describe('single sign-on', () => {
 
   it('links explicitly from a signed-in session, and only back to that session', async () => {
     const holder = await h.registerUser({ email: 'explicit@corp.example.test' });
-    // The identity's address differs from the account's: an explicit link
-    // attaches it anyway, because the account holder started it.
+    // The identity's address differs from the account's, so the portal must
+    // already hold proof that the signed-in holder controls the account address.
     const claims = { sub: 'explicit-subject', email: 'someone-else@corp.example.test' };
 
     // Back to no session, or another one: nothing is attached.
@@ -647,6 +647,16 @@ describe('single sign-on', () => {
     assert.match(String(crossedResponse.headers.location), /\/profile\?sso_error=/);
     assert.deepEqual(await h.store.userIdentities.listByUser(holder.user.id), []);
 
+    const unproven = await link(h, corp, 'corp', holder, claims);
+    assert.equal(ssoError(unproven), 'account_exists');
+    assert.deepEqual(await h.store.userIdentities.listByUser(holder.user.id), []);
+
+    await h.store.emailProofs.upsert(
+      holder.user.id,
+      holder.user.email,
+      'verification_link',
+      new Date().toISOString(),
+    );
     const linked = await link(h, corp, 'corp', holder, claims);
     assert.equal(ssoError(linked), null);
     assert.equal(linked.headers.location, `${h.config.publicUrl}/profile`);
@@ -656,8 +666,8 @@ describe('single sign-on', () => {
       (entry) => entry.target_id === holder.user.id,
     );
     assert.equal(row?.details.explicit, true);
-    // An address the provider did not verify for this account is no proof of it.
-    assert.equal(await h.store.emailProofs.findByUser(holder.user.id), null);
+    // The unrelated provider address does not replace the portal's proof.
+    assert.equal((await h.store.emailProofs.findByUser(holder.user.id))?.email, holder.user.email);
 
     // The same subject cannot then be attached to another account.
     const again = await link(h, corp, 'corp', other, claims);
@@ -1393,6 +1403,8 @@ describe('single sign-on login policies', () => {
       // linked there but a super admin.
       const linked = await link(h, partner, 'partner', founder, {
         sub: 'strict-founder-subject',
+        email: founder.user.email,
+        email_verified: true,
         groups: ['partners'],
       });
       assert.equal(ssoError(linked), null);
