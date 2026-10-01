@@ -60,7 +60,9 @@ describe('SpecDiffView', () => {
   it('shows no warning for a comparison from a server that omits `complete`', () => {
     const older: Partial<SpecDiff> = { ...NOTHING };
     delete older.complete;
-    render(<SpecDiffView diff={{ ...(older as SpecDiff), servers_changed: true, changed: true }} />);
+    render(
+      <SpecDiffView diff={{ ...(older as SpecDiff), servers_changed: true, changed: true }} />,
+    );
     expect(screen.queryByText(INCOMPLETE)).not.toBeInTheDocument();
   });
 });

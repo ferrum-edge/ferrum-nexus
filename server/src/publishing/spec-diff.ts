@@ -134,6 +134,13 @@ export interface SpecDiffOptions {
   /** Defaults to {@link MAX_SPEC_DIFF_UNITS}; a test lowers it to reach it. */
   unitLimit?: number;
   stats?: SpecDiffStats;
+  /**
+   * A document no longer passes the upload checks (a revision stored before a
+   * limit it breaks), so its parameters are not bounded by them. Nothing is
+   * folded: the result lists the operations each document declares and is
+   * `complete: false`, as one that ran out of budget is.
+   */
+  unchecked?: boolean;
 }
 
 /** Unwinds a comparison that has spent its budget. */
@@ -298,7 +305,7 @@ function infoChanges(
 export function diffSpecDocuments(
   from: { document: Record<string, unknown>; summary: ApiSpecSummary | null },
   to: { document: Record<string, unknown>; summary: ApiSpecSummary | null },
-  { resolveStats, unitLimit = MAX_SPEC_DIFF_UNITS, stats }: SpecDiffOptions = {},
+  { resolveStats, unitLimit = MAX_SPEC_DIFF_UNITS, stats, unchecked = false }: SpecDiffOptions = {},
 ): SpecDiff {
   let units = 0;
   const spend = (amount: number): void => {
@@ -309,16 +316,20 @@ export function diffSpecDocuments(
 
   // One running total for both documents; see `MAX_SPEC_DIFF_UNITS`.
   const keyText = createKeyTextCharge(spend);
-  let complete = true;
-  let before: Map<string, Operation>;
-  let after: Map<string, Operation>;
-  try {
-    before = operationsOf(from.document, resolveStats, spend, keyText);
-    after = operationsOf(to.document, resolveStats, spend, keyText);
-    keyText.settle();
-  } catch (error) {
-    if (!(error instanceof BudgetExhausted)) throw error;
-    complete = false;
+  let complete = !unchecked;
+  let before: Map<string, Operation> | null = null;
+  let after: Map<string, Operation> | null = null;
+  if (complete) {
+    try {
+      before = operationsOf(from.document, resolveStats, spend, keyText);
+      after = operationsOf(to.document, resolveStats, spend, keyText);
+      keyText.settle();
+    } catch (error) {
+      if (!(error instanceof BudgetExhausted)) throw error;
+      complete = false;
+    }
+  }
+  if (before === null || after === null) {
     before = operationKeysOf(from.document);
     after = operationKeysOf(to.document);
   }

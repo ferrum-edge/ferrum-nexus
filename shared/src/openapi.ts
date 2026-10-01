@@ -46,6 +46,14 @@ export const MAX_OPENAPI_REF_LENGTH = 2_048;
  */
 export const MAX_OPENAPI_PARAMETER_NAME_LENGTH = 1_024;
 
+/**
+ * Longest parameter `in` a document may give, in UTF-16 code units. OpenAPI
+ * names four locations, none longer than six; `in` is part of a parameter's
+ * identity just as `name` is, so it is bounded for the same reason, with room
+ * to spare for documents that spell something odd but harmless there.
+ */
+export const MAX_OPENAPI_PARAMETER_IN_LENGTH = 64;
+
 /** Why a Reference Object could not be followed. */
 export type OpenApiRefFailure = 'external' | 'missing' | 'cycle' | 'depth';
 

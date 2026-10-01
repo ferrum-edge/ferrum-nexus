@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
+  MAX_OPENAPI_PARAMETER_IN_LENGTH,
   MAX_OPENAPI_PARAMETER_NAME_LENGTH,
   MAX_OPENAPI_REF_LENGTH,
   MAX_SPEC_BYTES,
@@ -807,6 +808,31 @@ describe('OpenAPI parsing', () => {
       assert.deepEqual(failure.details, {
         field: 'paths',
         reason: 'parameter_name_too_long',
+        length: limit + 1,
+        limit,
+      });
+    }
+  });
+
+  it('refuses a parameter `in` longer than the limit, wherever it is listed', () => {
+    const limit = MAX_OPENAPI_PARAMETER_IN_LENGTH;
+    const atLimit = 'q'.repeat(limit);
+    const tooLong = `${atLimit}q`;
+    const components = { parameters: { Odd: { name: 'id', in: tooLong } } };
+    const accepted = { '/a': { get: { parameters: [{ name: 'id', in: atLimit }] } } };
+    assertRenderCost({ paths: accepted, components }, accepted);
+
+    const refused: Record<string, unknown>[] = [
+      { '/a': { get: { parameters: [{ name: 'id', in: tooLong }] } } },
+      { '/a': { get: { parameters: [{ $ref: '#/components/parameters/Odd' }] } } },
+      { '/a': { parameters: [{ name: 'id', in: tooLong }] } },
+    ];
+    for (const paths of refused) {
+      const failure = expectSpecInvalid(() => assertRenderCost({ paths, components }, paths));
+      assert.match(failure.message, /'in' is 65 characters long, more than the 64/);
+      assert.deepEqual(failure.details, {
+        field: 'paths',
+        reason: 'parameter_in_too_long',
         length: limit + 1,
         limit,
       });

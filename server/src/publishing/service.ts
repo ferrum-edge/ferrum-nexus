@@ -283,6 +283,7 @@ import {
   assertUpstreamAllowed,
   formatUpstreamUrl,
   parseOpenApiSpec,
+  parseStoredSpecStructure,
   parseUploadedOpenApiSpec,
   parseUpstreamUrl,
   resolveUpstream,
@@ -836,6 +837,39 @@ function safeSpecDocument(rawSpec: string): Record<string, unknown> {
 }
 
 /**
+ * A revision's document for the review comparison: `checked` when it passes
+ * the upload checks (an upload, or a stored revision that still does), and
+ * otherwise only its structure (see `parseStoredSpecStructure`), `null` when
+ * even that cannot be read.
+ */
+type ReviewDocument =
+  | { checked: true; document: Record<string, unknown> }
+  | { checked: false; document: Record<string, unknown> | null };
+
+/** An already-stored revision read back as a {@link ReviewDocument}. */
+function storedReviewDocument(rawSpec: string): ReviewDocument {
+  try {
+    return { checked: true, document: parseOpenApiSpec(rawSpec).document };
+  } catch {
+    return { checked: false, document: parseStoredSpecStructure(rawSpec) };
+  }
+}
+
+/**
+ * The document to put back on the gateway for a stored revision: the checked
+ * one, or, for a revision stored before a limit it now breaks, the one its
+ * structure reads as, which is what the gateway held. `{}` only when the
+ * stored text cannot be read as data at all.
+ */
+function restorableSpecDocument(rawSpec: string): Record<string, unknown> {
+  try {
+    return parseOpenApiSpec(rawSpec).document;
+  } catch {
+    return parseStoredSpecStructure(rawSpec) ?? {};
+  }
+}
+
+/**
  * What consumers are told a revision changed, against the revision it
  * replaces (issue #448).
  *
@@ -1385,17 +1419,36 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * An API with no current revision compares against an empty document, so a
    * first upload reads as "everything is new" rather than failing — there is
    * nothing wrong with reviewing a change to nothing.
+   *
+   * A stored side that no longer passes the upload checks is never read as an
+   * empty document, which would make the comparison look complete and
+   * harmless. The result is `complete: false` and `changed: true`, listing the
+   * operations each side declares when both can still be read as data, and
+   * nothing when one cannot.
    */
   function diffAgainstCurrent(
     current: ApiSpecRecord | null,
-    proposed: { document: Record<string, unknown>; summary: ApiSpecSummary | null },
+    proposed: { document: ReviewDocument; summary: ApiSpecSummary | null },
   ): SpecDiff {
+    const before: ReviewDocument = current
+      ? storedReviewDocument(current.raw_spec)
+      : { checked: true, document: {} };
+    const fromSummary = current ? specSummary(current) : null;
+    const after = proposed.document;
+    if (before.checked && after.checked) {
+      return diffSpecDocuments(
+        { document: before.document, summary: fromSummary },
+        { document: after.document, summary: proposed.summary },
+      );
+    }
+    // Listed only when both sides can be: one alone would read as every
+    // operation added, or every one removed.
+    const fromDocument = after.document === null ? null : before.document;
+    const toDocument = before.document === null ? null : after.document;
     return diffSpecDocuments(
-      {
-        document: current ? safeSpecDocument(current.raw_spec) : {},
-        summary: current ? specSummary(current) : null,
-      },
-      proposed,
+      { document: fromDocument ?? {}, summary: fromSummary },
+      { document: toDocument ?? {}, summary: proposed.summary },
+      { unchecked: true },
     );
   }
 
@@ -1551,7 +1604,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // restores to the new document, which is the best available answer
             // and never leaves the proxy without a spec.
             const restoreDocument = previous
-              ? safeSpecDocument(previous.raw_spec)
+              ? restorableSpecDocument(previous.raw_spec)
               : parsed.document;
             const restoreBackend = proxyBackendFields(proxy);
             // Register before PUT: a lost response can still mean it landed.
@@ -3068,7 +3121,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // `from` is what the API serves today and `to` is what it would serve,
       // so a rollback's diff reads in the direction the change would go.
       return diffAgainstCurrent(current, {
-        document: safeSpecDocument(target.raw_spec),
+        document: storedReviewDocument(target.raw_spec),
         summary: specSummary(target),
       });
     },
@@ -3081,7 +3134,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // change that cannot actually be made.
       const parsed = parseUploadedOpenApiSpec(specText);
       const current = await store.apiSpecs.findCurrentByApi(api.id);
-      return diffAgainstCurrent(current, { document: parsed.document, summary: null });
+      return diffAgainstCurrent(current, {
+        document: { checked: true, document: parsed.document },
+        summary: null,
+      });
     },
 
     async rollbackSpec(actor, apiId, revisionId, ip = null): Promise<PublishResult> {
