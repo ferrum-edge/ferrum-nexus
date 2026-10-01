@@ -123,21 +123,38 @@ Upgrade Nexus and Edge together, following the
    re-import the configuration. A MongoDB gateway database is unaffected and
    skips this step.
    1. Export the Nexus namespace from the running `v0.9.8` gateway with
-      `GET /backup`: an `admin` token signed with `FERRUM_ADMIN_JWT_SECRET`
-      and `X-Ferrum-Namespace` set to Nexus's `FERRUM_NAMESPACE`. The export
-      from step 1 serves if nothing has written to the gateway since. See
-      Edge's
+      `GET /backup`, sending `X-Ferrum-Namespace` set to Nexus's
+      `FERRUM_NAMESPACE` and an HS256 admin JWT signed with
+      `FERRUM_ADMIN_JWT_SECRET`. Nexus's own signer stamps the claims Edge
+      requires, listed below, and the Compose commands further down use it. Before
+      going on, check that the export is non-empty, reports
+      `source: "database"` (a `cached` export carries no API spec documents)
+      and lists your proxies, consumers and plugin configs. The export from
+      step 1 serves if nothing has written to the gateway since. See Edge's
       [backup and restore reference](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.9/docs/admin_backup_restore.md).
+      The token's claims:
+      - `iss` equal to the gateway's `FERRUM_ADMIN_JWT_ISSUER` (default
+        `ferrum-edge`);
+      - `sub`, any non-empty actor name for Edge's audit log;
+      - `iat`, `nbf` and `exp`, with `exp - iat` positive and at most
+        `FERRUM_ADMIN_JWT_MAX_TTL` (default 3,600 seconds);
+      - `jti`, a unique token id;
+      - `role: "admin"`, since `GET /backup` and `POST /restore` are
+        admin-only;
+      - `aud` only if the gateway sets `FERRUM_ADMIN_JWT_AUDIENCE` (a token
+        carrying `aud` is refused otherwise), and `ns` naming the namespace if
+        it requires namespace claims.
    2. Stop the gateway and set its database aside unchanged: it is the gateway
       half of your rollback.
    3. Start `v0.9.9` on an empty database with the same Edge secrets
       (`FERRUM_ADMIN_JWT_SECRET`, `FERRUM_BASIC_AUTH_HMAC_SECRET`) and import
-      the export into the same namespace with `POST /restore?confirm=true`.
-      Restore keeps every resource id, so the consumer, proxy and plugin-config
-      ids Nexus recorded still resolve, and issued credentials keep working.
-      It validates the whole export against `v0.9.9`'s rules first: a refusal
-      (`400`) names what it refused and writes nothing. Fix that resource in
-      the export and import again.
+      the export into the same namespace with `POST /restore?confirm=true`,
+      with the same header and the same kind of token. Restore keeps every
+      resource id, so the consumer, proxy and plugin-config ids Nexus recorded
+      still resolve, and issued credentials keep working. It validates the
+      whole export against `v0.9.9`'s rules first: a refusal (`400`) names what
+      it refused and writes nothing. Fix that resource in the export and import
+      again.
 4. **Run the migrations once from the new Nexus image**
    (`node server/dist/db/migrate-cli.js`). It applies `004_api_spec_changes`,
    `005_notification_preferences` and `006_user_identities`; re-running it is
@@ -148,15 +165,62 @@ Upgrade Nexus and Edge together, following the
    known client still calls an API through the gateway with its existing
    credential.
 
-On the Compose stack, from the checkout you installed from, with the four
-secrets you saved at install time exported again (never newly generated values)
-and `docker-compose.yml` unchanged. The gateway's database is
-`/data/ferrum.db` in the `ferrumdata` volume, and its Admin API listens only on
-the Compose network, at `http://ferrum-edge:9000`:
+On the Compose stack, run the commands below from the checkout you installed
+from, with the four secrets you saved at install time exported again (never
+newly generated values) and `docker-compose.yml` unchanged. The gateway's
+database is `/data/ferrum.db` in the `ferrumdata` volume. Its Admin API listens
+only on the Compose network, at `http://ferrum-edge:9000`, so the export and
+the import run in one-off containers of the `nexus` service. Those containers
+have the `nexus` service's `FERRUM_ADMIN_URL`, `FERRUM_ADMIN_JWT_SECRET` and
+`FERRUM_NAMESPACE`, and they sign with Nexus's own `signAdminJwt`
+(`server/dist/ferrum-admin/jwt.js`, unchanged since `v0.2.0`). Nothing else in
+the image runs.
+
+Stop the portal and export the `nexus` namespace into `edge-backup.json`
+(step 3.1). The file holds live credentials, so it is created readable by you
+only. Keep it with your other backups.
 
 ```bash
 docker compose stop nexus
-# Export the `nexus` namespace with GET /backup now (step 3.1).
+(umask 077 && docker compose run --rm -T --no-deps nexus node --input-type=module -e '
+import { signAdminJwt } from "./server/dist/ferrum-admin/jwt.js";
+const env = process.env;
+const token = await signAdminJwt({
+  secret: env.FERRUM_ADMIN_JWT_SECRET,
+  issuer: env.FERRUM_ADMIN_JWT_ISSUER || "ferrum-edge",
+  subject: "nexus-v0.3.0-upgrade",
+  role: "admin",
+  namespace: env.FERRUM_NAMESPACE,
+  audience: env.FERRUM_ADMIN_JWT_AUDIENCE,
+  ttlSeconds: 300,
+});
+const res = await fetch(`${env.FERRUM_ADMIN_URL}/backup`, {
+  headers: { authorization: `Bearer ${token}`, "x-ferrum-namespace": env.FERRUM_NAMESPACE },
+});
+if (!res.ok) throw new Error(`GET /backup answered ${res.status}: ${await res.text()}`);
+process.stdout.write(await res.text());
+' > edge-backup.json)
+```
+
+Check the export before you touch the old database. It must say
+`source: database` and count your resources; `api_specs` must be a number,
+not `missing`:
+
+```bash
+docker compose run --rm -T --no-deps nexus node -e '
+const backup = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+console.log("source:", backup.source);
+for (const key of ["proxies", "consumers", "plugin_configs", "upstreams"]) {
+  console.log(`${key}:`, backup[key]?.length ?? 0);
+}
+console.log("api_specs:", backup.api_specs?.items?.length ?? "missing");
+' < edge-backup.json
+```
+
+Stop the gateway, set its database aside (step 3.2), move to the new release
+and start Edge `v0.9.9` on an empty database:
+
+```bash
 docker compose stop ferrum-edge
 docker compose run --rm --no-deps ferrum-edge-init \
   sh -c 'mkdir /data/edge-v0.9.8 && mv /data/ferrum.db* /data/edge-v0.9.8/'
@@ -166,14 +230,57 @@ set -a
 . ./release/compatibility.env
 set +a
 docker compose up -d ferrum-edge
-# Import the export with POST /restore?confirm=true now (step 3.3), then:
+```
+
+Import the export (step 3.3). The command waits up to a minute for the gateway
+to be ready, then prints Edge's answer and exits non-zero on a refusal:
+
+```bash
+docker compose run --rm -T --no-deps nexus node --input-type=module -e '
+import { readFileSync } from "node:fs";
+import { signAdminJwt } from "./server/dist/ferrum-admin/jwt.js";
+const env = process.env;
+const body = readFileSync(0, "utf8");
+for (let attempt = 0; ; attempt++) {
+  const health = await fetch(`${env.FERRUM_ADMIN_URL}/health`).catch(() => null);
+  if (health?.ok) break;
+  if (attempt === 60) throw new Error("the gateway was not ready within 60 seconds");
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+}
+const token = await signAdminJwt({
+  secret: env.FERRUM_ADMIN_JWT_SECRET,
+  issuer: env.FERRUM_ADMIN_JWT_ISSUER || "ferrum-edge",
+  subject: "nexus-v0.3.0-upgrade",
+  role: "admin",
+  namespace: env.FERRUM_NAMESPACE,
+  audience: env.FERRUM_ADMIN_JWT_AUDIENCE,
+  ttlSeconds: 300,
+});
+const res = await fetch(`${env.FERRUM_ADMIN_URL}/restore?confirm=true`, {
+  method: "POST",
+  headers: {
+    authorization: `Bearer ${token}`,
+    "x-ferrum-namespace": env.FERRUM_NAMESPACE,
+    "content-type": "application/json",
+  },
+  body,
+});
+console.log(`POST /restore answered ${res.status}: ${await res.text()}`);
+if (!res.ok) process.exit(1);
+' < edge-backup.json
+```
+
+Then rebuild and start Nexus:
+
+```bash
 docker compose up -d --build
 ```
 
 The `mv` keeps the old database in the same volume, under `edge-v0.9.8/`.
-Start Nexus only after the import, so it never works against an empty gateway.
-`--build` rebuilds the Nexus image from the new checkout, and Nexus migrates
-the retained `pgdata` database when it starts.
+Start Nexus only after the import succeeds, so it never works against an empty
+gateway. The one-off containers above use the Nexus image you already built;
+`--build` then rebuilds it from the new checkout, and Nexus migrates the
+retained `pgdata` database when it starts.
 
 What the migrations do (all three only add tables, on every backend, and copy
 no data):
@@ -283,7 +390,7 @@ migrated.
   listed, blocking the server's event loop on one request. Each parameter's
   identity is now read once per document, the comparison works within a fixed
   budget, and parameter names and `in` are capped (see
-  [behaviour changes](#behaviour-changes-to-plan-for)). Affects `v0.2.0`.
+  [behaviour changes](#behaviour-changes-to-plan-for)).
 - **GHSA-r4wm-2vch-9jxm** (low): primitive schema entries bypassed the
   documentation render budget.
 - **GHSA-pr4m-gv4h-3x72** (medium): a shared cache in front of the portal could
