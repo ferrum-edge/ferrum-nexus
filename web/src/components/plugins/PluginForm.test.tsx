@@ -149,6 +149,16 @@ describe('validateDraft', () => {
     expect(errors.header_name).toMatch(/gateway owns 'AUTHORIZATION'/);
   });
 
+  it('reports the protocol headers Edge v0.9.9 added to its reserved set', () => {
+    for (const header of ['grpc-status', 'sec-websocket-key']) {
+      const errors = validateDraft(descriptor('correlation_id'), {
+        header_name: header,
+        echo_downstream: true,
+      });
+      expect(errors.header_name).toMatch(new RegExp(`gateway owns '${header}'`));
+    }
+  });
+
   it('reports a header name in the gateway-owned x-consumer-* namespace', () => {
     for (const name of ['correlation_id', 'request_deduplication']) {
       const spec = descriptor(name);

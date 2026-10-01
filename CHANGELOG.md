@@ -6,6 +6,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `correlation_id` header name now has the whole gateway-reserved set
+  refused in the portal** (#483). The portal's list was missing eleven names
+  Ferrum Edge `v0.9.9` refuses: `grpc-message`, `grpc-status`,
+  `grpc-status-details-bin`, `proxy-authentication-info`, the five
+  `sec-websocket-*` names, `x-ferrum-original-content-encoding` and
+  `x-grpc-web-mode`. Typing one used to reach the gateway and fail the write
+  with a `400`; it is now a field-level message in the form and on the server,
+  and a `shared` test pins the list against Edge's `RESERVED_HEADER_NAMES`.
+
 ## [0.3.0] - 2026-10-01
 
 Paired with Ferrum Edge `v0.9.9`. Upgrades a `v0.2.0` database in place with
