@@ -35,11 +35,27 @@
  * never equated with another. Anything outside the known member list that
  * differs collapses to a single `other` label rather than leaking vendor
  * extension names into the UI.
+ *
+ * ## Bounded, whatever the documents hold
+ *
+ * Folding parameters is the one part of this comparison whose work a document
+ * can multiply: a path item's parameters are merged under every operation
+ * beneath it, and one component parameter may be referenced from every
+ * operation. So each parameter object's identity is read once per document
+ * however many lists reach it, a long name becomes a short digest
+ * (`spec-keys.ts`) so merging and sorting by it costs the same whatever its
+ * length, and the folding spends from a fixed budget,
+ * {@link MAX_SPEC_DIFF_UNITS}. A comparison that runs out reports itself
+ * incomplete (`complete: false`): it still lists the operations added and
+ * removed, which cost nothing to find, but no changed ones, and it says
+ * `changed`, since it could not rule a change out.
  */
 
 import { isDeepStrictEqual } from 'node:util';
 
 import {
+  MAX_SPEC_RENDER_UNITS,
+  createOpenApiParameterKeyer,
   createOpenApiRefResolver,
   keyOpenApiParameters,
   mergeOpenApiParameters,
@@ -51,6 +67,8 @@ import {
   type SpecOperationChange,
   type SpecOperationRef,
 } from '@ferrum-nexus/shared';
+
+import { KEY_CODE_UNITS_PER_UNIT, compactSpecKey } from './spec-keys.js';
 
 /** HTTP methods an OpenAPI Path Item Object may carry, lowercase as written. */
 const OPERATION_KEYS = [
@@ -84,6 +102,39 @@ const OPERATION_MEMBERS = [
 
 type Operation = Record<string, unknown>;
 
+/**
+ * Most work units one comparison may spend folding parameters: one per
+ * operation, one per parameter entry keyed, one per entry merged into an
+ * operation's effective list, and one per {@link KEY_CODE_UNITS_PER_UNIT}
+ * code units of parameter `in` and `name` keyed, each parameter object once.
+ *
+ * An accepted document fits {@link MAX_SPEC_RENDER_UNITS}, which charges a
+ * path-item parameter under every operation beneath it, so its keying and its
+ * merging cost at most that ceiling each; its operations and its keyed text
+ * (at most `MAX_SPEC_EXPANDED_BYTES` code units) add about 20 000 more. Five
+ * times the ceiling therefore covers any pair of accepted documents, and only
+ * a document that was never checked can run out.
+ */
+export const MAX_SPEC_DIFF_UNITS = 5 * MAX_SPEC_RENDER_UNITS;
+
+/** Work counters a test may pass in, to assert how much a comparison cost. */
+export interface SpecDiffStats {
+  /** Units spent against {@link MAX_SPEC_DIFF_UNITS}. */
+  units: number;
+}
+
+/** Limits and counters a caller may pass to {@link diffSpecDocuments}. */
+export interface SpecDiffOptions {
+  /** Counts the reference-following work both documents cost. */
+  resolveStats?: OpenApiResolveStats;
+  /** Defaults to {@link MAX_SPEC_DIFF_UNITS}; a test lowers it to reach it. */
+  unitLimit?: number;
+  stats?: SpecDiffStats;
+}
+
+/** Unwinds a comparison that has spent its budget. */
+class BudgetExhausted {}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -104,28 +155,40 @@ function stringOrNull(value: unknown): string | null {
  * permissiveness the publishing parser applies.
  *
  * One resolver serves the whole document, so each distinct `$ref` is followed
- * once however many parameters use it.
+ * once however many parameters use it, and one keyer, so each parameter object
+ * is keyed once. The work is charged through `spend`, which throws once the
+ * budget is gone.
  */
 function operationsOf(
   document: Record<string, unknown>,
   stats: OpenApiResolveStats | undefined,
+  spend: (units: number) => void,
 ): Map<string, Operation> {
   const operations = new Map<string, Operation>();
   const paths = document.paths;
   if (!isRecord(paths)) return operations;
   const resolver = createOpenApiRefResolver(document, { stats });
+  const keyer = createOpenApiParameterKeyer({
+    onKey: (codeUnits) => spend(Math.ceil(codeUnits / KEY_CODE_UNITS_PER_UNIT)),
+    compact: compactSpecKey,
+  });
+  const keyed = (parameters: unknown, inherited: boolean): KeyedOpenApiParameter[] => {
+    const list = Array.isArray(parameters) ? parameters : [];
+    spend(list.length);
+    return keyOpenApiParameters(resolver, list, inherited, keyer);
+  };
   for (const [path, item] of Object.entries(paths)) {
     if (!isRecord(item)) continue;
-    const shared = keyOpenApiParameters(
-      resolver,
-      Array.isArray(item.parameters) ? item.parameters : [],
-      true,
-    );
+    // Keyed at the first operation, so a path item without one costs nothing.
+    let shared: KeyedOpenApiParameter[] | null = null;
     for (const key of OPERATION_KEYS) {
       const operation = item[key];
       if (!isRecord(operation)) continue;
+      spend(1);
+      shared ??= keyed(item.parameters, true);
       const { parameters: written, ...rest } = operation;
-      const own = keyOpenApiParameters(resolver, Array.isArray(written) ? written : [], false);
+      const own = keyed(written, false);
+      spend(shared.length + own.length);
       const effective = canonicalParameters(mergeOpenApiParameters(shared, own));
       // A `parameters` member that is not a list at all is compared as written.
       const normalized =
@@ -135,6 +198,24 @@ function operationsOf(
             ? rest
             : operation;
       operations.set(`${key.toUpperCase()} ${path}`, normalized);
+    }
+  }
+  return operations;
+}
+
+/**
+ * Every operation of a document, keyed `METHOD path`, as written: what a
+ * comparison that ran out of budget can still afford to list.
+ */
+function operationKeysOf(document: Record<string, unknown>): Map<string, Operation> {
+  const operations = new Map<string, Operation>();
+  const paths = document.paths;
+  if (!isRecord(paths)) return operations;
+  for (const [path, item] of Object.entries(paths)) {
+    if (!isRecord(item)) continue;
+    for (const key of OPERATION_KEYS) {
+      const operation = item[key];
+      if (isRecord(operation)) operations.set(`${key.toUpperCase()} ${path}`, operation);
     }
   }
   return operations;
@@ -207,16 +288,32 @@ function infoChanges(
  *
  * `from` is what the API is serving today and `to` is what it would serve —
  * so for a rollback, `from` is the current revision and `to` is the retained
- * one being restored, not the other way round. `resolveStats`, when given,
- * counts the reference-following work both documents cost.
+ * one being restored, not the other way round. See {@link SpecDiffOptions}.
  */
 export function diffSpecDocuments(
   from: { document: Record<string, unknown>; summary: ApiSpecSummary | null },
   to: { document: Record<string, unknown>; summary: ApiSpecSummary | null },
-  { resolveStats }: { resolveStats?: OpenApiResolveStats } = {},
+  { resolveStats, unitLimit = MAX_SPEC_DIFF_UNITS, stats }: SpecDiffOptions = {},
 ): SpecDiff {
-  const before = operationsOf(from.document, resolveStats);
-  const after = operationsOf(to.document, resolveStats);
+  let units = 0;
+  const spend = (amount: number): void => {
+    units += amount;
+    if (stats) stats.units = units;
+    if (units > unitLimit) throw new BudgetExhausted();
+  };
+
+  let complete = true;
+  let before: Map<string, Operation>;
+  let after: Map<string, Operation>;
+  try {
+    before = operationsOf(from.document, resolveStats, spend);
+    after = operationsOf(to.document, resolveStats, spend);
+  } catch (error) {
+    if (!(error instanceof BudgetExhausted)) throw error;
+    complete = false;
+    before = operationKeysOf(from.document);
+    after = operationKeysOf(to.document);
+  }
 
   const added: SpecOperationRef[] = [];
   const removed: SpecOperationRef[] = [];
@@ -231,6 +328,9 @@ export function diffSpecDocuments(
       added.push(refOf(key));
       continue;
     }
+    // Unfolded operations cannot be compared: a moved parameter would read as
+    // a change.
+    if (!complete) continue;
     const changes = memberChanges(previous, operation);
     if (changes.length > 0) changed.push({ ...refOf(key), changes });
   }
@@ -240,8 +340,10 @@ export function diffSpecDocuments(
 
   const beforePaths = pathsOf(from.document);
   const afterPaths = pathsOf(to.document);
-  const addedPaths = afterPaths.filter((path) => !beforePaths.includes(path));
-  const removedPaths = beforePaths.filter((path) => !afterPaths.includes(path));
+  const beforePathSet = new Set(beforePaths);
+  const afterPathSet = new Set(afterPaths);
+  const addedPaths = afterPaths.filter((path) => !beforePathSet.has(path));
+  const removedPaths = beforePaths.filter((path) => !afterPathSet.has(path));
 
   const info = infoChanges(from.document, to.document);
   const serversChanged = !isDeepStrictEqual(from.document.servers, to.document.servers);
@@ -261,7 +363,10 @@ export function diffSpecDocuments(
     // a list that guessed would be worse than one that is honest about its
     // scope — see the module docstring.
     potentially_breaking: removed,
+    complete,
+    // An incomplete comparison could not rule a change out.
     changed:
+      !complete ||
       added.length > 0 ||
       removed.length > 0 ||
       changed.length > 0 ||

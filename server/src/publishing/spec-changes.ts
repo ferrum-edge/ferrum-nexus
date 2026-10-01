@@ -42,11 +42,18 @@
  * - **Every other pair of schema objects is compared once** per direction,
  *   memoised by identity, so a YAML alias repeating a subtree costs nothing
  *   the second time.
- * - **Every step spends from one budget**, `MAX_SPEC_CHANGE_UNITS`: an
- *   operation, parameter, response, media type, schema pair or property, and
- *   enum and `required` entries by the sixteen, plus primitive enum string
- *   code units by the sixteen. A comparison that reaches it stops where it is
- *   and reports itself incomplete.
+ * - **Every step spends from one budget**, `MAX_SPEC_CHANGE_UNITS`: one unit
+ *   per operation, parameter, response, media type, schema pair or property,
+ *   and per sixteen enum and `required` entries, at every comparison that
+ *   reads them. A comparison that reaches it stops where it is and reports
+ *   itself incomplete, never as finding nothing.
+ * - **Provider text is keyed once.** Enum values, property and `required`
+ *   names, and parameter `in` and `name` become comparison keys once per enum
+ *   array, schema object or parameter object, however many pairs reach it,
+ *   and that keying costs one unit per `KEY_CODE_UNITS_PER_UNIT` code units
+ *   then. A long text becomes a short digest (`spec-keys.ts`), so comparing
+ *   two keys later costs the same whatever the document spells out, and a
+ *   set of long, same-length texts takes linear time to build.
  * - **Reference chains are walked from a queue**, not by recursion, so a chain
  *   of components as long as the document allows cannot exhaust the stack.
  *   Recursion follows only inline nesting, which `MAX_SPEC_DEPTH` bounds.
@@ -74,6 +81,7 @@ import {
   MAX_SPEC_CHANGE_UNITS,
   MAX_SPEC_CHANGES_LISTED,
   OPENAPI_OPERATION_METHODS,
+  createOpenApiParameterKeyer,
   createOpenApiRefResolver,
   emptySpecChangeReport,
   keyOpenApiParameters,
@@ -89,6 +97,8 @@ import {
   type SpecInfoChange,
   type SpecOperationRef,
 } from '@ferrum-nexus/shared';
+
+import { KEY_CODE_UNITS_PER_UNIT, compactSpecKey } from './spec-keys.js';
 
 /**
  * The way a schema travels. `parameter` and `request` are sent by the caller,
@@ -113,6 +123,12 @@ export interface SpecChangeStats {
   componentPairs: number;
   /** Entries of `type` lists read, across every schema looked at. */
   typeEntries: number;
+  /**
+   * UTF-16 code units of provider text made into comparison keys: enum
+   * strings, property and `required` names, and parameter `in` and `name`.
+   * Each enum array, schema object and parameter object is keyed once.
+   */
+  keyCodeUnits: number;
 }
 
 /** Limits a test may lower, to reach them with a small document. */
@@ -130,8 +146,21 @@ class BudgetExhausted {}
 /** Enum and `required` entries one unit pays for. */
 const ENTRIES_PER_UNIT = 16;
 
-/** Enum string code units one unit pays for before comparison keys are made. */
-const ENUM_CODE_UNITS_PER_UNIT = 16;
+/** The primitive values of one enum array, keyed; see {@link enumKey}. */
+interface EnumKeys {
+  /** Each primitive value with its key, in document order, repeats included. */
+  entries: { value: unknown; key: string }[];
+  keys: Set<string>;
+}
+
+/** A schema's declared properties and `required` names, by {@link compactSpecKey}. */
+interface SchemaMembers {
+  properties: Map<string, { name: string; schema: unknown }>;
+  /** Each name's first spelling. */
+  required: Map<string, string>;
+  /** Entries of the `required` list as written, which every comparison pays for. */
+  requiredEntries: number;
+}
 
 /** Enum values named in one change before the rest are counted. */
 const ENUM_VALUES_NAMED = 5;
@@ -250,12 +279,16 @@ function covers(to: readonly string[], from: readonly string[]): boolean {
   return from.every((type) => to.includes(type) || (type === 'integer' && to.includes('number')));
 }
 
-/** An enum value as a comparison key, or `null` for one that is not a primitive. */
+/**
+ * An enum value as a comparison key, or `null` for one that is not a
+ * primitive. A string is keyed through {@link compactSpecKey}, so the key is
+ * short however long the value is.
+ */
 function enumKey(value: unknown): string | null {
   if (value === null) return 'null';
   switch (typeof value) {
     case 'string':
-      return `s${value}`;
+      return `s${compactSpecKey(value)}`;
     case 'number':
       return `n${String(value)}`;
     case 'boolean':
@@ -348,6 +381,22 @@ export function compareSpecRevisions(
     if (units > unitLimit) throw new BudgetExhausted();
   };
 
+  /**
+   * Pay for making `codeUnits` of provider text into keys. Called once per
+   * enum array, schema object or parameter object, before its text is read.
+   */
+  const chargeKeyText = (codeUnits: number): void => {
+    if (stats) stats.keyCodeUnits += codeUnits;
+    spend(Math.ceil(codeUnits / KEY_CODE_UNITS_PER_UNIT));
+  };
+
+  // One keyer for both documents: it remembers each parameter object, and no
+  // object belongs to both.
+  const parameterKeys = createOpenApiParameterKeyer({
+    onKey: chargeKeyText,
+    compact: compactSpecKey,
+  });
+
   const record = (
     place: Place,
     kind: SpecChangeKind,
@@ -437,6 +486,33 @@ export function compareSpecRevisions(
     return 'invalid';
   };
 
+  // Keys of each enum array, made once however many pairs compare it.
+  const enumKeyCache = new WeakMap<readonly unknown[], EnumKeys>();
+
+  /**
+   * The primitive values of one enum array with their keys. Only primitive
+   * values are compared; an object or array value names nothing a caller
+   * switches on, and keying it would mean serializing it.
+   */
+  const enumKeysOf = (values: readonly unknown[]): EnumKeys => {
+    const known = enumKeyCache.get(values);
+    if (known) return known;
+    let codeUnits = 0;
+    for (const value of values) if (typeof value === 'string') codeUnits += value.length;
+    chargeKeyText(codeUnits);
+    const entries: EnumKeys['entries'] = [];
+    const keys = new Set<string>();
+    for (const value of values) {
+      const key = enumKey(value);
+      if (key === null) continue;
+      entries.push({ value, key });
+      keys.add(key);
+    }
+    const keyed: EnumKeys = { entries, keys };
+    enumKeyCache.set(values, keyed);
+    return keyed;
+  };
+
   const compareEnums = (
     left: Record<string, unknown>,
     right: Record<string, unknown>,
@@ -467,41 +543,20 @@ export function compareSpecRevisions(
       });
       return;
     }
-    // Keying primitive values below may scan each string more than once. Charge
-    // their size first, so repeated ref-versus-inline comparisons cannot hash a
-    // large shared enum without exhausting the fixed work budget.
-    let stringCodeUnits = 0;
-    for (const values of [from!, to!]) {
-      for (const value of values) {
-        if (typeof value === 'string') stringCodeUnits += value.length;
-      }
-    }
-    spend(Math.ceil((2 * stringCodeUnits) / ENUM_CODE_UNITS_PER_UNIT));
-    // Only primitive values are compared; an object or array value names
-    // nothing a caller switches on, and keying it would mean serializing it.
-    const keysOf = (values: readonly unknown[]): Set<string> => {
-      const keys = new Set<string>();
-      for (const value of values) {
-        const key = enumKey(value);
-        if (key !== null) keys.add(key);
-      }
-      return keys;
-    };
-    const fromKeys = keysOf(from!);
-    const toKeys = keysOf(to!);
-    const missing = (values: readonly unknown[], present: Set<string>): unknown[] => {
+    const fromKeys = enumKeysOf(from!);
+    const toKeys = enumKeysOf(to!);
+    const missing = (values: EnumKeys, present: ReadonlySet<string>): unknown[] => {
       const seen = new Set<string>();
       const result: unknown[] = [];
-      for (const value of values) {
-        const key = enumKey(value);
-        if (key === null || present.has(key) || seen.has(key)) continue;
+      for (const { value, key } of values.entries) {
+        if (present.has(key) || seen.has(key)) continue;
         seen.add(key);
         result.push(value);
       }
       return result;
     };
-    const removed = missing(from!, toKeys);
-    const added = missing(to!, fromKeys);
+    const removed = missing(fromKeys, toKeys.keys);
+    const added = missing(toKeys, fromKeys.keys);
     if (removed.length > 0) {
       record(place, 'schema_enum_values_removed', narrowing, {
         schemaPath: path,
@@ -516,13 +571,39 @@ export function compareSpecRevisions(
     }
   };
 
-  const requiredOf = (schema: Record<string, unknown>): Set<string> => {
-    const required = ownArray(schema, 'required');
-    const names = new Set<string>();
-    if (required === null) return names;
-    spend(Math.ceil(required.length / ENTRIES_PER_UNIT));
-    for (const name of required) if (typeof name === 'string') names.add(name);
-    return names;
+  // Keyed properties and `required` names of each schema object, made once
+  // however many pairs compare it.
+  const membersCache = new WeakMap<Record<string, unknown>, SchemaMembers>();
+
+  const membersOf = (schema: Record<string, unknown>): SchemaMembers => {
+    const known = membersCache.get(schema);
+    if (known) return known;
+    const declared = ownRecord(schema, 'properties');
+    const names = declared === null ? [] : Object.keys(declared);
+    const required = ownArray(schema, 'required') ?? [];
+    let codeUnits = 0;
+    for (const name of names) codeUnits += name.length;
+    for (const name of required) if (typeof name === 'string') codeUnits += name.length;
+    chargeKeyText(codeUnits);
+    const properties: SchemaMembers['properties'] = new Map();
+    if (declared !== null) {
+      for (const name of names) {
+        properties.set(compactSpecKey(name), { name, schema: declared[name] });
+      }
+    }
+    const requiredNames = new Map<string, string>();
+    for (const name of required) {
+      if (typeof name !== 'string') continue;
+      const key = compactSpecKey(name);
+      if (!requiredNames.has(key)) requiredNames.set(key, name);
+    }
+    const members: SchemaMembers = {
+      properties,
+      required: requiredNames,
+      requiredEntries: required.length,
+    };
+    membersCache.set(schema, members);
+    return members;
   };
 
   /** Compare two schema objects that are not references. */
@@ -585,46 +666,48 @@ export function compareSpecRevisions(
       compareSchema(fromItems, toItems, place, `${path}[]`, direction);
     }
 
-    const fromProperties = entriesOf(ownRecord(left, 'properties'));
-    const toProperties = entriesOf(ownRecord(right, 'properties'));
-    spend(fromProperties.size + toProperties.size);
     // Read whether or not there are properties: `required` may name members
     // declared elsewhere, as `allOf: [{ $ref: Base }, { required: [id] }]` does.
-    const fromRequired = requiredOf(left);
-    const toRequired = requiredOf(right);
-    for (const [name, schema] of toProperties) {
+    const fromMembers = membersOf(left);
+    const toMembers = membersOf(right);
+    spend(fromMembers.properties.size + toMembers.properties.size);
+    spend(Math.ceil(fromMembers.requiredEntries / ENTRIES_PER_UNIT));
+    spend(Math.ceil(toMembers.requiredEntries / ENTRIES_PER_UNIT));
+    for (const [key, { name, schema }] of toMembers.properties) {
       const at = childPath(path, name);
-      if (!fromProperties.has(name)) {
-        const required = toRequired.has(name);
+      const previous = fromMembers.properties.get(key);
+      if (previous === undefined) {
+        const required = toMembers.required.has(key);
         record(place, 'schema_property_added', required ? narrowing : 'non_breaking', {
           schemaPath: at,
           to: required ? 'required' : 'optional',
         });
         continue;
       }
-      const wasRequired = fromRequired.has(name);
-      const isRequired = toRequired.has(name);
+      const wasRequired = fromMembers.required.has(key);
+      const isRequired = toMembers.required.has(key);
       if (!wasRequired && isRequired) {
         record(place, 'schema_property_required', narrowing, { schemaPath: at });
       } else if (wasRequired && !isRequired) {
         record(place, 'schema_property_optional', widening, { schemaPath: at });
       }
-      compareSchema(fromProperties.get(name), schema, place, at, direction);
+      compareSchema(previous.schema, schema, place, at, direction);
     }
-    for (const name of fromProperties.keys()) {
-      if (toProperties.has(name)) continue;
+    for (const [key, { name }] of fromMembers.properties) {
+      if (toMembers.properties.has(key)) continue;
       // A caller that goes on sending it is at worst ignored; one that reads
       // it stops finding it.
       record(place, 'schema_property_removed', widening, { schemaPath: childPath(path, name) });
     }
     // Requiredness of members this schema does not declare itself. Those it
     // declares were compared above, with the property.
-    for (const name of toRequired) {
-      if (toProperties.has(name) || fromRequired.has(name)) continue;
+    for (const [key, name] of toMembers.required) {
+      if (toMembers.properties.has(key) || fromMembers.required.has(key)) continue;
       record(place, 'schema_property_required', narrowing, { schemaPath: childPath(path, name) });
     }
-    for (const name of fromRequired) {
-      if (toRequired.has(name) || fromProperties.has(name) || toProperties.has(name)) continue;
+    for (const [key, name] of fromMembers.required) {
+      const declared = fromMembers.properties.has(key) || toMembers.properties.has(key);
+      if (declared || toMembers.required.has(key)) continue;
       record(place, 'schema_property_optional', widening, { schemaPath: childPath(path, name) });
     }
   };
@@ -850,9 +933,12 @@ export function compareSpecRevisions(
     operation: Record<string, unknown>,
   ): KeyedOpenApiParameter[] => {
     const item = pathItemOf(document, path);
-    const shared = keyOpenApiParameters(resolver, ownArray(item, 'parameters') ?? [], true);
-    const declared = keyOpenApiParameters(resolver, ownArray(operation, 'parameters') ?? [], false);
-    return mergeOpenApiParameters(shared, declared);
+    const shared = ownArray(item, 'parameters') ?? [];
+    const declared = ownArray(operation, 'parameters') ?? [];
+    return mergeOpenApiParameters(
+      keyOpenApiParameters(resolver, shared, true, parameterKeys),
+      keyOpenApiParameters(resolver, declared, false, parameterKeys),
+    );
   };
 
   const fromOperations = operationsOf(before);

@@ -22,7 +22,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   are kept. A first publish records none, and revisions published before the
   upgrade have none. The comparison works within a fixed budget, and one that
   fails or runs out is recorded as incomplete; it never blocks a publish or a
-  rollback.
+  rollback. Each step it takes is charged at every comparison that takes it,
+  while enum values, property and `required` names and parameter names are
+  made into comparison keys once per enum, schema or parameter, however many
+  operations share it, and charged by length then.
 - Forward migration `004_api_spec_changes` adds the `api_spec_changes` table on
   every backend. It copies no data.
 - **Grantees are told when an API's specification changes** (#447). When a
@@ -165,6 +168,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   characters. The limit applies to revisions, revision comparisons and catalog
   reads too, so an already published document over it can no longer be read
   from the catalog until a revision within the limit replaces it.
+- **Revision comparisons say when they are incomplete.** The review shown
+  before replacing or rolling back a specification
+  (`GET /api/apis/:id/revisions/:revisionId/diff`, `POST /api/apis/:id/spec/diff`)
+  now reads each parameter's identity once per document and folds parameters
+  within a fixed work budget that any pair of accepted documents fits.
+  `SpecDiff` gains `complete`; one that ran out lists added and removed
+  operations but no changed ones, reports `changed`, and the review says so.
 - Upgrade Nodemailer to 10.0.13. This also includes the 10.0.11 CommonJS and
   type compatibility fixes, the 10.0.12 fix that settles sends after connection
   errors, and 10.0.13 address-parsing fixes.

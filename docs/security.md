@@ -619,7 +619,9 @@ host. Messages already in the outbox before an upgrade are not revalidated.
   type and component names, status codes, types and enum values, each cut to
   200 characters. Never the document, its `servers`, descriptions, examples or
   extensions. Its comparison reads document keys as own properties into maps,
-  never follows a `$ref` at every occurrence, and stops at a fixed work budget.
+  never follows a `$ref` at every occurrence, keys the text of each enum,
+  schema and parameter once (a long value as a digest), and stops at a fixed
+  work budget.
   Summaries are recorded whatever the API's visibility, and served under the
   visibility it has when they are read: history recorded while an API was
   `private` or `retired` becomes readable to every signed-in account once the

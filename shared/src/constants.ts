@@ -487,13 +487,23 @@ export const OPENAPI_OPERATION_METHODS = [
 
 /**
  * Most work units one comparison of two OpenAPI revisions may spend
- * (`server/src/publishing/spec-changes.ts`): one per operation, parameter,
- * response, media type, schema pair and property compared, and one per enum
- * value read. Both documents already fit {@link MAX_SPEC_RENDER_UNITS}, and the
- * comparison walks each shared component once rather than at every reference,
- * so twice that ceiling covers any pair of accepted documents that share
+ * (`server/src/publishing/spec-changes.ts`). Two kinds of work are charged:
+ *
+ * - **Walking**, at every comparison that does it: one unit per operation,
+ *   parameter, response, media type, schema pair and property compared, and
+ *   one per sixteen enum or `required` entries read.
+ * - **Keying** provider text (enum strings, property and `required` names,
+ *   parameter `in` and `name`): one unit per 256 UTF-16 code units, once per
+ *   enum array, schema object or parameter object however many comparisons
+ *   reach it. A document's keyed text is at most
+ *   {@link MAX_SPEC_EXPANDED_BYTES} code units, so keying costs at most about
+ *   16 000 units per document.
+ *
+ * Both documents already fit {@link MAX_SPEC_RENDER_UNITS}, and the comparison
+ * walks each shared component once rather than at every reference, so twice
+ * that ceiling covers the walk of any pair of accepted documents that share
  * their structure. A comparison that reaches it stops and reports itself as
- * incomplete rather than running on.
+ * incomplete rather than running on, never as having found nothing.
  */
 export const MAX_SPEC_CHANGE_UNITS = 2 * MAX_SPEC_RENDER_UNITS;
 

@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { diffSpecDocuments } from './spec-diff.js';
+import { diffSpecDocuments, type SpecDiffStats } from './spec-diff.js';
 
 /** A minimal OpenAPI document over a path/method/operation table. */
 function document(
@@ -32,6 +32,7 @@ describe('specification change review', () => {
     const doc = document({ '/invoices': { get: { responses: { '200': {} } } } });
     const result = diff(doc, structuredClone(doc));
     assert.equal(result.changed, false);
+    assert.equal(result.complete, true);
     assert.deepEqual(result.added_operations, []);
     assert.deepEqual(result.removed_operations, []);
     assert.deepEqual(result.changed_operations, []);
@@ -308,5 +309,58 @@ describe('specification change review', () => {
     // Reported as a change, absent from the breaking list — the comparison
     // does not read schemas, and the UI carries that caveat in words.
     assert.deepEqual(result.potentially_breaking, []);
+  });
+
+  it('keys a shared parameter once, however many operations reference it', () => {
+    const run = (name: string): { result: ReturnType<typeof diff>; stats: SpecDiffStats } => {
+      const paths: Record<string, Record<string, unknown>> = {};
+      for (let index = 0; index < 200; index += 1) {
+        paths[`/p${index}`] = { get: { parameters: [{ $ref: '#/components/parameters/Trace' }] } };
+      }
+      const components = { parameters: { Trace: { name, in: 'header' } } };
+      const before = document(paths, undefined, { components });
+      const stats: SpecDiffStats = { units: 0 };
+      const result = diffSpecDocuments(
+        { document: before, summary: null },
+        { document: structuredClone(before), summary: null },
+        { stats },
+      );
+      return { result, stats };
+    };
+    const short = run('X-Trace');
+    const long = run('X-'.padEnd(20_000, 'a'));
+
+    assert.equal(long.result.changed, false);
+    assert.equal(long.result.complete, true);
+    // The name is keyed, and charged, once per document.
+    assert.equal(
+      long.stats.units - short.stats.units,
+      2 * (Math.ceil(20_006 / 256) - Math.ceil(13 / 256)),
+    );
+  });
+
+  it('says it is incomplete, rather than finding nothing, when it runs out', () => {
+    const before = document({
+      '/a': { get: { parameters: [{ name: 'id', in: 'query' }] } },
+      '/b': { get: {} },
+    });
+    const after = document({
+      '/a': { get: { parameters: [{ name: 'id', in: 'query', required: true }] } },
+      '/c': { get: {} },
+    });
+    const stats: SpecDiffStats = { units: 0 };
+    const result = diffSpecDocuments(
+      { document: before, summary: null },
+      { document: after, summary: null },
+      { unitLimit: 2, stats },
+    );
+    assert.ok(stats.units > 2);
+    assert.equal(result.complete, false);
+    assert.equal(result.changed, true);
+    // What exists is still listed; what changed is not guessed at.
+    assert.deepEqual(result.added_operations, [{ method: 'GET', path: '/c' }]);
+    assert.deepEqual(result.removed_operations, [{ method: 'GET', path: '/b' }]);
+    assert.deepEqual(result.potentially_breaking, [{ method: 'GET', path: '/b' }]);
+    assert.deepEqual(result.changed_operations, []);
   });
 });

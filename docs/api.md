@@ -2243,7 +2243,8 @@ portal would refuse to publish.
 | `info_changes`                            | `title`, `version` or `description` differences as `{ field, from, to }`                                                                                                                                                                    |
 | `servers_changed`                         | whether the `servers` block differs                                                                                                                                                                                                         |
 | `potentially_breaking`                    | every removed operation                                                                                                                                                                                                                     |
-| `changed`                                 | whether the documents differ at all                                                                                                                                                                                                         |
+| `complete`                                | `false` when the comparison ran out of its work budget: added and removed operations and metadata are still listed, changed operations are not                                                                                              |
+| `changed`                                 | whether the documents differ at all; also `true` when `complete` is `false`                                                                                                                                                                 |
 
 The comparison is **structural**: it does not resolve `$ref`s, walk schemas or
 reason about semantics. A response schema can lose a required field with every
@@ -2252,6 +2253,11 @@ comparison found nothing, not that the change is compatible. Path-level
 `parameters` are folded into each operation (an operation parameter with the
 same `name` and `in` overrides) and compared in canonical order, so moving or
 reordering parameters is not a change.
+
+Folding parameters spends from a fixed work budget, with each parameter's
+identity read once per document. Any pair of documents the portal accepted fits
+it; a comparison that runs out returns `complete: false` rather than a partial
+list that would read as "nothing else changed".
 
 ### `POST /api/apis/:id/revisions/:revisionId/rollback`
 

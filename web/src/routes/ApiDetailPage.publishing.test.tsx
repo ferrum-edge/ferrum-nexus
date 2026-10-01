@@ -41,6 +41,7 @@ const EMPTY_DIFF: SpecDiff = {
   info_changes: [],
   servers_changed: false,
   potentially_breaking: [],
+  complete: true,
   changed: false,
 };
 

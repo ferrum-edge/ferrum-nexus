@@ -1019,7 +1019,17 @@ export interface SpecDiff {
    * {@link SpecDiff.removed_operations} rather than left to be counted.
    */
   potentially_breaking: SpecOperationRef[];
-  /** Whether the two documents differ at all, by any of the above. */
+  /**
+   * Whether the comparison ran to the end. One that ran out of its fixed work
+   * budget (only a document that was never checked at upload can make it)
+   * still lists the operations added and removed and the metadata changes,
+   * but no changed operations, and reports {@link SpecDiff.changed}.
+   */
+  complete: boolean;
+  /**
+   * Whether the two documents differ at all, by any of the above. Also `true`
+   * when the comparison is incomplete, since it could not rule a change out.
+   */
   changed: boolean;
 }
 

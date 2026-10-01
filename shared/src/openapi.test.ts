@@ -5,6 +5,7 @@ import {
   MAX_OPENAPI_POINTER_SEGMENTS,
   MAX_OPENAPI_REF_HOPS,
   MAX_OPENAPI_REF_LENGTH,
+  createOpenApiParameterKeyer,
   createOpenApiRefResolver,
   keyOpenApiParameters,
   mergeOpenApiParameters,
@@ -249,5 +250,27 @@ describe('OpenAPI parameter inheritance', () => {
       [operationParameters[1], false],
       [operationParameters[2], false],
     ]);
+  });
+
+  it('keys each parameter object once per keyer, however many lists reach it', () => {
+    const resolver = createOpenApiRefResolver(spec);
+    const charged: number[] = [];
+    const keyer = createOpenApiParameterKeyer({
+      onKey: (codeUnits) => charged.push(codeUnits),
+      compact: (text) => `<${text.length}>`,
+    });
+    const reference = { $ref: '#/components/parameters/Tenant' };
+    const copy = { ...tenant };
+    const lists = [[reference, reference], [{ $ref: '#/components/parameters/Tenant' }], [copy]];
+    const keys = lists.flatMap((list) =>
+      keyOpenApiParameters(resolver, list, false, keyer).map((entry) => entry.key),
+    );
+
+    // `in` and the case-folded `name`, each rewritten by `compact`.
+    assert.deepEqual(keys, ['<6>\u0000<9>', '<6>\u0000<9>', '<6>\u0000<9>', '<6>\u0000<9>']);
+    // The component once, however it is reached; its inline copy, another
+    // object, once more.
+    assert.deepEqual(charged, ['header'.length + 'tenant_id'.length, 15]);
+    assert.equal(keyer.keyOf({ ok: false, ref: '#/x', reason: 'missing' }), null);
   });
 });
