@@ -362,22 +362,27 @@ Each card is off until you choose **Turn on**. Saving writes the plugin to the
 gateway and attaches it to your proxy in one step, so it is live immediately.
 If the gateway refuses, nothing is saved.
 
-| Plugin                   | What it does                                                                                | What callers see                                                                   |
-| ------------------------ | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| **Security headers**     | Adds browser hardening headers and strips headers that reveal your stack                    | No change in how the API is called                                                 |
-| **Request size limit**   | Rejects a request body over your limit (default 1 MiB) before it reaches your backend       | `413 Payload Too Large`; document the limit on upload endpoints                    |
-| **Response size limit**  | Refuses to relay a backend response over your limit (default 8 MiB)                         | `502 Bad Gateway`; paginate anything that can grow without bound                   |
-| **IP allow / deny list** | Restricts callers by source address. A deny match always wins                               | Unlisted addresses are rejected before authentication                              |
-| **Bot filter**           | Blocks requests whose `User-Agent` contains a listed string; an allow list is checked first | Legitimate SDKs should send a recognisable `User-Agent`                            |
-| **Correlation ID**       | Gives every call an id, forwards it to your backend and echoes it back                      | They can send their own id, or quote the gateway's in a support request            |
-| **Response compression** | Compresses responses (gzip, Brotli) when the caller asks                                    | A compressed body when they send `Accept-Encoding`                                 |
-| **Idempotency keys**     | A retried write with the same key replays the first response instead of running again       | They send a unique key per operation; reusing a key with a different body is `409` |
-| **Maintenance / sunset** | Returns a fixed response instead of calling your backend                                    | Your status and message: `503` for maintenance, `410` for a retired endpoint       |
+| Plugin                   | What it does                                                                                        | What callers see                                                                   |
+| ------------------------ | --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **Security headers**     | Adds browser hardening headers and strips headers that reveal your stack                            | No change in how the API is called                                                 |
+| **Request size limit**   | Rejects a request body over your limit (default 1 MiB) before it reaches your backend               | `413 Payload Too Large`; document the limit on upload endpoints                    |
+| **Response size limit**  | Refuses a response over your limit; a declared length gets 502, a stream starts 200 then is cut off | `502 Bad Gateway`, or a `200` whose body is cut off for an unknown-length stream   |
+| **IP allow / deny list** | Restricts callers by source address. A deny match always wins                                       | Unlisted addresses are rejected before authentication                              |
+| **Bot filter**           | Blocks requests whose `User-Agent` contains a listed string; an allow list is checked first         | Legitimate SDKs should send a recognisable `User-Agent`                            |
+| **Correlation ID**       | Gives every call an id, forwards it to your backend and echoes it back                              | They can send their own id, or quote the gateway's in a support request            |
+| **Response compression** | Compresses responses (gzip, Brotli) when the caller asks                                            | A compressed body when they send `Accept-Encoding`                                 |
+| **Idempotency keys**     | A retried write with the same key replays the first response instead of running again               | They send a unique key per operation; reusing a key with a different body is `409` |
+| **Maintenance / sunset** | Returns a fixed response instead of calling your backend                                            | Your status and message: `503` for maintenance, `410` for a retired endpoint       |
 
 Notes:
 
 - The **bot filter** is coarse. `User-Agent` is trivially spoofed; it deters
   casual scrapers, not determined ones.
+- **Response size limit has two contracts.** A response that declares its length
+  is refused with `502 Bad Gateway` before any body is sent. A response of
+  unknown length (a chunked or streamed body, SSE included) commits `200` first
+  and is then cut off once it passes the limit, so a consumer sees a truncated
+  stream rather than a `502`. Paginate bodies that can grow without bound.
 - **Security headers → Strict-Transport-Security** sends
   `max-age=31536000; includeSubDomains`, pinning browsers to HTTPS for a year on
   your whole domain and every subdomain. Turn it on only when that is true.

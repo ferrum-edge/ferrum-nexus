@@ -15,6 +15,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   contributing guide and the agent brief now point at the org
   [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) store as
   the home of shared contracts.
+- **The response-size limit's guidance now names both response contracts** (#485).
+  A backend response that declares its length is refused with `502 Bad Gateway`
+  before any body is sent, but an unknown-length streamed (or chunked) response
+  commits `200` first and is then cut off at the ceiling, so the consumer sees a
+  truncated stream rather than a `502`. The palette summary and consumer recipe,
+  and the provider guide, previously promised `502` for both.
+- **The admin guide's Settings reference now includes the Single sign-on tab**
+  (#487) and describes what the shipped tab configures: the deployment-wide
+  sign-in policy and OpenID Connect providers with their claim mappings.
 
 ### Fixed
 
@@ -32,6 +41,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `x-grpc-web-mode`. Typing one used to reach the gateway and fail the write
   with a `400`; it is now a field-level message in the form and on the server,
   and a `shared` test pins the list against Edge's `RESERVED_HEADER_NAMES`.
+- **The acceptance Compose stack sets `NEXUS_EMAIL_FROM`** (#488), the key the
+  portal actually reads, instead of the ignored `NEXUS_SMTP_FROM`. The
+  mail-sink journey now asserts the delivered `From` address, so an ignored or
+  renamed sender variable fails the acceptance gate rather than silently
+  falling back to the built-in default.
 
 ## [0.3.0] - 2026-10-01
 
