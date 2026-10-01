@@ -918,9 +918,10 @@ docker compose up -d
 
 The four secrets and `FERRUM_EDGE_IMAGE` are required (`${VAR:?…}`); keep the
 secrets stable across restarts. [`release/compatibility.env`](../release/compatibility.env)
-pins the Edge image by digest: Ferrum Edge `v0.9.9` for Nexus `v0.3.0`. That is
-the release the acceptance suite ([`e2e/`](../e2e/README.md)) tests against;
-other Edge versions are unverified.
+pins the Edge image by digest. The current acceptance suite
+([`e2e/`](../e2e/README.md)) uses Ferrum Edge `v0.9.10`; the released Nexus
+`v0.3.0` pairing with Edge `v0.9.9` is recorded in the
+[`v0.3.0` release notes](release-notes.md#supported-combination).
 
 The portal is on `http://127.0.0.1:8787` and the gateway proxy listener on
 `http://127.0.0.1:8000`, both bound to loopback. Before adapting it:

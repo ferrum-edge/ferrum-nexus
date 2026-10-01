@@ -2416,7 +2416,7 @@ canonical request path, which **includes the `listen_path`**. It must start
 with `/` and contain no whitespace, percent escape, backslash, `.`/`..` segment
 or empty segment other than a trailing slash, each segment judged on its text
 before any `;` parameter (`/..;x`, `/a//b` and `/;x/b` are refused, as Edge
-`v0.9.9` refuses them).
+`v0.9.10` refuses them).
 
 A `correlation_id` or `request_deduplication` `header_name` in the
 gateway-owned `x-consumer-*` namespace (any case, `_` and `-` alike) is
