@@ -563,4 +563,41 @@ describe('consumer-facing revision comparison', () => {
     });
     assert.deepEqual(compareSpecRevisions(before, after), compareSpecRevisions(before, after));
   });
+
+  it('charges enum string size before comparing mixed reference and inline schemas', () => {
+    const shared = 'x'.repeat(1_000);
+    const before = document(
+      {
+        '/a': {
+          get: {
+            responses: {
+              '200': jsonResponse({
+                type: 'object',
+                properties: { value: { $ref: '#/components/schemas/Shared' } },
+              }),
+            },
+          },
+        },
+      },
+      { schemas: { Shared: { type: 'string', enum: [shared] } } },
+    );
+    const after = document({
+      '/a': {
+        get: {
+          responses: {
+            '200': jsonResponse({
+              type: 'object',
+              properties: { value: { type: 'string', enum: ['x'] } },
+            }),
+          },
+        },
+      },
+    });
+    const measured = stats();
+
+    const report = compareSpecRevisions(before, after, { unitLimit: 100, stats: measured });
+
+    assert.equal(report.complete, false);
+    assert.ok(measured.units > 100);
+  });
 });

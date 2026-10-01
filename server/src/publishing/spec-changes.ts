@@ -44,8 +44,9 @@
  *   the second time.
  * - **Every step spends from one budget**, `MAX_SPEC_CHANGE_UNITS`: an
  *   operation, parameter, response, media type, schema pair or property, and
- *   enum and `required` entries by the sixteen. A comparison that reaches it
- *   stops where it is and reports itself incomplete.
+ *   enum and `required` entries by the sixteen, plus primitive enum string
+ *   code units by the sixteen. A comparison that reaches it stops where it is
+ *   and reports itself incomplete.
  * - **Reference chains are walked from a queue**, not by recursion, so a chain
  *   of components as long as the document allows cannot exhaust the stack.
  *   Recursion follows only inline nesting, which `MAX_SPEC_DEPTH` bounds.
@@ -128,6 +129,9 @@ class BudgetExhausted {}
 
 /** Enum and `required` entries one unit pays for. */
 const ENTRIES_PER_UNIT = 16;
+
+/** Enum string code units one unit pays for before comparison keys are made. */
+const ENUM_CODE_UNITS_PER_UNIT = 16;
 
 /** Enum values named in one change before the rest are counted. */
 const ENUM_VALUES_NAMED = 5;
@@ -463,6 +467,16 @@ export function compareSpecRevisions(
       });
       return;
     }
+    // Keying primitive values below may scan each string more than once. Charge
+    // their size first, so repeated ref-versus-inline comparisons cannot hash a
+    // large shared enum without exhausting the fixed work budget.
+    let stringCodeUnits = 0;
+    for (const values of [from!, to!]) {
+      for (const value of values) {
+        if (typeof value === 'string') stringCodeUnits += value.length;
+      }
+    }
+    spend(Math.ceil((2 * stringCodeUnits) / ENUM_CODE_UNITS_PER_UNIT));
     // Only primitive values are compared; an object or array value names
     // nothing a caller switches on, and keying it would mean serializing it.
     const keysOf = (values: readonly unknown[]): Set<string> => {
