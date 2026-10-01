@@ -1916,7 +1916,8 @@ the Edge proxy and plugins, then stores the API.
   not serve it, the change summary of the revision replacing it is recorded as
   incomplete, and a review comparison with it on either side is
   `complete: false` and `changed: true`, listing the operations each document
-  declares but no changed ones.
+  declares but no changed ones (or no operations at all when a stored document
+  cannot be read even as data, for example one over the stored size limit).
 - A derived upstream URL, after server-variable expansion, must fit 2 000
   characters (`details.limit: 2000`, naming the server).
 - `routes` with no declared operation (`details.reason: "no_operations"`).

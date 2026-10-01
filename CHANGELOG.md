@@ -178,7 +178,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   A stored revision on either side that no longer passes the upload checks is
   no longer compared as an empty document, which read as a complete and
   harmless change: the comparison is `complete: false` and `changed: true`
-  and lists the operations each side declares. A publish that fails at the
+  and lists the operations each side declares (none, when a stored side
+  cannot be read even as data). A publish that fails at the
   gateway now puts such a previous revision back as its stored document
   rather than as an empty one.
 - **Parameter names are limited to 1,024 characters, and `in` to 64**
