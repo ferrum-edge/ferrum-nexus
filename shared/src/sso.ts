@@ -99,6 +99,13 @@ export const SSO_ERROR_REASONS = [
   /** A local account holds the address and could not be linked safely. */
   'account_exists',
   /**
+   * An explicit link was refused because the portal holds no proof that the
+   * signed-in account's holder controls its address, such as a redeemed
+   * verification link or a completed password reset. The provider's
+   * `email_verified` does not count for an explicit link.
+   */
+  'address_unproven',
+  /**
    * The address belongs to an `admin` or `super_admin`, which is never linked
    * automatically: its holder links from their profile while signed in.
    */

@@ -543,9 +543,9 @@ exactly as `POST /api/auth/login` sets them; or `302` to
 for a link started with `POST /api/auth/sso/:provider/link`). `reason` is one
 of `sso_disabled`, `provider_unavailable`, `invalid_state`, `idp_error`,
 `token_invalid`, `email_required`, `email_domain_not_allowed`,
-`email_not_verified`, `account_exists`, `privileged_account`,
-`link_session_mismatch`, `already_linked`, `access_denied`,
-`account_disabled`, `signup_disabled`, `server_error` — see
+`email_not_verified`, `account_exists`, `address_unproven`,
+`privileged_account`, `link_session_mismatch`, `already_linked`,
+`access_denied`, `account_disabled`, `signup_disabled`, `server_error` — see
 [`operations.md` §14](operations.md#when-a-sign-in-fails). Provider error text
 is never echoed. Audited as `auth.sso_login`, plus `auth.sso_provision`,
 `auth.sso_link` or `auth.sso_claims_sync` when the sign-in did that too.
@@ -562,12 +562,17 @@ and session, and returns where to send the browser:
 
 The SPA navigates to `location`. The callback links whatever identity signs in
 there to this account, whatever its email address, provided it returns to the
-same session (`link_session_mismatch` otherwise). The provider's own
-`allowed_email_domains` still apply, and a subject already linked to another
-account, or a second identity at the same provider, is refused
-(`already_linked`). It then lands on `/profile`. This is the only way an
-`admin` or `super_admin` account is linked. Audited as `auth.sso_link` with
-`explicit: true`.
+same session (`link_session_mismatch` otherwise) and the portal already holds a
+recorded proof of the account's current address: a redeemed verification link,
+a completed password reset, or an earlier provider-verified provisioning or
+automatic link. Without one the link is refused with `address_unproven`, even
+when the provider asserts `email_verified: true` for the same address. The
+founding `super_admin`, seated with the bootstrap token, needs no proof. The
+provider's own `allowed_email_domains` still apply, and a subject already
+linked to another account, or a second identity at the same provider, is
+refused (`already_linked`). It then lands on `/profile`. This is the only way
+an `admin` or `super_admin` account is linked. Accepting the link records no
+address proof. Audited as `auth.sso_link` with `explicit: true`.
 
 Errors: `400 VALIDATION_FAILED` with `details.reason` (`sso_disabled`,
 `provider_unavailable`, …) when the link cannot start, `401 UNAUTHORIZED`,

@@ -2312,7 +2312,8 @@ always used) with:
   default never provisioned. Providers that omit the claim (Entra ID, for one)
   need `require_verified_email: false` and no domain list. Their users are then
   provisioned, but an existing account is linked only explicitly, from its
-  profile.
+  profile, once the portal holds proof of its address (see "Explicit linking"
+  below).
 
 The issuer must be `https://` and must match the provider's discovery document
 exactly — including any trailing slash (`https://tenant.auth0.com/`). Nexus
@@ -2428,9 +2429,9 @@ Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
 
    The registration policy plays no part. Accounts registered while
    `require_email_verification` was off have no proof, and turning the
-   requirement on later does not give them one. They are linked only once
-   their holder verifies or resets, or explicitly (below). Otherwise the
-   sign-in is refused with `account_exists`.
+   requirement on later does not give them one. They are linked, automatically
+   or explicitly (below), only once their holder verifies or resets. Otherwise
+   the sign-in is refused with `account_exists`.
 
 3. Otherwise a new account is created (`jit_provisioning`) with the mapped role
    and organization. It has no usable password: password sign-in fails,
@@ -2445,6 +2446,27 @@ Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
 Linked sign-in**, whatever address the provider holds. The provider's domain
 list still applies. This is how administrators link: no provider can link an
 `admin` or `super_admin` account by address.
+
+An explicit link needs the same **recorded proof** of the account's address
+as an automatic one: a redeemed verification link, a completed password reset,
+or an earlier provider-verified provisioning or automatic link. Without it the
+link is refused with `address_unproven`, even when the provider asserts
+`email_verified: true` for that very address. Otherwise whoever registered an
+address first could link an identity they control and keep signing in through
+it after the rightful holder resets the password. Accepting an explicit link
+records no proof of its own. The one exception is the **founding
+`super_admin`**, the account seated with the bootstrap token: the token already
+proves the operator owns it, so it links without a proof.
+
+With `require_email_verification` off and no SMTP configured, nothing can
+record a proof (verification and reset mail stays queued), so no account but
+the founder can link explicitly. To offer single sign-on to such accounts,
+configure SMTP: existing holders then prove their address with **Forgot
+password**, and with `require_email_verification` on, new registrations prove
+it by redeeming their verification link. Otherwise let the provider create the
+accounts (`jit_provisioning`), or link them automatically once their address
+is proven. The founder's exemption keeps the `sso_only` setup below open on a
+portal without mail.
 
 **Passwords of linked accounts.** A pre-existing account keeps its password
 when it is linked, so the provider's offboarding and MFA do not bind it: it
@@ -2464,7 +2486,9 @@ Administrators see and remove an account's links with
 1. Configure the provider under `local_and_sso`. Every `super_admin` signs in
    with their password and links their account from **Profile → Linked
    sign-in**. The portal refuses `sso_only` until the `super_admin` saving it
-   has a link to an enabled provider.
+   has a link to an enabled provider. The founder links without an address
+   proof; any other `super_admin` must first verify their address or reset
+   their password (`address_unproven` otherwise).
 2. Switch the policy to `sso_only`. The founding registration (with the
    bootstrap token) still works on an empty portal.
 3. Keep `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN` in your runbook. Set it to `true`
@@ -2492,6 +2516,7 @@ reason and a short detail (never a token or secret):
 | `email_domain_not_allowed` | The address is outside the allowed domains (deployment-wide or the provider's).                                                                   |
 | `email_not_verified`       | The provider did not assert `email_verified: true` where linking, a domain list or provisioning needs it.                                         |
 | `account_exists`           | An account holds the address but the portal has no proof of it, or it is linked there already (see "How accounts are matched").                   |
+| `address_unproven`         | A profile link to an account the portal holds no address proof for: verify the address or reset the password first, then link again.              |
 | `privileged_account`       | The address belongs to an `admin` or `super_admin`, which links from its profile only.                                                            |
 | `link_session_mismatch`    | A profile link came back to a different session, or none: start it again while signed in.                                                         |
 | `already_linked`           | A profile link found the identity linked to another account, or this account linked at that provider.                                             |

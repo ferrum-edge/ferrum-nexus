@@ -18,6 +18,8 @@ export const SSO_ERROR_MESSAGES: Readonly<Record<SsoErrorReason, string>> = {
   email_not_verified: 'The identity provider has not verified your email address.',
   account_exists:
     'An account with this email address already exists and could not be linked automatically. Sign in with your password and link single sign-on from your profile, or ask an administrator.',
+  address_unproven:
+    'Single sign-on can only be linked once this portal has confirmed your email address. Verify your email address or reset your password first, then link again.',
   privileged_account:
     'Administrator accounts are never linked automatically. Sign in with your password, then link single sign-on from your profile.',
   link_session_mismatch:

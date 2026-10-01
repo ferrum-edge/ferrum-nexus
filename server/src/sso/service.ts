@@ -24,7 +24,13 @@
  * - **An explicit link** — started from the profile of a signed-in account —
  *   attaches the identity to that account only when the callback comes back
  *   to the same session and the portal already holds proof of the account's
- *   address (or the provider verifies that same address).
+ *   address in `user_email_proofs`. The provider's `email_verified` is not
+ *   enough here: whoever registered the address first holds a session too,
+ *   and could otherwise attach an identity of their own that survives the
+ *   rightful holder's password reset. The one exception is the founding
+ *   `super_admin` recorded under `SUPER_ADMIN_CLAIM_KEY`, whose seat the
+ *   operator's bootstrap token already proved. Accepting an explicit link
+ *   records no proof of its own.
  * - **Otherwise an existing account with the same address is linked only
  *   when both sides have proven it**: the provider asserts
  *   `email_verified: true` (the JSON boolean) *and* the portal holds a proof
@@ -63,7 +69,12 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { AuditAction, SYSTEM_ACTOR, type AuditActor, type AuditService } from '../audit/service.js';
-import type { AuthService, IssuedSession, RequestContext } from '../auth/service.js';
+import {
+  SUPER_ADMIN_CLAIM_KEY,
+  type AuthService,
+  type IssuedSession,
+  type RequestContext,
+} from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
 import { runGatewayTeardown, type CredentialsService } from '../credentials/service.js';
 import type { NexusStore, UserIdentityRecord, UserRecord } from '../db/store.js';
@@ -475,6 +486,23 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     return proof !== null && proof.email === account.email.trim().toLowerCase();
   }
 
+  /**
+   * Whether `account` is the portal's founding `super_admin`: the account
+   * recorded under {@link SUPER_ADMIN_CLAIM_KEY}, seated with the operator's
+   * bootstrap token. That token proves the operator owns the account, which
+   * stands in for a mailbox proof on an explicit link — a portal without SMTP
+   * gives its founder no other way to earn one.
+   */
+  async function seatedFounder(account: UserRecord): Promise<boolean> {
+    if (account.role !== 'super_admin') return false;
+    const claim: unknown = (await store.settings.get(SUPER_ADMIN_CLAIM_KEY))?.value;
+    return (
+      typeof claim === 'object' &&
+      claim !== null &&
+      (claim as { user_id?: unknown }).user_id === account.id
+    );
+  }
+
   /** Decide which account an explicit link attaches to. */
   async function planExplicitLink(
     provider: ResolvedSsoProvider,
@@ -515,10 +543,13 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     if (links.some((link) => link.provider_id === settings.id)) {
       throw new OidcError('already_linked', 'The account is already linked at this provider');
     }
-    const providerProvesAccountAddress =
-      emailVerified && email !== null && email === account.email.trim().toLowerCase();
-    if (!providerProvesAccountAddress && !(await addressProven(account))) {
-      throw new OidcError('account_exists', 'The portal holds no proof of the address');
+    // The portal must already hold proof that this account's holder controls
+    // its address. The provider asserting `email_verified` for the same
+    // address is not enough: an account registered on someone else's address
+    // has a session too, and could attach an identity that outlives the
+    // rightful holder's password reset.
+    if (!(await addressProven(account)) && !(await seatedFounder(account))) {
+      throw new OidcError('address_unproven', 'The portal holds no proof of the address');
     }
     if (mapping.role === null && account.role !== 'super_admin') {
       throw new OidcError('access_denied', 'The claims map to no role');
@@ -691,8 +722,15 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
             last_login_at: at,
           });
           identityId = identity.id;
-          // A provider that verified this very address is proof of it too.
-          if (emailVerified && email !== null && email === user.email.trim().toLowerCase()) {
+          // An automatic link held both proofs of this very address, so the
+          // provider's verification refreshes the portal's. An explicit link
+          // records none: there the provider's word alone would be the proof.
+          if (
+            !plan.explicit &&
+            emailVerified &&
+            email !== null &&
+            email === user.email.trim().toLowerCase()
+          ) {
             await tx.emailProofs.upsert(user.id, email, 'identity_provider', at);
           }
           await audit.forStore(tx).record(

@@ -632,9 +632,18 @@ describe('single sign-on', () => {
   });
 
   it('links explicitly from a signed-in session, and only back to that session', async () => {
-    const holder = await h.registerUser({ email: 'explicit@corp.example.test' });
-    // The identity's address differs from the account's, so the portal must
-    // already hold proof that the signed-in holder controls the account address.
+    // Registered as typed, stored lowercased; the proof, recorded under the
+    // address as typed too, still covers it.
+    const holder = await h.registerUser({ email: 'Explicit@Corp.example.test' });
+    assert.equal(holder.user.email, 'explicit@corp.example.test');
+    await h.store.emailProofs.upsert(
+      holder.user.id,
+      'Explicit@Corp.example.test',
+      'verification_link',
+      new Date().toISOString(),
+    );
+    // The identity's address differs from the account's: an explicit link
+    // attaches it anyway, because the holder of the proven account started it.
     const claims = { sub: 'explicit-subject', email: 'someone-else@corp.example.test' };
 
     // Back to no session, or another one: nothing is attached.
@@ -647,16 +656,6 @@ describe('single sign-on', () => {
     assert.match(String(crossedResponse.headers.location), /\/profile\?sso_error=/);
     assert.deepEqual(await h.store.userIdentities.listByUser(holder.user.id), []);
 
-    const unproven = await link(h, corp, 'corp', holder, claims);
-    assert.equal(ssoError(unproven), 'account_exists');
-    assert.deepEqual(await h.store.userIdentities.listByUser(holder.user.id), []);
-
-    await h.store.emailProofs.upsert(
-      holder.user.id,
-      holder.user.email,
-      'verification_link',
-      new Date().toISOString(),
-    );
     const linked = await link(h, corp, 'corp', holder, claims);
     assert.equal(ssoError(linked), null);
     assert.equal(linked.headers.location, `${h.config.publicUrl}/profile`);
@@ -666,8 +665,10 @@ describe('single sign-on', () => {
       (entry) => entry.target_id === holder.user.id,
     );
     assert.equal(row?.details.explicit, true);
-    // The unrelated provider address does not replace the portal's proof.
-    assert.equal((await h.store.emailProofs.findByUser(holder.user.id))?.email, holder.user.email);
+    // The portal's proof stands as it was: the link recorded none of its own.
+    const proof = await h.store.emailProofs.findByUser(holder.user.id);
+    assert.equal(proof?.email, 'explicit@corp.example.test');
+    assert.equal(proof?.method, 'verification_link');
 
     // The same subject cannot then be attached to another account.
     const again = await link(h, corp, 'corp', other, claims);
@@ -677,6 +678,86 @@ describe('single sign-on', () => {
     const mine = await h.authed(holder, { method: 'GET', url: '/api/users/me/identities' });
     assert.equal(mine.statusCode, 200, mine.body);
     assert.equal(mine.json<{ items: unknown[] }>().items.length, 1);
+  });
+
+  it('refuses an explicit link to an account the portal holds no proof for', async () => {
+    // Registered with verification off: signed in, but nothing proves the address.
+    const holder = await h.registerUser({ email: 'explicit-unproven@corp.example.test' });
+    assert.equal(await h.store.emailProofs.findByUser(holder.user.id), null);
+    const sub = 'explicit-unproven-subject';
+    const attempts: [string, Record<string, unknown>][] = [
+      [
+        'the provider verifies the same address',
+        { email: holder.user.email, email_verified: true },
+      ],
+      [
+        'the provider verifies another address',
+        { email: 'elsewhere@corp.example.test', email_verified: true },
+      ],
+      ['email_verified absent', { email: holder.user.email }],
+      ['email_verified the string "true"', { email: holder.user.email, email_verified: 'true' }],
+    ];
+    for (const [label, claims] of attempts) {
+      const refused = await link(h, corp, 'corp', holder, { sub, ...claims });
+      assert.equal(ssoError(refused), 'address_unproven', label);
+      assert.match(String(refused.headers.location), /\/profile\?sso_error=address_unproven$/);
+    }
+    assert.deepEqual(await h.store.userIdentities.listByUser(holder.user.id), []);
+    assert.equal(await h.store.userIdentities.findBySubject('corp', corp.issuer, sub), null);
+    // No refused attempt turned the provider's word into a proof either.
+    assert.equal(await h.store.emailProofs.findByUser(holder.user.id), null);
+  });
+
+  it('keeps a pre-registered address from carrying an identity past a reset', async () => {
+    // Verification is off (the default): whoever registers the victim's
+    // address first is signed in at once…
+    const squatter = await h.registerUser({ email: 'prehijack-victim@corp.example.test' });
+    assert.equal(squatter.user.email_verified, true);
+    // …and tries to attach a provider account of their own, which would keep
+    // opening the account by `sub` after the victim takes it back.
+    const attacker = {
+      sub: 'prehijack-attacker',
+      email: 'prehijack-attacker@corp.example.test',
+      email_verified: true,
+    };
+    const refused = await link(h, corp, 'corp', squatter, attacker);
+    assert.equal(ssoError(refused), 'address_unproven');
+    assert.deepEqual(await h.store.userIdentities.listByUser(squatter.user.id), []);
+
+    // The victim takes the account back with a password reset, which proves
+    // the address.
+    const token = 'reset-token-for-prehijack-012345';
+    await h.store.verificationTokens.create({
+      user_id: squatter.user.id,
+      token_hash: h.app.nexus.crypto.hashToken(token),
+      purpose: 'password_reset',
+      expires_at: new Date(Date.now() + 600_000).toISOString(),
+    });
+    const reset = await h.app.inject({
+      method: 'POST',
+      url: '/api/auth/reset-password',
+      payload: { token, new_password: TEST_PASSWORD },
+    });
+    assert.equal(reset.statusCode, 200, reset.body);
+
+    // The attacker's identity opens nothing of the victim's.
+    await signIn(h, corp, 'corp', attacker);
+    const identity = await h.store.userIdentities.findBySubject('corp', corp.issuer, attacker.sub);
+    assert.notEqual(identity?.user_id, squatter.user.id);
+
+    // The victim, now proven, links their own identity; the link adds no
+    // provider proof over the reset's.
+    const victim = await h.loginUser(squatter.user.email);
+    const linked = await link(h, corp, 'corp', victim, {
+      sub: 'prehijack-victim',
+      email: squatter.user.email,
+      email_verified: true,
+    });
+    assert.equal(ssoError(linked), null);
+    assert.equal(
+      (await h.store.emailProofs.findByUser(squatter.user.id))?.method,
+      'password_reset',
+    );
   });
 
   it('holds a second provider to the same rule, and one identity per provider', async () => {
@@ -822,6 +903,8 @@ describe('single sign-on', () => {
       groups: [],
     });
     assert.equal(ssoError(linked), null);
+    // The provider's verification of the founder's address is no proof of it.
+    assert.equal(await h.store.emailProofs.findByUser(founder.user.id), null);
     const session = await sessionOf(h, linked);
     assert.equal(session.user.id, founder.user.id);
     assert.equal(session.user.role, 'super_admin', 'a claim mapping to client does not demote');
@@ -844,6 +927,8 @@ describe('single sign-on', () => {
   });
 
   it('never locks a super admin out for claims that map to no role', async () => {
+    // Needs only the founder seated in `before`: the founder links without an
+    // address proof, so nothing another test links or proves matters here.
     const response = await signIn(h, partner, 'partner', { sub: 'founder-partner', groups: [] });
     // Not linked at partner: refused like anyone unknown…
     assert.notEqual(ssoError(response), null);
@@ -1403,8 +1488,6 @@ describe('single sign-on login policies', () => {
       // linked there but a super admin.
       const linked = await link(h, partner, 'partner', founder, {
         sub: 'strict-founder-subject',
-        email: founder.user.email,
-        email_verified: true,
         groups: ['partners'],
       });
       assert.equal(ssoError(linked), null);
@@ -1458,6 +1541,34 @@ describe('single sign-on login policies', () => {
       });
       assert.equal(ssoError(linked), null);
       assert.equal((await put()).statusCode, 200);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('lets the unproven founder link explicitly, and no other super admin', async () => {
+    const h = await app();
+    try {
+      const founder = await h.registerUser({ email: 'unproven-founder@corp.example.test' });
+      assert.equal(founder.user.role, 'super_admin');
+      assert.equal(await h.store.emailProofs.findByUser(founder.user.id), null);
+      // The bootstrap token proved the seat: no address, verified or not, needed.
+      const linked = await link(h, corp, 'corp', founder, { sub: 'unproven-founder-subject' });
+      assert.equal(ssoError(linked), null);
+      const [identity] = await h.store.userIdentities.listByUser(founder.user.id);
+      assert.equal(identity?.subject, 'unproven-founder-subject');
+      assert.equal(await h.store.emailProofs.findByUser(founder.user.id), null);
+
+      // A super admin promoted later was never seated by the token.
+      const promoted = await h.registerUser({ email: 'promoted-super@corp.example.test' });
+      await h.store.users.update(promoted.user.id, { role: 'super_admin' });
+      const refused = await link(h, corp, 'corp', promoted, {
+        sub: 'promoted-super-subject',
+        email: promoted.user.email,
+        email_verified: true,
+      });
+      assert.equal(ssoError(refused), 'address_unproven');
+      assert.deepEqual(await h.store.userIdentities.listByUser(promoted.user.id), []);
     } finally {
       await h.close();
     }
