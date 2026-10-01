@@ -8,6 +8,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- **The acceptance suite now pins Ferrum Edge `v0.9.10`** by its published
+  multi-architecture image digest. This release adds fail-closed handling for
+  uninspectable MCP JSON-RPC batches and refuses non-UTF-8 charsets for
+  `mcp_gateway` and `ai_prompt_shield`; Nexus does not call either plugin or
+  parse MCP JSON-RPC traffic, so its Edge client and test mock need no change.
 - **The Ferrum Edge `gateway-headers` vocabulary is now vendored and pinned**
   alongside the plugin catalog and provisioned-by vocabularies, and the shared
   contract test checks the `X-Ferrum-Namespace`, `X-Ferrum-Namespace-Unserved`

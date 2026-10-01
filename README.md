@@ -238,7 +238,7 @@ The bootstrap token is printed to the container log (`docker logs`). Pass
 ### Full stack with Compose
 
 The Compose example runs Nexus, PostgreSQL and Ferrum Edge. The
-[compatibility record](release/compatibility.env) selects the Edge `v0.9.9`
+[compatibility record](release/compatibility.env) selects the Edge `v0.9.10`
 image by digest, the same image CI tests. The Nexus image is built from your
 checkout, so check out the release tag first
 (`git checkout --detach v0.3.0`).
