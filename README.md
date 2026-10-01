@@ -272,6 +272,18 @@ publish an API and call it through Edge. Before production, read
 [operations](docs/operations.md) for TLS, backups, upgrades and the
 single-active-writer model.
 
+## Contracts
+
+Cross-repo contracts — shared vocabularies, JSON schemas and fixtures — live in the org
+[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) store. Nexus vendors the
+Ferrum Edge vocabularies it speaks under
+[`contracts/ferrum-contracts/`](contracts/ferrum-contracts/), pinned by tag
+(`contracts-edge-0.9.9`) and per-file SHA-256 in
+[`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN). The `shared` contract test
+verifies every digest and checks Nexus's local names against the vendored vocabularies; the
+vendoring and bump procedure is in [`CONTRIBUTING.md`](CONTRIBUTING.md). A shared contract changes
+in ferrum-contracts first and is then re-vendored here — never edited locally.
+
 ## Documentation
 
 Start here:

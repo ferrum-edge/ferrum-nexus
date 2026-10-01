@@ -1,4 +1,5 @@
 tag: contracts-edge-0.9.9
 commit: 25c4e9e00033d7941a1dd0ab733fa74e735546ae
+sha256: 6ed57f067fdc0148dbb1622b770bf259bcb2fcf09c0545b8aa89105d8199685f  vocabularies/gateway-headers.json
 sha256: bba27e2beb6c0a4b48875b499e49f9f70a5debe53793f26cdc124c4251025494  vocabularies/plugin-catalog.json
 sha256: 60f6df5cabead31dc456c3fefb01f4191f0a48ad6f8406a58481e033aa1ac061  vocabularies/provisioned-by.json

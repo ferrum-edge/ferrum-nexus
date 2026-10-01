@@ -236,6 +236,12 @@ export const CSRF_HEADER = 'X-Nexus-CSRF';
 /** Lowercased {@link CSRF_HEADER}, matching Node's normalized header keys. */
 export const CSRF_HEADER_LOWER = 'x-nexus-csrf';
 
+/** Selects the namespace of a Ferrum Edge Admin API request. */
+export const FERRUM_NAMESPACE_HEADER = 'X-Ferrum-Namespace';
+
+/** Response header Edge stamps on an accepted write its data plane will not route. */
+export const FERRUM_NAMESPACE_UNSERVED_HEADER = 'X-Ferrum-Namespace-Unserved';
+
 /** Ferrum Edge attribution header and value for resources created by Nexus. */
 export const FERRUM_PROVISIONED_BY_HEADER = 'X-Ferrum-Provisioned-By';
 export const FERRUM_PROVISIONED_BY_VALUE = 'ferrum-nexus';

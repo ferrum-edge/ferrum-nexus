@@ -6,6 +6,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The Ferrum Edge `gateway-headers` vocabulary is now vendored and pinned**
+  alongside the plugin catalog and provisioned-by vocabularies, and the shared
+  contract test checks the `X-Ferrum-Namespace`, `X-Ferrum-Namespace-Unserved`
+  and `x-consumer-*` names Nexus relies on against it. The README, the
+  contributing guide and the agent brief now point at the org
+  [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) store as
+  the home of shared contracts.
+
 ### Fixed
 
 - **A `correlation_id` header name now has the whole gateway-reserved set
