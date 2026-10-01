@@ -1896,6 +1896,14 @@ the Edge proxy and plugins, then stores the API.
   extensions are not counted.
 - A `$ref` in a parameter, request body, response or schema longer than 2 048
   characters (`details.reason: "ref_too_long"`, `details.limit: 2048`).
+- A parameter `name` longer than 1 024 characters, in any path item's or
+  operation's `parameters` list, inline or behind a `$ref`
+  (`details.reason: "parameter_name_too_long"`, `details.length`,
+  `details.limit: 1024`). A revision stored before this limit and past it is
+  handled like any stored document that no longer passes these checks: the
+  catalog does not serve it, the change summary of the revision replacing it
+  is recorded as incomplete, and the review comparison reads it as an empty
+  document.
 - A derived upstream URL, after server-variable expansion, must fit 2 000
   characters (`details.limit: 2000`, naming the server).
 - `routes` with no declared operation (`details.reason: "no_operations"`).
@@ -2254,10 +2262,13 @@ comparison found nothing, not that the change is compatible. Path-level
 same `name` and `in` overrides) and compared in canonical order, so moving or
 reordering parameters is not a change.
 
-Folding parameters spends from a fixed work budget, with each parameter's
-identity read once per document. Any pair of documents the portal accepted fits
-it; a comparison that runs out returns `complete: false` rather than a partial
-list that would read as "nothing else changed".
+Folding parameters spends from a fixed work budget of 500 000 units, with each
+parameter's identity read once per document: a unit per operation, per
+parameter entry keyed and per entry merged, plus a unit per 256 characters of
+`in` and `name` keyed, counted over the whole comparison. Under the document
+limits above a pair of documents costs at most 438 768, so any pair the portal
+accepted fits it; a comparison that runs out returns `complete: false` rather
+than a partial list that would read as "nothing else changed".
 
 ### `POST /api/apis/:id/revisions/:revisionId/rollback`
 

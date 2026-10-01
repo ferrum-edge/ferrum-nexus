@@ -36,6 +36,16 @@ export const MAX_OPENAPI_POINTER_SEGMENTS = MAX_SPEC_DEPTH;
  */
 export const MAX_OPENAPI_REF_LENGTH = 2_048;
 
+/**
+ * Longest parameter `name` a document may give, in UTF-16 code units. A
+ * parameter's name is part of its identity, which every reader keys and
+ * compares wherever the parameter is listed, so an unbounded one makes every
+ * listing of it cost its length. Real names are a few dozen characters; the
+ * server refuses a document that gives a longer one, at upload and whenever a
+ * stored document is read back.
+ */
+export const MAX_OPENAPI_PARAMETER_NAME_LENGTH = 1_024;
+
 /** Why a Reference Object could not be followed. */
 export type OpenApiRefFailure = 'external' | 'missing' | 'cycle' | 'depth';
 
@@ -319,7 +329,9 @@ export function resolveOpenApiObject(
  * parameter without an identity is never merged with another one.
  *
  * `in` is compared as written; `name` is compared case-insensitively for
- * headers only, since HTTP header names are.
+ * headers only, since HTTP header names are. The key spells `in` with its
+ * length first, so no `in` and `name` can run together into another pair's
+ * key, whatever characters they hold.
  */
 function parameterKeyOf(
   resolution: OpenApiRefResolution | null,
@@ -332,8 +344,8 @@ function parameterKeyOf(
   options.onKey?.(location.length + name.length);
   const folded = location === 'header' ? name.toLowerCase() : name;
   const { compact } = options;
-  if (compact) return `${compact(location)}\u0000${compact(folded)}`;
-  return `${location}\u0000${folded}`;
+  const where = compact ? compact(location) : location;
+  return `${where.length}:${where}\u0000${compact ? compact(folded) : folded}`;
 }
 
 /** See {@link parameterKeyOf}; `parameter` is followed through `resolver`. */

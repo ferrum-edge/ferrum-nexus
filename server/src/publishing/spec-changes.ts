@@ -43,17 +43,19 @@
  *   memoised by identity, so a YAML alias repeating a subtree costs nothing
  *   the second time.
  * - **Every step spends from one budget**, `MAX_SPEC_CHANGE_UNITS`: one unit
- *   per operation, parameter, response, media type, schema pair or property,
- *   and per sixteen enum and `required` entries, at every comparison that
- *   reads them. A comparison that reaches it stops where it is and reports
- *   itself incomplete, never as finding nothing.
+ *   per operation, request body, parameter, response, media type, schema pair
+ *   or property, and per sixteen enum and `required` entries, at every
+ *   comparison that reads them. A comparison that reaches it stops where it
+ *   is and reports itself incomplete, never as finding nothing.
  * - **Provider text is keyed once.** Enum values, property and `required`
  *   names, and parameter `in` and `name` become comparison keys once per enum
  *   array, schema object or parameter object, however many pairs reach it,
- *   and that keying costs one unit per `KEY_CODE_UNITS_PER_UNIT` code units
- *   then. A long text becomes a short digest (`spec-keys.ts`), so comparing
- *   two keys later costs the same whatever the document spells out, and a
- *   set of long, same-length texts takes linear time to build.
+ *   and that keying costs one unit per `SPEC_KEY_CODE_UNITS_PER_UNIT` code
+ *   units of the comparison's running total, so a thousand short names cost
+ *   what their combined length does, not a unit each. A long text becomes a
+ *   short digest (`spec-keys.ts`), so comparing two keys later costs the same
+ *   whatever the document spells out, and a set of long, same-length texts
+ *   takes linear time to build.
  * - **Reference chains are walked from a queue**, not by recursion, so a chain
  *   of components as long as the document allows cannot exhaust the stack.
  *   Recursion follows only inline nesting, which `MAX_SPEC_DEPTH` bounds.
@@ -98,7 +100,7 @@ import {
   type SpecOperationRef,
 } from '@ferrum-nexus/shared';
 
-import { KEY_CODE_UNITS_PER_UNIT, compactSpecKey } from './spec-keys.js';
+import { compactSpecKey, createKeyTextCharge } from './spec-keys.js';
 
 /**
  * The way a schema travels. `parameter` and `request` are sent by the caller,
@@ -381,13 +383,15 @@ export function compareSpecRevisions(
     if (units > unitLimit) throw new BudgetExhausted();
   };
 
+  const keyText = createKeyTextCharge(spend);
+
   /**
    * Pay for making `codeUnits` of provider text into keys. Called once per
    * enum array, schema object or parameter object, before its text is read.
    */
   const chargeKeyText = (codeUnits: number): void => {
     if (stats) stats.keyCodeUnits += codeUnits;
-    spend(Math.ceil(codeUnits / KEY_CODE_UNITS_PER_UNIT));
+    keyText.charge(codeUnits);
   };
 
   // One keyer for both documents: it remembers each parameter object, and no
@@ -981,6 +985,7 @@ export function compareSpecRevisions(
       );
     }
     compareComponents();
+    keyText.settle();
   } catch (error) {
     if (!(error instanceof BudgetExhausted)) throw error;
     complete = false;

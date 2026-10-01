@@ -486,26 +486,56 @@ export const OPENAPI_OPERATION_METHODS = [
 ] as const satisfies readonly string[];
 
 /**
+ * UTF-16 code units of provider text made into comparison keys that one work
+ * unit pays for, in both revision comparisons. Charged on a running total
+ * across one comparison and rounded up once at its end, so many short keys
+ * cost their combined length rather than a unit each.
+ */
+export const SPEC_KEY_CODE_UNITS_PER_UNIT = 256;
+
+/**
+ * Most units keying one document's text can cost. A comparison keys each
+ * object's text once, and that text is made of the document's keys and
+ * scalars, of which no accepted document has more than
+ * {@link MAX_SPEC_EXPANDED_BYTES} UTF-8 bytes, and so no more UTF-16 code
+ * units: about 16 000 units.
+ */
+export const MAX_SPEC_KEY_UNITS = Math.ceil(MAX_SPEC_EXPANDED_BYTES / SPEC_KEY_CODE_UNITS_PER_UNIT);
+
+/**
  * Most work units one comparison of two OpenAPI revisions may spend
  * (`server/src/publishing/spec-changes.ts`). Two kinds of work are charged:
  *
  * - **Walking**, at every comparison that does it: one unit per operation,
- *   parameter, response, media type, schema pair and property compared, and
- *   one per sixteen enum or `required` entries read.
+ *   request body, parameter, response, media type, schema pair and property
+ *   compared, and one per sixteen enum or `required` entries read.
  * - **Keying** provider text (enum strings, property and `required` names,
- *   parameter `in` and `name`): one unit per 256 UTF-16 code units, once per
- *   enum array, schema object or parameter object however many comparisons
- *   reach it. A document's keyed text is at most
- *   {@link MAX_SPEC_EXPANDED_BYTES} code units, so keying costs at most about
- *   16 000 units per document.
+ *   parameter `in` and `name`), once per enum array, schema object or
+ *   parameter object however many comparisons reach it, at
+ *   {@link SPEC_KEY_CODE_UNITS_PER_UNIT}.
  *
- * Both documents already fit {@link MAX_SPEC_RENDER_UNITS}, and the comparison
- * walks each shared component once rather than at every reference, so twice
- * that ceiling covers the walk of any pair of accepted documents that share
- * their structure. A comparison that reaches it stops and reports itself as
- * incomplete rather than running on, never as having found nothing.
+ * The ceiling adds up, for each of the two documents:
+ *
+ * - {@link MAX_SPEC_RENDER_UNITS}, for the parameter rows, response entries,
+ *   media types, schema nodes and properties the comparison reads, which the
+ *   render count charges wherever the comparison reads them;
+ * - two units per operation, for the operation and its request body, which
+ *   the render count does not charge: 2 × {@link MAX_SPEC_OPERATIONS};
+ * - {@link MAX_SPEC_KEY_UNITS}, for the keyed text.
+ *
+ * That is 2 × (100 000 + 6 000 + 16 384) = 244 768, which a pair of documents
+ * of the same shape fits whatever their size: one made of many small inline
+ * parameters, say. Three things the render count charges less than the
+ * comparison reads can still take a pair past it: a component reached from
+ * more than one of parameters, request bodies and responses, compared once for
+ * each but counted once; a request body or response written as a `$ref`,
+ * counted once but compared under every operation that names it; and an enum
+ * longer than the twelve values the viewer shows. A comparison that reaches
+ * the ceiling stops and reports itself as incomplete rather than running on,
+ * never as having found nothing.
  */
-export const MAX_SPEC_CHANGE_UNITS = 2 * MAX_SPEC_RENDER_UNITS;
+export const MAX_SPEC_CHANGE_UNITS =
+  2 * (MAX_SPEC_RENDER_UNITS + 2 * MAX_SPEC_OPERATIONS + MAX_SPEC_KEY_UNITS);
 
 /**
  * Most changes one comparison lists. Every change is still counted, so the

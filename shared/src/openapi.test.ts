@@ -198,7 +198,7 @@ describe('OpenAPI Reference Objects', () => {
     const keyed = keyOpenApiParameters(resolver, parameters, false);
 
     assert.equal(keyed.length, fanOut);
-    assert.ok(keyed.every((entry) => entry.key === 'header\u0000tenant_id'));
+    assert.ok(keyed.every((entry) => entry.key === '6:header\u0000tenant_id'));
     // One lookup per distinct reference string in the chain — not per
     // parameter, and not per hop of each parameter's chain.
     assert.equal(stats.pointerLookups, chainLength + 1);
@@ -209,7 +209,7 @@ describe('OpenAPI Reference Objects', () => {
 describe('OpenAPI parameter inheritance', () => {
   it('identifies a parameter by location and name, headers case-insensitively', () => {
     const resolver = createOpenApiRefResolver(spec);
-    assert.equal(openApiParameterKey(resolver, { name: 'id', in: 'path' }), 'path\u0000id');
+    assert.equal(openApiParameterKey(resolver, { name: 'id', in: 'path' }), '4:path\u0000id');
 
     const upper = openApiParameterKey(resolver, { name: 'X-Trace', in: 'header' });
     const lower = openApiParameterKey(resolver, { name: 'x-trace', in: 'header' });
@@ -220,7 +220,12 @@ describe('OpenAPI parameter inheritance', () => {
     assert.notEqual(queryUpper, queryLower);
 
     const referenced = openApiParameterKey(resolver, { $ref: '#/components/parameters/Tenant' });
-    assert.equal(referenced, 'header\u0000tenant_id');
+    assert.equal(referenced, '6:header\u0000tenant_id');
+    // Whatever `in` and `name` hold, two different pairs never share a key.
+    assert.notEqual(
+      openApiParameterKey(resolver, { name: 'b', in: 'a\u0000' }),
+      openApiParameterKey(resolver, { name: '\u0000b', in: 'a' }),
+    );
     assert.equal(openApiParameterKey(resolver, { $ref: '#/components/parameters/Self' }), null);
     assert.equal(openApiParameterKey(resolver, { name: 'id' }), null);
     assert.equal(openApiParameterKey(resolver, 'not a parameter'), null);
@@ -267,7 +272,7 @@ describe('OpenAPI parameter inheritance', () => {
     );
 
     // `in` and the case-folded `name`, each rewritten by `compact`.
-    assert.deepEqual(keys, ['<6>\u0000<9>', '<6>\u0000<9>', '<6>\u0000<9>', '<6>\u0000<9>']);
+    assert.deepEqual(keys, Array(4).fill('3:<6>\u0000<9>'));
     // The component once, however it is reached; its inline copy, another
     // object, once more.
     assert.deepEqual(charged, ['header'.length + 'tenant_id'.length, 15]);

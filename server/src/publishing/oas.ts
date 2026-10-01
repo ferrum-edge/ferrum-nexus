@@ -81,6 +81,7 @@ import {
 
 import {
   MAX_OPENAPI_ENUM_CHIPS,
+  MAX_OPENAPI_PARAMETER_NAME_LENGTH,
   MAX_OPENAPI_REF_LENGTH,
   MAX_SPEC_BYTES,
   MAX_SPEC_DEPTH,
@@ -826,6 +827,23 @@ function refTooLong(ref: string): NexusError {
   );
 }
 
+/**
+ * Refuse a parameter name too long to key; see
+ * {@link MAX_OPENAPI_PARAMETER_NAME_LENGTH}.
+ */
+function parameterNameTooLong(name: string): NexusError {
+  return specInvalid(
+    `A parameter name is ${name.length} characters long, more than the ` +
+      `${MAX_OPENAPI_PARAMETER_NAME_LENGTH} a parameter name may be`,
+    {
+      field: 'paths',
+      reason: 'parameter_name_too_long',
+      length: name.length,
+      limit: MAX_OPENAPI_PARAMETER_NAME_LENGTH,
+    },
+  );
+}
+
 /** Unwinds a schema walk whose cost has passed the caller's limit. */
 class RenderLimitReached {}
 
@@ -1019,6 +1037,12 @@ interface ContentCost {
  * charge, and within every schema walk: counting stops at the first unit past
  * the ceiling, and the error reports the totals reached by then. A `$ref`
  * longer than {@link MAX_OPENAPI_REF_LENGTH} is refused before it is resolved.
+ *
+ * Every parameter a path item or operation lists, followed through any
+ * reference, must have a `name` of at most
+ * {@link MAX_OPENAPI_PARAMETER_NAME_LENGTH} characters. That is checked on
+ * every list, a path item's even when it has no operation (the viewer and the
+ * review comparison key those too), and once per parameter object.
  */
 export function assertRenderCost(
   document: Record<string, unknown>,
@@ -1094,6 +1118,25 @@ export function assertRenderCost(
     return target;
   };
 
+  // Each parameter object's name is read once, however many lists name it.
+  const namedParameters = new WeakSet<object>();
+  const assertParameterNames = (list: unknown): void => {
+    if (!Array.isArray(list)) return;
+    for (const entry of list) {
+      if (!isRecord(entry)) continue;
+      if (typeof entry.$ref === 'string' && entry.$ref.length > MAX_OPENAPI_REF_LENGTH) {
+        throw refTooLong(entry.$ref);
+      }
+      const resolution = resolver.resolve(entry);
+      if (!resolution.ok || namedParameters.has(resolution.value)) continue;
+      namedParameters.add(resolution.value);
+      const { name } = resolution.value;
+      if (typeof name === 'string' && name.length > MAX_OPENAPI_PARAMETER_NAME_LENGTH) {
+        throw parameterNameTooLong(name);
+      }
+    }
+  };
+
   const addParameterSchemas = (list: unknown[]): void => {
     for (const entry of list) {
       const parameter = chargeable(entry, chargedParameters);
@@ -1143,6 +1186,7 @@ export function assertRenderCost(
 
   for (const item of objectValues(paths)) {
     if (!isRecord(item)) continue;
+    assertParameterNames(item.parameters);
     const inherited = Array.isArray(item.parameters) ? item.parameters : [];
     let inheritedSchemasCharged = false;
     for (const method of OPENAPI_OPERATION_METHODS) {
@@ -1155,6 +1199,7 @@ export function assertRenderCost(
         inheritedSchemasCharged = true;
         addParameterSchemas(inherited);
       }
+      assertParameterNames(operation.parameters);
       addParameters(operation.parameters);
       addContent(operation.requestBody);
       if (!isRecord(operation.responses)) continue;

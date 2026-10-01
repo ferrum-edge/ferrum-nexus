@@ -9,7 +9,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { diffSpecDocuments, type SpecDiffStats } from './spec-diff.js';
+import {
+  MAX_SPEC_KEY_UNITS,
+  MAX_SPEC_OPERATIONS,
+  MAX_SPEC_RENDER_UNITS,
+} from '@ferrum-nexus/shared';
+
+import { assertRenderCost } from './oas.js';
+import { MAX_SPEC_DIFF_UNITS, diffSpecDocuments, type SpecDiffStats } from './spec-diff.js';
 
 /** A minimal OpenAPI document over a path/method/operation table. */
 function document(
@@ -335,8 +342,46 @@ describe('specification change review', () => {
     // The name is keyed, and charged, once per document.
     assert.equal(
       long.stats.units - short.stats.units,
-      2 * (Math.ceil(20_006 / 256) - Math.ceil(13 / 256)),
+      Math.ceil((2 * 20_006) / 256) - Math.ceil((2 * 13) / 256),
     );
+  });
+
+  it('fits any pair of accepted documents, small inline parameters and all', () => {
+    // The arithmetic behind the budget: per document, its operations, its
+    // parameter rows keyed and merged, and its keyed text.
+    const worst = 2 * (MAX_SPEC_OPERATIONS + 2 * MAX_SPEC_RENDER_UNITS + MAX_SPEC_KEY_UNITS);
+    assert.ok(worst <= MAX_SPEC_DIFF_UNITS, `${worst} > ${MAX_SPEC_DIFF_UNITS}`);
+
+    // As many parameter rows as the render limit allows, over as many
+    // operations as a document may declare, each its own small inline object.
+    const methods = ['get', 'put', 'post'] as const;
+    const paths: Record<string, Record<string, unknown>> = {};
+    for (let index = 0; index < MAX_SPEC_OPERATIONS; index += 1) {
+      const count =
+        Math.floor(MAX_SPEC_RENDER_UNITS / MAX_SPEC_OPERATIONS) + (index < 1_000 ? 1 : 0);
+      const parameters = Array.from({ length: count }, (_, position) => ({
+        name: `p${position}`,
+        in: 'query',
+      }));
+      const item = (paths[`/p${Math.floor(index / methods.length)}`] ??= {});
+      item[methods[index % methods.length]!] = { parameters };
+    }
+    const before = document(paths);
+    assertRenderCost(before, paths);
+
+    const stats: SpecDiffStats = { units: 0 };
+    const result = diffSpecDocuments(
+      { document: before, summary: null },
+      { document: structuredClone(before), summary: null },
+      { stats },
+    );
+    assert.equal(result.complete, true);
+    assert.equal(result.changed, false);
+    // Operations, rows keyed and rows merged, per document, and the keyed
+    // text by its total length (1 540 000 code units of `in` and `name`)
+    // rather than a unit per parameter.
+    const walked = 2 * (MAX_SPEC_OPERATIONS + 2 * MAX_SPEC_RENDER_UNITS);
+    assert.equal(stats.units, walked + Math.ceil(1_540_000 / 256));
   });
 
   it('says it is incomplete, rather than finding nothing, when it runs out', () => {

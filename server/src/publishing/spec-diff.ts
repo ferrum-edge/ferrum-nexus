@@ -68,7 +68,7 @@ import {
   type SpecOperationRef,
 } from '@ferrum-nexus/shared';
 
-import { KEY_CODE_UNITS_PER_UNIT, compactSpecKey } from './spec-keys.js';
+import { compactSpecKey, createKeyTextCharge, type KeyTextCharge } from './spec-keys.js';
 
 /** HTTP methods an OpenAPI Path Item Object may carry, lowercase as written. */
 const OPERATION_KEYS = [
@@ -105,15 +105,19 @@ type Operation = Record<string, unknown>;
 /**
  * Most work units one comparison may spend folding parameters: one per
  * operation, one per parameter entry keyed, one per entry merged into an
- * operation's effective list, and one per {@link KEY_CODE_UNITS_PER_UNIT}
- * code units of parameter `in` and `name` keyed, each parameter object once.
+ * operation's effective list, and one per `SPEC_KEY_CODE_UNITS_PER_UNIT` code
+ * units of parameter `in` and `name` keyed, each parameter object once and
+ * charged on the comparison's running total.
  *
  * An accepted document fits {@link MAX_SPEC_RENDER_UNITS}, which charges a
- * path-item parameter under every operation beneath it, so its keying and its
- * merging cost at most that ceiling each; its operations and its keyed text
- * (at most `MAX_SPEC_EXPANDED_BYTES` code units) add about 20 000 more. Five
- * times the ceiling therefore covers any pair of accepted documents, and only
- * a document that was never checked can run out.
+ * path-item parameter under every operation beneath it. Its keying (each
+ * operation's own list, and each path item's list once) and its merging (both
+ * lists under every operation) therefore cost at most that ceiling each. Add
+ * one unit per operation, at most `MAX_SPEC_OPERATIONS`, and its keyed text,
+ * at most `MAX_SPEC_KEY_UNITS`: a pair of accepted documents costs
+ * at most 2 × (3 000 + 2 × 100 000 + 16 384) = 438 768 units, whatever their
+ * shape. Five times the ceiling, 500 000, covers that, so only a document that
+ * was never checked can run out.
  */
 export const MAX_SPEC_DIFF_UNITS = 5 * MAX_SPEC_RENDER_UNITS;
 
@@ -156,20 +160,21 @@ function stringOrNull(value: unknown): string | null {
  *
  * One resolver serves the whole document, so each distinct `$ref` is followed
  * once however many parameters use it, and one keyer, so each parameter object
- * is keyed once. The work is charged through `spend`, which throws once the
- * budget is gone.
+ * is keyed once. The work is charged through `spend` and `keyText`, which throw
+ * once the budget is gone.
  */
 function operationsOf(
   document: Record<string, unknown>,
   stats: OpenApiResolveStats | undefined,
   spend: (units: number) => void,
+  keyText: KeyTextCharge,
 ): Map<string, Operation> {
   const operations = new Map<string, Operation>();
   const paths = document.paths;
   if (!isRecord(paths)) return operations;
   const resolver = createOpenApiRefResolver(document, { stats });
   const keyer = createOpenApiParameterKeyer({
-    onKey: (codeUnits) => spend(Math.ceil(codeUnits / KEY_CODE_UNITS_PER_UNIT)),
+    onKey: (codeUnits) => keyText.charge(codeUnits),
     compact: compactSpecKey,
   });
   const keyed = (parameters: unknown, inherited: boolean): KeyedOpenApiParameter[] => {
@@ -302,12 +307,15 @@ export function diffSpecDocuments(
     if (units > unitLimit) throw new BudgetExhausted();
   };
 
+  // One running total for both documents; see `MAX_SPEC_DIFF_UNITS`.
+  const keyText = createKeyTextCharge(spend);
   let complete = true;
   let before: Map<string, Operation>;
   let after: Map<string, Operation>;
   try {
-    before = operationsOf(from.document, resolveStats, spend);
-    after = operationsOf(to.document, resolveStats, spend);
+    before = operationsOf(from.document, resolveStats, spend, keyText);
+    after = operationsOf(to.document, resolveStats, spend, keyText);
+    keyText.settle();
   } catch (error) {
     if (!(error instanceof BudgetExhausted)) throw error;
     complete = false;

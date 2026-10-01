@@ -18,6 +18,7 @@ import {
   MAX_OPENAPI_REF_LENGTH,
   MAX_SPEC_BYTES,
   MAX_SPEC_EXPANDED_BYTES,
+  createOpenApiParameterKeyer,
   createOpenApiRefResolver,
   keyOpenApiParameters,
   mergeOpenApiParameters,
@@ -27,6 +28,7 @@ import {
   type OpenApiRefFailure,
   type OpenApiRefOverrides,
   type OpenApiRefResolution,
+  type OpenApiParameterKeyer,
   type OpenApiRefResolver,
 } from '@ferrum-nexus/shared';
 import { parse as parseYaml } from 'yaml';
@@ -186,10 +188,12 @@ interface EntryParameter extends KeyedOpenApiParameter {
 
 /**
  * The object members of one `parameters` list, each resolved once and keyed by
- * `(in, name)`; anything that is not an object was never a parameter.
+ * `(in, name)`; anything that is not an object was never a parameter. `keyer`
+ * serves the whole document, so a parameter many lists name is keyed once.
  */
 function readParameters(
   resolver: OpenApiRefResolver,
+  keyer: OpenApiParameterKeyer,
   value: unknown,
   inherited: boolean,
 ): EntryParameter[] {
@@ -198,7 +202,7 @@ function readParameters(
     const record = asRecord(item);
     if (record) nodes.push(record);
   }
-  return keyOpenApiParameters(resolver, nodes, inherited).map((keyed) => ({
+  return keyOpenApiParameters(resolver, nodes, inherited, keyer).map((keyed) => ({
     ...keyed,
     // Every node is an object, so each one was resolved.
     entry: toEntry(keyed.resolution!),
@@ -207,8 +211,9 @@ function readParameters(
 
 /**
  * Every operation of the document. One resolver serves the whole document, so
- * each distinct `$ref` is followed once however many places use it, and a
- * path item's parameters are resolved once for all the operations beneath it.
+ * each distinct `$ref` is followed once however many places use it, one keyer
+ * reads each parameter's identity once, and a path item's parameters are
+ * resolved once for all the operations beneath it.
  */
 function readOperations(doc: SpecNode, specVersion: string | null): SpecOperation[] {
   const paths = asRecord(doc.paths);
@@ -218,17 +223,18 @@ function readOperations(doc: SpecNode, specVersion: string | null): SpecOperatio
     siblingsApply: openApiRefSiblingsApply(specVersion),
   });
   const resolve = (node: SpecNode): SpecEntry => toEntry(resolver.resolve(node));
+  const keyer = createOpenApiParameterKeyer();
 
   for (const [path, pathValue] of Object.entries(paths)) {
     const pathItem = asRecord(pathValue);
     if (!pathItem) continue;
-    const sharedParameters = readParameters(resolver, pathItem.parameters, true);
+    const sharedParameters = readParameters(resolver, keyer, pathItem.parameters, true);
 
     for (const method of HTTP_METHODS) {
       const operation = asRecord(pathItem[method]);
       if (!operation) continue;
 
-      const ownParameters = readParameters(resolver, operation.parameters, false);
+      const ownParameters = readParameters(resolver, keyer, operation.parameters, false);
       const merged = mergeOpenApiParameters(sharedParameters, ownParameters);
       const parameters = merged.map((parameter) => parameter.entry);
 

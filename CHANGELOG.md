@@ -25,7 +25,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   rollback. Each step it takes is charged at every comparison that takes it,
   while enum values, property and `required` names and parameter names are
   made into comparison keys once per enum, schema or parameter, however many
-  operations share it, and charged by length then.
+  operations share it, and charged by their total length.
 - Forward migration `004_api_spec_changes` adds the `api_spec_changes` table on
   every backend. It copies no data.
 - **Grantees are told when an API's specification changes** (#447). When a
@@ -175,6 +175,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   within a fixed work budget that any pair of accepted documents fits.
   `SpecDiff` gains `complete`; one that ran out lists added and removed
   operations but no changed ones, reports `changed`, and the review says so.
+- **Parameter names are limited to 1,024 characters** (GHSA-qw45-p9g8-rprj).
+  A document whose path items or operations list a parameter, inline or behind
+  a `$ref`, with a longer `name` is refused with `400 SPEC_INVALID`
+  (`details.reason: "parameter_name_too_long"`). The limit also applies when a
+  stored revision is read back, so **a revision published before it with a
+  longer name is no longer served from the catalog** until a revision within
+  the limit replaces it, as for the other document limits.
 - Upgrade Nodemailer to 10.0.13. This also includes the 10.0.11 CommonJS and
   type compatibility fixes, the 10.0.12 fix that settles sends after connection
   errors, and 10.0.13 address-parsing fixes.
@@ -211,6 +218,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   walking the remaining siblings. The publication check walks each schema
   object once and resolves each `$ref` string once, and refuses a `$ref` longer
   than 2,048 characters, which the viewer now shows as unresolved.
+- GHSA-qw45-p9g8-rprj: a provider could make the specification review
+  comparison, and the catalog's documentation viewer, spend CPU in proportion
+  to a parameter name's length at every place the parameter was listed: one
+  very long header name, referenced from every operation, could block the
+  server's event loop for a long time on one review request in v0.2.0. Each
+  parameter's identity is now read once per document and long names are keyed
+  by digest, the review comparison works within a fixed budget and says when
+  it ran out (`SpecDiff.complete`), and parameter names are limited to 1,024
+  characters at upload and when stored revisions are read back.
 
 - Nodemailer 10.0.12 hardens SMTP message-body line endings by converting bare
   carriage returns to CRLF, and makes `requireTLS` fail instead of silently

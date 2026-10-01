@@ -8,11 +8,15 @@ import { describe, it } from 'node:test';
 
 import {
   MAX_SPEC_CHANGE_TEXT,
+  MAX_SPEC_CHANGE_UNITS,
+  MAX_SPEC_OPERATIONS,
+  MAX_SPEC_RENDER_UNITS,
   emptySpecChangeReport,
   type SpecChange,
   type SpecChangeReport,
 } from '@ferrum-nexus/shared';
 
+import { assertRenderCost } from './oas.js';
 import {
   MAX_TYPE_ENTRIES,
   compareSpecRevisions,
@@ -633,10 +637,10 @@ describe('consumer-facing revision comparison', () => {
     assert.equal(long.report.counts.operations_changed, operations);
     // The shared array's strings are read once, each inline `x` once.
     assert.equal(long.counters.keyCodeUnits, 64 * 16_000 + operations);
-    // And charged once: the longer strings cost only their keying.
+    // And charged once, on the comparison's running total of keyed text.
     assert.equal(
       long.counters.units - short.counters.units,
-      Math.ceil((64 * 16_000) / 256) - Math.ceil((64 * 2) / 256),
+      Math.ceil((64 * 16_000 + operations) / 256) - Math.ceil((64 * 2 + operations) / 256),
     );
   });
 
@@ -734,7 +738,7 @@ describe('consumer-facing revision comparison', () => {
     assert.equal(long.counters.keyCodeUnits, 2 * 20_000 + operations * 4);
     assert.equal(
       long.counters.units - short.counters.units,
-      Math.ceil((2 * 20_000) / 256) - Math.ceil(2 / 256),
+      Math.ceil((2 * 20_000 + operations * 4) / 256) - Math.ceil((2 + operations * 4) / 256),
     );
   });
 
@@ -768,7 +772,40 @@ describe('consumer-facing revision comparison', () => {
     assert.equal(long.counters.keyCodeUnits, 2 * ('header'.length + 20_000));
     assert.equal(
       long.counters.units - short.counters.units,
-      2 * (Math.ceil(20_006 / 256) - Math.ceil(13 / 256)),
+      Math.ceil((2 * 20_006) / 256) - Math.ceil((2 * 13) / 256),
     );
+  });
+
+  it('fits a pair of the largest accepted documents of small inline parameters', () => {
+    // As many parameter rows as the render limit allows, over as many
+    // operations as a document may declare, each its own small inline object.
+    const operations = MAX_SPEC_OPERATIONS;
+    const methods = ['get', 'put', 'post'] as const;
+    const paths: Document = {};
+    let rows = 0;
+    for (let index = 0; index < operations; index += 1) {
+      const count = Math.floor(MAX_SPEC_RENDER_UNITS / operations) + (index < 1_000 ? 1 : 0);
+      const parameters = Array.from({ length: count }, (_, position) => ({
+        name: `p${position}`,
+        in: 'query',
+      }));
+      rows += count;
+      const path = `/p${Math.floor(index / methods.length)}`;
+      const item = (paths[path] ??= {}) as Document;
+      item[methods[index % methods.length]!] = { parameters };
+    }
+    assert.equal(rows, MAX_SPEC_RENDER_UNITS);
+    const before = document(paths);
+    // Accepted: exactly at the render limit.
+    assertRenderCost(before, paths);
+
+    const counters = stats();
+    const report = compareSpecRevisions(before, structuredClone(before), { stats: counters });
+
+    assert.deepEqual(report, emptySpecChangeReport());
+    // One unit per operation and per parameter of each document, and the
+    // keyed text by its total length rather than a unit per parameter.
+    assert.equal(counters.units, operations + 2 * rows + Math.ceil(counters.keyCodeUnits / 256));
+    assert.ok(counters.units <= MAX_SPEC_CHANGE_UNITS);
   });
 });
