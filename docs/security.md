@@ -366,7 +366,10 @@ turns the provider's word into the portal's proof. The one exception is the
 **founding `super_admin`**, the account recorded under
 `bootstrap.super_admin_claimed` when it was seated with the bootstrap token.
 That token is the operator's proof of ownership, so the founder links without
-an address proof, which keeps a portal with no SMTP able to move to `sso_only`.
+an address proof, which keeps a portal with no SMTP able to move to `sso_only`. The exemption
+also requires the account to still hold `super_admin`. A claim written before
+the founder's seat became atomic can name an account that was never promoted;
+if a `super_admin` later promotes that account, it gains the exemption too.
 
 The provider's own domain list still applies, and a subject already linked to
 another account is refused (`already_linked`). A refused link returns to

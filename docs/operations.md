@@ -2516,7 +2516,7 @@ reason and a short detail (never a token or secret):
 | `email_domain_not_allowed` | The address is outside the allowed domains (deployment-wide or the provider's).                                                                   |
 | `email_not_verified`       | The provider did not assert `email_verified: true` where linking, a domain list or provisioning needs it.                                         |
 | `account_exists`           | An account holds the address but the portal has no proof of it, or it is linked there already (see "How accounts are matched").                   |
-| `address_unproven`         | A profile link to an account the portal holds no address proof for: verify the address or reset the password first, then link again.              |
+| `address_unproven`         | A profile link to an account the portal holds no address proof for: use **Forgot password**, which confirms the address, then link again.         |
 | `privileged_account`       | The address belongs to an `admin` or `super_admin`, which links from its profile only.                                                            |
 | `link_session_mismatch`    | A profile link came back to a different session, or none: start it again while signed in.                                                         |
 | `already_linked`           | A profile link found the identity linked to another account, or this account linked at that provider.                                             |

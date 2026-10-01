@@ -743,7 +743,8 @@ describe('single sign-on', () => {
     // The attacker's identity opens nothing of the victim's.
     await signIn(h, corp, 'corp', attacker);
     const identity = await h.store.userIdentities.findBySubject('corp', corp.issuer, attacker.sub);
-    assert.notEqual(identity?.user_id, squatter.user.id);
+    assert.ok(identity);
+    assert.notEqual(identity.user_id, squatter.user.id);
 
     // The victim, now proven, links their own identity; the link adds no
     // provider proof over the reset's.
