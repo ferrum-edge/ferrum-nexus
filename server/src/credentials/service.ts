@@ -309,6 +309,24 @@ export function gatewayIdentityLockKey(username: string): string {
 const CONSUMER_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /**
+ * Refuse a rotation by anyone but the credential's owner, whatever their role.
+ *
+ * Rotation is not a revocation with a side effect: it mints a replacement on
+ * the same consumer, with the same grants, and returns its plaintext to the
+ * caller. Whoever receives it can call every API that identity is approved
+ * for, so it goes to the identity's owner or to nobody. Checked when the row
+ * is first loaded and again on the copy re-read inside the consumer's queue,
+ * so the secret is only ever minted for the account that asked for it.
+ */
+function assertRotatedByOwner(user: UserRecord, credential: CredentialRecord): void {
+  if (credential.user_id !== user.id) {
+    throw forbidden(
+      'Only the owner of this credential can rotate it; an administrator can revoke it instead',
+    );
+  }
+}
+
+/**
  * Raised whenever the Nexus mirror and the live Edge array disagree in a way
  * that cannot be read unambiguously.
  *
@@ -493,14 +511,18 @@ export interface CredentialsService {
     },
     ip?: string | null,
   ): Promise<IssueCredentialResponse>;
-  /** Append-then-delete rotation of one credential. Show-once. */
+  /**
+   * Append-then-delete rotation of one credential. Show-once, so the
+   * credential's owner only: an administrator is refused with `FORBIDDEN`
+   * and can revoke it instead.
+   */
   rotate(
     user: UserRecord,
     credentialId: Uuid,
     label?: string | null,
     ip?: string | null,
   ): Promise<RotateCredentialResponse>;
-  /** Delete the entry from Edge and mark the row revoked. */
+  /** Delete the entry from Edge and mark the row revoked. The owner or an admin. */
   revoke(
     user: UserRecord,
     credentialId: Uuid,
@@ -1738,7 +1760,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     return removed;
   }
 
-  async function loadOwned(user: UserRecord, credentialId: Uuid): Promise<CredentialRecord> {
+  /**
+   * Load a credential for an operation that only takes access away.
+   *
+   * The owner, or an administrator: revoking somebody else's credential is how
+   * an incident is contained, and it hands the caller nothing.
+   */
+  async function loadForRevoke(user: UserRecord, credentialId: Uuid): Promise<CredentialRecord> {
     const credential = await store.credentials.findById(credentialId);
     if (!credential) throw notFound('Credential', credentialId);
     if (credential.user_id !== user.id && !roleAtLeast(user.role, 'admin')) {
@@ -1746,6 +1774,23 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // not, and a 403 is what the SPA needs to render a useful message.
       throw forbidden('This credential belongs to another account');
     }
+    return credential;
+  }
+
+  /**
+   * Load a credential for an operation that mints and returns a secret.
+   *
+   * The owner only, whatever the caller's role. A rotation's replacement stays
+   * on the owner's consumer with the owner's grants, so whoever receives its
+   * show-once plaintext can call every API that identity is approved for.
+   * Handing that to an administrator would let them act as another account or
+   * application, which no role may do. An administrator revokes instead, and
+   * the owner issues a new one.
+   */
+  async function loadForRotate(user: UserRecord, credentialId: Uuid): Promise<CredentialRecord> {
+    const credential = await store.credentials.findById(credentialId);
+    if (!credential) throw notFound('Credential', credentialId);
+    assertRotatedByOwner(user, credential);
     return credential;
   }
 
@@ -2622,20 +2667,20 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     },
 
     async rotate(user, credentialId, label, ip = null): Promise<RotateCredentialResponse> {
-      const target = await loadOwned(user, credentialId);
+      // Owner only: the response carries the replacement's plaintext.
+      const target = await loadForRotate(user, credentialId);
       if (target.status === 'revoked') {
         throw conflict('This credential has already been revoked');
       }
       const type = target.credential_type;
       const consumerId = target.ferrum_consumer_id;
+      // No `owner_user_id`: the actor is always the owner (earlier releases
+      // wrote one when an administrator rotated somebody else's credential).
       const rotation = {
         credential_type: type,
         consumer_id: consumerId,
         rotated_from: target.id,
         previous_last4: target.last4,
-        // Only when they differ: an admin acting on somebody else's
-        // credential is the case worth being able to find in the log.
-        ...(target.user_id === user.id ? {} : { owner_user_id: target.user_id }),
       };
 
       const result = await edge.serializePerKey(consumerId, async () => {
@@ -2646,12 +2691,16 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         // deleted an entry and both handed out a live-looking secret.
         const current = await store.credentials.findById(target.id);
         if (!current) throw notFound('Credential', credentialId);
+        // Fail closed on the copy the rotation acts on, not only the one the
+        // route loaded: nothing below may mint a secret for another identity.
+        assertRotatedByOwner(user, current);
         if (!LIVE_STATUSES.has(current.status)) {
           throw conflict('This credential has already been revoked');
         }
 
-        // The owner, not the actor: an admin rotating somebody else's key must
-        // not be able to hand a disabled account a working one.
+        // A session that passed authentication before the account was disabled
+        // must not be handed a working key once it reaches the front of the
+        // queue.
         await assertOwnerActive(current.user_id);
         // Nor a disabled *application*. Rotation mints a new secret, and a
         // disabled application acquires no new credentials — the documented
@@ -2727,7 +2776,6 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
                 consumer_id: consumerId,
                 last4: current.last4,
                 operation: 'rotate',
-                ...(current.user_id === user.id ? {} : { owner_user_id: current.user_id }),
               },
               ip,
             );
@@ -2764,18 +2812,15 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         }
 
         const created = await appendCredential({
-          // The replacement belongs to whoever the credential belonged to. An
-          // admin may rotate somebody else's key — `loadOwned` allows it — but
-          // rotating is not taking: attributing the row to the admin would put
-          // the replacement on a consumer the owner cannot list it against, and
-          // the owner's own `DELETE` of it would come back 403.
+          // The replacement belongs to whoever the credential belonged to —
+          // the caller, since only the owner may rotate ({@link
+          // assertRotatedByOwner}) — and taken from the row so it can never
+          // drift from the consumer it is appended to.
           ownerId: current.user_id,
           // …and to whichever identity it belonged to. A rotation replaces one
           // credential on one consumer; moving it between identities would
           // silently change what the new secret can reach.
           applicationId: current.application_id,
-          // The admin is still the actor: theirs is the id Edge records as the
-          // write's subject, and the one the Nexus audit row names.
           actorId: user.id,
           consumerId,
           consumerUsername: consumer.username,
@@ -2963,31 +3008,31 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         return { created, previous, consumerUsername: consumer.username };
       });
 
-      const owner = target.user_id === user.id ? user : await store.users.findById(target.user_id);
-      if (owner) {
-        await notifications
-          .notify(
-            owner.id,
-            'credential_rotated',
-            'A gateway credential was rotated',
-            `Your ${type} credential ending …${target.last4} was replaced.`,
-            '/credentials',
-          )
-          .catch(() => undefined);
-        await email
-          .enqueue({
-            to: owner.email,
-            templateKey: 'credential_rotated',
-            vars: {
-              recipient_name: owner.display_name,
-              recipient_email: owner.email,
-              credential_label: result.created.credential.label ?? type,
-              credential_last4: result.created.credential.last4,
-              credentials_url: `${config.publicUrl}/credentials`,
-            },
-          })
-          .catch(() => undefined);
-      }
+      // The owner, who is the caller ({@link assertRotatedByOwner}). Told even
+      // so: a rotation from a session they did not start is how they find out.
+      const owner = user;
+      await notifications
+        .notify(
+          owner.id,
+          'credential_rotated',
+          'A gateway credential was rotated',
+          `Your ${type} credential ending …${target.last4} was replaced.`,
+          '/credentials',
+        )
+        .catch(() => undefined);
+      await email
+        .enqueue({
+          to: owner.email,
+          templateKey: 'credential_rotated',
+          vars: {
+            recipient_name: owner.display_name,
+            recipient_email: owner.email,
+            credential_label: result.created.credential.label ?? type,
+            credential_last4: result.created.credential.last4,
+            credentials_url: `${config.publicUrl}/credentials`,
+          },
+        })
+        .catch(() => undefined);
 
       return {
         credential: result.created.credential,
@@ -2998,7 +3043,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     },
 
     async revoke(user, credentialId, ip = null, clearType = false): Promise<void> {
-      const target = await loadOwned(user, credentialId);
+      const target = await loadForRevoke(user, credentialId);
       if (clearType && target.credential_type !== 'basicauth') {
         // Every other type is located against the live array, so emptying it
         // is never the repair, and a flag that silently did nothing would let

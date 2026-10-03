@@ -19,8 +19,12 @@
  *   destructive step, so the row it retires is revoked the moment Edge confirms
  *   it — never after a later step that can still fail. Whatever survives a
  *   failed rotation is still revocable.
- * - **An admin rotating somebody's credential does not take it over.** The
- *   replacement keeps its owner and its consumer; the admin is only the actor.
+ * - **Only the owner can rotate a credential.** A rotation returns the
+ *   replacement's plaintext, and the replacement keeps the owner's consumer and
+ *   grants, so an administrator who could rotate somebody else's credential
+ *   could act as them. Admins and super admins are refused and nothing is
+ *   minted; they can still revoke, and the owner's own rotation keeps its
+ *   owner and consumer.
  */
 
 import assert from 'node:assert/strict';
@@ -34,7 +38,6 @@ import {
   type CreateTestConsumerResponse,
   type CredentialType,
   type IssueCredentialResponse,
-  type ListCredentialsResponse,
   type ListNotificationsResponse,
   type PublishApiResponse,
   type RotateCredentialResponse,
@@ -43,7 +46,9 @@ import {
 
 import { createTeardownWorker } from '../credentials/teardown-worker.js';
 import type { UserRecord } from '../db/store.js';
+import { isNexusError } from '../lib/errors.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
+import type { RecordedRequest } from './mock-ferrum-edge.js';
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
@@ -349,12 +354,15 @@ describe('credential lifecycle across identities', () => {
     );
   });
 
-  it('refuses to rotate a disabled account’s credential, even for an admin', async () => {
+  it('refuses to rotate a disabled account’s credential, even in flight', async () => {
     const victim = await harness.registerUser({
       email: 'lifecycle-rotdis@example.test',
       role: 'client',
     });
     const issued = await issue(victim, 'keyauth');
+    // The request-time copy of the account, taken while it was still active —
+    // exactly what the owner's in-flight rotation carries.
+    const stale = await record(victim);
     // Disable against a gateway that refuses, so the row is still `active` and
     // the rotation is refused on the account's status rather than on the row's.
     harness.edge.queueFailure(503, { error: 'down' }, '/consumers/', 'PUT');
@@ -364,13 +372,18 @@ describe('credential lifecycle across identities', () => {
       'active',
     );
 
+    await assert.rejects(
+      () => harness.services.credentials.rotate(stale, issued.credential.id),
+      (error: unknown) => isNexusError(error) && error.code === 'USER_DISABLED',
+    );
+    // Nor can an administrator rotate it on the account's behalf.
     const rotated = await harness.authed(admin, {
       method: 'POST',
       url: `/api/credentials/${issued.credential.id}/rotate`,
       payload: {},
     });
     assert.equal(rotated.statusCode, 403, rotated.body);
-    assert.equal(errorCode(rotated.body), 'USER_DISABLED');
+    assert.equal(errorCode(rotated.body), 'FORBIDDEN');
     const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(victim.user.id));
     assert.equal(consumer?.credentials.keyauth?.length, 1, 'no replacement was appended');
   });
@@ -720,69 +733,106 @@ describe('credential lifecycle across identities', () => {
     assert.equal(harness.edge.consumerByUsername(username)?.credentials.keyauth?.length, 1);
   });
 
-  /* ── #65 — an admin rotation keeps the owner ──────────────────────────── */
+  /* ── GHSA-mr69-2744-f78w — only the owner rotates ─────────────────────── */
+
+  /** How many entries of a type the gateway holds on an account's consumer. */
+  function entriesOf(userId: string, type: CredentialType): number {
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(userId));
+    return consumer?.credentials[type]?.length ?? 0;
+  }
+
+  /** A gateway call that adds or removes a consumer's credentials. */
+  function isCredentialWrite(request: RecordedRequest): boolean {
+    return request.method !== 'GET' && request.path.includes('/credentials');
+  }
+
+  /** Whether any `credential.rotate` row names this credential as rotated from. */
+  async function rotatedFrom(credentialId: string): Promise<boolean> {
+    return (await harness.auditRows('credential.rotate')).some(
+      (entry) => entry.details.rotated_from === credentialId,
+    );
+  }
 
   for (const actorName of ['admin', 'super_admin'] as const) {
     for (const type of ['keyauth', 'basicauth', 'jwt'] as CredentialType[]) {
-      it(`keeps the owner when a ${actorName} rotates a ${type} credential`, async () => {
+      it(`refuses a ${actorName} rotating somebody else's ${type} credential`, async () => {
         const owner = await harness.registerUser({
           email: `lifecycle-owner-${actorName}-${type}@example.test`,
           role: 'client',
         });
-        const stranger = await harness.registerUser({
-          email: `lifecycle-stranger-${actorName}-${type}@example.test`,
-          role: 'client',
-        });
         const issued = await issue(owner, type);
         const actor = actorName === 'admin' ? admin : founder;
+        const held = entriesOf(owner.user.id, type);
+        const writes = harness.edge.requests.length;
 
         const rotated = await harness.authed(actor, {
           method: 'POST',
           url: `/api/credentials/${issued.credential.id}/rotate`,
           payload: {},
         });
-        assert.equal(rotated.statusCode, 200, rotated.body);
-        const replacement = rotated.json<RotateCredentialResponse>().credential;
-        assert.equal(replacement.user_id, owner.user.id, 'the replacement keeps its owner');
+        assert.equal(rotated.statusCode, 403, rotated.body);
+        assert.equal(errorCode(rotated.body), 'FORBIDDEN');
+        assert.ok(!('secret' in JSON.parse(rotated.body)), 'no secret was handed out');
+
+        // Refused before anything reached the gateway or the mirror.
+        const touched = harness.edge.requests.slice(writes).filter(isCredentialWrite);
+        assert.deepEqual(
+          touched,
+          [],
+          'nothing was appended to or deleted from the owner’s consumer',
+        );
+        assert.equal(entriesOf(owner.user.id, type), held);
+        const row = await harness.store.credentials.findById(issued.credential.id);
+        assert.equal(row?.status, 'active', 'the credential is untouched');
+        const live = await harness.store.credentials.list(
+          { user_id: owner.user.id, status: 'active' },
+          { limit: 50 },
+        );
+        assert.deepEqual(
+          live.items.map((item) => item.id),
+          [issued.credential.id],
+          'no replacement row was written',
+        );
+        assert.equal(await rotatedFrom(issued.credential.id), false);
+
+        // The owner can still rotate it, and the replacement stays theirs.
+        const own = await harness.authed(owner, {
+          method: 'POST',
+          url: `/api/credentials/${issued.credential.id}/rotate`,
+          payload: {},
+        });
+        assert.equal(own.statusCode, 200, own.body);
+        const body = own.json<RotateCredentialResponse>();
+        assert.equal(body.secret.type, type);
+        assert.equal(body.credential.user_id, owner.user.id, 'the replacement keeps its owner');
         assert.equal(
-          replacement.ferrum_consumer_id,
+          body.credential.ferrum_consumer_id,
           issued.credential.ferrum_consumer_id,
           'and its consumer',
         );
 
-        // The owner sees it, and can revoke it.
-        const listed = await harness.authed(owner, { method: 'GET', url: '/api/credentials' });
-        assert.equal(listed.statusCode, 200, listed.body);
-        assert.ok(
-          listed
-            .json<ListCredentialsResponse>()
-            .items.some((row) => row.id === replacement.id && row.status === 'active'),
-        );
-
-        const outsider = await harness.authed(stranger, {
+        // And the administrator can still take it away.
+        const revoked = await harness.authed(actor, {
           method: 'DELETE',
-          url: `/api/credentials/${replacement.id}`,
-        });
-        assert.equal(outsider.statusCode, 403, outsider.body);
-        assert.equal(errorCode(outsider.body), 'FORBIDDEN');
-
-        const revoked = await harness.authed(owner, {
-          method: 'DELETE',
-          url: `/api/credentials/${replacement.id}`,
+          url: `/api/credentials/${body.credential.id}`,
         });
         assert.equal(revoked.statusCode, 200, revoked.body);
+        assert.equal(
+          (await harness.store.credentials.findById(body.credential.id))?.status,
+          'revoked',
+        );
       });
     }
   }
 
-  it('records the admin as the actor and the owner as the subject', async () => {
+  it('records the owner as the actor and notifies them of their own rotation', async () => {
     const owner = await harness.registerUser({
       email: 'lifecycle-attribution@example.test',
       role: 'client',
     });
     const issued = await issue(owner, 'keyauth');
 
-    const rotated = await harness.authed(admin, {
+    const rotated = await harness.authed(owner, {
       method: 'POST',
       url: `/api/credentials/${issued.credential.id}/rotate`,
       payload: {},
@@ -793,19 +843,23 @@ describe('credential lifecycle across identities', () => {
     const row = (await harness.auditRows('credential.rotate')).find(
       (entry) => entry.target_id === replacement.id,
     );
-    assert.equal(row?.actor_user_id, admin.user.id, 'the admin is the actor');
-    assert.equal(row?.details.owner_user_id, owner.user.id, 'the owner is named');
+    assert.equal(row?.actor_user_id, owner.user.id, 'the owner is the actor');
+    assert.equal(row?.details.rotated_from, issued.credential.id);
+    assert.equal(
+      'owner_user_id' in (row?.details ?? {}),
+      false,
+      'no other owner to name: only the owner rotates',
+    );
 
-    // Edge attributes the write to the admin who made it: the JWT it was sent
-    // with carries the admin's id as `sub`.
+    // Edge attributes the write to the owner: the JWT it was sent with carries
+    // their id as `sub`.
     const write = [...harness.edge.requests]
       .reverse()
       .find(
         (request) => request.method === 'POST' && request.path.includes('/credentials/keyauth'),
       );
-    assert.equal(write?.claims?.sub, admin.user.id);
+    assert.equal(write?.claims?.sub, owner.user.id);
 
-    // The notification and the email go to the owner, not the admin.
     const notified = await harness.authed(owner, { method: 'GET', url: '/api/notifications' });
     assert.equal(notified.statusCode, 200, notified.body);
     assert.ok(
@@ -819,7 +873,7 @@ describe('credential lifecycle across identities', () => {
     );
   });
 
-  it('keeps the provider as owner when an admin rotates a test credential', async () => {
+  it('refuses an admin rotating a provider’s test credential', async () => {
     const provider = await harness.registerUser({
       email: 'lifecycle-testrot@example.test',
       role: 'provider',
@@ -832,8 +886,21 @@ describe('credential lifecycle across identities', () => {
     });
     assert.equal(created.statusCode, 201, created.body);
     const credential = created.json<CreateTestConsumerResponse>().credential;
+    const username = `nexus-test-${api.id}`;
 
-    const rotated = await harness.authed(admin, {
+    const refused = await harness.authed(admin, {
+      method: 'POST',
+      url: `/api/credentials/${credential.id}/rotate`,
+      payload: {},
+    });
+    assert.equal(refused.statusCode, 403, refused.body);
+    assert.equal(errorCode(refused.body), 'FORBIDDEN');
+    assert.ok(!('secret' in JSON.parse(refused.body)), 'no secret was handed out');
+    assert.equal(harness.edge.consumerByUsername(username)?.credentials.keyauth?.length, 1);
+    assert.equal(await rotatedFrom(credential.id), false);
+
+    // The provider rotates their own; the replacement keeps owner and consumer.
+    const rotated = await harness.authed(provider, {
       method: 'POST',
       url: `/api/credentials/${credential.id}/rotate`,
       payload: {},
@@ -843,7 +910,8 @@ describe('credential lifecycle across identities', () => {
     assert.equal(replacement.user_id, provider.user.id);
     assert.equal(replacement.ferrum_consumer_id, credential.ferrum_consumer_id);
 
-    const revoked = await harness.authed(provider, {
+    // The admin can still revoke it.
+    const revoked = await harness.authed(admin, {
       method: 'DELETE',
       url: `/api/credentials/${replacement.id}`,
     });
