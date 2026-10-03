@@ -62,6 +62,15 @@ trap cleanup_env_temp EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+write_generated_secret() {
+  local name="$1" length="$2" secret
+  if ! secret="$(openssl rand -hex "$length")"; then
+    printf 'error: failed to generate %s for e2e/.env\n' "$name" >&2
+    return 1
+  fi
+  printf '%s=%s\n' "$name" "$secret"
+}
+
 # ── Secrets ────────────────────────────────────────────────────────────────
 #
 # Minted per run rather than committed. A compose file with a working secret in
@@ -77,12 +86,12 @@ if [[ ! -f .env ]]; then
   chmod 600 "$ENV_TEMP"
   {
     grep -E '^(NEXUS_IMAGE|NEXUS_PORT|FERRUM_PROXY_PORT|FERRUM_ADMIN_PORT|MAILPIT_HTTP_PORT|DEX_PORT)=' .env.example
-    echo "NEXUS_SECRET_KEY=$(openssl rand -hex 32)"
-    echo "NEXUS_BOOTSTRAP_TOKEN=$(openssl rand -hex 32)"
-    echo "NEXUS_DB_PASSWORD=$(openssl rand -hex 16)"
-    echo "FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)"
-    echo "FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)"
-    echo "DEX_CLIENT_SECRET=$(openssl rand -hex 32)"
+    write_generated_secret NEXUS_SECRET_KEY 32
+    write_generated_secret NEXUS_BOOTSTRAP_TOKEN 32
+    write_generated_secret NEXUS_DB_PASSWORD 16
+    write_generated_secret FERRUM_ADMIN_JWT_SECRET 32
+    write_generated_secret FERRUM_BASIC_AUTH_HMAC_SECRET 32
+    write_generated_secret DEX_CLIENT_SECRET 32
   } > "$ENV_TEMP"
   mv -f "$ENV_TEMP" .env
 fi
@@ -99,7 +108,7 @@ if ! grep -q '^DEX_CLIENT_SECRET=' .env; then
   cat .env > "$ENV_TEMP"
   # Do not glue the new line onto a last line that has no newline.
   if [[ -s .env && -n "$(tail -c1 .env)" ]]; then echo >> "$ENV_TEMP"; fi
-  echo "DEX_CLIENT_SECRET=$(openssl rand -hex 32)" >> "$ENV_TEMP"
+  write_generated_secret DEX_CLIENT_SECRET 32 >> "$ENV_TEMP"
   mv -f "$ENV_TEMP" .env
 fi
 

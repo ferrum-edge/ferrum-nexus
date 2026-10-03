@@ -213,6 +213,8 @@ chmod +x "$FIXTURE/bin/openssl"
 status=0
 run_fixture bash ./run.sh && status=0 || status=$?
 [[ "$status" == 1 ]] || fail "temp-file failure returned $status"
+contains "$FIXTURE/output" 'error: failed to generate NEXUS_SECRET_KEY for e2e/.env'
+[[ ! -e "$FIXTURE/e2e/.env" ]] || fail 'failed secret generation created .env'
 temp_files=("$FIXTURE"/e2e/.env.??????)
 [[ ! -e "${temp_files[0]:-}" ]] || fail 'temporary dotenv file was not removed'
 
