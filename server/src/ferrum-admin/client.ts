@@ -13,22 +13,13 @@
  * - `EDGE_REJECTED_SPEC` — a 4xx API-spec parse/validation refusal (HTTP 400).
  * - `EDGE_PROTOCOL_ERROR` — an invalid HTTP/JSON response.
  *
- * Edge's flat `{"error": "..."}` text is always logged. Whether it is *also*
- * echoed to the caller depends on who the message is about:
+ * Edge controls every non-success response body. It may echo request secrets,
+ * so response text, URLs, and transport causes are never logged or returned.
+ * Errors expose only a fixed classification and the HTTP status.
  *
- * - `400`, `409` and `422` are Edge validating the body Nexus just built out of
- *   the caller's own request ("FERRUM_BASIC_AUTH_HMAC_SECRET must be set…",
- *   "listen_path already exists in this namespace"). A provider cannot fix
- *   those without reading them, so the text rides along in
- *   `details.gateway_message` (trimmed to {@link MAX_GATEWAY_MESSAGE} chars).
- * - `401`, `403` and every `5xx` stay **opaque**: those describe the gateway's
- *   own configuration or the Nexus↔Edge trust relationship, not the caller's
- *   request, and can name internal hosts and settings.
- *
- * A `503` carrying `applied: false` is a special case worth knowing about: the
- * write **is durable**, it just is not live yet. It surfaces as `EDGE_ERROR`
- * with an explicit message and is never retried automatically — a blind retry
- * of a create would `409`.
+ * A `503` on a write leaves its acknowledgement uncertain. It surfaces as
+ * `EDGE_ERROR` with an instruction to verify gateway state before retrying; the
+ * client never retries writes automatically.
  */
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -412,9 +403,6 @@ const EDGE_MAX_PAGE_SIZE = 1000;
  */
 const MAX_PLUGIN_CONFIG_SCAN_PAGES = 50;
 
-/** Longest Edge validation text echoed back to the caller. */
-const MAX_GATEWAY_MESSAGE = 500;
-
 /** Bound all JSON responses, including intermediary error pages and resource lists. */
 export const ADMIN_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
 
@@ -675,7 +663,6 @@ function numberAt(value: unknown, key: string): number | null {
  * Edge statuses whose `{"error": …}` text is about the caller's own request and
  * is therefore safe — and necessary — to surface. See the module doc comment.
  */
-const ECHOED_EDGE_STATUSES = new Set([400, 409, 422]);
 
 /* ── Connection pooling ─────────────────────────────────────────────────── */
 
@@ -912,7 +899,7 @@ export function createFerrumAdminClient(
     if (value !== NAMESPACE_UNSERVED_HEADER_VALUE) return;
     if (!namespaceMonitor.observeUnservedMutation()) return;
     logger.error(
-      { namespace, method, path, header: NAMESPACE_UNSERVED_HEADER },
+      { namespace, method, header: NAMESPACE_UNSERVED_HEADER },
       'Ferrum Edge accepted a write into a namespace its data plane does not serve; ' +
         'published APIs in this namespace will answer 404',
     );
@@ -938,9 +925,9 @@ export function createFerrumAdminClient(
     let serializedBody: string | undefined;
     try {
       serializedBody = hasBody ? JSON.stringify(options.body) : undefined;
-    } catch (cause) {
-      logger.error({ method, path }, 'Ferrum Edge Admin API request serialization failed');
-      throw internal(`Could not serialize Ferrum Edge request ${method} ${path}`, cause);
+    } catch {
+      logger.error({ method }, 'Ferrum Edge Admin API request serialization failed');
+      throw internal('Could not serialize Ferrum Edge request');
     }
 
     let statusCode = 0;
@@ -980,7 +967,7 @@ export function createFerrumAdminClient(
       shouldRetryOnFreshConnection(method, attempt.error, attempt.responseStarted, signal)
     ) {
       logger.warn(
-        { method, path, code: errorCodes(attempt.error)[0] ?? null },
+        { method, code: errorCodes(attempt.error)[0] ?? null },
         'Ferrum Edge Admin API closed a pooled connection; retrying the read on a fresh one',
       );
       attempt = await send();
@@ -991,11 +978,11 @@ export function createFerrumAdminClient(
         throw protocolError(statusCode, 'response_too_large', method, path);
       }
       logger.error(
-        { method, path, code: (cause as NodeJS.ErrnoException).code ?? null },
+        { method, code: (cause as NodeJS.ErrnoException).code ?? null },
         'Ferrum Edge Admin API is unreachable',
       );
-      if (isUnavailable(cause)) throw edgeUnavailable(undefined, cause);
-      throw edgeUnavailable('The Ferrum Edge Admin API request failed', cause);
+      if (isUnavailable(cause)) throw edgeUnavailable();
+      throw edgeUnavailable('The Ferrum Edge Admin API request failed');
     }
     const bytes = attempt.bytes;
 
@@ -1077,11 +1064,11 @@ export function createFerrumAdminClient(
     return parsed as T;
   }
 
-  function protocolError(status: number, reason: string, method: string, path: string): NexusError {
+  function protocolError(status: number, reason: string, method: string, _path: string): NexusError {
     // Never log response bytes, Location, parser exceptions, JWTs or request
     // bodies. Even a bounded prefix can expose credentials or an HTML login.
     logger.error(
-      { method, path, status, reason },
+      { method, status, reason },
       'Ferrum Edge Admin API returned an invalid protocol response',
     );
     return new NexusError(
@@ -1091,84 +1078,31 @@ export function createFerrumAdminClient(
     );
   }
 
-  function classify(status: number, parsed: unknown, method: string, path: string): Error {
-    const body = (parsed ?? {}) as {
-      error?: unknown;
-      applied?: unknown;
-      reason?: unknown;
-      details?: unknown;
-      code?: unknown;
-      failures?: unknown;
-    };
-    const isApiSpecWrite =
-      (method === 'POST' || method === 'PUT') && /^\/api-specs(?:\/[^/]+)?$/.test(path);
-    const upstream = typeof body.error === 'string' ? body.error : `HTTP ${status}`;
+  function classify(status: number, _parsed: unknown, method: string, path: string): Error {
     logger.error(
-      {
-        method,
-        path,
-        status,
-        upstream,
-        reason: body.reason ?? null,
-        // readBoundedBody caps this structure before JSON parsing. Keep the full
-        // diagnostics server-side; never reflect the raw document to the caller.
-        ...(isApiSpecWrite ? { gateway_response: parsed } : {}),
-      },
-      'Ferrum Edge Admin API returned an error',
+      { method, status },
+      'Ferrum Edge Admin API returned an error; response content was omitted',
     );
-
-    if (status === 503 && body.applied === false) {
+    if (method !== 'GET' && status === 503) {
       return edgeError(
-        'The gateway accepted the change but has not applied it yet; do not retry — verify the gateway configuration and try again once it recovers',
-        { status, reason: typeof body.reason === 'string' ? body.reason : null },
+        'The gateway may have accepted the change; verify its state before retrying',
+        { status, kind: 'write_acknowledgement_uncertain' },
       );
+    }
+    if (
+      (method === 'POST' || method === 'PUT') &&
+      /^\/api-specs(?:\/[^/]+)?$/.test(path) &&
+      status >= 400 &&
+      status < 500 &&
+      status !== 401 &&
+      status !== 403
+    ) {
+      return new NexusError('EDGE_REJECTED_SPEC', 'The gateway rejected the API specification', {
+        status,
+      });
     }
     if (status === 401 || status === 403) {
       return edgeError('The gateway rejected the Nexus admin credentials', { status });
-    }
-    if (
-      isApiSpecWrite &&
-      status >= 400 &&
-      status < 500 &&
-      (body.error === 'Spec parse failed' || body.error === 'Spec validation failed')
-    ) {
-      let gatewayMessage: string = body.error;
-      if (typeof body.details === 'string' && body.details.trim() !== '') {
-        gatewayMessage += `: ${body.details.trim().slice(0, MAX_GATEWAY_MESSAGE)}`;
-      }
-      if (Array.isArray(body.failures)) {
-        for (const failure of body.failures) {
-          if (gatewayMessage.length >= MAX_GATEWAY_MESSAGE) break;
-          if (!isRecord(failure) || typeof failure.resource_type !== 'string') continue;
-          const firstError = Array.isArray(failure.errors) ? failure.errors[0] : undefined;
-          if (typeof firstError !== 'string') continue;
-          const resource = failure.resource_type.slice(0, MAX_GATEWAY_MESSAGE);
-          gatewayMessage += `; ${resource}: ${firstError.slice(0, MAX_GATEWAY_MESSAGE)}`;
-        }
-      }
-      gatewayMessage = gatewayMessage.slice(0, MAX_GATEWAY_MESSAGE);
-      return new NexusError(
-        'EDGE_REJECTED_SPEC',
-        `The gateway rejected the spec: ${gatewayMessage}`,
-        {
-          status,
-          gateway_message: gatewayMessage,
-          ...(typeof body.code === 'string'
-            ? { gateway_code: body.code.slice(0, MAX_GATEWAY_MESSAGE) }
-            : {}),
-        },
-      );
-    }
-    // A validation refusal is about the body Nexus built from the caller's own
-    // request, so the provider needs the gateway's reason to act on it.
-    if (ECHOED_EDGE_STATUSES.has(status) && typeof body.error === 'string') {
-      const gatewayMessage = body.error.trim().slice(0, MAX_GATEWAY_MESSAGE);
-      if (gatewayMessage !== '') {
-        return edgeError(`The gateway rejected the request: ${gatewayMessage}`, {
-          status,
-          gateway_message: gatewayMessage,
-        });
-      }
     }
     return edgeError('The gateway rejected the request', { status });
   }

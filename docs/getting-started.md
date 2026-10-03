@@ -117,7 +117,8 @@ Three settings need explaining:
 - **`FERRUM_BASIC_AUTH_HMAC_SECRET`** (at least 32 bytes) is how the gateway
   hashes Basic-auth passwords. Without it the gateway refuses the `basic_auth`
   plugin, and publishing a `basic_auth` API fails with `EDGE_ERROR`. The
-  gateway's reason is in `details.gateway_message`.
+  Nexus returns a generic gateway error and omits Edge's response text, which
+  can echo submitted secrets. Ask the gateway operator to check Edge logs.
 
 The gateway has two ports. Confusing them is the most common first-run mistake:
 

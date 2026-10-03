@@ -32,6 +32,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Edge Admin errors no longer expose submitted secrets** (GHSA-qc7r-4j9m-pm44).
+  Error responses can echo credential material or other request values. The
+  client now omits Edge response bodies, URLs and transport causes from logs
+  and thrown errors, and returns fixed classifications with safe status data.
 - **Failed list and detail reads no longer look empty** (#486). A persistent
   unavailable state with a Retry action now replaces the empty state when
   credentials, messages, APIs, users, organizations, notifications, audit

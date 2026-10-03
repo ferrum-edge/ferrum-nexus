@@ -290,7 +290,7 @@ describe('publishing', () => {
       assert.equal(converted.json<UpdateApiResponse>().api.spec_enforcement, 'routes');
     });
 
-    it('returns actionable API-spec rejection details to the provider', async () => {
+    it('returns a fixed API-spec rejection without gateway diagnostics', async () => {
       harness.edge.queueFailure(
         422,
         {
@@ -309,11 +309,9 @@ describe('publishing', () => {
       assert.equal(response.statusCode, 400, response.body);
       const body = response.json<ApiErrorBody>();
       assert.equal(body.error.code, 'EDGE_REJECTED_SPEC');
-      assert.match(body.error.message, /unknown field upstream_url/);
-      assert.equal(
-        (body.error.details as { gateway_code: string }).gateway_code,
-        'MalformedExtension',
-      );
+      assert.equal(body.error.message, 'The gateway rejected the API specification');
+      assert.deepEqual(body.error.details, { status: 422 });
+      assert.ok(!response.body.includes('unknown field upstream_url'));
       assert.equal(harness.edge.proxies.size, 0);
     });
 
@@ -1197,10 +1195,7 @@ describe('publishing', () => {
       assert.equal(errorCode(response.body), 'FORBIDDEN');
     });
 
-    it('hands the provider the gateway’s reason for a validation refusal', async () => {
-      // Publishing a basic_auth API against a gateway with no
-      // FERRUM_BASIC_AUTH_HMAC_SECRET is the canonical case: the provider can
-      // do nothing about it until they can read why the plugin was refused.
+    it('keeps gateway validation text out of the provider error', async () => {
       const gatewayText =
         'FERRUM_BASIC_AUTH_HMAC_SECRET must be set to accept basic_auth credentials';
       harness.edge.queueFailure(400, { error: gatewayText }, '/plugins/config', 'POST');
@@ -1214,10 +1209,9 @@ describe('publishing', () => {
 
       const body = JSON.parse(response.body) as ApiErrorBody;
       assert.equal(body.error.code, 'EDGE_ERROR');
-      assert.match(body.error.message, /FERRUM_BASIC_AUTH_HMAC_SECRET/);
-      const details = body.error.details as { status: number; gateway_message: string };
-      assert.equal(details.status, 400);
-      assert.equal(details.gateway_message, gatewayText);
+      assert.equal(body.error.message, 'The gateway rejected the request');
+      assert.deepEqual(body.error.details, { status: 400 });
+      assert.ok(!response.body.includes(gatewayText));
 
       // The proxy created before the failing plugin is still rolled back.
       assert.equal(harness.edge.proxyByName('nexus-basic-auth-refused'), undefined);
