@@ -180,6 +180,11 @@ built to reveal nothing:
 - **Reset links are short-lived and single-use.** One hour
   (`PASSWORD_RESET_TTL_SECONDS`), burned by a compare-and-set in the same
   transaction that writes the new password.
+- **Issuing a new reset link supersedes the old one.** After the 10-minute
+  throttle, a fresh request deletes every existing `password_reset` token for
+  the account in the same transaction that mints and queues its replacement, so
+  only the newest link is ever live. A leaked or suspected link cannot outlive
+  the request meant to replace it. `email_verification` tokens are left alone.
 - **Every password change invalidates outstanding reset links.** A self-service
   change or a redeemed reset commits the new password, the deletion of all
   `password_reset` tokens, session invalidation and the audit row in one

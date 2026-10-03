@@ -466,7 +466,9 @@ _public_ — body `{ "email": string }` (≤ 320 chars).
 
 Queues a password-reset link to `<public URL>/reset-password?token=…` when the
 address belongs to an active account and none was issued in the last 10
-minutes. The link expires after one hour (`PASSWORD_RESET_TTL_SECONDS`).
+minutes. The link expires after one hour (`PASSWORD_RESET_TTL_SECONDS`), and
+issuing it supersedes every earlier live reset link for the account, so only the
+newest is valid.
 
 ### `POST /api/auth/reset-password`
 

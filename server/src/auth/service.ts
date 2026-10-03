@@ -999,6 +999,10 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
             // Genuinely throttled: another request holds the window.
             return;
           }
+          // Supersede any earlier reset link: issuing a new one must revoke the
+          // old, so a leaked or suspected recovery link cannot outlive its
+          // replacement. Only the newest link is ever live.
+          await tx.verificationTokens.deleteForUser(record.id, 'password_reset');
           const created = await tx.verificationTokens.create({
             user_id: record.id,
             token_hash: crypto.hashToken(token),

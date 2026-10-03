@@ -32,6 +32,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Issuing a new password-reset link now revokes every earlier one**
+  (GHSA-fgq6-8q7j-qmww). After the 10-minute issuance throttle, the
+  `forgot-password` flow used to insert a replacement one-hour token while
+  leaving prior live tokens usable, so a leaked or suspected link remained an
+  account-recovery capability until a token was redeemed. The replacement
+  request now deletes all outstanding `password_reset` tokens in the same
+  transaction that mints and queues the new link, on every backend, matching
+  the supersession the verification-resend flow already performed.
 - **Failed list and detail reads no longer look empty** (#486). A persistent
   unavailable state with a Retry action now replaces the empty state when
   credentials, messages, APIs, users, organizations, notifications, audit
