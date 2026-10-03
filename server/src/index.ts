@@ -31,6 +31,7 @@ import {
 import { createGodService, type GodService } from './admin/god-service.js';
 import { createMassEmailService, type MassEmailService } from './admin/mass-email-service.js';
 import { createSettingsService, type SettingsService } from './admin/settings-service.js';
+import { createSmtpTestService, type SmtpTestService } from './admin/smtp-test-service.js';
 import { createAuditService, type AuditService } from './audit/service.js';
 import {
   createCaptchaService,
@@ -129,6 +130,8 @@ export interface NexusServices {
   sso: SsoService;
   messaging: MessagingService;
   massEmail: MassEmailService;
+  /** The admin SMTP probe: recipient policy, hourly budget and intent-first audit. */
+  smtpTest: SmtpTestService;
   catalog: CatalogService;
   credentials: CredentialsService;
   publishing: PublishingService;
@@ -238,6 +241,13 @@ export interface BuildServerDeps {
    * rollback — does once its waits run out. Nothing in production sets it.
    */
   storeLockWaitMs?: number;
+  /**
+   * Most recipients per mass-email fan-out transaction. Defaults to
+   * `MASS_EMAIL_CHUNK_RECIPIENTS` (200). A seam for the tests that drive a
+   * failure between two chunks, which would otherwise need hundreds of
+   * accounts. Nothing in production sets it.
+   */
+  massEmailChunkRecipients?: number;
 }
 
 /** Shared per-IP budget for sensitive `/api/auth` routes, including credential guessing. */
@@ -411,7 +421,27 @@ export async function buildServer(
     locks: sendLocks,
     log: warn,
   });
-  const massEmail = createMassEmailService({ config, store: deps.store, email, audit });
+  // Both admin mail paths take their per-administrator keys from `sendLocks`:
+  // the daily campaign count and the hourly SMTP-test count are each a
+  // count-then-insert that has to be exact across instances.
+  const massEmail = createMassEmailService({
+    config,
+    store: deps.store,
+    email,
+    audit,
+    locks: sendLocks,
+    log: warn,
+    ...(deps.massEmailChunkRecipients === undefined
+      ? {}
+      : { chunkRecipients: deps.massEmailChunkRecipients }),
+  });
+  const smtpTest = createSmtpTestService({
+    store: deps.store,
+    email,
+    audit,
+    locks: sendLocks,
+    log: warn,
+  });
 
   // ── Gateway workflow ────────────────────────────────────────────────────
   // One consumer provisioner is shared by credentials and access so both
@@ -610,6 +640,7 @@ export async function buildServer(
     sso,
     messaging,
     massEmail,
+    smtpTest,
     catalog,
     credentials,
     publishing,
@@ -784,17 +815,25 @@ export async function buildServer(
   );
 
   await app.register(
-    async (scope) =>
-      scope.register(adminRoutes, {
+    async (scope) => {
+      // `global: false` so only the two mail routes carry a limit — the probe
+      // that contacts the relay directly and the campaign composer — bucketed
+      // per account (see `userOrIpKey`). Their durable budgets bound the hour
+      // and the day; this bounds a burst.
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(adminRoutes, {
         settings,
         massEmail,
-        email,
+        smtpTest,
         audit,
         god,
         credentials,
         reconciliation,
         sso,
-      }),
+      });
+    },
     { prefix: '/api/admin' },
   );
 

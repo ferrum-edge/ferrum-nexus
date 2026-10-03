@@ -677,6 +677,11 @@ describe('audit commit classes', () => {
       AuditAction.CREDENTIAL_REVOKE_START,
       AuditAction.API_SPEC_REVISION_START,
       AuditAction.API_GATEWAY_RESTORE_START,
+      // Irreversible mail: the row that names (and charges) the attempt
+      // commits before the relay is contacted or the first row is queued.
+      AuditAction.ADMIN_SMTP_TEST,
+      AuditAction.ADMIN_MASS_EMAIL,
+      AuditAction.GOD_BROADCAST,
     ];
     for (const action of intents) assert.equal(AUDIT_COMMIT_CLASSES[action].kind, 'intent', action);
   });

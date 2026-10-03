@@ -106,7 +106,7 @@ docker/    Dockerfile + docker-compose.example.yml
 | `messaging/service.ts`                         | 1:1 threads and the platform inbox.                                                                                                                                    |
 | `notifications/service.ts`                     | The header bell and inbox. A courtesy channel, never the record.                                                                                                       |
 | `email/`                                       | `service.ts` (render + enqueue), `outbox-worker.ts` (the only SMTP caller), `templates.ts`.                                                                            |
-| `admin/`                                       | `settings-service.ts`, `mass-email-service.ts`, `god-service.ts`, `gateway-reconciliation.ts`, `rotate-key.ts`.                                                        |
+| `admin/`                                       | `settings-service.ts`, `mass-email-service.ts`, `smtp-test-service.ts`, `god-service.ts`, `gateway-reconciliation.ts`, `rotate-key.ts`.                                |
 | `routes/`                                      | One plugin per domain. Routes validate shapes and delegate to the services they are handed.                                                                            |
 | `test/`                                        | `helpers.ts` boots the real app on in-memory SQLite; `mock-ferrum-edge.ts` is a real HTTP server.                                                                      |
 

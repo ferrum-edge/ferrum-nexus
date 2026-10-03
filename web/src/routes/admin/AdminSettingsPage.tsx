@@ -719,7 +719,9 @@ function EmailTab({ settings }: { settings: AdminSettingsResponse }): ReactEleme
   const smtpTest = useSmtpTest();
   const toast = useToast();
   // The SMTP fields are super_admin-only. "Send test email" is not — it changes
-  // nothing, and an admin diagnosing a delivery problem needs it.
+  // nothing, and an admin diagnosing a delivery problem needs it — but only a
+  // super_admin may aim it at an address other than their own (the server
+  // refuses an admin that tries), so the recipient field is theirs alone.
   const { canSuperAdmin } = useAuth();
   const [host, setHost] = useState(settings.smtp.host ?? '');
   const [port, setPort] = useState(String(settings.smtp.port));
@@ -838,24 +840,31 @@ function EmailTab({ settings }: { settings: AdminSettingsResponse }): ReactEleme
         <CardHeader
           icon="send"
           title="Delivery test"
-          description="Enqueues one message through the settings above. Changes nothing, so any administrator may run it."
+          description="Sends one message straight through the settings above, up to 10 an hour. Changes nothing, so any administrator may run it."
         />
         <CardBody>
-          <LabeledInput
-            className="max-w-md"
-            label="Send a test email to"
-            type="email"
-            placeholder="Defaults to your own address"
-            value={testTo}
-            onChange={(event) => setTestTo(event.target.value)}
-          />
+          {canSuperAdmin ? (
+            <LabeledInput
+              className="max-w-md"
+              label="Send a test email to"
+              type="email"
+              placeholder="Defaults to your own address"
+              value={testTo}
+              onChange={(event) => setTestTo(event.target.value)}
+            />
+          ) : (
+            <p className="text-sm text-fg-muted">
+              The test message goes to your own account address. Only a super admin can send it
+              anywhere else.
+            </p>
+          )}
         </CardBody>
         <CardFooter>
           <Button
             variant="secondary"
             loading={smtpTest.isPending}
             onClick={() =>
-              smtpTest.mutate(testTo.trim() ? { to_email: testTo.trim() } : {}, {
+              smtpTest.mutate(canSuperAdmin && testTo.trim() ? { to_email: testTo.trim() } : {}, {
                 onSuccess: (response) => {
                   if (response.ok) toast.success('Test email sent');
                   else toast.error('Test email failed', response.error ?? undefined);

@@ -3,6 +3,7 @@ import { after, before, describe, it } from 'node:test';
 
 import type { ApiErrorBody, MassEmailResponse } from '@ferrum-nexus/shared';
 
+import { DEFAULT_MAX_MASS_EMAIL_BYTES, DEFAULT_MAX_MASS_EMAILS_PER_DAY } from '../config/index.js';
 import { NexusError } from '../lib/errors.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -18,7 +19,9 @@ describe('mass email', () => {
   let provider: TestSession;
 
   before(async () => {
-    harness = await buildTestApp();
+    // This suite starts more campaigns from one administrator than the default
+    // daily budget allows; the budget has its own suite below.
+    harness = await buildTestApp({ env: { NEXUS_MAX_MASS_EMAILS_PER_DAY: '20' } });
     founder = await harness.registerUser({ email: 'founder@example.test' });
     clientA = await harness.registerUser({ email: 'client-a@example.test', role: 'client' });
     clientB = await harness.registerUser({ email: 'client-b@example.test', role: 'client' });
@@ -162,11 +165,16 @@ describe('mass email', () => {
     });
     assert.equal(denied.statusCode, 403);
 
+    // One `admin.mass_email` row per campaign — the replay of
+    // `campaign-2026-08` is the same campaign and is not recorded or charged
+    // again — and one `admin.mass_email_complete` row per attempt.
     const audit = await harness.store.auditLogs.list({ action: 'admin.mass_email' });
-    assert.equal(audit.total, 6);
+    assert.equal(audit.total, 5);
     const details = audit.items[0]?.details as { recipients?: number; audience_scope?: string };
     assert.ok(typeof details.recipients === 'number');
     assert.ok(typeof details.audience_scope === 'string');
+    const outcomes = await harness.store.auditLogs.list({ action: 'admin.mass_email_complete' });
+    assert.equal(outcomes.total, 6);
   });
 
   it('delivers the queued campaign on the next worker tick', async () => {
@@ -255,6 +263,12 @@ describe('mass email recipient ceiling', () => {
           role: 'client',
         });
       }
+      // The narrower send below must match real accounts: an audience that
+      // resolves to nobody is refused before the ceiling is even consulted.
+      await harness.registerUser({
+        email: 'ceiling-provider@example.test',
+        role: 'provider',
+      });
       const outboxBefore = (await harness.outbox()).length;
       const auditBefore = (await harness.auditRows('admin.mass_email')).length;
 
@@ -388,6 +402,490 @@ describe('a mass-email campaign that loses to contention', () => {
       assert.equal(retry.statusCode, 200, retry.body);
       assert.equal(retry.json<MassEmailResponse>().batch_id, 'contended-campaign');
       assert.equal(retry.json<MassEmailResponse>().enqueued, 2);
+    } finally {
+      await harness.close();
+    }
+  });
+});
+
+/**
+ * The aggregate ceiling — `NEXUS_MAX_MASS_EMAIL_BYTES` (GHSA-rqrj-7g3f-c6ww).
+ *
+ * The recipient ceiling and the two 100 000-character body limits are each
+ * reasonable alone; their product — a full rendered copy per recipient — is
+ * what the outbox has to store and drain ahead of every later verification and
+ * password-reset message. This bounds the product, before anything is written.
+ */
+describe('mass email aggregate size ceiling', () => {
+  it('refuses a campaign whose rendered size times its audience is too large', async () => {
+    const harness = await buildTestApp({
+      env: { NEXUS_MAX_MASS_EMAIL_BYTES: '4000' },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      const admin = await harness.registerUser({ email: 'bytes-admin@example.test' });
+      for (const index of [1, 2, 3]) {
+        await harness.registerUser({ email: `bytes-client-${index}@example.test`, role: 'client' });
+      }
+      const outboxBefore = (await harness.outbox()).length;
+      const auditBefore = (await harness.auditRows('admin.mass_email')).length;
+
+      // About 2 KB per message: under the limit for one recipient, over it
+      // for three.
+      const large = 'x'.repeat(1_000);
+      const refused = await harness.authed(admin, {
+        method: 'POST',
+        url: '/api/admin/mass-email',
+        payload: {
+          subject: 'Large',
+          body_html: `<p>${large}</p>`,
+          body_text: large,
+          audience: { scope: 'filtered', roles: ['client'] },
+        },
+      });
+      assert.equal(refused.statusCode, 429, refused.body);
+      const failure = errorBody(refused.body);
+      assert.equal(failure.code, 'QUOTA_EXCEEDED');
+      const details = failure.details as {
+        limit: number;
+        bytes: number;
+        message_bytes: number;
+        recipients: number;
+        setting: string;
+      };
+      assert.equal(details.limit, 4000);
+      assert.equal(details.recipients, 3);
+      assert.equal(details.setting, 'NEXUS_MAX_MASS_EMAIL_BYTES');
+      assert.ok(details.message_bytes > 2_000, 'both bodies count');
+      assert.equal(details.bytes, details.message_bytes * 3);
+      assert.ok(details.bytes > details.limit);
+      assert.equal((await harness.outbox()).length, outboxBefore, 'nothing was queued');
+      assert.equal(
+        (await harness.auditRows('admin.mass_email')).length,
+        auditBefore,
+        'and nothing was recorded or charged',
+      );
+
+      // The same message to one recipient fits.
+      const allowed = await harness.authed(admin, {
+        method: 'POST',
+        url: '/api/admin/mass-email',
+        payload: {
+          subject: 'Large',
+          body_html: `<p>${large}</p>`,
+          body_text: large,
+          audience: { scope: 'filtered', roles: ['super_admin'] },
+        },
+      });
+      assert.equal(allowed.statusCode, 200, allowed.body);
+      assert.equal(allowed.json<MassEmailResponse>().enqueued, 1);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('treats 0 as no ceiling and ships the documented defaults', async () => {
+    const defaults = await buildTestApp({ deps: { startOutboxWorker: false } });
+    try {
+      assert.equal(defaults.config.maxMassEmailBytes, DEFAULT_MAX_MASS_EMAIL_BYTES);
+      assert.equal(DEFAULT_MAX_MASS_EMAIL_BYTES, 64 * 1024 * 1024);
+      assert.equal(defaults.config.maxMassEmailsPerDay, DEFAULT_MAX_MASS_EMAILS_PER_DAY);
+      // Low until security mail gets its own outbox lane (issue #500).
+      assert.equal(DEFAULT_MAX_MASS_EMAILS_PER_DAY, 5);
+    } finally {
+      await defaults.close();
+    }
+
+    const harness = await buildTestApp({
+      env: { NEXUS_MAX_MASS_EMAIL_BYTES: '0' },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      assert.equal(harness.config.maxMassEmailBytes, 0);
+      const admin = await harness.registerUser({ email: 'unsized-admin@example.test' });
+      await harness.registerUser({ email: 'unsized-client@example.test', role: 'client' });
+      const large = 'y'.repeat(100_000);
+      const response = await harness.authed(admin, {
+        method: 'POST',
+        url: '/api/admin/mass-email',
+        payload: { subject: 'Big', body_html: large, body_text: large, audience: { scope: 'all' } },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(response.json<MassEmailResponse>().enqueued, 2);
+    } finally {
+      await harness.close();
+    }
+  });
+});
+
+/**
+ * The per-message size is an upper bound, not a sample.
+ *
+ * `body_html` HTML-escapes the recipient variables, so a display name of `"`
+ * characters takes six times its raw size there, while the subject and text
+ * take every name verbatim; and an overridden template may repeat either
+ * variable any number of times. Sizing the campaign from the longest *raw*
+ * name under-counted exactly that recipient's copy, and with it the aggregate
+ * ceiling and the chunk size.
+ */
+describe('mass email per-message size estimate', () => {
+  /** Bytes of one queued row's rendered content, as the estimate counts them. */
+  function rowBytes(row: { subject: string; body_html: string; body_text: string }): number {
+    return (
+      Buffer.byteLength(row.subject, 'utf8') +
+      Buffer.byteLength(row.body_html, 'utf8') +
+      Buffer.byteLength(row.body_text, 'utf8')
+    );
+  }
+
+  it('bounds every copy, HTML escaping and template repetition included', async () => {
+    const harness = await buildTestApp({
+      env: { NEXUS_MAX_MASS_EMAIL_BYTES: '60000' },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      const admin = await harness.registerUser({ email: 'escape-admin@example.test' });
+      const quoted = await harness.registerUser({ email: 'escape-quoted@example.test' });
+      const plain = await harness.registerUser({ email: 'escape-plain@example.test' });
+      // 150 raw bytes that escape to 900, and 200 raw bytes that escape to 200:
+      // the longest raw name is not the largest HTML copy.
+      await harness.store.users.update(quoted.user.id, { display_name: '"'.repeat(150) });
+      await harness.store.users.update(plain.user.id, { display_name: 'a'.repeat(200) });
+      const template = await harness.authed(admin, {
+        method: 'PUT',
+        url: '/api/admin/email-templates/mass',
+        payload: {
+          subject: '{{subject}}',
+          body_html: `${'<p>{{recipient_name}}</p>'.repeat(50)}{{body_html}}`,
+          body_text: `${'{{recipient_name}} '.repeat(50)}{{body_text}}`,
+        },
+      });
+      assert.equal(template.statusCode, 200, template.body);
+
+      const campaign = (userIds: string[]) => ({
+        method: 'POST' as const,
+        url: '/api/admin/mass-email',
+        payload: {
+          subject: 'Escaped',
+          body_html: '<p>Hello</p>',
+          body_text: 'Hello',
+          audience: { scope: 'explicit', user_ids: userIds },
+        },
+      });
+
+      // Both together: about 45 KB of HTML for the quoted name and 10 KB of
+      // text for the plain one, per copy. Sized from the plain name alone it
+      // was about 20 KB a copy, and the pair fit under 60 000.
+      const refused = await harness.authed(admin, campaign([quoted.user.id, plain.user.id]));
+      assert.equal(refused.statusCode, 429, refused.body);
+      const details = errorBody(refused.body).details as { message_bytes: number; bytes: number };
+      assert.ok(details.message_bytes > 50_000, `escaping counted: ${details.message_bytes}`);
+      assert.equal(details.bytes, details.message_bytes * 2);
+
+      // Each alone fits, and what each actually queued is within the bound
+      // the pair was refused on.
+      for (const recipient of [quoted, plain]) {
+        const sent = await harness.authed(admin, campaign([recipient.user.id]));
+        assert.equal(sent.statusCode, 200, sent.body);
+        const rows = (await harness.outbox()).filter(
+          (row) =>
+            row.to_email === recipient.user.email && row.idempotency_key?.startsWith('mass:'),
+        );
+        assert.equal(rows.length, 1);
+        const row = rows[0];
+        assert.ok(row);
+        assert.ok(
+          rowBytes(row) <= details.message_bytes,
+          `${recipient.user.email} queued ${rowBytes(row)} bytes, over the ` +
+            `${details.message_bytes} estimated`,
+        );
+      }
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('refuses a message too large for a fan-out transaction of its own', async () => {
+    const harness = await buildTestApp({
+      env: { NEXUS_MAX_MASS_EMAIL_BYTES: '0' },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      const admin = await harness.registerUser({ email: 'oversize-admin@example.test' });
+      const template = await harness.authed(admin, {
+        method: 'PUT',
+        url: '/api/admin/email-templates/mass',
+        payload: {
+          subject: '{{subject}}',
+          body_html: '{{body_html}}'.repeat(50),
+          body_text: '{{body_text}}',
+        },
+      });
+      assert.equal(template.statusCode, 200, template.body);
+      const outboxBefore = (await harness.outbox()).length;
+      const auditBefore = (await harness.auditRows('admin.mass_email')).length;
+
+      // 100 000 characters, repeated 50 times by the template: about 5 MB in
+      // one copy, past the 4 MiB a chunk transaction holds, with no aggregate
+      // ceiling to stop it first.
+      const refused = await harness.authed(admin, {
+        method: 'POST',
+        url: '/api/admin/mass-email',
+        payload: {
+          subject: 'Oversized',
+          body_html: 'z'.repeat(100_000),
+          body_text: 'Oversized',
+          audience: { scope: 'all' },
+        },
+      });
+      assert.equal(refused.statusCode, 400, refused.body);
+      assert.equal(errorBody(refused.body).code, 'VALIDATION_FAILED');
+      assert.equal((await harness.outbox()).length, outboxBefore, 'nothing was queued');
+      assert.equal((await harness.auditRows('admin.mass_email')).length, auditBefore);
+    } finally {
+      await harness.close();
+    }
+  });
+});
+
+/**
+ * The campaign budget — `NEXUS_MAX_MASS_EMAILS_PER_DAY`.
+ *
+ * The per-campaign ceilings bound one campaign; this bounds a loop of them.
+ * It counts the administrator's own `admin.mass_email` rows, one per campaign,
+ * written before anything is queued — so a retry of the same campaign is free
+ * and a refused one costs nothing.
+ */
+describe('mass email daily campaign budget', () => {
+  it('refuses a campaign past the daily count but not a retry of a started one', async () => {
+    const harness = await buildTestApp({
+      env: { NEXUS_MAX_MASS_EMAILS_PER_DAY: '2' },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      const admin = await harness.registerUser({ email: 'budget-admin@example.test' });
+      const other = await harness.registerUser({ email: 'budget-other@example.test' });
+      await harness.registerUser({ email: 'budget-client@example.test', role: 'client' });
+      const promoted = await harness.authed(admin, {
+        method: 'PATCH',
+        url: `/api/users/${other.user.id}`,
+        payload: { role: 'admin' },
+      });
+      assert.equal(promoted.statusCode, 200, promoted.body);
+      const otherAdmin = await harness.loginUser('budget-other@example.test');
+
+      const send = (session: TestSession, key: string) =>
+        harness.authed(session, {
+          method: 'POST',
+          url: '/api/admin/mass-email',
+          payload: {
+            subject: `Campaign ${key}`,
+            body_text: 'Hello',
+            audience: { scope: 'filtered', roles: ['client'] },
+            idempotency_key: key,
+          },
+        });
+
+      assert.equal((await send(admin, 'budget-one')).statusCode, 200);
+      assert.equal((await send(admin, 'budget-two')).statusCode, 200);
+      // A retry of a campaign already started is the same campaign.
+      const retry = await send(admin, 'budget-two');
+      assert.equal(retry.statusCode, 200, retry.body);
+      assert.equal(retry.json<MassEmailResponse>().enqueued, 0);
+
+      const outboxBefore = (await harness.outbox()).length;
+      const auditBefore = (await harness.auditRows('admin.mass_email')).length;
+      const refused = await send(admin, 'budget-three');
+      assert.equal(refused.statusCode, 429, refused.body);
+      const failure = errorBody(refused.body);
+      assert.equal(failure.code, 'QUOTA_EXCEEDED');
+      assert.deepEqual(failure.details, {
+        limit: 2,
+        used: 2,
+        recipients: 1,
+        window: '24h',
+        setting: 'NEXUS_MAX_MASS_EMAILS_PER_DAY',
+      });
+      assert.equal((await harness.outbox()).length, outboxBefore, 'nothing was queued');
+      assert.equal(
+        (await harness.auditRows('admin.mass_email')).length,
+        auditBefore,
+        'a refused campaign writes no row of its own',
+      );
+
+      // The budget is per administrator.
+      const theirs = await send(otherAdmin, 'budget-other-one');
+      assert.equal(theirs.statusCode, 200, theirs.body);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('refuses a reused key with other content or audience, and charges nothing', async () => {
+    const harness = await buildTestApp({
+      env: { NEXUS_MAX_MASS_EMAILS_PER_DAY: '2' },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      const admin = await harness.registerUser({ email: 'reuse-admin@example.test' });
+      const first = await harness.registerUser({ email: 'reuse-first@example.test' });
+      const second = await harness.registerUser({ email: 'reuse-second@example.test' });
+      const campaign = {
+        subject: 'Campaign A',
+        body_html: '<p>Hello</p>',
+        body_text: 'Hello',
+        audience: { scope: 'explicit', user_ids: [first.user.id] },
+        idempotency_key: 'reused-key',
+      };
+      const send = (payload: Record<string, unknown>) =>
+        harness.authed(admin, { method: 'POST', url: '/api/admin/mass-email', payload });
+
+      const sent = await send(campaign);
+      assert.equal(sent.statusCode, 200, sent.body);
+      assert.equal(sent.json<MassEmailResponse>().enqueued, 1);
+
+      const outboxBefore = (await harness.outbox()).length;
+      const auditBefore = (await harness.auditRows('admin.mass_email')).length;
+      // The bypass: the same key with a new message, or a new audience, used to
+      // be an uncharged campaign of its own.
+      for (const variant of [
+        { ...campaign, subject: 'Campaign B' },
+        { ...campaign, body_html: '<p>Something else</p>' },
+        { ...campaign, body_text: 'Something else' },
+        { ...campaign, audience: { scope: 'explicit', user_ids: [second.user.id] } },
+        { ...campaign, audience: { scope: 'all' } },
+      ]) {
+        const refused = await send(variant);
+        assert.equal(refused.statusCode, 409, refused.body);
+        const failure = errorBody(refused.body);
+        assert.equal(failure.code, 'CONFLICT');
+        assert.deepEqual(failure.details, {
+          batch_id: 'reused-key',
+          reason: 'idempotency_key_reused',
+        });
+      }
+      assert.equal((await harness.outbox()).length, outboxBefore, 'nothing was queued');
+      assert.equal(
+        (await harness.auditRows('admin.mass_email')).length,
+        auditBefore,
+        'and nothing was recorded or charged',
+      );
+      assert.equal(
+        (await harness.outbox()).filter((row) => row.to_email === second.user.email).length,
+        0,
+      );
+
+      // A genuine retry still is one, however its audience is spelled.
+      const retry = await send({
+        ...campaign,
+        audience: { scope: 'explicit', user_ids: [first.user.id, first.user.id] },
+      });
+      assert.equal(retry.statusCode, 200, retry.body);
+      assert.equal(retry.json<MassEmailResponse>().enqueued, 0);
+
+      // The refusals spent no slot: the second of two still goes through.
+      const next = await send({ ...campaign, subject: 'Campaign C', idempotency_key: 'next-key' });
+      assert.equal(next.statusCode, 200, next.body);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('refuses an audience that resolves to nobody without charging it', async () => {
+    const harness = await buildTestApp({
+      env: { NEXUS_MAX_MASS_EMAILS_PER_DAY: '1' },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      const admin = await harness.registerUser({ email: 'nobody-admin@example.test' });
+      await harness.registerUser({ email: 'nobody-client@example.test', role: 'client' });
+      const send = (roles: string[]) =>
+        harness.authed(admin, {
+          method: 'POST',
+          url: '/api/admin/mass-email',
+          payload: {
+            subject: 'Providers only',
+            body_text: 'Hello',
+            audience: { scope: 'filtered', roles },
+          },
+        });
+
+      const refused = await send(['provider']);
+      assert.equal(refused.statusCode, 400, refused.body);
+      assert.equal(errorBody(refused.body).code, 'VALIDATION_FAILED');
+      assert.equal((await harness.auditRows('admin.mass_email')).length, 0);
+
+      // The one slot is still there.
+      const sent = await send(['client']);
+      assert.equal(sent.statusCode, 200, sent.body);
+      assert.equal(sent.json<MassEmailResponse>().enqueued, 1);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('treats 0 as no budget', async () => {
+    const harness = await buildTestApp({
+      env: { NEXUS_MAX_MASS_EMAILS_PER_DAY: '0' },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      assert.equal(harness.config.maxMassEmailsPerDay, 0);
+      const admin = await harness.registerUser({ email: 'unbudgeted-admin@example.test' });
+      for (const subject of ['One', 'Two', 'Three']) {
+        const response = await harness.authed(admin, {
+          method: 'POST',
+          url: '/api/admin/mass-email',
+          payload: { subject, body_text: subject, audience: { scope: 'all' } },
+        });
+        assert.equal(response.statusCode, 200, response.body);
+      }
+    } finally {
+      await harness.close();
+    }
+  });
+});
+
+/**
+ * Chunked fan-out. One transaction per campaign held every other write on the
+ * instance — the password-reset and verification enqueues included — for as
+ * long as the whole audience took to insert; now each transaction holds at
+ * most a chunk, and other writers get their turn between chunks.
+ */
+describe('mass email chunked fan-out', () => {
+  it('queues a campaign in transactions of at most one chunk each', async (t) => {
+    const harness = await buildTestApp({
+      deps: { startOutboxWorker: false, massEmailChunkRecipients: 2 },
+    });
+    try {
+      const admin = await harness.registerUser({ email: 'chunk-admin@example.test' });
+      for (const index of [1, 2, 3, 4]) {
+        await harness.registerUser({ email: `chunk-client-${index}@example.test`, role: 'client' });
+      }
+      const transactions = t.mock.method(harness.store, 'transaction');
+      const response = await harness.authed(admin, {
+        method: 'POST',
+        url: '/api/admin/mass-email',
+        payload: {
+          subject: 'Chunked',
+          body_text: 'Five recipients, two per transaction',
+          audience: { scope: 'all' },
+          idempotency_key: 'chunked-five',
+        },
+      });
+      const calls = transactions.mock.callCount();
+      transactions.mock.restore();
+      assert.equal(response.statusCode, 200, response.body);
+      assert.deepEqual(response.json<MassEmailResponse>(), {
+        enqueued: 5,
+        recipients: 5,
+        batch_id: 'chunked-five',
+      });
+      // One for the campaign's own row, then ⌈5 / 2⌉ = 3 for the fan-out.
+      assert.equal(calls, 4);
+      const outcome = (await harness.auditRows('admin.mass_email_complete'))[0];
+      assert.equal(outcome?.details.chunks, 3);
+      assert.equal(outcome?.details.enqueued, 5);
     } finally {
       await harness.close();
     }
