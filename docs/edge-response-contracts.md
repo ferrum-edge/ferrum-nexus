@@ -84,11 +84,11 @@ discriminant. Validation failures carry `failures[]` with `resource_type` and
 
 For `POST`/`PUT` API-spec writes, a 4xx `Spec parse failed` or
 `Spec validation failed` (other than `401`/`403`) becomes
-`400 EDGE_REJECTED_SPEC`. Its public message includes the string `details` and
+`400 EDGE_REJECTED_SPEC`. The public message includes the string `details` and
 each resource's first error, within 500 characters, plus a separately bounded
-`gateway_code`. The full parsed body is logged, bounded by the 16 MiB response
-limit. Other flat errors keep the normal mapping; `5xx` and authentication
-errors stay opaque `502`s.
+`gateway_code`. The full parsed body goes to the server log only (bounded by the
+16 MiB response limit). Other flat errors keep the normal mapping; `5xx` and
+authentication errors stay opaque `502`s.
 
 Non-GET `/consumers` writes can carry show-once credential material. For those
 requests only, error bodies and response objects are omitted from logs and

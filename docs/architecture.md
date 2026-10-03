@@ -47,11 +47,14 @@ Every change must keep three rules true:
    `audit/service.ts` classifies how each action's row commits: in the store
    transaction that records the change, as an intent row before gateway work
    that cannot be undone, or after commit.
-3. **Credential-bearing Edge writes never expose gateway response text.**
-   Non-GET `/consumers` calls can carry show-once material, so
-   `ferrum-admin/client.ts` omits Edge response text and objects from their logs
-   and thrown errors. Other endpoints preserve provider validation and
-   API-spec diagnostics. `classify()` owns this policy.
+3. **Upstream text reaches the browser only when Edge is judging the caller's
+   own input.** `ferrum-admin/client.ts` logs every Edge error body except for
+   non-GET `/consumers` writes, which can carry show-once credential material
+   and therefore log only method, path and status. A validation refusal (`400`,
+   `409`, `422`) is echoed in `details.gateway_message`; an API-spec
+   parse/validation failure becomes `EDGE_REJECTED_SPEC` with a bounded summary.
+   `401`, `403` and `5xx` are never echoed. `classify()` is the only place this
+   is decided.
 
 The public reads are `GET /api/health`, `GET /api/health/edge`,
 `GET /api/auth/captcha` and `GET /api/branding`. Branding lets the login page

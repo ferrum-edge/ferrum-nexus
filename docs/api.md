@@ -178,13 +178,15 @@ repeated per endpoint:
   `kind: "write_durable_not_live"`; another write `503` carries
   `kind: "write_acknowledgement_uncertain"`.
 - Other `EDGE_ERROR` validation refusals (`400`, `409`, `422`) carry
-  `details: { status, gateway_message }`: Edge's text, trimmed to 500
-  characters, also repeated in `message`. A `401`, `403` or `5xx` stays opaque
-  to callers; the response text is available in server logs.
-- `EDGE_REJECTED_SPEC` covers API-spec writes rejected with a 4xx
-  `Spec parse failed` or `Spec validation failed` (401/403 remain `EDGE_ERROR`).
-  Its bounded `gateway_message` and optional `gateway_code` are returned, and
-  the full response is logged.
+  `details: { status, gateway_message }`: Edge's own text, trimmed to 500
+  characters, also repeated in `message`. A `401`, `403` or `5xx` from the
+  gateway stays opaque; its text only reaches the server log.
+- `EDGE_REJECTED_SPEC` covers an API-spec write (publish, spec revision,
+  enforcement conversion) that Edge rejects with a 4xx `Spec parse failed` or
+  `Spec validation failed` (401/403 remain `EDGE_ERROR`). `details` carries the
+  upstream `status`, `gateway_message` and, when Edge supplies one,
+  `gateway_code`, each capped at 500 characters. The full response is logged,
+  not reflected.
 - `EDGE_PROTOCOL_ERROR` carries `details` with `status`,
   `kind: "protocol_error"` and a fixed `reason` such as `invalid_utf8`.
   Response bytes and parser exceptions are never included. See

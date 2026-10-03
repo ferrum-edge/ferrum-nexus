@@ -13,13 +13,26 @@
  * - `EDGE_REJECTED_SPEC` — a 4xx API-spec parse/validation refusal (HTTP 400).
  * - `EDGE_PROTOCOL_ERROR` — an invalid HTTP/JSON response.
  *
- * Credential writes to `/consumers` carry show-once material. Their Edge error
- * bodies are untrusted and are never logged or returned. Other endpoints keep
- * the established gateway validation and API-spec diagnostics.
+ * Edge's flat `{"error": "..."}` text is logged. Whether it is *also* echoed to
+ * the caller depends on who the message is about:
  *
- * A `503` with `applied: false` means the write is durable but not yet live.
- * Other write 503s leave the acknowledgement uncertain. The client never
- * retries writes automatically.
+ * - `400`, `409` and `422` are Edge validating the body Nexus just built out of
+ *   the caller's own request ("FERRUM_BASIC_AUTH_HMAC_SECRET must be set…",
+ *   "listen_path already exists in this namespace"). A provider cannot fix
+ *   those without reading them, so the text rides along in
+ *   `details.gateway_message` (trimmed to {@link MAX_GATEWAY_MESSAGE} chars).
+ * - `401`, `403` and every `5xx` stay **opaque**: those describe the gateway's
+ *   own configuration or the Nexus↔Edge trust relationship, not the caller's
+ *   request, and can name internal hosts and settings.
+ *
+ * Credential writes to `/consumers` carry show-once material; their Edge error
+ * bodies are untrusted and are never logged or returned, and the two rules
+ * above do not apply to them. Every other endpoint keeps the behaviour above.
+ *
+ * A `503` carrying `applied: false` is a special case worth knowing about: the
+ * write **is durable**, it just is not live yet. It surfaces as `EDGE_ERROR`
+ * with an explicit message and is never retried automatically — a blind retry
+ * of a create would `409`.
  */
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -403,6 +416,9 @@ const EDGE_MAX_PAGE_SIZE = 1000;
  */
 const MAX_PLUGIN_CONFIG_SCAN_PAGES = 50;
 
+/** Longest Edge validation text echoed back to the caller. */
+const MAX_GATEWAY_MESSAGE = 500;
+
 /** Bound all JSON responses, including intermediary error pages and resource lists. */
 export const ADMIN_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
 
@@ -659,10 +675,10 @@ function numberAt(value: unknown, key: string): number | null {
   return typeof found === 'number' && Number.isFinite(found) ? found : null;
 }
 
-/** Longest Edge validation text echoed back to callers. */
-const MAX_GATEWAY_MESSAGE = 500;
-
-/** Edge statuses whose validation text is actionable for the caller. */
+/**
+ * Edge statuses whose `{"error": …}` text is about the caller's own request and
+ * is therefore safe — and necessary — to surface. See the module doc comment.
+ */
 const ECHOED_EDGE_STATUSES = new Set([400, 409, 422]);
 
 /* ── Connection pooling ─────────────────────────────────────────────────── */
@@ -1105,6 +1121,8 @@ export function createFerrumAdminClient(
           status,
           upstream,
           reason: body.reason ?? null,
+          // readBoundedBody caps this structure before JSON parsing. Keep the full
+          // diagnostics server-side; never reflect the raw document to the caller.
           ...(isApiSpecWrite ? { gateway_response: parsed } : {}),
         },
         'Ferrum Edge Admin API returned an error',
@@ -1116,7 +1134,7 @@ export function createFerrumAdminClient(
         credentialWrite
           ? 'The gateway accepted the change but has not applied it; verify state before retrying'
           : 'The gateway accepted the change but has not applied it yet; do not retry — verify ' +
-            'the gateway configuration and try again once it recovers',
+              'the gateway configuration and try again once it recovers',
         {
           status,
           ...(credentialWrite
@@ -1167,6 +1185,8 @@ export function createFerrumAdminClient(
         },
       );
     }
+    // A validation refusal is about the body Nexus built from the caller's own
+    // request, so the provider needs the gateway's reason to act on it.
     if (!credentialWrite && ECHOED_EDGE_STATUSES.has(status) && typeof body.error === 'string') {
       const gatewayMessage = body.error.trim().slice(0, MAX_GATEWAY_MESSAGE);
       if (gatewayMessage !== '') {

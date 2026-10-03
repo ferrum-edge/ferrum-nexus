@@ -156,7 +156,7 @@ export function showOnceAlready(
 
 /**
  * 502 — the Ferrum Edge Admin API could not be reached (DNS, connect, TLS,
- * socket or timeout). Never carries upstream response text.
+ * socket or timeout). Never carries upstream text; the cause is logged.
  */
 export function edgeUnavailable(
   message = 'The Ferrum Edge Admin API is unreachable',

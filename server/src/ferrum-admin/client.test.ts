@@ -1021,6 +1021,7 @@ describe('ferrum admin client', () => {
           () => logged.apiSpecs.replace('diagnostics', document),
           (error: unknown) => {
             assert.ok(isNexusError(error));
+            assert.equal(error.code, 'EDGE_REJECTED_SPEC');
             assert.match(
               error.message,
               /proxy: overlapping listen_path; plugin_config: invalid config/,

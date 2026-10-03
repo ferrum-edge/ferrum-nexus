@@ -11,6 +11,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { sha256Hex } from '../lib/crypto.js';
+import type { EdgeLogger } from '../ferrum-admin/index.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 function errorCode(body: string): string {
@@ -128,7 +129,13 @@ describe('gateway credentials', () => {
 
   it('hides echoed credential secrets from the response, audit and server log', async () => {
     const logLines: string[] = [];
+    const edgeLogger: EdgeLogger = {
+      debug: () => undefined,
+      warn: () => undefined,
+      error: (obj) => logLines.push(JSON.stringify(obj)),
+    };
     const loggedHarness = await buildTestApp({
+      edgeLogger,
       deps: {
         logger: {
           level: 'debug',
@@ -165,8 +172,7 @@ describe('gateway credentials', () => {
         assert.equal(response.statusCode, 502);
 
         const writes = loggedHarness.edge.requests.filter(
-          (request) =>
-            request.method === 'POST' && request.path.includes('/credentials/basicauth'),
+          (request) => request.method === 'POST' && request.path.includes('/credentials/basicauth'),
         );
         const secret = (writes.at(-1)?.body as { password?: string } | undefined)?.password;
         assert.ok(secret);
