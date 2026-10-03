@@ -177,7 +177,7 @@ connection; retrying the read on a fresh one` at `warn`.
 | Variable (on Ferrum Edge)       | Notes                                                                                                                                                                            |
 | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `FERRUM_ADMIN_JWT_SECRET`       | Must equal Nexus's value. A mismatch makes every Admin API call fail (`502 EDGE_ERROR`, "The gateway rejected the Nexus admin credentials").                                     |
-| `FERRUM_BASIC_AUTH_HMAC_SECRET` | At least 32 bytes. **Required before any `basic_auth` API is published**; without it the publish fails with `EDGE_ERROR`. Check Edge configuration and gateway logs for the cause. |
+| `FERRUM_BASIC_AUTH_HMAC_SECRET` | At least 32 bytes. **Required before any `basic_auth` API is published**; without it the publish fails with `EDGE_ERROR` and the gateway's message in `details.gateway_message`. |
 
 #### Multi-tenant gateways (`FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM`)
 
@@ -1647,13 +1647,19 @@ Structured JSON (pino) at `NEXUS_LOG_LEVEL`. Unhandled 5xx errors log at
 `error` with the URL and error; other error responses log at `debug` with
 `{ code, status, url }`.
 
-Gateway errors log at `error` as `Ferrum Edge Admin API returned an error` with
-only the HTTP method and status. Edge response bodies, request URLs and
-transport causes are omitted because Edge may echo submitted credentials.
-Callers receive fixed error messages and safe status details; API-spec
-rejections use `EDGE_REJECTED_SPEC` without gateway diagnostics. A
-request-serialization bug logs `Ferrum Edge Admin API request serialization
-failed` and returns `500 INTERNAL`; it does not mean the gateway is down.
+Gateway errors log at `error` as `Ferrum Edge Admin API returned an error`. For
+a gateway `400`, `409` or `422`, the message is also returned to the caller in
+`EDGE_ERROR.details.gateway_message`, except on non-GET `/consumers` writes,
+whose request can contain show-once credentials. Those writes log only the
+method, path and status and return fixed classifications with safe status
+details. For other endpoints, `401`, `403` and `5xx` response text is only in
+the log.
+
+Spec parse or validation rejections from Edge are `400 EDGE_REJECTED_SPEC` with
+`details.gateway_message` and `details.gateway_code`; the full gateway response
+is logged as `gateway_response`. A request-serialization bug logs `Ferrum Edge
+Admin API request serialization failed` and returns `500 INTERNAL`; it does not
+mean the gateway is down.
 
 ### Shutdown
 

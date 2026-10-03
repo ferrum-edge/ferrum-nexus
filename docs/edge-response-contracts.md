@@ -82,10 +82,19 @@ category, string `details` the explanation, and `code` the machine-readable
 discriminant. Validation failures carry `failures[]` with `resource_type` and
 `errors[]` instead.
 
-For API-spec writes rejected with a 4xx status (other than `401`/`403`), the
-client returns `EDGE_REJECTED_SPEC` with only the HTTP status. Other Edge errors
-also use fixed messages and safe status details. Error response text and
-response objects are omitted from logs because Edge may echo submitted secrets.
+For `POST`/`PUT` API-spec writes, a 4xx `Spec parse failed` or
+`Spec validation failed` (other than `401`/`403`) becomes
+`400 EDGE_REJECTED_SPEC`. Its public message includes the string `details` and
+each resource's first error, within 500 characters, plus a separately bounded
+`gateway_code`. The full parsed body is logged, bounded by the 16 MiB response
+limit. Other flat errors keep the normal mapping; `5xx` and authentication
+errors stay opaque `502`s.
+
+Non-GET `/consumers` writes can carry show-once credential material. For those
+requests only, error bodies and response objects are omitted from logs and
+thrown errors. The client returns fixed classifications and safe status
+details, including a fixed kind for the `applied: false` and uncertain-503
+cases.
 
 ## Upload limits
 

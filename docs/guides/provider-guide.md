@@ -151,8 +151,7 @@ short-lived tokens themselves.
 
 > **HTTP Basic needs gateway configuration.** Publishing fails unless the
 > operator has set `FERRUM_BASIC_AUTH_HMAC_SECRET` (at least 32 bytes) on Ferrum
-> Edge. Nexus returns a generic gateway error; ask the gateway operator to check
-> the Edge configuration and server-side gateway logs.
+> Edge. The error includes the gateway's reason in `details.gateway_message`.
 
 ### Require an approved access request
 
@@ -754,10 +753,10 @@ server. See [The upstream](#the-upstream).
 **"The slug is already in use."** Slugs are unique portal-wide. Pick another.
 
 **"Publishing failed with a gateway error."** Check the API error code and
-status, then ask the gateway operator to review Edge configuration and logs.
-Nexus omits Edge response text because an error can echo credentials or other
-submitted secrets. Verify gateway state before retrying a write whose
-acknowledgement may have been lost.
+status. A rejected spec includes Edge's bounded validation details; other
+validation refusals include `details.gateway_message`. For an unclear gateway
+failure, ask the operator to review Edge configuration and server logs. Verify
+gateway state before retrying a write whose acknowledgement may have been lost.
 
 **"A client gets 403."** They are authenticated but not approved for this API,
 or their credential belongs to a different identity than the grant. Check

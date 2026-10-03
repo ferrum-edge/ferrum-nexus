@@ -126,6 +126,59 @@ describe('gateway credentials', () => {
     assert.deepEqual(Object.keys(entries?.[0] ?? {}), ['password']);
   });
 
+  it('hides echoed credential secrets from the response, audit and server log', async () => {
+    const logLines: string[] = [];
+    const loggedHarness = await buildTestApp({
+      deps: {
+        logger: {
+          level: 'debug',
+          stream: { write: (line: string) => logLines.push(line) },
+        },
+      },
+    });
+    try {
+      const owner = await loggedHarness.registerUser({ email: 'cred-redaction@example.test' });
+      await loggedHarness.authed(owner, {
+        method: 'POST',
+        url: '/api/credentials',
+        payload: { credential_type: 'basicauth' },
+      });
+
+      loggedHarness.edge.queueFailure(
+        500,
+        { error: 'gateway echoed a failed credential write' },
+        '/credentials/basicauth',
+        'POST',
+        0,
+        true,
+      );
+      const response = await loggedHarness.authed(owner, {
+        method: 'POST',
+        url: '/api/credentials',
+        payload: { credential_type: 'basicauth' },
+      });
+      assert.equal(response.statusCode, 502);
+
+      const writes = loggedHarness.edge.requests.filter(
+        (request) => request.method === 'POST' && request.path.includes('/credentials/basicauth'),
+      );
+      const secret = (writes.at(-1)?.body as { password?: string } | undefined)?.password;
+      assert.ok(secret);
+      assert.equal(
+        response.json<ApiErrorBody>().error.message,
+        'The gateway rejected the request',
+      );
+
+      const rollback = (await loggedHarness.auditRows('credential.append_rollback')).at(-1);
+      assert.ok(rollback);
+      assert.ok(!JSON.stringify(rollback.details).includes(secret));
+      assert.ok(!response.body.includes(secret));
+      assert.ok(!logLines.join('').includes(secret));
+    } finally {
+      await loggedHarness.close();
+    }
+  });
+
   it('issues a JWT secret plus the consumer id the client must put in `sub`', async () => {
     const body = await issue(bob, 'jwt');
     assert.equal(body.secret.type, 'jwt');

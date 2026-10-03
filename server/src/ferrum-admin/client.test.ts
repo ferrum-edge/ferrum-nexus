@@ -531,21 +531,39 @@ describe('ferrum admin client', () => {
   });
 
   describe('error mapping', () => {
-    it('maps an upstream 503 to EDGE_ERROR without echoing the upstream text', async () => {
+    it('restores applied:false details for a non-credential write', async () => {
       edge.queueFailure(503, {
         error: 'internal detail nobody outside should see',
         applied: false,
+        reason: 'private gateway reason',
       });
       await assert.rejects(
-        () => client.consumers.list(),
+        () =>
+          client.proxies.create({
+            listen_path: '/nexus/oops',
+            backend_host: 'x.internal',
+            backend_port: 443,
+          }),
         (error: unknown) => {
           assert.ok(isNexusError(error));
           assert.equal(error.code, 'EDGE_ERROR');
           assert.equal(error.statusCode, 502);
-          assert.ok(!error.message.includes('nobody outside should see'));
-          assert.match(error.message, /verify its state before retrying/);
+          assert.match(error.message, /has not applied it yet/);
+          assert.deepEqual(error.details, { status: 503, reason: 'private gateway reason' });
           return true;
         },
+      );
+    });
+
+    it('keeps a GET 503 generic', async () => {
+      edge.queueFailure(503, { error: 'private read failure' });
+      await assert.rejects(
+        () => client.consumers.list(),
+        (error: unknown) =>
+          isNexusError(error) &&
+          error.code === 'EDGE_ERROR' &&
+          error.message === 'The gateway rejected the request' &&
+          JSON.stringify(error.details) === JSON.stringify({ status: 503 }),
       );
     });
 
@@ -566,15 +584,18 @@ describe('ferrum admin client', () => {
       );
     });
 
-    it('keeps upstream response text out of errors', async () => {
+    it('returns actionable gateway validation text on non-credential endpoints', async () => {
       edge.queueFailure(409, { error: 'listen_path already exists in this namespace' });
       await assert.rejects(
         () => client.consumers.list(),
         (error: unknown) => {
           assert.ok(isNexusError(error));
           assert.equal(error.code, 'EDGE_ERROR');
-          assert.equal(error.message, 'The gateway rejected the request');
-          assert.deepEqual(error.details, { status: 409 });
+          assert.match(error.message, /listen_path already exists/);
+          assert.deepEqual(error.details, {
+            status: 409,
+            gateway_message: 'listen_path already exists in this namespace',
+          });
           return true;
         },
       );
@@ -592,14 +613,14 @@ describe('ferrum admin client', () => {
       );
     });
 
-    it('does not expose long upstream errors', async () => {
+    it('trims long gateway validation errors', async () => {
       edge.queueFailure(400, { error: 'private upstream detail'.repeat(100) });
       await assert.rejects(
         () => client.consumers.list(),
         (error: unknown) => {
           assert.ok(isNexusError(error));
-          assert.deepEqual(error.details, { status: 400 });
-          assert.ok(!error.message.includes('private upstream detail'));
+          const { gateway_message: message } = error.details as { gateway_message: string };
+          assert.equal(message.length, 500);
           return true;
         },
       );
@@ -609,8 +630,8 @@ describe('ferrum admin client', () => {
       const secret = `credential-canary-${randomUUID()}`;
       const logs: Record<string, unknown>[] = [];
       const logged = createFerrumAdminClient(configFor(edgeUrl), {
-        debug: () => undefined,
-        warn: () => undefined,
+        debug: (entry) => logs.push(entry),
+        warn: (entry) => logs.push(entry),
         error: (entry) => logs.push(entry),
       });
       try {
@@ -619,7 +640,9 @@ describe('ferrum admin client', () => {
           ['basicauth', { password: secret }],
           ['jwt', { secret }],
         ] as const) {
+          const credentialPath = `/consumers/fixed-consumer-id/credentials/${type}`;
           for (const status of [422, 500]) {
+            const logsBefore = logs.length;
             edge.queueFailure(
               status,
               {
@@ -631,7 +654,7 @@ describe('ferrum admin client', () => {
               'POST',
             );
             await assert.rejects(
-              () => logged.consumers.addCredential(secret, type, entry),
+              () => logged.consumers.addCredential('fixed-consumer-id', type, entry),
               (error: unknown) => {
                 assert.ok(isNexusError(error));
                 assert.ok(
@@ -645,7 +668,9 @@ describe('ferrum admin client', () => {
                 return true;
               },
             );
-            assert.ok(!JSON.stringify(logs).includes(secret));
+            assert.ok(logs.length > logsBefore);
+            assert.ok(!JSON.stringify(logs.slice(logsBefore)).includes(secret));
+            assert.ok(logs.slice(logsBefore).some((entry) => entry.path === credentialPath));
           }
         }
       } finally {
@@ -892,7 +917,7 @@ describe('ferrum admin client', () => {
   });
 
   describe('api specs', () => {
-    it('reports a fixed API-spec rejection without exposing gateway diagnostics', async () => {
+    it('reports API-spec rejection diagnostics to callers', async () => {
       const malformed = specDocument('bad-extension', '/nexus/bad-extension', ['/invoices']);
       malformed['x-ferrum-proxy'] = { upstream_url: 'https://example.com' };
       for (const [document, code, explanation] of [
@@ -905,17 +930,15 @@ describe('ferrum admin client', () => {
             assert.ok(isNexusError(error));
             assert.equal(error.code, 'EDGE_REJECTED_SPEC');
             assert.equal(error.statusCode, 400);
-            assert.equal(error.message, 'The gateway rejected the API specification');
-            assert.deepEqual(error.details, { status: 400 });
-            assert.ok(!JSON.stringify(error.toBody()).includes(explanation));
-            assert.ok(!JSON.stringify(error.toBody()).includes(code));
+            assert.ok(error.message.includes(explanation));
+            assert.equal((error.details as { gateway_code: string }).gateway_code, code);
             return true;
           },
         );
       }
     });
 
-    it('omits gateway response bodies from API-spec errors and logs', async () => {
+    it('bounds API-spec diagnostics and logs the gateway response', async () => {
       const logs: Record<string, unknown>[] = [];
       const messages: (string | undefined)[] = [];
       const logged = createFerrumAdminClient(configFor(edgeUrl), {
@@ -940,12 +963,19 @@ describe('ferrum admin client', () => {
             (error: unknown) => {
               assert.ok(isNexusError(error));
               assert.equal(error.code, 'EDGE_REJECTED_SPEC');
-              assert.deepEqual(error.details, { status: 422 });
-              assert.ok(!JSON.stringify(error.toBody()).includes('not a string'));
+              const diagnostics = error.details as {
+                gateway_message: string;
+                gateway_code: string;
+              };
+              assert.equal(diagnostics.gateway_code, 'MalformedExtension');
+              assert.equal(
+                diagnostics.gateway_message.length,
+                typeof details === 'string' ? 500 : 'Spec parse failed'.length,
+              );
               return true;
             },
           );
-          assert.deepEqual(logs.at(-1), { method: 'POST', status: 422 });
+          assert.deepEqual(logs.at(-1)?.gateway_response, rejection);
         }
 
         const failures = [
@@ -961,13 +991,22 @@ describe('ferrum admin client', () => {
           (error: unknown) => {
             assert.ok(isNexusError(error));
             assert.equal(error.code, 'EDGE_REJECTED_SPEC');
-            assert.equal(error.message, 'The gateway rejected the API specification');
+            assert.match(
+              error.message,
+              /proxy: overlapping listen_path; plugin_config: invalid config/,
+            );
             assert.ok(!error.message.includes('not echoed'));
-            assert.deepEqual(error.details, { status: 400 });
+            assert.equal(
+              (error.details as { gateway_message: string }).gateway_message.length,
+              500,
+            );
             return true;
           },
         );
-        assert.deepEqual(logs.at(-1), { method: 'PUT', status: 400 });
+        assert.deepEqual(logs.at(-1)?.gateway_response, {
+          error: 'Spec validation failed',
+          failures,
+        });
 
         for (const status of [401, 403, 500, 503]) {
           edge.queueFailure(
@@ -996,7 +1035,7 @@ describe('ferrum admin client', () => {
           (error: unknown) => isNexusError(error) && error.code === 'INTERNAL',
         );
         assert.equal(edge.requests.length, before);
-        assert.equal(logs.at(-1)?.method, 'POST');
+        assert.equal(logs.at(-1)?.path, '/api-specs');
         assert.equal(logs.at(-1)?.status, undefined);
         assert.equal(messages.at(-1), 'Ferrum Edge Admin API request serialization failed');
       } finally {

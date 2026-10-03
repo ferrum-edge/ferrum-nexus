@@ -1431,13 +1431,13 @@ Handling the secret:
 - Rotation is a coordinated restart of both processes; see
   [`operations.md`](operations.md#rotating-ferrum_admin_jwt_secret).
 
-Edge error responses are untrusted: the gateway can echo any submitted value,
-including show-once credentials. The client never logs upstream response text,
-response objects, request URLs, or transport causes. Logs include only the HTTP
-method and status, while callers receive fixed error messages and safe status
-details. API-spec refusals use `EDGE_REJECTED_SPEC` without gateway diagnostics.
-For an uncertain `503` write acknowledgement, the error tells the caller to
-verify gateway state before retrying without including Edge's `reason` text.
+Non-GET `/consumers` writes can carry show-once credentials, and Edge can echo
+the request body in an error. For those writes only, `classify()` omits Edge
+response text and response objects from logs and thrown errors. The API returns
+fixed messages and safe status details; logs retain the method, path and status.
+Other Edge calls preserve their gateway validation and API-spec diagnostics.
+For credential writes, `applied: false` remains distinguishable from an
+uncertain `503` through a fixed `kind` without returning Edge's `reason` text.
 
 Invalid HTTP or JSON responses are `EDGE_PROTOCOL_ERROR`, carrying only the
 status and a fixed reason; response bytes are never logged or returned.

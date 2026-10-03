@@ -8,6 +8,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- **Credential-write errors no longer return Edge response text** (GHSA-qc7r-4j9m-pm44).
+  Non-GET `/consumers` failures omit `details.gateway_message` and use fixed
+  classifications so an Edge response that echoes a show-once secret cannot
+  expose it through the API. Other Edge endpoints keep their existing
+  validation and API-spec diagnostics.
 - **The acceptance suite now pins Ferrum Edge `v0.9.10`** by its published
   multi-architecture image digest. This release adds fail-closed handling for
   uninspectable MCP JSON-RPC batches and refuses non-UTF-8 charsets for
@@ -32,10 +37,6 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
-- **Edge Admin errors no longer expose submitted secrets** (GHSA-qc7r-4j9m-pm44).
-  Error responses can echo credential material or other request values. The
-  client now omits Edge response bodies, URLs and transport causes from logs
-  and thrown errors, and returns fixed classifications with safe status data.
 - **Failed list and detail reads no longer look empty** (#486). A persistent
   unavailable state with a Retry action now replaces the empty state when
   credentials, messages, APIs, users, organizations, notifications, audit
@@ -58,6 +59,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Security
 
+- **Edge credential-write errors no longer expose submitted secrets**
+  (GHSA-qc7r-4j9m-pm44). Non-GET `/consumers` failures omit Edge response text
+  from logs, API errors and rollback audit rows, including when Edge echoes the
+  submitted credential material.
 - **Only a credential's owner can rotate it** (GHSA-mr69-2744-f78w).
   `POST /api/credentials/:id/rotate` used to accept an `admin` or `super_admin`
   acting on another account's, application's or test consumer's credential,

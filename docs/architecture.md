@@ -47,10 +47,11 @@ Every change must keep three rules true:
    `audit/service.ts` classifies how each action's row commits: in the store
    transaction that records the change, as an intent row before gateway work
    that cannot be undone, or after commit.
-3. **Edge error bodies are always treated as untrusted.** `ferrum-admin/client.ts`
-   omits response text, response objects, URLs and transport causes from logs
-   and thrown errors because Edge can echo request secrets. Errors expose a
-   fixed classification and safe status details; `classify()` owns this policy.
+3. **Credential-bearing Edge writes never expose gateway response text.**
+   Non-GET `/consumers` calls can carry show-once material, so
+   `ferrum-admin/client.ts` omits Edge response text and objects from their logs
+   and thrown errors. Other endpoints preserve provider validation and
+   API-spec diagnostics. `classify()` owns this policy.
 
 The public reads are `GET /api/health`, `GET /api/health/edge`,
 `GET /api/auth/captcha` and `GET /api/branding`. Branding lets the login page
@@ -335,8 +336,9 @@ the same deadline. Writes are never replayed. See
 
 A `503` with `applied: false` means the write **is durable** but not yet live.
 It surfaces as `EDGE_ERROR` with an explicit message and is never retried
-automatically, because a blind retry of a create would `409`. The exact status
-and body each call accepts is in
+automatically, because a blind retry of a create would `409`. Credential writes
+retain the distinction as `kind: "write_durable_not_live"` without returning
+Edge's reason text. The exact status and body each call accepts is in
 [`edge-response-contracts.md`](edge-response-contracts.md); why `401`/`403`/`5xx`
 stay opaque is in
 [`security.md` §9](security.md#9-ferrum-edge-admin-jwt-hygiene).
