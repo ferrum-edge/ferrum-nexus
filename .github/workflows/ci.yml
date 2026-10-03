@@ -30,21 +30,6 @@ jobs:
             exit 1
           fi
 
-  image-pins:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Require digests for container images
-        run: |
-          unpinned=$(grep -rnE '^[[:space:]]*(image:[[:space:]]*|FROM[[:space:]]+)|docker[[:space:]]+run[[:space:]]' docker e2e .github/workflows \
-            | grep -vE '@sha256:[0-9a-f]{64}([[:space:]]|$)' \
-            | grep -vE 'image:[[:space:]]*\$\{|FROM[[:space:]]+scratch([[:space:]]|$)|docker[[:space:]]+run .*ferrum-nexus:' || true)
-          if [ -n "$unpinned" ]; then
-            echo "::error::Pin every container image to a full registry digest:"
-            echo "$unpinned"
-            exit 1
-          fi
-
   checks:
     runs-on: ubuntu-latest
     strategy:
@@ -53,6 +38,8 @@ jobs:
         node: ['22.14.0', '22', '24']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require digests for container images
+        run: bash ci/check-image-pins.sh
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}

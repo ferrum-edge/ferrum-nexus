@@ -11,8 +11,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **Quickstart and required CI container images are digest-pinned**
   (GHSA-99p3-8fmh-3pfc). Compose and workflow images, plus the acceptance
   upstream base image, retain readable version tags with immutable multi-arch
-  digests. Dependabot covers quickstart Compose pins, and CI rejects unpinned
-  container references.
+  digests. Dependabot covers Compose and Dockerfile pins; workflow service and
+  command images are refreshed manually. A required CI check rejects unpinned
+  container references. The Edge egress-policy visibility needed to detect
+  unsafe existing deployments (Part B of GHSA-93rq-89vr-38pc) is tracked in
+  ferrum-edge#5994.
 
 - **Credential-write errors no longer return Edge response text** (GHSA-qc7r-4j9m-pm44).
   Non-GET `/consumers` failures omit `details.gateway_message` and use fixed
@@ -79,8 +82,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **The quickstart Edge service enforces public-only upstream egress by default**
   (GHSA-93rq-89vr-38pc, Part A). The gateway's connection-time address check
   now complements Nexus's publish-time DNS validation. Operators who enable
-  `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` must also configure Edge to allow the
-  intended private destinations.
+  `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` must configure Edge with
+  `FERRUM_BACKEND_ALLOW_CIDRS` for intended private destinations while keeping
+  `FERRUM_BACKEND_ALLOW_IPS=public`. Edge's public mode also screens plugin
+  endpoints such as private Redis. Nexus cannot detect an Edge deployment
+  without public-only egress; that residual risk (Part B) is tracked in
+  ferrum-edge#5994.
 
 - **Edge credential-write errors no longer expose submitted secrets**
   (GHSA-qc7r-4j9m-pm44). Non-GET `/consumers` failures omit Edge response text

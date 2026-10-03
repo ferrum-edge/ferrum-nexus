@@ -107,3 +107,8 @@ updates:
       docker-compose:
         patterns:
           - '*'
+    ignore:
+      # Existing named volumes use this major's on-disk PostgreSQL format.
+      - dependency-name: postgres
+        update-types:
+          - version-update:semver-major
