@@ -629,7 +629,9 @@ recipient.
 ## Troubleshooting
 
 **"I cannot promote someone to admin."** Only a super admin can grant admin
-roles.
+roles. A promotion is also refused while the account has an identity at a
+provider not trusted to grant admin. Review the account's linked identities;
+remove the lower-trust link or restore that provider's admin trust, then retry.
 
 **"I cannot disable this account."** It is the last active super admin, it is
 an administrator and you are an admin, or it is your own account.

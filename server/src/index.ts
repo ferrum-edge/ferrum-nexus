@@ -481,18 +481,6 @@ export async function buildServer(
         'consumer with a credential.append_rollback basicauth row with withdrawn: false',
     );
   }
-  // Users is composed after credentials: disabling an account has to strip the
-  // gateway identity, not merely the browser session.
-  const users = createUsersService({
-    store: deps.store,
-    crypto,
-    audit,
-    notifications,
-    auth,
-    credentials,
-    locks,
-    log: warn,
-  });
   // After credentials for the same reason: an account whose claims no longer
   // map to a role is disabled through the same durable gateway revocation.
   const sso = createSsoService({
@@ -502,6 +490,20 @@ export async function buildServer(
     audit,
     auth,
     credentials,
+    locks,
+    log: warn,
+  });
+  // Users is composed after credentials: disabling an account has to strip the
+  // gateway identity, not merely the browser session. SSO supplies the same
+  // lower-trust identity check used by claims promotions.
+  const users = createUsersService({
+    store: deps.store,
+    crypto,
+    audit,
+    notifications,
+    auth,
+    credentials,
+    assertManualAdminPromotionAllowed: sso.assertManualAdminPromotionAllowed,
     locks,
     log: warn,
   });

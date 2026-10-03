@@ -446,7 +446,8 @@ that is not itself trusted with `admin`, the promotion is **withheld**:
 - `auth.sso_claims_sync` records `role_withheld`,
   `withheld_reason: "lower_trust_identities"` and `lower_trust_provider_ids`;
 - a `super_admin` decides: remove the identities the holder does not
-  recognise, after which the next sign-in promotes, or promote by hand.
+  recognise, after which the next sign-in promotes, or restore admin trust to
+  those providers before promoting the account by hand.
 
 A provider is trusted with `admin` when `sync_roles` is on and its default
 role or one of its mappings is `admin`, under the identity's issuer: its own
@@ -460,9 +461,12 @@ an explicit link.
 
 Changing a provider's `sync_roles` to `false` changes how its identities are
 classified for future promotion checks, but does not automatically demote
-accounts already holding admin or revoke their identities' access. Until a
-`super_admin` reviews and removes those links or manually changes the affected
-roles, those identities continue to open the account with its current role.
+accounts already holding admin or revoke their identities' access. Those
+identities continue to open the account with its current admin role. The
+settings audit row records the affected provider id in
+`providers_trust_lowered`. To find affected accounts, inspect each admin's
+linked identities with `GET /api/users/:id/identities` and look for that
+provider id; a `super_admin` can remove the identity or demote the account.
 
 A claims promotion that goes through **ends every other session of the
 account** in the same transaction (`terminated_sessions`), so a session opened
@@ -548,7 +552,8 @@ commits nothing (`sso_disabled`) unless all of these still hold:
 The deployment-wide domain list is checked again there too. A callback that
 writes one of the provider's links (a first-time link or a provisioned account)
 and a settings save hold the same per-provider lease (`sso:provider:<id>`). A
-save takes the key of every provider it can affect, in sorted order, and then,
+settings save first takes the deployment-wide `sso:settings` key and then the
+key of every provider it can affect, in sorted order, and then,
 inside its transaction, refuses with `409 CONFLICT` unless the stored settings
 are still the ones it worked that set out from. So on every backend, a save
 either commits before the callback's re-read, or waits for the callback to
@@ -586,11 +591,12 @@ Environment secrets stay in the environment. No token, code, verifier, `state`,
   use the domain lists and `link_existing_accounts: false`.
 
 - Every identity on an account opens it with the account's role. Claims never
-  promote an account with a lower-trust identity on it (above), but a
-  `super_admin` who promotes one by hand (`PATCH /api/users/:id`) accepts
-  every identity and live session on it as the holder's. Review the account's
-  links first (`GET /api/users/:id/identities`). A manual promotion does not
-  end the account's sessions.
+  promote an account with a lower-trust identity on it (above), and a manual
+  promotion to `admin` or `super_admin` is refused while any such identity
+  remains linked. The
+  `super_admin` must remove the identity or restore that provider's admin trust
+  first. The role change and first-time links take the account lifecycle lease,
+  so a link cannot slip between the check and promotion.
 - An address a lower-trust provider provisioned first leaves its rightful,
   admin-mapped holder refused with `privileged_account`, and with no password
   to sign in and link. A `super_admin` disables that account and removes its
@@ -885,8 +891,9 @@ says how to fix it: promote a second super admin.
 ### Cross-instance locks are fenced at commit
 
 Every cross-instance lock (the super-admin, account-lifecycle, password-change,
-message-budget, access-request-budget and broadcast keys, and the gateway
-consumer, identity and proxy keys) is an `edge_leases` row with a 60-second TTL,
+`sso:settings`, `sso:provider:<id>`, message-budget, access-request-budget and
+broadcast keys, and the gateway consumer, identity and proxy keys) is an
+`edge_leases` row with a 60-second TTL,
 renewed at half-life. A waiter gives up after 30 seconds with `409 CONFLICT`.
 Expiry keeps a crashed instance from blocking a key forever, but it also means a
 **stalled** instance can resume after another has taken its key.
@@ -1804,7 +1811,7 @@ Revoking a `retiring` credential again completes it.
 
 | Action                      | Target type      | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | --------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `admin.settings_update`     | `settings`       | Portal settings changed. `target_id` is `null`, or `sso` for `PUT /api/admin/sso`. `details`: `changed_keys` (never values), `smtp_password_source_change` when relevant, `captcha_self_test: "passed"` when one ran; for `sso`, `section`, `providers_added`, `providers_removed`, `links_removed` (provider id → links deleted with it) and `client_secrets_changed` (provider ids only).                                                                                                                    |
+| `admin.settings_update`     | `settings`       | Portal settings changed. `target_id` is `null`, or `sso` for `PUT /api/admin/sso`. `details`: `changed_keys` (never values), `smtp_password_source_change` when relevant, `captcha_self_test: "passed"` when one ran; for `sso`, `section`, `providers_added`, `providers_removed`, `links_removed` (provider id → links deleted with it), `client_secrets_changed` (provider ids only), and `providers_trust_lowered` (provider ids whose settings stopped granting admin trust).                                                                                                                    |
 | `admin.template_update`     | `email_template` | An email template was overridden. `target_id` is the template key. `details`: `key`, `body_html_sha256`, `body_text_sha256` (hex SHA-256 of the saved bodies).                                                                                                                                                                                                                                                                                                                                                 |
 | `admin.mass_email`          | `mass_email`     | A mass-email campaign was started: written, and counted against `NEXUS_MAX_MASS_EMAILS_PER_DAY`, **before** any outbox row is queued; if it cannot be written nothing is queued. One row per campaign — a retry of the same batch by the same administrator writes none, and is a retry only if its `content_sha256` matches (otherwise `409`). `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `bytes` (rendered size × recipients), `content_sha256`, `phase: "started"`. |
 | `admin.mass_email_complete` | `mass_email`     | What one attempt at a campaign queued, written best-effort after its chunked fan-out. `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `enqueued`, `chunks` (fan-out transactions committed), `failed` (a chunk failed; the retry with the same batch id queues the rest).                                                                                                                                                                                                   |

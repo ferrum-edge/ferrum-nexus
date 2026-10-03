@@ -1601,6 +1601,67 @@ describe('single sign-on', () => {
     assert.ok(leases.taken.includes(userLifecycleLockKey(target.id)));
   });
 
+  it('refuses a manual admin promotion while a lower-trust identity is linked', async () => {
+    const target = await localAccount('manual-promotion-trust@corp.example.test', true);
+    const linked = await signIn(h, partner, 'partner', {
+      sub: 'manual-promotion-lower-trust',
+      email: target.email,
+      email_verified: true,
+    });
+    assert.equal((await sessionOf(h, linked)).user.id, target.id);
+
+    const promotion = await h.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${target.id}`,
+      payload: { role: 'admin' },
+    });
+    assert.equal(promotion.statusCode, 409, promotion.body);
+    assert.match(promotion.body, /lower_trust_provider_ids/);
+    assert.equal((await h.store.users.findById(target.id))?.role, 'client');
+  });
+
+  it('audits providers whose settings stop granting admin trust', async () => {
+    const before = await readStoredSsoSettings(h.store);
+    const trusted = {
+      id: 'trust-lowered',
+      display_name: 'Trust lowered',
+      issuer: 'https://trust-lowered.example.test',
+      client_id: 'nexus-trust-lowered',
+      client_secret: 'test-secret',
+      scopes: ['openid', 'email'],
+      enabled: true,
+      jit_provisioning: true,
+      link_existing_accounts: false,
+      require_verified_email: true,
+      allowed_email_domains: [],
+      disable_local_password_for_linked: false,
+      sync_roles: true,
+      default_role: 'admin',
+      role_mappings: [],
+      org_mappings: [],
+    };
+    const saveProviders = (providers: unknown[]): Promise<LightMyRequestResponse> =>
+      h.authed(founder, { method: 'PUT', url: '/api/admin/sso', payload: { providers } });
+    try {
+      const added = await saveProviders([...before.providers, trusted]);
+      assert.equal(added.statusCode, 200, added.body);
+      const lowered = await saveProviders([
+        ...before.providers,
+        { ...trusted, sync_roles: false },
+      ]);
+      assert.equal(lowered.statusCode, 200, lowered.body);
+      const row = (await h.auditRows(AuditAction.ADMIN_SETTINGS_UPDATE)).find(
+        (entry) =>
+          entry.target_id === SSO_SETTINGS_KEY &&
+          Array.isArray(entry.details.providers_trust_lowered) &&
+          entry.details.providers_trust_lowered.includes('trust-lowered'),
+      );
+      assert.deepEqual(row?.details.providers_trust_lowered, ['trust-lowered']);
+    } finally {
+      await saveProviders(before.providers);
+    }
+  });
+
   it('refuses a settings save when the settings changed after it read them', async () => {
     const before = await readStoredSsoSettings(h.store);
     assert.equal(before.deprovision_on_access_loss, false);

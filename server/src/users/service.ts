@@ -241,6 +241,8 @@ export interface UsersServiceDeps {
   auth: AuthService;
   /** Strips the gateway identity of an account being disabled. */
   credentials: Pick<CredentialsService, 'disableGatewayAccess' | 'restoreGatewayAccess'>;
+  /** Applies the SSO claims trust rule to manual promotions inside the account transaction. */
+  assertManualAdminPromotionAllowed?: (tx: NexusStore, userId: Uuid) => Promise<void>;
   /**
    * Store-level cross-instance lock, built in the composition root from
    * `store.leases`. Every transition that can shrink the active `super_admin`
@@ -630,6 +632,14 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         store.transaction(async (tx) => {
           if (guardsLastSuperAdmin && (await tx.users.countActiveSuperAdmins(target.id)) === 0) {
             throw lastSuperAdmin();
+          }
+          if (
+            roleChanged &&
+            !roleAtLeast(target.role, 'admin') &&
+            update.role !== undefined &&
+            roleAtLeast(update.role, 'admin')
+          ) {
+            await deps.assertManualAdminPromotionAllowed?.(tx, target.id);
           }
           const row = await tx.users.updateIfMatches(
             target.id,

@@ -1565,17 +1565,23 @@ change away from `super_admin`, `status: "disabled"`, god mode's
 re-counts, and gets `409 LAST_SUPER_ADMIN` with nothing written. Promotions and
 re-enables take no lock.
 
-A second key, `users:lifecycle:<user_id>`, orders an account's status changes
-against registering a new gateway identity for it
+A second key, `users:lifecycle:<user_id>`, orders an account's role and status
+changes against registering a new gateway identity for it
 ([§11](#11-gateway-revocation-for-disabled-accounts)). It is always taken inside
 `users:super-admins` when both are needed.
 
-Single sign-on uses two of these keys. A callback that writes one of a
+Single sign-on uses three of these keys. A callback that writes one of a
 provider's links (a first-time link or a provisioned account) and every save of
 the single sign-on settings take `sso:provider:<id>`; returning sign-ins do not.
-Every sign-in into an existing account also takes its `users:lifecycle:<user_id>`
-key, inside the provider's, so a claims promotion and an automatic link at
-another provider never miss each other's write.
+Every settings save first takes the deployment-wide `sso:settings` key, then
+the affected provider keys in sorted order. A sign-in into an existing account
+takes its `users:lifecycle:<user_id>` key; a callback that also writes a new
+link takes the provider key first, so a claims promotion and an automatic link
+at another provider never miss each other's write.
+Manual role changes take the account lifecycle key as well. A promotion from
+below `admin` to an elevated role is refused while the account has an identity
+at a provider not trusted to grant `admin`; remove that identity or restore the
+provider's admin trust before promoting.
 
 Both behave like gateway leases. A `409 CONFLICT` saying "Another administrator
 change is in flight right now — please retry" means two admins changed
@@ -2458,8 +2464,9 @@ account. Explicitly linked identities count like automatic ones, since the
 portal cannot tell who held the session that linked them. To finish a
 withheld promotion, a `super_admin` reviews the account's links
 (`GET /api/users/:id/identities`) and either removes the ones its holder does
-not recognise, after which the next sign-in promotes it, or promotes the
-account by hand, which accepts those identities as the holder's.
+not recognise, after which the next sign-in promotes it, or restores admin
+trust to those providers before promoting the account by hand. A manual
+promotion is refused while a lower-trust identity remains linked.
 
 A promotion that goes through ends every other session the account holds
 (`terminated_sessions` in the same row), so no session opened before it, by
@@ -2495,9 +2502,13 @@ Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
 Every save takes the deployment-wide SSO settings lock as well as locks for
 the affected providers. Two saves at the same moment do not overwrite each
 other: a save whose settings another save changed after it read them is refused
-with `409 CONFLICT`. Reload the page and save again. Disabling `sync_roles`
-does not itself demote accounts that already have admin; see
-[the trust note in the security guide](security.md#claims-never-promote-an-account-a-lower-trust-provider-can-open).
+with `409 CONFLICT`. Reload the page and save again. When disabling `sync_roles`
+on a provider trusted to grant `admin`, its linked identities keep opening any
+existing admin accounts with their current role. The save records the provider
+id in `providers_trust_lowered`. To find affected accounts, inspect each admin's
+linked identities with `GET /api/users/:id/identities` and look for that
+provider id. See
+[Single sign-on in the security guide](security.md#single-sign-on-openid-connect).
 
 ### How accounts are matched
 
