@@ -68,7 +68,7 @@
  */
 
 import { Resolver } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { isIP, type LookupFunction } from 'node:net';
 
 import {
   isAlias,
@@ -425,6 +425,121 @@ export function isPublicUpstreamHost(host: string): boolean {
   if (version === 4) return isPublicIpv4(host);
   if (version === 6) return isPublicIpv6(host);
   return true;
+}
+
+/** Why {@link resolvePublicDestination} refused a host. */
+export type DestinationRefusal = 'not_public' | 'unresolvable' | 'resolves_non_public';
+
+const DESTINATION_REFUSAL_MESSAGES: Record<DestinationRefusal, string> = {
+  not_public: 'host is not a public address',
+  unresolvable: 'host could not be resolved',
+  resolves_non_public: 'host resolves to a non-public address',
+};
+
+/**
+ * A destination the public-address policy refused. It is also what a
+ * {@link createVettedLookup} lookup hands the socket, so `code` follows the
+ * `dns.lookup` convention: `ENOTFOUND` when the answer is unknown, and
+ * `ERR_NON_PUBLIC_DESTINATION` when it is known and not public. The message
+ * never names an address.
+ */
+export class DestinationRefusedError extends Error {
+  readonly code: string;
+  readonly reason: DestinationRefusal;
+  readonly host: string;
+
+  constructor(host: string, reason: DestinationRefusal, options?: { cause?: unknown }) {
+    super(DESTINATION_REFUSAL_MESSAGES[reason], options as ErrorOptions | undefined);
+    this.name = 'DestinationRefusedError';
+    this.code = reason === 'unresolvable' ? 'ENOTFOUND' : 'ERR_NON_PUBLIC_DESTINATION';
+    this.reason = reason;
+    this.host = host;
+  }
+}
+
+/**
+ * Resolve `host` (a lower-cased hostname or bare IP literal) and return its
+ * addresses, but only when every one of them is public — the same rules as
+ * {@link assertUpstreamAllowed}, without its opt-out.
+ *
+ * An IP literal is its own answer. A name is resolved through `resolve`, and a
+ * mixed public/private answer set is refused whole; an empty answer or a
+ * failed lookup is refused too, because neither shows the destination to be
+ * public.
+ *
+ * @throws DestinationRefusedError naming why.
+ */
+export async function resolvePublicDestination(
+  host: string,
+  resolve: UpstreamResolver,
+): Promise<ResolvedAddress[]> {
+  // `idp.internal.` is `idp.internal`: the root label must not slip a name
+  // past the suffix list.
+  if (!isPublicUpstreamHost(host.replace(/\.$/, ''))) {
+    throw new DestinationRefusedError(host, 'not_public');
+  }
+  const version = isIP(host);
+  if (version !== 0) return [{ address: host, family: version === 6 ? 6 : 4 }];
+  let answers: ResolvedAddress[];
+  try {
+    answers = await resolve(host);
+  } catch (cause) {
+    throw new DestinationRefusedError(host, 'unresolvable', { cause });
+  }
+  if (answers.length === 0) throw new DestinationRefusedError(host, 'unresolvable');
+  if (!answers.every(isPublicResolvedAddress)) {
+    throw new DestinationRefusedError(host, 'resolves_non_public');
+  }
+  return answers;
+}
+
+/** The address family a `dns.lookup` caller asked for; `0` for either. */
+function requestedFamily(family: number | 'IPv4' | 'IPv6' | undefined): 0 | 4 | 6 {
+  if (family === 4 || family === 'IPv4') return 4;
+  if (family === 6 || family === 'IPv6') return 6;
+  return 0;
+}
+
+/**
+ * A `lookup` for `net.connect`/`tls.connect` (an undici `Agent`'s `connect`
+ * option) that hands the socket only the addresses `vet` returns.
+ *
+ * A policy check that resolves a name and then lets the connection resolve it
+ * again checks one answer and connects to another: a name whose DNS changes
+ * in between (DNS rebinding) passes the check and reaches a private address.
+ * With this lookup the address the socket dials *is* the vetted one, while
+ * the hostname still drives `Host`, SNI and certificate verification. A
+ * refusal from `vet` fails the connection before any packet is sent.
+ *
+ * `vet` receives the lower-cased hostname; {@link resolvePublicDestination}
+ * is the usual one. The caller's `family` and `all` options are honoured.
+ */
+export function createVettedLookup(
+  vet: (host: string) => Promise<ResolvedAddress[]>,
+): LookupFunction {
+  return function vettedLookup(hostname, options, callback): void {
+    const family = requestedFamily(options.family);
+    void vet(hostname.toLowerCase()).then(
+      (vetted) => {
+        const usable = family === 0 ? vetted : vetted.filter((entry) => entry.family === family);
+        const first = usable[0];
+        if (first === undefined) {
+          callback(new DestinationRefusedError(hostname, 'unresolvable'), '');
+        } else if (options.all === true) {
+          callback(null, usable);
+        } else {
+          callback(null, first.address, first.family);
+        }
+      },
+      (error: unknown) => {
+        const refused =
+          error instanceof Error
+            ? error
+            : new DestinationRefusedError(hostname, 'unresolvable', { cause: error });
+        callback(refused, '');
+      },
+    );
+  };
 }
 
 function isPublicIpv4(host: string): boolean {

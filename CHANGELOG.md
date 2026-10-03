@@ -116,6 +116,22 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   (`DELETE /api/credentials/:id`) and reconciling; after a revoke, the owner
   issues a new one. The `credential.rotate` audit row no longer
   carries `owner_user_id`, since the actor is always the owner.
+- **OpenID Connect requests now connect only to addresses the public-address
+  check vetted** (GHSA-cq2h-g4g3-rw3p). Discovery, key-set and token requests
+  checked a provider host's DNS answer and then let the HTTP stack resolve the
+  name again to connect, so a name whose answer changed in between (DNS
+  rebinding) could reach a private address. Provider requests now go through
+  undici with a connection-time lookup that resolves the name through the same
+  policy resolver, refuses any answer set containing a non-public address, and
+  dials only the vetted addresses; `Host`, SNI and certificate verification
+  still use the provider's hostname, and redirects are still refused.
+  `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK` (where `localhost` is now dialled only at
+  loopback addresses) and `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES` behave as before.
+  Provider requests now always connect directly: they ignore the environment
+  proxy settings (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and Node's
+  `NODE_USE_ENV_PROXY` / `--use-env-proxy`), because a proxy resolves the
+  provider name itself and cannot be vetted. A deployment whose only egress is
+  a proxy must allow direct egress to the identity provider.
 
 ## [0.3.0] - 2026-10-01
 
