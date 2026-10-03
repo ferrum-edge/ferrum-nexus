@@ -2432,7 +2432,8 @@ Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
 2. With no link, an existing account with the same address is linked
    automatically only when all of these hold:
    - `link_existing_accounts` is on;
-   - the account is not an `admin` or `super_admin` (`privileged_account`);
+   - the account is not an `admin` or `super_admin`, and the provider's claims
+     would not make it one (`privileged_account`);
    - the provider asserts `email_verified: true`;
    - the portal holds a **recorded proof** of the account's address. The
      holder redeemed a verification link or completed a password reset for
@@ -2519,7 +2520,7 @@ reason and a short detail (never a token or secret):
 
 | Reason                     | Usual cause                                                                                                                                       |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sso_disabled`             | Policy `local_only`, or an unknown or disabled provider.                                                                                          |
+| `sso_disabled`             | Policy `local_only`, or an unknown or disabled provider — including one removed, disabled or edited while the sign-in was in flight.              |
 | `provider_unavailable`     | Discovery, JWKS or the token endpoint failed; an issuer mismatch; a secret that no longer decrypts.                                               |
 | `invalid_state`            | The sign-in took over 10 minutes, cookies were blocked, or the response was not for this browser.                                                 |
 | `idp_error`                | The provider refused the request (consent denied, client misconfigured).                                                                          |
@@ -2529,7 +2530,7 @@ reason and a short detail (never a token or secret):
 | `email_not_verified`       | The provider did not assert `email_verified: true` where linking, a domain list or provisioning needs it.                                         |
 | `account_exists`           | An account holds the address but the portal has no proof of it, or it is linked there already (see "How accounts are matched").                   |
 | `address_unproven`         | A profile link to an account the portal holds no address proof for: use **Forgot password**, which confirms the address, then link again.         |
-| `privileged_account`       | The address belongs to an `admin` or `super_admin`, which links from its profile only.                                                            |
+| `privileged_account`       | The account is an `admin` or `super_admin`, or this provider's claims would make it one: it links from its profile only.                          |
 | `link_session_mismatch`    | A profile link came back to a different session, or none: start it again while signed in.                                                         |
 | `already_linked`           | A profile link found the identity linked to another account, or this account linked at that provider.                                             |
 | `access_denied`            | The claims map to no role.                                                                                                                        |

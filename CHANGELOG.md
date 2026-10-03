@@ -52,6 +52,29 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   renamed sender variable fails the acceptance gate rather than silently
   falling back to the built-in default.
 
+### Security
+
+- GHSA-8w4q-fv8h-jv73: automatic single sign-on linking refused an account
+  that already was an `admin`, but not one the same sign-in's claims were about
+  to promote. A provider mapping a user to `admin` could therefore link to an
+  account another, lower-trust provider had provisioned or linked, and the
+  promotion then reached that provider's identity and live sessions too.
+  Automatic linking is now refused (`privileged_account`) when the account is
+  an administrator or the provider's claims would make it one, checked when the
+  sign-in is planned and again in the transaction that commits it. Such an
+  account links only explicitly, from its holder's signed-in session.
+  **Behaviour change:** a deployment that relied on automatic linking to
+  attach an admin-mapped provider to an existing account must link explicitly.
+- GHSA-p9qg-f2w6-c4qj: a single sign-on callback read its provider before the
+  token exchange and did not read it again, so a callback in flight when an
+  administrator removed or disabled the provider could still link, provision,
+  sync claims or open a session afterwards. The transaction that commits a
+  callback now re-reads the settings and refuses (`sso_disabled`) unless the
+  login policy still allows single sign-on and the provider is still in force,
+  enabled and configured as the callback found it. Callbacks and settings saves
+  take the same per-provider lease (`sso:provider:<id>`), so the re-read cannot
+  miss a save committing at the same moment on any database backend.
+
 ## [0.3.0] - 2026-10-01
 
 Paired with Ferrum Edge `v0.9.9`. Upgrades a `v0.2.0` database in place with

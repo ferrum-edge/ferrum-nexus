@@ -36,9 +36,9 @@
  *   `email_verified: true` (the JSON boolean) *and* the portal holds a proof
  *   of the address in `user_email_proofs` — a redeemed verification link, a
  *   completed reset, or a provider that verified it before. `email_verified`
- *   alone is not proof. An `admin` or `super_admin` is never linked this way;
- *   its holder links explicitly. Anything less is refused and nothing is
- *   linked.
+ *   alone is not proof. An `admin` or `super_admin` is never linked this way,
+ *   and neither is an account this provider's claims would make one: its
+ *   holder links explicitly. Anything less is refused and nothing is linked.
  * - **Otherwise, with just-in-time provisioning on, a new account is created**
  *   (by default only for a verified address), with the role and organization
  *   the claims map to. It is never a `super_admin`, and it has no password.
@@ -50,6 +50,12 @@
  * gateway revocation an administrator's disable queues. The session is the
  * ordinary portal session (`auth/service.ts`), and every change commits in
  * one transaction with its audit row.
+ *
+ * That transaction re-reads the provider: one removed, disabled or
+ * reconfigured while the callback waited on the provider's token endpoint, or
+ * a login policy turned to `local_only`, commits nothing. Callbacks and
+ * settings saves both hold the provider's `ssoProviderLockKey`, so the
+ * re-read cannot miss a save that is committing at the same moment.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -81,7 +87,11 @@ import type { NexusStore, UserIdentityRecord, UserRecord } from '../db/store.js'
 import { SCRYPT_PARAMS, type NexusCrypto } from '../lib/crypto.js';
 import { forbidden, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
-import { userLifecycleLockKey, type KeyedSerializer } from '../lib/keyed-serializer.js';
+import {
+  ssoProviderLockKey,
+  userLifecycleLockKey,
+  type KeyedSerializer,
+} from '../lib/keyed-serializer.js';
 import {
   issuerProblem,
   MAX_ALLOWED_EMAIL_DOMAINS,
@@ -281,6 +291,28 @@ function checkDomains(email: string | null, emailVerified: boolean, domains: str
   }
 }
 
+/**
+ * Whether an automatic link would leave a provider identity on an
+ * administrator's account: the account is an `admin` or `super_admin` already,
+ * or the claims this sign-in carries would make it one.
+ *
+ * The second half is the one that matters across providers. The role is the
+ * account's, not the identity's, so a promotion by this provider would hand
+ * administrator access to every identity already on the account — one a
+ * lower-trust provider provisioned or linked included — and to its live
+ * sessions. Only an explicit link, made by the account's holder from a
+ * signed-in session, may put an identity on an administrator's account.
+ */
+function privilegedAutoLink(
+  account: UserRecord,
+  mapping: ClaimMapping,
+  provider: SsoProviderSettings,
+): boolean {
+  if (roleAtLeast(account.role, 'admin')) return true;
+  const mapped = planClaimsChange(account, mapping, provider, false)?.role;
+  return mapped !== undefined && roleAtLeast(mapped, 'admin');
+}
+
 /** How a sign-in reaches its account. */
 type SignInPlan =
   | { kind: 'returning'; user: UserRecord; identity: UserIdentityRecord }
@@ -338,6 +370,52 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       );
     }
     return provider;
+  }
+
+  /**
+   * Re-read the settings through `tx`, inside the transaction about to commit
+   * what a callback decided, and refuse unless the login policy still allows
+   * single sign-on and the provider is still in force, enabled, and configured
+   * exactly as the callback found it before its slow token exchange.
+   *
+   * Run under the provider's {@link ssoProviderLockKey}, which a settings save
+   * takes as well, so a removal or a disable that has committed is seen here,
+   * and one that has not yet started waits for this commit.
+   */
+  async function currentSettings(
+    tx: NexusStore,
+    provider: SsoProviderSettings,
+  ): Promise<StoredSsoSettings> {
+    const stored = await readStoredSsoSettings(tx);
+    if (stored.policy === 'local_only') {
+      throw new OidcError('sso_disabled', 'The login policy became local_only during sign-in');
+    }
+    const current = providersInForce(config, stored).find(
+      ({ settings }) => settings.id === provider.id,
+    );
+    if (!current || !current.settings.enabled) {
+      throw new OidcError('sso_disabled', 'The provider was removed or disabled during sign-in');
+    }
+    if (!isDeepStrictEqual(current.settings, provider)) {
+      throw new OidcError('sso_disabled', 'The provider was reconfigured during sign-in');
+    }
+    return stored;
+  }
+
+  /**
+   * Run `fn` holding {@link ssoProviderLockKey} for every one of `providerIds`,
+   * taken one inside the other in sorted order so two saves never wait on each
+   * other's keys. Never called inside a transaction.
+   */
+  function underProviderLocks<T>(providerIds: Iterable<string>, fn: () => Promise<T>): Promise<T> {
+    const keys = [...new Set(providerIds)].sort().map(ssoProviderLockKey);
+    let section = fn;
+    // Innermost last: the first key in sorted order is the outermost section.
+    for (const key of keys.reverse()) {
+      const inner = section;
+      section = () => locks(key, inner);
+    }
+    return section();
   }
 
   /** Mint and seal one attempt, and build the authorization request for it. */
@@ -413,7 +491,10 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
   /**
    * Disable an account whose claims no longer map to any role, and queue its
    * gateway revocation — the same durable work an administrator's disable
-   * owes, taken under the same lifecycle key. Never a `super_admin`.
+   * owes, taken under the same lifecycle key. Never a `super_admin`. Taken
+   * inside the provider's {@link ssoProviderLockKey}, and only while the
+   * provider and `deprovision_on_access_loss` are still as the callback read
+   * them.
    */
   async function deprovision(
     user: UserRecord,
@@ -421,34 +502,42 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     subject: string,
     context: RequestContext,
   ): Promise<void> {
-    const job = await locks(userLifecycleLockKey(user.id), () =>
-      store.transaction(async (tx) => {
-        const current = await tx.users.findById(user.id);
-        if (!current || current.status !== 'active' || current.role === 'super_admin') return null;
-        const disabled = await tx.users.updateIfMatches(
-          current.id,
-          { role: current.role, status: 'active' },
-          { status: 'disabled' },
-        );
-        if (!disabled) return null;
-        const queued = await tx.gatewayTeardownJobs.upsertPending(current.id, null, nowIso());
-        const terminatedSessions = await tx.sessions.deleteForUser(current.id);
-        await audit.forStore(tx).record(
-          SYSTEM_ACTOR,
-          AuditAction.AUTH_SSO_DEPROVISION,
-          { type: 'user', id: current.id },
-          {
-            provider_id: provider.id,
-            subject,
-            reason: 'no_mapped_role',
-            role: current.role,
-            terminated_sessions: terminatedSessions,
-            gateway_teardown: 'queued',
-          },
-          context.ip,
-        );
-        return queued;
-      }),
+    const job = await locks(ssoProviderLockKey(provider.id), () =>
+      locks(userLifecycleLockKey(user.id), () =>
+        store.transaction(async (tx) => {
+          // The provider, and the setting that called for this, as they are
+          // now: a stale callback deprovisions nobody.
+          const stored = await currentSettings(tx, provider);
+          if (!stored.deprovision_on_access_loss) return null;
+          const current = await tx.users.findById(user.id);
+          if (!current || current.status !== 'active' || current.role === 'super_admin') {
+            return null;
+          }
+          const disabled = await tx.users.updateIfMatches(
+            current.id,
+            { role: current.role, status: 'active' },
+            { status: 'disabled' },
+          );
+          if (!disabled) return null;
+          const queued = await tx.gatewayTeardownJobs.upsertPending(current.id, null, nowIso());
+          const terminatedSessions = await tx.sessions.deleteForUser(current.id);
+          await audit.forStore(tx).record(
+            SYSTEM_ACTOR,
+            AuditAction.AUTH_SSO_DEPROVISION,
+            { type: 'user', id: current.id },
+            {
+              provider_id: provider.id,
+              subject,
+              reason: 'no_mapped_role',
+              role: current.role,
+              terminated_sessions: terminatedSessions,
+              gateway_teardown: 'queued',
+            },
+            context.ip,
+          );
+          return queued;
+        }),
+      ),
     );
     if (!job) return;
     const attempt = await runGatewayTeardown({
@@ -598,8 +687,9 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         throw new OidcError('account_exists', 'Linking existing accounts is off for this provider');
       }
       // Whoever controls a provider that asserts this address would gain the
-      // account: never an administrator's, which links explicitly instead.
-      if (roleAtLeast(existing.role, 'admin')) {
+      // account: never an administrator's, nor one these claims would make
+      // an administrator's, which links explicitly instead.
+      if (privilegedAutoLink(existing, mapping, settings)) {
         throw new OidcError('privileged_account', 'Administrator accounts link explicitly');
       }
       if (!emailVerified) {
@@ -656,150 +746,168 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         : false;
     const subject = claims.sub;
 
-    return store.transaction(async (tx) => {
-      let user: UserRecord;
-      let identityId: Uuid;
-      if (plan.kind === 'provision') {
-        if (email === null || mapping.role === null) {
-          throw new OidcError('server_error', 'Provisioning without an address or a role');
-        }
-        user = await tx.users.create({
-          email,
-          password_hash: passwordHash,
-          display_name: displayNameFromClaims(claims, email),
-          role: mapping.role,
-          org_id: typeof mapping.orgId === 'string' && orgExists ? mapping.orgId : null,
-          status: 'active',
-          email_verified: emailVerified,
-        });
-        const identity = await tx.userIdentities.create({
-          user_id: user.id,
-          provider_id: provider.id,
-          issuer: provider.issuer,
-          subject,
-          email,
-          provisioned: true,
-          last_login_at: at,
-        });
-        identityId = identity.id;
-        // The account never has a local password, whatever later happens to
-        // this link or this provider.
-        await tx.passwordLocks.create(user.id, provider.id, at);
-        if (emailVerified) {
-          await tx.emailProofs.upsert(user.id, email, 'identity_provider', at);
-        }
-        await audit.forStore(tx).record(
-          { id: user.id, role: user.role },
-          AuditAction.AUTH_SSO_PROVISION,
-          { type: 'user', id: user.id },
-          {
-            provider_id: provider.id,
-            subject,
+    // Under the provider's key, taken before the transaction (never inside
+    // it): a settings save that removes or disables the provider either
+    // committed before this body's re-read below, or waits for this commit.
+    return locks(ssoProviderLockKey(provider.id), () =>
+      store.transaction(async (tx) => {
+        // What the callback read before its token exchange may be stale by
+        // now: the provider, the login policy and the deployment-wide domain
+        // list are held to what is committed, in the transaction that commits.
+        const stored = await currentSettings(tx, provider);
+        checkDomains(email, emailVerified, stored.allowed_email_domains);
+        let user: UserRecord;
+        let identityId: Uuid;
+        if (plan.kind === 'provision') {
+          if (email === null || mapping.role === null) {
+            throw new OidcError('server_error', 'Provisioning without an address or a role');
+          }
+          user = await tx.users.create({
             email,
+            password_hash: passwordHash,
+            display_name: displayNameFromClaims(claims, email),
+            role: mapping.role,
+            org_id: typeof mapping.orgId === 'string' && orgExists ? mapping.orgId : null,
+            status: 'active',
             email_verified: emailVerified,
-            role: user.role,
-            org_id: user.org_id,
-            role_mapping: mapping.roleMapping,
-            org_mapping: mapping.orgMapping,
-          },
-          context.ip,
-        );
-      } else {
-        const current = await tx.users.findById(plan.user.id);
-        if (!current) throw new OidcError('server_error', 'The account no longer exists');
-        if (current.status !== 'active') {
-          throw new OidcError('account_disabled', 'The account was disabled during sign-in');
-        }
-        user = current;
-        if (plan.kind === 'link') {
+          });
           const identity = await tx.userIdentities.create({
             user_id: user.id,
             provider_id: provider.id,
             issuer: provider.issuer,
             subject,
             email,
-            provisioned: false,
+            provisioned: true,
             last_login_at: at,
           });
           identityId = identity.id;
-          // An automatic link held both proofs of this very address, so the
-          // provider's verification refreshes the portal's. An explicit link
-          // records none: there the provider's word alone would be the proof.
-          if (
-            !plan.explicit &&
-            emailVerified &&
-            email !== null &&
-            email === user.email.trim().toLowerCase()
-          ) {
+          // The account never has a local password, whatever later happens to
+          // this link or this provider.
+          await tx.passwordLocks.create(user.id, provider.id, at);
+          if (emailVerified) {
             await tx.emailProofs.upsert(user.id, email, 'identity_provider', at);
           }
           await audit.forStore(tx).record(
             { id: user.id, role: user.role },
-            AuditAction.AUTH_SSO_LINK,
+            AuditAction.AUTH_SSO_PROVISION,
             { type: 'user', id: user.id },
             {
               provider_id: provider.id,
               subject,
-              identity_id: identity.id,
               email,
-              explicit: plan.explicit,
-              email_verified_by_provider: emailVerified,
-            },
-            context.ip,
-          );
-        } else {
-          identityId = plan.identity.id;
-          if (!(await tx.userIdentities.touchLogin(identityId, email, at))) {
-            throw new OidcError('server_error', 'The identity was unlinked during sign-in');
-          }
-        }
-
-        const change = planClaimsChange(user, mapping, provider, orgExists);
-        if (change) {
-          const updated = await tx.users.updateIfMatches(
-            user.id,
-            { role: user.role, status: 'active' },
-            change,
-          );
-          if (!updated) throw new OidcError('server_error', 'The account changed during sign-in');
-          await audit.forStore(tx).record(
-            SYSTEM_ACTOR,
-            AuditAction.AUTH_SSO_CLAIMS_SYNC,
-            { type: 'user', id: user.id },
-            {
-              provider_id: provider.id,
-              subject,
-              ...(change.role !== undefined ? { from_role: user.role, to_role: change.role } : {}),
-              ...(change.org_id !== undefined
-                ? { from_org_id: user.org_id, to_org_id: change.org_id }
-                : {}),
+              email_verified: emailVerified,
+              role: user.role,
+              org_id: user.org_id,
               role_mapping: mapping.roleMapping,
               org_mapping: mapping.orgMapping,
             },
             context.ip,
           );
-          user = updated;
-        }
-      }
+        } else {
+          const current = await tx.users.findById(plan.user.id);
+          if (!current) throw new OidcError('server_error', 'The account no longer exists');
+          if (current.status !== 'active') {
+            throw new OidcError('account_disabled', 'The account was disabled during sign-in');
+          }
+          user = current;
+          if (plan.kind === 'link') {
+            // Held to the account as it is now: a role granted since the plan
+            // was made, or one these claims are about to grant, makes this an
+            // administrator's account, which only an explicit link may reach.
+            if (!plan.explicit && privilegedAutoLink(user, mapping, provider)) {
+              throw new OidcError('privileged_account', 'Administrator accounts link explicitly');
+            }
+            const identity = await tx.userIdentities.create({
+              user_id: user.id,
+              provider_id: provider.id,
+              issuer: provider.issuer,
+              subject,
+              email,
+              provisioned: false,
+              last_login_at: at,
+            });
+            identityId = identity.id;
+            // An automatic link held both proofs of this very address, so the
+            // provider's verification refreshes the portal's. An explicit link
+            // records none: there the provider's word alone would be the proof.
+            if (
+              !plan.explicit &&
+              emailVerified &&
+              email !== null &&
+              email === user.email.trim().toLowerCase()
+            ) {
+              await tx.emailProofs.upsert(user.id, email, 'identity_provider', at);
+            }
+            await audit.forStore(tx).record(
+              { id: user.id, role: user.role },
+              AuditAction.AUTH_SSO_LINK,
+              { type: 'user', id: user.id },
+              {
+                provider_id: provider.id,
+                subject,
+                identity_id: identity.id,
+                email,
+                explicit: plan.explicit,
+                email_verified_by_provider: emailVerified,
+              },
+              context.ip,
+            );
+          } else {
+            identityId = plan.identity.id;
+            if (!(await tx.userIdentities.touchLogin(identityId, email, at))) {
+              throw new OidcError('server_error', 'The identity was unlinked during sign-in');
+            }
+          }
 
-      await tx.users.touchLastLogin(user.id, at);
-      const issued = await auth.issueSession(user, context, tx);
-      await audit.forStore(tx).record(
-        { id: user.id, role: user.role },
-        AuditAction.AUTH_SSO_LOGIN,
-        { type: 'user', id: user.id },
-        {
-          provider_id: provider.id,
-          subject,
-          identity_id: identityId,
-          email,
-          ...(plan.kind === 'provision' ? { provisioned: true } : {}),
-          ...(plan.kind === 'link' ? { linked: true } : {}),
-        },
-        context.ip,
-      );
-      return issued;
-    });
+          const change = planClaimsChange(user, mapping, provider, orgExists);
+          if (change) {
+            const updated = await tx.users.updateIfMatches(
+              user.id,
+              { role: user.role, status: 'active' },
+              change,
+            );
+            if (!updated) throw new OidcError('server_error', 'The account changed during sign-in');
+            await audit.forStore(tx).record(
+              SYSTEM_ACTOR,
+              AuditAction.AUTH_SSO_CLAIMS_SYNC,
+              { type: 'user', id: user.id },
+              {
+                provider_id: provider.id,
+                subject,
+                ...(change.role !== undefined
+                  ? { from_role: user.role, to_role: change.role }
+                  : {}),
+                ...(change.org_id !== undefined
+                  ? { from_org_id: user.org_id, to_org_id: change.org_id }
+                  : {}),
+                role_mapping: mapping.roleMapping,
+                org_mapping: mapping.orgMapping,
+              },
+              context.ip,
+            );
+            user = updated;
+          }
+        }
+
+        await tx.users.touchLastLogin(user.id, at);
+        const issued = await auth.issueSession(user, context, tx);
+        await audit.forStore(tx).record(
+          { id: user.id, role: user.role },
+          AuditAction.AUTH_SSO_LOGIN,
+          { type: 'user', id: user.id },
+          {
+            provider_id: provider.id,
+            subject,
+            identity_id: identityId,
+            email,
+            ...(plan.kind === 'provision' ? { provisioned: true } : {}),
+            ...(plan.kind === 'link' ? { linked: true } : {}),
+          },
+          context.ip,
+        );
+        return issued;
+      }),
+    );
   }
 
   async function publicConfig(): Promise<SsoPublicConfigResponse> {
@@ -1084,39 +1192,49 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       for (const [id, secret] of secretWrites) {
         encrypted.set(id, secret === null ? null : crypto.encryptJson(secret));
       }
-      await store.transaction(async (tx) => {
-        await tx.settings.set(SSO_SETTINGS_KEY, next, false);
-        for (const [id, blob] of encrypted) {
-          if (blob === null) await tx.settings.delete(ssoClientSecretKey(id));
-          else await tx.settings.set(ssoClientSecretKey(id), blob, true);
-        }
-        // A removed provider's links go with it, so a provider added later
-        // under the same id starts with none. A stored provider shadowed by an
-        // environment one leaves the links alone: they are the environment
-        // provider's, which stays in force.
-        const envIds = new Set(config.sso.providers.map((provider) => provider.settings.id));
-        const linksRemoved: Record<string, number> = {};
-        for (const id of removed) {
-          if (envIds.has(id)) continue;
-          linksRemoved[id] = await tx.userIdentities.deleteByProvider(id);
-        }
-        // Key names and provider ids only: never a secret, and never the
-        // mappings themselves, which the settings page shows to admins anyway.
-        await audit.forStore(tx).record(
-          actor,
-          AuditAction.ADMIN_SETTINGS_UPDATE,
-          { type: 'settings', id: SSO_SETTINGS_KEY },
-          {
-            section: 'sso',
-            changed_keys: changed,
-            providers_added: added,
-            providers_removed: removed,
-            links_removed: linksRemoved,
-            client_secrets_changed: [...secretWrites.keys()],
-          },
-          ip,
-        );
-      });
+      // Every provider this save can touch — removed, disabled, reconfigured,
+      // or cut off by the policy or the domain list — is locked first, so a
+      // callback that read the old settings either commits before this save
+      // or re-reads the new ones and commits nothing (`currentSettings`).
+      const affected = [
+        ...providersInForce(config, stored).map(({ settings }) => settings.id),
+        ...next.providers.map((provider) => provider.id),
+      ];
+      await underProviderLocks(affected, () =>
+        store.transaction(async (tx) => {
+          await tx.settings.set(SSO_SETTINGS_KEY, next, false);
+          for (const [id, blob] of encrypted) {
+            if (blob === null) await tx.settings.delete(ssoClientSecretKey(id));
+            else await tx.settings.set(ssoClientSecretKey(id), blob, true);
+          }
+          // A removed provider's links go with it, so a provider added later
+          // under the same id starts with none. A stored provider shadowed by an
+          // environment one leaves the links alone: they are the environment
+          // provider's, which stays in force.
+          const envIds = new Set(config.sso.providers.map((provider) => provider.settings.id));
+          const linksRemoved: Record<string, number> = {};
+          for (const id of removed) {
+            if (envIds.has(id)) continue;
+            linksRemoved[id] = await tx.userIdentities.deleteByProvider(id);
+          }
+          // Key names and provider ids only: never a secret, and never the
+          // mappings themselves, which the settings page shows to admins anyway.
+          await audit.forStore(tx).record(
+            actor,
+            AuditAction.ADMIN_SETTINGS_UPDATE,
+            { type: 'settings', id: SSO_SETTINGS_KEY },
+            {
+              section: 'sso',
+              changed_keys: changed,
+              providers_added: added,
+              providers_removed: removed,
+              links_removed: linksRemoved,
+              client_secrets_changed: [...secretWrites.keys()],
+            },
+            ip,
+          );
+        }),
+      );
       oidc.clearCache();
       return getAdminSettings();
     },

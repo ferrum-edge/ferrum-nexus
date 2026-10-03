@@ -331,9 +331,16 @@ or `ES256`, is refused.
    **An `admin` or `super_admin` account is never linked this way**
    (`privileged_account`). Whoever controls a provider that asserts the
    address would otherwise gain administrator access. Its holder links
-   explicitly (below). Anything else that falls short is refused
-   (`email_not_verified` or `account_exists`) and nothing is linked. A second
-   provider is held to exactly the same rule.
+   explicitly (below). **Neither is an account this provider's claims would
+   make an `admin`**: the check is made against the role the account would
+   have after this sign-in's claims sync, not only the role it has now. A
+   role belongs to the account, not to the identity, so promoting it would
+   hand administrator access to every identity already on it, one that a
+   lower-trust provider provisioned or linked included, and to that
+   identity's live sessions. The sign-in's transaction checks both again
+   against the account as it is at commit. Anything else that falls short is
+   refused (`email_not_verified` or `account_exists`) and nothing is linked. A
+   second provider is held to exactly the same rule.
 
 3. **Just-in-time provisioning**: a new account with the mapped role and
    organization and an unusable password hash. That is a well-formed scrypt
@@ -348,7 +355,8 @@ sign-in** (`POST /api/auth/sso/:provider/link`, session and CSRF). The sealed
 attempt records the account and the session that started it, and the callback
 attaches the identity only when it returns to that same session
 (`link_session_mismatch` otherwise). This is the only way an administrator's
-account is ever linked. The identity's email address plays no part, because
+account, or one the provider's claims make an administrator's, is ever
+linked. The identity's email address plays no part, because
 the holder is present and chose it.
 
 A session is not proof that its holder owns the account's address, though.
@@ -460,6 +468,25 @@ before the super admin saving it has a link of their own to an enabled
 provider, under the provider's current issuer. The admin API refuses both with
 `400`, so a policy change cannot lock out the person making it.
 
+**Removing or disabling a provider stops sign-ins in flight.** A callback
+reads the provider before it redeems the code, and the provider decides how
+long the token exchange takes. So the transaction that commits the sign-in,
+link, provisioning, claims sync or deprovisioning re-reads the settings, and
+commits nothing (`sso_disabled`) unless all of these still hold:
+
+- the login policy is not `local_only`;
+- the provider is in force and enabled;
+- its settings, mappings included, are exactly those the callback started
+  with. Any edit in the meantime refuses the attempt; the user signs in again.
+
+The deployment-wide domain list is checked again there too. A callback and a
+settings save hold the same per-provider lease (`sso:provider:<id>`; a save
+takes the key of every provider it can affect, in sorted order). So on every
+backend, a save either commits before the callback's re-read, or waits for
+the callback to commit and then removes its links with the rest
+([Cross-instance locks are fenced at commit](#cross-instance-locks-are-fenced-at-commit)).
+Sessions issued before the change are not ended by it (see **Losing access**).
+
 **Secrets and logs.** A settings provider's client secret:
 
 - is stored AES-256-GCM encrypted (`sso.client_secret.<id>`,
@@ -480,10 +507,17 @@ Environment secrets stay in the environment. No token, code, verifier, `state`,
 - A provider operator, or anyone who can make the provider assert a verified
   address, can:
   - sign in as any account linked at that provider;
-  - link any non-admin account whose address the portal holds a proof for.
+  - link any account whose address the portal holds a proof for, unless the
+    account is an administrator or the provider's claims would make it one.
 
   Configure only providers you trust with that. For a provider you trust less,
   use the domain lists and `link_existing_accounts: false`.
+
+- Every identity on an account opens it with the account's role. When a
+  returning sign-in's claims, or an administrator, later promote an account
+  that already holds an identity at another provider, that identity opens an
+  administrator's account too. Give admin mappings only to providers whose
+  linked accounts you trust every other provider on with that.
 
 - A proof records that someone controlled the mailbox once. An address that
   later changes hands (a recycled mailbox) still carries its old proof.

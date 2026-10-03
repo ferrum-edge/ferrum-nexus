@@ -79,6 +79,12 @@ export interface MockOidcProvider {
   nextIdToken: ((payload: JWTPayload) => JWTPayload) | null;
   /** How the next ID token is signed; resets to `provider` after use. */
   nextSigning: MockSigning;
+  /**
+   * Awaited once a token request has redeemed a valid code and before the
+   * tokens are sent, so a test can change the portal while a callback waits on
+   * the token endpoint. Resets to `null` after use.
+   */
+  beforeNextTokenResponse: (() => Promise<void>) | null;
   /** Merged over the discovery document. */
   discoveryOverrides: Record<string, unknown>;
   /** Makes the discovery endpoint misbehave until reset to `null`. */
@@ -166,6 +172,7 @@ export function createMockOidcProvider(options: MockOidcProviderOptions): MockOi
     },
     nextIdToken: null,
     nextSigning: 'provider',
+    beforeNextTokenResponse: null,
     discoveryOverrides: {},
     discoveryFault: null,
     tokenRequests: [],
@@ -297,6 +304,9 @@ export function createMockOidcProvider(options: MockOidcProviderOptions): MockOi
         sendJson(response, 400, { error: 'invalid_grant', error_description: 'PKCE failed' });
         return;
       }
+      const pause = provider.beforeNextTokenResponse;
+      provider.beforeNextTokenResponse = null;
+      if (pause) await pause();
       const accessToken = randomBytes(24).toString('base64url');
       const now = Math.floor(Date.now() / 1000);
       let payload: JWTPayload = {

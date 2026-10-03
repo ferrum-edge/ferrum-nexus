@@ -631,6 +631,65 @@ describe('single sign-on', () => {
     }
   });
 
+  it('never links automatically when the claims would make the account an admin', async () => {
+    // A lower-trust provider (partner) provisions the address first, and
+    // records its own verified proof of it.
+    const who = person('promote');
+    const lowTrust = await sessionOf(
+      h,
+      await signIn(h, partner, 'partner', {
+        sub: `${who.sub}-partner`,
+        email: who.email,
+        email_verified: true,
+        groups: ['partners'],
+      }),
+    );
+    assert.equal(lowTrust.user.role, 'client');
+
+    // The address's holder then signs in at corp, which maps them to admin.
+    // Linking automatically would promote the shared account, and with it the
+    // partner identity and its live session.
+    const corpClaims = {
+      sub: `${who.sub}-corp`,
+      email: who.email,
+      email_verified: true,
+      groups: ['portal-admins'],
+    };
+    const refused = await signIn(h, corp, 'corp', corpClaims);
+    assert.equal(ssoError(refused), 'privileged_account');
+    assert.equal((await h.store.users.findById(lowTrust.user.id))?.role, 'client');
+    const identities = await h.store.userIdentities.listByUser(lowTrust.user.id);
+    assert.deepEqual(identities.map((identity) => identity.provider_id), ['partner']);
+    assert.equal(
+      await h.store.userIdentities.findBySubject('corp', corp.issuer, corpClaims.sub),
+      null,
+    );
+    const syncs = (await h.auditRows(AuditAction.AUTH_SSO_CLAIMS_SYNC)).filter(
+      (row) => row.target_id === lowTrust.user.id,
+    );
+    assert.deepEqual(syncs, []);
+    const me = await h.app.inject({
+      method: 'GET',
+      url: '/api/auth/me',
+      headers: { cookie: lowTrust.cookieHeader },
+    });
+    assert.equal(
+      me.json<{ user: User }>().user.role,
+      'client',
+      'the partner session gains nothing',
+    );
+
+    // An explicit link, made by the account's holder from a signed-in
+    // session, is still how an admin-mapped identity reaches the account.
+    const linked = await link(h, corp, 'corp', lowTrust, corpClaims);
+    assert.equal(ssoError(linked), null);
+    assert.equal((await sessionOf(h, linked)).user.role, 'admin');
+    const row = (await h.auditRows(AuditAction.AUTH_SSO_LINK)).find(
+      (entry) => entry.target_id === lowTrust.user.id && entry.details.provider_id === 'corp',
+    );
+    assert.equal(row?.details.explicit, true);
+  });
+
   it('links explicitly from a signed-in session, and only back to that session', async () => {
     // Registered as typed, stored lowercased; the proof, recorded under the
     // address as typed too, still covers it.
@@ -1141,6 +1200,110 @@ describe('single sign-on', () => {
       email_verified: true,
     });
     assert.notEqual((await sessionOf(h, reused)).user.id, account.user.id);
+    assert.equal((await put([])).statusCode, 200);
+  });
+
+  it('commits nothing for a callback whose provider changed while it waited', async () => {
+    const provider = {
+      id: 'inflight',
+      display_name: 'In flight',
+      issuer: corp.issuer,
+      client_id: 'nexus-corp',
+      client_secret: CORP_SECRET,
+      scopes: ['openid', 'email'],
+      enabled: true,
+      jit_provisioning: true,
+      link_existing_accounts: true,
+      require_verified_email: true,
+      allowed_email_domains: [],
+      disable_local_password_for_linked: false,
+      sync_roles: true,
+      default_role: 'client',
+      role_mappings: [{ claim: 'groups', value: 'portal-admins', role: 'admin' }],
+      org_mappings: [],
+    };
+    const put = (providers: unknown[]): Promise<LightMyRequestResponse> =>
+      h.authed(founder, { method: 'PUT', url: '/api/admin/sso', payload: { providers } });
+    /** Deliver `attempt` once `providers` were saved while it waited on the token endpoint. */
+    const finishAfterSave = async (
+      attempt: Attempt,
+      providers: unknown[],
+    ): Promise<LightMyRequestResponse> => {
+      let saved = 0;
+      corp.beforeNextTokenResponse = async () => {
+        saved = (await put(providers)).statusCode;
+      };
+      const response = await finish(h, 'inflight', attempt);
+      assert.equal(saved, 200, 'the save committed while the callback waited');
+      return response;
+    };
+    assert.equal((await put([provider])).statusCode, 200);
+
+    // Removed while a first sign-in waited: nothing is provisioned.
+    const fresh = person('inflight');
+    const removed = await finishAfterSave(
+      await begin(h, corp, 'inflight', { ...fresh, email_verified: true }),
+      [],
+    );
+    assert.equal(ssoError(removed), 'sso_disabled');
+    assert.equal(cookieValue(removed, SESSION_COOKIE), undefined);
+    assert.equal(await h.store.users.findByEmail(fresh.email), null);
+    assert.equal(
+      await h.store.userIdentities.findBySubject('inflight', corp.issuer, fresh.sub),
+      null,
+    );
+
+    // Disabled while an automatic link waited: nothing is linked.
+    assert.equal((await put([provider])).statusCode, 200);
+    const local = await localAccount('inflight-link@corp.example.test', true);
+    const disabled = await finishAfterSave(
+      await begin(h, corp, 'inflight', {
+        sub: 'inflight-link-subject',
+        email: local.email,
+        email_verified: true,
+      }),
+      [{ ...provider, enabled: false }],
+    );
+    assert.equal(ssoError(disabled), 'sso_disabled');
+    assert.deepEqual(await h.store.userIdentities.listByUser(local.id), []);
+
+    // A returning account: a mapping removed mid-flight is not applied from
+    // the stale copy, and a disable mid-flight issues no session.
+    assert.equal((await put([provider])).statusCode, 200);
+    const returning = person('inflight-returning');
+    const first = await sessionOf(
+      h,
+      await signIn(h, corp, 'inflight', { ...returning, email_verified: true }),
+    );
+    assert.equal(first.user.role, 'client');
+    const logins = async (): Promise<number> => {
+      const rows = await h.auditRows(AuditAction.AUTH_SSO_LOGIN);
+      return rows.filter((row) => row.target_id === first.user.id).length;
+    };
+    const loginsBefore = await logins();
+    const [identityBefore] = await h.store.userIdentities.listByUser(first.user.id);
+
+    const remapped = await finishAfterSave(
+      await begin(h, corp, 'inflight', {
+        ...returning,
+        email_verified: true,
+        groups: ['portal-admins'],
+      }),
+      [{ ...provider, role_mappings: [] }],
+    );
+    assert.equal(ssoError(remapped), 'sso_disabled');
+    assert.equal((await h.store.users.findById(first.user.id))?.role, 'client');
+
+    const stale = await finishAfterSave(
+      await begin(h, corp, 'inflight', { ...returning, email_verified: true }),
+      [{ ...provider, role_mappings: [], enabled: false }],
+    );
+    assert.equal(ssoError(stale), 'sso_disabled');
+    assert.equal(cookieValue(stale, SESSION_COOKIE), undefined);
+    assert.equal(await logins(), loginsBefore);
+    const [identityAfter] = await h.store.userIdentities.listByUser(first.user.id);
+    assert.equal(identityAfter?.last_login_at, identityBefore?.last_login_at);
+
     assert.equal((await put([])).statusCode, 200);
   });
 

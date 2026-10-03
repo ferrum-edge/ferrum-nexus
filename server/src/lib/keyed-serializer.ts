@@ -104,6 +104,29 @@ export function userLifecycleLockKey(userId: string): string {
 }
 
 /**
+ * The per-provider **single sign-on** key: every commit an OIDC callback makes
+ * (a link, a provisioned account, a claims sync, a session, a deprovisioning)
+ * and every save of the single sign-on settings are taken under it.
+ *
+ * A callback reads the provider before it spends seconds on the provider's
+ * token endpoint, so it re-reads the provider inside the transaction that
+ * commits. That re-read alone is a check-then-write across two rows a removal
+ * also writes — the settings row and the provider's links — and under READ
+ * COMMITTED a removal committing between the two would still lose to a stale
+ * link. Holding this key across both the callback's transaction and the
+ * settings save orders them: whichever commits second sees the other.
+ *
+ * Per provider rather than portal-wide, so sign-ins at different providers
+ * never wait for each other. A settings save takes the key of every provider
+ * it can affect, sorted, before its transaction; a callback takes one, and
+ * takes {@link userLifecycleLockKey} inside it to deprovision — never the
+ * reverse.
+ */
+export function ssoProviderLockKey(providerId: string): string {
+  return `sso:provider:${providerId}`;
+}
+
+/**
  * The per-sender key the rolling daily **message budget** is spent under.
  *
  * The budget is a read-then-write — count the sender's rows in the window, then
