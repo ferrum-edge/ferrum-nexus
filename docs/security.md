@@ -190,6 +190,12 @@ built to reveal nothing:
   `password_reset` tokens, session invalidation and the audit row in one
   transaction, under a per-user lease so concurrent changes across instances
   are ordered. `email_verification` tokens are left alone.
+- **Disabling an account revokes its outstanding reset links.** Every path that
+  disables an account — `PATCH /api/users/:id`, god mode and the SSO
+  deprovision — deletes every `password_reset` token for the account in the same
+  transaction as `status = 'disabled'`, so re-enabling inside the link's
+  one-hour lifetime cannot revive a recovery capability an administrator meant
+  to end. `email_verification` tokens are left alone.
 - **The link is unreadable in the outbox.** The token is stored only as an
   HMAC, and the queued message that carries it is sealed (AES-256-GCM under a
   key derived from `NEXUS_SECRET_KEY`, bound to the row id and recipient), so
@@ -920,7 +926,8 @@ gateway-writing Nexus instance ([`operations.md` §8](operations.md#8-scaling)).
 Both `PATCH /api/users/:id` with `status: "disabled"` and
 `POST /api/admin/god/disable-user`:
 
-1. delete every session, so an open tab gets `401`;
+1. delete every session and every outstanding `password_reset` token, so an open
+   tab gets `401` and an old recovery link cannot survive a later re-enable;
 2. strip every ACL group from the account's Ferrum consumer;
 3. delete **every credential of every type** on that consumer (including
    `basicauth`, which never appears in Edge reads) and mark the

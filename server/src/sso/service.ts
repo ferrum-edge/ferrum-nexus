@@ -576,6 +576,11 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
           if (!disabled) return null;
           const queued = await tx.gatewayTeardownJobs.upsertPending(current.id, null, nowIso());
           const terminatedSessions = await tx.sessions.deleteForUser(current.id);
+          // A deprovision is a disable: an outstanding reset link must die with
+          // the session cut-off, or re-enabling the account inside the link's
+          // lifetime would revive a recovery capability the disable ended
+          // (issue #499). Committed with the status flip like every other disable.
+          await tx.verificationTokens.deleteForUser(current.id, 'password_reset');
           await audit.forStore(tx).record(
             SYSTEM_ACTOR,
             AuditAction.AUTH_SSO_DEPROVISION,
