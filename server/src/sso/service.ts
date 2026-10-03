@@ -580,7 +580,10 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
           // the session cut-off, or re-enabling the account inside the link's
           // lifetime would revive a recovery capability the disable ended
           // (issue #499). Committed with the status flip like every other disable.
-          await tx.verificationTokens.deleteForUser(current.id, 'password_reset');
+          const revokedResetLinks = await tx.verificationTokens.deleteForUser(
+            current.id,
+            'password_reset',
+          );
           await audit.forStore(tx).record(
             SYSTEM_ACTOR,
             AuditAction.AUTH_SSO_DEPROVISION,
@@ -591,6 +594,7 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
               reason: 'no_mapped_role',
               role: current.role,
               terminated_sessions: terminatedSessions,
+              ...(revokedResetLinks > 0 ? { revoked_reset_links: revokedResetLinks } : {}),
               gateway_teardown: 'queued',
             },
             context.ip,

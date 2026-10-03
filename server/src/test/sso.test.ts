@@ -1821,6 +1821,10 @@ describe('single sign-on organization mapping and deprovisioning', () => {
     const refused = await signIn(h, partner, 'partner', { ...claims, groups: [] });
     assert.equal(ssoError(refused), 'access_denied');
     assert.equal((await h.store.users.findById(account.user.id))?.status, 'active');
+    assert.ok(
+      await h.store.verificationTokens.findByTokenHash(resetHash, 'password_reset'),
+      'the refused sign-in left the reset link alone',
+    );
 
     const enable = await h.authed(founder, {
       method: 'PUT',

@@ -8,14 +8,16 @@
  * revived a recovery capability the disable was meant to end. Both disable
  * paths — `PATCH /api/users/:id` and `POST /api/admin/god/disable-user` — now
  * delete the account's `password_reset` tokens in the transaction that writes
- * `status = 'disabled'`.
+ * `status = 'disabled'`, and the re-enable deletes any token still present, so a
+ * link that predates the disable (or raced it) cannot be redeemed either.
  *
  * Cross-adapter: the delete shares one transaction with the status write and
  * the session cut-off, which on Mongo is a multi-document transaction the
- * smoke suite's replica set provides. Two cases drive each disable path; a
- * third injects a failure in the token delete and proves the whole transition
- * rolls back, which is what distinguishes a same-transaction delete from one
- * that merely runs close to the flip.
+ * smoke suite's replica set provides. A case drives each disable path, one
+ * proves the re-enable cleanup, and a final one injects a failure in the token
+ * delete and proves the whole transition rolls back, which is what
+ * distinguishes a same-transaction delete from one that merely runs close to
+ * the flip.
  */
 
 import assert from 'node:assert/strict';
@@ -115,6 +117,34 @@ export function runDisableRevokesResetLinksContract(
 
       const enabled = await patchStatus(founder, subject, 'active');
       assert.equal(enabled.statusCode, 200, enabled.body);
+
+      const reset = await redeem(token);
+      assert.equal(reset.statusCode, 400, reset.body);
+      assert.equal(errorCode(reset.body), 'VALIDATION_FAILED');
+    });
+
+    it('re-enabling revokes a reset link that appeared while the account was off', async () => {
+      const subject = await freshTarget();
+      const disabled = await patchStatus(founder, subject, 'disabled');
+      assert.equal(disabled.statusCode, 200, disabled.body);
+
+      // A link present while the account is disabled is stale by definition: a
+      // leftover from before the revoking behaviour shipped, or an issuance
+      // whose pre-transaction status read raced this disable. Re-enabling must
+      // not revive it, so the re-enable deletes it too.
+      const { token, hash } = await issueReset(subject);
+      assert.ok(
+        await harness.store.verificationTokens.findByTokenHash(hash, 'password_reset'),
+        'the seed link is live on the disabled account',
+      );
+
+      const enabled = await patchStatus(founder, subject, 'active');
+      assert.equal(enabled.statusCode, 200, enabled.body);
+      assert.equal(
+        await harness.store.verificationTokens.findByTokenHash(hash, 'password_reset'),
+        null,
+        'the re-enable deleted the stale reset link',
+      );
 
       const reset = await redeem(token);
       assert.equal(reset.statusCode, 400, reset.body);

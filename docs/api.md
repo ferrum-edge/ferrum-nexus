@@ -740,12 +740,13 @@ Rules:
   `password_reset` link, and queues the gateway revocation in the same
   transaction, so a re-enable inside a link's one-hour lifetime cannot revive
   it.
-- Re-enabling cancels any queued revocation and rebuilds each identity's
-  `nexus:api:<id>:approved` ACL groups from its active grants (revoked
-  credentials and test consumers are not restored; groups outside that
-  namespace are kept). If the gateway fails, the status change has already
-  committed and the response is `502 EDGE_ERROR`; repeat the same PATCH to
-  retry.
+- Re-enabling cancels any queued revocation, deletes any `password_reset` link
+  still present (a pre-deploy leftover, or one whose issuance raced the disable),
+  and rebuilds each identity's `nexus:api:<id>:approved` ACL groups from its
+  active grants (revoked credentials and test consumers are not restored; groups
+  outside that namespace are kept). If the gateway fails, the status change has
+  already committed and the response is `502 EDGE_ERROR`; repeat the same PATCH
+  to retry.
 
 ### `POST /api/users/:id/gateway-teardown/retry`
 

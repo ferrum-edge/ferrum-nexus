@@ -385,7 +385,10 @@ export function createGodService(deps: GodServiceDeps): GodService {
           // re-enabled within its one-hour lifetime (issue #499). Deleted in the
           // same transaction as the status flip, so it commits or rolls back
           // with the disable.
-          await tx.verificationTokens.deleteForUser(target.id, 'password_reset');
+          const revokedResetLinks = await tx.verificationTokens.deleteForUser(
+            target.id,
+            'password_reset',
+          );
           await audit.forStore(tx).record(
             { id: actor.id, role: actor.role },
             AuditAction.USER_DISABLE,
@@ -395,6 +398,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
               from_status: target.status,
               to_status: 'disabled',
               terminated_sessions: terminated,
+              ...(revokedResetLinks > 0 ? { revoked_reset_links: revokedResetLinks } : {}),
               gateway_teardown: 'queued',
             },
             ip,
@@ -407,6 +411,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
               reason: why,
               previous_status: target.status,
               terminated_sessions: terminated,
+              ...(revokedResetLinks > 0 ? { revoked_reset_links: revokedResetLinks } : {}),
               revoke_grants: revokeGrants,
               gateway_teardown: 'queued',
             },

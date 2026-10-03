@@ -51,7 +51,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   capability the disable was meant to end. Every disable path — the
   `PATCH /api/users/:id` route, god-mode `disable-user` and the SSO deprovision —
   now deletes the account's `password_reset` tokens in the same transaction as
-  the status change, on every backend.
+  the status change, on every backend. Re-enabling deletes any `password_reset`
+  row still present as well, so a link minted before this behaviour shipped, or
+  one whose issuance raced the disable, is not revived either. The disable's
+  audit row records how many links it revoked.
 - **The acceptance runner treats `e2e/.env` as data and protects its secrets** (#497). It rejects
   malformed, duplicate, unsupported, or shell-containing entries without evaluating them, refuses
   symlinks, and creates or secures the file with mode `0600`.
