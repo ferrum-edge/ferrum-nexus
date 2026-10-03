@@ -1,14 +1,24 @@
 /**
  * The OpenID Connect primitives in isolation: discovery pinning, PKCE, and
  * every way an ID token can fail validation — a bad algorithm, audience or
- * issuer, an expired or not-yet-valid token, a nonce or `at_hash` mismatch.
+ * issuer, an expired or not-yet-valid token, a nonce or `at_hash` mismatch —
+ * and the public-address rule at the moment a connection is opened.
  */
 
 import assert from 'node:assert/strict';
+import type { LookupAddress, LookupOptions } from 'node:dns';
+import { createServer, type AddressInfo, type LookupFunction } from 'node:net';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
 import type { JWTPayload } from 'jose';
 
+import {
+  createVettedLookup,
+  DestinationRefusedError,
+  resolvePublicDestination,
+  type ResolvedAddress,
+  type UpstreamResolver,
+} from '../publishing/oas.js';
 import { createMockOidcProvider, type MockOidcProvider } from '../test/mock-oidc-provider.js';
 import { isLoopbackHostname, issuerProblem, oidcUrlProblem } from './config.js';
 import {
@@ -496,5 +506,149 @@ describe('discovery', () => {
       'provider_unavailable',
       /invalid_grant/,
     );
+  });
+
+  it('dials a loopback name only at loopback addresses, without the policy resolver', async () => {
+    const issuer = idp.issuer.replace('127.0.0.1', 'localhost');
+    idp.discoveryOverrides = { issuer };
+    const client = createOidcClient({
+      allowHttpLoopback: true,
+      resolve: async () => assert.fail('a loopback name is not sent to the policy resolver'),
+    });
+    const document = await client.discover(issuer);
+    assert.equal(document.issuer, issuer);
+  });
+});
+
+describe('connection-time destination vetting', () => {
+  const PUBLIC_V4: ResolvedAddress = { address: '93.184.215.14', family: 4 };
+  const PUBLIC_V6: ResolvedAddress = { address: '2606:4700::1111', family: 6 };
+
+  interface LookupResult {
+    address: string | LookupAddress[];
+    family: number | undefined;
+  }
+
+  function lookupWith(
+    lookup: LookupFunction,
+    host: string,
+    options: LookupOptions,
+  ): Promise<LookupResult> {
+    return new Promise((resolve, reject) => {
+      lookup(host, options, (error, address, family) => {
+        if (error) reject(error);
+        else resolve({ address, family });
+      });
+    });
+  }
+
+  function policyLookup(resolve: UpstreamResolver): LookupFunction {
+    return createVettedLookup((host) => resolvePublicDestination(host, resolve));
+  }
+
+  it('refuses a connection whose answer turned private after the check passed', async () => {
+    // What the rebinding answer points at. It must never see a connection.
+    let connections = 0;
+    const listener = createServer((socket) => {
+      connections += 1;
+      socket.destroy();
+    });
+    await new Promise<void>((resolve) => listener.listen(0, '127.0.0.1', () => resolve()));
+    const { port } = listener.address() as AddressInfo;
+    // The first answer, for the check before the request, is public; the
+    // second, for the connection's own lookup, is the listener's address.
+    const resolved: string[] = [];
+    const client = createOidcClient({
+      allowHttpLoopback: false,
+      timeoutMs: 2_000,
+      resolve: async (host) => {
+        resolved.push(host);
+        return resolved.length === 1 ? [PUBLIC_V4] : [{ address: '127.0.0.1', family: 4 }];
+      },
+    });
+    try {
+      await rejectsWith(
+        client.discover(`https://idp.rebind.example:${port}`),
+        'provider_unavailable',
+        /request failed: connection refused, host resolves to a non-public address/,
+      );
+      assert.deepEqual(
+        resolved,
+        ['idp.rebind.example', 'idp.rebind.example'],
+        'the connection resolved the name again, through the policy resolver',
+      );
+      assert.equal(connections, 0, 'the private address was never dialled');
+    } finally {
+      await new Promise<void>((resolve) => listener.close(() => resolve()));
+    }
+  });
+
+  it('hands the socket only the vetted addresses, in the family it asks for', async () => {
+    const asked: string[] = [];
+    const lookup = policyLookup(async (host) => {
+      asked.push(host);
+      return [PUBLIC_V4, PUBLIC_V6];
+    });
+    const all = await lookupWith(lookup, 'IdP.Example.com', { all: true });
+    assert.deepEqual(all.address, [PUBLIC_V4, PUBLIC_V6]);
+    const v4 = await lookupWith(lookup, 'idp.example.com', { family: 4 });
+    assert.deepEqual(v4, { address: PUBLIC_V4.address, family: 4 });
+    const one = await lookupWith(lookup, 'idp.example.com', { family: 6 });
+    assert.deepEqual(one, { address: PUBLIC_V6.address, family: 6 });
+    const v6 = await lookupWith(lookup, 'idp.example.com', { all: true, family: 'IPv6' });
+    assert.deepEqual(v6.address, [PUBLIC_V6]);
+    assert.ok(
+      asked.every((host) => host === 'idp.example.com'),
+      'the name is resolved lower-cased',
+    );
+  });
+
+  it('refuses a private, mixed, empty or failed answer, and internal names', async () => {
+    async function refuses(
+      resolve: UpstreamResolver,
+      host: string,
+      reason: DestinationRefusedError['reason'],
+      options: LookupOptions = { all: true },
+    ): Promise<void> {
+      await assert.rejects(lookupWith(policyLookup(resolve), host, options), (error: unknown) => {
+        assert.ok(error instanceof DestinationRefusedError);
+        assert.equal(error.reason, reason);
+        assert.equal(
+          error.code,
+          reason === 'unresolvable' ? 'ENOTFOUND' : 'ERR_NON_PUBLIC_DESTINATION',
+        );
+        return true;
+      });
+    }
+    const never: UpstreamResolver = async () => assert.fail('the name is refused unresolved');
+
+    await refuses(
+      async () => [{ address: '10.0.0.7', family: 4 }],
+      'idp.example.com',
+      'resolves_non_public',
+    );
+    await refuses(
+      async () => [PUBLIC_V4, { address: '169.254.169.254', family: 4 }],
+      'idp.example.com',
+      'resolves_non_public',
+    );
+    // A NAT64 address is judged by the IPv4 address it carries.
+    await refuses(
+      async () => [{ address: '64:ff9b::a00:1', family: 6 }],
+      'idp.example.com',
+      'resolves_non_public',
+    );
+    await refuses(async () => [], 'idp.example.com', 'unresolvable');
+    await refuses(
+      async () => {
+        throw new Error('SERVFAIL');
+      },
+      'idp.example.com',
+      'unresolvable',
+    );
+    await refuses(never, 'metadata.internal', 'not_public');
+    await refuses(never, 'idp.internal.', 'not_public');
+    // Public, but not in the family the socket asked for.
+    await refuses(async () => [PUBLIC_V4], 'idp.example.com', 'unresolvable', { family: 6 });
   });
 });

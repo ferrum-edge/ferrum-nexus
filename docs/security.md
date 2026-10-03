@@ -265,12 +265,20 @@ such as `localhost`, `*.internal` or `*.local`, a private, loopback,
 link-local or otherwise reserved IP literal, or a name that resolves to one is
 refused before anything is sent, with the rules the OpenAPI importer uses. This
 covers the endpoints a discovery document names too, so a provider cannot
-point the portal at its own network. The literal loopback hosts are exempt
-under `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`, and
-`NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES=true` lifts the check entirely, for a
-provider on a private network. Redirects are not followed, and every request
-has a 5-second deadline and a 512 KiB response cap. The discovery document must
-name exactly the configured issuer, and is cached for an hour. So is the key
+point the portal at its own network. The rule is enforced again where the
+connection is made: the portal's provider requests go through undici with a
+connection-time `lookup` that resolves the name through the same policy
+resolver, refuses the whole answer if any address in it is not public, and
+dials only the vetted addresses. A name whose DNS answer changes after the
+check (DNS rebinding) therefore fails to connect instead of reaching a private
+address, while `Host`, SNI and certificate verification still use the
+provider's hostname. The literal loopback hosts are exempt under
+`NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`, and `localhost` is then dialled only at
+loopback addresses; `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES=true` lifts the check
+entirely, for a provider on a private network. Redirects are not followed, so
+there is no second hop to vet, and every request has a 5-second deadline and a
+512 KiB response cap. The discovery document must name exactly the configured
+issuer, and is cached for an hour. So is the key
 set, which an unknown `kid` refetches at most once per 30 seconds, so forged
 tokens cannot turn the portal into a request amplifier. Concurrent sign-ins
 share one discovery or key-set request, and a failed one is remembered for 30
@@ -487,10 +495,6 @@ Environment secrets stay in the environment. No token, code, verifier, `state`,
 
 - A proof records that someone controlled the mailbox once. An address that
   later changes hands (a recycled mailbox) still carries its old proof.
-- The public-address check resolves a name and then connects, so a name whose
-  DNS answer changes between the two (DNS rebinding) could still reach a
-  private address. The 5-second deadline, the size cap and the refusal to
-  follow redirects bound what such a request can do.
 - Deprovisioning happens at sign-in time, not in real time (above). There is no
   SCIM or back-channel logout.
 
