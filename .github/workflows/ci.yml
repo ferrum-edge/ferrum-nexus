@@ -30,6 +30,21 @@ jobs:
             exit 1
           fi
 
+  image-pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require digests for container images
+        run: |
+          unpinned=$(grep -rnE '^[[:space:]]*(image:[[:space:]]*|FROM[[:space:]]+)|docker[[:space:]]+run[[:space:]]' docker e2e .github/workflows \
+            | grep -vE '@sha256:[0-9a-f]{64}([[:space:]]|$)' \
+            | grep -vE 'image:[[:space:]]*\$\{|FROM[[:space:]]+scratch([[:space:]]|$)|docker[[:space:]]+run .*ferrum-nexus:' || true)
+          if [ -n "$unpinned" ]; then
+            echo "::error::Pin every container image to a full registry digest:"
+            echo "$unpinned"
+            exit 1
+          fi
+
   checks:
     runs-on: ubuntu-latest
     strategy:
@@ -93,7 +108,7 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
         env:
           POSTGRES_PASSWORD: nexus_test
         ports:
@@ -104,7 +119,7 @@ jobs:
           --health-timeout 5s
           --health-retries 20
       mysql:
-        image: mysql:8.4
+        image: mysql:8.4@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242
         env:
           MYSQL_ROOT_PASSWORD: nexus_test
         ports:
@@ -122,7 +137,7 @@ jobs:
           cache: npm
       - name: Start MongoDB replica set
         run: |
-          docker run -d --name nexus-mongo -p 27017:27017 mongo:7 --replSet rs0 --bind_ip_all
+          docker run -d --name nexus-mongo -p 27017:27017 mongo:7@sha256:1f995ad6fdb93244a1addab1b58f934a0bc2f5643c38e02f5e9d7f0c7d227a7b --replSet rs0 --bind_ip_all
           for attempt in $(seq 1 60); do
             if docker exec nexus-mongo mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'; then
               break

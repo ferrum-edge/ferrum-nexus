@@ -80,16 +80,18 @@ moves a proxy that follows its document, and on a gateway restore. A refusal is
 `resolved` addresses when DNS decided) or `unresolvable_upstream`.
 
 `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` skips all three checks, including the
-lookup. Use it only for a portal that fronts internal services, and restrict
-gateway egress at the network layer instead.
+lookup. Use it only for a portal that fronts internal services, and configure
+Edge's `FERRUM_BACKEND_ALLOW_IPS` to permit the intended private destinations.
 
 **Residual risk: time-of-check, not time-of-use.** Nexus resolves the name once,
 when the backend is written; Edge resolves it on every request. DNS rebinding or
 a re-pointed record is invisible to the portal, and Nexus does not pin the
 address because the proxy stores a hostname. Run Ferrum Edge with
 `FERRUM_BACKEND_ALLOW_IPS=public` so the gateway screens the address it actually
-connects to. Nexus's check gives the provider an immediate `400`; Edge's egress
-mode holds when the record changes later.
+connects to. The quickstart configures this setting. Nexus's check gives the
+provider an immediate `400`; Edge's egress mode holds when the record changes
+later. Deployments that allow private Nexus upstreams must coordinate the Edge
+allowlist with those destinations.
 
 ### Out of scope
 

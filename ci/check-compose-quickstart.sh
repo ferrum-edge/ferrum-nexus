@@ -19,6 +19,10 @@ if grep -Eq '^FERRUM_EDGE_IMAGE=' e2e/.env.example; then
   echo 'error: e2e/.env.example duplicates the Edge image reference' >&2
   exit 1
 fi
+if ! grep -Fq 'FERRUM_BACKEND_ALLOW_IPS: public' docker/docker-compose.example.yml; then
+  echo 'error: the quickstart Edge service must enforce public-only backend addresses' >&2
+  exit 1
+fi
 
 # The verbatim quickstart gate (ci/verbatim-quickstart-gate.sh) runs this
 # marked block and nothing else, so the markers must be there, exactly once.

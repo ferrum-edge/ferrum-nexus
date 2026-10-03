@@ -8,6 +8,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- **Quickstart and required CI container images are digest-pinned**
+  (GHSA-99p3-8fmh-3pfc). Compose and workflow images, plus the acceptance
+  upstream base image, retain readable version tags with immutable multi-arch
+  digests. Dependabot covers quickstart Compose pins, and CI rejects unpinned
+  container references.
+
 - **Credential-write errors no longer return Edge response text** (GHSA-qc7r-4j9m-pm44).
   Non-GET `/consumers` failures omit `details.gateway_message` and use fixed
   classifications so an Edge response that echoes a show-once secret cannot
@@ -69,6 +75,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   falling back to the built-in default.
 
 ### Security
+
+- **The quickstart Edge service enforces public-only upstream egress by default**
+  (GHSA-93rq-89vr-38pc, Part A). The gateway's connection-time address check
+  now complements Nexus's publish-time DNS validation. Operators who enable
+  `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` must also configure Edge to allow the
+  intended private destinations.
 
 - **Edge credential-write errors no longer expose submitted secrets**
   (GHSA-qc7r-4j9m-pm44). Non-GET `/consumers` failures omit Edge response text

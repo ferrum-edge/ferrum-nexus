@@ -92,3 +92,18 @@ updates:
       docker-compose:
         patterns:
           - '*'
+
+  - package-ecosystem: docker-compose
+    directory: /docker
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+    groups:
+      docker-compose:
+        patterns:
+          - '*'

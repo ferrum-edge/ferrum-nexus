@@ -928,6 +928,15 @@ pins the Edge image by digest. The current acceptance suite
 `v0.3.0` pairing with Edge `v0.9.9` is recorded in the
 [`v0.3.0` release notes](release-notes.md#supported-combination).
 
+The quickstart pins its PostgreSQL and Alpine images by multi-architecture
+digest and sets `FERRUM_BACKEND_ALLOW_IPS=public` on Edge, so the gateway
+rechecks public-address policy when it opens each upstream connection. A
+deployment that sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` must also relax
+Edge's backend-address policy to permit its intended private destinations.
+Digest updates are proposed through Dependabot and reviewed with the source
+change; CI rejects unpinned container image declarations in Dockerfiles,
+Compose files and workflows.
+
 The portal is on `http://127.0.0.1:8787` and the gateway proxy listener on
 `http://127.0.0.1:8000`, both bound to loopback. Before adapting it:
 
