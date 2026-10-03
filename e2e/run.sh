@@ -56,8 +56,15 @@ IMAGE_OVERRIDE="${NEXUS_IMAGE:-}"
 #
 # Minted per run rather than committed. A compose file with a working secret in
 # it is a secret that ends up in somebody's real deployment.
+if [[ -L .env || ( -e .env && ! -f .env ) ]]; then
+  echo 'error: e2e/.env must be a regular file, not a symlink' >&2
+  exit 1
+fi
+
 if [[ ! -f .env ]]; then
   echo "==> generating e2e/.env"
+  ENV_TEMP="$(umask 077; mktemp .env.XXXXXX)"
+  chmod 600 "$ENV_TEMP"
   {
     grep -E '^(NEXUS_IMAGE|NEXUS_PORT|FERRUM_PROXY_PORT|FERRUM_ADMIN_PORT|MAILPIT_HTTP_PORT|DEX_PORT)=' .env.example
     echo "NEXUS_SECRET_KEY=$(openssl rand -hex 32)"
@@ -66,21 +73,61 @@ if [[ ! -f .env ]]; then
     echo "FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)"
     echo "FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)"
     echo "DEX_CLIENT_SECRET=$(openssl rand -hex 32)"
-  } > .env
+  } > "$ENV_TEMP"
+  mv -f "$ENV_TEMP" .env
 fi
+
+# Existing files may have been created under a permissive umask. Refuse links
+# above, then secure the file before reading or updating any secret values.
+chmod 600 .env
+
 # An e2e/.env generated before the Dex service existed has no client secret
 # for it; add one rather than make the developer delete their environment.
 if ! grep -q '^DEX_CLIENT_SECRET=' .env; then
+  ENV_TEMP="$(umask 077; mktemp .env.XXXXXX)"
+  chmod 600 "$ENV_TEMP"
+  cat .env > "$ENV_TEMP"
   # Do not glue the new line onto a last line that has no newline.
-  if [[ -s .env && -n "$(tail -c1 .env)" ]]; then echo >> .env; fi
-  echo "DEX_CLIENT_SECRET=$(openssl rand -hex 32)" >> .env
+  if [[ -s .env && -n "$(tail -c1 .env)" ]]; then echo >> "$ENV_TEMP"; fi
+  echo "DEX_CLIENT_SECRET=$(openssl rand -hex 32)" >> "$ENV_TEMP"
+  mv -f "$ENV_TEMP" .env
 fi
+
 # Only an image supplied by the caller is treated as a prebuilt image. The
 # value in .env is a convenient tag for the image built from this checkout.
-set -a
-# shellcheck disable=SC1091
-source .env
-set +a
+# Parse it as data: no shell syntax is accepted or evaluated.
+ENV_KEYS=' '
+while IFS= read -r ENV_LINE || [[ -n "$ENV_LINE" ]]; do
+  if [[ "$ENV_LINE" =~ [[:cntrl:]] ]]; then
+    echo 'error: control character in e2e/.env' >&2
+    exit 1
+  fi
+  [[ -z "$ENV_LINE" || "$ENV_LINE" =~ ^[[:space:]]*# ]] && continue
+  if [[ ! "$ENV_LINE" =~ ^([A-Z_][A-Z0-9_]*)=([A-Za-z0-9._:/@+=-]*)$ ]]; then
+    echo 'error: invalid line in e2e/.env' >&2
+    exit 1
+  fi
+  ENV_KEY="${BASH_REMATCH[1]}"
+  ENV_VALUE="${BASH_REMATCH[2]}"
+  case "$ENV_KEY" in
+    NEXUS_IMAGE|NEXUS_SECRET_KEY|NEXUS_BOOTSTRAP_TOKEN|NEXUS_DB_PASSWORD) ;;
+    FERRUM_ADMIN_JWT_SECRET|FERRUM_BASIC_AUTH_HMAC_SECRET|DEX_CLIENT_SECRET) ;;
+    NEXUS_PORT|FERRUM_PROXY_PORT|FERRUM_ADMIN_PORT|MAILPIT_HTTP_PORT) ;;
+    DEX_PORT|FERRUM_EDGE_IMAGE|FERRUM_ADMIN_JWT_ISSUER) ;;
+    *)
+      echo "error: unsupported key in e2e/.env: $ENV_KEY" >&2
+      exit 1
+      ;;
+  esac
+  if [[ "$ENV_KEYS" == *" $ENV_KEY "* ]]; then
+    echo "error: duplicate key in e2e/.env: $ENV_KEY" >&2
+    exit 1
+  fi
+  ENV_KEYS+="$ENV_KEY "
+  printf -v "$ENV_KEY" '%s' "$ENV_VALUE"
+  export "$ENV_KEY"
+done < .env
+
 NEXUS_IMAGE="${IMAGE_OVERRIDE:-${NEXUS_IMAGE:-ferrum-nexus:e2e}}"
 export NEXUS_IMAGE
 FERRUM_EDGE_IMAGE="${EDGE_OVERRIDE:-$PINNED_EDGE_IMAGE}"

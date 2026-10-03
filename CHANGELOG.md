@@ -32,6 +32,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **The acceptance runner treats `e2e/.env` as data and protects its secrets.** It rejects
+  malformed, duplicate, unsupported, or shell-containing entries without evaluating them, refuses
+  symlinks, and creates or secures the file with mode `0600`.
 - **Failed list and detail reads no longer look empty** (#486). A persistent
   unavailable state with a Retry action now replaces the empty state when
   credentials, messages, APIs, users, organizations, notifications, audit

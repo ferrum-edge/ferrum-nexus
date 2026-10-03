@@ -76,7 +76,8 @@ not_contains() {
 
 # Fresh run and repeat run both rebuild the current checkout and use the pin.
 new_fixture fresh
-run_fixture bash ./run.sh
+run_fixture bash -c 'umask 022; exec bash ./run.sh'
+[[ "$(stat -c '%a' "$FIXTURE/e2e/.env")" == 600 ]] || fail 'generated .env mode is not 600'
 contains "$FIXTURE/trace" 'docker build -t ferrum-nexus:e2e'
 contains "$FIXTURE/trace" 'edge=example/edge:pin-one@sha256:111'
 contains "$FIXTURE/output" 'Nexus image: ferrum-nexus:e2e (sha256:nexus-image)'
@@ -89,7 +90,8 @@ run_fixture bash ./run.sh
 new_fixture changed_pin
 run_fixture bash ./run.sh
 sed -i.bak 's/pin-one/pin-two/' "$FIXTURE/release/compatibility.env"
-printf '\nFERRUM_EDGE_IMAGE=example/edge:old-saved-pin\nNEXUS_SECRET_KEY=preserved-secret\n' >> "$FIXTURE/e2e/.env"
+sed -i.bak 's/^NEXUS_SECRET_KEY=.*/NEXUS_SECRET_KEY=preserved-secret/' "$FIXTURE/e2e/.env"
+printf '\nFERRUM_EDGE_IMAGE=example/edge:old-saved-pin\n' >> "$FIXTURE/e2e/.env"
 run_fixture bash ./run.sh
 contains "$FIXTURE/trace" 'edge=example/edge:pin-two@sha256:111'
 not_contains "$FIXTURE/trace" 'edge=example/edge:old-saved-pin'
@@ -163,5 +165,30 @@ for args in 'unknown' 'all extra'; do
   not_contains "$FIXTURE/trace" 'docker '
   [[ ! -e "$FIXTURE/e2e/.env" ]] || fail 'invalid arguments generated .env'
 done
+
+# Dotenv input is data, so shell substitutions are rejected without running.
+new_fixture dotenv_code
+printf 'NEXUS_IMAGE=$(touch sentinel)\n' > "$FIXTURE/e2e/.env"
+status=0
+run_fixture bash ./run.sh && status=0 || status=$?
+[[ "$status" == 1 ]] || fail "malformed dotenv returned $status"
+[[ ! -e "$FIXTURE/e2e/sentinel" ]] || fail 'dotenv command substitution executed'
+not_contains "$FIXTURE/trace" 'docker build'
+
+# An existing dotenv file is secured before its values are read.
+new_fixture existing_env_mode
+printf 'NEXUS_SECRET_KEY=preserved-secret\n' > "$FIXTURE/e2e/.env"
+chmod 644 "$FIXTURE/e2e/.env"
+run_fixture bash ./run.sh
+[[ "$(stat -c '%a' "$FIXTURE/e2e/.env")" == 600 ]] || fail 'existing .env mode is not 600'
+
+# A symlink cannot redirect secret reads or writes to another file.
+new_fixture dotenv_symlink
+printf 'NEXUS_SECRET_KEY=preserved-secret\n' > "$FIXTURE/target.env"
+ln -s ../target.env "$FIXTURE/e2e/.env"
+status=0
+run_fixture bash ./run.sh && status=0 || status=$?
+[[ "$status" == 1 ]] || fail "dotenv symlink returned $status"
+not_contains "$FIXTURE/trace" 'docker build'
 
 echo 'E2E runner shell regressions passed'
