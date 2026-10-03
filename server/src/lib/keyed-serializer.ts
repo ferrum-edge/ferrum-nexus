@@ -92,15 +92,50 @@ export const SUPER_ADMIN_LOCK_CONFLICT_MESSAGE =
  * it too, so whichever wins, the teardown that follows the flip sees every
  * identity the account got as far as registering.
  *
+ * A single sign-on into an existing account commits under it too. A claims
+ * promotion to `admin` reads the account's identity links, and an automatic
+ * link at another provider reads the account's role; each writes what the
+ * other reads, so without one key both could commit and leave a lower-trust
+ * identity on an administrator's account.
+ *
  * Per account rather than portal-wide: the invariant is a property of one
  * account, and two different accounts never need to wait for each other. It is
- * always taken **inside** {@link SUPER_ADMIN_LOCK_KEY} when both are needed,
- * and a caller that holds a gateway consumer key or a proxy lease may take it
- * — never the reverse — which is what keeps the keys free of lock-order
- * inversion.
+ * always taken **inside** {@link SUPER_ADMIN_LOCK_KEY} and
+ * {@link ssoProviderLockKey} when both are needed, and a caller that holds a
+ * gateway consumer key or a proxy lease may take it — never the reverse —
+ * which is what keeps the keys free of lock-order inversion.
  */
 export function userLifecycleLockKey(userId: string): string {
   return `users:lifecycle:${userId}`;
+}
+
+/**
+ * The per-provider **single sign-on** key: every OIDC callback that writes one
+ * of the provider's links (a first-time link, a provisioned account), every
+ * deprovisioning, and every save of the single sign-on settings are taken
+ * under it.
+ *
+ * A callback reads the provider before it spends seconds on the provider's
+ * token endpoint, so it re-reads the provider inside the transaction that
+ * commits. For a new link that re-read alone is a check-then-write across two
+ * rows a removal also writes — the settings row and the provider's links — and
+ * under READ COMMITTED a removal committing between the two would still lose
+ * to a stale link. Holding this key across both the callback's transaction and
+ * the settings save orders them: whichever commits second sees the other.
+ *
+ * A returning sign-in does not take it. It writes nothing a save reads, so its
+ * re-read orders it on its own, and taking the key would queue every sign-in
+ * at the provider, deployment-wide, behind one lease.
+ *
+ * Per provider rather than portal-wide, so sign-ins at different providers
+ * never wait for each other. A settings save takes the key of every provider
+ * it can affect, sorted, before its transaction, and then checks inside the
+ * transaction that the settings it worked that set out from are still the
+ * stored ones. A callback takes one, and takes {@link userLifecycleLockKey}
+ * inside it — never the reverse.
+ */
+export function ssoProviderLockKey(providerId: string): string {
+  return `sso:provider:${providerId}`;
 }
 
 /**
