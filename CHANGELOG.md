@@ -40,6 +40,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   request now deletes all outstanding `password_reset` tokens in the same
   transaction that mints and queues the new link, on every backend, matching
   the supersession the verification-resend flow already performed.
+- **The acceptance runner treats `e2e/.env` as data and protects its secrets** (#497). It rejects
+  malformed, duplicate, unsupported, or shell-containing entries without evaluating them, refuses
+  symlinks, and creates or secures the file with mode `0600`.
 - **Failed list and detail reads no longer look empty** (#486). A persistent
   unavailable state with a Retry action now replaces the empty state when
   credentials, messages, APIs, users, organizations, notifications, audit

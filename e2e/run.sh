@@ -52,35 +52,103 @@ fi
 cd "$HERE"
 IMAGE_OVERRIDE="${NEXUS_IMAGE:-}"
 
+ENV_TEMP=''
+cleanup_env_temp() {
+  if [[ -n "$ENV_TEMP" ]]; then
+    rm -f -- "$ENV_TEMP"
+  fi
+}
+trap cleanup_env_temp EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+write_generated_secret() {
+  local name="$1" length="$2" secret
+  if ! secret="$(openssl rand -hex "$length")"; then
+    printf 'error: failed to generate %s for e2e/.env\n' "$name" >&2
+    return 1
+  fi
+  printf '%s=%s\n' "$name" "$secret"
+}
+
 # ── Secrets ────────────────────────────────────────────────────────────────
 #
 # Minted per run rather than committed. A compose file with a working secret in
 # it is a secret that ends up in somebody's real deployment.
+if [[ -L .env || ( -e .env && ! -f .env ) ]]; then
+  echo 'error: e2e/.env must be a regular file, not a symlink' >&2
+  exit 1
+fi
+
 if [[ ! -f .env ]]; then
   echo "==> generating e2e/.env"
+  ENV_TEMP="$(umask 077; mktemp .env.XXXXXX)"
+  chmod 600 "$ENV_TEMP"
   {
     grep -E '^(NEXUS_IMAGE|NEXUS_PORT|FERRUM_PROXY_PORT|FERRUM_ADMIN_PORT|MAILPIT_HTTP_PORT|DEX_PORT)=' .env.example
-    echo "NEXUS_SECRET_KEY=$(openssl rand -hex 32)"
-    echo "NEXUS_BOOTSTRAP_TOKEN=$(openssl rand -hex 32)"
-    echo "NEXUS_DB_PASSWORD=$(openssl rand -hex 16)"
-    echo "FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)"
-    echo "FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)"
-    echo "DEX_CLIENT_SECRET=$(openssl rand -hex 32)"
-  } > .env
+    write_generated_secret NEXUS_SECRET_KEY 32
+    write_generated_secret NEXUS_BOOTSTRAP_TOKEN 32
+    write_generated_secret NEXUS_DB_PASSWORD 16
+    write_generated_secret FERRUM_ADMIN_JWT_SECRET 32
+    write_generated_secret FERRUM_BASIC_AUTH_HMAC_SECRET 32
+    write_generated_secret DEX_CLIENT_SECRET 32
+  } > "$ENV_TEMP"
+  mv -f "$ENV_TEMP" .env
 fi
+
+# Existing files may have been created under a permissive umask. Refuse links
+# above, then secure the file before reading or updating any secret values.
+chmod 600 .env
+
 # An e2e/.env generated before the Dex service existed has no client secret
 # for it; add one rather than make the developer delete their environment.
 if ! grep -q '^DEX_CLIENT_SECRET=' .env; then
+  ENV_TEMP="$(umask 077; mktemp .env.XXXXXX)"
+  chmod 600 "$ENV_TEMP"
+  cat .env > "$ENV_TEMP"
   # Do not glue the new line onto a last line that has no newline.
-  if [[ -s .env && -n "$(tail -c1 .env)" ]]; then echo >> .env; fi
-  echo "DEX_CLIENT_SECRET=$(openssl rand -hex 32)" >> .env
+  if [[ -s .env && -n "$(tail -c1 .env)" ]]; then echo >> "$ENV_TEMP"; fi
+  write_generated_secret DEX_CLIENT_SECRET 32 >> "$ENV_TEMP"
+  mv -f "$ENV_TEMP" .env
 fi
+
 # Only an image supplied by the caller is treated as a prebuilt image. The
 # value in .env is a convenient tag for the image built from this checkout.
-set -a
-# shellcheck disable=SC1091
-source .env
-set +a
+# Parse it as data: no shell syntax is accepted or evaluated.
+ENV_KEYS=' '
+ENV_LINE_NUMBER=0
+while IFS= read -r ENV_LINE || [[ -n "$ENV_LINE" ]]; do
+  ((ENV_LINE_NUMBER += 1))
+  if [[ "$ENV_LINE" =~ [[:cntrl:]] ]]; then
+    echo "error: control character in e2e/.env at line $ENV_LINE_NUMBER" >&2
+    exit 1
+  fi
+  [[ -z "$ENV_LINE" || "$ENV_LINE" =~ ^[[:space:]]*# ]] && continue
+  if [[ ! "$ENV_LINE" =~ ^([A-Z_][A-Z0-9_]*)=([A-Za-z0-9._:/@+=-]*)$ ]]; then
+    echo "error: invalid line in e2e/.env at line $ENV_LINE_NUMBER" >&2
+    exit 1
+  fi
+  ENV_KEY="${BASH_REMATCH[1]}"
+  ENV_VALUE="${BASH_REMATCH[2]}"
+  case "$ENV_KEY" in
+    NEXUS_IMAGE|NEXUS_SECRET_KEY|NEXUS_BOOTSTRAP_TOKEN|NEXUS_DB_PASSWORD) ;;
+    FERRUM_ADMIN_JWT_SECRET|FERRUM_BASIC_AUTH_HMAC_SECRET|DEX_CLIENT_SECRET) ;;
+    NEXUS_PORT|FERRUM_PROXY_PORT|FERRUM_ADMIN_PORT|MAILPIT_HTTP_PORT) ;;
+    DEX_PORT|FERRUM_EDGE_IMAGE|FERRUM_ADMIN_JWT_ISSUER) ;;
+    *)
+      echo "error: unsupported key in e2e/.env at line $ENV_LINE_NUMBER: $ENV_KEY" >&2
+      exit 1
+      ;;
+  esac
+  if [[ "$ENV_KEYS" == *" $ENV_KEY "* ]]; then
+    echo "error: duplicate key in e2e/.env at line $ENV_LINE_NUMBER: $ENV_KEY" >&2
+    exit 1
+  fi
+  ENV_KEYS+="$ENV_KEY "
+  printf -v "$ENV_KEY" '%s' "$ENV_VALUE"
+  export "$ENV_KEY"
+done < .env
+
 NEXUS_IMAGE="${IMAGE_OVERRIDE:-${NEXUS_IMAGE:-ferrum-nexus:e2e}}"
 export NEXUS_IMAGE
 FERRUM_EDGE_IMAGE="${EDGE_OVERRIDE:-$PINNED_EDGE_IMAGE}"
@@ -98,6 +166,7 @@ fi
 
 cleanup() {
   local status=$?
+  cleanup_env_temp
   mkdir -p "$ARTIFACTS"
   echo "==> collecting logs into $ARTIFACTS"
   # Container logs only. They carry request lines and gateway decisions, which
