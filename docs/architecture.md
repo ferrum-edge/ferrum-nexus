@@ -958,7 +958,10 @@ the same while active rows remain. See
 ```
 POST /api/credentials/:id/rotate
   │
+  ├─ caller must own the credential             any other caller, admin included: 403
+  │
   └─ serializePerKey(consumer):
+       re-read the row; owner checked again
        GET /consumers/{id}                      fresh view, same lock
        rows      = live credential_metadata rows for (consumer, type), by edge_ordinal
        position  = index of the target

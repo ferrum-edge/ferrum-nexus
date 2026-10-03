@@ -14,7 +14,9 @@
  *    consumer id it was handed, including one an operator created by hand;
  * 4. a revocation racing a re-approval of the same API, which could strip the
  *    new grant's group after it landed;
- * 5. an issue whose application was disabled after the route resolved it.
+ * 5. an issue whose application was disabled after the route resolved it;
+ * 6. an administrator rotating an application's credential, which would hand
+ *    them a secret that acts as that application (GHSA-mr69-2744-f78w).
  *
  * And the ordering around them: an approval's grant is written under the
  * consumer key an application delete holds, a re-enable that cancelled a
@@ -40,6 +42,7 @@ import {
   type IssueCredentialResponse,
   type PublishApiResponse,
   type ReconcileCredentialsResponse,
+  type RotateCredentialResponse,
 } from '@ferrum-nexus/shared';
 
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
@@ -409,6 +412,53 @@ describe('credential and access ownership (issue #341)', () => {
     assert.ok(remote, 'the identity was provisioned before the disable');
     assert.equal(remote.credentials.keyauth?.length ?? 0, 0, 'but nothing was appended to it');
     assert.equal((await harness.store.credentials.list({ application_id: appId })).total, 0);
+  });
+
+  /* ── 6. Only the owner rotates an application's credential ──────────── */
+
+  it('refuses an administrator rotating an application’s credential', async () => {
+    const appId = await createApplication('Rotated by its owner only');
+    const issued = await harness.authed(owner, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth', application_id: appId },
+    });
+    assert.equal(issued.statusCode, 201, issued.body);
+    const credential = issued.json<IssueCredentialResponse>().credential;
+
+    // The founder is a super admin: the role that can do the most is refused
+    // too, because the replacement's secret would act as the application.
+    const refused = await harness.authed(founder, {
+      method: 'POST',
+      url: `/api/credentials/${credential.id}/rotate`,
+      payload: {},
+    });
+    assert.equal(refused.statusCode, 403, refused.body);
+    assert.equal(errorOf(refused.body).code, 'FORBIDDEN');
+    assert.ok(!('secret' in JSON.parse(refused.body)), 'no secret was handed out');
+    assert.equal(appConsumer(appId)?.credentials.keyauth?.length, 1, 'nothing was appended');
+    assert.equal((await harness.store.credentials.findById(credential.id))?.status, 'active');
+    assert.equal((await harness.store.credentials.list({ application_id: appId })).total, 1);
+
+    // The owner rotates it on the application's own consumer.
+    const rotated = await harness.authed(owner, {
+      method: 'POST',
+      url: `/api/credentials/${credential.id}/rotate`,
+      payload: {},
+    });
+    assert.equal(rotated.statusCode, 200, rotated.body);
+    const body = rotated.json<RotateCredentialResponse>();
+    assert.equal(body.consumer_username, consumerUsernameForApplication(appId));
+    assert.equal(body.credential.application_id, appId);
+    assert.equal(body.credential.user_id, owner.user.id);
+
+    // And the super admin can still revoke it.
+    const revoked = await harness.authed(founder, {
+      method: 'DELETE',
+      url: `/api/credentials/${body.credential.id}`,
+    });
+    assert.equal(revoked.statusCode, 200, revoked.body);
+    assert.equal(appConsumer(appId)?.credentials.keyauth?.length ?? 0, 0);
   });
 
   /* ── 4. Revoke is serialised with approve ───────────────────────────── */

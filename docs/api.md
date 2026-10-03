@@ -466,7 +466,9 @@ _public_ — body `{ "email": string }` (≤ 320 chars).
 
 Queues a password-reset link to `<public URL>/reset-password?token=…` when the
 address belongs to an active account and none was issued in the last 10
-minutes. The link expires after one hour (`PASSWORD_RESET_TTL_SECONDS`).
+minutes. The link expires after one hour (`PASSWORD_RESET_TTL_SECONDS`), and
+issuing it supersedes every earlier live reset link for the account, so only the
+newest is valid.
 
 ### `POST /api/auth/reset-password`
 
@@ -2723,7 +2725,7 @@ and put nothing in a claim you would not show the provider. See the
 
 ### `POST /api/credentials/:id/rotate`
 
-_session_, owner or admin → **show-once.** Body `{ "label"?: string | null }`,
+_session_, **owner only** → **show-once.** Body `{ "label"?: string | null }`,
 optional; defaults to the previous label.
 
 ```json
@@ -2754,12 +2756,17 @@ optional; defaults to the previous label.
   whether the gateway still holds both (revoke the named one yourself) or
   neither could be confirmed (an administrator must reconcile — see
   [`operations.md`](operations.md#12-the-credential-mirror)).
-- An admin rotating someone else's credential does not take it over: the
-  replacement keeps the owner and consumer, and the notification goes to the
-  owner.
+- **Only the credential's owner can rotate it, whatever their role.** The
+  replacement stays on the same consumer with the same grants, so its secret
+  acts as that account or application; returning it to anyone else would let
+  them call the identity's APIs. An `admin` or `super_admin` gets
+  `403 FORBIDDEN` before anything reaches the gateway, and nothing is minted.
+  To take a credential away, an administrator
+  [revokes](#delete-apicredentialsid) it; the owner then issues a new one.
+- The owner is notified and emailed (`credential_rotated`).
 
-Errors: `403 FORBIDDEN` (someone else's credential), `403 USER_DISABLED` (the
-owner is disabled), `409 CONFLICT` (already revoked, the credential's
+Errors: `403 FORBIDDEN` (someone else's credential, including for an
+administrator), `403 USER_DISABLED` (the owner is disabled), `409 CONFLICT` (already revoked, the credential's
 application is disabled — revoking stays allowed — or, for `basicauth`, an
 unconfirmed change on the same identity), `502 EDGE_ERROR` (including a gateway
 credential list that no longer matches the portal's, which is refused rather
@@ -2768,7 +2775,8 @@ than guessed at).
 ### `DELETE /api/credentials/:id`
 
 _session_, owner or admin → `{ "ok": true }`. Deletes the entry from Edge and
-marks the row `revoked`. Idempotent: an already-revoked credential succeeds
+marks the row `revoked`. This is how an administrator takes away another
+account's or application's credential; unlike rotation, it returns no secret. Idempotent: an already-revoked credential succeeds
 without a gateway call.
 
 The row moves to `retiring` (with `credential.revoke_start`) before the gateway

@@ -138,6 +138,52 @@ describe('password reset', () => {
     assert.ok(performed.some((row) => row.target_id === owner.user.id));
   });
 
+  it('revokes an earlier link when a newer one is issued', async (t) => {
+    // Fake only Date: advancing past the issuance throttle needs no sleep and
+    // ages both the stored token and the claim with it.
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    await harness.registerUser({ email: 'superseded@example.test' });
+
+    await forgotPassword('superseded@example.test');
+    await harness.tick();
+    const firstMail = harness.mailbox.sent.find((mail) => mail.to === 'superseded@example.test');
+    assert.ok(firstMail, 'the first reset mail was delivered');
+    const firstToken = tokenIn(firstMail.text);
+
+    // Past the 10-minute throttle the next ask issues a genuinely new link.
+    t.mock.timers.tick(11 * 60 * 1000);
+    await forgotPassword('superseded@example.test');
+    assert.equal(
+      (await mailFor('superseded@example.test')).length,
+      2,
+      'a second link was issued once the window had passed',
+    );
+    await harness.tick();
+    const secondMail = harness.mailbox.sent
+      .filter((mail) => mail.to === 'superseded@example.test')
+      .at(-1);
+    assert.ok(secondMail, 'the second reset mail was delivered');
+    const secondToken = tokenIn(secondMail.text);
+    assert.notEqual(secondToken, firstToken, 'the second ask minted a new token');
+
+    // Issuing the newer link revoked the older one: a leaked or suspected link
+    // must not survive its replacement.
+    const superseded = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/reset-password',
+      payload: { token: firstToken, new_password: NEW_PASSWORD },
+    });
+    assert.equal(superseded.statusCode, 400, superseded.body);
+    assert.equal(errorCode(superseded.body), 'VALIDATION_FAILED');
+
+    const accepted = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/reset-password',
+      payload: { token: secondToken, new_password: NEW_PASSWORD },
+    });
+    assert.equal(accepted.statusCode, 200, accepted.body);
+  });
+
   it('answers an address with no account exactly as it answers a real one', async () => {
     const before = (await harness.outbox()).length;
 
