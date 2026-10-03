@@ -60,7 +60,7 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     environment:
       POSTGRES_USER: nexus
       POSTGRES_PASSWORD: ${NEXUS_DB_PASSWORD:?set NEXUS_DB_PASSWORD}
@@ -78,7 +78,7 @@ services:
   # This one-shot container also repairs older root-owned named volumes before
   # SQLite opens its database; it is a no-op on later starts.
   ferrum-edge-init:
-    image: alpine:3
+    image: alpine:3@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
     command: ['chown', '65532:65532', '/data']
     volumes:
       - ferrumdata:/data
@@ -93,6 +93,7 @@ services:
       FERRUM_DB_URL: 'sqlite:///data/ferrum.db?mode=rwc'
       FERRUM_NAMESPACE: nexus
       FERRUM_ADMIN_JWT_SECRET: ${FERRUM_ADMIN_JWT_SECRET:?set FERRUM_ADMIN_JWT_SECRET}
+      FERRUM_BACKEND_ALLOW_IPS: public
       # Required before any `basic_auth` API can be published; at least 32 bytes.
       FERRUM_BASIC_AUTH_HMAC_SECRET: ${FERRUM_BASIC_AUTH_HMAC_SECRET:?set FERRUM_BASIC_AUTH_HMAC_SECRET}
       FERRUM_ADMIN_BIND_ADDRESS: 0.0.0.0

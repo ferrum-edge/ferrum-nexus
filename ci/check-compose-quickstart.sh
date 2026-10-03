@@ -19,7 +19,6 @@ if grep -Eq '^FERRUM_EDGE_IMAGE=' e2e/.env.example; then
   echo 'error: e2e/.env.example duplicates the Edge image reference' >&2
   exit 1
 fi
-
 # The verbatim quickstart gate (ci/verbatim-quickstart-gate.sh) runs this
 # marked block and nothing else, so the markers must be there, exactly once.
 if ! commands=$(awk '
@@ -55,6 +54,12 @@ fi
 setup=$(printf '%s\n' "$commands" | sed '$d')
 eval "$setup"
 docker compose --env-file /dev/null config --quiet
+config_json=$(docker compose --env-file /dev/null config --format json)
+if ! printf '%s\n' "$config_json" | jq -e \
+  '.services["ferrum-edge"].environment.FERRUM_BACKEND_ALLOW_IPS == "public"' >/dev/null; then
+  echo 'error: resolved quickstart config must enforce public-only backend addresses on Ferrum Edge' >&2
+  exit 1
+fi
 if ! docker compose --env-file /dev/null config --images | grep -Fx "$FERRUM_EDGE_IMAGE" >/dev/null; then
   echo 'error: Compose did not select the compatibility record Edge image' >&2
   exit 1
