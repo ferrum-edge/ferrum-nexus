@@ -77,9 +77,9 @@ export const SUPER_ADMIN_LOCK_CONFLICT_MESSAGE =
   'Another administrator change is in flight right now — please retry';
 
 /**
- * The per-account **lifecycle** key: every `status` transition of one account
- * (`PATCH /api/users/:id`, god mode's `disable-user`) and every registration
- * of a new gateway identity for it are taken under this key.
+ * The per-account **lifecycle** key: every `role` or `status` transition of
+ * one account (`PATCH /api/users/:id`, god mode's `disable-user`) and every
+ * registration of a new gateway identity for it are taken under this key.
  *
  * The two have to be ordered against each other, not merely against other
  * writes to the same Edge consumer. A provider's first test consumer has no
@@ -137,6 +137,15 @@ export function userLifecycleLockKey(userId: string): string {
 export function ssoProviderLockKey(providerId: string): string {
   return `sso:provider:${providerId}`;
 }
+
+/**
+ * The deployment-wide single sign-on settings key. Every settings save takes
+ * it before the sorted `sso:provider:*` keys, including saves whose provider
+ * sets do not overlap, so the settings compare-and-swap is serialized across
+ * instances. A role change takes `users:lifecycle:<user_id>` to order manual
+ * admin promotions against account identity links.
+ */
+export const SSO_SETTINGS_LOCK_KEY = 'sso:settings';
 
 /**
  * The per-sender key the rolling daily **message budget** is spent under.

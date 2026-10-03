@@ -46,6 +46,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **SSO settings saves and account role changes are serialized across instances** (#505).
+  A deployment-wide lock now protects settings compare-and-swap even when no
+  provider locks overlap, and every manual role change shares the account
+  lifecycle lock with first-time SSO links. Manual admin promotions now refuse
+  while lower-trust identities remain linked, and settings audit rows name
+  providers whose admin trust was lowered. The security guide also documents
+  that turning off `sync_roles` does not automatically demote existing admins
+  or unlink their identities.
 - **The publishing upstream check now normalises the host before its
   name-suffix rules** (#503, GHSA-cq2h-g4g3-rw3p). A host written fully
   qualified (`api.internal.`) or in another letter case (`API.INTERNAL`) skipped

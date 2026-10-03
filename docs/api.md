@@ -732,6 +732,10 @@ Rules:
 - Only a `super_admin` may promote to or demote from `admin`/`super_admin`, or
   disable/re-enable an administrator → otherwise `403 FORBIDDEN`. A plain
   `admin` can move accounts between `client` and `provider`.
+- Promoting an account from below `admin` to an elevated role while it has a
+  linked identity at a provider not trusted to grant `admin` → `409 CONFLICT`,
+  with `details.lower_trust_provider_ids`. Remove those identities or restore
+  the providers' admin trust before retrying.
 - Demoting or disabling the last active `super_admin` → `409 LAST_SUPER_ADMIN`
   (this wins over the self-disable rule).
 - Disabling your own account otherwise → `409 CONFLICT`.

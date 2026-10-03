@@ -164,14 +164,17 @@ describe('MySQL conditional user transitions', { skip: !adminUrl, timeout: 30_00
               throw new Error(`Transaction snapshot barrier missed: ${response.statusCode}`);
             }),
           ]);
-          // This authorized role-only request uses B's independent store and
-          // commits without acquiring the account lifecycle lease held by A.
-          const changed = await appB.authed(founder, {
-            method: 'PATCH',
-            url: `/api/users/${targetId}`,
-            payload: { role: 'provider' },
-          });
-          assert.equal(changed.statusCode, 200, changed.body);
+          // Write directly through B's store: production role changes now take
+          // the lifecycle lease that A holds while paused, so a route request
+          // here would correctly wait instead of creating the stale snapshot.
+          const changed = await b.transaction((tx) =>
+            tx.users.updateIfMatches(
+              targetId,
+              { role: beforeUser.role, status: beforeUser.status },
+              { role: 'provider' },
+            ),
+          );
+          assert.ok(changed);
           const committedUser = await b.users.findById(targetId);
           assert.ok(committedUser);
           assert.deepEqual(committedUser, {
