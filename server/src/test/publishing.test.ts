@@ -1198,6 +1198,9 @@ describe('publishing', () => {
     });
 
     it('hands the provider the gateway’s reason for a validation refusal', async () => {
+      // Publishing a basic_auth API against a gateway with no
+      // FERRUM_BASIC_AUTH_HMAC_SECRET is the canonical case: the provider can
+      // do nothing about it until they can read why the plugin was refused.
       const gatewayText =
         'FERRUM_BASIC_AUTH_HMAC_SECRET must be set to accept basic_auth credentials';
       harness.edge.queueFailure(400, { error: gatewayText }, '/plugins/config', 'POST');

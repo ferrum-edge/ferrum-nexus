@@ -1541,6 +1541,13 @@ against registering a new gateway identity for it
 ([§11](#11-gateway-revocation-for-disabled-accounts)). It is always taken inside
 `users:super-admins` when both are needed.
 
+Single sign-on uses two of these keys. A callback that writes one of a
+provider's links (a first-time link or a provisioned account) and every save of
+the single sign-on settings take `sso:provider:<id>`; returning sign-ins do not.
+Every sign-in into an existing account also takes its `users:lifecycle:<user_id>`
+key, inside the provider's, so a claims promotion and an automatic link at
+another provider never miss each other's write.
+
 Both behave like gateway leases. A `409 CONFLICT` saying "Another administrator
 change is in flight right now — please retry" means two admins changed
 administrator accounts at the same moment; retry.
@@ -2337,6 +2344,11 @@ without following redirects, and caches both for an hour; a failed fetch is
 retried after 30 seconds at the earliest. Every provider host, the endpoints
 its discovery document names included, must resolve to public addresses. For
 a provider on a private network set `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES=true`.
+Provider requests always connect directly and ignore the environment proxy
+settings (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, and Node's
+`NODE_USE_ENV_PROXY` / `--use-env-proxy`), because a proxy resolves the
+provider name itself and cannot be vetted; a deployment whose only egress is a
+proxy must allow direct egress to the identity provider.
 
 ### Configure the provider in Nexus
 
@@ -2402,6 +2414,30 @@ Mapping `admin` makes the provider's group the source of truth for who
 administers the portal, which is why only a `super_admin` may edit these
 settings.
 
+**Claims do not promote an account another provider can open.** A role
+belongs to the account, and a session does not record which provider opened
+it. So when a sign-in's claims would raise an account to `admin`, and the
+account also holds an identity at another provider that is not itself trusted
+with `admin`, the promotion is **withheld**: the sign-in goes ahead with the
+account's current role, and an `auth.sso_claims_sync` row records
+`role_withheld`, `withheld_reason: "lower_trust_identities"` and
+`lower_trust_provider_ids`. Otherwise the identity at that other provider, and
+every session opened through it, would become an administrator's too. A
+provider is trusted with `admin` when `sync_roles` is on and its default role
+or one of its mappings is `admin`: its own identities could already raise the
+account. Explicitly linked identities count like automatic ones, since the
+portal cannot tell who held the session that linked them. To finish a
+withheld promotion, a `super_admin` reviews the account's links
+(`GET /api/users/:id/identities`) and either removes the ones its holder does
+not recognise, after which the next sign-in promotes it, or promotes the
+account by hand, which accepts those identities as the holder's.
+
+A promotion that goes through ends every other session the account holds
+(`terminated_sessions` in the same row), so no session opened before it, by
+password, through another provider or through an identity since removed,
+carries the new role. The holder's other browsers sign in again. A demotion
+needs no such step: every request reloads the role.
+
 ### Deployment-wide settings
 
 Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
@@ -2427,6 +2463,10 @@ Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
   disable. This runs **when the user next signs in**; Nexus gets no events
   from the provider.
 
+Two saves at the same moment do not overwrite each other: a save whose
+settings another save changed after it read them is refused with
+`409 CONFLICT`. Reload the page and save again.
+
 ### How accounts are matched
 
 1. A returning sign-in is matched on the provider id, its issuer and `sub`,
@@ -2435,7 +2475,8 @@ Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
 2. With no link, an existing account with the same address is linked
    automatically only when all of these hold:
    - `link_existing_accounts` is on;
-   - the account is not an `admin` or `super_admin` (`privileged_account`);
+   - the account is not an `admin` or `super_admin`, and the provider's claims
+     would not make it one (`privileged_account`);
    - the provider asserts `email_verified: true`;
    - the portal holds a **recorded proof** of the account's address. The
      holder redeemed a verification link or completed a password reset for
@@ -2456,6 +2497,26 @@ Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
    leaves the account active but with no way to sign in until a provider
    links it again by its proven address. To end such an account's access,
    disable it.
+
+**An address another provider got to first.** If a provider the holder does
+not use provisioned or linked an account at their address first, and the
+holder's own provider maps them to `admin`, their sign-in is refused with
+`privileged_account`. That is deliberate: linking would promote the account
+and hand administrator access to the other provider's identity. When that
+account was provisioned through single sign-on it has no password either, so
+its holder cannot sign in and link explicitly. The way out depends on whose
+account it is, and a `super_admin` decides:
+
+- If the account is the holder's after all (they used the other provider
+  once), the holder signs in through that provider and links their
+  admin-mapped provider from **Profile → Linked sign-in**. The promotion is
+  withheld until a `super_admin` has reviewed the other identity (above).
+- If it is not, a `super_admin` disables it (`PATCH /api/users/:id` with
+  `status: "disabled"`), which ends its sessions and revokes its gateway
+  credentials, and removes its links. The portal has no API that deletes an
+  account or changes its address, so the address stays with the disabled
+  account: the holder gets an account at it only once that account's row is
+  removed from the database, which is a database operator's task.
 
 **Explicit linking.** A signed-in user links their own account from **Profile →
 Linked sign-in**, whatever address the provider holds. The provider's domain
@@ -2522,7 +2583,7 @@ reason and a short detail (never a token or secret):
 
 | Reason                     | Usual cause                                                                                                                                       |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sso_disabled`             | Policy `local_only`, or an unknown or disabled provider.                                                                                          |
+| `sso_disabled`             | Policy `local_only`, or an unknown or disabled provider — including one removed, disabled or edited while the sign-in was in flight.              |
 | `provider_unavailable`     | Discovery, JWKS or the token endpoint failed; an issuer mismatch; a secret that no longer decrypts.                                               |
 | `invalid_state`            | The sign-in took over 10 minutes, cookies were blocked, or the response was not for this browser.                                                 |
 | `idp_error`                | The provider refused the request (consent denied, client misconfigured).                                                                          |
@@ -2532,13 +2593,17 @@ reason and a short detail (never a token or secret):
 | `email_not_verified`       | The provider did not assert `email_verified: true` where linking, a domain list or provisioning needs it.                                         |
 | `account_exists`           | An account holds the address but the portal has no proof of it, or it is linked there already (see "How accounts are matched").                   |
 | `address_unproven`         | A profile link to an account the portal holds no address proof for: use **Forgot password**, which confirms the address, then link again.         |
-| `privileged_account`       | The address belongs to an `admin` or `super_admin`, which links from its profile only.                                                            |
+| `privileged_account`       | The account is an `admin` or `super_admin`, or this provider's claims would make it one: it links from its profile only (see below the table).    |
 | `link_session_mismatch`    | A profile link came back to a different session, or none: start it again while signed in.                                                         |
 | `already_linked`           | A profile link found the identity linked to another account, or this account linked at that provider.                                             |
 | `access_denied`            | The claims map to no role.                                                                                                                        |
 | `account_disabled`         | The linked account is disabled.                                                                                                                   |
 | `signup_disabled`          | No account matched and `jit_provisioning` is off.                                                                                                 |
 | `server_error`             | Anything else; see the log.                                                                                                                       |
+
+A holder refused with `privileged_account` who has no other way into the
+account holding their address needs a `super_admin`: see "An address another
+provider got to first" under "How accounts are matched".
 
 ### Local development against a provider
 

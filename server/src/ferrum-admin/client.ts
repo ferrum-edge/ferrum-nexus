@@ -1131,6 +1131,9 @@ export function createFerrumAdminClient(
         { status, kind: 'write_acknowledgement_uncertain' },
       );
     }
+    if (status === 401 || status === 403) {
+      return edgeError('The gateway rejected the Nexus admin credentials', { status });
+    }
     if (
       isApiSpecWrite &&
       status >= 400 &&
@@ -1163,9 +1166,6 @@ export function createFerrumAdminClient(
             : {}),
         },
       );
-    }
-    if (status === 401 || status === 403) {
-      return edgeError('The gateway rejected the Nexus admin credentials', { status });
     }
     if (!credentialWrite && ECHOED_EDGE_STATUSES.has(status) && typeof body.error === 'string') {
       const gatewayMessage = body.error.trim().slice(0, MAX_GATEWAY_MESSAGE);

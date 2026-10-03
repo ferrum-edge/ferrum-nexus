@@ -10,6 +10,10 @@ fail() {
   exit 1
 }
 
+file_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
 new_fixture() {
   local name="$1"
   FIXTURE="$TEMP/$name"
@@ -76,7 +80,8 @@ not_contains() {
 
 # Fresh run and repeat run both rebuild the current checkout and use the pin.
 new_fixture fresh
-run_fixture bash ./run.sh
+run_fixture bash -c 'umask 022; exec bash ./run.sh'
+[[ "$(file_mode "$FIXTURE/e2e/.env")" == 600 ]] || fail 'generated .env mode is not 600'
 contains "$FIXTURE/trace" 'docker build -t ferrum-nexus:e2e'
 contains "$FIXTURE/trace" 'edge=example/edge:pin-one@sha256:111'
 contains "$FIXTURE/output" 'Nexus image: ferrum-nexus:e2e (sha256:nexus-image)'
@@ -89,7 +94,8 @@ run_fixture bash ./run.sh
 new_fixture changed_pin
 run_fixture bash ./run.sh
 sed -i.bak 's/pin-one/pin-two/' "$FIXTURE/release/compatibility.env"
-printf '\nFERRUM_EDGE_IMAGE=example/edge:old-saved-pin\nNEXUS_SECRET_KEY=preserved-secret\n' >> "$FIXTURE/e2e/.env"
+sed -i.bak 's/^NEXUS_SECRET_KEY=.*/NEXUS_SECRET_KEY=preserved-secret/' "$FIXTURE/e2e/.env"
+printf '\nFERRUM_EDGE_IMAGE=example/edge:old-saved-pin\n' >> "$FIXTURE/e2e/.env"
 run_fixture bash ./run.sh
 contains "$FIXTURE/trace" 'edge=example/edge:pin-two@sha256:111'
 not_contains "$FIXTURE/trace" 'edge=example/edge:old-saved-pin'
@@ -163,5 +169,77 @@ for args in 'unknown' 'all extra'; do
   not_contains "$FIXTURE/trace" 'docker '
   [[ ! -e "$FIXTURE/e2e/.env" ]] || fail 'invalid arguments generated .env'
 done
+
+# Dotenv input is data: hostile shell syntax and unsupported records are rejected.
+for hostile_case in backticks semicolon single_quote double_quote spaces crlf export_prefix duplicate unknown_key whitespace_line; do
+  new_fixture "dotenv_$hostile_case"
+  expected_error='error: invalid line in e2e/.env at line 1'
+  case "$hostile_case" in
+    backticks) printf 'NEXUS_IMAGE=`touch sentinel`\n' > "$FIXTURE/e2e/.env" ;;
+    semicolon) printf 'NEXUS_IMAGE=bad;touch sentinel\n' > "$FIXTURE/e2e/.env" ;;
+    single_quote) printf "NEXUS_IMAGE='bad'\n" > "$FIXTURE/e2e/.env" ;;
+    double_quote) printf 'NEXUS_IMAGE="bad"\n' > "$FIXTURE/e2e/.env" ;;
+    spaces) printf 'NEXUS_IMAGE=bad value\n' > "$FIXTURE/e2e/.env" ;;
+    crlf)
+      printf 'NEXUS_IMAGE=bad\r\n' > "$FIXTURE/e2e/.env"
+      expected_error='error: control character in e2e/.env at line 1'
+      ;;
+    export_prefix) printf 'export NEXUS_IMAGE=bad\n' > "$FIXTURE/e2e/.env" ;;
+    duplicate)
+      printf 'NEXUS_IMAGE=first\nNEXUS_IMAGE=second\n' > "$FIXTURE/e2e/.env"
+      expected_error='error: duplicate key in e2e/.env at line 2: NEXUS_IMAGE'
+      ;;
+    unknown_key)
+      printf 'BASH_ENV=sentinel\n' > "$FIXTURE/e2e/.env"
+      expected_error='error: unsupported key in e2e/.env at line 1: BASH_ENV'
+      ;;
+    whitespace_line) printf '   \n' > "$FIXTURE/e2e/.env" ;;
+  esac
+  status=0
+  run_fixture bash ./run.sh && status=0 || status=$?
+  [[ "$status" == 1 ]] || fail "$hostile_case dotenv returned $status"
+  contains "$FIXTURE/output" "$expected_error"
+  [[ ! -e "$FIXTURE/e2e/sentinel" ]] || fail "$hostile_case dotenv created sentinel"
+  not_contains "$FIXTURE/trace" 'docker build'
+done
+
+# A failure after mktemp removes the secret-bearing temporary file.
+new_fixture dotenv_temp_cleanup
+cat > "$FIXTURE/bin/openssl" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$FIXTURE/bin/openssl"
+status=0
+run_fixture bash ./run.sh && status=0 || status=$?
+[[ "$status" == 1 ]] || fail "temp-file failure returned $status"
+contains "$FIXTURE/output" 'error: failed to generate NEXUS_SECRET_KEY for e2e/.env'
+[[ ! -e "$FIXTURE/e2e/.env" ]] || fail 'failed secret generation created .env'
+temp_files=("$FIXTURE"/e2e/.env.??????)
+[[ ! -e "${temp_files[0]:-}" ]] || fail 'temporary dotenv file was not removed'
+
+# Base64-style values retain equals, plus and slash characters; shell-looking comments stay inert.
+new_fixture dotenv_valid_value
+printf '# `touch sentinel`\nNEXUS_SECRET_KEY=abc=+/def\n' > "$FIXTURE/e2e/.env"
+run_fixture bash ./run.sh
+grep -qx 'NEXUS_SECRET_KEY=abc=+/def' "$FIXTURE/e2e/.env" || fail 'valid value changed'
+[[ ! -e "$FIXTURE/e2e/sentinel" ]] || fail 'comment shell syntax executed'
+contains "$FIXTURE/trace" 'docker build -t ferrum-nexus:e2e'
+
+# An existing dotenv file is secured before its values are read.
+new_fixture existing_env_mode
+printf 'NEXUS_SECRET_KEY=preserved-secret\nDEX_CLIENT_SECRET=x\n' > "$FIXTURE/e2e/.env"
+chmod 644 "$FIXTURE/e2e/.env"
+run_fixture bash ./run.sh
+[[ "$(file_mode "$FIXTURE/e2e/.env")" == 600 ]] || fail 'existing .env mode is not 600'
+
+# A symlink cannot redirect secret reads or writes to another file.
+new_fixture dotenv_symlink
+printf 'NEXUS_SECRET_KEY=preserved-secret\n' > "$FIXTURE/target.env"
+ln -s ../target.env "$FIXTURE/e2e/.env"
+status=0
+run_fixture bash ./run.sh && status=0 || status=$?
+[[ "$status" == 1 ]] || fail "dotenv symlink returned $status"
+not_contains "$FIXTURE/trace" 'docker build'
 
 echo 'E2E runner shell regressions passed'

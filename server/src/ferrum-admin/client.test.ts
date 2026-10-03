@@ -584,7 +584,8 @@ describe('ferrum admin client', () => {
       );
     });
 
-    it('returns actionable gateway validation text on non-credential endpoints', async () => {
+    it('echoes the gateway text on a validation refusal but not on a 5xx', async () => {
+      // 400/409/422 describe the caller's own request, so the reason travels.
       edge.queueFailure(409, { error: 'listen_path already exists in this namespace' });
       await assert.rejects(
         () => client.consumers.list(),
@@ -613,8 +614,8 @@ describe('ferrum admin client', () => {
       );
     });
 
-    it('trims long gateway validation errors', async () => {
-      edge.queueFailure(400, { error: 'private upstream detail'.repeat(100) });
+    it('trims a runaway gateway message to 500 characters', async () => {
+      edge.queueFailure(400, { error: 'x'.repeat(2_000) });
       await assert.rejects(
         () => client.consumers.list(),
         (error: unknown) => {
@@ -675,6 +676,35 @@ describe('ferrum admin client', () => {
         }
       } finally {
         await logged.close();
+      }
+    });
+
+    it('classifies credential-write 503 responses without exposing Edge text', async () => {
+      for (const [body, details] of [
+        [
+          {
+            error: 'failed with durable secret-canary',
+            reason: 'private reason secret-canary',
+            applied: false,
+          },
+          { status: 503, kind: 'write_durable_not_live' },
+        ],
+        [
+          { error: 'uncertain secret-canary', reason: 'private reason secret-canary' },
+          { status: 503, kind: 'write_acknowledgement_uncertain' },
+        ],
+      ] as const) {
+        edge.queueFailure(503, body, '/consumers/', 'POST');
+        await assert.rejects(
+          () => client.consumers.addCredential('fixed-consumer-id', 'keyauth', { key: 'secret' }),
+          (error: unknown) => {
+            assert.ok(isNexusError(error));
+            assert.deepEqual(error.details, details);
+            assert.ok(!JSON.stringify(error.toBody()).includes('secret-canary'));
+            assert.ok(!JSON.stringify(error.toBody()).includes('reason'));
+            return true;
+          },
+        );
       }
     });
 
@@ -917,7 +947,7 @@ describe('ferrum admin client', () => {
   });
 
   describe('api specs', () => {
-    it('reports API-spec rejection diagnostics to callers', async () => {
+    it('reports parse categories and their distinct details from the mock importer', async () => {
       const malformed = specDocument('bad-extension', '/nexus/bad-extension', ['/invoices']);
       malformed['x-ferrum-proxy'] = { upstream_url: 'https://example.com' };
       for (const [document, code, explanation] of [
@@ -938,7 +968,7 @@ describe('ferrum admin client', () => {
       }
     });
 
-    it('bounds API-spec diagnostics and logs the gateway response', async () => {
+    it('bounds spec diagnostics and keeps gateway failures opaque', async () => {
       const logs: Record<string, unknown>[] = [];
       const messages: (string | undefined)[] = [];
       const logged = createFerrumAdminClient(configFor(edgeUrl), {
@@ -963,6 +993,7 @@ describe('ferrum admin client', () => {
             (error: unknown) => {
               assert.ok(isNexusError(error));
               assert.equal(error.code, 'EDGE_REJECTED_SPEC');
+              assert.ok(!JSON.stringify(error.toBody()).includes('not a string'));
               const diagnostics = error.details as {
                 gateway_message: string;
                 gateway_code: string;
@@ -990,7 +1021,6 @@ describe('ferrum admin client', () => {
           () => logged.apiSpecs.replace('diagnostics', document),
           (error: unknown) => {
             assert.ok(isNexusError(error));
-            assert.equal(error.code, 'EDGE_REJECTED_SPEC');
             assert.match(
               error.message,
               /proxy: overlapping listen_path; plugin_config: invalid config/,

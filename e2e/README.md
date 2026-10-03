@@ -28,8 +28,16 @@ default `run.sh` rebuilds the portal image from the current checkout (using Dock
 and Compose reuses or pulls the pinned Edge image. Set `NEXUS_IMAGE` to use a prebuilt image
 instead, as CI does.
 
-If `e2e/.env` does not exist, `run.sh` generates it with fresh random secrets. Nothing in this
-directory ships a working secret, so none can leak into a real deployment.
+If `e2e/.env` does not exist, `run.sh` generates it with fresh random secrets and mode `0600`.
+Existing files are changed to mode `0600` before they are read, and symlinks are refused. The file
+is parsed as data: empty lines and comments are allowed, and other lines must be unique, allowlisted
+`KEY=VALUE` records. Whitespace-only lines are rejected. Values may contain only letters, digits,
+and `.`, `_`, `:`, `/`, `@`, `+`, `=`, or `-`; shell syntax, quotes, whitespace, and unknown keys
+are rejected. The Edge image entry remains accepted for compatibility with older local files, but
+the runner always uses the current pin from the compatibility record unless `FERRUM_EDGE_IMAGE` is
+exported in the environment.
+
+Nothing in this directory ships a working secret, so none can leak into a real deployment.
 
 `run.sh` bootstraps the portal once, before either suite: it registers the first account with the
 bootstrap token and turns email verification on. Both suites then sign in as that account, because

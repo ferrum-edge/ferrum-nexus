@@ -37,6 +37,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Issuing a new password-reset link now revokes every earlier one**
+  (GHSA-fgq6-8q7j-qmww). After the 10-minute issuance throttle, the
+  `forgot-password` flow used to insert a replacement one-hour token while
+  leaving prior live tokens usable, so a leaked or suspected link remained an
+  account-recovery capability until a token was redeemed. The replacement
+  request now deletes all outstanding `password_reset` tokens in the same
+  transaction that mints and queues the new link, on every backend, matching
+  the supersession the verification-resend flow already performed.
+- **The acceptance runner treats `e2e/.env` as data and protects its secrets** (#497). It rejects
+  malformed, duplicate, unsupported, or shell-containing entries without evaluating them, refuses
+  symlinks, and creates or secures the file with mode `0600`.
 - **Failed list and detail reads no longer look empty** (#486). A persistent
   unavailable state with a Retry action now replaces the empty state when
   credentials, messages, APIs, users, organizations, notifications, audit
@@ -63,6 +74,45 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   (GHSA-qc7r-4j9m-pm44). Non-GET `/consumers` failures omit Edge response text
   from logs, API errors and rollback audit rows, including when Edge echoes the
   submitted credential material.
+- GHSA-8w4q-fv8h-jv73: automatic single sign-on linking refused an account
+  that already was an `admin`, but not one the same sign-in's claims were about
+  to promote. A provider mapping a user to `admin` could therefore link to an
+  account another, lower-trust provider had provisioned or linked, and the
+  promotion then reached that provider's identity and live sessions too.
+  Automatic linking is now refused (`privileged_account`) when the account is
+  an administrator or the provider's claims would make it one, checked when the
+  sign-in is planned and again in the transaction that commits it. Such an
+  account links only explicitly, from its holder's signed-in session.
+  The same escalation in the other order (#495), where the lower-trust provider
+  links first and the holder's own provider promotes the account later, is
+  closed too: claims no longer promote an account to `admin` while it holds an
+  identity at another provider that is not itself trusted with `admin`
+  (`sync_roles` on and an `admin` default or mapping). The sign-in goes ahead
+  with the current role, and `auth.sso_claims_sync` records `role_withheld` and
+  `lower_trust_provider_ids` for a `super_admin` to review. Explicit links count
+  too, since a session does not record which provider opened it. A claims
+  promotion that does go through ends every other session of the account, so
+  none opened earlier inherits the role. Automatic links and promotions of one
+  account commit under its lifecycle lease, so neither misses the other.
+  **Behaviour changes:** a deployment that relied on automatic linking to
+  attach an admin-mapped provider to an existing account must link explicitly;
+  an account linked at a provider that cannot grant `admin` is promoted by
+  claims only after a `super_admin` removes that link, or by hand; and a
+  promotion signs the account out of its other browsers.
+- GHSA-p9qg-f2w6-c4qj: a single sign-on callback read its provider before the
+  token exchange and did not read it again, so a callback in flight when an
+  administrator removed or disabled the provider could still link, provision,
+  sync claims or open a session afterwards. The transaction that commits a
+  callback now re-reads the settings and refuses (`sso_disabled`) unless the
+  login policy still allows single sign-on and the provider is still in force,
+  enabled and configured as the callback found it. A callback that writes a
+  link (a first-time link or a provisioned account) and a settings save take
+  the same per-provider lease (`sso:provider:<id>`), so the re-read cannot miss
+  a save committing at the same moment on any database backend; returning
+  sign-ins do not take it, so they do not queue behind each other. A settings
+  save now also refuses with `409 CONFLICT` when another save changed the
+  settings after it read them, instead of silently dropping that save's
+  providers and leaving their links behind.
 - **Only a credential's owner can rotate it** (GHSA-mr69-2744-f78w).
   `POST /api/credentials/:id/rotate` used to accept an `admin` or `super_admin`
   acting on another account's, application's or test consumer's credential,
@@ -75,6 +125,22 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   (`DELETE /api/credentials/:id`) and reconciling; after a revoke, the owner
   issues a new one. The `credential.rotate` audit row no longer
   carries `owner_user_id`, since the actor is always the owner.
+- **OpenID Connect requests now connect only to addresses the public-address
+  check vetted** (GHSA-cq2h-g4g3-rw3p). Discovery, key-set and token requests
+  checked a provider host's DNS answer and then let the HTTP stack resolve the
+  name again to connect, so a name whose answer changed in between (DNS
+  rebinding) could reach a private address. Provider requests now go through
+  undici with a connection-time lookup that resolves the name through the same
+  policy resolver, refuses any answer set containing a non-public address, and
+  dials only the vetted addresses; `Host`, SNI and certificate verification
+  still use the provider's hostname, and redirects are still refused.
+  `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK` (where `localhost` is now dialled only at
+  loopback addresses) and `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES` behave as before.
+  Provider requests now always connect directly: they ignore the environment
+  proxy settings (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and Node's
+  `NODE_USE_ENV_PROXY` / `--use-env-proxy`), because a proxy resolves the
+  provider name itself and cannot be vetted. A deployment whose only egress is
+  a proxy must allow direct egress to the identity provider.
 
 ## [0.3.0] - 2026-10-01
 

@@ -144,36 +144,43 @@ describe('gateway credentials', () => {
         payload: { credential_type: 'basicauth' },
       });
 
-      loggedHarness.edge.queueFailure(
-        500,
-        { error: 'gateway echoed a failed credential write' },
-        '/credentials/basicauth',
-        'POST',
-        0,
-        true,
-      );
-      const response = await loggedHarness.authed(owner, {
-        method: 'POST',
-        url: '/api/credentials',
-        payload: { credential_type: 'basicauth' },
-      });
-      assert.equal(response.statusCode, 502);
+      for (const [status, action] of [
+        [422, 'api-response'],
+        [500, 'rollback-audit'],
+      ] as const) {
+        const logStart = logLines.length;
+        loggedHarness.edge.queueFailure(
+          status,
+          { error: 'gateway error', reason: 'gateway reason' },
+          '/credentials/basicauth',
+          'POST',
+          0,
+          true,
+        );
+        const response = await loggedHarness.authed(owner, {
+          method: 'POST',
+          url: '/api/credentials',
+          payload: { credential_type: 'basicauth' },
+        });
+        assert.equal(response.statusCode, 502);
 
-      const writes = loggedHarness.edge.requests.filter(
-        (request) => request.method === 'POST' && request.path.includes('/credentials/basicauth'),
-      );
-      const secret = (writes.at(-1)?.body as { password?: string } | undefined)?.password;
-      assert.ok(secret);
-      assert.equal(
-        response.json<ApiErrorBody>().error.message,
-        'The gateway rejected the request',
-      );
+        const writes = loggedHarness.edge.requests.filter(
+          (request) =>
+            request.method === 'POST' && request.path.includes('/credentials/basicauth'),
+        );
+        const secret = (writes.at(-1)?.body as { password?: string } | undefined)?.password;
+        assert.ok(secret);
+        const responseError = response.json<ApiErrorBody>().error;
+        assert.equal(responseError.message, 'The gateway rejected the request');
+        assert.ok(!response.body.includes(secret));
+        assert.ok(!logLines.slice(logStart).join('').includes(secret));
 
-      const rollback = (await loggedHarness.auditRows('credential.append_rollback')).at(-1);
-      assert.ok(rollback);
-      assert.ok(!JSON.stringify(rollback.details).includes(secret));
-      assert.ok(!response.body.includes(secret));
-      assert.ok(!logLines.join('').includes(secret));
+        if (action === 'rollback-audit') {
+          const rollback = (await loggedHarness.auditRows('credential.append_rollback')).at(-1);
+          assert.ok(rollback);
+          assert.ok(!JSON.stringify(rollback.details).includes(secret));
+        }
+      }
     } finally {
       await loggedHarness.close();
     }

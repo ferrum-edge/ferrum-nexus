@@ -2868,7 +2868,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           failure.echoRequestBody
             ? {
                 ...(isRecord(responseBody) ? responseBody : { error: responseBody }),
-                echoed_request: body,
+                error: `refused ${JSON.stringify(body)}`,
+                reason: `reason ${JSON.stringify(body)}`,
               }
             : responseBody,
         );

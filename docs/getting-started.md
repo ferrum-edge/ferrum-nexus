@@ -117,8 +117,7 @@ Three settings need explaining:
 - **`FERRUM_BASIC_AUTH_HMAC_SECRET`** (at least 32 bytes) is how the gateway
   hashes Basic-auth passwords. Without it the gateway refuses the `basic_auth`
   plugin, and publishing a `basic_auth` API fails with `EDGE_ERROR`. The
-  gateway's reason is returned in `details.gateway_message` so the provider
-  can identify this configuration issue.
+  gateway's reason is in `details.gateway_message`.
 
 The gateway has two ports. Confusing them is the most common first-run mistake:
 
