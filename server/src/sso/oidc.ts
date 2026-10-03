@@ -22,16 +22,19 @@
  *   {@link ID_TOKEN_MAX_AGE_SECONDS} — the `nonce` must equal the one this
  *   attempt sent, and `at_hash` must match the access token when both are
  *   present.
- * - **Public destinations only**, unless the operator says otherwise; failed
- *   fetches are remembered for {@link OIDC_FAILURE_CACHE_MS} and concurrent
- *   ones share a single request.
+ * - **Public destinations only**, unless the operator says otherwise, and
+ *   checked where it counts: the connection dials only addresses the policy
+ *   resolver vetted, so a name cannot pass the check with one DNS answer and
+ *   connect with another. Failed fetches are remembered for
+ *   {@link OIDC_FAILURE_CACHE_MS} and concurrent ones share a single request.
  *
  * Nothing here logs, and no error message it produces contains a token, a
  * code, a secret or a claim value.
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { isIP } from 'node:net';
+import { lookup as systemLookup } from 'node:dns/promises';
+import { isIP, type LookupFunction } from 'node:net';
 
 import {
   createLocalJWKSet,
@@ -41,13 +44,16 @@ import {
   type JWTPayload,
   type JWTVerifyGetKey,
 } from 'jose';
+import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from 'undici';
 
 import { SSO_TRANSACTION_TTL_SECONDS, type SsoErrorReason } from '@ferrum-nexus/shared';
 
 import {
   createUpstreamResolver,
-  isPublicResolvedAddress,
-  isPublicUpstreamHost,
+  createVettedLookup,
+  DestinationRefusedError,
+  resolvePublicDestination,
+  type ResolvedAddress,
   type UpstreamResolver,
 } from '../publishing/oas.js';
 import { isLoopbackHostname, oidcUrlProblem } from './config.js';
@@ -138,9 +144,24 @@ export interface OidcClientOptions {
   allowHttpLoopback: boolean;
   /** `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES`: any address may be spoken to. */
   allowPrivateAddresses?: boolean;
-  /** Resolves a provider host before it is contacted. Defaults to real DNS. */
+  /**
+   * Resolves a provider host, both for the check before a request and for the
+   * connection itself, which dials only the addresses it answered with and
+   * the policy accepted. Defaults to real DNS.
+   */
   resolve?: UpstreamResolver;
-  /** Defaults to the global `fetch`. */
+  /**
+   * Resolves the literal loopback hosts under
+   * `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK`, from which only loopback answers are
+   * dialled. Defaults to the system resolver; injectable so a test can prove
+   * an answer that is not loopback is dropped rather than dialled.
+   */
+  loopbackLookup?: (host: string) => Promise<ResolvedAddress[]>;
+  /**
+   * Defaults to undici's `fetch` over a dispatcher that dials only vetted
+   * addresses. An injected one replaces that transport, connection-time
+   * vetting included; it exists for tests.
+   */
   fetch?: OidcFetch;
   /** Clock, in milliseconds; defaults to `Date.now`. */
   now?: () => number;
@@ -264,10 +285,62 @@ function asStringArray(value: unknown): string[] | null {
   return value.filter((entry: unknown): entry is string => typeof entry === 'string');
 }
 
+/** The destination refusal somewhere in `error`'s cause chain, if any. */
+function destinationRefusal(error: unknown): DestinationRefusedError | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current instanceof Error; depth += 1) {
+    if (current instanceof DestinationRefusedError) return current;
+    current = current.cause;
+  }
+  return null;
+}
+
 function describe(error: unknown): string {
   if (error instanceof OidcError) return error.message;
   if (error instanceof Error && error.name === 'TimeoutError') return 'timed out';
+  const refusal = destinationRefusal(error);
+  if (refusal !== null) return `connection refused, ${refusal.message}`;
   return error instanceof Error ? error.name : 'failed';
+}
+
+/** Whether `address` is a loopback address: `127.0.0.0/8` or `::1`. */
+function isLoopbackAddress(address: string): boolean {
+  const version = isIP(address);
+  if (version === 4) return address.startsWith('127.');
+  return version === 6 && address === '::1';
+}
+
+/** The system resolver, in the {@link ResolvedAddress} shape. */
+async function systemLoopbackLookup(host: string): Promise<ResolvedAddress[]> {
+  const answers = await systemLookup(host, { all: true });
+  return answers.map((answer) => ({
+    address: answer.address,
+    family: answer.family === 6 ? 6 : 4,
+  }));
+}
+
+/**
+ * The default transport: undici's own `fetch` — not the global one, whose
+ * bundled undici may differ from this one — over an `Agent` whose sockets
+ * resolve names through `lookup`. `null` keeps the system resolver, for
+ * `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES`.
+ */
+function createOidcTransport(lookup: LookupFunction | null): OidcFetch {
+  const dispatcher = new Agent({ connect: lookup === null ? {} : { lookup } });
+  return async (input, init) => {
+    // Every caller passes a method, a header record and a string body.
+    const request: UndiciRequestInit = {
+      method: init?.method,
+      headers: init?.headers as Record<string, string> | undefined,
+      body: init?.body as string | undefined,
+      redirect: init?.redirect,
+      signal: init?.signal,
+      dispatcher,
+    };
+    const response = await undiciFetch(input, request);
+    // The same WHATWG Response; only the two undici type packages differ.
+    return response as unknown as Response;
+  };
 }
 
 /* ── The client ─────────────────────────────────────────────────────────── */
@@ -289,9 +362,9 @@ interface CachedFailure {
 
 /** Build a relying party with its own discovery and key-set caches. */
 export function createOidcClient(options: OidcClientOptions): OidcClient {
-  const fetchImpl: OidcFetch = options.fetch ?? ((input, init) => fetch(input, init));
   const now = options.now ?? (() => Date.now());
   const resolveHost = options.resolve ?? createUpstreamResolver();
+  const loopbackLookup = options.loopbackLookup ?? systemLoopbackLookup;
   const timeoutMs = options.timeoutMs ?? OIDC_HTTP_TIMEOUT_MS;
   const discoveries = new Map<string, CachedDiscovery>();
   const keySets = new Map<string, CachedKeySet>();
@@ -300,32 +373,56 @@ export function createOidcClient(options: OidcClientOptions): OidcClient {
   const failures = new Map<string, CachedFailure>();
 
   /**
-   * Refuse a destination that is not public, unless the operator allowed it.
+   * The addresses a provider host may be dialled at, or a
+   * {@link DestinationRefusedError}.
    *
    * The issuer is an administrator's choice, but the endpoints come from the
    * discovery document, so without this a provider — or whoever controls its
    * document — could aim the portal's requests at its own network. A name is
-   * resolved and every answer must be public; the literal loopback hosts pass
-   * with `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK`, anything with
-   * `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES`. The check is at request time only:
-   * the connection resolves the name again (see `docs/security.md`).
+   * resolved through the policy resolver and every answer must be public. The
+   * literal loopback hosts pass with `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK`, and
+   * then only at loopback addresses.
+   */
+  async function vetDestination(host: string): Promise<ResolvedAddress[]> {
+    if (options.allowHttpLoopback && isLoopbackHostname(host)) {
+      const version = isIP(host);
+      if (version !== 0) return [{ address: host, family: version === 6 ? 6 : 4 }];
+      const answers = await loopbackLookup(host);
+      const loopback: ResolvedAddress[] = [];
+      for (const answer of answers) {
+        if (!isLoopbackAddress(answer.address)) continue;
+        loopback.push(answer);
+      }
+      if (loopback.length === 0) throw new DestinationRefusedError(host, 'resolves_non_public');
+      return loopback;
+    }
+    return resolvePublicDestination(host, resolveHost);
+  }
+
+  // The connection-time half of the rule: every socket the default transport
+  // opens dials only what vetDestination returned for its hostname, so a DNS
+  // answer that changes after the check below (DNS rebinding) is refused at
+  // connect time instead of reaching a private address. Host, SNI and the
+  // certificate check still use the hostname.
+  const lookup = options.allowPrivateAddresses === true ? null : createVettedLookup(vetDestination);
+  const fetchImpl: OidcFetch = options.fetch ?? createOidcTransport(lookup);
+
+  /**
+   * Refuse a destination that is not public before anything is sent, unless
+   * the operator allowed it: `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES` lifts the
+   * rule, and the literal loopback hosts pass with
+   * `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK`. The connection vets the address it
+   * dials again (above); this check is what names the refusal.
    */
   async function assertPublicDestination(url: string, label: string): Promise<void> {
     if (options.allowPrivateAddresses === true) return;
     const host = new URL(url).hostname.replace(/^\[|\]$/g, '').toLowerCase();
     if (options.allowHttpLoopback && isLoopbackHostname(host)) return;
-    if (!isPublicUpstreamHost(host)) {
-      throw new OidcError('provider_unavailable', `${label} host is not a public address`);
-    }
-    if (isIP(host) !== 0) return;
-    let answers: Awaited<ReturnType<UpstreamResolver>>;
     try {
-      answers = await resolveHost(host);
-    } catch {
-      throw new OidcError('provider_unavailable', `${label} host could not be resolved`);
-    }
-    if (answers.length === 0 || !answers.every(isPublicResolvedAddress)) {
-      throw new OidcError('provider_unavailable', `${label} host resolves to a non-public address`);
+      await resolvePublicDestination(host, resolveHost);
+    } catch (error) {
+      const reason = error instanceof DestinationRefusedError ? error.message : 'is refused';
+      throw new OidcError('provider_unavailable', `${label} ${reason}`);
     }
   }
 

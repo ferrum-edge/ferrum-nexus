@@ -270,12 +270,25 @@ such as `localhost`, `*.internal` or `*.local`, a private, loopback,
 link-local or otherwise reserved IP literal, or a name that resolves to one is
 refused before anything is sent, with the rules the OpenAPI importer uses. This
 covers the endpoints a discovery document names too, so a provider cannot
-point the portal at its own network. The literal loopback hosts are exempt
-under `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`, and
+point the portal at its own network. The rule is enforced again where the
+connection is made: the portal's provider requests go through undici with a
+connection-time `lookup` that resolves the name through the same policy
+resolver, refuses the whole answer if any address in it is not public, and
+dials only the vetted addresses. A name whose DNS answer changes after the
+check (DNS rebinding) therefore fails to connect instead of reaching a private
+address, while `Host`, SNI and certificate verification still use the
+provider's hostname. Provider requests always connect directly and ignore the
+environment proxy settings (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, and Node's
+`NODE_USE_ENV_PROXY` / `--use-env-proxy`): a proxy resolves the name itself, so
+a vetted-dial rule cannot be enforced through one. A deployment whose only
+egress is a proxy must allow direct egress to the identity provider. The
+literal loopback hosts are exempt under `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`,
+and `localhost` is then dialled only at loopback addresses;
 `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES=true` lifts the check entirely, for a
-provider on a private network. Redirects are not followed, and every request
-has a 5-second deadline and a 512 KiB response cap. The discovery document must
-name exactly the configured issuer, and is cached for an hour. So is the key
+provider on a private network. Redirects are not followed, so there is no
+second hop to vet, and every request has a 5-second deadline and a 512 KiB
+response cap. The discovery document must name exactly the configured
+issuer, and is cached for an hour. So is the key
 set, which an unknown `kid` refetches at most once per 30 seconds, so forged
 tokens cannot turn the portal into a request amplifier. Concurrent sign-ins
 share one discovery or key-set request, and a failed one is remembered for 30
@@ -336,9 +349,16 @@ or `ES256`, is refused.
    **An `admin` or `super_admin` account is never linked this way**
    (`privileged_account`). Whoever controls a provider that asserts the
    address would otherwise gain administrator access. Its holder links
-   explicitly (below). Anything else that falls short is refused
-   (`email_not_verified` or `account_exists`) and nothing is linked. A second
-   provider is held to exactly the same rule.
+   explicitly (below). **Neither is an account this provider's claims would
+   make an `admin`**: the check is made against the role the account would
+   have after this sign-in's claims sync, not only the role it has now. A
+   role belongs to the account, not to the identity, so promoting it would
+   hand administrator access to every identity already on it, one that a
+   lower-trust provider provisioned or linked included, and to that
+   identity's live sessions. The sign-in's transaction checks both again
+   against the account as it is at commit. Anything else that falls short is
+   refused (`email_not_verified` or `account_exists`) and nothing is linked. A
+   second provider is held to exactly the same rule.
 
 3. **Just-in-time provisioning**: a new account with the mapped role and
    organization and an unusable password hash. That is a well-formed scrypt
@@ -353,8 +373,11 @@ sign-in** (`POST /api/auth/sso/:provider/link`, session and CSRF). The sealed
 attempt records the account and the session that started it, and the callback
 attaches the identity only when it returns to that same session
 (`link_session_mismatch` otherwise). This is the only way an administrator's
-account is ever linked. The identity's email address plays no part, because
-the holder is present and chose it.
+account, or one the provider's claims make an administrator's, is ever
+linked. The identity's email address plays no part, because
+the holder is present and chose it. Its claims still promote the account only
+as any other sign-in's do (see **Claims never promote an account a lower-trust
+provider can open**, below).
 
 A session is not proof that its holder owns the account's address, though.
 With `require_email_verification` off, anyone can register a victim's address,
@@ -403,6 +426,44 @@ accounts **the provider's groups are the source of truth**, including for
 `admin`. That is why only a `super_admin` may edit the single sign-on
 settings. Every change is written as `auth.sso_claims_sync` by the system actor
 in the sign-in's transaction.
+
+**Claims never promote an account a lower-trust provider can open.** The
+linking rule above stops a promotion in the sign-in that links. The same
+escalation is open in the other order: a lower-trust provider links first
+(the account is a client then, and that provider would not change it), and
+the account's holder is promoted later, through their own admin-mapped
+provider. A session carries no provider, and every request reloads the role,
+so the lower-trust provider's live session would become an administrator's
+with no further step. So whenever a sign-in's claims would raise an account
+below `admin` to `admin`, the transaction that commits it reads the account's
+links, under the account's lifecycle lease. If any is at another provider
+that is not itself trusted with `admin`, the promotion is **withheld**:
+
+- the sign-in goes ahead with the account's current role, and any
+  organization change still applies;
+- `auth.sso_claims_sync` records `role_withheld`,
+  `withheld_reason: "lower_trust_identities"` and `lower_trust_provider_ids`;
+- a `super_admin` decides: remove the identities the holder does not
+  recognise, after which the next sign-in promotes, or promote by hand.
+
+A provider is trusted with `admin` when `sync_roles` is on and its default
+role or one of its mappings is `admin`, under the identity's issuer: its own
+identities could raise the account anyway, so the promotion hands them
+nothing new. Every other provider counts, whatever its mappings. Explicitly
+linked identities count like automatic ones. Exempting them would need to
+know that the account's owner held the session that made the link, and the
+portal cannot know that: a session records neither the provider nor the
+password that opened it, and a lower-trust provider's own session can start
+an explicit link.
+
+A claims promotion that goes through **ends every other session of the
+account** in the same transaction (`terminated_sessions`), so a session opened
+before it, by a password, through another provider, or through an identity a
+`super_admin` has just removed, never carries the new role. Only the session
+this sign-in issues does. Demotions end nothing: the next request already sees
+the lower role. An automatic link at one provider and a promotion at another
+both commit under the account's lifecycle lease, so neither can miss the
+other's write.
 
 **Passwords after single sign-on.** An account that an identity provider
 provisioned has no password to use. Password sign-in fails like a wrong
@@ -465,6 +526,31 @@ before the super admin saving it has a link of their own to an enabled
 provider, under the provider's current issuer. The admin API refuses both with
 `400`, so a policy change cannot lock out the person making it.
 
+**Removing or disabling a provider stops sign-ins in flight.** A callback
+reads the provider before it redeems the code, and the provider decides how
+long the token exchange takes. So the transaction that commits the sign-in,
+link, provisioning, claims sync or deprovisioning re-reads the settings, and
+commits nothing (`sso_disabled`) unless all of these still hold:
+
+- the login policy is not `local_only`;
+- the provider is in force and enabled;
+- its settings, mappings included, are exactly those the callback started
+  with. Any edit in the meantime refuses the attempt; the user signs in again.
+
+The deployment-wide domain list is checked again there too. A callback that
+writes one of the provider's links (a first-time link or a provisioned account)
+and a settings save hold the same per-provider lease (`sso:provider:<id>`). A
+save takes the key of every provider it can affect, in sorted order, and then,
+inside its transaction, refuses with `409 CONFLICT` unless the stored settings
+are still the ones it worked that set out from. So on every backend, a save
+either commits before the callback's re-read, or waits for the callback to
+commit and then removes its links with the rest
+([Cross-instance locks are fenced at commit](#cross-instance-locks-are-fenced-at-commit)).
+A returning sign-in does not take the lease: it writes nothing a save reads,
+so its re-read orders it alone, and sign-ins at one provider do not queue
+behind each other across the deployment. Sessions issued before the change are
+not ended by it (see **Losing access**).
+
 **Secrets and logs.** A settings provider's client secret:
 
 - is stored AES-256-GCM encrypted (`sso.client_secret.<id>`,
@@ -485,17 +571,27 @@ Environment secrets stay in the environment. No token, code, verifier, `state`,
 - A provider operator, or anyone who can make the provider assert a verified
   address, can:
   - sign in as any account linked at that provider;
-  - link any non-admin account whose address the portal holds a proof for.
+  - link any account whose address the portal holds a proof for, unless the
+    account is an administrator or the provider's claims would make it one.
 
   Configure only providers you trust with that. For a provider you trust less,
   use the domain lists and `link_existing_accounts: false`.
 
+- Every identity on an account opens it with the account's role. Claims never
+  promote an account with a lower-trust identity on it (above), but a
+  `super_admin` who promotes one by hand (`PATCH /api/users/:id`) accepts
+  every identity and live session on it as the holder's. Review the account's
+  links first (`GET /api/users/:id/identities`). A manual promotion does not
+  end the account's sessions.
+- An address a lower-trust provider provisioned first leaves its rightful,
+  admin-mapped holder refused with `privileged_account`, and with no password
+  to sign in and link. A `super_admin` disables that account and removes its
+  links. The portal cannot delete an account or change its address, so freeing
+  the address is a database operator's task
+  ([docs/operations.md](operations.md#how-accounts-are-matched)).
+
 - A proof records that someone controlled the mailbox once. An address that
   later changes hands (a recycled mailbox) still carries its old proof.
-- The public-address check resolves a name and then connects, so a name whose
-  DNS answer changes between the two (DNS rebinding) could still reach a
-  private address. The 5-second deadline, the size cap and the refusal to
-  follow redirects bound what such a request can do.
 - Deprovisioning happens at sign-in time, not in real time (above). There is no
   SCIM or back-channel logout.
 
@@ -1545,14 +1641,14 @@ Naming is `<domain>.<verb>`, lowercase snake_case. God-mode actions are `god.*`.
 
 ### Single sign-on
 
-| Action                 | Target type | Description                                                                                                                                                                                                                                                                                                                                                                         |
-| ---------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auth.sso_login`       | `user`      | A single sign-on opened a session; committed with the session. `details`: `provider_id`, `subject`, `identity_id`, `email`, `provisioned` or `linked` when this sign-in did that too. Refused sign-ins are logged (provider and reason), not audited.                                                                                                                               |
-| `auth.sso_provision`   | `user`      | Just-in-time provisioning created the account. `details`: `provider_id`, `subject`, `email`, `email_verified`, `role`, `org_id`, `role_mapping`, `org_mapping` (the rules that matched). Never `super_admin`.                                                                                                                                                                       |
-| `auth.sso_link`        | `user`      | An identity-provider subject was linked to an existing account: automatically under the proven-address rule, or explicitly from the account's own session. `details`: `provider_id`, `subject`, `identity_id`, `email`, `explicit`, `email_verified_by_provider`.                                                                                                                   |
-| `auth.sso_unlink`      | `user`      | An administrator removed a link (`DELETE /api/users/:id/identities/:identityId`). `details`: `identity_id`, `provider_id`, `subject`.                                                                                                                                                                                                                                               |
-| `auth.sso_claims_sync` | `user`      | A sign-in's claims changed the account's role or organization; the actor is the system. `details`: `provider_id`, `subject`, `from_role`/`to_role` and/or `from_org_id`/`to_org_id`, `role_mapping`, `org_mapping`. Never written for a `super_admin`.                                                                                                                              |
-| `auth.sso_deprovision` | `user`      | A sign-in's claims mapped to no role and `deprovision_on_access_loss` is on: the account was disabled, its sessions ended and its gateway revocation queued, in one transaction; the actor is the system. `details`: `provider_id`, `subject`, `reason`, `role`, `terminated_sessions`, `gateway_teardown: "queued"`. The revocation's outcome is `user.gateway_teardown_complete`. |
+| Action                 | Target type | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ---------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth.sso_login`       | `user`      | A single sign-on opened a session; committed with the session. `details`: `provider_id`, `subject`, `identity_id`, `email`, `provisioned` or `linked` when this sign-in did that too. Refused sign-ins are logged (provider and reason), not audited.                                                                                                                                                                                                                        |
+| `auth.sso_provision`   | `user`      | Just-in-time provisioning created the account. `details`: `provider_id`, `subject`, `email`, `email_verified`, `role`, `org_id`, `role_mapping`, `org_mapping` (the rules that matched). Never `super_admin`.                                                                                                                                                                                                                                                                |
+| `auth.sso_link`        | `user`      | An identity-provider subject was linked to an existing account: automatically under the proven-address rule, or explicitly from the account's own session. `details`: `provider_id`, `subject`, `identity_id`, `email`, `explicit`, `email_verified_by_provider`.                                                                                                                                                                                                            |
+| `auth.sso_unlink`      | `user`      | An administrator removed a link (`DELETE /api/users/:id/identities/:identityId`). `details`: `identity_id`, `provider_id`, `subject`.                                                                                                                                                                                                                                                                                                                                        |
+| `auth.sso_claims_sync` | `user`      | A sign-in's claims changed the account's role or organization, or a promotion was withheld; the actor is the system. `details`: `provider_id`, `subject`, `from_role`/`to_role` and/or `from_org_id`/`to_org_id`, `role_mapping`, `org_mapping`; for a promotion, `terminated_sessions` (every other session was ended); for a withheld one, `role_withheld`, `withheld_reason: "lower_trust_identities"` and `lower_trust_provider_ids`. Never written for a `super_admin`. |
+| `auth.sso_deprovision` | `user`      | A sign-in's claims mapped to no role and `deprovision_on_access_loss` is on: the account was disabled, its sessions ended and its gateway revocation queued, in one transaction; the actor is the system. `details`: `provider_id`, `subject`, `reason`, `role`, `terminated_sessions`, `gateway_teardown: "queued"`. The revocation's outcome is `user.gateway_teardown_complete`.                                                                                          |
 
 ### Users and organizations
 

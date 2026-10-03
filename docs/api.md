@@ -1271,8 +1271,9 @@ Errors: `400 VALIDATION_FAILED` for any of:
 - `sso_only` without an enabled provider, or before the caller has a link of
   their own to an enabled provider.
 
-Also `403 FORBIDDEN` (not a `super_admin`) and `404 NOT_FOUND` (an `org_id`
-that does not exist).
+Also `403 FORBIDDEN` (not a `super_admin`), `404 NOT_FOUND` (an `org_id`
+that does not exist) and `409 CONFLICT` (another save changed the settings
+after this one read them; reload and save again).
 
 ### `POST /api/admin/settings/smtp-test`
 
