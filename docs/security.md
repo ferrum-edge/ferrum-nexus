@@ -456,6 +456,12 @@ portal cannot know that: a session records neither the provider nor the
 password that opened it, and a lower-trust provider's own session can start
 an explicit link.
 
+Changing a provider's `sync_roles` to `false` changes how its identities are
+classified for future promotion checks, but does not automatically demote
+accounts already holding admin or revoke their identities' access. Until a
+`super_admin` reviews and removes those links or manually changes the affected
+roles, those identities continue to open the account with its current role.
+
 A claims promotion that goes through **ends every other session of the
 account** in the same transaction (`terminated_sessions`), so a session opened
 before it, by a password, through another provider, or through an identity a

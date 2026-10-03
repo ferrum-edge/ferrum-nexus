@@ -2492,9 +2492,12 @@ Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
   disable. This runs **when the user next signs in**; Nexus gets no events
   from the provider.
 
-Two saves at the same moment do not overwrite each other: a save whose
-settings another save changed after it read them is refused with
-`409 CONFLICT`. Reload the page and save again.
+Every save takes the deployment-wide SSO settings lock as well as locks for
+the affected providers. Two saves at the same moment do not overwrite each
+other: a save whose settings another save changed after it read them is refused
+with `409 CONFLICT`. Reload the page and save again. Disabling `sync_roles`
+does not itself demote accounts that already have admin; see
+[the trust note in the security guide](security.md#claims-never-promote-an-account-a-lower-trust-provider-can-open).
 
 ### How accounts are matched
 

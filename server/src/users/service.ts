@@ -704,14 +704,17 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
           return { row, job };
         });
 
-      // A status flip is also taken under the account's own lifecycle key, the
-      // one the credentials service holds while it registers a new gateway
-      // identity for the account. Without it a provider's first test consumer
-      // could pass its "owner is active" check, be disabled, and only then be
-      // registered — after the teardown had already enumerated nothing. Inside
+      // Every manual role change and status flip is taken under the account's
+      // lifecycle key. An automatic SSO link reads the role while taking this
+      // same key, so a role change cannot race between the link's review and
+      // commit. Status flips also order against gateway identity registration:
+      // a provider's first test consumer cannot pass its "owner is active"
+      // check and register after disable teardown has enumerated nothing. Inside
       // the super-admin key, never around it, so the lock order is fixed.
       const lifecycle = (): ReturnType<typeof transition> =>
-        statusChanged ? locks(userLifecycleLockKey(target.id), transition) : transition();
+        roleChanged || statusChanged
+          ? locks(userLifecycleLockKey(target.id), transition)
+          : transition();
       const result = guardsLastSuperAdmin
         ? await locks(SUPER_ADMIN_LOCK_KEY, lifecycle)
         : await lifecycle();

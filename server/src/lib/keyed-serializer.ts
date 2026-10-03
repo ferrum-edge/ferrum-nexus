@@ -139,6 +139,13 @@ export function ssoProviderLockKey(providerId: string): string {
 }
 
 /**
+ * The deployment-wide single sign-on settings key. Every settings save takes
+ * it, including saves whose provider sets do not overlap, so the settings
+ * compare-and-swap is serialized across instances.
+ */
+export const SSO_SETTINGS_LOCK_KEY = 'sso:settings';
+
+/**
  * The per-sender key the rolling daily **message budget** is spent under.
  *
  * The budget is a read-then-write — count the sender's rows in the window, then

@@ -1525,6 +1525,21 @@ describe('single sign-on', () => {
       h.authed(founder, { method: 'PUT', url: '/api/admin/sso', payload: { providers } });
     assert.equal((await put([provider])).statusCode, 200);
 
+    const provenLocal = await localAccount('ordered-linked@corp.example.test', true);
+    leases.taken = [];
+    const linked = await signIn(h, corp, 'ordered', {
+      sub: 'ordered-linked-subject',
+      email: provenLocal.email,
+      email_verified: true,
+    });
+    assert.equal((await sessionOf(h, linked)).user.id, provenLocal.id);
+    const linkedLifecycleKey = userLifecycleLockKey(provenLocal.id);
+    assert.deepEqual(
+      leases.taken.filter((key) => key.startsWith('sso:') || key === linkedLifecycleKey),
+      [ssoProviderLockKey('ordered'), linkedLifecycleKey],
+      'a first-time automatic link takes the account lifecycle lock',
+    );
+
     // A returning sign-in holds only its account's key: sign-ins at one
     // provider do not queue behind each other deployment-wide.
     const returning = person('ordered-returning');
@@ -1570,7 +1585,20 @@ describe('single sign-on', () => {
     const removal = (await h.auditRows(AuditAction.ADMIN_SETTINGS_UPDATE)).find(
       (row) => row.target_id === SSO_SETTINGS_KEY,
     );
-    assert.deepEqual(removal?.details.links_removed, { ordered: 2 });
+    assert.deepEqual(removal?.details.links_removed, { ordered: 3 });
+  });
+
+  it('takes the account lifecycle lock for every manual role change', async () => {
+    const target = await localAccount('manual-role-lock@corp.example.test', true);
+    leases.taken = [];
+    const response = await h.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${target.id}`,
+      payload: { role: 'provider' },
+    });
+
+    assert.equal(response.statusCode, 200, response.body);
+    assert.ok(leases.taken.includes(userLifecycleLockKey(target.id)));
   });
 
   it('refuses a settings save when the settings changed after it read them', async () => {

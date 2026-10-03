@@ -95,6 +95,7 @@ import { SCRYPT_PARAMS, type NexusCrypto } from '../lib/crypto.js';
 import { conflict, forbidden, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import {
+  SSO_SETTINGS_LOCK_KEY,
   ssoProviderLockKey,
   userLifecycleLockKey,
   type KeyedSerializer,
@@ -1315,7 +1316,7 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         ...providersInForce(config, stored).map(({ settings }) => settings.id),
         ...next.providers.map((provider) => provider.id),
       ];
-      await underProviderLocks(affected, () =>
+      await underProviderLocks([SSO_SETTINGS_LOCK_KEY, ...affected], () =>
         store.transaction(async (tx) => {
           // A compare-and-swap. Everything above, the keys just taken and the
           // providers whose links go below included, was worked out from

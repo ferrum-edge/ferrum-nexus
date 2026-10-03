@@ -37,6 +37,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **SSO settings saves and account role changes are serialized across instances** (#505).
+  A deployment-wide lock now protects settings compare-and-swap even when no
+  provider locks overlap, and every manual role change shares the account
+  lifecycle lock with first-time SSO links. The security guide also documents
+  that turning off `sync_roles` does not automatically demote existing admins
+  or unlink their identities.
 - **Issuing a new password-reset link now revokes every earlier one**
   (GHSA-fgq6-8q7j-qmww). After the 10-minute issuance throttle, the
   `forgot-password` flow used to insert a replacement one-hour token while
