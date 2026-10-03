@@ -1246,7 +1246,7 @@ not settle the row` and changes nothing.
 `POST /api/admin/mass-email` first commits the campaign's `admin.mass_email`
 audit row (counted against `NEXUS_MAX_MASS_EMAILS_PER_DAY`), then inserts the
 outbox rows in transactions of at most 200 recipients, and fewer when messages
-are large (about 4 MB of rendered content per transaction). Between chunks,
+are large (about 4 MiB of rendered content per transaction). Between chunks,
 other writes — verification and password-reset enqueues included — get their
 turn, so a large campaign no longer stalls the instance while it is written,
 and no transaction approaches MongoDB's 16 MB cap.
@@ -1274,7 +1274,7 @@ and no transaction approaches MongoDB's 16 MB cap.
     and address after HTML escaping, however often the template repeats them)
     times the recipients. The body limits alone allow about 200 KB per message,
     so 5 000 recipients could otherwise queue about a gigabyte. A single
-    message too large for a 4 MB chunk is refused with `400 VALIDATION_FAILED`
+    message too large for a 4 MiB chunk is refused with `400 VALIDATION_FAILED`
     whatever this is set to.
   - `NEXUS_MAX_MASS_EMAILS_PER_DAY` (default 5): campaigns per administrator
     per rolling 24 hours, counted under a per-administrator lease. The default

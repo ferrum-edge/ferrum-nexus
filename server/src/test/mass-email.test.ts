@@ -263,6 +263,12 @@ describe('mass email recipient ceiling', () => {
           role: 'client',
         });
       }
+      // The narrower send below must match real accounts: an audience that
+      // resolves to nobody is refused before the ceiling is even consulted.
+      await harness.registerUser({
+        email: 'ceiling-provider@example.test',
+        role: 'provider',
+      });
       const outboxBefore = (await harness.outbox()).length;
       const auditBefore = (await harness.auditRows('admin.mass_email')).length;
 

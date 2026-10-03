@@ -147,8 +147,11 @@ function Composer(): ReactElement {
           setSummary({ enqueued: total, recipients: response.recipients });
           let detail = `${response.enqueued} of ${response.recipients} recipients enqueued.`;
           if (total > response.enqueued) {
+            // The resolved audience can shrink between attempts (accounts
+            // disabled, say), so the summed total may exceed this retry's
+            // recipient count; omit the denominator rather than read "7 of 6".
             detail =
-              `${total} of ${response.recipients} recipients enqueued in total, ` +
+              `${total} recipients enqueued in total across attempts, ` +
               `${response.enqueued} by this retry.`;
           }
           toast.success('Mass email queued', detail);
