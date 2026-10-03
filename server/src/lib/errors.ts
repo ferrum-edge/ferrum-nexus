@@ -166,8 +166,9 @@ export function edgeUnavailable(
 }
 
 /**
- * 502 — the Ferrum Edge Admin API answered with an error status. The upstream
- * `{"error": "..."}` text is logged by the client, never echoed to browsers.
+ * 502 — the Ferrum Edge Admin API answered with an error status. The client
+ * logs upstream text except for non-GET `/consumers` writes, which can carry
+ * show-once credentials and therefore use fixed messages and safe details.
  */
 export function edgeError(
   message = 'The Ferrum Edge Admin API rejected the request',

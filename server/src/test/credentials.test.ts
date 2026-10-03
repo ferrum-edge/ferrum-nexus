@@ -11,6 +11,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { sha256Hex } from '../lib/crypto.js';
+import type { EdgeLogger } from '../ferrum-admin/index.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 function errorCode(body: string): string {
@@ -124,6 +125,71 @@ describe('gateway credentials', () => {
     const entries = consumerOf(bob.user.id)?.credentials.basicauth;
     assert.equal(entries?.length, 1);
     assert.deepEqual(Object.keys(entries?.[0] ?? {}), ['password']);
+  });
+
+  it('hides echoed credential secrets from the response, audit and server log', async () => {
+    const logLines: string[] = [];
+    const edgeLogger: EdgeLogger = {
+      debug: () => undefined,
+      warn: () => undefined,
+      error: (obj) => logLines.push(JSON.stringify(obj)),
+    };
+    const loggedHarness = await buildTestApp({
+      edgeLogger,
+      deps: {
+        logger: {
+          level: 'debug',
+          stream: { write: (line: string) => logLines.push(line) },
+        },
+      },
+    });
+    try {
+      const owner = await loggedHarness.registerUser({ email: 'cred-redaction@example.test' });
+      await loggedHarness.authed(owner, {
+        method: 'POST',
+        url: '/api/credentials',
+        payload: { credential_type: 'basicauth' },
+      });
+
+      for (const [status, action] of [
+        [422, 'api-response'],
+        [500, 'rollback-audit'],
+      ] as const) {
+        const logStart = logLines.length;
+        loggedHarness.edge.queueFailure(
+          status,
+          { error: 'gateway error', reason: 'gateway reason' },
+          '/credentials/basicauth',
+          'POST',
+          0,
+          true,
+        );
+        const response = await loggedHarness.authed(owner, {
+          method: 'POST',
+          url: '/api/credentials',
+          payload: { credential_type: 'basicauth' },
+        });
+        assert.equal(response.statusCode, 502);
+
+        const writes = loggedHarness.edge.requests.filter(
+          (request) => request.method === 'POST' && request.path.includes('/credentials/basicauth'),
+        );
+        const secret = (writes.at(-1)?.body as { password?: string } | undefined)?.password;
+        assert.ok(secret);
+        const responseError = response.json<ApiErrorBody>().error;
+        assert.equal(responseError.message, 'The gateway rejected the request');
+        assert.ok(!response.body.includes(secret));
+        assert.ok(!logLines.slice(logStart).join('').includes(secret));
+
+        if (action === 'rollback-audit') {
+          const rollback = (await loggedHarness.auditRows('credential.append_rollback')).at(-1);
+          assert.ok(rollback);
+          assert.ok(!JSON.stringify(rollback.details).includes(secret));
+        }
+      }
+    } finally {
+      await loggedHarness.close();
+    }
   });
 
   it('issues a JWT secret plus the consumer id the client must put in `sub`', async () => {

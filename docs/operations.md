@@ -1685,8 +1685,11 @@ Structured JSON (pino) at `NEXUS_LOG_LEVEL`. Unhandled 5xx errors log at
 
 Gateway errors log at `error` as `Ferrum Edge Admin API returned an error`. For
 a gateway `400`, `409` or `422`, the message is also returned to the caller in
-`EDGE_ERROR.details.gateway_message`. For `401`, `403` and `5xx` it is **only**
-in the log, so check here when a provider reports an unexplained `EDGE_ERROR`.
+`EDGE_ERROR.details.gateway_message`, except on non-GET `/consumers` writes,
+whose request can contain show-once credentials. Those writes log only the
+method, path and status and return fixed classifications with safe status
+details. For other endpoints, `401`, `403` and `5xx` response text is only in
+the log.
 
 Spec parse or validation rejections from Edge are `400 EDGE_REJECTED_SPEC` with
 `details.gateway_message` and `details.gateway_code`; the full gateway response

@@ -24,7 +24,11 @@ import type { AuditLogRecord, EmailOutboxRecord, NexusStore } from '../db/store.
 import type { MailTransport, MailTransportFactory, OutboundMail } from '../email/service.js';
 import type { OutboxTickResult } from '../email/outbox-worker.js';
 import { openOutboxRecord } from '../email/sealed-outbox.js';
-import { createFerrumAdminClient, type FerrumAdminClient } from '../ferrum-admin/index.js';
+import {
+  createFerrumAdminClient,
+  type EdgeLogger,
+  type FerrumAdminClient,
+} from '../ferrum-admin/index.js';
 import type { ResolvedAddress, UpstreamResolver } from '../publishing/oas.js';
 import { buildServer, type BuildServerDeps, type NexusServices } from '../index.js';
 import { createMockFerrumEdge, type MockFerrumEdge } from './mock-ferrum-edge.js';
@@ -175,6 +179,13 @@ export interface BuildTestAppOptions {
    * leaves a shared mock running.
    */
   edge?: MockFerrumEdge;
+  /**
+   * Logger for the Edge Admin client. Defaults to the client's own silent
+   * logger; a test that asserts on what the client logs passes a recorder here.
+   * The client's logger is separate from `deps.logger`, which only carries the
+   * Fastify/app pino output.
+   */
+  edgeLogger?: EdgeLogger;
 }
 
 /** An authenticated identity produced by the register/login helpers. */
@@ -337,7 +348,9 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
 
   // The real composition root passes `store.leases`, so the whole suite runs
   // through the cross-instance path rather than the in-process queue alone.
-  const edgeClient = createFerrumAdminClient(config.edge, undefined, { leases: store.leases });
+  const edgeClient = createFerrumAdminClient(config.edge, options.edgeLogger, {
+    leases: store.leases,
+  });
   const { mailbox, factory } = createTestMailbox();
   const app = await buildServer(config, {
     store,

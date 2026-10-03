@@ -222,6 +222,8 @@ interface QueuedDelay {
 interface QueuedFailure {
   status: number;
   body: unknown;
+  /** Include the request body in the response to model an Edge error echo. */
+  echoRequestBody?: boolean;
   /** Only fail requests whose path contains this substring. */
   pathContains?: string;
   /**
@@ -297,6 +299,7 @@ export interface MockFerrumEdge {
     pathContains?: string,
     method?: string,
     skip?: number,
+    echoRequestBody?: boolean,
   ): void;
   /**
    * Apply the next matching request normally, then answer it with `status` and
@@ -2858,7 +2861,18 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         failure.skip -= 1;
       } else {
         failures.splice(failures.indexOf(failure), 1);
-        return send(res, failure.status, failure.body ?? { error: 'Injected failure' });
+        const responseBody = failure.body ?? { error: 'Injected failure' };
+        return send(
+          res,
+          failure.status,
+          failure.echoRequestBody
+            ? {
+                ...(isRecord(responseBody) ? responseBody : { error: responseBody }),
+                error: `refused ${JSON.stringify(body)}`,
+                reason: `reason ${JSON.stringify(body)}`,
+              }
+            : responseBody,
+        );
       }
     }
 
@@ -3027,11 +3041,13 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       pathContains?: string,
       method?: string,
       skip = 0,
+      echoRequestBody = false,
     ): void {
       failures.push({
         status,
         body: body ?? { error: 'Injected failure' },
         skip,
+        ...(echoRequestBody ? { echoRequestBody: true } : {}),
         ...(pathContains === undefined ? {} : { pathContains }),
         ...(method === undefined ? {} : { method }),
       });

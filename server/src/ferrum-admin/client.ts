@@ -13,8 +13,8 @@
  * - `EDGE_REJECTED_SPEC` — a 4xx API-spec parse/validation refusal (HTTP 400).
  * - `EDGE_PROTOCOL_ERROR` — an invalid HTTP/JSON response.
  *
- * Edge's flat `{"error": "..."}` text is always logged. Whether it is *also*
- * echoed to the caller depends on who the message is about:
+ * Edge's flat `{"error": "..."}` text is logged. Whether it is *also* echoed to
+ * the caller depends on who the message is about:
  *
  * - `400`, `409` and `422` are Edge validating the body Nexus just built out of
  *   the caller's own request ("FERRUM_BASIC_AUTH_HMAC_SECRET must be set…",
@@ -24,6 +24,10 @@
  * - `401`, `403` and every `5xx` stay **opaque**: those describe the gateway's
  *   own configuration or the Nexus↔Edge trust relationship, not the caller's
  *   request, and can name internal hosts and settings.
+ *
+ * Credential writes to `/consumers` carry show-once material; their Edge error
+ * bodies are untrusted and are never logged or returned, and the two rules
+ * above do not apply to them. Every other endpoint keeps the behaviour above.
  *
  * A `503` carrying `applied: false` is a special case worth knowing about: the
  * write **is durable**, it just is not live yet. It surfaces as `EDGE_ERROR`
@@ -1100,27 +1104,49 @@ export function createFerrumAdminClient(
       code?: unknown;
       failures?: unknown;
     };
+    const credentialWrite = method !== 'GET' && /^\/consumers(?:\/|$)/.test(path);
     const isApiSpecWrite =
       (method === 'POST' || method === 'PUT') && /^\/api-specs(?:\/[^/]+)?$/.test(path);
-    const upstream = typeof body.error === 'string' ? body.error : `HTTP ${status}`;
-    logger.error(
-      {
-        method,
-        path,
-        status,
-        upstream,
-        reason: body.reason ?? null,
-        // readBoundedBody caps this structure before JSON parsing. Keep the full
-        // diagnostics server-side; never reflect the raw document to the caller.
-        ...(isApiSpecWrite ? { gateway_response: parsed } : {}),
-      },
-      'Ferrum Edge Admin API returned an error',
-    );
+    if (credentialWrite) {
+      logger.error(
+        { method, path, status },
+        'Ferrum Edge Admin API returned an error; response content was omitted',
+      );
+    } else {
+      const upstream = typeof body.error === 'string' ? body.error : `HTTP ${status}`;
+      logger.error(
+        {
+          method,
+          path,
+          status,
+          upstream,
+          reason: body.reason ?? null,
+          // readBoundedBody caps this structure before JSON parsing. Keep the full
+          // diagnostics server-side; never reflect the raw document to the caller.
+          ...(isApiSpecWrite ? { gateway_response: parsed } : {}),
+        },
+        'Ferrum Edge Admin API returned an error',
+      );
+    }
 
     if (status === 503 && body.applied === false) {
       return edgeError(
-        'The gateway accepted the change but has not applied it yet; do not retry — verify the gateway configuration and try again once it recovers',
-        { status, reason: typeof body.reason === 'string' ? body.reason : null },
+        credentialWrite
+          ? 'The gateway accepted the change but has not applied it; verify state before retrying'
+          : 'The gateway accepted the change but has not applied it yet; do not retry — verify ' +
+              'the gateway configuration and try again once it recovers',
+        {
+          status,
+          ...(credentialWrite
+            ? { kind: 'write_durable_not_live' }
+            : { reason: typeof body.reason === 'string' ? body.reason : null }),
+        },
+      );
+    }
+    if (credentialWrite && status === 503) {
+      return edgeError(
+        'The gateway may have accepted the change; verify its state before retrying',
+        { status, kind: 'write_acknowledgement_uncertain' },
       );
     }
     if (status === 401 || status === 403) {
@@ -1161,7 +1187,7 @@ export function createFerrumAdminClient(
     }
     // A validation refusal is about the body Nexus built from the caller's own
     // request, so the provider needs the gateway's reason to act on it.
-    if (ECHOED_EDGE_STATUSES.has(status) && typeof body.error === 'string') {
+    if (!credentialWrite && ECHOED_EDGE_STATUSES.has(status) && typeof body.error === 'string') {
       const gatewayMessage = body.error.trim().slice(0, MAX_GATEWAY_MESSAGE);
       if (gatewayMessage !== '') {
         return edgeError(`The gateway rejected the request: ${gatewayMessage}`, {

@@ -90,6 +90,12 @@ each resource's first error, within 500 characters, plus a separately bounded
 16 MiB response limit). Other flat errors keep the normal mapping; `5xx` and
 authentication errors stay opaque `502`s.
 
+Non-GET `/consumers` writes can carry show-once credential material. For those
+requests only, error bodies and response objects are omitted from logs and
+thrown errors. The client returns fixed classifications and safe status
+details, including a fixed kind for the `applied: false` and uncertain-503
+cases.
+
 ## Upload limits
 
 The upload validator applies the 2,000-character upstream URL limit to

@@ -171,7 +171,13 @@ humans and may change; `details` appears only when there is structured context.
 **Gateway errors.** These can come from any endpoint that calls Edge and are not
 repeated per endpoint:
 
-- `EDGE_ERROR` on a gateway validation refusal (`400`, `409`, `422`) carries
+- Non-GET `/consumers` writes can carry show-once credential material. Their
+  `EDGE_ERROR` messages are fixed, and details contain only safe status and
+  classification fields. Edge error text and response objects are omitted from
+  these logs and errors. A `503` with `applied: false` carries
+  `kind: "write_durable_not_live"`; another write `503` carries
+  `kind: "write_acknowledgement_uncertain"`.
+- Other `EDGE_ERROR` validation refusals (`400`, `409`, `422`) carry
   `details: { status, gateway_message }`: Edge's own text, trimmed to 500
   characters, also repeated in `message`. A `401`, `403` or `5xx` from the
   gateway stays opaque; its text only reaches the server log.

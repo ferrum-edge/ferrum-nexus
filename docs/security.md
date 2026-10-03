@@ -1553,14 +1553,21 @@ Handling the secret:
 - Rotation is a coordinated restart of both processes; see
   [`operations.md`](operations.md#rotating-ferrum_admin_jwt_secret).
 
-Edge error text is always logged. Whether the browser sees it is decided in one
-place, `classify()` in `server/src/ferrum-admin/client.ts`:
+For non-credential Edge calls, error text is logged. Whether the caller sees it
+is decided in one place, `classify()` in `server/src/ferrum-admin/client.ts`:
 
 - **`400`, `409` and `422` are echoed** in `details.gateway_message` (trimmed to
   500 characters), because they describe the body built from the caller's own
   request. A rejected spec import is `EDGE_REJECTED_SPEC` with the same field.
 - **`401`, `403` and `5xx` stay opaque** (`EDGE_ERROR` / `EDGE_UNAVAILABLE`),
   because they describe gateway configuration and can name internal hosts.
+- Non-GET `/consumers` writes can carry show-once credentials, and Edge can echo
+  the request body in an error. For those writes only, `classify()` omits Edge
+  response text and response objects from logs and thrown errors. The API
+  returns fixed messages and safe status details; logs retain the method, path
+  and status. For credential writes, `applied: false` remains distinguishable
+  from an uncertain `503` through a fixed `kind` without returning Edge's
+  `reason` text.
 
 Invalid HTTP or JSON responses are `EDGE_PROTOCOL_ERROR`, carrying only the
 status and a fixed reason; response bytes are never logged or returned.

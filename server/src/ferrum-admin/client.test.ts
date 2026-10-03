@@ -531,21 +531,39 @@ describe('ferrum admin client', () => {
   });
 
   describe('error mapping', () => {
-    it('maps an upstream 503 to EDGE_ERROR without echoing the upstream text', async () => {
+    it('restores applied:false details for a non-credential write', async () => {
       edge.queueFailure(503, {
         error: 'internal detail nobody outside should see',
         applied: false,
+        reason: 'private gateway reason',
       });
       await assert.rejects(
-        () => client.consumers.list(),
+        () =>
+          client.proxies.create({
+            listen_path: '/nexus/oops',
+            backend_host: 'x.internal',
+            backend_port: 443,
+          }),
         (error: unknown) => {
           assert.ok(isNexusError(error));
           assert.equal(error.code, 'EDGE_ERROR');
           assert.equal(error.statusCode, 502);
-          assert.ok(!error.message.includes('nobody outside should see'));
           assert.match(error.message, /has not applied it yet/);
+          assert.deepEqual(error.details, { status: 503, reason: 'private gateway reason' });
           return true;
         },
+      );
+    });
+
+    it('keeps a GET 503 generic', async () => {
+      edge.queueFailure(503, { error: 'private read failure' });
+      await assert.rejects(
+        () => client.consumers.list(),
+        (error: unknown) =>
+          isNexusError(error) &&
+          error.code === 'EDGE_ERROR' &&
+          error.message === 'The gateway rejected the request' &&
+          JSON.stringify(error.details) === JSON.stringify({ status: 503 }),
       );
     });
 
@@ -607,6 +625,87 @@ describe('ferrum admin client', () => {
           return true;
         },
       );
+    });
+
+    it('never exposes credential material echoed in Edge mutation errors or logs', async () => {
+      const secret = `credential-canary-${randomUUID()}`;
+      const logs: Record<string, unknown>[] = [];
+      const logged = createFerrumAdminClient(configFor(edgeUrl), {
+        debug: (entry) => logs.push(entry),
+        warn: (entry) => logs.push(entry),
+        error: (entry) => logs.push(entry),
+      });
+      try {
+        for (const [type, entry] of [
+          ['keyauth', { key: secret }],
+          ['basicauth', { password: secret }],
+          ['jwt', { secret }],
+        ] as const) {
+          const credentialPath = `/consumers/fixed-consumer-id/credentials/${type}`;
+          for (const status of [422, 500]) {
+            const logsBefore = logs.length;
+            edge.queueFailure(
+              status,
+              {
+                error: `refused ${secret}`,
+                reason: `reason ${secret}`,
+                details: { echoed: secret },
+              },
+              '/consumers/',
+              'POST',
+            );
+            await assert.rejects(
+              () => logged.consumers.addCredential('fixed-consumer-id', type, entry),
+              (error: unknown) => {
+                assert.ok(isNexusError(error));
+                assert.ok(
+                  !JSON.stringify({
+                    message: error.message,
+                    details: error.details,
+                    cause: error.cause,
+                    stack: error.stack,
+                  }).includes(secret),
+                );
+                return true;
+              },
+            );
+            assert.ok(logs.length > logsBefore);
+            assert.ok(!JSON.stringify(logs.slice(logsBefore)).includes(secret));
+            assert.ok(logs.slice(logsBefore).some((entry) => entry.path === credentialPath));
+          }
+        }
+      } finally {
+        await logged.close();
+      }
+    });
+
+    it('classifies credential-write 503 responses without exposing Edge text', async () => {
+      for (const [body, details] of [
+        [
+          {
+            error: 'failed with durable secret-canary',
+            reason: 'private reason secret-canary',
+            applied: false,
+          },
+          { status: 503, kind: 'write_durable_not_live' },
+        ],
+        [
+          { error: 'uncertain secret-canary', reason: 'private reason secret-canary' },
+          { status: 503, kind: 'write_acknowledgement_uncertain' },
+        ],
+      ] as const) {
+        edge.queueFailure(503, body, '/consumers/', 'POST');
+        await assert.rejects(
+          () => client.consumers.addCredential('fixed-consumer-id', 'keyauth', { key: 'secret' }),
+          (error: unknown) => {
+            assert.ok(isNexusError(error));
+            assert.deepEqual(error.details, details);
+            assert.ok(!JSON.stringify(error.toBody()).includes('secret-canary'));
+            assert.ok(!JSON.stringify(error.toBody()).includes('reason'));
+            return true;
+          },
+        );
+      }
     });
 
     it('maps a refused connection to EDGE_UNAVAILABLE', async () => {
@@ -893,17 +992,17 @@ describe('ferrum admin client', () => {
             () => logged.apiSpecs.create(document),
             (error: unknown) => {
               assert.ok(isNexusError(error));
+              assert.equal(error.code, 'EDGE_REJECTED_SPEC');
+              assert.ok(!JSON.stringify(error.toBody()).includes('not a string'));
               const diagnostics = error.details as {
                 gateway_message: string;
                 gateway_code: string;
               };
-              assert.equal(error.code, 'EDGE_REJECTED_SPEC');
               assert.equal(diagnostics.gateway_code, 'MalformedExtension');
               assert.equal(
                 diagnostics.gateway_message.length,
                 typeof details === 'string' ? 500 : 'Spec parse failed'.length,
               );
-              assert.ok(!JSON.stringify(error.toBody()).includes('not a string'));
               return true;
             },
           );

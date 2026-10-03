@@ -48,11 +48,13 @@ Every change must keep three rules true:
    transaction that records the change, as an intent row before gateway work
    that cannot be undone, or after commit.
 3. **Upstream text reaches the browser only when Edge is judging the caller's
-   own input.** `ferrum-admin/client.ts` logs every Edge error body. A
-   validation refusal (`400`, `409`, `422`) is echoed in
-   `details.gateway_message`; an API-spec parse/validation failure becomes
-   `EDGE_REJECTED_SPEC` with a bounded summary. `401`, `403` and `5xx` are
-   never echoed. `classify()` is the only place this is decided.
+   own input.** `ferrum-admin/client.ts` logs every Edge error body except for
+   non-GET `/consumers` writes, which can carry show-once credential material
+   and therefore log only method, path and status. A validation refusal (`400`,
+   `409`, `422`) is echoed in `details.gateway_message`; an API-spec
+   parse/validation failure becomes `EDGE_REJECTED_SPEC` with a bounded summary.
+   `401`, `403` and `5xx` are never echoed. `classify()` is the only place this
+   is decided.
 
 The public reads are `GET /api/health`, `GET /api/health/edge`,
 `GET /api/auth/captcha` and `GET /api/branding`. Branding lets the login page
@@ -337,8 +339,9 @@ the same deadline. Writes are never replayed. See
 
 A `503` with `applied: false` means the write **is durable** but not yet live.
 It surfaces as `EDGE_ERROR` with an explicit message and is never retried
-automatically, because a blind retry of a create would `409`. The exact status
-and body each call accepts is in
+automatically, because a blind retry of a create would `409`. Credential writes
+retain the distinction as `kind: "write_durable_not_live"` without returning
+Edge's reason text. The exact status and body each call accepts is in
 [`edge-response-contracts.md`](edge-response-contracts.md); why `401`/`403`/`5xx`
 stay opaque is in
 [`security.md` §9](security.md#9-ferrum-edge-admin-jwt-hygiene).
