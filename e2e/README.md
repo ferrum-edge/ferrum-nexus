@@ -30,11 +30,12 @@ instead, as CI does.
 
 If `e2e/.env` does not exist, `run.sh` generates it with fresh random secrets and mode `0600`.
 Existing files are changed to mode `0600` before they are read, and symlinks are refused. The file
-is parsed as data: blank lines and comments are allowed, and other lines must be unique, allowlisted
-`KEY=VALUE` records. Values may contain only letters, digits, `.`, `_`, `:`, `/`, `@`, `+`, `=` and
-`-`; shell syntax, quotes, whitespace, and unknown keys are rejected. The Edge image entry remains
-accepted for compatibility with older local files, but the runner always uses the current pin from
-the compatibility record unless `FERRUM_EDGE_IMAGE` is exported in the environment.
+is parsed as data: empty lines and comments are allowed, and other lines must be unique, allowlisted
+`KEY=VALUE` records. Whitespace-only lines are rejected. Values may contain only letters, digits,
+and `.`, `_`, `:`, `/`, `@`, `+`, `=`, or `-`; shell syntax, quotes, whitespace, and unknown keys
+are rejected. The Edge image entry remains accepted for compatibility with older local files, but
+the runner always uses the current pin from the compatibility record unless `FERRUM_EDGE_IMAGE` is
+exported in the environment.
 
 Nothing in this directory ships a working secret, so none can leak into a real deployment.
 

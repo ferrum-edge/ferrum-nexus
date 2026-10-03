@@ -52,6 +52,16 @@ fi
 cd "$HERE"
 IMAGE_OVERRIDE="${NEXUS_IMAGE:-}"
 
+ENV_TEMP=''
+cleanup_env_temp() {
+  if [[ -n "$ENV_TEMP" ]]; then
+    rm -f -- "$ENV_TEMP"
+  fi
+}
+trap cleanup_env_temp EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # ── Secrets ────────────────────────────────────────────────────────────────
 #
 # Minted per run rather than committed. A compose file with a working secret in
@@ -97,14 +107,16 @@ fi
 # value in .env is a convenient tag for the image built from this checkout.
 # Parse it as data: no shell syntax is accepted or evaluated.
 ENV_KEYS=' '
+ENV_LINE_NUMBER=0
 while IFS= read -r ENV_LINE || [[ -n "$ENV_LINE" ]]; do
+  ((ENV_LINE_NUMBER += 1))
   if [[ "$ENV_LINE" =~ [[:cntrl:]] ]]; then
-    echo 'error: control character in e2e/.env' >&2
+    echo "error: control character in e2e/.env at line $ENV_LINE_NUMBER" >&2
     exit 1
   fi
   [[ -z "$ENV_LINE" || "$ENV_LINE" =~ ^[[:space:]]*# ]] && continue
   if [[ ! "$ENV_LINE" =~ ^([A-Z_][A-Z0-9_]*)=([A-Za-z0-9._:/@+=-]*)$ ]]; then
-    echo 'error: invalid line in e2e/.env' >&2
+    echo "error: invalid line in e2e/.env at line $ENV_LINE_NUMBER" >&2
     exit 1
   fi
   ENV_KEY="${BASH_REMATCH[1]}"
@@ -115,12 +127,12 @@ while IFS= read -r ENV_LINE || [[ -n "$ENV_LINE" ]]; do
     NEXUS_PORT|FERRUM_PROXY_PORT|FERRUM_ADMIN_PORT|MAILPIT_HTTP_PORT) ;;
     DEX_PORT|FERRUM_EDGE_IMAGE|FERRUM_ADMIN_JWT_ISSUER) ;;
     *)
-      echo "error: unsupported key in e2e/.env: $ENV_KEY" >&2
+      echo "error: unsupported key in e2e/.env at line $ENV_LINE_NUMBER: $ENV_KEY" >&2
       exit 1
       ;;
   esac
   if [[ "$ENV_KEYS" == *" $ENV_KEY "* ]]; then
-    echo "error: duplicate key in e2e/.env: $ENV_KEY" >&2
+    echo "error: duplicate key in e2e/.env at line $ENV_LINE_NUMBER: $ENV_KEY" >&2
     exit 1
   fi
   ENV_KEYS+="$ENV_KEY "
@@ -145,6 +157,7 @@ fi
 
 cleanup() {
   local status=$?
+  cleanup_env_temp
   mkdir -p "$ARTIFACTS"
   echo "==> collecting logs into $ARTIFACTS"
   # Container logs only. They carry request lines and gateway decisions, which

@@ -32,7 +32,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
-- **The acceptance runner treats `e2e/.env` as data and protects its secrets.** It rejects
+- **Issuing a new password-reset link now revokes every earlier one**
+  (GHSA-fgq6-8q7j-qmww). After the 10-minute issuance throttle, the
+  `forgot-password` flow used to insert a replacement one-hour token while
+  leaving prior live tokens usable, so a leaked or suspected link remained an
+  account-recovery capability until a token was redeemed. The replacement
+  request now deletes all outstanding `password_reset` tokens in the same
+  transaction that mints and queues the new link, on every backend, matching
+  the supersession the verification-resend flow already performed.
+- **The acceptance runner treats `e2e/.env` as data and protects its secrets** (#497). It rejects
   malformed, duplicate, unsupported, or shell-containing entries without evaluating them, refuses
   symlinks, and creates or secures the file with mode `0600`.
 - **Failed list and detail reads no longer look empty** (#486). A persistent
@@ -54,6 +62,21 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   mail-sink journey now asserts the delivered `From` address, so an ignored or
   renamed sender variable fails the acceptance gate rather than silently
   falling back to the built-in default.
+
+### Security
+
+- **Only a credential's owner can rotate it** (GHSA-mr69-2744-f78w).
+  `POST /api/credentials/:id/rotate` used to accept an `admin` or `super_admin`
+  acting on another account's, application's or test consumer's credential,
+  and returned the replacement's show-once secret to the administrator. The
+  replacement stays on the owner's gateway consumer with the owner's grants, so
+  that secret let the administrator call every API the identity was approved
+  for. Rotating somebody else's credential is now `403 FORBIDDEN` for every
+  role, checked before anything reaches the gateway and again inside the
+  consumer's queue, and nothing is minted. Administrators keep revoking
+  (`DELETE /api/credentials/:id`) and reconciling; after a revoke, the owner
+  issues a new one. The `credential.rotate` audit row no longer
+  carries `owner_user_id`, since the actor is always the owner.
 
 ## [0.3.0] - 2026-10-01
 
