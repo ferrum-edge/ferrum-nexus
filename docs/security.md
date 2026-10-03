@@ -58,7 +58,9 @@ only lets a proxy point at a public destination
 (`server/src/publishing/oas.ts`). Three checks run in order:
 
 1. **Name suffixes.** `localhost` and names ending `.localhost`, `.local`,
-   `.internal` or `.home.arpa` are refused.
+   `.internal` or `.home.arpa` are refused. The host is lower-cased with one
+   trailing root label stripped first, so `API.INTERNAL.` is refused exactly
+   like `api.internal`.
 2. **IP literals.** Refused: `0.0.0.0/8`, loopback, RFC 1918, carrier-grade
    NAT, link-local, `192.0.0.0/16`, `198.18.0.0/15`, multicast and reserved
    IPv4; IPv6 unique-local, link-local, site-local (`fec0::/10`) and multicast.

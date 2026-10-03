@@ -406,24 +406,37 @@ export function isPublicResolvedAddress(entry: ResolvedAddress): boolean {
 }
 
 /**
- * Whether `host` (a lower-cased hostname or bare IP literal) is a public
- * destination. Exported for the policy check above and for tests; the parser
- * itself never consults it.
+ * The canonical spelling of a host for the name-suffix rules.
+ *
+ * DNS treats letter case and a single trailing root label as equivalent, so
+ * `API.INTERNAL.` and `api.internal` name the same destination. Every
+ * name-suffix rule reads this form, so a fully-qualified `api.internal.` cannot
+ * slip past the rule that refuses `api.internal`.
+ */
+function normalizeHost(host: string): string {
+  return host.replace(/\.$/, '').toLowerCase();
+}
+
+/**
+ * Whether `host` (a hostname or bare IP literal, in any letter case and with or
+ * without a trailing root label) is a public destination. Exported for the
+ * policy check above and for tests; the parser itself never consults it.
  */
 export function isPublicUpstreamHost(host: string): boolean {
+  const name = normalizeHost(host);
   if (
-    host === 'localhost' ||
-    host.endsWith('.localhost') ||
-    host.endsWith('.local') ||
-    host.endsWith('.internal') ||
-    host.endsWith('.home.arpa')
+    name === 'localhost' ||
+    name.endsWith('.localhost') ||
+    name.endsWith('.local') ||
+    name.endsWith('.internal') ||
+    name.endsWith('.home.arpa')
   ) {
     return false;
   }
 
-  const version = isIP(host);
-  if (version === 4) return isPublicIpv4(host);
-  if (version === 6) return isPublicIpv6(host);
+  const version = isIP(name);
+  if (version === 4) return isPublicIpv4(name);
+  if (version === 6) return isPublicIpv6(name);
   return true;
 }
 
@@ -458,7 +471,7 @@ export class DestinationRefusedError extends Error {
 }
 
 /**
- * Resolve `host` (a lower-cased hostname or bare IP literal) and return its
+ * Resolve `host` (a hostname or bare IP literal) and return its
  * addresses, but only when every one of them is public — the same rules as
  * {@link assertUpstreamAllowed}, without its opt-out.
  *
@@ -475,7 +488,7 @@ export async function resolvePublicDestination(
 ): Promise<ResolvedAddress[]> {
   // `idp.internal.` is `idp.internal`: the root label must not slip a name
   // past the suffix list.
-  if (!isPublicUpstreamHost(host.replace(/\.$/, ''))) {
+  if (!isPublicUpstreamHost(host)) {
     throw new DestinationRefusedError(host, 'not_public');
   }
   const version = isIP(host);
