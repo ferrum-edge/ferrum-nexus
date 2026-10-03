@@ -386,8 +386,9 @@ export const AuditAction = {
    * completion record later fails is still named in the trail and still
    * charged: `NEXUS_MAX_MASS_EMAILS_PER_DAY` counts exactly these rows. One row
    * per campaign (`target_id` is the batch id); a retry of the same batch by
-   * the same administrator writes no second one. What was actually queued is
-   * {@link ADMIN_MASS_EMAIL_COMPLETE}.
+   * the same administrator writes no second one, and is a retry only when its
+   * content and audience match `details.content_sha256`. What was actually
+   * queued is {@link ADMIN_MASS_EMAIL_COMPLETE}.
    */
   ADMIN_MASS_EMAIL: 'admin.mass_email',
   /**

@@ -92,6 +92,18 @@ export const DEFAULT_SPEC_HISTORY_LIMIT = 10;
 export const DEFAULT_MAX_MASS_EMAIL_BYTES = 64 * 1024 * 1024;
 
 /**
+ * Default ceiling on mass-email campaigns per administrator per rolling 24
+ * hours (`NEXUS_MAX_MASS_EMAILS_PER_DAY`): 5.
+ *
+ * Deliberately low for now. Campaign mail and password-reset and verification
+ * mail share one first-in, first-out outbox, so a day's campaigns are backlog
+ * ahead of every security message; 5 × the 64 MiB campaign ceiling bounds that
+ * at about 320 MiB per administrator. Expected to rise once security mail gets
+ * a priority lane in the outbox (issue #500).
+ */
+export const DEFAULT_MAX_MASS_EMAILS_PER_DAY = 5;
+
+/**
  * Accepted values of `NEXUS_CAPTCHA_ENFORCEMENT`, in that exact spelling.
  *
  * Deliberately two words rather than a boolean: `NEXUS_CAPTCHA_ENFORCEMENT=0`
@@ -424,9 +436,10 @@ export interface NexusConfig {
   maxMassEmailRecipients: number;
   /**
    * How many rendered bytes one mass-email campaign may queue in total
-   * (`NEXUS_MAX_MASS_EMAIL_BYTES`): the size of one rendered message — subject,
-   * HTML and text, for the longest recipient name and address — times the
-   * number of recipients. `0` removes the ceiling.
+   * (`NEXUS_MAX_MASS_EMAIL_BYTES`): an upper bound on the size of one rendered
+   * message — subject, HTML and text, for the longest recipient name and
+   * address, HTML escaping included — times the number of recipients. `0`
+   * removes the ceiling.
    *
    * The recipient ceiling and the body-length limits bound each dimension on
    * its own; this bounds their product, which is what the outbox actually has
@@ -439,7 +452,9 @@ export interface NexusConfig {
    *
    * The per-campaign ceilings bound one campaign; this bounds a loop of them.
    * Counted from the actor's own `admin.mass_email` audit rows, one per
-   * campaign: a retry of the same `idempotency_key` is not charged again.
+   * campaign: a retry of the same `idempotency_key` with the same content and
+   * audience is not charged again. Defaults to
+   * {@link DEFAULT_MAX_MASS_EMAILS_PER_DAY}.
    */
   maxMassEmailsPerDay: number;
   /**
@@ -607,7 +622,7 @@ const envSchema = z.object({
   NEXUS_MAX_BROADCASTS_PER_DAY: intish(20, 0, 100_000),
   NEXUS_MAX_MASS_EMAIL_RECIPIENTS: intish(5_000, 0, 1_000_000),
   NEXUS_MAX_MASS_EMAIL_BYTES: intish(DEFAULT_MAX_MASS_EMAIL_BYTES, 0, 17_179_869_184),
-  NEXUS_MAX_MASS_EMAILS_PER_DAY: intish(20, 0, 100_000),
+  NEXUS_MAX_MASS_EMAILS_PER_DAY: intish(DEFAULT_MAX_MASS_EMAILS_PER_DAY, 0, 100_000),
   NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
   NEXUS_ALLOW_ENV_OVERRIDE: boolish(false),
   NEXUS_WEB_DIST: optionalString(),

@@ -1405,25 +1405,35 @@ failure `details`; retry with it as `idempotency_key` and exactly the missing
 recipients are queued — nobody is mailed twice, and the retry is not charged as
 a new campaign. Each attempt's outcome is an `admin.mass_email_complete` row.
 
+A key names one campaign. A retry must repeat the subject, both bodies and the
+audience selector exactly (the order of `roles` and `user_ids` does not
+matter); the same key with anything else is `409 CONFLICT` with
+`details: { batch_id, reason: "idempotency_key_reused" }`, and nothing is
+queued or charged. An audience that resolves to nobody is
+`400 VALIDATION_FAILED` and costs no campaign.
+
 Three bounds are checked before anything is written, each refused with
 `429 QUOTA_EXCEEDED` and a `details.setting` naming the variable:
 
 - the audience, by `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5 000);
   `details: { limit, recipients, setting }`;
-- the aggregate size — one rendered message (subject, HTML and text) times the
-  recipients — by `NEXUS_MAX_MASS_EMAIL_BYTES` (default 64 MiB);
+- the aggregate size — an upper bound on one rendered message (subject, HTML
+  and text, for the longest recipient name and address after HTML escaping)
+  times the recipients — by `NEXUS_MAX_MASS_EMAIL_BYTES` (default 64 MiB);
   `details: { limit, bytes, message_bytes, recipients, setting }`;
 - campaigns per administrator per rolling 24 hours, by
-  `NEXUS_MAX_MASS_EMAILS_PER_DAY` (default 20);
+  `NEXUS_MAX_MASS_EMAILS_PER_DAY` (default 5);
   `details: { limit, used, recipients, window, setting }`.
 
 `0` disables any of them. With `NEXUS_RATE_LIMIT_ENABLED`, the route also allows
 10 requests per minute per account (`429 RATE_LIMITED`).
 
-Errors: `400 VALIDATION_FAILED` (empty subject/body, empty explicit list),
-`429 QUOTA_EXCEEDED` (above), `409 CONFLICT` (contention; `batch_id` and, once
-queueing started, `enqueued` in `details`), `500 OUTBOX_FAILURE`
-(`details: { batch_id, recipients, enqueued }`).
+Errors: `400 VALIDATION_FAILED` (empty subject/body, an audience that matches
+nobody, one message too large for a 4 MiB chunk on its own),
+`429 QUOTA_EXCEEDED` (above), `409 CONFLICT` (contention, another campaign from
+the same administrator still in flight, or a reused key; `batch_id` always,
+`enqueued` once queueing started, and `reason` for a reused key, in
+`details`), `500 OUTBOX_FAILURE` (`details: { batch_id, recipients, enqueued }`).
 
 ### `GET /api/admin/audit-logs`
 

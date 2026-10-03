@@ -86,19 +86,34 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   password-reset and verification enqueues included — while it ran. Now:
   - `NEXUS_MAX_MASS_EMAIL_BYTES` (default 64 MiB, `0` disables) caps one
     rendered message times the audience, and `NEXUS_MAX_MASS_EMAILS_PER_DAY`
-    (default 20, `0` disables) caps campaigns per administrator per rolling
-    24 hours. Both refuse with `429 QUOTA_EXCEEDED` before anything is written.
-  - The campaign's `admin.mass_email` row commits before the first outbox row
-    (one per campaign; a retry with the same `idempotency_key` is not charged
-    again), and the outbox rows are inserted in transactions of at most 200
-    recipients. A failed chunk rolls back alone: the failure reports
+    (`0` disables) caps campaigns per administrator per rolling 24 hours.
+    Both refuse with `429 QUOTA_EXCEEDED` before anything is written. The
+    message size is an upper bound: the longest recipient name and address
+    are measured after HTML escaping, and a template that repeats them counts
+    every repetition. A single message too large for a 4 MiB fan-out
+    transaction is `400 VALIDATION_FAILED`.
+  - **Behaviour change:** `NEXUS_MAX_MASS_EMAILS_PER_DAY` defaults to **5**,
+    deliberately low while campaign mail shares one queue with password-reset
+    and verification mail; it is expected to rise once that mail gets its own
+    outbox lane (#500). Set it explicitly to keep a higher ceiling.
+  - The campaign's `admin.mass_email` row commits before the first outbox row,
+    one per campaign, with a `content_sha256` digest of the subject, both
+    bodies and the audience selector. A retry with the same `idempotency_key`,
+    content and audience is not charged again; the same key with anything else
+    is `409 CONFLICT` with `details.reason` set to `idempotency_key_reused`,
+    and queues nothing. An audience that matches nobody is
+    `400 VALIDATION_FAILED` and costs no campaign. Every mass-email `409`,
+    including the one for a per-administrator lease still held elsewhere,
+    carries `details.batch_id`.
+  - The outbox rows are inserted in transactions of at most 200 recipients and
+    about 4 MiB. A failed chunk rolls back alone: the failure reports
     `details.enqueued` for the chunks already queued, and the retry with the
     same batch id queues exactly the rest. Each attempt's outcome is a new
     `admin.mass_email_complete` row; `enqueued` moved there from
-    `admin.mass_email`.
+    `admin.mass_email`. After such a retry the composer reports the campaign's
+    total, not only what the retry added.
   - Campaign and security mail still share one first-in, first-out outbox; a
-    priority lane for password-reset and verification mail is planned
-    separately.
+    priority lane for password-reset and verification mail is tracked in #500.
 - **Only a credential's owner can rotate it** (GHSA-mr69-2744-f78w).
   `POST /api/credentials/:id/rotate` used to accept an `admin` or `super_admin`
   acting on another account's, application's or test consumer's credential,

@@ -740,6 +740,33 @@ describe('the SMTP test rate limit', () => {
       assert.deepEqual(statuses, [...accepted, 429]);
       assert.equal(errorCode(refusal), 'RATE_LIMITED');
       assert.equal(harness.mailbox.sent.length, SMTP_TEST_RATE_LIMIT.max);
+
+      // A second administrator gets a bucket of their own. Both share
+      // 127.0.0.1, so a limiter keyed on the address — what `userOrIpKey`
+      // silently degrades to if the session is not resolved first — would
+      // refuse this first request.
+      const other = await harness.registerUser({ email: 'burst-other@example.test' });
+      const promoted = await harness.authed(founder, {
+        method: 'PATCH',
+        url: `/api/users/${other.user.id}`,
+        payload: { role: 'admin' },
+      });
+      assert.equal(promoted.statusCode, 200, promoted.body);
+      const otherAdmin = await harness.loginUser('burst-other@example.test');
+      const theirs = await harness.authed(otherAdmin, {
+        method: 'POST',
+        url: '/api/admin/settings/smtp-test',
+        payload: {},
+      });
+      assert.equal(theirs.statusCode, 200, `a fresh account's own bucket: ${theirs.body}`);
+      assert.equal(harness.mailbox.sent.length, SMTP_TEST_RATE_LIMIT.max + 1);
+
+      const again = await harness.authed(founder, {
+        method: 'POST',
+        url: '/api/admin/settings/smtp-test',
+        payload: {},
+      });
+      assert.equal(again.statusCode, 429, 'and the first is still refused in the same window');
     } finally {
       await harness.close();
     }

@@ -1418,7 +1418,11 @@ export interface MassEmailRequest {
   body_text: string;
   /** Audience selector; combined with AND when several are supplied. */
   audience: MassEmailAudience;
-  /** Reuse of a key makes the send idempotent (at-most-once). */
+  /**
+   * Reuse of a key makes the send idempotent (at-most-once). A key names one
+   * campaign: reusing it with a different subject, body or audience is
+   * `409 CONFLICT` (`details.reason: 'idempotency_key_reused'`).
+   */
   idempotency_key?: string;
 }
 

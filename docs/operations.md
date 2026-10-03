@@ -99,8 +99,8 @@ See the README for a two-stack example.
 | `NEXUS_MAX_BROADCAST_RECIPIENTS`             | `5000`                                | Recipients per god-mode broadcast, 0–1 000 000; `0` disables.                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `NEXUS_MAX_BROADCASTS_PER_DAY`               | `20`                                  | Broadcasts per administrator per rolling 24 h, 0–100 000; `0` disables.                                                                                                                                                                                                                                                                                                                                                                                              |
 | `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`            | `5000`                                | Recipients per mass-email campaign, 0–1 000 000; `0` disables. See [A mass-email campaign is recorded, then queued in chunks](#a-mass-email-campaign-is-recorded-then-queued-in-chunks).                                                                                                                                                                                                                                                                             |
-| `NEXUS_MAX_MASS_EMAIL_BYTES`                 | `67108864`                            | Rendered bytes per mass-email campaign (one message × recipients), 0–17 179 869 184; `0` disables. Default 64 MiB.                                                                                                                                                                                                                                                                                                                                                   |
-| `NEXUS_MAX_MASS_EMAILS_PER_DAY`              | `20`                                  | Mass-email campaigns per administrator per rolling 24 h, 0–100 000; `0` disables. A retry with the same `idempotency_key` is not counted again.                                                                                                                                                                                                                                                                                                                      |
+| `NEXUS_MAX_MASS_EMAIL_BYTES`                 | `67108864`                            | Rendered bytes per mass-email campaign (an upper bound on one message, HTML escaping included, × recipients), 0–17 179 869 184; `0` disables. Default 64 MiB.                                                                                                                                                                                                                                                                                                        |
+| `NEXUS_MAX_MASS_EMAILS_PER_DAY`              | `5`                                   | Mass-email campaigns per administrator per rolling 24 h, 0–100 000; `0` disables. A retry with the same `idempotency_key`, content and audience is not counted again; the same key with anything else is `409 CONFLICT`. Kept low until security mail has its own outbox lane (issue #500).                                                                                                                                                                          |
 | `NEXUS_ALLOW_PRIVATE_UPSTREAMS`              | `false`                               | Whether an API upstream may be loopback, private (RFC 1918, CGNAT, link-local) or a `.local`/`.internal`/`.localhost`/`.home.arpa` name. At `false` Nexus also resolves every other upstream hostname and refuses it if any answer is private or the name does not resolve, so **the Nexus process needs public DNS**. Refusals are `400 SPEC_INVALID`. Set `true` for internal-only portals and local development. See [`security.md`](security.md#1-threat-model). |
 | `NEXUS_ALLOW_ENV_OVERRIDE`                   | `false`                               | Allow the process environment to override `.env` for `FERRUM_NAMESPACE`/`FERRUM_ADMIN_URL` outside production (see above). No effect in production.                                                                                                                                                                                                                                                                                                                  |
 | `NEXUS_WEB_DIST`                             | _(unset)_                             | Directory of the built SPA. Nexus uses the first of this, `../../web/dist` relative to the server, and `./web/dist` under the working directory that contains an `index.html`; with none, only the API is served.                                                                                                                                                                                                                                                    |
@@ -367,7 +367,7 @@ Each message writes a message row and an audit row. A **platform thread** (no
 | Broadcasts per admin              | 20 per rolling 24 h (`0` = unlimited)               | `NEXUS_MAX_BROADCASTS_PER_DAY`        |
 | Mass-email recipients             | 5 000 per campaign (`0` = unlimited)                | `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`     |
 | Mass-email size                   | 64 MiB per campaign (`0` = unlimited)               | `NEXUS_MAX_MASS_EMAIL_BYTES`          |
-| Mass-email campaigns per admin    | 20 per rolling 24 h (`0` = unlimited)               | `NEXUS_MAX_MASS_EMAILS_PER_DAY`       |
+| Mass-email campaigns per admin    | 5 per rolling 24 h (`0` = unlimited)                | `NEXUS_MAX_MASS_EMAILS_PER_DAY`       |
 | SMTP tests per admin              | 10 per rolling hour; 3 per minute                   | Fixed; rate limiter                   |
 | `message_received` email          | 1 per recipient per thread per 10 minutes           | Outbox idempotency key; fixed         |
 | `spec_updated` email              | 1 per recipient per API per clock hour              | Outbox idempotency key; fixed         |
@@ -1259,15 +1259,28 @@ and no transaction approaches MongoDB's 16 MB cap.
   retrying with that `batch_id` queues exactly the missing recipients and is
   not charged as a new campaign. Each attempt's result is an
   `admin.mass_email_complete` row (`enqueued`, `chunks`, `failed`).
+- **A key names one campaign.** The `admin.mass_email` row stores
+  `content_sha256`, a digest of the subject, both bodies and the audience
+  selector. The same key with a different subject, body or audience is
+  `409 CONFLICT` with `details: { batch_id, reason: "idempotency_key_reused" }`,
+  and nothing is queued or charged. Start a new campaign without the key
+  instead. An audience that resolves to nobody is `400 VALIDATION_FAILED` and
+  costs no campaign.
 - **The campaign is bounded** before anything is written, each refusal a
   `429 QUOTA_EXCEEDED` whose `details.setting` names the variable:
   - `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5 000): the audience.
-  - `NEXUS_MAX_MASS_EMAIL_BYTES` (default 64 MiB): one rendered message
-    (subject, HTML and text, for the longest recipient name and address) times
-    the recipients. The body limits alone allow about 200 KB per message, so
-    5 000 recipients could otherwise queue about a gigabyte.
-  - `NEXUS_MAX_MASS_EMAILS_PER_DAY` (default 20): campaigns per administrator
-    per rolling 24 hours, counted under a per-administrator lease.
+  - `NEXUS_MAX_MASS_EMAIL_BYTES` (default 64 MiB): an upper bound on one
+    rendered message (subject, HTML and text, for the longest recipient name
+    and address after HTML escaping, however often the template repeats them)
+    times the recipients. The body limits alone allow about 200 KB per message,
+    so 5 000 recipients could otherwise queue about a gigabyte. A single
+    message too large for a 4 MB chunk is refused with `400 VALIDATION_FAILED`
+    whatever this is set to.
+  - `NEXUS_MAX_MASS_EMAILS_PER_DAY` (default 5): campaigns per administrator
+    per rolling 24 hours, counted under a per-administrator lease. The default
+    keeps a day's campaign backlog to about 320 MiB per administrator while
+    campaign and security mail share one queue; it is expected to rise when
+    security mail gets its own outbox lane (issue #500).
 
   **Campaign mail still shares the outbox with security mail.** The worker
   delivers in the order rows were queued, so a password-reset or verification

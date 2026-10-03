@@ -434,10 +434,14 @@ refused with a message naming the limit and the setting:
 - at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` accounts (5000 by default);
 - at most `NEXUS_MAX_MASS_EMAIL_BYTES` of mail in total (64 MiB by default):
   the size of one message times the number of recipients, so a long message
-  reaches fewer people;
+  reaches fewer people. The size allows for the longest recipient name and
+  address, so a template that repeats them counts every repetition;
 - at most `NEXUS_MAX_MASS_EMAILS_PER_DAY` campaigns per admin in a rolling
-  24 hours (20 by default). Retrying a campaign with the same ID does not count
+  24 hours (5 by default, until password-reset and verification mail get their
+  own place in the queue). Retrying a campaign with the same ID does not count
   again.
+
+An audience that matches nobody is refused and does not count as a campaign.
 
 ### Retrying safely
 
@@ -449,9 +453,13 @@ had succeeded and the retry added nothing.
 Changing the content or audience, or a successful send, starts a new campaign.
 Reloading or leaving the page loses the ID, so check the audit log
 (`admin.mass_email` and `admin.mass_email_complete`) before sending again.
+After a partly queued attempt, the retry's confirmation counts the whole
+campaign, not just the recipients the retry added.
 
 API callers get the same protection by sending an `idempotency_key` (8–128
-characters). Without one, **every send is a new campaign**.
+characters). Without one, **every send is a new campaign**. A key belongs to
+one campaign: reusing it with a different subject, body or audience is refused
+with `409` and sends nothing.
 
 ### Before you send
 
