@@ -63,17 +63,36 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   an administrator or the provider's claims would make it one, checked when the
   sign-in is planned and again in the transaction that commits it. Such an
   account links only explicitly, from its holder's signed-in session.
-  **Behaviour change:** a deployment that relied on automatic linking to
-  attach an admin-mapped provider to an existing account must link explicitly.
+  The same escalation in the other order (#495), where the lower-trust provider
+  links first and the holder's own provider promotes the account later, is
+  closed too: claims no longer promote an account to `admin` while it holds an
+  identity at another provider that is not itself trusted with `admin`
+  (`sync_roles` on and an `admin` default or mapping). The sign-in goes ahead
+  with the current role, and `auth.sso_claims_sync` records `role_withheld` and
+  `lower_trust_provider_ids` for a `super_admin` to review. Explicit links count
+  too, since a session does not record which provider opened it. A claims
+  promotion that does go through ends every other session of the account, so
+  none opened earlier inherits the role. Automatic links and promotions of one
+  account commit under its lifecycle lease, so neither misses the other.
+  **Behaviour changes:** a deployment that relied on automatic linking to
+  attach an admin-mapped provider to an existing account must link explicitly;
+  an account linked at a provider that cannot grant `admin` is promoted by
+  claims only after a `super_admin` removes that link, or by hand; and a
+  promotion signs the account out of its other browsers.
 - GHSA-p9qg-f2w6-c4qj: a single sign-on callback read its provider before the
   token exchange and did not read it again, so a callback in flight when an
   administrator removed or disabled the provider could still link, provision,
   sync claims or open a session afterwards. The transaction that commits a
   callback now re-reads the settings and refuses (`sso_disabled`) unless the
   login policy still allows single sign-on and the provider is still in force,
-  enabled and configured as the callback found it. Callbacks and settings saves
-  take the same per-provider lease (`sso:provider:<id>`), so the re-read cannot
-  miss a save committing at the same moment on any database backend.
+  enabled and configured as the callback found it. A callback that writes a
+  link (a first-time link or a provisioned account) and a settings save take
+  the same per-provider lease (`sso:provider:<id>`), so the re-read cannot miss
+  a save committing at the same moment on any database backend; returning
+  sign-ins do not take it, so they do not queue behind each other. A settings
+  save now also refuses with `409 CONFLICT` when another save changed the
+  settings after it read them, instead of silently dropping that save's
+  providers and leaving their links behind.
 - **Only a credential's owner can rotate it** (GHSA-mr69-2744-f78w).
   `POST /api/credentials/:id/rotate` used to accept an `admin` or `super_admin`
   acting on another account's, application's or test consumer's credential,

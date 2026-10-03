@@ -51,11 +51,18 @@
  * ordinary portal session (`auth/service.ts`), and every change commits in
  * one transaction with its audit row.
  *
+ * A role is the account's, and a session carries no provider, so claims never
+ * promote an account to `admin` while it holds an identity at another provider
+ * that is not itself trusted to grant `admin`: the promotion is withheld and
+ * audited, and a `super_admin` decides. A promotion that does go through ends
+ * the account's other sessions, so none opened before it inherits the role.
+ *
  * That transaction re-reads the provider: one removed, disabled or
  * reconfigured while the callback waited on the provider's token endpoint, or
- * a login policy turned to `local_only`, commits nothing. Callbacks and
- * settings saves both hold the provider's `ssoProviderLockKey`, so the
- * re-read cannot miss a save that is committing at the same moment.
+ * a login policy turned to `local_only`, commits nothing. A first-time link or
+ * a provisioned account commits under the provider's `ssoProviderLockKey`,
+ * which settings saves hold too, so the re-read cannot miss a save that is
+ * committing at the same moment.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -85,7 +92,7 @@ import type { NexusConfig } from '../config/index.js';
 import { runGatewayTeardown, type CredentialsService } from '../credentials/service.js';
 import type { NexusStore, UserIdentityRecord, UserRecord } from '../db/store.js';
 import { SCRYPT_PARAMS, type NexusCrypto } from '../lib/crypto.js';
-import { forbidden, notFound, validationFailed } from '../lib/errors.js';
+import { conflict, forbidden, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import {
   ssoProviderLockKey,
@@ -313,6 +320,21 @@ function privilegedAutoLink(
   return mapped !== undefined && roleAtLeast(mapped, 'admin');
 }
 
+/**
+ * Whether the deployment trusts `provider` to make the accounts it opens
+ * administrators: it re-applies the role on every sign-in (`sync_roles`) and
+ * its default role or one of its mappings is `admin`.
+ *
+ * An identity at such a provider can already raise its account to `admin` on
+ * its own, so another provider's promotion hands it nothing new. Any other
+ * provider is lower-trust for this purpose.
+ */
+function grantsAdmin(provider: SsoProviderSettings): boolean {
+  if (!provider.sync_roles) return false;
+  const roles = [provider.default_role, ...provider.role_mappings.map((rule) => rule.role)];
+  return roles.some((role) => role !== null && roleAtLeast(role, 'admin'));
+}
+
 /** How a sign-in reaches its account. */
 type SignInPlan =
   | { kind: 'returning'; user: UserRecord; identity: UserIdentityRecord }
@@ -378,9 +400,11 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
    * single sign-on and the provider is still in force, enabled, and configured
    * exactly as the callback found it before its slow token exchange.
    *
-   * Run under the provider's {@link ssoProviderLockKey}, which a settings save
-   * takes as well, so a removal or a disable that has committed is seen here,
-   * and one that has not yet started waits for this commit.
+   * A commit that writes one of the provider's links runs under the
+   * provider's {@link ssoProviderLockKey}, which a settings save takes as well,
+   * so a removal or a disable that has committed is seen here, and one that
+   * has not yet started waits for this commit. A returning sign-in writes
+   * nothing a save reads, so this re-read alone orders it against one.
    */
   async function currentSettings(
     tx: NexusStore,
@@ -400,6 +424,37 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       throw new OidcError('sso_disabled', 'The provider was reconfigured during sign-in');
     }
     return stored;
+  }
+
+  /**
+   * The providers other than `provider` at which the account holds an
+   * identity, leaving out those {@link grantsAdmin} trusts with `admin` under
+   * the identity's issuer. Read through `tx`, under the account's
+   * {@link userLifecycleLockKey}, so an automatic link committing at another
+   * provider is either seen here or sees the promotion.
+   *
+   * Explicit links count as well as automatic ones. A session records neither
+   * the provider nor the password that opened it, so an explicit link proves
+   * only that someone holding a session on the account made it — possibly
+   * through the very lower-trust identity this guards against.
+   */
+  async function lowerTrustProviders(
+    tx: NexusStore,
+    userId: Uuid,
+    provider: SsoProviderSettings,
+    stored: StoredSsoSettings,
+  ): Promise<string[]> {
+    const trusted = new Map(
+      providersInForce(config, stored)
+        .filter(({ settings }) => grantsAdmin(settings))
+        .map(({ settings }): [string, string] => [settings.id, settings.issuer]),
+    );
+    const others = (await tx.userIdentities.listByUser(userId)).filter(
+      (identity) =>
+        identity.provider_id !== provider.id &&
+        trusted.get(identity.provider_id) !== identity.issuer,
+    );
+    return [...new Set(others.map((identity) => identity.provider_id))].sort();
   }
 
   /**
@@ -746,10 +801,7 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         : false;
     const subject = claims.sub;
 
-    // Under the provider's key, taken before the transaction (never inside
-    // it): a settings save that removes or disables the provider either
-    // committed before this body's re-read below, or waits for this commit.
-    return locks(ssoProviderLockKey(provider.id), () =>
+    const commit = (): Promise<IssuedSession> =>
       store.transaction(async (tx) => {
         // What the callback read before its token exchange may be stale by
         // now: the provider, the login policy and the deployment-wide domain
@@ -859,14 +911,44 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
             }
           }
 
-          const change = planClaimsChange(user, mapping, provider, orgExists);
-          if (change) {
-            const updated = await tx.users.updateIfMatches(
-              user.id,
-              { role: user.role, status: 'active' },
-              change,
-            );
-            if (!updated) throw new OidcError('server_error', 'The account changed during sign-in');
+          const planned = planClaimsChange(user, mapping, provider, orgExists);
+          let change = planned;
+          // A promotion to administrator reaches every identity on the account
+          // and every session it has: neither the role nor a session belongs
+          // to one provider. While a lower-trust provider can open the account,
+          // claims do not promote it; the promotion is withheld, audited, and
+          // left to a super admin, and the rest of the sign-in goes ahead.
+          const promotedTo = planned?.role;
+          let withheld: string[] = [];
+          if (
+            promotedTo !== undefined &&
+            roleAtLeast(promotedTo, 'admin') &&
+            !roleAtLeast(user.role, 'admin')
+          ) {
+            withheld = await lowerTrustProviders(tx, user.id, provider, stored);
+            if (withheld.length > 0) {
+              const orgId = planned?.org_id;
+              change = orgId !== undefined ? { org_id: orgId } : null;
+            }
+          }
+          if (change !== null || withheld.length > 0) {
+            let updated = user;
+            let terminatedSessions: number | null = null;
+            if (change !== null) {
+              const row = await tx.users.updateIfMatches(
+                user.id,
+                { role: user.role, status: 'active' },
+                change,
+              );
+              if (!row) throw new OidcError('server_error', 'The account changed during sign-in');
+              updated = row;
+              // A raised role starts from the session this sign-in issues. One
+              // opened earlier, through another provider, a password or an
+              // identity since unlinked, must not inherit it.
+              if (change.role !== undefined && !roleAtLeast(user.role, change.role)) {
+                terminatedSessions = await tx.sessions.deleteForUser(user.id);
+              }
+            }
             await audit.forStore(tx).record(
               SYSTEM_ACTOR,
               AuditAction.AUTH_SSO_CLAIMS_SYNC,
@@ -874,12 +956,20 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
               {
                 provider_id: provider.id,
                 subject,
-                ...(change.role !== undefined
+                ...(change !== null && change.role !== undefined
                   ? { from_role: user.role, to_role: change.role }
                   : {}),
-                ...(change.org_id !== undefined
+                ...(change !== null && change.org_id !== undefined
                   ? { from_org_id: user.org_id, to_org_id: change.org_id }
                   : {}),
+                ...(withheld.length > 0
+                  ? {
+                      role_withheld: promotedTo,
+                      withheld_reason: 'lower_trust_identities',
+                      lower_trust_provider_ids: withheld,
+                    }
+                  : {}),
+                ...(terminatedSessions !== null ? { terminated_sessions: terminatedSessions } : {}),
                 role_mapping: mapping.roleMapping,
                 org_mapping: mapping.orgMapping,
               },
@@ -906,8 +996,28 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
           context.ip,
         );
         return issued;
-      }),
-    );
+      });
+
+    // Keys are taken before the transaction, never inside it.
+    //
+    // A first-time link or a provisioned account writes one of the provider's
+    // links, which a settings save that removes the provider deletes by
+    // predicate. The provider's key orders the two: the save either committed
+    // before this body's re-read, or waits for this commit and removes the new
+    // link with the rest. A returning sign-in writes nothing a save reads, so
+    // the re-read alone orders it, and it does not queue every sign-in at the
+    // provider behind one key.
+    //
+    // Any sign-in into an existing account also takes the account's lifecycle
+    // key, inside the provider's: a promotion reads the account's links and an
+    // automatic link at another provider reads its role, and each writes what
+    // the other reads.
+    const accountId = plan.kind === 'provision' ? null : plan.user.id;
+    const underAccount =
+      accountId === null ? commit : () => locks(userLifecycleLockKey(accountId), commit);
+    return plan.kind === 'returning'
+      ? underAccount()
+      : locks(ssoProviderLockKey(provider.id), underAccount);
   }
 
   async function publicConfig(): Promise<SsoPublicConfigResponse> {
@@ -1105,6 +1215,12 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       const secretWrites = new Map<string, string | null>();
       const added: string[] = [];
       const removed: string[] = [];
+      // Providers whose issuer this save changes.
+      const reissued: string[] = [];
+      const issuerHasLinks = (id: string): Error =>
+        validationFailed(
+          `Provider '${id}' has linked accounts; add another provider for that issuer`,
+        );
       if (patch.providers !== undefined) {
         const envIds = new Set(config.sso.providers.map((provider) => provider.settings.id));
         if (envIds.size + patch.providers.length > MAX_SSO_PROVIDERS) {
@@ -1130,15 +1246,14 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
           // Links are keyed on the issuer: moving a provider with links to
           // another issuer would strand them, or worse, keep an id pointing at
           // accounts the new issuer's subjects must not reach.
+          // Checked here for a prompt answer, and again under the provider's
+          // key, where no first-time link can commit in between.
           const before = previous.get(provider.id);
-          if (
-            before !== undefined &&
-            before.issuer !== provider.issuer &&
-            (await store.userIdentities.countByProvider(provider.id)) > 0
-          ) {
-            throw validationFailed(
-              `Provider '${provider.id}' has linked accounts; add another provider for that issuer`,
-            );
+          if (before !== undefined && before.issuer !== provider.issuer) {
+            reissued.push(provider.id);
+            if ((await store.userIdentities.countByProvider(provider.id)) > 0) {
+              throw issuerHasLinks(provider.id);
+            }
           }
           for (const mapping of provider.org_mappings) {
             if (!(await store.organizations.findById(mapping.org_id))) {
@@ -1202,6 +1317,19 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       ];
       await underProviderLocks(affected, () =>
         store.transaction(async (tx) => {
+          // A compare-and-swap. Everything above, the keys just taken and the
+          // providers whose links go below included, was worked out from
+          // `stored`, which was read before any key was held. A save that
+          // committed since would make all of it stale: a provider it added
+          // would be dropped unlocked, and its links left behind.
+          if (!isDeepStrictEqual(await readStoredSsoSettings(tx), stored)) {
+            throw conflict(
+              'Single sign-on settings changed since they were read; reload and try again',
+            );
+          }
+          for (const id of reissued) {
+            if ((await tx.userIdentities.countByProvider(id)) > 0) throw issuerHasLinks(id);
+          }
           await tx.settings.set(SSO_SETTINGS_KEY, next, false);
           for (const [id, blob] of encrypted) {
             if (blob === null) await tx.settings.delete(ssoClientSecretKey(id));

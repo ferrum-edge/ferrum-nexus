@@ -27,8 +27,9 @@ import {
 
 import { AuditAction } from '../audit/service.js';
 import { REGISTRATION_SETTINGS_KEY } from '../auth/service.js';
-import type { UserRecord } from '../db/store.js';
-import { SSO_SETTINGS_KEY, ssoClientSecretKey } from '../sso/settings.js';
+import type { LeaseRepo, NexusStore, UserRecord } from '../db/store.js';
+import { ssoProviderLockKey, userLifecycleLockKey } from '../lib/keyed-serializer.js';
+import { readStoredSsoSettings, SSO_SETTINGS_KEY, ssoClientSecretKey } from '../sso/settings.js';
 import {
   buildTestApp,
   cookieValue,
@@ -197,6 +198,54 @@ async function assertNoLocalPassword(h: TestApp, email: string): Promise<void> {
   assert.deepEqual(mailed, [], 'no reset link is issued');
 }
 
+/** The store-level leases the app takes, as a test sees them. */
+interface LeaseWatch {
+  /** Every key taken, in order. */
+  taken: string[];
+  /**
+   * Run once, the next time `key` is taken: while it is held, and before the
+   * work under it starts. For a callback that is between its plan and the
+   * transaction that commits it; for a settings save, between its read of the
+   * settings and its write.
+   */
+  next: { key: string; run: () => Promise<void> } | null;
+}
+
+/** Wrap `store` so that every lease it grants is reported to `watch`. */
+function watchLeases(store: NexusStore, watch: LeaseWatch): NexusStore {
+  const leases = new Proxy(store.leases, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property);
+      if (property !== 'acquire') return value;
+      return async (...args: Parameters<LeaseRepo['acquire']>): Promise<boolean> => {
+        const taken = await target.acquire(...args);
+        const [key] = args;
+        if (taken) {
+          watch.taken.push(key);
+          const hook = watch.next;
+          if (hook !== null && hook.key === key) {
+            watch.next = null;
+            await hook.run();
+          }
+        }
+        return taken;
+      };
+    },
+  });
+  return new Proxy(store, {
+    get(target, property) {
+      if (property === 'leases') return leases;
+      const value: unknown = Reflect.get(target, property);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+/** Resolve after `ms` milliseconds. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function providersEnv(corp: MockOidcProvider, partner: MockOidcProvider): string {
   return JSON.stringify([
     {
@@ -228,6 +277,7 @@ describe('single sign-on', () => {
   let h: TestApp;
   let founder: TestSession;
   let logLines: string[];
+  const leases: LeaseWatch = { taken: [], next: null };
 
   before(async () => {
     corp = createMockOidcProvider({ clientId: 'nexus-corp', clientSecret: CORP_SECRET });
@@ -240,6 +290,7 @@ describe('single sign-on', () => {
         NEXUS_OIDC_ALLOW_HTTP_LOOPBACK: 'true',
         NEXUS_OIDC_PROVIDERS: providersEnv(corp, partner),
       },
+      wrapStore: (store) => watchLeases(store, leases),
       deps: {
         logger: {
           level: 'warn',
@@ -659,7 +710,10 @@ describe('single sign-on', () => {
     assert.equal(ssoError(refused), 'privileged_account');
     assert.equal((await h.store.users.findById(lowTrust.user.id))?.role, 'client');
     const identities = await h.store.userIdentities.listByUser(lowTrust.user.id);
-    assert.deepEqual(identities.map((identity) => identity.provider_id), ['partner']);
+    assert.deepEqual(
+      identities.map((identity) => identity.provider_id),
+      ['partner'],
+    );
     assert.equal(
       await h.store.userIdentities.findBySubject('corp', corp.issuer, corpClaims.sub),
       null,
@@ -679,15 +733,156 @@ describe('single sign-on', () => {
       'the partner session gains nothing',
     );
 
-    // An explicit link, made by the account's holder from a signed-in
-    // session, is still how an admin-mapped identity reaches the account.
+    // An explicit link, made from a signed-in session, still attaches the
+    // admin-mapped identity. It does not promote the account while the
+    // partner identity can open it too: a session does not say which provider
+    // opened it, so the link proves no more than the partner session did.
     const linked = await link(h, corp, 'corp', lowTrust, corpClaims);
     assert.equal(ssoError(linked), null);
-    assert.equal((await sessionOf(h, linked)).user.role, 'admin');
+    assert.equal((await sessionOf(h, linked)).user.role, 'client');
+    assert.equal((await h.store.users.findById(lowTrust.user.id))?.role, 'client');
     const row = (await h.auditRows(AuditAction.AUTH_SSO_LINK)).find(
       (entry) => entry.target_id === lowTrust.user.id && entry.details.provider_id === 'corp',
     );
     assert.equal(row?.details.explicit, true);
+  });
+
+  it('re-checks the account inside the transaction that would link it', async () => {
+    const local = await localAccount('recheck-target@corp.example.test', true);
+    const attempt = await begin(h, partner, 'partner', {
+      sub: 'recheck-partner',
+      email: local.email,
+      email_verified: true,
+      groups: ['partners'],
+    });
+    // The plan finds a client and links it; by the time the link commits, the
+    // account is an administrator's.
+    leases.next = {
+      key: ssoProviderLockKey('partner'),
+      run: async () => {
+        await h.store.users.update(local.id, { role: 'admin' });
+      },
+    };
+    const response = await finish(h, 'partner', attempt);
+    assert.equal(leases.next, null, 'the account changed between the plan and the commit');
+    assert.equal(ssoError(response), 'privileged_account');
+    assert.equal(cookieValue(response, SESSION_COOKIE), undefined);
+    assert.deepEqual(await h.store.userIdentities.listByUser(local.id), []);
+    assert.equal((await h.store.users.findById(local.id))?.role, 'admin');
+  });
+
+  it('never promotes an account a lower-trust provider can open (#495)', async () => {
+    /** The role `session` acts with now, or the status code it gets instead. */
+    const roleOf = async (session: TestSession): Promise<string | number> => {
+      const me = await h.app.inject({
+        method: 'GET',
+        url: '/api/auth/me',
+        headers: { cookie: session.cookieHeader },
+      });
+      return me.statusCode === 200 ? me.json<{ user: User }>().user.role : me.statusCode;
+    };
+
+    // The victim is provisioned at corp as a client, which proves the address.
+    const who = person('reversed');
+    const corpClaims = { ...who, email_verified: true };
+    const victim = await sessionOf(h, await signIn(h, corp, 'corp', corpClaims));
+    assert.equal(victim.user.role, 'client');
+
+    // Whoever controls partner, which maps nobody above client, asserts the
+    // same verified address. The account is no administrator's and partner
+    // would not make it one, so partner links to it and holds a session.
+    const attacker = await sessionOf(
+      h,
+      await signIn(h, partner, 'partner', {
+        sub: `${who.sub}-partner`,
+        email: who.email,
+        email_verified: true,
+        groups: ['partners'],
+      }),
+    );
+    assert.equal(attacker.user.id, victim.user.id);
+
+    // The victim is then made an administrator at corp. Their next sign-in
+    // goes ahead, but the promotion is withheld: the role is the account's,
+    // so it would reach the partner identity and its live session too.
+    const admins = { ...corpClaims, groups: ['portal-admins'] };
+    const withheld = await signIn(h, corp, 'corp', admins);
+    assert.equal(ssoError(withheld), null);
+    assert.equal((await sessionOf(h, withheld)).user.role, 'client');
+    assert.equal((await h.store.users.findById(victim.user.id))?.role, 'client');
+    assert.equal(await roleOf(attacker), 'client', 'the partner session gains nothing');
+    const held = (await h.auditRows(AuditAction.AUTH_SSO_CLAIMS_SYNC)).filter(
+      (row) => row.target_id === victim.user.id,
+    );
+    assert.equal(held.length, 1);
+    assert.equal(held[0]?.details.role_withheld, 'admin');
+    assert.equal(held[0]?.details.withheld_reason, 'lower_trust_identities');
+    assert.deepEqual(held[0]?.details.lower_trust_provider_ids, ['partner']);
+    assert.equal(held[0]?.details.to_role, undefined);
+
+    // A super admin reviews the account and removes the partner identity. The
+    // next corp sign-in promotes it and ends every session opened before it,
+    // the partner one included, so none of them inherits the new role.
+    const partnerIdentity = (await h.store.userIdentities.listByUser(victim.user.id)).find(
+      (identity) => identity.provider_id === 'partner',
+    );
+    assert.ok(partnerIdentity);
+    const unlinked = await h.authed(founder, {
+      method: 'DELETE',
+      url: `/api/users/${victim.user.id}/identities/${partnerIdentity.id}`,
+    });
+    assert.equal(unlinked.statusCode, 200, unlinked.body);
+    const promoted = await sessionOf(h, await signIn(h, corp, 'corp', admins));
+    assert.equal(promoted.user.role, 'admin');
+    assert.equal(await roleOf(attacker), 401, 'the partner session was ended');
+    assert.equal(await roleOf(victim), 401, 'so was every other earlier session');
+    assert.equal(await roleOf(promoted), 'admin');
+    const sync = (await h.auditRows(AuditAction.AUTH_SSO_CLAIMS_SYNC)).find(
+      (row) => row.target_id === victim.user.id && row.details.to_role === 'admin',
+    );
+    assert.equal(sync?.details.from_role, 'client');
+    assert.equal(sync?.details.terminated_sessions, 3);
+  });
+
+  it('promotes an account whose other providers are trusted with admin', async () => {
+    const provider = {
+      id: 'trusted',
+      display_name: 'Trusted',
+      issuer: partner.issuer,
+      client_id: 'nexus-partner',
+      scopes: ['openid', 'email'],
+      enabled: true,
+      jit_provisioning: true,
+      link_existing_accounts: true,
+      require_verified_email: true,
+      allowed_email_domains: [],
+      disable_local_password_for_linked: false,
+      sync_roles: true,
+      default_role: 'client',
+      role_mappings: [{ claim: 'groups', value: 'trusted-admins', role: 'admin' }],
+      org_mappings: [],
+    };
+    const put = (providers: unknown[]): Promise<LightMyRequestResponse> =>
+      h.authed(founder, { method: 'PUT', url: '/api/admin/sso', payload: { providers } });
+    assert.equal((await put([provider])).statusCode, 200);
+    try {
+      const who = person('trusted');
+      const first = await sessionOf(
+        h,
+        await signIn(h, partner, 'trusted', { ...who, email_verified: true }),
+      );
+      const corpClaims = { sub: `${who.sub}-corp`, email: who.email, email_verified: true };
+      assert.equal(
+        (await sessionOf(h, await signIn(h, corp, 'corp', corpClaims))).user.id,
+        first.user.id,
+      );
+      // `trusted` could make the account an administrator itself, so corp's
+      // promotion hands its identity nothing new.
+      const promoted = await signIn(h, corp, 'corp', { ...corpClaims, groups: ['portal-admins'] });
+      assert.equal((await sessionOf(h, promoted)).user.role, 'admin');
+    } finally {
+      assert.equal((await put([])).statusCode, 200);
+    }
   });
 
   it('links explicitly from a signed-in session, and only back to that session', async () => {
@@ -1305,6 +1500,130 @@ describe('single sign-on', () => {
     assert.equal(identityAfter?.last_login_at, identityBefore?.last_login_at);
 
     assert.equal((await put([])).statusCode, 200);
+  });
+
+  it('orders a first-time link, not a returning sign-in, against a settings save', async () => {
+    const provider = {
+      id: 'ordered',
+      display_name: 'Ordered',
+      issuer: corp.issuer,
+      client_id: 'nexus-corp',
+      client_secret: CORP_SECRET,
+      scopes: ['openid', 'email'],
+      enabled: true,
+      jit_provisioning: true,
+      link_existing_accounts: true,
+      require_verified_email: true,
+      allowed_email_domains: [],
+      disable_local_password_for_linked: false,
+      sync_roles: true,
+      default_role: 'client',
+      role_mappings: [],
+      org_mappings: [],
+    };
+    const put = (providers: unknown[]): Promise<LightMyRequestResponse> =>
+      h.authed(founder, { method: 'PUT', url: '/api/admin/sso', payload: { providers } });
+    assert.equal((await put([provider])).statusCode, 200);
+
+    // A returning sign-in holds only its account's key: sign-ins at one
+    // provider do not queue behind each other deployment-wide.
+    const returning = person('ordered-returning');
+    const account = await sessionOf(
+      h,
+      await signIn(h, corp, 'ordered', { ...returning, email_verified: true }),
+    );
+    leases.taken = [];
+    const again = await signIn(h, corp, 'ordered', { ...returning, email_verified: true });
+    assert.equal((await sessionOf(h, again)).user.id, account.user.id);
+    const lifecycleKey = userLifecycleLockKey(account.user.id);
+    assert.deepEqual(
+      leases.taken.filter((key) => key.startsWith('sso:') || key === lifecycleKey),
+      [lifecycleKey],
+    );
+
+    // A first-time sign-in provisions under the provider's key. A save that
+    // removes the provider meanwhile waits for it, then removes its link.
+    const fresh = person('ordered-fresh');
+    const attempt = await begin(h, corp, 'ordered', { ...fresh, email_verified: true });
+    const race: { save: Promise<LightMyRequestResponse> | null; whileHeld: string | null } = {
+      save: null,
+      whileHeld: null,
+    };
+    leases.next = {
+      key: ssoProviderLockKey('ordered'),
+      run: async () => {
+        const save = put([]);
+        race.save = save;
+        race.whileHeld = await Promise.race([
+          save.then(() => 'saved'),
+          delay(300).then(() => 'waiting'),
+        ]);
+      },
+    };
+    const response = await finish(h, 'ordered', attempt);
+    assert.equal(race.whileHeld, 'waiting', 'the save waited for the provisioning to commit');
+    assert.equal(ssoError(response), null);
+    assert.ok(await h.store.users.findByEmail(fresh.email));
+    assert.ok(race.save, 'the save was started');
+    assert.equal((await race.save).statusCode, 200);
+    assert.equal(await h.store.userIdentities.countByProvider('ordered'), 0);
+    const removal = (await h.auditRows(AuditAction.ADMIN_SETTINGS_UPDATE)).find(
+      (row) => row.target_id === SSO_SETTINGS_KEY,
+    );
+    assert.deepEqual(removal?.details.links_removed, { ordered: 2 });
+  });
+
+  it('refuses a settings save when the settings changed after it read them', async () => {
+    const before = await readStoredSsoSettings(h.store);
+    assert.equal(before.deprovision_on_access_loss, false);
+    // Another save adds a provider after this one read the settings and
+    // before it holds its keys. Writing over it would drop the new provider
+    // without locking it or removing its links.
+    const added = {
+      id: 'swapped',
+      display_name: 'Swapped',
+      issuer: 'https://swapped.example.com',
+      client_id: 'nexus-swapped',
+      scopes: ['openid', 'email'],
+      enabled: false,
+      jit_provisioning: true,
+      link_existing_accounts: true,
+      require_verified_email: true,
+      allowed_email_domains: [],
+      disable_local_password_for_linked: false,
+      sync_roles: true,
+      default_role: 'client',
+      role_mappings: [],
+      org_mappings: [],
+    };
+    leases.next = {
+      key: ssoProviderLockKey('corp'),
+      run: async () => {
+        await h.store.settings.set(
+          SSO_SETTINGS_KEY,
+          { ...before, providers: [...before.providers, added] },
+          false,
+        );
+      },
+    };
+    try {
+      const refused = await h.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/sso',
+        payload: { deprovision_on_access_loss: true },
+      });
+      assert.equal(leases.next, null, 'the settings changed while the save held its keys');
+      assert.equal(refused.statusCode, 409, refused.body);
+      const after = await readStoredSsoSettings(h.store);
+      assert.equal(after.deprovision_on_access_loss, false);
+      assert.deepEqual(
+        after.providers.map((provider) => provider.id),
+        [...before.providers.map((provider) => provider.id), 'swapped'],
+      );
+    } finally {
+      leases.next = null;
+      await h.store.settings.set(SSO_SETTINGS_KEY, before, false);
+    }
   });
 
   it('reports a stored provider that an environment provider shadows', async () => {
