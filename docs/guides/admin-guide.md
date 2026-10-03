@@ -280,8 +280,11 @@ worker re-reads them every poll (5 seconds), so no restart is needed.
 
 **Send test email** (any admin) sends one message **directly through SMTP**
 using the saved settings, not through the outbox, and shows the relay's own
-error (for example `535 authentication failed`). It defaults to your own
-address. Run it after every change.
+error (for example `535 authentication failed`). It goes to your own address;
+only a super admin can send it to another one. Each admin may send 10 an hour.
+Every attempt is recorded (`admin.smtp_test`) before the relay is contacted,
+and its result separately (`admin.smtp_test_complete`). Run it after every
+change.
 
 **The quiet failure mode:** with no SMTP host, queued mail waits in `pending`
 indefinitely rather than failing, so configuring SMTP later delivers the
@@ -416,16 +419,29 @@ test first.
 Each recipient gets their own queued message, never a BCC. One bad address
 retries and fails on its own without affecting the rest.
 
-The whole campaign is queued in one transaction: it is either queued in full or
-not at all. The response reports `recipients` (audience size), `enqueued`
-(messages queued) and `batch_id`. A failure returns `500` with
-`details: { batch_id, recipients, enqueued: 0 }`; a busy portal returns `409`.
-Both are safe to retry.
+The campaign is recorded in the audit log (`admin.mass_email`) before anything
+is queued, then queued in batches of up to 200 recipients, so a large campaign
+does not hold up password-reset and verification mail while it is written. The
+response reports `recipients` (audience size), `enqueued` (messages queued) and
+`batch_id`. A failure returns `500` with
+`details: { batch_id, recipients, enqueued }`, where `enqueued` is what was
+queued before a batch failed; a busy portal returns `409`. Both are safe to
+retry with the same ID: only the recipients still missing are queued.
 
-One campaign may reach at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` accounts (5000
-by default). A larger audience is refused before anything is queued, with a
-message naming the limit and the setting. On a MongoDB-backed portal a long
-body lowers the practical limit, to roughly 800 recipients at 10 KB.
+Before anything is queued, a campaign is checked against three limits, each
+refused with a message naming the limit and the setting:
+
+- at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` accounts (5000 by default);
+- at most `NEXUS_MAX_MASS_EMAIL_BYTES` of mail in total (64 MiB by default):
+  the size of one message times the number of recipients, so a long message
+  reaches fewer people. The size allows for the longest recipient name and
+  address, so a template that repeats them counts every repetition;
+- at most `NEXUS_MAX_MASS_EMAILS_PER_DAY` campaigns per admin in a rolling
+  24 hours (5 by default, until password-reset and verification mail get their
+  own place in the queue). Retrying a campaign with the same ID does not count
+  again.
+
+An audience that matches nobody is refused and does not count as a campaign.
 
 ### Retrying safely
 
@@ -436,10 +452,14 @@ had succeeded and the retry added nothing.
 
 Changing the content or audience, or a successful send, starts a new campaign.
 Reloading or leaving the page loses the ID, so check the audit log
-(`admin.mass_email`) before sending again.
+(`admin.mass_email` and `admin.mass_email_complete`) before sending again.
+After a partly queued attempt, the retry's confirmation counts the whole
+campaign, not just the recipients the retry added.
 
 API callers get the same protection by sending an `idempotency_key` (8–128
-characters). Without one, **every send is a new campaign**.
+characters). Without one, **every send is a new campaign**. A key belongs to
+one campaign: reusing it with a different subject, body or audience is refused
+with `409` and sends nothing.
 
 ### Before you send
 

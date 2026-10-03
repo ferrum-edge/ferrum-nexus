@@ -1368,7 +1368,11 @@ export type UpdateSettingsResponse = AdminSettingsResponse;
 
 /** `POST /api/admin/settings/smtp-test` */
 export interface SmtpTestRequest {
-  /** Where to send the probe message; defaults to the calling admin's email. */
+  /**
+   * Where to send the probe message; defaults to the calling admin's email.
+   * Only a `super_admin` may name another address — an `admin` naming one is
+   * refused with `403 FORBIDDEN`.
+   */
   to_email?: string;
 }
 
@@ -1414,7 +1418,11 @@ export interface MassEmailRequest {
   body_text: string;
   /** Audience selector; combined with AND when several are supplied. */
   audience: MassEmailAudience;
-  /** Reuse of a key makes the send idempotent (at-most-once). */
+  /**
+   * Reuse of a key makes the send idempotent (at-most-once). A key names one
+   * campaign: reusing it with a different subject, body or audience is
+   * `409 CONFLICT` (`details.reason: 'idempotency_key_reused'`).
+   */
   idempotency_key?: string;
 }
 
@@ -1441,7 +1449,9 @@ export interface MassEmailResponse {
    *
    * Echoed so a retry can pass it back as `idempotency_key` and reach the same
    * outbox rows instead of sending the campaign a second time. The failure
-   * body carries it too, in `details.batch_id`.
+   * body carries it too, in `details.batch_id`, with `details.enqueued`: the
+   * campaign is queued in chunks, and a failed chunk leaves the ones before it
+   * queued, which the retry then skips.
    */
   batch_id: string;
 }

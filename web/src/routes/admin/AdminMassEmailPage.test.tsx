@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MassEmailRequest, MassEmailResponse } from '@ferrum-nexus/shared';
-import { adminApi, organizationsApi, usersApi } from '../../lib/api';
+import { adminApi, ApiError, organizationsApi, usersApi } from '../../lib/api';
 import { AdminMassEmailPage } from './AdminMassEmailPage';
 
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), push: vi.fn() }));
@@ -108,6 +108,73 @@ describe('mass email campaign IDs', () => {
     await submit();
     await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
     expect(queued.size).toBe(2);
+  });
+
+  it('reports the campaign total when a retry queues the rest of a partial send', async () => {
+    let attempts = 0;
+    const send = vi
+      .spyOn(adminApi, 'massEmail')
+      .mockImplementation(async (request: MassEmailRequest): Promise<MassEmailResponse> => {
+        attempts += 1;
+        const batch = request.idempotency_key ?? 'batch-generated';
+        if (attempts === 1) {
+          throw new ApiError('OUTBOX_FAILURE', 'The campaign was only partly queued', 500, {
+            batch_id: batch,
+            recipients: 7,
+            enqueued: 3,
+          });
+        }
+        return { enqueued: 4, recipients: 7, batch_id: batch };
+      });
+    renderComposer();
+    await submit();
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    // Three from the failed attempt and four from the retry: all seven, not
+    // "4 of 7", which reads as if three recipients were dropped.
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        'Mass email queued',
+        expect.stringContaining('7 recipients enqueued in total across attempts'),
+      ),
+    );
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[1]?.[0]).toEqual(send.mock.calls[0]?.[0]);
+  });
+
+  it('does not report more enqueued than the audience a retry now resolves', async () => {
+    let attempts = 0;
+    const send = vi
+      .spyOn(adminApi, 'massEmail')
+      .mockImplementation(async (request: MassEmailRequest): Promise<MassEmailResponse> => {
+        attempts += 1;
+        const batch = request.idempotency_key ?? 'batch-generated';
+        if (attempts === 1) {
+          throw new ApiError('OUTBOX_FAILURE', 'The campaign was only partly queued', 500, {
+            batch_id: batch,
+            recipients: 7,
+            enqueued: 3,
+          });
+        }
+        // An account was disabled between attempts, so the retry's audience is
+        // smaller than the running total it would otherwise be paired with.
+        return { enqueued: 4, recipients: 6, batch_id: batch };
+      });
+    renderComposer();
+    await submit();
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        'Mass email queued',
+        expect.stringContaining('7 recipients enqueued in total across attempts'),
+      ),
+    );
+    const detail = toast.success.mock.calls.at(-1)?.[1] as string;
+    expect(detail).not.toContain('of 6');
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
   it('surfaces unexpected deduplication of a fresh campaign', async () => {

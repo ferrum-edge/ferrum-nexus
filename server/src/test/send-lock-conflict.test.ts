@@ -2,9 +2,11 @@
  * What an outbound send does when the per-account key is held elsewhere and the
  * wait runs out — the `409` the docs promise on both send paths.
  *
- * The daily message budget and the two broadcast ceilings are read-then-write
- * checks, so each one runs inside a lease keyed to the account
- * (`messages:budget:<user>`, `god:broadcast:<user>`). A lease another instance
+ * The daily message budget, the two broadcast ceilings, the daily mass-email
+ * campaign budget and the hourly SMTP-test budget are read-then-write checks,
+ * so each one runs inside a lease keyed to the account
+ * (`messages:budget:<user>`, `god:broadcast:<user>`, `mass-email:<user>`,
+ * `smtp-test:<user>`). A lease another instance
  * is holding is normally waited out; a lease still held after
  * `LEASE_WAIT_MS` is a `CONFLICT`, deliberately, rather than a silent overshoot
  * of the ceiling the lease exists to enforce.
@@ -25,8 +27,10 @@ import type { ApiErrorBody } from '@ferrum-nexus/shared';
 import { isoInSeconds, nowIso } from '../lib/ids.js';
 import {
   broadcastLockKey,
+  massEmailLockKey,
   messageBudgetLockKey,
   SEND_LOCK_CONFLICT_MESSAGE,
+  smtpTestLockKey,
 } from '../lib/keyed-serializer.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -145,6 +149,87 @@ describe('a send whose per-account key is held elsewhere', () => {
         body: 'The key came back',
         audience: { scope: 'all' },
       },
+    });
+    assert.equal(allowed.statusCode, 200, allowed.body);
+  });
+
+  it('refuses a mass-email campaign with CONFLICT, its batch id, and writes nothing', async () => {
+    const key = massEmailLockKey(founder.user.id);
+    const campaign = {
+      subject: 'Blocked campaign',
+      body_text: 'The other instance still holds the key',
+      audience: { scope: 'explicit', user_ids: [member.user.id] },
+      idempotency_key: 'lock-held-campaign',
+    };
+    await plant(key);
+    try {
+      const outboxBefore = (await harness.outbox()).length;
+      const auditBefore = (await harness.auditRows('admin.mass_email')).length;
+
+      const refused = await harness.authed(founder, {
+        method: 'POST',
+        url: '/api/admin/mass-email',
+        payload: campaign,
+      });
+
+      assert.equal(refused.statusCode, 409, refused.body);
+      const failure = errorBody(refused.body);
+      assert.equal(failure.code, 'CONFLICT');
+      assert.equal(failure.message, SEND_LOCK_CONFLICT_MESSAGE);
+      assert.deepEqual(
+        failure.details,
+        { batch_id: 'lock-held-campaign' },
+        'the 409 names the campaign to retry, like every other mass-email 409',
+      );
+      assert.equal((await harness.outbox()).length, outboxBefore, 'nothing was queued');
+      assert.equal(
+        (await harness.auditRows('admin.mass_email')).length,
+        auditBefore,
+        'a refused campaign is not charged against the daily budget',
+      );
+    } finally {
+      await harness.store.leases.release(key, FOREIGN_OWNER);
+    }
+
+    const allowed = await harness.authed(founder, {
+      method: 'POST',
+      url: '/api/admin/mass-email',
+      payload: campaign,
+    });
+    assert.equal(allowed.statusCode, 200, allowed.body);
+  });
+
+  it('refuses an SMTP test with CONFLICT and neither records nor sends it', async () => {
+    const key = smtpTestLockKey(founder.user.id);
+    await plant(key);
+    try {
+      const sentBefore = harness.mailbox.sent.length;
+      const auditBefore = (await harness.auditRows('admin.smtp_test')).length;
+
+      const refused = await harness.authed(founder, {
+        method: 'POST',
+        url: '/api/admin/settings/smtp-test',
+        payload: {},
+      });
+
+      assert.equal(refused.statusCode, 409, refused.body);
+      const failure = errorBody(refused.body);
+      assert.equal(failure.code, 'CONFLICT');
+      assert.equal(failure.message, SEND_LOCK_CONFLICT_MESSAGE);
+      assert.equal(harness.mailbox.sent.length, sentBefore, 'the relay was not contacted');
+      assert.equal(
+        (await harness.auditRows('admin.smtp_test')).length,
+        auditBefore,
+        'a refused probe is not charged against the hourly budget',
+      );
+    } finally {
+      await harness.store.leases.release(key, FOREIGN_OWNER);
+    }
+
+    const allowed = await harness.authed(founder, {
+      method: 'POST',
+      url: '/api/admin/settings/smtp-test',
+      payload: {},
     });
     assert.equal(allowed.statusCode, 200, allowed.body);
   });

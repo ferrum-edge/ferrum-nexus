@@ -12,8 +12,12 @@
  *    not carry the batch id, so the retry minted a new one and mailed the
  *    already-queued recipients again.
  *
- * Both now commit their rows and their audit row in one transaction, so the
- * `500` is truthful: nothing happened.
+ * Messaging now commits its rows and its audit row in one transaction, so the
+ * `500` is truthful: nothing happened. Mass email commits the campaign's
+ * `admin.mass_email` row **before** any outbox row, then queues in bounded
+ * chunks (GHSA-rqrj-7g3f-c6ww): a failed chunk rolls back alone, the failure
+ * says how many rows this attempt queued and carries the batch id, and the
+ * retry with that id queues exactly the rest.
  */
 
 import assert from 'node:assert/strict';
@@ -132,14 +136,15 @@ describe('messaging audits inside its transaction', () => {
   });
 });
 
-describe('mass email fan-out is atomic', () => {
+describe('mass email fan-out is recorded first and chunked', () => {
   let harness: TestApp;
   let faults: FaultInjectingStore;
   let founder: TestSession;
 
   before(async () => {
     harness = await buildTestApp({
-      deps: { startOutboxWorker: false },
+      // Three recipients per transaction: seven accounts make three chunks.
+      deps: { startOutboxWorker: false, massEmailChunkRecipients: 3 },
       wrapStore: (store) => {
         faults = faultInjectingStore(store);
         return faults.store;
@@ -162,25 +167,64 @@ describe('mass email fan-out is atomic', () => {
     audience: { scope: 'all' as const },
   };
 
-  it('queues nothing and audits nothing when one enqueue fails partway', async () => {
+  it('rolls a failed chunk back alone and names the campaign before any of it', async () => {
     const outboxBefore = (await harness.outbox()).length;
     const auditBefore = (await harness.auditRows('admin.mass_email')).length;
 
-    faults.failAfter('emailOutbox', 'enqueue', 3);
+    // The first chunk (three rows) commits; the fifth insert, in the second
+    // chunk, fails after one row of that chunk was written.
+    faults.failAfter('emailOutbox', 'enqueue', 4);
     const refused = await harness.authed(founder, {
       method: 'POST',
       url: '/api/admin/mass-email',
-      payload: campaign,
+      payload: { ...campaign, idempotency_key: 'chunked-campaign' },
     });
 
     assert.equal(refused.statusCode, 500, refused.body);
     assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
-    assert.equal(
-      (await harness.outbox()).length,
-      outboxBefore,
-      'the three rows the loop had already written are rolled back with the rest',
+    const failure = errorBody(refused.body);
+    assert.equal(failure.code, 'OUTBOX_FAILURE');
+    assert.deepEqual(failure.details, {
+      batch_id: 'chunked-campaign',
+      recipients: 7,
+      enqueued: 3,
+    });
+    assert.match(failure.message, /3 of 7/);
+
+    const queued = (await harness.outbox()).filter((row) =>
+      row.idempotency_key?.startsWith('mass:chunked-campaign:'),
     );
-    assert.equal((await harness.auditRows('admin.mass_email')).length, auditBefore);
+    assert.equal(queued.length, 3, 'the first chunk stays; the failed one rolled back whole');
+    assert.equal((await harness.outbox()).length, outboxBefore + 3);
+
+    const started = await harness.auditRows('admin.mass_email');
+    assert.equal(started.length, auditBefore + 1, 'the campaign was recorded before queueing');
+    assert.equal(started[0]?.target_id, 'chunked-campaign');
+    const outcome = (await harness.auditRows('admin.mass_email_complete'))[0];
+    assert.equal(outcome?.target_id, 'chunked-campaign');
+    assert.equal(outcome?.details.enqueued, 3);
+    assert.equal(outcome?.details.chunks, 1);
+    assert.equal(outcome?.details.failed, true);
+
+    // The retry with the same id queues exactly the four that are missing,
+    // and is not recorded — or charged — as a second campaign.
+    const retry = await harness.authed(founder, {
+      method: 'POST',
+      url: '/api/admin/mass-email',
+      payload: { ...campaign, idempotency_key: 'chunked-campaign' },
+    });
+    assert.equal(retry.statusCode, 200, retry.body);
+    assert.deepEqual(retry.json<MassEmailResponse>(), {
+      enqueued: 4,
+      recipients: 7,
+      batch_id: 'chunked-campaign',
+    });
+    const rows = (await harness.outbox()).filter((row) =>
+      row.idempotency_key?.startsWith('mass:chunked-campaign:'),
+    );
+    assert.equal(rows.length, 7, 'one row per recipient across both attempts');
+    assert.equal(new Set(rows.map((row) => row.to_email)).size, 7);
+    assert.equal((await harness.auditRows('admin.mass_email')).length, auditBefore + 1);
   });
 
   it('reports the batch id and the counts on the failure, so the retry is safe', async () => {
@@ -227,7 +271,7 @@ describe('mass email fan-out is atomic', () => {
     assert.equal(rows.length, 7, 'one row per recipient, however many times it was retried');
   });
 
-  it('rolls the queued rows back when the audit row itself fails', async () => {
+  it('queues nothing when the campaign itself cannot be recorded', async () => {
     const outboxBefore = (await harness.outbox()).length;
     const auditBefore = (await harness.auditRows('admin.mass_email')).length;
 
@@ -258,7 +302,11 @@ describe('mass email fan-out is atomic', () => {
 
     const audit = (await harness.auditRows('admin.mass_email'))[0];
     assert.equal(audit?.target_id, body.batch_id, 'the audit row names the batch the caller got');
-    assert.equal(audit?.details.enqueued, 7);
     assert.equal(audit?.details.recipients, 7);
+    const outcome = (await harness.auditRows('admin.mass_email_complete'))[0];
+    assert.equal(outcome?.target_id, body.batch_id);
+    assert.equal(outcome?.details.enqueued, 7);
+    assert.equal(outcome?.details.chunks, 3, 'seven recipients, three per transaction');
+    assert.equal(outcome?.details.failed, false);
   });
 });

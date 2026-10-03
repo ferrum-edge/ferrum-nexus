@@ -380,8 +380,36 @@ export const AuditAction = {
   /* admin */
   ADMIN_SETTINGS_UPDATE: 'admin.settings_update',
   ADMIN_TEMPLATE_UPDATE: 'admin.template_update',
+  /**
+   * A mass-email campaign was started. Written in a transaction of its own
+   * **before** the first outbox row is queued, so a campaign whose fan-out or
+   * completion record later fails is still named in the trail and still
+   * charged: `NEXUS_MAX_MASS_EMAILS_PER_DAY` counts exactly these rows. One row
+   * per campaign (`target_id` is the batch id); a retry of the same batch by
+   * the same administrator writes no second one, and is a retry only when its
+   * content and audience match `details.content_sha256`. What was actually
+   * queued is {@link ADMIN_MASS_EMAIL_COMPLETE}.
+   */
   ADMIN_MASS_EMAIL: 'admin.mass_email',
+  /**
+   * The outcome of one attempt at a campaign whose {@link ADMIN_MASS_EMAIL}
+   * row already exists: how many rows it queued, in how many transactions, and
+   * whether a chunk failed.
+   */
+  ADMIN_MASS_EMAIL_COMPLETE: 'admin.mass_email_complete',
+  /**
+   * An SMTP test was about to be sent. Committed **before** the relay is
+   * contacted, so a delivered probe is never missing from the trail and a
+   * failure to record it stops the send. The per-administrator hourly
+   * SMTP-test budget counts these rows. The result is
+   * {@link ADMIN_SMTP_TEST_COMPLETE}.
+   */
   ADMIN_SMTP_TEST: 'admin.smtp_test',
+  /**
+   * The result of an SMTP test whose {@link ADMIN_SMTP_TEST} row already
+   * exists. `details.intent_id` is that row's id.
+   */
+  ADMIN_SMTP_TEST_COMPLETE: 'admin.smtp_test_complete',
 
   /* god mode (super_admin only) */
   GOD_REVOKE_GRANT: 'god.revoke_grant',
@@ -573,9 +601,15 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   ),
   [AuditAction.ADMIN_SETTINGS_UPDATE]: TRANSACTIONAL,
   [AuditAction.ADMIN_TEMPLATE_UPDATE]: TRANSACTIONAL,
-  [AuditAction.ADMIN_MASS_EMAIL]: TRANSACTIONAL,
-  [AuditAction.ADMIN_SMTP_TEST]: postCommit(
-    'Sends one test message straight through SMTP and changes no stored state.',
+  [AuditAction.ADMIN_MASS_EMAIL]: INTENT,
+  [AuditAction.ADMIN_MASS_EMAIL_COMPLETE]: postCommit(
+    'The outcome of a fan-out whose campaign admin.mass_email already recorded; failing the ' +
+      'request after rows were queued would invite a retry under a fresh key.',
+  ),
+  [AuditAction.ADMIN_SMTP_TEST]: INTENT,
+  [AuditAction.ADMIN_SMTP_TEST_COMPLETE]: postCommit(
+    'The result of a probe whose attempt admin.smtp_test already recorded; failing the ' +
+      'request after delivery would invite a second send.',
   ),
   [AuditAction.GOD_REVOKE_GRANT]: TRANSACTIONAL,
   [AuditAction.GOD_DELETE_API]: TRANSACTIONAL,

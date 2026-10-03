@@ -195,6 +195,28 @@ export function broadcastLockKey(actorUserId: string): string {
 }
 
 /**
+ * The per-administrator key a **mass-email campaign** runs under.
+ *
+ * Same shape as {@link broadcastLockKey}: the per-day campaign ceiling counts
+ * the actor's own `admin.mass_email` audit rows and writes the one that charges
+ * this campaign in the same section, and the key is held across the whole
+ * chunked fan-out, so a second campaign from the same administrator cannot
+ * start while the first is still queueing.
+ */
+export function massEmailLockKey(actorUserId: string): string {
+  return `mass-email:${actorUserId}`;
+}
+
+/**
+ * The per-administrator key an **SMTP test** runs under: the hourly budget
+ * counts the actor's own `admin.smtp_test` rows, and the row that charges the
+ * current probe is written in the same section, before the relay is contacted.
+ */
+export function smtpTestLockKey(actorUserId: string): string {
+  return `smtp-test:${actorUserId}`;
+}
+
+/**
  * The per-API key every write to an API's **missing-deployment** state runs
  * under: `publishing.restoreGateway`, and the gateway repair that flags an
  * orphaned proxy.
@@ -212,10 +234,10 @@ export function apiRestoreLockKey(apiId: string): string {
 }
 
 /**
- * `CONFLICT` text for a caller that could not get {@link messageBudgetLockKey}
- * or {@link broadcastLockKey}.
+ * `CONFLICT` text for a caller that could not get {@link messageBudgetLockKey},
+ * {@link broadcastLockKey}, {@link massEmailLockKey} or {@link smtpTestLockKey}.
  *
- * Both keys guard an outbound send's own ceiling and are taken from one
+ * All four keys guard an outbound send's own ceiling and are taken from one
  * serializer, so they share one wording. Deliberately vague about which
  * instance holds it: this reaches a browser, and "retry" is the whole of the
  * useful advice.

@@ -1,6 +1,7 @@
 import { useRef, useState, type ReactElement } from 'react';
 import { escapeHtml } from '@ferrum-nexus/shared';
 import { useMassEmail } from '../../hooks/useAdminSettings';
+import { ApiError } from '../../lib/api';
 import { useAuth } from '../../stores/auth';
 import { useToast } from '../../stores/toast';
 import {
@@ -23,6 +24,26 @@ import { LabeledInput, LabeledTextarea } from '../../components/ui/Input';
 interface SendSummary {
   enqueued: number;
   recipients: number;
+}
+
+/** One campaign the composer is sending: its batch id, its request, and what it queued. */
+interface Campaign {
+  id: string;
+  content: string;
+  /** Rows earlier failed attempts at this campaign reported queueing. */
+  queued: number;
+}
+
+/**
+ * How many rows a failed attempt reported queueing for campaign `batchId`: a
+ * partly queued campaign's failure carries `details.enqueued` for that attempt.
+ */
+function queuedByFailure(error: unknown, batchId: string): number {
+  if (!ApiError.is(error)) return 0;
+  const details = error.details;
+  if (typeof details !== 'object' || details === null) return 0;
+  const { batch_id: batch, enqueued } = details as { batch_id?: unknown; enqueued?: unknown };
+  return batch === batchId && typeof enqueued === 'number' ? enqueued : 0;
 }
 
 /** One number from the outcome summary. */
@@ -66,7 +87,7 @@ function Composer(): ReactElement {
   const [bodyHtml, setBodyHtml] = useState('');
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [summary, setSummary] = useState<SendSummary | null>(null);
-  const campaign = useRef<{ id: string; content: string } | null>(null);
+  const campaign = useRef<Campaign | null>(null);
   const submitting = useRef(false);
 
   const submit = (): void => {
@@ -85,10 +106,12 @@ function Composer(): ReactElement {
       campaign.current = {
         id: Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join(''),
         content,
+        queued: 0,
       };
     }
-    const id = campaign.current?.id;
-    if (!id) return;
+    const current = campaign.current;
+    if (!current) return;
+    const id = current.id;
     submitting.current = true;
     send.mutate(
       {
@@ -96,6 +119,11 @@ function Composer(): ReactElement {
         idempotency_key: id,
       },
       {
+        onError: (error) => {
+          // A partly queued attempt keeps what it queued; the retry queues only
+          // the rest, so the total is the sum across attempts.
+          current.queued += queuedByFailure(error, id);
+        },
         onSuccess: (response) => {
           setConfirmOpen(false);
           campaign.current = null;
@@ -112,11 +140,21 @@ function Composer(): ReactElement {
             }
             return;
           }
-          setSummary({ enqueued: response.enqueued, recipients: response.recipients });
-          toast.success(
-            'Mass email queued',
-            `${response.enqueued} of ${response.recipients} recipients enqueued.`,
-          );
+          // Report the campaign, not the attempt: after a partial failure this
+          // retry queued only the remainder, and its count alone would read as
+          // if the earlier recipients had been dropped.
+          const total = current.queued + response.enqueued;
+          setSummary({ enqueued: total, recipients: response.recipients });
+          let detail = `${response.enqueued} of ${response.recipients} recipients enqueued.`;
+          if (total > response.enqueued) {
+            // The resolved audience can shrink between attempts (accounts
+            // disabled, say), so the summed total may exceed this retry's
+            // recipient count; omit the denominator rather than read "7 of 6".
+            detail =
+              `${total} recipients enqueued in total across attempts, ` +
+              `${response.enqueued} by this retry.`;
+          }
+          toast.success('Mass email queued', detail);
         },
         onSettled: () => {
           submitting.current = false;

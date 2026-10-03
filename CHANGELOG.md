@@ -74,6 +74,58 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   (GHSA-qc7r-4j9m-pm44). Non-GET `/consumers` failures omit Edge response text
   from logs, API errors and rollback audit rows, including when Edge echoes the
   submitted credential material.
+- **The SMTP test records its attempt before contacting the relay**
+  (GHSA-whpj-2fr3-jjrw). `POST /api/admin/settings/smtp-test` used to send
+  first and write `admin.smtp_test` afterwards, so an audit failure left a
+  delivered message unrecorded behind a `500` that invited a second send. The
+  `admin.smtp_test` row now commits in its own transaction before the send; if
+  it cannot be written, nothing is sent. The result is a new, best-effort
+  `admin.smtp_test_complete` row (`ok`, `intent_id`). The `admin.smtp_test`
+  row's `details` are now `to_email` and `phase`; `ok` moved to the new row.
+- **The SMTP test is bounded** (GHSA-xx68-cpwv-x264). **Behaviour change:** an
+  `admin` may now send it only to their own account address — another
+  `to_email` is `403 FORBIDDEN`, and the Delivery test card shows the
+  recipient field to super admins only. Every administrator may send 10 tests
+  per rolling hour (`429 QUOTA_EXCEEDED`), counted from their `admin.smtp_test`
+  rows under a per-administrator lease, and with `NEXUS_RATE_LIMIT_ENABLED` the
+  route allows 3 requests per minute per account. The `/api/admin` scope now
+  registers the per-account rate limiter, which also limits
+  `POST /api/admin/mass-email` to 10 requests per minute.
+- **Mass-email campaigns are bounded in aggregate and queued in chunks**
+  (GHSA-rqrj-7g3f-c6ww). The recipient ceiling and the two 100 000-character
+  body limits were independent, so one campaign could queue about a gigabyte
+  of rendered mail in a single transaction that stalled every other write —
+  password-reset and verification enqueues included — while it ran. Now:
+  - `NEXUS_MAX_MASS_EMAIL_BYTES` (default 64 MiB, `0` disables) caps one
+    rendered message times the audience, and `NEXUS_MAX_MASS_EMAILS_PER_DAY`
+    (`0` disables) caps campaigns per administrator per rolling 24 hours.
+    Both refuse with `429 QUOTA_EXCEEDED` before anything is written. The
+    message size is an upper bound: the longest recipient name and address
+    are measured after HTML escaping, and a template that repeats them counts
+    every repetition. A single message too large for a 4 MiB fan-out
+    transaction is `400 VALIDATION_FAILED`.
+  - **Behaviour change:** `NEXUS_MAX_MASS_EMAILS_PER_DAY` defaults to **5**,
+    deliberately low while campaign mail shares one queue with password-reset
+    and verification mail; it is expected to rise once that mail gets its own
+    outbox lane (#500). Set it explicitly to keep a higher ceiling.
+  - The campaign's `admin.mass_email` row commits before the first outbox row,
+    one per campaign, with a `content_sha256` digest of the subject, both
+    bodies and the audience selector. A retry with the same `idempotency_key`,
+    content and audience is not charged again; the same key with anything else
+    is `409 CONFLICT` with `details.reason` set to `idempotency_key_reused`,
+    and queues nothing. An audience that matches nobody is
+    `400 VALIDATION_FAILED` and costs no campaign. Every mass-email `409`,
+    including the one for a per-administrator lease still held elsewhere,
+    carries `details.batch_id`.
+  - The outbox rows are inserted in transactions of at most 200 recipients and
+    about 4 MiB. A failed chunk rolls back alone: the failure reports
+    `details.enqueued` for the chunks already queued, and the retry with the
+    same batch id queues exactly the rest. Each attempt's outcome is a new
+    `admin.mass_email_complete` row; `enqueued` moved there from
+    `admin.mass_email`. After such a retry the composer reports the campaign's
+    total, not only what the retry added.
+  - Campaign and security mail still share one first-in, first-out outbox; a
+    priority lane for password-reset and verification mail is tracked in #500.
 - GHSA-8w4q-fv8h-jv73: automatic single sign-on linking refused an account
   that already was an `admin`, but not one the same sign-in's claims were about
   to promote. A provider mapping a user to `admin` could therefore link to an
