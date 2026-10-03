@@ -52,6 +52,21 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   renamed sender variable fails the acceptance gate rather than silently
   falling back to the built-in default.
 
+### Security
+
+- **Only a credential's owner can rotate it** (GHSA-mr69-2744-f78w).
+  `POST /api/credentials/:id/rotate` used to accept an `admin` or `super_admin`
+  acting on another account's, application's or test consumer's credential,
+  and returned the replacement's show-once secret to the administrator. The
+  replacement stays on the owner's gateway consumer with the owner's grants, so
+  that secret let the administrator call every API the identity was approved
+  for. Rotating somebody else's credential is now `403 FORBIDDEN` for every
+  role, checked before anything reaches the gateway and again inside the
+  consumer's queue, and nothing is minted. Administrators keep revoking
+  (`DELETE /api/credentials/:id`) and reconciling; after a revoke, the owner
+  issues a new one. The `credential.rotate` audit row no longer
+  carries `owner_user_id`, since the actor is always the owner.
+
 ## [0.3.0] - 2026-10-01
 
 Paired with Ferrum Edge `v0.9.9`. Upgrades a `v0.2.0` database in place with
