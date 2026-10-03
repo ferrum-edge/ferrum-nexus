@@ -28,6 +28,7 @@ import {
 import { AuditAction } from '../audit/service.js';
 import { REGISTRATION_SETTINGS_KEY } from '../auth/service.js';
 import type { LeaseRepo, NexusStore, UserRecord } from '../db/store.js';
+import { isoInSeconds } from '../lib/ids.js';
 import { ssoProviderLockKey, userLifecycleLockKey } from '../lib/keyed-serializer.js';
 import { readStoredSsoSettings, SSO_SETTINGS_KEY, ssoClientSecretKey } from '../sso/settings.js';
 import {
@@ -1806,10 +1807,24 @@ describe('single sign-on organization mapping and deprovisioning', () => {
       payload: { credential_type: 'keyauth' },
     });
 
+    // A live recovery link an administrator would expect a disable to end.
+    const resetToken = 'a-live-reset-link-for-deprovision';
+    const resetHash = h.app.nexus.crypto.hashToken(resetToken);
+    await h.store.verificationTokens.create({
+      user_id: account.user.id,
+      token_hash: resetHash,
+      purpose: 'password_reset',
+      expires_at: isoInSeconds(3600),
+    });
+
     // Off (the default): the sign-in is refused and the account left alone.
     const refused = await signIn(h, partner, 'partner', { ...claims, groups: [] });
     assert.equal(ssoError(refused), 'access_denied');
     assert.equal((await h.store.users.findById(account.user.id))?.status, 'active');
+    assert.ok(
+      await h.store.verificationTokens.findByTokenHash(resetHash, 'password_reset'),
+      'the refused sign-in left the reset link alone',
+    );
 
     const enable = await h.authed(founder, {
       method: 'PUT',
@@ -1829,6 +1844,11 @@ describe('single sign-on organization mapping and deprovisioning', () => {
       (entry) => entry.target_id === account.user.id,
     );
     assert.equal(row?.details.gateway_teardown, 'queued');
+    assert.equal(
+      await h.store.verificationTokens.findByTokenHash(resetHash, 'password_reset'),
+      null,
+      'the deprovision revoked the outstanding reset link',
+    );
     // The old session is gone.
     const me = await h.app.inject({
       method: 'GET',

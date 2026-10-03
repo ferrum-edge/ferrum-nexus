@@ -201,6 +201,14 @@ built to reveal nothing:
   `password_reset` tokens, session invalidation and the audit row in one
   transaction, under a per-user lease so concurrent changes across instances
   are ordered. `email_verification` tokens are left alone.
+- **Disabling an account revokes its outstanding reset links.** Every path that
+  disables an account — `PATCH /api/users/:id`, god mode and the SSO
+  deprovision — deletes every `password_reset` token for the account in the same
+  transaction as `status = 'disabled'`, so re-enabling inside the link's
+  one-hour lifetime cannot revive a recovery capability an administrator meant
+  to end. A re-enable deletes any `password_reset` row still present as well, so
+  a link minted before this behaviour shipped, or one whose issuance raced the
+  disable, is not revived either. `email_verification` tokens are left alone.
 - **The link is unreadable in the outbox.** The token is stored only as an
   HMAC, and the queued message that carries it is sealed (AES-256-GCM under a
   key derived from `NEXUS_SECRET_KEY`, bound to the row id and recipient), so
@@ -928,10 +936,13 @@ gateway-writing Nexus instance ([`operations.md` §8](operations.md#8-scaling)).
 
 ### Disabling an account
 
-Both `PATCH /api/users/:id` with `status: "disabled"` and
-`POST /api/admin/god/disable-user`:
+Every disable path — `PATCH /api/users/:id` with `status: "disabled"`,
+`POST /api/admin/god/disable-user`, and the SSO deprovision — does:
 
-1. delete every session, so an open tab gets `401`;
+1. delete every session and every outstanding `password_reset` token, so an open
+   tab gets `401` and an old recovery link cannot survive a later re-enable
+   (re-enabling also deletes any `password_reset` row still present, covering a
+   link minted before the disable or raced it);
 2. strip every ACL group from the account's Ferrum consumer;
 3. delete **every credential of every type** on that consumer (including
    `basicauth`, which never appears in Edge reads) and mark the
@@ -1666,7 +1677,7 @@ Naming is `<domain>.<verb>`, lowercase snake_case. God-mode actions are `god.*`.
 | `auth.sso_link`        | `user`      | An identity-provider subject was linked to an existing account: automatically under the proven-address rule, or explicitly from the account's own session. `details`: `provider_id`, `subject`, `identity_id`, `email`, `explicit`, `email_verified_by_provider`.                                                                                                                                                                                                            |
 | `auth.sso_unlink`      | `user`      | An administrator removed a link (`DELETE /api/users/:id/identities/:identityId`). `details`: `identity_id`, `provider_id`, `subject`.                                                                                                                                                                                                                                                                                                                                        |
 | `auth.sso_claims_sync` | `user`      | A sign-in's claims changed the account's role or organization, or a promotion was withheld; the actor is the system. `details`: `provider_id`, `subject`, `from_role`/`to_role` and/or `from_org_id`/`to_org_id`, `role_mapping`, `org_mapping`; for a promotion, `terminated_sessions` (every other session was ended); for a withheld one, `role_withheld`, `withheld_reason: "lower_trust_identities"` and `lower_trust_provider_ids`. Never written for a `super_admin`. |
-| `auth.sso_deprovision` | `user`      | A sign-in's claims mapped to no role and `deprovision_on_access_loss` is on: the account was disabled, its sessions ended and its gateway revocation queued, in one transaction; the actor is the system. `details`: `provider_id`, `subject`, `reason`, `role`, `terminated_sessions`, `gateway_teardown: "queued"`. The revocation's outcome is `user.gateway_teardown_complete`.                                                                                          |
+| `auth.sso_deprovision` | `user`      | A sign-in's claims mapped to no role and `deprovision_on_access_loss` is on: the account was disabled, its sessions ended and its gateway revocation queued, in one transaction; the actor is the system. `details`: `provider_id`, `subject`, `reason`, `role`, `terminated_sessions`, `revoked_reset_links`, `gateway_teardown: "queued"`. The revocation's outcome is `user.gateway_teardown_complete`.                                                                   |
 
 ### Users and organizations
 
@@ -1675,8 +1686,8 @@ Naming is `<domain>.<verb>`, lowercase snake_case. God-mode actions are `god.*`.
 | `user.update`                          | `user`         | Profile or account fields changed, without a role or status change. `details`: `self`, `changed_fields` (`password` as a name only), `terminated_sessions` on a self-service password change.                                                                                                                                                                          |
 | `user.notification_preferences_update` | `user`         | An account changed its own notification preferences. `details`: `changed` (the preference names), and every preference's new value.                                                                                                                                                                                                                                    |
 | `user.role_change`                     | `user`         | `details`: `from_role`, `to_role`.                                                                                                                                                                                                                                                                                                                                     |
-| `user.enable`                          | `user`         | An account was re-enabled. `details`: `from_status`, `to_status`. Repeating `status: "active"` on an active account re-runs the gateway restore and records `changed_fields: []` and `gateway_restore_retry: true`.                                                                                                                                                    |
-| `user.disable`                         | `user`         | An account was disabled (ordinary or god mode), committed with the disable, session deletion and teardown job. `details`: `from_status`, `to_status`, `terminated_sessions`, `gateway_teardown: "queued"`.                                                                                                                                                             |
+| `user.enable`                          | `user`         | An account was re-enabled. `details`: `from_status`, `to_status`, and `revoked_reset_links` when any were deleted. Repeating `status: "active"` on an active account re-runs the gateway restore and records `changed_fields: []` and `gateway_restore_retry: true`.                                                                                                   |
+| `user.disable`                         | `user`         | An account was disabled (ordinary or god mode), committed with the disable, session deletion and teardown job. `details`: `from_status`, `to_status`, `terminated_sessions`, `revoked_reset_links`, `gateway_teardown: "queued"`.                                                                                                                                      |
 | `user.gateway_teardown_complete`       | `user`         | The queued gateway revocation landed. Actor is the system (worker) or the admin whose immediate attempt succeeded (`inline: true`). `details`: `attempts`, `gateway_teardown` (`ok` \| `no_consumer`), `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`, `deleted_consumers`. A failed immediate attempt writes nothing; see the job's `last_error`. |
 | `user.gateway_teardown_retry`          | `user`         | An admin re-ran a pending revocation (`POST /api/users/:id/gateway-teardown/retry`). `details`: `attempts`, `gateway_teardown: "queued"`.                                                                                                                                                                                                                              |
 | `org.create`                           | `organization` | `details`: `name`.                                                                                                                                                                                                                                                                                                                                                     |

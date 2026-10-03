@@ -2501,8 +2501,9 @@ Also in **Admin → Settings → Single sign-on** (`PUT /api/admin/sso`):
   `sub.example.com`. A provider's own `allowed_email_domains` applies as well
   when it links or provisions.
 - **Deprovision on access loss.** Off by default. When on, a sign-in whose
-  claims map to no role disables the account, ends its sessions and queues the
-  same gateway revocation an administrator's disable does
+  claims map to no role disables the account, ends its sessions, revokes its
+  outstanding password-reset links and queues the same gateway revocation an
+  administrator's disable does
   ([§11](#11-gateway-revocation-for-disabled-accounts)): every ACL group and
   credential of `nexus-user-<id>` and each `nexus-app-<id>` goes. Grants are
   kept, so re-enabling the account restores their ACL groups, as for any
