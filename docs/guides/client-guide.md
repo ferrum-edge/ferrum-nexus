@@ -258,7 +258,8 @@ The dialog shows, per type:
 **Rotate** replaces a credential in one step. The new secret is created and
 the old one is revoked in the same operation. There is no overlap: callers
 still using the old secret get `401` as soon as the gateway applies the change.
-The new secret is shown once.
+The new secret is shown once, and only to you: nobody else can rotate your
+credentials, not even an administrator.
 
 For a cutover with no downtime, **issue** a new credential, deploy it, then
 **revoke** the old one.
@@ -268,6 +269,9 @@ For a cutover with no downtime, **issue** a new credential, deploy it, then
 **Revoke** deletes the credential from the gateway. Anything still using it gets
 `401`. Revoke as soon as a secret leaks, a laptop is lost, or an integration is
 retired.
+
+An administrator can also revoke your credential, for example during an
+incident. If that happens, issue a new one yourself.
 
 ### The per-type limit
 
