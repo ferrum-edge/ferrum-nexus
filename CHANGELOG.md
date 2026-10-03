@@ -43,6 +43,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   lifecycle lock with first-time SSO links. The security guide also documents
   that turning off `sync_roles` does not automatically demote existing admins
   or unlink their identities.
+- **The publishing upstream check now normalises the host before its
+  name-suffix rules** (#503, GHSA-cq2h-g4g3-rw3p). A host written fully
+  qualified (`api.internal.`) or in another letter case (`API.INTERNAL`) skipped
+  the `.internal`/`.local`/`.localhost`/`.home.arpa` refusal, so the suffix list
+  could be bypassed before the DNS check. The host is now lower-cased with one
+  trailing root label stripped before every suffix rule, matching the OIDC
+  destination check.
 - **Issuing a new password-reset link now revokes every earlier one**
   (GHSA-fgq6-8q7j-qmww). After the 10-minute issuance throttle, the
   `forgot-password` flow used to insert a replacement one-hour token while
