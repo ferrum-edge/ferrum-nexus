@@ -511,12 +511,29 @@ describe('discovery', () => {
   it('dials a loopback name only at loopback addresses, without the policy resolver', async () => {
     const issuer = idp.issuer.replace('127.0.0.1', 'localhost');
     idp.discoveryOverrides = { issuer };
+    // The literal loopback hosts bypass the policy resolver, but their answer
+    // is still filtered to loopback addresses before a socket may dial it.
     const client = createOidcClient({
       allowHttpLoopback: true,
       resolve: async () => assert.fail('a loopback name is not sent to the policy resolver'),
+      loopbackLookup: async () => [{ address: '127.0.0.1', family: 4 }],
     });
     const document = await client.discover(issuer);
     assert.equal(document.issuer, issuer);
+
+    // A `localhost` answer that is not loopback is dropped, so there is no
+    // address to dial and the request is refused. On the old code, which never
+    // vetted the loopback answer, the request reached the provider instead.
+    const nonLoopback = createOidcClient({
+      allowHttpLoopback: true,
+      resolve: async () => assert.fail('a loopback name is not sent to the policy resolver'),
+      loopbackLookup: async () => [{ address: '93.184.215.14', family: 4 }],
+    });
+    await rejectsWith(
+      nonLoopback.discover(issuer),
+      'provider_unavailable',
+      /request failed: connection refused, host resolves to a non-public address/,
+    );
   });
 });
 
@@ -567,6 +584,12 @@ describe('connection-time destination vetting', () => {
       },
     });
     try {
+      // These two assertions are what discriminate the fix: the refusal
+      // message shows the connection-time lookup re-vetted the answer, and the
+      // two resolver calls show it did so through the policy resolver. On the
+      // old code the policy was consulted once and the global fetch failed
+      // with a plain `TypeError`, so only `connections` (always 0 here, since
+      // system DNS cannot resolve `idp.rebind.example`) would still hold.
       await rejectsWith(
         client.discover(`https://idp.rebind.example:${port}`),
         'provider_unavailable',

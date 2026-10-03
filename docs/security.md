@@ -180,6 +180,11 @@ built to reveal nothing:
 - **Reset links are short-lived and single-use.** One hour
   (`PASSWORD_RESET_TTL_SECONDS`), burned by a compare-and-set in the same
   transaction that writes the new password.
+- **Issuing a new reset link supersedes the old one.** After the 10-minute
+  throttle, a fresh request deletes every existing `password_reset` token for
+  the account in the same transaction that mints and queues its replacement, so
+  only the newest link is ever live. A leaked or suspected link cannot outlive
+  the request meant to replace it. `email_verification` tokens are left alone.
 - **Every password change invalidates outstanding reset links.** A self-service
   change or a redeemed reset commits the new password, the deletion of all
   `password_reset` tokens, session invalidation and the audit row in one
@@ -272,12 +277,17 @@ resolver, refuses the whole answer if any address in it is not public, and
 dials only the vetted addresses. A name whose DNS answer changes after the
 check (DNS rebinding) therefore fails to connect instead of reaching a private
 address, while `Host`, SNI and certificate verification still use the
-provider's hostname. The literal loopback hosts are exempt under
-`NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`, and `localhost` is then dialled only at
-loopback addresses; `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES=true` lifts the check
-entirely, for a provider on a private network. Redirects are not followed, so
-there is no second hop to vet, and every request has a 5-second deadline and a
-512 KiB response cap. The discovery document must name exactly the configured
+provider's hostname. Provider requests always connect directly and ignore the
+environment proxy settings (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, and Node's
+`NODE_USE_ENV_PROXY` / `--use-env-proxy`): a proxy resolves the name itself, so
+a vetted-dial rule cannot be enforced through one. A deployment whose only
+egress is a proxy must allow direct egress to the identity provider. The
+literal loopback hosts are exempt under `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK=true`,
+and `localhost` is then dialled only at loopback addresses;
+`NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES=true` lifts the check entirely, for a
+provider on a private network. Redirects are not followed, so there is no
+second hop to vet, and every request has a 5-second deadline and a 512 KiB
+response cap. The discovery document must name exactly the configured
 issuer, and is cached for an hour. So is the key
 set, which an unknown `kid` refetches at most once per 30 seconds, so forged
 tokens cannot turn the portal into a request amplifier. Concurrent sign-ins
@@ -566,6 +576,8 @@ Route guards check the **role**; services check **row-level ownership**.
 | Manage organizations                                      | —      | —        | ✓     | ✓           |
 | List another account's credential metadata                | —      | —        | ✓     | ✓           |
 | Reconcile a consumer's credentials                        | —      | —        | ✓     | ✓           |
+| Revoke another account's credential                       | —      | —        | ✓     | ✓           |
+| Rotate another account's credential (receives its secret) | —      | —        | —     | —           |
 | Read/reply in the platform inbox; read any thread         | —      | —        | ✓     | ✓           |
 | Portal settings: branding, registration policy            | —      | —        | ✓     | ✓           |
 | Email templates, mass email, SMTP test message            | —      | —        | ✓     | ✓           |
@@ -579,6 +591,12 @@ Route guards check the **role**; services check **row-level ownership**.
 The bolded gaps are the point of the `super_admin` tier: an `admin` cannot
 escalate itself or anyone else, cannot disable an administrator, and cannot
 take over the platform's mail or gateway origin.
+
+No role can rotate another account's or application's credential. A rotation
+returns the replacement's plaintext, and the replacement keeps the identity's
+consumer and grants, so receiving it is acting as that identity. An
+administrator revokes instead, which hands them nothing
+([§5](#5-show-once-credentials)).
 
 `smtp`, `captcha` and `gateway` are `super_admin`-only because each is an
 escalation path. The SMTP host receives every verification and reset link (an
@@ -883,6 +901,16 @@ in `credential_metadata`.
 Only `POST /api/credentials`, `POST /api/credentials/:id/rotate` and
 `POST /api/apis/:id/test-consumer` ever return a secret. `/api` responses are
 `Cache-Control: no-store`, which keeps them out of shared caches.
+
+**A secret is only ever returned to the credential's owner.** Issuing acts on
+the caller's own account and applications, and a test consumer's credential
+belongs to whoever created it. Rotation is owner-only for every role, `admin` and `super_admin` included
+(GHSA-mr69-2744-f78w): the replacement stays on the owner's consumer with the
+owner's grants, so its plaintext in an administrator's hands would let them
+call the identity's APIs. The check runs before any gateway write and again on
+the row re-read inside the consumer's queue. An administrator who needs a
+credential gone revokes it (`DELETE /api/credentials/:id`), which returns no
+secret, and the owner issues a new one.
 
 **Ferrum Edge enforces the same independently.** Admin API reads return
 `keyauth.key` and `jwt.secret` as `[REDACTED]` and omit `basicauth` entirely.
@@ -1617,7 +1645,7 @@ gateway write; a malformed id is `400 VALIDATION_FAILED`.
 | Action                          | Target type  | Description                                                                                                                                                                                                                                                                                                                                                                                  |
 | ------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `credential.issue`              | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                                                                                                                                           |
-| `credential.rotate`             | `credential` | Rotation; target is the **new** credential. `details`: type, consumer id, `rotated_from`, `previous_last4`, `owner_user_id` when an admin rotated someone else's.                                                                                                                                                                                                                            |
+| `credential.rotate`             | `credential` | Rotation by the credential's owner (an administrator is refused); target is the **new** credential. `details`: type, consumer id, `rotated_from`, `previous_last4`. Rows written before GHSA-mr69-2744-f78w may carry `owner_user_id`, naming the owner an administrator rotated for.                                                                                                        |
 | `credential.revoke_start`       | `credential` | Intent, committed with the row's move to `retiring`, before the gateway delete. `details` as `credential.revoke`; a rotation at the per-type cap writes one with `operation: "rotate"`. Completed by `credential.revoke`, `credential.rotate` or `credential.revoke_rollback`.                                                                                                               |
 | `credential.revoke`             | `credential` | Deleted from Edge and marked `revoked`. `details`: type, consumer id, `last4`, optional `scope: "whole-type"`, and — when caused by an `auth_plugin` change on the API's own test consumer — `reason`, `api_id` and the `auth_plugin` pair. The target row lists settled rows in `swept_credential_ids`; each swept row also gets its own event with `swept_by` and `owner_user_id`.         |
 | `credential.revoke_rollback`    | `credential` | A retirement whose gateway delete provably never applied; the row went back to `active`. `details`: `credential_type`, `consumer_id`, `last4`, `operation` (`revoke` \| `rotate`), `cause`, `owner_user_id`.                                                                                                                                                                                 |

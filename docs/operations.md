@@ -2334,6 +2334,11 @@ without following redirects, and caches both for an hour; a failed fetch is
 retried after 30 seconds at the earliest. Every provider host, the endpoints
 its discovery document names included, must resolve to public addresses. For
 a provider on a private network set `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES=true`.
+Provider requests always connect directly and ignore the environment proxy
+settings (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, and Node's
+`NODE_USE_ENV_PROXY` / `--use-env-proxy`), because a proxy resolves the
+provider name itself and cannot be vetted; a deployment whose only egress is a
+proxy must allow direct egress to the identity provider.
 
 ### Configure the provider in Nexus
 

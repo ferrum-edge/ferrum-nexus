@@ -151,6 +151,13 @@ export interface OidcClientOptions {
    */
   resolve?: UpstreamResolver;
   /**
+   * Resolves the literal loopback hosts under
+   * `NEXUS_OIDC_ALLOW_HTTP_LOOPBACK`, from which only loopback answers are
+   * dialled. Defaults to the system resolver; injectable so a test can prove
+   * an answer that is not loopback is dropped rather than dialled.
+   */
+  loopbackLookup?: (host: string) => Promise<ResolvedAddress[]>;
+  /**
    * Defaults to undici's `fetch` over a dispatcher that dials only vetted
    * addresses. An injected one replaces that transport, connection-time
    * vetting included; it exists for tests.
@@ -303,6 +310,15 @@ function isLoopbackAddress(address: string): boolean {
   return version === 6 && address === '::1';
 }
 
+/** The system resolver, in the {@link ResolvedAddress} shape. */
+async function systemLoopbackLookup(host: string): Promise<ResolvedAddress[]> {
+  const answers = await systemLookup(host, { all: true });
+  return answers.map((answer) => ({
+    address: answer.address,
+    family: answer.family === 6 ? 6 : 4,
+  }));
+}
+
 /**
  * The default transport: undici's own `fetch` — not the global one, whose
  * bundled undici may differ from this one — over an `Agent` whose sockets
@@ -348,6 +364,7 @@ interface CachedFailure {
 export function createOidcClient(options: OidcClientOptions): OidcClient {
   const now = options.now ?? (() => Date.now());
   const resolveHost = options.resolve ?? createUpstreamResolver();
+  const loopbackLookup = options.loopbackLookup ?? systemLoopbackLookup;
   const timeoutMs = options.timeoutMs ?? OIDC_HTTP_TIMEOUT_MS;
   const discoveries = new Map<string, CachedDiscovery>();
   const keySets = new Map<string, CachedKeySet>();
@@ -370,11 +387,11 @@ export function createOidcClient(options: OidcClientOptions): OidcClient {
     if (options.allowHttpLoopback && isLoopbackHostname(host)) {
       const version = isIP(host);
       if (version !== 0) return [{ address: host, family: version === 6 ? 6 : 4 }];
-      const answers = await systemLookup(host, { all: true });
+      const answers = await loopbackLookup(host);
       const loopback: ResolvedAddress[] = [];
       for (const answer of answers) {
         if (!isLoopbackAddress(answer.address)) continue;
-        loopback.push({ address: answer.address, family: answer.family === 6 ? 6 : 4 });
+        loopback.push(answer);
       }
       if (loopback.length === 0) throw new DestinationRefusedError(host, 'resolves_non_public');
       return loopback;
