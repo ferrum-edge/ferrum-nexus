@@ -1275,14 +1275,26 @@ that does not exist).
 ### `POST /api/admin/settings/smtp-test`
 
 _admin_ — sends a probe message **straight through SMTP, bypassing the outbox**.
-Body `{ "to_email"?: string }`, defaulting to the caller's address. Audited as
-`admin.smtp_test`.
+Body `{ "to_email"?: string }`, defaulting to the caller's address. Only a
+`super_admin` may name another address; an `admin` naming one gets
+`403 FORBIDDEN`.
+
+The attempt is audited as `admin.smtp_test` **before** the relay is contacted:
+if that row cannot be written, nothing is sent and the request fails. The result
+is a separate `admin.smtp_test_complete` row (`ok`, and `intent_id` naming the
+attempt's row), written best-effort, so a delivered probe never answers with an
+error that would invite a second send.
 
 ```json
 { "ok": false, "error": "getaddrinfo ENOTFOUND smtp.example.com" }
 ```
 
 A delivery failure is a `200` with `ok: false`, not an error response.
+
+Each administrator may send 10 probes per rolling hour, counted from their own
+`admin.smtp_test` rows; past that is `429 QUOTA_EXCEEDED` with
+`details: { limit, used, window }`. With `NEXUS_RATE_LIMIT_ENABLED`, the route
+also allows 3 requests per minute per account (`429 RATE_LIMITED`).
 
 ### `GET /api/admin/email-templates`
 
@@ -1381,17 +1393,35 @@ Rows are keyed `mass:<batch>:<user_id>`, where `<batch>` is your
 excludes rows the key already produced, so resending with the same key queues
 nothing new.
 
-The fan-out is atomic: every outbox row and the `admin.mass_email` audit row
-commit together. `batch_id` is returned on success **and** in the failure
-`details`; retry with it as `idempotency_key` and nobody is mailed twice.
+The campaign's `admin.mass_email` audit row commits **before** any outbox row;
+if it cannot be written, nothing is queued. The rows are then queued in
+transactions of at most 200 recipients (fewer for large messages), so a
+campaign never holds the database for its whole audience. A failed chunk rolls
+back alone: the chunks before it stay queued and the failure reports how many
+rows this attempt queued. `batch_id` is returned on success **and** in the
+failure `details`; retry with it as `idempotency_key` and exactly the missing
+recipients are queued — nobody is mailed twice, and the retry is not charged as
+a new campaign. Each attempt's outcome is an `admin.mass_email_complete` row.
 
-The audience is capped by `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5 000, `0`
-disables), checked before anything is written.
+Three bounds are checked before anything is written, each refused with
+`429 QUOTA_EXCEEDED` and a `details.setting` naming the variable:
+
+- the audience, by `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5 000);
+  `details: { limit, recipients, setting }`;
+- the aggregate size — one rendered message (subject, HTML and text) times the
+  recipients — by `NEXUS_MAX_MASS_EMAIL_BYTES` (default 64 MiB);
+  `details: { limit, bytes, message_bytes, recipients, setting }`;
+- campaigns per administrator per rolling 24 hours, by
+  `NEXUS_MAX_MASS_EMAILS_PER_DAY` (default 20);
+  `details: { limit, used, recipients, window, setting }`.
+
+`0` disables any of them. With `NEXUS_RATE_LIMIT_ENABLED`, the route also allows
+10 requests per minute per account (`429 RATE_LIMITED`).
 
 Errors: `400 VALIDATION_FAILED` (empty subject/body, empty explicit list),
-`429 QUOTA_EXCEEDED` (`details: { limit, recipients, setting }`),
-`409 CONFLICT` (contention; `batch_id` in `details`),
-`500 OUTBOX_FAILURE` (`details: { batch_id, recipients, enqueued: 0 }`).
+`429 QUOTA_EXCEEDED` (above), `409 CONFLICT` (contention; `batch_id` and, once
+queueing started, `enqueued` in `details`), `500 OUTBOX_FAILURE`
+(`details: { batch_id, recipients, enqueued }`).
 
 ### `GET /api/admin/audit-logs`
 

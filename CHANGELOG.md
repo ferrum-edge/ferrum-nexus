@@ -52,6 +52,46 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   renamed sender variable fails the acceptance gate rather than silently
   falling back to the built-in default.
 
+### Security
+
+- **The SMTP test records its attempt before contacting the relay**
+  (GHSA-whpj-2fr3-jjrw). `POST /api/admin/settings/smtp-test` used to send
+  first and write `admin.smtp_test` afterwards, so an audit failure left a
+  delivered message unrecorded behind a `500` that invited a second send. The
+  `admin.smtp_test` row now commits in its own transaction before the send; if
+  it cannot be written, nothing is sent. The result is a new, best-effort
+  `admin.smtp_test_complete` row (`ok`, `intent_id`). The `admin.smtp_test`
+  row's `details` are now `to_email` and `phase`; `ok` moved to the new row.
+- **The SMTP test is bounded** (GHSA-xx68-cpwv-x264). **Behaviour change:** an
+  `admin` may now send it only to their own account address — another
+  `to_email` is `403 FORBIDDEN`, and the Delivery test card shows the
+  recipient field to super admins only. Every administrator may send 10 tests
+  per rolling hour (`429 QUOTA_EXCEEDED`), counted from their `admin.smtp_test`
+  rows under a per-administrator lease, and with `NEXUS_RATE_LIMIT_ENABLED` the
+  route allows 3 requests per minute per account. The `/api/admin` scope now
+  registers the per-account rate limiter, which also limits
+  `POST /api/admin/mass-email` to 10 requests per minute.
+- **Mass-email campaigns are bounded in aggregate and queued in chunks**
+  (GHSA-rqrj-7g3f-c6ww). The recipient ceiling and the two 100 000-character
+  body limits were independent, so one campaign could queue about a gigabyte
+  of rendered mail in a single transaction that stalled every other write —
+  password-reset and verification enqueues included — while it ran. Now:
+  - `NEXUS_MAX_MASS_EMAIL_BYTES` (default 64 MiB, `0` disables) caps one
+    rendered message times the audience, and `NEXUS_MAX_MASS_EMAILS_PER_DAY`
+    (default 20, `0` disables) caps campaigns per administrator per rolling
+    24 hours. Both refuse with `429 QUOTA_EXCEEDED` before anything is written.
+  - The campaign's `admin.mass_email` row commits before the first outbox row
+    (one per campaign; a retry with the same `idempotency_key` is not charged
+    again), and the outbox rows are inserted in transactions of at most 200
+    recipients. A failed chunk rolls back alone: the failure reports
+    `details.enqueued` for the chunks already queued, and the retry with the
+    same batch id queues exactly the rest. Each attempt's outcome is a new
+    `admin.mass_email_complete` row; `enqueued` moved there from
+    `admin.mass_email`.
+  - Campaign and security mail still share one first-in, first-out outbox; a
+    priority lane for password-reset and verification mail is planned
+    separately.
+
 ## [0.3.0] - 2026-10-01
 
 Paired with Ferrum Edge `v0.9.9`. Upgrades a `v0.2.0` database in place with

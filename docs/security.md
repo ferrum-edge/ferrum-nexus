@@ -564,9 +564,10 @@ Route guards check the **role**; services check **row-level ownership**.
 | Reconcile a consumer's credentials                        | —      | —        | ✓     | ✓           |
 | Read/reply in the platform inbox; read any thread         | —      | —        | ✓     | ✓           |
 | Portal settings: branding, registration policy            | —      | —        | ✓     | ✓           |
-| Email templates, mass email, SMTP test message            | —      | —        | ✓     | ✓           |
+| Email templates, mass email, SMTP test to own address     | —      | —        | ✓     | ✓           |
 | Read the audit log                                        | —      | —        | ✓     | ✓           |
 | Portal settings: **SMTP, CAPTCHA and gateway URL**        | —      | —        | **—** | ✓           |
+| SMTP test message to **another** address                  | —      | —        | **—** | ✓           |
 | Grant or revoke `admin` / `super_admin`                   | —      | —        | **—** | ✓           |
 | Disable or re-enable an `admin` or `super_admin`          | —      | —        | **—** | ✓           |
 | Gateway reference reconcile and repair                    | —      | —        | —     | ✓           |
@@ -583,6 +584,13 @@ registration brake; the gateway origin tells every client where to send its
 gateway credentials. `PUT /api/admin/settings` answers `403 FORBIDDEN` when an
 `admin` sends any of these sections. The check lives in the settings service, so
 it holds however `updateSettings` is reached.
+
+The SMTP test sends straight through the relay, outside the outbox, so an
+`admin` may aim it only at their own address; another `to_email` is
+`403 FORBIDDEN`. Every administrator is limited to 10 tests per rolling hour,
+counted from their `admin.smtp_test` rows under a per-actor lease, and the route
+to 3 per minute when the rate limiter is on. The `admin.smtp_test` row commits
+before the relay is contacted, so a delivered test is never unrecorded.
 
 The settings body rejects unknown sections and keys at every level with
 `400 VALIDATION_FAILED` naming each field path. Validation runs before anything
@@ -1215,9 +1223,16 @@ and emails every active `admin` and `super_admin`. Independent bounds:
 4. **Broadcasts per day** — `NEXUS_MAX_BROADCASTS_PER_DAY` (default 20, `0`
    disables) per administrator, counted from `god.broadcast` rows under a
    per-actor lease.
-5. **Mass-email recipients** — `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5,000,
-   `0` disables). Admin-only, so this bounds the size of the single transaction
-   that holds the fan-out and its audit row.
+5. **Mass-email campaigns** — admin-only, checked before anything is written:
+   `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5,000) bounds the audience,
+   `NEXUS_MAX_MASS_EMAIL_BYTES` (default 64 MiB) bounds one rendered message
+   times the audience, and `NEXUS_MAX_MASS_EMAILS_PER_DAY` (default 20) bounds
+   campaigns per administrator per rolling 24 hours, counted from
+   `admin.mass_email` rows under a per-actor lease. `0` disables each. The
+   campaign row commits before the first outbox row, and the fan-out is queued
+   in transactions of at most 200 recipients, so it never holds other writers
+   — password-reset and verification enqueues among them — for its whole
+   audience.
 6. **Email coalescing** — `message_received` mail uses the idempotency key
    `message_received:<thread>:<recipient>:<bucket>` with a 10-minute bucket, so
    a reply storm sends one mail per recipient per thread per window.
@@ -1647,12 +1662,14 @@ Revoking a `retiring` credential again completes it.
 
 ### Administration
 
-| Action                  | Target type      | Description                                                                                                                                                                                                                                                                                                                                                                                 |
-| ----------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `admin.settings_update` | `settings`       | Portal settings changed. `target_id` is `null`, or `sso` for `PUT /api/admin/sso`. `details`: `changed_keys` (never values), `smtp_password_source_change` when relevant, `captcha_self_test: "passed"` when one ran; for `sso`, `section`, `providers_added`, `providers_removed`, `links_removed` (provider id → links deleted with it) and `client_secrets_changed` (provider ids only). |
-| `admin.template_update` | `email_template` | An email template was overridden. `target_id` is the template key. `details`: `key`, `body_html_sha256`, `body_text_sha256` (hex SHA-256 of the saved bodies).                                                                                                                                                                                                                              |
-| `admin.mass_email`      | `mass_email`     | A mass email was queued. `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `enqueued`.                                                                                                                                                                                                                                                                     |
-| `admin.smtp_test`       | `settings`       | A test message was sent through SMTP. `target_id` is `smtp`. `details`: `to_email`, `ok`.                                                                                                                                                                                                                                                                                                   |
+| Action                      | Target type      | Description                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `admin.settings_update`     | `settings`       | Portal settings changed. `target_id` is `null`, or `sso` for `PUT /api/admin/sso`. `details`: `changed_keys` (never values), `smtp_password_source_change` when relevant, `captcha_self_test: "passed"` when one ran; for `sso`, `section`, `providers_added`, `providers_removed`, `links_removed` (provider id → links deleted with it) and `client_secrets_changed` (provider ids only).                           |
+| `admin.template_update`     | `email_template` | An email template was overridden. `target_id` is the template key. `details`: `key`, `body_html_sha256`, `body_text_sha256` (hex SHA-256 of the saved bodies).                                                                                                                                                                                                                                                        |
+| `admin.mass_email`          | `mass_email`     | A mass-email campaign was started: written, and counted against `NEXUS_MAX_MASS_EMAILS_PER_DAY`, **before** any outbox row is queued; if it cannot be written nothing is queued. One row per campaign — a retry of the same batch by the same administrator writes none. `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `bytes` (rendered size × recipients), `phase: "started"`. |
+| `admin.mass_email_complete` | `mass_email`     | What one attempt at a campaign queued, written best-effort after its chunked fan-out. `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `enqueued`, `chunks` (fan-out transactions committed), `failed` (a chunk failed; the retry with the same batch id queues the rest).                                                                                                          |
+| `admin.smtp_test`           | `settings`       | An SMTP test was about to be sent: written, and counted against the hourly budget of 10 per administrator, **before** the relay is contacted; if it cannot be written nothing is sent. `target_id` is `smtp`. `details`: `to_email`, `phase: "started"`.                                                                                                                                                              |
+| `admin.smtp_test_complete`  | `settings`       | The result of that SMTP test, written best-effort after the send. `target_id` is `smtp`. `details`: `to_email`, `ok`, `intent_id` (the `admin.smtp_test` row).                                                                                                                                                                                                                                                        |
 
 ### God mode (`super_admin` only)
 

@@ -1368,7 +1368,11 @@ export type UpdateSettingsResponse = AdminSettingsResponse;
 
 /** `POST /api/admin/settings/smtp-test` */
 export interface SmtpTestRequest {
-  /** Where to send the probe message; defaults to the calling admin's email. */
+  /**
+   * Where to send the probe message; defaults to the calling admin's email.
+   * Only a `super_admin` may name another address — an `admin` naming one is
+   * refused with `403 FORBIDDEN`.
+   */
   to_email?: string;
 }
 
@@ -1441,7 +1445,9 @@ export interface MassEmailResponse {
    *
    * Echoed so a retry can pass it back as `idempotency_key` and reach the same
    * outbox rows instead of sending the campaign a second time. The failure
-   * body carries it too, in `details.batch_id`.
+   * body carries it too, in `details.batch_id`, with `details.enqueued`: the
+   * campaign is queued in chunks, and a failed chunk leaves the ones before it
+   * queued, which the retry then skips.
    */
   batch_id: string;
 }

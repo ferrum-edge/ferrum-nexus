@@ -12,7 +12,10 @@ import type {
 } from '@ferrum-nexus/shared';
 
 import { SMTP_PASSWORD_SETTINGS_KEY } from '../admin/settings-service.js';
+import { SMTP_TEST_LIMIT } from '../admin/smtp-test-service.js';
 import { CAPTCHA_SECRET_SETTINGS_KEY } from '../auth/captcha.js';
+import { SMTP_TEST_RATE_LIMIT } from '../routes/admin.js';
+import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, TEST_CAPTCHA_TOKEN, type TestApp, type TestSession } from './helpers.js';
 
 const SMTP_PASSWORD = 'hunter2-but-longer';
@@ -490,7 +493,7 @@ describe('admin settings', () => {
     assert.ok(keys.includes('captcha.secret_key'));
   });
 
-  it('reports an SMTP test result and audits it', async () => {
+  it('reports an SMTP test result and audits the attempt and its outcome', async () => {
     const response = await harness.authed(founder, {
       method: 'POST',
       url: '/api/admin/settings/smtp-test',
@@ -500,9 +503,19 @@ describe('admin settings', () => {
     assert.deepEqual(response.json<SmtpTestResponse>(), { ok: true, error: null });
     assert.equal(harness.mailbox.sent.at(-1)?.to, 'founder@example.test');
 
-    const audit = await harness.store.auditLogs.list({ action: 'admin.smtp_test' });
-    assert.equal(audit.total, 1);
-    assert.equal((audit.items[0]?.details as { ok?: boolean }).ok, true);
+    const intent = await harness.store.auditLogs.list({ action: 'admin.smtp_test' });
+    assert.equal(intent.total, 1);
+    assert.deepEqual(intent.items[0]?.details, {
+      to_email: 'founder@example.test',
+      phase: 'started',
+    });
+    const outcome = await harness.store.auditLogs.list({ action: 'admin.smtp_test_complete' });
+    assert.equal(outcome.total, 1);
+    assert.deepEqual(outcome.items[0]?.details, {
+      to_email: 'founder@example.test',
+      ok: true,
+      intent_id: intent.items[0]?.id,
+    });
   });
 
   it('reads and overrides an email template', async () => {
@@ -569,5 +582,166 @@ describe('admin settings', () => {
       url: `/api/admin/audit-logs?from=${new Date(Date.now() + 60_000).toISOString()}`,
     });
     assert.equal(future.json<ListAuditLogsResponse>().total, 0);
+  });
+});
+
+/**
+ * The SMTP probe — GHSA-whpj-2fr3-jjrw and GHSA-xx68-cpwv-x264.
+ *
+ * The probe contacts the relay directly, outside the outbox. It used to send
+ * first and audit afterwards, so an audit failure left a delivered message
+ * unrecorded behind a `500` that invited a second send; and any administrator
+ * could aim it at any address, as often as they liked.
+ */
+describe('the SMTP test', () => {
+  let harness: TestApp;
+  let faults: FaultInjectingStore;
+  let founder: TestSession;
+  let admin: TestSession;
+
+  before(async () => {
+    harness = await buildTestApp({
+      deps: { startOutboxWorker: false },
+      wrapStore: (store) => {
+        faults = faultInjectingStore(store);
+        return faults.store;
+      },
+    });
+    founder = await harness.registerUser({ email: 'probe-founder@example.test' });
+    const account = await harness.registerUser({ email: 'probe-admin@example.test' });
+    const promoted = await harness.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${account.user.id}`,
+      payload: { role: 'admin' },
+    });
+    assert.equal(promoted.statusCode, 200, promoted.body);
+    admin = await harness.loginUser('probe-admin@example.test');
+    assert.equal(admin.user.role, 'admin');
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  function probe(session: TestSession, payload: Record<string, unknown> = {}) {
+    return harness.authed(session, {
+      method: 'POST',
+      url: '/api/admin/settings/smtp-test',
+      payload,
+    });
+  }
+
+  async function rowsFor(session: TestSession, action: string) {
+    const rows = await harness.auditRows(action);
+    return rows.filter((row) => row.actor_user_id === session.user.id);
+  }
+
+  it('lets an admin probe their own address, by default or by name', async () => {
+    const sentBefore = harness.mailbox.sent.length;
+    const implicit = await probe(admin);
+    assert.equal(implicit.statusCode, 200, implicit.body);
+    const explicit = await probe(admin, { to_email: 'Probe-Admin@Example.test' });
+    assert.equal(explicit.statusCode, 200, explicit.body);
+    assert.deepEqual(
+      harness.mailbox.sent.slice(sentBefore).map((mail) => mail.to.toLowerCase()),
+      ['probe-admin@example.test', 'probe-admin@example.test'],
+    );
+  });
+
+  it('refuses an admin naming any other address, before anything is sent or recorded', async () => {
+    const sentBefore = harness.mailbox.sent.length;
+    const rowsBefore = (await rowsFor(admin, 'admin.smtp_test')).length;
+    for (const to of ['outsider@example.test', 'probe-founder@example.test']) {
+      const refused = await probe(admin, { to_email: to });
+      assert.equal(refused.statusCode, 403, refused.body);
+      assert.equal(errorCode(refused.body), 'FORBIDDEN');
+    }
+    assert.equal(harness.mailbox.sent.length, sentBefore, 'no probe left the portal');
+    assert.equal((await rowsFor(admin, 'admin.smtp_test')).length, rowsBefore);
+  });
+
+  it('lets a super admin probe another address', async () => {
+    const response = await probe(founder, { to_email: 'relay-check@example.test' });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(harness.mailbox.sent.at(-1)?.to, 'relay-check@example.test');
+  });
+
+  it('sends nothing when the attempt cannot be recorded', async () => {
+    const sentBefore = harness.mailbox.sent.length;
+    const rowsBefore = (await rowsFor(founder, 'admin.smtp_test')).length;
+    faults.failNext('auditLogs', 'create');
+    const refused = await probe(founder);
+    assert.equal(refused.statusCode, 500, refused.body);
+    assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
+    assert.equal(harness.mailbox.sent.length, sentBefore, 'the relay was never contacted');
+    assert.equal((await rowsFor(founder, 'admin.smtp_test')).length, rowsBefore);
+  });
+
+  it('records the attempt first and still answers when only the outcome fails', async () => {
+    const sentBefore = harness.mailbox.sent.length;
+    const rowsBefore = (await rowsFor(founder, 'admin.smtp_test')).length;
+    const outcomesBefore = (await rowsFor(founder, 'admin.smtp_test_complete')).length;
+    // The intent row commits; the outcome row after the send is refused.
+    faults.failAfter('auditLogs', 'create', 1);
+    const response = await probe(founder);
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(response.json<SmtpTestResponse>(), { ok: true, error: null });
+    assert.deepEqual(faults.pending(), []);
+    assert.equal(harness.mailbox.sent.length, sentBefore + 1, 'exactly one message went out');
+    assert.equal((await rowsFor(founder, 'admin.smtp_test')).length, rowsBefore + 1);
+    assert.equal((await rowsFor(founder, 'admin.smtp_test_complete')).length, outcomesBefore);
+  });
+
+  it('stops each administrator at the hourly budget, without sending', async () => {
+    const used = (await rowsFor(admin, 'admin.smtp_test')).length;
+    for (let attempt = used; attempt < SMTP_TEST_LIMIT; attempt += 1) {
+      const response = await probe(admin);
+      assert.equal(response.statusCode, 200, response.body);
+    }
+    const sentBefore = harness.mailbox.sent.length;
+    const refused = await probe(admin);
+    assert.equal(refused.statusCode, 429, refused.body);
+    const failure = (JSON.parse(refused.body) as ApiErrorBody).error;
+    assert.equal(failure.code, 'QUOTA_EXCEEDED');
+    assert.deepEqual(failure.details, {
+      limit: SMTP_TEST_LIMIT,
+      used: SMTP_TEST_LIMIT,
+      window: '1h',
+    });
+    assert.equal(harness.mailbox.sent.length, sentBefore);
+    assert.equal((await rowsFor(admin, 'admin.smtp_test')).length, SMTP_TEST_LIMIT);
+
+    // The budget is per administrator: another one is unaffected.
+    const other = await probe(founder);
+    assert.equal(other.statusCode, 200, other.body);
+  });
+});
+
+describe('the SMTP test rate limit', () => {
+  it('refuses a burst per account with RATE_LIMITED', async () => {
+    const harness = await buildTestApp({
+      env: { NEXUS_ENV: 'development', NEXUS_RATE_LIMIT_ENABLED: 'true' },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      const founder = await harness.registerUser({ email: 'burst-founder@example.test' });
+      const statuses: number[] = [];
+      let refusal = '';
+      for (let attempt = 0; attempt < SMTP_TEST_RATE_LIMIT.max + 1; attempt += 1) {
+        const response = await harness.authed(founder, {
+          method: 'POST',
+          url: '/api/admin/settings/smtp-test',
+          payload: {},
+        });
+        statuses.push(response.statusCode);
+        if (response.statusCode === 429) refusal = response.body;
+      }
+      const accepted = Array.from({ length: SMTP_TEST_RATE_LIMIT.max }, () => 200);
+      assert.deepEqual(statuses, [...accepted, 429]);
+      assert.equal(errorCode(refusal), 'RATE_LIMITED');
+      assert.equal(harness.mailbox.sent.length, SMTP_TEST_RATE_LIMIT.max);
+    } finally {
+      await harness.close();
+    }
   });
 });

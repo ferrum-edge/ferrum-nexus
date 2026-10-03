@@ -12,6 +12,11 @@
  * verifies it with the vendor before storing anything, so a portal cannot adopt
  * a challenge it is unable to check and lock every account out of sign-in.
  *
+ * `POST /settings/smtp-test` sends straight through the relay, outside the
+ * outbox, so it is bounded on its own: an `admin` may probe only their own
+ * address, a `super_admin` any address, each within an hourly budget and a
+ * per-minute limiter.
+ *
  * The two `/gateway/*` endpoints raise the bar the same way: one reports which
  * of the portal's stored Ferrum Edge references the gateway no longer holds,
  * the other recreates them. Both name accounts and APIs and both exist for the
@@ -55,10 +60,10 @@ import type { GatewayReconciliationService } from '../admin/gateway-reconciliati
 import type { GodService } from '../admin/god-service.js';
 import type { MassEmailService } from '../admin/mass-email-service.js';
 import type { SettingsService } from '../admin/settings-service.js';
+import type { SmtpTestService } from '../admin/smtp-test-service.js';
 import { AuditAction, type AuditService } from '../audit/service.js';
 import { CREDENTIAL_TYPES, type CredentialsService } from '../credentials/service.js';
 import type { AuditLogFilter } from '../db/store.js';
-import type { EmailService } from '../email/service.js';
 import { assertRole, clientIp, requireAuth, requireRole } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 import {
@@ -74,13 +79,28 @@ import { listOptions, listQuerySchema } from './common.js';
 export interface AdminRoutesOptions {
   settings: SettingsService;
   massEmail: MassEmailService;
-  email: EmailService;
+  smtpTest: SmtpTestService;
   audit: AuditService;
   god: GodService;
   credentials: CredentialsService;
   reconciliation: GatewayReconciliationService;
   sso: SsoService;
 }
+
+/**
+ * Per-account burst limit on `POST /settings/smtp-test`, applied when
+ * `NEXUS_RATE_LIMIT_ENABLED` is on. The probe contacts the SMTP relay directly,
+ * outside the outbox; the hourly budget in the SMTP-test service, which counts
+ * durable rows, bounds the hour. In-memory, so N instances allow N × this.
+ */
+export const SMTP_TEST_RATE_LIMIT = { max: 3, timeWindow: '1 minute' } as const;
+
+/**
+ * Per-account burst limit on `POST /mass-email`. Generous enough for retries
+ * with the same `idempotency_key`; the per-campaign ceilings and the daily
+ * campaign budget are what bound the cost.
+ */
+export const MASS_EMAIL_RATE_LIMIT = { max: 10, timeWindow: '1 minute' } as const;
 
 /** Largest accepted logo, as a data URL. Roughly 384 KiB of binary. */
 export const MAX_LOGO_DATA_URL_LENGTH = 512 * 1024;
@@ -330,7 +350,7 @@ const updateSsoBody: z.ZodType<UpdateSsoSettingsRequest> = z
 
 /** `/api/admin` route plugin. */
 export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, options) => {
-  const { settings, massEmail, email, audit, god, credentials, reconciliation, sso } = options;
+  const { settings, massEmail, smtpTest, audit, god, credentials, reconciliation, sso } = options;
   app.addHook('onRequest', requireRole('admin'));
 
   /* ── Settings ─────────────────────────────────────────────────────────── */
@@ -359,20 +379,22 @@ export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, o
     return sso.updateAdminSettings({ id: user.id, role: user.role }, patch, clientIp(request));
   });
 
-  app.post('/settings/smtp-test', async (request): Promise<SmtpTestResponse> => {
-    const { user } = requireAuth(request);
-    const input = parseOrThrow(smtpTestBody, request.body ?? {});
-    const to = input.to_email ?? user.email;
-    const result = await email.sendTest(to);
-    await audit.record(
-      { id: user.id, role: user.role },
-      AuditAction.ADMIN_SMTP_TEST,
-      { type: 'settings', id: 'smtp' },
-      { to_email: to, ok: result.ok },
-      clientIp(request),
-    );
-    return result;
-  });
+  // An `admin` may probe only their own address; another recipient needs
+  // `super_admin`. The service enforces it, with the hourly budget, and
+  // commits the audit row before the relay is contacted.
+  app.post(
+    '/settings/smtp-test',
+    { config: { rateLimit: { ...SMTP_TEST_RATE_LIMIT } } },
+    async (request): Promise<SmtpTestResponse> => {
+      const { user } = requireAuth(request);
+      const input = parseOrThrow(smtpTestBody, request.body ?? {});
+      return smtpTest.send(
+        { id: user.id, role: user.role, email: user.email },
+        input.to_email,
+        clientIp(request),
+      );
+    },
+  );
 
   /* ── Email templates ──────────────────────────────────────────────────── */
 
@@ -400,19 +422,23 @@ export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, o
 
   /* ── Mass email ───────────────────────────────────────────────────────── */
 
-  app.post('/mass-email', async (request): Promise<MassEmailResponse> => {
-    const { user } = requireAuth(request);
-    const body = parseOrThrow(massEmailBody, request.body);
-    return massEmail.send(
-      { id: user.id, role: user.role },
-      {
-        ...body,
-        body_html: body.body_html ?? '',
-        body_text: body.body_text ?? '',
-      },
-      clientIp(request),
-    );
-  });
+  app.post(
+    '/mass-email',
+    { config: { rateLimit: { ...MASS_EMAIL_RATE_LIMIT } } },
+    async (request): Promise<MassEmailResponse> => {
+      const { user } = requireAuth(request);
+      const body = parseOrThrow(massEmailBody, request.body);
+      return massEmail.send(
+        { id: user.id, role: user.role },
+        {
+          ...body,
+          body_html: body.body_html ?? '',
+          body_text: body.body_text ?? '',
+        },
+        clientIp(request),
+      );
+    },
+  );
 
   /* ── Audit log ────────────────────────────────────────────────────────── */
 
