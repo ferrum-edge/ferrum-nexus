@@ -1855,12 +1855,15 @@ a start without completion requires comparing the live spec policy with Nexus.
 
 | Phase            | Meaning                                                                                                                                                                                        | Other `details`                                                                                                                        |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `conversion`     | A `spec_enforcement` conversion failed and the original proxy could not be restored. The API has **no gateway proxy**; grants and credentials stay valid.                                      | `proxy_id`, `plugin_names`, `spec_enforcement` (the level the row still holds), `attempted_spec_enforcement`, `error`, `restore_error` |
+| `conversion`     | A `spec_enforcement` conversion failed and the original proxy could not be restored. The API is `repair_required`; its owned proxy id may be missing or partial.                                      | `proxy_id`, `plugin_names`, `spec_enforcement` (the level the row still holds), `attempted_spec_enforcement`, `error`, `restore_error` |
 | `rollback`       | The conversion succeeded, a later step of the same `PATCH` failed, and the unwind could not rebuild the proxy. Same outcome as `conversion`.                                                   | as `conversion`, plus `restore_target`, without `error`                                                                                |
 | `compensation`   | A `PATCH` or spec revision could not undo every gateway change. The proxy exists but may not match the catalog.                                                                                | `proxy_id`, `attempted_changes`, `steps`, `step_errors`, `error`                                                                       |
 | `orphaned_proxy` | The stored proxy id no longer exists on the gateway (found by gateway reconciliation or a restore). The reference is cleared and the API marked `repair_required` until `api.gateway_restore`. | `namespace`, `proxy_id`, `slug`, `spec_enforcement`, optional `reason`                                                                 |
 
-Raw proxy and plugin configurations are never recorded.
+Raw proxy and plugin configurations never enter audit rows or logs. Enforcement
+conversion snapshots are sealed in encrypted settings before teardown and removed
+only after recovery or successful compensation; they are not consumer credential
+snapshots and never cross into portal responses.
 
 ### Access workflow
 

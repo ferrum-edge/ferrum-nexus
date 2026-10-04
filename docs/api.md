@@ -329,11 +329,13 @@ unknown, CP-only, default-both and allow-overlay cases refuse with bounded opaqu
 cache/coalescing still bounds public probe load. The supported CP/public-profile
 owner decision and actual image/canonical-pin qualification remain pending.
 
-Whole-consumer replacements use complete server-only verification snapshots and strong
-row `If-Match`. A stale `412` is exposed as `409 CONFLICT`; credential material never
-enters portal responses, persistence or audits. Credential append/delete and show-once
-responses are unchanged. Namespace backup ETags belong to the separate operator
-recovery contract described in operations, never to Nexus gateway rebuild requests.
+Whole-consumer metadata replacements pair complete server-only verification with
+the original strong row `If-Match`, using Edge's masked projection and hidden-type
+preservation. Edge canonicalizes legacy JWT/HMAC fields; it can refuse genuinely
+unrepresentable history. A stale `412` is exposed as `409 CONFLICT`; credential
+material never enters portal responses, persistence or audits. Credential append/delete
+and show-once responses are unchanged. Namespace backup ETags belong to the
+separate operator recovery contract described in operations, never to Nexus gateway rebuild requests.
 
 `edge.reconciliation` reports whether Edge still holds the consumer and proxy
 ids Nexus stored — the failure after `FERRUM_ADMIN_URL` is retargeted at a fresh
@@ -1964,7 +1966,7 @@ and threads.
 | `timeouts`         | `{ connect_ms, read_ms, write_ms }` \| null | backend timeouts; `null` keeps the gateway defaults (5000 / 30000 / 30000 ms)                                                                                                                                                                            |
 | `circuit_breaker`  | boolean                                     | `true` attaches Edge's default breaker (5 failures to open, 3 successes to close, 30 s open, trips on 500/502/503/504 and connection errors)                                                                                                             |
 | `spec_enforcement` | `docs_only` \| `routes`                     | `docs_only` (default): the document is catalog metadata only. `routes`: the proxy is **spec-owned** — Edge imports the document and generates an `openapi_validator` that answers `400` for an undeclared path or method. **Bodies are never validated** |
-| `gateway_state`    | `deployed` \| `repair_required`             | `repair_required` means the portal established that the gateway does not serve this API (a reconciliation repair, or a failed restore). It stays until `POST /api/apis/:id/restore-gateway` succeeds                                                     |
+| `gateway_state`    | `deployed` \| `repair_required`             | `repair_required` means the portal established a missing or incomplete gateway deployment (a reconciliation repair, or a failed restore). It stays until `POST /api/apis/:id/restore-gateway` succeeds                                                     |
 
 `HttpMethod` is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`,
 `TRACE` or `CONNECT`.
@@ -2469,15 +2471,22 @@ gateway no longer serves. Empty body →
 **Non-destructive.** The API keeps its id, slug, owner, spec history, gateway
 URL and grants; only the Edge objects are recreated, from what the portal
 stores. Approved clients keep their credentials: the ACL group is derived from
-the API id, so their existing consumer groups match again. Anything configured
-directly on the gateway (an operator's plugin config, a hand edit such as
-`hide_credentials: false`) was deleted with the proxy and is not restored.
+the API id, so their existing consumer groups match again. After a missing-proxy
+repair, direct gateway changes were deleted with the proxy and are not restored.
+A failed enforcement conversion instead retains an encrypted recovery snapshot of
+the original proxy and plugins, including operator fields.
+Recovery retains the original id and refuses deletion of unknown or changed
+partial resources; the operator must reconcile those first.
 
 What is rebuilt, in publish order: the proxy (through the API-spec importer in
 `routes` mode), the auth plugin, `access_control` when `requestable`, the rate
 limit, CORS, and the [plugin palette](#plugin-palette); then the move onto
 `/<namespace>/<slug>` as the last write. The current revision is deployed; no
 new revision is written (you can `PUT /api/apis/:id/spec` first to correct it).
+An existing proxy clears a repair flag only after the expected listen path, backend,
+settings, owned plugins, associations, route matchers and specification ownership
+match. Recovery checks a rebuilt staging deployment before moving it onto the public path. Mere
+existence, or an incomplete original-id staging proxy, never counts as restored.
 
 | Status           | Meaning                                                                                                                                                                                        |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

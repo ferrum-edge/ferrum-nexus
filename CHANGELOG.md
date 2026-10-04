@@ -11,11 +11,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **Draft Edge security adoption proposal** (GHSA-93rq-89vr-38pc Part B): fresh,
   closed namespace-matched egress admission on all proxy/spec write boundaries,
   preflight before destructive/staging/ACL effects, fail-closed compensation with
-  repair reporting, and coarse observational degraded health. Three whole-consumer
-  callers use credential-complete verification and matching strong row `If-Match`,
-  preserving labels and hidden/custom data and refusing stale replacements. Four-store
-  service/protocol regressions and a separate controlled packaged DNS-rebinding fixture
-  are included. This cannot land pending explicit CP/public-profile owner approval,
+  truthful `repair_required` state with encrypted owned-resource recovery records,
+  validated staging recovery, and coarse observational degraded health. Three
+  whole-consumer callers pair complete historical verification with the owner's
+  masked metadata projection and original opaque strong row `If-Match`. Hidden
+  Basic/custom state, labels and identity survive; Edge canonicalizes legacy
+  JWT/HMAC fields and invalid hidden history refuses without silent loss. Exact
+  secret placeholders, plaintext Basic, malformed/ambiguous tags and stale writes
+  are refused. The mock hashes Basic through normal write lifecycles and enforces
+  closed credential fields; the delayed issue/disable regression keeps its `ok`
+  teardown requirement. Four-store service/protocol regressions and a separate
+  controlled packaged DNS-rebinding fixture are included. This cannot land pending explicit CP/public-profile owner approval,
   exact-head hosted CI/review, actual published-image qualification and released
   canonical-pin finishing. Versions and current pins remain unchanged; the advisory
   is not declared fixed. See [proposal limitations](docs/security.md#1-threat-model).

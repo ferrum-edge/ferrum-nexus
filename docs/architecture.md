@@ -387,16 +387,25 @@ lock, so the array length it checks and the index it deletes cannot drift.
 
 The draft Edge adoption uses credential-complete `GET /consumers/{id}/verification`
 and its matching strong row ETag at exactly three whole-consumer callers: ACL mutation,
-re-enable and disable. Each preserves labels, Basic hashes, hidden/custom types and
-all unknown credential fields in transient server memory. Missing/unavailable tags
-refuse replacement; stale `412` becomes `CONFLICT`. A retry must re-read and recompute,
+re-enable and disable. Verification keeps the complete historical JSON row in
+transient server memory. Metadata PUT sends the owner's ordinary masked projection
+under that original row tag: labels, identity, hidden Basic/custom groups and
+keyauth fields survive; Edge intentionally canonicalizes legacy JWT/HMAC entries
+to their single secret field. Unrepresentable hidden state refuses the update,
+never gets dropped to make it succeed. Missing/unavailable tags refuse replacement;
+stale `412` becomes `CONFLICT`. A retry must re-read and recompute,
 never put a stale body under a fresh tag. Verification error bodies are suppressed
 like credential writes. Dedicated append/delete and show-once paths are unchanged.
 Leases still order Nexus's multi-step operations and fence its store transactions.
 
 Fresh closed `GET /backend-egress-policy` admission lives at every proxy/spec create
 and replacement, including plugin binding and undo; service preflight precedes staging,
-destructive conversion and spec ACL enrollment. Health caches observations only.
+destructive conversion and spec ACL enrollment. Failed conversion compensation
+sets `repair_required`, retains the owned proxy id and seals a recovery journal in
+`app_settings` before resource teardown. Deliberate restore takes both API and proxy
+leases, verifies partial resource ownership, refuses unknown state, and validates
+the rebuilt path, configuration, plugins and spec before cutover and completion.
+Health caches observations only.
 The public profile requires namespace-matched local serving/public-only metadata and
 operator-established Admin/traffic singleton identity. Process evidence cannot attest
 CPs, remote DPs, load-balanced Admin endpoints or fleets. See the pending

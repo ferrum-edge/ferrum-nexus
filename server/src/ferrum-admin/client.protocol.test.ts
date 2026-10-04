@@ -37,7 +37,7 @@ async function fixture(t: TestContext) {
     body: string | Buffer;
     location: string;
     disconnect: boolean;
-    headers: Record<string, string>;
+    headers: Record<string, string | string[]>;
     /** Overrides `body` with one computed from the request URL, e.g. to echo a page offset. */
     respond: ((url: URL) => string) | null;
   } = {
@@ -49,9 +49,11 @@ async function fixture(t: TestContext) {
     respond: null,
   };
   const requests: string[] = [];
+  const ifMatches: (string | undefined)[] = [];
   const logs: unknown[] = [];
   const server = createServer((req, res) => {
     requests.push(`${req.method} ${req.url}`);
+    ifMatches.push(req.headers['if-match']);
     req.resume();
     if (reply.disconnect) {
       req.on('end', () => req.socket.destroy());
@@ -94,7 +96,7 @@ async function fixture(t: TestContext) {
       server.close((error) => (error ? reject(error) : resolve()));
     });
   });
-  return { client, reply, requests, logs };
+  return { client, reply, requests, logs, ifMatches };
 }
 
 function protocolFailure(error: unknown): boolean {
@@ -151,6 +153,76 @@ describe('Edge response contracts over HTTP sockets', () => {
     }
     assert.ok(!JSON.stringify(logs).includes('verification-secret-canary'));
     assert.ok(!JSON.stringify(logs).includes('hidden-secret-canary'));
+  });
+
+  it('keeps opaque row tags verbatim and refuses ambiguous preconditions', async (t) => {
+    const { client, reply, requests, ifMatches } = await fixture(t);
+    const complete = { ...consumer, credentials: { keyauth: [{ key: 'complete-key' }] } };
+    for (const tag of ['"opaque-v1"', '"!#$%&()*+,-./:;<=>?@[\\]^_`{|}~"']) {
+      reply.body = JSON.stringify(complete);
+      reply.headers = { 'cache-control': 'no-store', etag: tag };
+      const snapshot = await client.consumers.verification('consumer-1');
+      assert.equal(snapshot?.etag, tag);
+      reply.body = JSON.stringify(consumer);
+      await client.consumers.replace(
+        'consumer-1',
+        { username: 'alice', credentials: snapshot!.consumer.credentials, acl_groups: [] },
+        undefined,
+        snapshot!.etag,
+      );
+      assert.equal(ifMatches.at(-1), tag, 'the original row token is sent unchanged');
+    }
+    for (const tag of [
+      '',
+      '*',
+      'W/"weak"',
+      '"a", "b"',
+      'unquoted',
+      '""',
+      '"a b"',
+      '"a\nb"',
+      '"a\rb"',
+      '"a\tb"',
+      '"é"',
+      '"a"\n',
+    ]) {
+      const offset = requests.length;
+      await assert.rejects(
+        client.consumers.replace('consumer-1', { username: 'alice' }, undefined, tag),
+      );
+      assert.equal(requests.length, offset);
+    }
+    reply.body = JSON.stringify(complete);
+    reply.headers = { 'cache-control': 'no-store', etag: ['"same"', '"same"'] };
+    await assert.rejects(client.consumers.verification('consumer-1'), protocolFailure);
+  });
+
+  it('verifies historical JSON shapes and reserves only exact known secret markers', async (t) => {
+    const { client, reply } = await fixture(t);
+    reply.headers = { 'cache-control': 'no-store', etag: '"opaque-history"' };
+    const credentials = {
+      keyauth: [{ key: 'prefix[REDACTED]suffix', metadata: '[REDACTED]' }],
+      jwt: { secret: 'j'.repeat(32), algorithm: 'legacy' },
+      hmac_auth: [],
+      basicauth: { password_hash: 'hmac_sha256:' + 'a'.repeat(64), future: true },
+      custom: { secret: '[REDACTED]', nested: ['[REDACTED]'] },
+      empty_custom: [],
+      old_custom: null,
+    };
+    reply.body = JSON.stringify({ ...consumer, credentials });
+    assert.deepEqual(
+      (await client.consumers.verification('consumer-1'))?.consumer.credentials,
+      credentials,
+    );
+    for (const [type, value] of [
+      ['keyauth', [{ key: '[REDACTED]' }]],
+      ['jwt', { secret: '[REDACTED]' }],
+      ['hmac_auth', [{ secret: '[REDACTED]' }]],
+      ['basicauth', [{ password: 'plaintext-must-not-pass' }]],
+    ] as const) {
+      reply.body = JSON.stringify({ ...consumer, credentials: { [type]: value } });
+      await assert.rejects(client.consumers.verification('consumer-1'), protocolFailure);
+    }
   });
 
   const resourceReads: [string, (client: FerrumAdminClient) => Promise<unknown>, unknown][] = [

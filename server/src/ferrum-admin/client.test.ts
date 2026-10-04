@@ -11,14 +11,18 @@ import type { EdgeConfig } from '../config/index.js';
 import { isNexusError } from '../lib/errors.js';
 import { createEdgePluginBinder } from '../publishing/edge-plugins.js';
 import { handOwnedPlugins } from '../publishing/spec-document.js';
-import { createMockFerrumEdge, type MockFerrumEdge } from '../test/mock-ferrum-edge.js';
+import {
+  createMockFerrumEdge,
+  mockBasicPasswordHash,
+  type MockFerrumEdge,
+} from '../test/mock-ferrum-edge.js';
 import {
   CONSUMER_SCAN_LIMIT,
   createFerrumAdminClient,
   createKeyedSerializer,
   type FerrumAdminClient,
 } from './client.js';
-import type { AdminTokenMinter } from './jwt.js';
+import { createAdminTokenMinter, type AdminTokenMinter } from './jwt.js';
 import type { EdgeApiSpecDocument, EdgeProxyWrite } from './types.js';
 
 const SECRET = 'ferrum-admin-client-test-secret-0123456789';
@@ -43,6 +47,21 @@ function configFor(url: string, overrides: Partial<EdgeConfig> = {}): EdgeConfig
     rateLimit: { syncMode: 'local', redisUrl: undefined, redisTls: false },
     ...overrides,
   };
+}
+
+/** Exercise the mock's actual whole-consumer input independently of the metadata builder. */
+async function rawConsumerPut(id: string, credentials: unknown, etag: string): Promise<Response> {
+  const token = await createAdminTokenMinter(configFor(edgeUrl)).getToken('mock-contract-test');
+  return fetch(`${edgeUrl}/consumers/${id}`, {
+    method: 'PUT',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'x-ferrum-namespace': 'nexus',
+      'content-type': 'application/json',
+      'if-match': etag,
+    },
+    body: JSON.stringify({ id, username: id, credentials, acl_groups: ['approved'] }),
+  });
 }
 
 describe('ferrum admin client', () => {
@@ -130,6 +149,169 @@ describe('ferrum admin client', () => {
       ),
     );
     assert.deepEqual(edge.consumers.get('nexus/placeholder'), before);
+  });
+
+  it('hashes Basic create, append, type replacement and metadata PUT', async () => {
+    await client.consumers.create({
+      id: 'basic-hashing',
+      username: 'basic-hashing',
+      credentials: { basicauth: [{ password: 'initial-password' }] },
+    });
+    const stored = edge.consumers.get('nexus/basic-hashing')!;
+    assert.deepEqual(stored.credentials.basicauth, [
+      { password_hash: mockBasicPasswordHash('initial-password') },
+    ]);
+    await client.consumers.addCredential('basic-hashing', 'basicauth', {
+      password: 'appended-password',
+    });
+    assert.deepEqual(stored.credentials.basicauth?.[1], {
+      password_hash: mockBasicPasswordHash('appended-password'),
+    });
+    await client.consumers.replaceCredentials('basic-hashing', 'basicauth', [
+      { password: 'replacement-password' },
+    ]);
+    const snapshot = await client.consumers.verification('basic-hashing');
+    assert.deepEqual(snapshot?.consumer.credentials.basicauth, [
+      { password_hash: mockBasicPasswordHash('replacement-password') },
+    ]);
+    await client.consumers.replace(
+      'basic-hashing',
+      {
+        username: stored.username,
+        credentials: snapshot!.consumer.credentials,
+        acl_groups: ['approved'],
+      },
+      undefined,
+      snapshot!.etag,
+    );
+    assert.deepEqual(stored.credentials.basicauth, [
+      { password_hash: mockBasicPasswordHash('replacement-password') },
+    ]);
+    assert.deepEqual(stored.acl_groups, ['approved']);
+    assert.ok(!JSON.stringify(stored).includes('replacement-password'));
+    const refreshed = await client.consumers.verification(stored.id);
+    const response = await rawConsumerPut(
+      stored.id,
+      { basicauth: [{ password: 'whole-consumer-password' }] },
+      refreshed!.etag,
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(stored.credentials.basicauth, [
+      { password_hash: mockBasicPasswordHash('whole-consumer-password') },
+    ]);
+    assert.ok(!JSON.stringify(await response.json()).includes('whole-consumer-password'));
+  });
+
+  it('rejects owner-closed credential fields without effects', async () => {
+    const basic = { password: 'secret-password', username: 'unsupported' };
+    const jwt = { secret: 's'.repeat(32), issuer: 'unsupported' };
+    for (const [type, entry] of [['basicauth', basic], ['jwt', jwt]] as const) {
+      await assert.rejects(
+        client.consumers.create({
+          username: `closed-${type}`,
+          credentials: { [type]: [entry] },
+        }),
+      );
+      await client.consumers.create({ id: `closed-${type}`, username: `closed-${type}` });
+      const stored = edge.consumers.get(`nexus/closed-${type}`)!;
+      const before = structuredClone(stored);
+      await assert.rejects(client.consumers.addCredential(stored.id, type, entry));
+      await assert.rejects(client.consumers.replaceCredentials(stored.id, type, [entry]));
+      const snapshot = await client.consumers.verification(stored.id);
+      const response = await rawConsumerPut(stored.id, { [type]: [entry] }, snapshot!.etag);
+      assert.equal(response.status, 400);
+      await response.arrayBuffer();
+      assert.deepEqual(stored, before);
+    }
+  });
+
+  it('projects legacy known objects and refuses invalid hidden custom history without loss', async () => {
+    await client.consumers.create({
+      id: 'legacy-objects',
+      username: 'legacy-objects',
+      credentials: {
+        keyauth: [{ key: 'prefix[REDACTED]suffix', operator: 'kept' }],
+        jwt: [{ secret: 'j'.repeat(32) }],
+        custom: [{ marker: '[REDACTED]' }],
+      },
+    });
+    const stored = edge.consumers.get('nexus/legacy-objects')!;
+    // Restore history can still hold single objects; ordinary PUT input cannot.
+    const history = stored.credentials as unknown as Record<string, unknown>;
+    history.keyauth = { key: 'prefix[REDACTED]suffix', operator: 'kept' };
+    history.jwt = { secret: 'j'.repeat(32), algorithm: 'legacy' };
+    const snapshot = await client.consumers.verification(stored.id);
+    await client.consumers.replace(
+      stored.id,
+      {
+        username: stored.username,
+        credentials: snapshot!.consumer.credentials,
+        acl_groups: ['ok'],
+      },
+      undefined,
+      snapshot!.etag,
+    );
+    assert.deepEqual(stored.credentials, {
+      keyauth: [{ key: 'prefix[REDACTED]suffix', operator: 'kept' }],
+      jwt: [{ secret: 'j'.repeat(32) }],
+      custom: [{ marker: '[REDACTED]' }],
+    });
+    const invalid = stored.credentials as unknown as Record<string, unknown>;
+    invalid.custom = { hidden: 'custom-history-canary' };
+    const before = structuredClone(stored);
+    const next = await client.consumers.verification(stored.id);
+    await assert.rejects(
+      client.consumers.replace(
+        stored.id,
+        { username: stored.username, credentials: next!.consumer.credentials, acl_groups: [] },
+        undefined,
+        next!.etag,
+      ),
+      (error: unknown) => {
+        assert.ok(isNexusError(error));
+        assert.ok(!JSON.stringify(error).includes('custom-history-canary'));
+        return true;
+      },
+    );
+    assert.deepEqual(
+      stored,
+      before,
+      'hidden invalid state is retained instead of silently dropped',
+    );
+  });
+
+  it('refuses unrepresentable Basic history without a write or disclosure', async () => {
+    await client.consumers.create({
+      id: 'legacy-basic',
+      username: 'legacy-basic',
+      credentials: { basicauth: [{ password: 'legacy-password-canary' }] },
+    });
+    const stored = edge.consumers.get('nexus/legacy-basic')!;
+    stored.credentials.basicauth![0]!.future = true;
+    const snapshot = await client.consumers.verification(stored.id);
+    const offset = edge.requests.length;
+    await assert.rejects(
+      client.consumers.replace(
+        stored.id,
+        { username: stored.username, credentials: snapshot!.consumer.credentials, acl_groups: [] },
+        undefined,
+        snapshot!.etag,
+      ),
+      (error: unknown) => {
+        assert.ok(isNexusError(error));
+        assert.equal(
+          (error.details as { reason: string }).reason,
+          'consumer_metadata_unrepresentable',
+        );
+        assert.ok(!JSON.stringify(error).includes('hmac_sha256:'));
+        return true;
+      },
+    );
+    assert.equal(edge.requests.length, offset);
+    assert.deepEqual(stored.acl_groups, []);
+    const raw = await rawConsumerPut(stored.id, {}, snapshot!.etag);
+    assert.equal(raw.status, 400, 'the owner also refuses the restored invalid hidden entry');
+    await raw.arrayBuffer();
   });
 
   it('attributes every provisioning path while retaining caller labels and actor subjects', async () => {

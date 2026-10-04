@@ -192,6 +192,7 @@ import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import {
+  agentOperations,
   ACCESS_CONTROL_PLUGIN,
   CREDENTIAL_TYPE_FOR_PLUGIN,
   DEFAULT_BACKEND_CONNECT_TIMEOUT_MS,
@@ -279,6 +280,7 @@ import {
   validationFailed,
 } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
+import type { NexusCrypto } from '../lib/crypto.js';
 import { apiRestoreLockKey } from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
 import {
@@ -320,6 +322,23 @@ interface AppliedRevision {
   api: ApiRecord;
   /** The change summary recorded with it, when it replaced a revision. */
   change: ApiSpecChangeRecord | null;
+}
+
+/** Encrypted settings journal; no operator resource body enters DTOs or audits. */
+interface ConversionRecovery {
+  apiId: string;
+  namespace: string;
+  shape: Record<string, unknown>;
+  proxy: EdgeProxy;
+  plugins: EdgePluginConfig[];
+  document: Record<string, unknown>;
+  attempt: {
+    level: SpecEnforcementLevel;
+    agents: ApiAgents | null;
+    proxy: Record<string, unknown>;
+    documentDigests: string[];
+    specId: string | null;
+  } | null;
 }
 
 /** Result of {@link PublishingService.restoreGateway}. */
@@ -460,6 +479,7 @@ export interface PublishingService {
 /** Dependencies of {@link createPublishingService}. */
 export interface PublishingServiceDeps {
   config: NexusConfig;
+  crypto: NexusCrypto;
   store: NexusStore;
   edge: FerrumAdminClient;
   audit: AuditService;
@@ -1231,7 +1251,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * keep working, and a corrected specification can still be uploaded.
    */
   function assertGatewaySettingsWritable(api: ApiRecord, patch: UpdateApiInput): void {
-    if (api.ferrum_proxy_id !== null) return;
+    if (api.ferrum_proxy_id !== null && api.gateway_state !== 'repair_required') return;
     const fields = GATEWAY_SETTING_FIELDS.filter((field) => patch[field] !== undefined);
     if (fields.length === 0) return;
     throw conflict(
@@ -1261,6 +1281,406 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       spec_enforcement: api.spec_enforcement,
       agents: api.agents ?? null,
     };
+  }
+
+  function recoveryKey(apiId: string): string {
+    return `gateway_recovery:${namespace}:${apiId}`;
+  }
+
+  async function saveConversionRecovery(
+    api: ApiRecord,
+    recovery: ConversionRecovery,
+  ): Promise<void> {
+    if (api.namespace !== namespace || recovery.proxy.namespace !== namespace) {
+      throw conflict('Gateway recovery cannot cross the configured namespace');
+    }
+    const sealed = deps.crypto.encryptJson(recovery);
+    await store.transaction(async (tx) => {
+      const latest = await tx.apis.findById(api.id);
+      if (!latest) throw notFound('API', api.id);
+      if (latest.ferrum_proxy_id !== api.ferrum_proxy_id) {
+        throw conflict('The API gateway reference changed during conversion');
+      }
+      await tx.settings.set(recoveryKey(api.id), sealed, true);
+    });
+  }
+
+  async function readConversionRecovery(api: ApiRecord): Promise<ConversionRecovery | null> {
+    const row = await store.settings.get(recoveryKey(api.id));
+    if (!row) return null;
+    if (!row.encrypted || typeof row.value !== 'string') {
+      throw conflict('The encrypted gateway recovery record is unavailable');
+    }
+    const recovery = deps.crypto.decryptJson<ConversionRecovery>(row.value);
+    if (
+      recovery.apiId !== api.id ||
+      api.namespace !== namespace ||
+      recovery.namespace !== namespace ||
+      recovery.proxy.namespace !== namespace ||
+      (api.ferrum_proxy_id !== null && recovery.proxy.id !== api.ferrum_proxy_id) ||
+      !isDeepStrictEqual(recovery.shape, deploymentShape(api))
+    ) {
+      throw conflict('The API changed since its gateway recovery snapshot was recorded');
+    }
+    return recovery;
+  }
+
+  /** Match the owner's literal-prefix OpenAPI route table, including local Path Item refs. */
+  function routeMatchers(
+    document: Record<string, unknown>,
+    listenPath: string,
+  ): Record<string, unknown>[] {
+    const escape = (literal: string): string => literal.replace(/[\\.+*?()|[\]{}^$#&\-~]/g, '\\$&');
+    return agentOperations(document).map(({ method, path }) => {
+      const tail = path === '/' ? '' : path;
+      let regex = '^' + escape(listenPath);
+      let literal = '';
+      for (let index = 0; index < tail.length; index += 1) {
+        if (tail[index] !== '{') {
+          literal += tail[index];
+          continue;
+        }
+        regex += escape(literal);
+        literal = '';
+        const end = tail.indexOf('}', index + 1);
+        if (end === -1 || tail.slice(index + 1, end).trim() === '') {
+          throw specInvalid('The stored specification has an invalid route template');
+        }
+        regex += '[^/]+';
+        index = end;
+      }
+      return {
+        method,
+        path_template: listenPath + tail,
+        path_regex: regex + escape(literal) + '$',
+      };
+    });
+  }
+
+  /** Existence alone cannot establish a complete, matching deployment. */
+  async function deploymentMatches(
+    api: ApiRecord,
+    current: ApiSpecRecord,
+    live: EdgeProxy,
+    expectedPath = listenPathFor(namespace, api.slug),
+  ): Promise<boolean> {
+    const parsed = parseOpenApiSpec(current.raw_spec);
+    const upstream = resolveUpstream(parsed, api.upstream_url ?? '');
+    if (
+      live.namespace !== namespace ||
+      live.name !== proxyNameForSlug(api.slug) ||
+      live.listen_path !== expectedPath ||
+      live.backend_scheme !== upstream.scheme ||
+      live.backend_host !== upstream.host ||
+      live.backend_port !== upstream.port ||
+      (live.backend_path ?? '') !== (upstream.basePath ?? '') ||
+      live.strip_listen_path !== true ||
+      !isDeepStrictEqual(
+        live.allowed_methods ?? null,
+        proxyAllowedMethods(api.allowed_methods, api.cors),
+      ) ||
+      !isDeepStrictEqual(live.allowed_ws_origins ?? [], wsOriginsFor(api.cors))
+    ) {
+      return false;
+    }
+    if (api.timeouts !== null) {
+      for (const [field, value] of Object.entries(timeoutFields(api.timeouts))) {
+        if ((live as unknown as Record<string, unknown>)[field] !== value) return false;
+      }
+    }
+    if (Boolean(live.circuit_breaker) !== api.circuit_breaker) return false;
+    const plugins = await binder.listByProxy(live.id);
+    const running = new Set(associatedIds(live));
+    const owned = await firstClassOwnership(api, plugins);
+    if (owned.ambiguous.length > 0) return false;
+    const expected: Partial<Record<ApiGatewayPluginRole, EdgePluginSettings>> = {
+      auth: authPluginConfig(api.auth_plugin),
+      ...(api.requestable ? { access_control: accessControlConfig(api.id) } : {}),
+      ...(api.rate_limit
+        ? { rate_limit: rateLimitConfig(api.rate_limit, config.edge.rateLimit) }
+        : {}),
+      ...(api.cors
+        ? { cors: corsPluginConfig(api.cors, api.auth_plugin, api.allowed_methods) }
+        : {}),
+    };
+    for (const role of API_GATEWAY_PLUGIN_ROLES) {
+      const settings = expected[role];
+      const plugin = owned.live[role];
+      if (settings === undefined) {
+        if (plugin && plugin.enabled && running.has(plugin.id)) return false;
+        continue;
+      }
+      if (!plugin || !plugin.enabled || !running.has(plugin.id) || plugin.proxy_id !== live.id) {
+        return false;
+      }
+      for (const [field, value] of Object.entries(settings)) {
+        if (!isDeepStrictEqual((plugin.config as Record<string, unknown> | null)?.[field], value)) {
+          return false;
+        }
+      }
+    }
+    for (const row of await store.apiPlugins.listByApi(api.id)) {
+      const plugin = plugins.find((item) => item.id === row.ferrum_plugin_config_id);
+      if (
+        !plugin ||
+        plugin.plugin_name !== row.plugin_name ||
+        plugin.enabled !== row.enabled ||
+        !running.has(plugin.id) ||
+        !isDeepStrictEqual(
+          plugin.config,
+          paletteGatewaySettings(row.plugin_name, row.config, config.edge.rateLimit),
+        ) ||
+        !isDeepStrictEqual(plugin.trigger ?? null, edgeTriggerFor(row.trigger) ?? null)
+      ) {
+        return false;
+      }
+    }
+    const spec = await edge.apiSpecs.findByProxy(live.id);
+    if (api.spec_enforcement !== 'routes') return !spec && !live.api_spec_id;
+    if (!spec || live.api_spec_id !== spec.id || spec.proxy_id !== live.id) return false;
+    const document = await edge.apiSpecs.documentByProxy(live.id);
+    const expectedDocument = routesSpecDocument(parsed.document, {
+      proxy: submittableProxyBody(live),
+      ...(api.agents
+        ? {
+            agentDeployment: {
+              apiId: api.id,
+              slug: api.slug,
+              agents: api.agents,
+              sync: config.edge.rateLimit,
+              live: plugins,
+              specId: spec.id,
+            },
+          }
+        : {}),
+    });
+    const documentProxy = document?.['x-ferrum-proxy'] as Record<string, unknown> | undefined;
+    if (
+      !documentProxy ||
+      documentProxy.id !== live.id ||
+      documentProxy.listen_path !== live.listen_path
+    ) {
+      return false;
+    }
+    // Runtime proxy PATCHes do not rewrite the stored spec's backend/settings.
+    // The live proxy was checked above; compare the rest of the complete spec.
+    if (
+      !isDeepStrictEqual(
+        { ...document, 'x-ferrum-proxy': expectedDocument['x-ferrum-proxy'] },
+        expectedDocument,
+      )
+    ) {
+      return false;
+    }
+    const generated = expectedDocument['x-ferrum-plugins'];
+    for (const value of Array.isArray(generated) ? generated : []) {
+      const expectedPlugin = value as EdgePluginConfigWrite;
+      const livePlugin = plugins.find((plugin) => plugin.id === expectedPlugin.id);
+      if (
+        !livePlugin ||
+        livePlugin.api_spec_id !== spec.id ||
+        livePlugin.plugin_name !== expectedPlugin.plugin_name ||
+        livePlugin.enabled !== expectedPlugin.enabled ||
+        !running.has(livePlugin.id)
+      ) {
+        return false;
+      }
+      for (const [field, value] of Object.entries(expectedPlugin.config ?? {})) {
+        if (field === 'operations') continue; // Compared as route matchers below.
+        if (!isDeepStrictEqual((livePlugin.config as Record<string, unknown> | null)?.[field], value)) {
+          return false;
+        }
+      }
+    }
+    const sortMatchers = (rows: Record<string, unknown>[]): Record<string, unknown>[] =>
+      rows.sort((left, right) =>
+        `${left.method} ${left.path_template}`.localeCompare(
+          `${right.method} ${right.path_template}`,
+        ),
+      );
+    const expectedMatchers = sortMatchers(routeMatchers(expectedDocument, live.listen_path));
+    return plugins.some((plugin) => {
+      const settings = plugin.config as Record<string, unknown> | null;
+      if (
+        plugin.plugin_name !== 'openapi_validator' ||
+        plugin.api_spec_id !== spec.id ||
+        !plugin.enabled ||
+        !running.has(plugin.id) ||
+        settings?.enforcement_mode !== 'block' ||
+        settings.validate_request !== false ||
+        settings.validate_response !== false ||
+        settings.fail_on_unknown_operation !== true ||
+        !Array.isArray(settings.operations)
+      ) {
+        return false;
+      }
+      if (
+        !api.agents &&
+        settings.bypass !== undefined &&
+        settings.bypass !== null &&
+        !isDeepStrictEqual(settings.bypass, [])
+      ) {
+        return false;
+      }
+      const actualMatchers = settings.operations.map((operation: unknown) => {
+        const row =
+          typeof operation === 'object' && operation !== null && !Array.isArray(operation)
+            ? (operation as Record<string, unknown>)
+            : {};
+        return { method: row.method, path_template: row.path_template, path_regex: row.path_regex };
+      });
+      return isDeepStrictEqual(sortMatchers(actualMatchers), expectedMatchers);
+    });
+  }
+
+  function recoveryPluginShape(plugin: EdgePluginConfig): Record<string, unknown> {
+    const body = { ...plugin } as Record<string, unknown>;
+    for (const field of ['namespace', 'created_at', 'updated_at']) delete body[field];
+    return body;
+  }
+
+  /** Structural spec digest: wire object ordering must not invalidate owned recovery. */
+  function documentFingerprint(document: Record<string, unknown>): string {
+    const canonicalize = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(canonicalize);
+      if (typeof value !== 'object' || value === null) return value;
+      const object = value as Record<string, unknown>;
+      return Object.fromEntries(
+        Object.keys(object)
+          .sort()
+          .map((key) => [key, canonicalize(object[key])]),
+      );
+    };
+    return deps.crypto.fingerprint(JSON.stringify(canonicalize(document)));
+  }
+
+  /** Refuse deletion when the recorded partial rebuild has acquired unknown state. */
+  async function removeConversionPartialLocked(
+    recovery: ConversionRecovery,
+    subject: string,
+  ): Promise<void> {
+    const live = await edge.proxies.get(recovery.proxy.id);
+    if (!live) return;
+    const attempt = recovery.attempt;
+    if (!attempt || live.namespace !== namespace) {
+      throw conflict('The gateway proxy is not a recorded partial conversion');
+    }
+    const expectedPath = attempt.proxy.listen_path;
+    const finalPath = recovery.proxy.listen_path;
+    if (live.listen_path !== expectedPath && live.listen_path !== finalPath) {
+      throw conflict(
+        'The partial conversion proxy path changed; operator reconciliation is required',
+      );
+    }
+    const actual = submittableProxyBody(live);
+    if (!isDeepStrictEqual(actual, { ...attempt.proxy, listen_path: live.listen_path })) {
+      throw conflict(
+        'The partial conversion proxy configuration changed; operator reconciliation is required',
+      );
+    }
+    const spec = await edge.apiSpecs.findByProxy(live.id);
+    if (attempt.level === 'routes') {
+      if (
+        !spec ||
+        live.api_spec_id !== spec.id ||
+        (attempt.specId !== null && spec.id !== attempt.specId)
+      ) {
+        throw conflict('The partial conversion spec ownership changed');
+      }
+      const document = await edge.apiSpecs.documentByProxy(live.id);
+      if (
+        !document ||
+        !attempt.documentDigests.includes(documentFingerprint(document))
+      ) {
+        throw conflict('The partial conversion specification changed');
+      }
+    } else if (spec || live.api_spec_id) {
+      throw conflict('The partial conversion acquired an unrecorded specification');
+    }
+    const plugins = await binder.listByProxy(live.id);
+    const known = new Set(recovery.plugins.map((plugin) => plugin.id));
+    for (const plugin of plugins) {
+      if (plugin.api_spec_id && plugin.api_spec_id === spec?.id) continue;
+      const original = recovery.plugins.find((item) => item.id === plugin.id);
+      if (
+        !original ||
+        !isDeepStrictEqual(recoveryPluginShape(plugin), recoveryPluginShape(original))
+      ) {
+        throw conflict('The partial conversion has unknown or changed plugin state');
+      }
+    }
+    const available = new Set(plugins.map((plugin) => plugin.id));
+    if (associatedIds(live).some((id) => !available.has(id) && !known.has(id))) {
+      throw conflict('The partial conversion has an unknown plugin association');
+    }
+    // A real compensation/recovery mutation needs its own fresh policy fence.
+    await edge.assertBackendEgress();
+    await edge.proxies.delete(live.id, subject);
+  }
+
+  async function rebuildConversionLocked(
+    api: ApiRecord,
+    recovery: ConversionRecovery,
+    level: SpecEnforcementLevel,
+    agents: ApiAgents | null,
+    subject: string,
+    methods: HttpMethod[] | null = api.allowed_methods,
+    verifyAgainst?: ApiSpecRecord,
+    preserveGenerated = true,
+  ): Promise<void> {
+    const staged = {
+      ...submittableProxyBody(recovery.proxy),
+      id: recovery.proxy.id,
+      listen_path: stagingListenPath(namespace),
+      ...(agents ? { allowed_methods: proxyAllowedMethods(methods, api.cors) } : {}),
+    };
+    recovery.attempt = { level, agents, proxy: staged, documentDigests: [], specId: null };
+    await saveConversionRecovery(api, recovery);
+    let specId: string | null = null;
+    if (level === 'routes') {
+      const ref = await createSpecOwnedProxy(
+        recovery.document,
+        staged,
+        subject,
+        { ...api, agents },
+        preserveGenerated
+          ? recovery.plugins.filter((plugin) => plugin.api_spec_id === recovery.proxy.api_spec_id)
+          : undefined,
+        async (document) => {
+          recovery.attempt!.documentDigests.push(documentFingerprint(document));
+          await saveConversionRecovery(api, recovery);
+        },
+      );
+      specId = ref.specId;
+      recovery.attempt!.specId = specId;
+      await saveConversionRecovery(api, recovery);
+    } else {
+      await edge.proxies.create(staged as unknown as EdgeProxyWrite, subject);
+    }
+    await binder.restorePluginsLocked(
+      recovery.proxy.id,
+      handOwnedPlugins(recovery.plugins),
+      subject,
+    );
+    if (verifyAgainst) {
+      const live = await edge.proxies.get(recovery.proxy.id);
+      if (!live || !(await deploymentMatches(api, verifyAgainst, live, staged.listen_path))) {
+        throw conflict('The staged recovery does not match the API deployment');
+      }
+    }
+    await cutOverToListenPathLocked(
+      recovery.proxy.id,
+      level,
+      listenPathFor(namespace, api.slug),
+      recovery.document,
+      specId,
+      subject,
+      { ...api, agents },
+      async (document) => {
+        recovery.attempt!.documentDigests.push(documentFingerprint(document));
+        await saveConversionRecovery(api, recovery);
+      },
+    );
   }
 
   /** Unique slug, or `CONFLICT` when the provider's choice is taken. */
@@ -1496,7 +1916,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     const parsed = parseUploadedOpenApiSpec(specText);
     let previous = await store.apiSpecs.findCurrentByApi(api.id);
     const nextVersion = version?.trim() || parsed.version;
-    const proxyId = api.ferrum_proxy_id;
+    const recordedProxyId = api.ferrum_proxy_id;
+    let proxyId = api.gateway_state === 'repair_required' ? null : recordedProxyId;
 
     // The gateway moves **first**, and the revision only becomes current once
     // it has. The other order publishes a document describing a backend Edge
@@ -1538,7 +1959,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     const apply = async (): Promise<AppliedRevision> => {
       const fresh = await loadApi(apiId);
       assertCanAdminister(actor, fresh);
-      if (fresh.ferrum_proxy_id !== proxyId) {
+      if (fresh.ferrum_proxy_id !== recordedProxyId) {
         throw conflict(
           'The gateway proxy changed while this revision was waiting; reload and retry',
         );
@@ -1547,6 +1968,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       if (!isDeepStrictEqual(fresh, api) || current?.id !== previous?.id) {
         api = fresh;
         previous = current;
+        proxyId = api.gateway_state === 'repair_required' ? null : api.ferrum_proxy_id;
         backend = proxyId ? await followedUpstream(api, previous, parsed) : null;
       }
       assertRoutesEnforceable(api.spec_enforcement, parsed.paths);
@@ -1832,7 +2254,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       }
     };
 
-    const persisted = proxyId ? await binder.withProxy(proxyId, apply) : await apply();
+    const persisted = recordedProxyId
+      ? await binder.withProxy(recordedProxyId, apply)
+      : await apply();
 
     // Only once the revision has committed, outside the proxy lease, and
     // detached: the response does not wait for a fan-out that can reach every
@@ -2241,6 +2665,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         } = binder;
         const api = await loadApi(apiId);
         assertCanAdminister(actor, api);
+        assertGatewaySettingsWritable(api, patch);
 
         if (
           api.ferrum_proxy_id &&
@@ -3101,8 +3526,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           //
           // A step that writes its *own* record is excluded from that summary
           // rather than reported twice: the enforcement conversion's rebuild is
-          // the one that can leave the API with no proxy at all, and its row
-          // carries the document and plugin configs needed to rebuild it.
+          // the one that can leave the API missing or partially rebuilt. Its
+          // encrypted journal retains the resources needed to recover it.
           const failures: { step: string; error: string }[] = [];
           for (let index = undo.length - 1; index >= 0; index -= 1) {
             const step = undo[index];
@@ -3355,13 +3780,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         rebuilt,
       });
 
-      // Serialised per API, not per proxy: there is no proxy to hold a lease on
-      // — that is the whole condition — so this is the only thing standing
-      // between two restores of the same API and two live proxies claiming one
-      // listen path. Everything from the missing-deployment check to the store
-      // write runs inside it. The gateway repair takes the same key before it
-      // flags an orphaned proxy, so it can never clear a reference this has
-      // just committed (issue #342).
+      // Serialised per API so two missing-deployment restores cannot build
+      // two proxies claiming one path. A retained conversion identity also
+      // takes its canonical proxy lease for validation and recovery. The API
+      // key spans the missing-deployment check and store write. Gateway repair
+      // takes the same key before it flags an orphaned proxy, so it can never
+      // clear a reference this has just committed (issue #342).
       const restored = await edge.serializePerKey(apiRestoreLockKey(apiId), async () => {
         const api = await loadApi(apiId);
         assertCanAdminister(actor, api);
@@ -3378,6 +3802,108 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           });
         }
 
+        const recovery = await readConversionRecovery(api);
+        if (recovery) {
+          return binder.withProxy(recovery.proxy.id, async () => {
+            const latest = await loadApi(api.id);
+            assertCanAdminister(actor, latest);
+            const snapshot = await readConversionRecovery(latest);
+            const latestSpec = await store.apiSpecs.findCurrentByApi(api.id);
+            if (!snapshot || latestSpec?.id !== current.id) {
+              throw conflict('The API changed while gateway recovery was waiting');
+            }
+            await edge.assertBackendEgress();
+            await store.transaction(async (tx) => {
+              await audit.forStore(tx).record(
+                { id: actor.id, role: actor.role },
+                AuditAction.API_GATEWAY_RESTORE_START,
+                { type: 'api', id: api.id },
+                { proxy_id: snapshot.proxy.id, spec_id: current.id, recovery: 'conversion' },
+                ip,
+              );
+            });
+            let rebuilt = false;
+            try {
+              const live = await edge.proxies.get(snapshot.proxy.id);
+              if (!live || !(await deploymentMatches(latest, current, live))) {
+                const parsed = parseOpenApiSpec(current.raw_spec);
+                validateAgents(
+                  latest.agents,
+                  parsed.document,
+                  latest.spec_enforcement,
+                  latest.requestable,
+                  latest.allowed_methods,
+                );
+                await assertUpstreamAllowed(
+                  resolveUpstream(parsed, latest.upstream_url ?? ''),
+                  upstreamPolicy,
+                );
+                assertRoutesEnforceable(latest.spec_enforcement, parsed.paths);
+                assertRoutesSubmittable(latest.spec_enforcement, parsed.document);
+                await removeConversionPartialLocked(snapshot, actor.id);
+                snapshot.document = parsed.document;
+                await rebuildConversionLocked(
+                  latest,
+                  snapshot,
+                  latest.spec_enforcement,
+                  latest.agents ?? null,
+                  actor.id,
+                  latest.allowed_methods,
+                  current,
+                );
+                rebuilt = true;
+              }
+              const completed = await edge.proxies.get(snapshot.proxy.id);
+              if (!completed || !(await deploymentMatches(latest, current, completed))) {
+                throw conflict('Gateway recovery did not restore the matching API deployment');
+              }
+              const row = await store.transaction(async (tx) => {
+                const final = await tx.apis.findById(api.id);
+                const finalSpec = await tx.apiSpecs.findCurrentByApi(api.id);
+                if (
+                  !final ||
+                  final.ferrum_proxy_id !== latest.ferrum_proxy_id ||
+                  finalSpec?.id !== current.id ||
+                  !isDeepStrictEqual(deploymentShape(final), deploymentShape(latest))
+                ) {
+                  throw conflict('The API changed while its gateway recovery was running');
+                }
+                const updated = await tx.apis.update(api.id, {
+                  ferrum_proxy_id: snapshot.proxy.id,
+                  gateway_state: 'deployed',
+                });
+                if (!updated) throw notFound('API', api.id);
+                await tx.settings.delete(recoveryKey(api.id));
+                await audit.forStore(tx).record(
+                  { id: actor.id, role: actor.role },
+                  AuditAction.API_GATEWAY_RESTORE,
+                  { type: 'api', id: api.id },
+                  restoreDetails(updated, current, snapshot.proxy.id, rebuilt),
+                  ip,
+                );
+                return updated;
+              });
+              return { api: row, spec: current, proxyId: snapshot.proxy.id, rebuilt };
+            } catch (error) {
+              // Leave the encrypted record and owned identity for the next attempt.
+              // Do not withdraw resources found to have unknown operator state.
+              await store.transaction(async (tx) => {
+                const final = await tx.apis.findById(api.id);
+                if (!final || final.ferrum_proxy_id !== latest.ferrum_proxy_id) return;
+                await tx.apis.update(api.id, { gateway_state: 'repair_required' });
+                await audit.forStore(tx).record(
+                  { id: actor.id, role: actor.role },
+                  AuditAction.API_GATEWAY_RESTORE_FAILED,
+                  { type: 'api', id: api.id },
+                  { proxy_id: snapshot.proxy.id, withdrawn: false, error: errorMessage(error) },
+                  ip,
+                );
+              });
+              throw error;
+            }
+          });
+        }
+
         // Is the deployment actually missing? `edge.proxies.get` answers `null`
         // for a 404 and *throws* for everything else, and that distinction is
         // load-bearing: a refused connection, a 500 or an expired admin token
@@ -3386,35 +3912,56 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // second proxy beside a live one.
         const recorded = api.ferrum_proxy_id;
         if (recorded !== null) {
-          const live = await edge.proxies.get(recorded);
-          if (live) {
-            // Nothing to restore. If the row was flagged by a pass that has
-            // since been overtaken — an operator rebuilt the proxy by hand —
-            // say so by clearing the condition rather than by rebuilding on
-            // top of a proxy that is already serving.
-            if (api.gateway_state === 'repair_required') {
-              // In a transaction so the restore key's fence covers it (#384),
-              // and so the row commits or rolls back with the flag it clears.
-              const cleared = await store.transaction(async (tx) => {
-                const row = (await tx.apis.update(api.id, { gateway_state: 'deployed' })) ?? api;
-                await audit
-                  .forStore(tx)
-                  .record(
-                    { id: actor.id, role: actor.role },
-                    AuditAction.API_GATEWAY_RESTORE,
-                    { type: 'api', id: row.id },
-                    restoreDetails(row, current, recorded, false),
-                    ip,
-                  );
-                return row;
-              });
-              return { api: cleared, spec: current, proxyId: recorded, rebuilt: false };
+          const present = await binder.withProxy(recorded, async () => {
+            const latest = await loadApi(api.id);
+            assertCanAdminister(actor, latest);
+            const latestSpec = await store.apiSpecs.findCurrentByApi(api.id);
+            if (
+              latest.ferrum_proxy_id !== recorded ||
+              latestSpec?.id !== current.id ||
+              !isDeepStrictEqual(deploymentShape(latest), deploymentShape(api))
+            ) {
+              throw conflict('The API changed while gateway validation was waiting');
             }
-            throw conflict('This API already has a gateway proxy; there is nothing to restore', {
-              api_id: api.id,
-              proxy_id: recorded,
+            const live = await edge.proxies.get(recorded);
+            if (!live) return null;
+            if (!(await deploymentMatches(latest, current, live))) {
+              throw conflict(
+                'The existing proxy does not match the API deployment; operator reconciliation is required',
+                { api_id: api.id, proxy_id: recorded },
+              );
+            }
+            if (latest.gateway_state !== 'repair_required') {
+              throw conflict('This API already has a gateway proxy; there is nothing to restore', {
+                api_id: api.id,
+                proxy_id: recorded,
+              });
+            }
+            const cleared = await store.transaction(async (tx) => {
+              const final = await tx.apis.findById(api.id);
+              const finalSpec = await tx.apiSpecs.findCurrentByApi(api.id);
+              if (
+                !final ||
+                final.ferrum_proxy_id !== recorded ||
+                finalSpec?.id !== current.id ||
+                !isDeepStrictEqual(deploymentShape(final), deploymentShape(latest))
+              ) {
+                throw conflict('The API changed during gateway validation');
+              }
+              const row = await tx.apis.update(api.id, { gateway_state: 'deployed' });
+              if (!row) throw notFound('API', api.id);
+              await audit.forStore(tx).record(
+                { id: actor.id, role: actor.role },
+                AuditAction.API_GATEWAY_RESTORE,
+                { type: 'api', id: row.id },
+                restoreDetails(row, current, recorded, false),
+                ip,
+              );
+              return row;
             });
-          }
+            return { api: cleared, spec: current, proxyId: recorded, rebuilt: false };
+          });
+          if (present) return present;
           // A confirmed 404 on a reference the row still holds. Record the
           // condition before building anything, so a restore that fails
           // halfway leaves the API flagged rather than leaving a dead
@@ -3424,6 +3971,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // took the key over is refused rather than clearing a reference the
           // other restore has since committed (#384).
           await store.transaction(async (tx) => {
+            const latest = await tx.apis.findById(api.id);
+            if (!latest) throw notFound('API', api.id);
+            if (latest.ferrum_proxy_id !== recorded) {
+              throw conflict('The gateway reference changed');
+            }
             await tx.apis.update(api.id, {
               ferrum_proxy_id: null,
               gateway_state: 'repair_required',
@@ -3687,8 +4239,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           let strandedProxyId: string | null = null;
           if (created.proxyId) {
             const target = created.proxyId;
-            strandedProxyId = await edge.proxies
-              .delete(target, actor.id)
+            strandedProxyId = await edge
+              .assertBackendEgress()
+              .then(() => edge.proxies.delete(target, actor.id))
               .then(() => null)
               .catch(() => target);
           }
@@ -3902,6 +4455,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               await tx.accessRequests.deleteByApi(api.id);
               await tx.apiPlugins.deleteByApi(api.id);
               await tx.apiGatewayPlugins.deleteByApi(api.id);
+              await tx.settings.delete(recoveryKey(api.id));
               await tx.apiViewers.deleteByApi(api.id);
               await tx.apiSpecChanges.deleteByApi(api.id);
               await tx.apiSpecs.deleteByApi(api.id);
@@ -4384,6 +4938,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     subject: string,
     api?: Pick<ApiRecord, 'id' | 'slug' | 'agents'>,
     preserved?: EdgePluginConfig[],
+    beforeWrite?: (document: Record<string, unknown>) => Promise<void>,
   ): Promise<{ id: string; specId: string }> {
     const submitted = await buildSpecDocument(document, proxyBody, api);
     if (preserved && Array.isArray(submitted['x-ferrum-plugins'])) {
@@ -4393,6 +4948,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         return prior ? { ...operatorOwnedFields(prior), ...plugin } : plugin;
       });
     }
+    await beforeWrite?.(submitted);
     const ref = await edge.apiSpecs.create(submitted, subject);
     const id = ref.proxy_id || proxyBody.id;
     return { id, specId: ref.id || (await specIdForProxy(id)) };
@@ -4441,6 +4997,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     specId: string | null,
     subject: string,
     api?: Pick<ApiRecord, 'id' | 'slug' | 'agents'>,
+    beforeWrite?: (document: Record<string, unknown>) => Promise<void>,
   ): Promise<void> {
     if (level !== 'routes') {
       await binder.mutateProxyLocked(
@@ -4458,15 +5015,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     // timeouts and method list written at create — reverts to its default.
     const proxy = await edge.proxies.get(proxyId);
     if (!proxy) throw notFound('Proxy', proxyId);
-    await edge.apiSpecs.replace(
-      id,
-      await buildSpecDocument(
-        document,
-        { ...submittableProxyBody(proxy), listen_path: listenPath },
-        api,
-      ),
-      subject,
+    const submitted = await buildSpecDocument(
+      document,
+      { ...submittableProxyBody(proxy), listen_path: listenPath },
+      api,
     );
+    await beforeWrite?.(submitted);
+    await edge.apiSpecs.replace(id, submitted, subject);
   }
 
   /**
@@ -4508,10 +5063,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * whatever the half-built replacement left (deleting the proxy cascades its
    * plugin configs, and the spec and validator with them) and rebuilds the mode
    * the API came from, through the same staging-and-cutover path, before
-   * rethrowing. If *that* fails too the API has no gateway object at all and
-   * the captured document is the only copy left, so it is logged and written to
-   * an {@link AuditAction.API_GATEWAY_REPAIR_REQUIRED} row instead of being
-   * dropped.
+   * rethrowing. If that fails too, the API is repair_required with its original
+   * proxy id retained. An encrypted settings journal tracks the original
+   * resources and each partial rebuild; audit and log retain identifiers only.
    *
    * **The returned undo step carries the same guarantee.** It runs the same
    * destructive `restore()`, and the caller's compensation loop swallows what
@@ -4542,62 +5096,33 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     if (!before) throw notFound('Proxy', proxyId);
     const beforePlugins = await binder.listByProxy(proxyId);
     const carried = handOwnedPlugins(beforePlugins);
-    const body = { ...submittableProxyBody(before), id: proxyId };
-    const listenPath = listenPathFor(api.namespace, api.slug);
-    // Validate the recorded role ids while their owning spec still exists.
-    // A failed conversion must retain operator resource fields on recreation.
-    if (api.agents) await buildSpecDocument(document, body, api);
-    const preservedAgentPlugins = beforePlugins.filter(
-      (plugin) => plugin.api_spec_id === before.api_spec_id,
-    );
-
-    /**
-     * Build the proxy back in `level`, **on a fresh staging path**, put its
-     * plugins back, and only then move it onto `listenPath`.
-     *
-     * The staging detour is what keeps the rebuild fail-closed. A recreate
-     * straight onto the real path would serve the API unauthenticated for the
-     * round trips it takes to restore the plugins — the same window publishing
-     * used to have, on an API that already has consumers. This way the real
-     * path answers `404` for the whole rebuild instead, which is the failure
-     * direction a portal is allowed to choose.
-     */
+    const recovery: ConversionRecovery = {
+      apiId: api.id,
+      namespace,
+      shape: deploymentShape(api),
+      proxy: before,
+      plugins: beforePlugins,
+      document,
+      attempt: null,
+    };
+    // Durable and encrypted before teardown, including operator-managed fields.
+    await saveConversionRecovery(api, recovery);
+    if (api.agents) await buildSpecDocument(document, submittableProxyBody(before), api);
     const rebuild = async (
       level: SpecEnforcementLevel,
       agents: ApiAgents | null,
       forward = false,
-    ): Promise<void> => {
-      const stagingPath = stagingListenPath(api.namespace);
-      const staged = {
-        ...body,
-        listen_path: stagingPath,
-        ...(forward && nextAgents
-          ? { allowed_methods: proxyAllowedMethods(nextMethods, api.cors) }
-          : {}),
-      };
-      let specId: string | null = null;
-      if (level === 'routes') {
-        specId = (
-          await createSpecOwnedProxy(
-            document,
-            staged,
-            subject,
-            { ...api, agents },
-            forward ? undefined : preservedAgentPlugins,
-          )
-        ).specId;
-      } else {
-        // A document read off the wire, not one composed here: `EdgeProxyWrite`
-        // models only the narrow subset Nexus sets, and every unmodelled key an
-        // operator added has to survive the rebuild.
-        await edge.proxies.create(staged as unknown as EdgeProxyWrite, subject);
-      }
-      await binder.restorePluginsLocked(proxyId, carried, subject);
-      await cutOverToListenPathLocked(proxyId, level, listenPath, document, specId, subject, {
-        ...api,
+    ): Promise<void> =>
+      rebuildConversionLocked(
+        api,
+        recovery,
+        level,
         agents,
-      });
-    };
+        subject,
+        forward ? nextMethods : api.allowed_methods,
+        undefined,
+        !forward,
+      );
 
     /**
      * Whether the portal still has a row for this API.
@@ -4630,19 +5155,21 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
      */
     const restore = async (level: SpecEnforcementLevel): Promise<void> => {
       await edge.assertBackendEgress();
-      await edge.proxies.delete(proxyId, subject).catch(() => undefined);
+      await removeConversionPartialLocked(recovery, subject);
       if (!(await apiStillExists())) return;
       await rebuild(level, api.agents ?? null);
+      await store.transaction((tx) => tx.settings.delete(recoveryKey(api.id)));
     };
 
     // Deleting the proxy cascades its plugin configs and, when it was
     // spec-owned, the spec and generated validator too — so the recreate starts
     // from nothing whichever direction it runs in.
-    await edge.assertBackendEgress();
-    await edge.proxies.delete(proxyId, subject);
     try {
+      await edge.assertBackendEgress();
+      await edge.proxies.delete(proxyId, subject);
       if (!(await apiStillExists())) throw notFound('API', api.id);
       await rebuild(target, nextAgents, true);
+      await store.transaction((tx) => tx.settings.delete(recoveryKey(api.id)));
     } catch (error) {
       // The original is already gone, and the caller has no undo step for this
       // conversion yet — put the API back here or it stays off the gateway.
@@ -4666,6 +5193,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
 
     return async () => {
       try {
+        await saveConversionRecovery(api, recovery);
         await restore(api.spec_enforcement);
       } catch (restoreError) {
         // The same invariant as the forward path's `catch`, on the path that
@@ -4696,9 +5224,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * The audit row and error log contain only identifiers and plugin names. The
    * captured Edge resources can contain infrastructure credentials and other
    * operator-managed secrets, so neither snapshot may cross into these broadly
-   * readable sinks. The `apis` row itself is deliberately not moved to a failed
-   * state — the API's catalog entry, its grants and its credentials are all
-   * still valid, and only the gateway objects need rebuilding.
+   * readable sinks. The API keeps its catalog entry, grants and credentials,
+   * but its gateway state becomes repair_required. The reference and encrypted
+   * settings journal retain the original identity and partial rebuild configuration
+   * for recovery.
    *
    * `phase` says which of the two failures produced the row so one PATCH cannot
    * be mistaken for two incidents: `conversion` is a rebuild that failed and
@@ -4748,17 +5277,20 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     };
     deps.log?.(
       { api_id: input.api.id, ...details },
-      'the spec_enforcement conversion left the API with no gateway proxy and could not be restored',
+      'the spec_enforcement conversion left an incomplete gateway deployment requiring recovery',
     );
-    await audit
-      .record(
+    await store.transaction(async (tx) => {
+      const latest = await tx.apis.findById(input.api.id);
+      if (!latest || latest.ferrum_proxy_id !== input.proxyId) return;
+      await tx.apis.update(input.api.id, { gateway_state: 'repair_required' });
+      await audit.forStore(tx).record(
         { id: input.actor.id, role: input.actor.role },
         AuditAction.API_GATEWAY_REPAIR_REQUIRED,
         { type: 'api', id: input.api.id },
         details,
         input.ip,
-      )
-      .catch(() => undefined);
+      );
+    });
   }
 
   /**
@@ -4769,8 +5301,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * match the portal. It carries identifiers and step names only — never a
    * captured Edge resource, for the reason {@link reportUnrepairableProxy}
    * gives — and `phase: 'compensation'` separates it from the two the
-   * enforcement conversion writes, which describe an API with no proxy at all
-   * rather than one whose fields drifted.
+   * enforcement conversion writes, which also retain a recovery journal for
+   * a missing or partially rebuilt deployment.
    *
    * `attempted_changes` is what the mutation had got as far as changing when it
    * failed, and `steps` names the ones that could not be undone, so an operator

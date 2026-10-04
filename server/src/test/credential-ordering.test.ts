@@ -37,23 +37,24 @@ import {
 
 import type { CreateInput, CredentialRecord } from '../db/store.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
+import { mockBasicPasswordHash } from './mock-ferrum-edge.js';
 
 const TYPES: readonly CredentialType[] = ['keyauth', 'basicauth', 'jwt'];
 
 /** The field each type's Edge entry carries its material in. */
 const ENTRY_FIELD: Record<CredentialType, string> = {
   keyauth: 'key',
-  basicauth: 'password',
+  basicauth: 'password_hash',
   jwt: 'secret',
 };
 
-/** The plaintext a show-once payload carries, for comparison with the gateway. */
+/** Stored material corresponding to a show-once payload, for gateway comparison. */
 function materialOf(secret: ShowOnceSecret): string {
   switch (secret.type) {
     case 'keyauth':
       return secret.key ?? '';
     case 'basicauth':
-      return secret.password ?? '';
+      return mockBasicPasswordHash(secret.password ?? '');
     case 'jwt':
       return secret.jwt_secret ?? '';
     default:
@@ -163,7 +164,7 @@ describe('credential positions follow the append ordinal', () => {
     return [first, second];
   }
 
-  /** Plaintext material live on the mock gateway for a user and type, in array order. */
+  /** Stored material live on the mock gateway for a user and type, in array order. */
   function liveMaterial(userId: string, type: CredentialType): string[] {
     const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(userId));
     return (consumer?.credentials[type] ?? []).map((entry) => String(entry[ENTRY_FIELD[type]]));

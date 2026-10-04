@@ -519,6 +519,7 @@ export async function buildServer(
   });
   const publishing = createPublishingService({
     config,
+    crypto,
     store: deps.store,
     edge: deps.edge,
     audit,

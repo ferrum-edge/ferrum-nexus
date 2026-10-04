@@ -141,15 +141,15 @@ describe('credential durability across a lost gateway write', () => {
   }
 
   /**
-   * The basicauth material live on the mock gateway, in array order.
+   * The basicauth hashes live on the mock gateway, in array order.
    *
    * Read straight off the stored consumer, not through a projection: Edge
-   * omits `basicauth` from every response, which is exactly why the portal
+   * omits `basicauth` from ordinary responses, which is exactly why the portal
    * cannot identify one of its entries.
    */
-  function livePasswords(userId: string): string[] {
+  function livePasswordHashes(userId: string): string[] {
     const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(userId));
-    return (consumer?.credentials.basicauth ?? []).map((entry) => String(entry.password));
+    return (consumer?.credentials.basicauth ?? []).map((entry) => String(entry.password_hash));
   }
 
   async function statusOf(credentialId: string): Promise<string | undefined> {
@@ -562,7 +562,7 @@ describe('credential durability across a lost gateway write', () => {
     assert.equal(response.statusCode, 201, response.body);
     const restored = response.json<IssueCredentialResponse>();
     const consumerId = restored.credential.ferrum_consumer_id;
-    const preRestore = livePasswords(user.user.id);
+    const preRestore = livePasswordHashes(user.user.id);
     assert.equal(preRestore.length, 1);
 
     // The same Nexus-only restore as above. `basicauth` appears in no read
@@ -581,7 +581,7 @@ describe('credential durability across a lost gateway write', () => {
     });
     assert.ok(issued.statusCode >= 500, issued.body);
 
-    const passwords = livePasswords(user.user.id);
+    const passwords = livePasswordHashes(user.user.id);
     assert.equal(passwords.length, 2, 'nothing was deleted on the mirror’s word');
     assert.equal(passwords[0], preRestore[0], 'the pre-restore password survived');
 
@@ -592,7 +592,12 @@ describe('credential durability across a lost gateway write', () => {
     assert.equal(rollback[0]?.details.withdrawn, false, 'the orphan is recorded, not guessed at');
     assert.equal(rollback[0]?.details.credential_type, 'basicauth');
     assert.equal(rollback[0]?.details.append_index, 0);
-    assert.equal(rollback[0]?.details.last4, passwords[1]?.slice(-4));
+    const append = harness.edge
+      .callsTo('POST', `/consumers/${consumerId}/credentials/basicauth`)
+      .at(-1);
+    const password = (append?.body as { password: string }).password;
+    assert.match(passwords[1]!, /^hmac_sha256:[0-9a-f]{64}$/);
+    assert.equal(rollback[0]?.details.last4, password.slice(-4));
     assert.equal(rollback[0]?.ip, '127.0.0.1', 'and the address that caused it');
     const stranded = rollback[0]?.details.stranded_credential_id;
     assert.ok(typeof stranded === 'string', 'the orphan has a row');

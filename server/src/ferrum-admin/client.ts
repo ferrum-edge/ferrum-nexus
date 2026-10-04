@@ -91,6 +91,7 @@ import type {
   EdgeProxyWrite,
   EdgeUnhealthyTarget,
 } from './types.js';
+import { consumerMetadataCredentials } from './consumer-metadata.js';
 
 /** Minimal logger surface, so this module does not depend on Fastify. */
 export interface EdgeLogger {
@@ -234,7 +235,7 @@ export interface FerrumAdminClient {
     ): Promise<{ consumer: EdgeConsumer; created: boolean }>;
     create(body: EdgeConsumerWrite, subject?: string): Promise<EdgeConsumer>;
     /**
-     * Whole-resource replace from `verification()`, with its matching row tag.
+     * Metadata replace from `verification()` via the owner projection and original row tag.
      * No automatic retry: a stale snapshot must be read and recomputed.
      */
     replace(
@@ -341,6 +342,8 @@ export interface FerrumAdminClient {
      * Edge spec id and looks it up from the proxy whenever one is needed.
      */
     findByProxy(proxyId: string): Promise<EdgeApiSpecSummary | null>;
+    /** Stored document, used to verify deployment configuration and spec ownership. */
+    documentByProxy(proxyId: string): Promise<Record<string, unknown> | null>;
     /** Delete the spec — and, by cascade, its proxy and every plugin on it. */
     delete(id: string, subject?: string): Promise<void>;
   };
@@ -448,9 +451,9 @@ export const ADMIN_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
 
 type BodyValidator = (value: unknown) => boolean;
 
-/** Edge v1 row tags are quoted 128-bit keyed MACs, never wildcard/weak/list tags. */
+/** Opaque single strong entity-tag syntax; this does not validate its MAC or freshness. */
 function isStrongRowTag(value: unknown): value is string {
-  return typeof value === 'string' && /^"[0-9a-f]{32}"$/.test(value);
+  return typeof value === 'string' && /^"[\x21\x23-\x7e]+"(?![\s\S])/.test(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -492,6 +495,32 @@ function isConsumerBody(value: unknown): boolean {
     }) &&
     isStringArray(value.acl_groups)
   );
+}
+
+/** Verification preserves historical JSON credential shapes, unlike ordinary reads. */
+function isVerifiedConsumerBody(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !isIdentifier(value.id) ||
+    !isIdentifier(value.namespace) ||
+    !isString(value.username) ||
+    !isRecord(value.credentials) ||
+    !isStringArray(value.acl_groups)
+  ) {
+    return false;
+  }
+  for (const [type, credential] of Object.entries(value.credentials)) {
+    const entries = Array.isArray(credential) ? credential : [credential];
+    for (const entry of entries) {
+      if (!isRecord(entry)) continue;
+      if (type === 'basicauth' && 'password' in entry) return false;
+      const field = type === 'keyauth' ? 'key' : 'secret';
+      if (['keyauth', 'jwt', 'hmac_auth'].includes(type) && entry[field] === '[REDACTED]') {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 function isProxyBody(value: unknown): boolean {
@@ -561,7 +590,7 @@ function responseContract(method: string, path: string): ResponseContract {
   let body: BodyValidator;
   switch (resource) {
     case 'consumers':
-      body = isConsumerBody;
+      body = parts[2] === 'verification' ? isVerifiedConsumerBody : isConsumerBody;
       break;
     case 'proxies':
       body = isProxyBody;
@@ -574,7 +603,9 @@ function responseContract(method: string, path: string): ResponseContract {
       break;
     case 'api-specs':
       body = isSpecRefBody;
-      if (method === 'GET') {
+      if (method === 'GET' && parts[1] === 'by-proxy') {
+        body = (value) => isRecord(value) && isString(value.openapi) && isRecord(value.paths);
+      } else if (method === 'GET') {
         body = (value) =>
           isRecord(value) &&
           Array.isArray(value.items) &&
@@ -1640,14 +1671,7 @@ export function createFerrumAdminClient(
           },
         );
         if (!consumer) return null;
-        if (
-          !isStrongRowTag(etag) ||
-          JSON.stringify(consumer.credentials).includes('[REDACTED]') ||
-          consumer.credentials.basicauth?.some(
-            (entry) =>
-              !isRecord(entry) || typeof entry.password_hash !== 'string' || 'password' in entry,
-          )
-        ) {
+        if (!isStrongRowTag(etag)) {
           throw protocolError(200, 'invalid_consumer_verification', 'GET', '/consumers/verification');
         }
         return { consumer, etag };
@@ -1725,7 +1749,12 @@ export function createFerrumAdminClient(
           throw edgeError('A credential-complete consumer snapshot and strong row tag are required');
         }
         return callRequired<EdgeConsumer>('PUT', `/consumers/${encodeURIComponent(id)}`, {
-          body,
+          body: {
+            ...body,
+            ...(body.credentials === undefined
+              ? {}
+              : { credentials: consumerMetadataCredentials(body.credentials) }),
+          },
           subject,
           ifMatch,
         });
@@ -1892,6 +1921,13 @@ export function createFerrumAdminClient(
           query: { proxy_id: proxyId, limit: 1 },
         });
         return page.items[0] ?? null;
+      },
+      async documentByProxy(proxyId: string): Promise<Record<string, unknown> | null> {
+        return call<Record<string, unknown>>(
+          'GET',
+          `/api-specs/by-proxy/${encodeURIComponent(proxyId)}`,
+          { allow404: true },
+        );
       },
       async delete(id: string, subject?: string): Promise<void> {
         await call('DELETE', `/api-specs/${encodeURIComponent(id)}`, { subject, allow404: true });

@@ -445,6 +445,79 @@ const REDACTED = '[REDACTED]';
 const REDACTABLE_TYPES = new Set(['keyauth', 'jwt', 'hmac_auth']);
 const KNOWN_CREDENTIAL_TYPES = new Set(['basicauth', 'keyauth', 'jwt', 'hmac_auth', 'mtls_auth']);
 
+/** Deterministic fixture HMAC, separate from the Admin JWT key. Never stores plaintext. */
+export function mockBasicPasswordHash(password: string): string {
+  return (
+    'hmac_sha256:' +
+    createHmac('sha256', 'mock-basic-hmac-secret-0123456789abcdef').update(password).digest('hex')
+  );
+}
+
+/** Owner closed single-field/Basic input validation and Basic write preparation. */
+function prepareCredentials(
+  credentials: Record<string, Record<string, unknown>[]>,
+  maxCredentials: number,
+): Record<string, Record<string, unknown>[]> | null {
+  const prepared: Record<string, Record<string, unknown>[]> = {};
+  for (const [type, entries] of Object.entries(credentials)) {
+    if (
+      !/^[A-Za-z0-9_-]{1,64}$/.test(type) ||
+      !Array.isArray(entries) ||
+      entries.length === 0 ||
+      entries.length > maxCredentials
+    ) {
+      return null;
+    }
+    const result: Record<string, unknown>[] = [];
+    for (const entry of entries) {
+      if (!isRecord(entry)) return null;
+      for (const value of Object.values(entry)) {
+        if (
+          typeof value === 'string' &&
+          ([...value].length > 4096 || /[\u0000-\u001f\u007f-\u009f]/.test(value))
+        ) {
+          return null;
+        }
+      }
+      if (type === 'basicauth') {
+        if (Object.keys(entry).length !== 1) return null;
+        if (typeof entry.password === 'string' && entry.password !== '') {
+          if (
+            [...entry.password].length > 4096 ||
+            /[\u0000-\u001f\u007f-\u009f]/.test(entry.password)
+          ) {
+            return null;
+          }
+          result.push({ password_hash: mockBasicPasswordHash(entry.password) });
+          continue;
+        }
+        if (
+          typeof entry.password_hash !== 'string' ||
+          !/^hmac_sha256:[0-9a-f]{64}$/.test(entry.password_hash)
+        ) {
+          return null;
+        }
+      }
+      const field = type === 'mtls_auth' ? 'identity' : type === 'keyauth' ? 'key' : 'secret';
+      if (['jwt', 'hmac_auth', 'mtls_auth'].includes(type) && Object.keys(entry).length !== 1) {
+        return null;
+      }
+      if (KNOWN_CREDENTIAL_TYPES.has(type) && type !== 'basicauth') {
+        const value = entry[field];
+        if (typeof value !== 'string' || value.trim() === '') return null;
+        if (REDACTABLE_TYPES.has(type) && value === REDACTED) return null;
+        if (type === 'jwt' && [...value].length < 32) return null;
+        if (type === 'hmac_auth' && [...value].filter((char) => char.trim() !== '').length < 32) {
+          return null;
+        }
+      }
+      result.push({ ...entry });
+    }
+    prepared[type] = result;
+  }
+  return prepared;
+}
+
 /**
  * Every field Edge's `Proxy` deserializer accepts, from the openapi `Proxy`
  * schema minus the `#[serde(skip)]` derived-only members (`dispatch_kind`,
@@ -1539,21 +1612,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Apply Edge's closed read projection to a stored consumer. */
-function project(consumer: StoredConsumer): Record<string, unknown> {
+/** Owner projection: legacy single objects are wrapped; hidden/empty types are omitted. */
+function projectCredentials(
+  stored: Record<string, Record<string, unknown>[]>,
+): Record<string, Record<string, unknown>[]> {
   const credentials: Record<string, Record<string, unknown>[]> = {};
-  for (const [type, entries] of Object.entries(consumer.credentials)) {
-    if (type === 'basicauth') continue; // omitted entirely
-    if (!KNOWN_CREDENTIAL_TYPES.has(type)) continue; // unknown types are omitted
+  for (const [type, value] of Object.entries(stored)) {
+    const entries = (Array.isArray(value) ? value : [value]).filter(isRecord);
     if (type === 'mtls_auth') {
-      credentials[type] = entries.map((entry) => ({ identity: entry.identity }));
-      continue;
-    }
-    if (REDACTABLE_TYPES.has(type)) {
+      const visible = entries.filter(
+        (entry) =>
+          typeof entry.identity === 'string' &&
+          entry.identity.trim() !== '' &&
+          [...entry.identity].length <= 4096 &&
+          !/[\u0000-\u001f\u007f-\u009f]/.test(entry.identity),
+      );
+      if (visible.length > 0) {
+        credentials[type] = visible.map((entry) => ({ identity: entry.identity }));
+      }
+    } else if (REDACTABLE_TYPES.has(type) && entries.length > 0) {
       const field = type === 'keyauth' ? 'key' : 'secret';
       credentials[type] = entries.map(() => ({ [field]: REDACTED }));
     }
   }
+  return credentials;
+}
+
+/** Apply Edge's closed read projection to a stored consumer. */
+function project(consumer: StoredConsumer): Record<string, unknown> {
+  const credentials = projectCredentials(consumer.credentials);
   return {
     id: consumer.id,
     username: consumer.username,
@@ -1971,13 +2058,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             'Consumer identity or credential conflicts with another Consumer in the namespace',
           );
         }
+        const submitted = normaliseCredentials(body.credentials);
+        const credentials =
+          submitted === null ? null : prepareCredentials(submitted, maxCredentials);
+        if (credentials === null) return fail(res, 400, 'Invalid consumer credentials');
         const stored: StoredConsumer = {
           id: newId,
           ...(isRecord(body.labels) && { labels: body.labels as Record<string, string> }),
           username,
           namespace,
           custom_id: customId,
-          credentials: normaliseCredentials(body.credentials),
+          credentials,
           acl_groups: Array.isArray(body.acl_groups) ? body.acl_groups.map(String) : [],
           created_at: nowIso(),
           updated_at: nowIso(),
@@ -2023,8 +2114,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             'Consumer identity or credential conflicts with another Consumer in the namespace',
           );
         }
-        const credentials = mergeCredentialsOnReplace(stored.credentials, body.credentials);
-        if (credentials === null) return fail(res, 400, 'Unmatched redacted credential');
+        const merged = mergeCredentialsOnReplace(stored.credentials, body.credentials);
+        const credentials = merged === null ? null : prepareCredentials(merged, maxCredentials);
+        if (credentials === null) return fail(res, 400, 'Invalid consumer credentials');
         if (isRecord(body.labels)) stored.labels = body.labels as Record<string, string>;
         stored.username = username;
         stored.custom_id = customId;
@@ -2045,7 +2137,14 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       return fail(res, 404, 'Not found');
     }
     if (!stored) return fail(res, 404, 'Consumer not found');
-    if (!KNOWN_CREDENTIAL_TYPES.has(credentialType)) {
+    if (
+      !KNOWN_CREDENTIAL_TYPES.has(credentialType) &&
+      !(
+        method === 'DELETE' &&
+        indexSegment === undefined &&
+        Object.hasOwn(stored.credentials, credentialType)
+      )
+    ) {
       return fail(res, 400, `Unknown credential type '${credentialType}'`);
     }
 
@@ -2072,7 +2171,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       if (credentialType === 'keyauth' && body.key === REDACTED) {
         return fail(res, 400, '[REDACTED] is not accepted as credential material');
       }
-      entries.push({ ...body });
+      const prepared = prepareCredentials({ [credentialType]: [body] }, maxCredentials);
+      if (prepared === null) return fail(res, 400, 'Invalid credential entry');
+      entries.push(...prepared[credentialType]!);
       stored.credentials[credentialType] = entries;
       stored.updated_at = nowIso();
       return send(res, 200, project(stored));
@@ -2084,7 +2185,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       if (list.length > maxCredentials) {
         return fail(res, 400, 'FERRUM_MAX_CREDENTIALS_PER_TYPE exceeded');
       }
-      stored.credentials[credentialType] = list.map((entry) => ({ ...(entry as object) }));
+      if (!list.every(isRecord)) return fail(res, 400, 'Invalid credential entry');
+      const prepared = prepareCredentials({ [credentialType]: list }, maxCredentials);
+      if (prepared === null) return fail(res, 400, 'Invalid credential entry');
+      stored.credentials[credentialType] = prepared[credentialType]!;
       stored.updated_at = nowIso();
       return send(res, 200, project(stored));
     }
@@ -2096,14 +2200,16 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     return fail(res, 405, 'Method not allowed');
   }
 
-  function normaliseCredentials(value: unknown): Record<string, Record<string, unknown>[]> {
-    if (!isRecord(value)) return {};
+  function normaliseCredentials(value: unknown): Record<string, Record<string, unknown>[]> | null {
+    if (value === undefined) return {};
+    if (!isRecord(value)) return null;
     const result: Record<string, Record<string, unknown>[]> = {};
     for (const [type, entries] of Object.entries(value)) {
       if (Array.isArray(entries)) {
-        result[type] = entries.filter(isRecord).map((entry) => ({ ...entry }));
-      } else if (isRecord(entries)) {
-        result[type] = [{ ...entries }];
+        if (!entries.every(isRecord)) return null;
+        result[type] = entries.map((entry) => ({ ...entry }));
+      } else {
+        return null;
       }
     }
     return result;
@@ -2120,22 +2226,45 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     incoming: unknown,
   ): Record<string, Record<string, unknown>[]> | null {
     const submitted = normaliseCredentials(incoming);
+    if (submitted === null) return null;
+    const projected = projectCredentials(stored);
     const result: Record<string, Record<string, unknown>[]> = {};
 
     for (const [type, entries] of Object.entries(submitted)) {
-      const previous = stored[type] ?? [];
+      const storedValue = stored[type];
+      const previous = Array.isArray(storedValue)
+        ? storedValue
+        : isRecord(storedValue)
+          ? [storedValue]
+          : [];
       if (
         entries.some((entry, index) => {
           const field = type === 'keyauth' ? 'key' : 'secret';
-          return entry[field] === REDACTED && previous[index] === undefined;
+          return (
+            REDACTABLE_TYPES.has(type) &&
+            Object.keys(entry).length === 1 &&
+            entry[field] === REDACTED &&
+            previous[index] === undefined
+          );
         })
       ) {
         return null;
       }
+      if (type === 'mtls_auth' && JSON.stringify(entries) === JSON.stringify(projected.mtls_auth)) {
+        result[type] = storedValue!;
+        continue;
+      }
       result[type] = entries.map((entry, index) => {
         const field = type === 'keyauth' ? 'key' : 'secret';
-        if (entry[field] === REDACTED) {
+        if (
+          REDACTABLE_TYPES.has(type) &&
+          Object.keys(entry).length === 1 &&
+          entry[field] === REDACTED
+        ) {
           const restored = previous[index];
+          if (restored && type !== 'keyauth' && typeof restored.secret === 'string') {
+            return { secret: restored.secret };
+          }
           return restored ? { ...restored } : { ...entry };
         }
         return { ...entry };
@@ -2144,7 +2273,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     // Types absent from the read projection are preserved when omitted.
     for (const [type, entries] of Object.entries(stored)) {
       if (result[type] !== undefined) continue;
-      if (type === 'basicauth' || !KNOWN_CREDENTIAL_TYPES.has(type)) result[type] = entries;
+      if (projected[type] === undefined) result[type] = entries;
     }
     return result;
   }

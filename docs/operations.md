@@ -240,7 +240,19 @@ exact allowed/blocked class arrays, evaluation order and cross-field consistency
 Unknown/missing/malformed metadata, auth/network/timeout failures, cached answers,
 CP-only/admission-only, unserved/no data plane, mode `both` and any allow-CIDR overlay
 refuse writes. Preflight precedes destructive conversions, staging and ACL building;
-compensation repeats admission and records repair-required failures.
+compensation repeats admission and records repair-required failures. A failed
+enforcement conversion retains its original proxy reference and sets
+`gateway_state=repair_required`, even when that id still exists on a staging path.
+The encrypted `gateway_recovery:<namespace>:<api_id>` setting records original
+operator fields, plugin ids and partial rebuild paths/spec ownership. It uses the
+existing settings repository on all four stores; no schema migration is needed.
+`POST /api/apis/:id/restore-gateway` repeats admission, takes the API and proxy
+leases, and verifies resources against that record before removing/rebuilding them.
+Unknown or changed resources require operator reconciliation and remain untouched.
+Only a deployment matching the catalog clears the condition; recovery checks it
+on staging before cutover, then again before the fenced completion transaction.
+Reconciliation takes the same proxy lease and retains conversion-owned references
+through missing-resource gaps, so repair cannot release those identities.
 
 `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` retains its existing DNS-admission opt-in:
 internal and unresolvable names are permitted, and Edge still decides reachability.
@@ -1181,7 +1193,17 @@ Fail closed, resolve the condition and obtain a new coherent snapshot; never ret
 an old restore body under a newly fetched tag. Verify durable/live state after an
 uncertain acknowledgement before retrying. These are distinct from strong **row**
 `If-Match` used by Nexus's three whole-consumer callers with
-`GET /consumers/{id}/verification`.
+`GET /consumers/{id}/verification`. Tokens are opaque quoted visible ASCII,
+validated as one strong entity tag and preserved verbatim; syntax checking does not
+validate their MAC. Weak, wildcard, list, empty, control/non-ASCII and ambiguous
+duplicate tags refuse the write. Consumer metadata uses Edge's masked projection:
+hidden Basic/custom state is restored by the owner under that original row fence,
+while historical JWT/HMAC entries are canonicalized to their supported secret field.
+The complete verification shape can contain historical empty arrays, objects or
+other JSON values. Only exact `[REDACTED]` at keyauth/JWT/HMAC secret sites is a
+reserved marker; substrings and custom metadata remain valid. Basic plaintext is
+never accepted by verification; an invalid hidden Basic shape reports
+`consumer_metadata_unrepresentable` before a PUT, without credential details.
 
 Nexus has no namespace Admin restore caller. Its API gateway restore rebuilds
 individual resources and repeats egress admission. Conditional Edge backup does not
@@ -1554,6 +1576,10 @@ These subkeys are HKDF-derived from `NEXUS_SECRET_KEY`:
 | Session token HMAC (HMAC-SHA-256)    | `nexus-session-hmac-v1`    | `sessions.token_hash`, `email_verification_tokens.token_hash`                                             |
 | Single sign-on attempt (AES-256-GCM) | `nexus-sso-transaction-v1` | The `nexus_sso` cookie of a sign-in in progress (10 minutes at most)                                      |
 
+Encrypted gateway recovery journals use the same settings subkey. Include every
+`gateway_recovery:<namespace>:<api_id>` row in settings re-encryption during rotation;
+losing that key makes recovery refuse instead of guessing at resource ownership.
+
 Passwords are hashed with scrypt and a random salt, independent of the key, so
 password sign-in survives a rotation.
 
@@ -1715,7 +1741,7 @@ so alert on each:
 
 | Row                           | Meaning                                                                                                                                                                                                                                            |
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api.gateway_repair_required` | A change could not be undone. `details.phase`: `conversion` or `rollback` means a `spec_enforcement` rebuild left the API with **no proxy**; `compensation` means the proxy exists but fields listed in `details.steps` may not match the catalog. |
+| `api.gateway_repair_required` | A change could not be undone. `conversion` or `rollback` leaves a missing or partial deployment tracked as `repair_required`; `compensation` means fields listed in `details.steps` may not match the catalog.                                     |
 | `api.publish_rollback`        | A publish reached the gateway, then failed. `withdrawn: true` needs nothing. `withdrawn: false` means `details.stranded_proxy_id` may still be live on a staging path with no `apis` row.                                                          |
 | `api.plugin_rollback`         | A palette plugin change failed. `restored: true` needs nothing. `restored: false` means the config in `details.plugin_config_id` may still hold the attempted change; `details.step_errors` says which step failed.                                |
 
@@ -1734,6 +1760,11 @@ Repairs:
 - **`api.publish_rollback`, `withdrawn: false`:** check `GET /proxies/{id}`. If
   it exists, nothing in the portal owns it; delete it. Nexus never reuses a
   stranded id, so this cannot affect the provider's retry.
+- **`api.gateway_repair_required`, `phase: "conversion"` or `"rollback"`:** restore
+  the API through `POST /api/apis/:id/restore-gateway` after fresh policy permits.
+  Keep its encrypted recovery setting and original proxy reference until completion.
+  If resource validation refuses, reconcile the named partial resources on Edge;
+  do not clear the flag merely because that proxy id exists.
 - **`api.gateway_repair_required`, `phase: "compensation"`:** compare the fields
   in `details.steps` with the catalog and fix the gateway, or ask the provider
   to re-submit the `PATCH`.

@@ -2584,8 +2584,8 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           removedGroups.push(...(live?.acl_groups ?? []));
 
           if (live) {
-            // Groups first, preserving the complete stored credentials under
-            // their matching row tag. Secrets remain transient here.
+            // Groups first through the owner metadata projection, fenced by
+            // the original complete row tag. Secrets remain transient here.
             await edge.consumers.replace(
               id,
               {

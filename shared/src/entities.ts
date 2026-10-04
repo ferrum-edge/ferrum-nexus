@@ -99,10 +99,10 @@ export type ApiVisibility = 'public' | 'internal' | 'private';
  *
  * `deployed` is the ordinary state and what every API reads back as until
  * something says otherwise. `repair_required` is written when the portal has
- * *established* that the gateway no longer serves the API — today only by a
- * reconciliation pass answering `404` for the stored `ferrum_proxy_id`, or by
- * a restore attempt that failed partway — and it stays until a restore
- * succeeds.
+ * *established* a missing or incomplete deployment: a confirmed missing
+ * reference, a failed restore, or conversion compensation that could not finish.
+ * An owned partial proxy keeps its reference for safe recovery. The flag stays
+ * until a validated restore succeeds.
  *
  * It is deliberately a separate field from {@link Api.ferrum_proxy_id} rather
  * than being derived from it. Clearing a dead proxy reference is what makes the
@@ -264,7 +264,7 @@ export interface Api {
    * Whether the gateway is believed to be serving this API.
    *
    * `repair_required` is an actionable condition, not a cosmetic badge: the
-   * public path answers `404`, approved clients' credentials reach nothing,
+   * deployment is missing or incomplete (including an owned staging proxy),
    * and only `POST /api/apis/:id/restore-gateway` clears it.
    */
   gateway_state: ApiGatewayState;

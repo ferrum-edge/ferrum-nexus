@@ -115,8 +115,9 @@ export interface EdgeConsumer {
  *
  * `namespace` is intentionally absent: the `X-Ferrum-Namespace` header
  * overwrites it on the wire, and sending unknown/read-only fields risks a 400.
- * Whole-resource `PUT` uses EdgeConsumerReplacement, built from a complete
- * verification snapshot and sent with its matching strong row tag.
+ * Metadata `PUT` uses EdgeConsumerReplacement: a complete verification snapshot
+ * supplies the original row tag; the owner projection preserves hidden groups
+ * and canonicalizes supported legacy single-field credentials.
  */
 export interface EdgeConsumerWrite {
   labels?: Record<string, string>;
@@ -127,14 +128,14 @@ export interface EdgeConsumerWrite {
   acl_groups?: string[];
 }
 
-/** Complete authoritative server-only row, including hidden/custom credential fields. */
+/** Complete authoritative server-only row, including historical JSON credential values. */
 export type EdgeVerifiedConsumer = Omit<EdgeConsumer, 'credentials'> & {
-  credentials: Record<string, Record<string, unknown>[]>;
+  credentials: Record<string, unknown>;
 };
 
-/** Whole-consumer writes must preserve the credential-complete snapshot. */
+/** Metadata writes use the owner projection under the original complete row tag. */
 export type EdgeConsumerReplacement = Omit<EdgeConsumerWrite, 'credentials'> & {
-  credentials?: Record<string, Record<string, unknown>[]>;
+  credentials?: Record<string, unknown>;
 };
 
 /* ── Proxies ────────────────────────────────────────────────────────────── */

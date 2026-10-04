@@ -31,7 +31,11 @@ import {
   type TestSession,
 } from './helpers.js';
 
-import { mockCorsPreflight, mockWebsocketAllowed } from './mock-ferrum-edge.js';
+import {
+  mockBasicPasswordHash,
+  mockCorsPreflight,
+  mockWebsocketAllowed,
+} from './mock-ferrum-edge.js';
 
 const CORS_HEADERS = [
   'Accept',
@@ -2911,7 +2915,10 @@ describe('publishing', () => {
 
       const stored = harness.edge.consumerByUsername(`nexus-test-${apiId}`);
       assert.equal(stored?.credentials.basicauth?.length, 1, 'the old consumer was replaced');
-      assert.equal(stored?.credentials.basicauth?.[0]?.password, secondBody.secret.password);
+      assert.equal(
+        stored?.credentials.basicauth?.[0]?.password_hash,
+        mockBasicPasswordHash(secondBody.secret.password!),
+      );
 
       const row = (await harness.auditRows('test_consumer.create')).find(
         (entry) => entry.target_id === apiId && entry.details.replaced === true,
