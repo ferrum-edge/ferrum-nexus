@@ -133,7 +133,11 @@ describe('proposed immutable service-manifest consumer', () => {
         url,
         payload: { ...payload, padding: 'x'.repeat(33 * 1024) },
       });
-      assert.equal(oversized.statusCode, 413, oversized.body);
+      assert.equal(oversized.statusCode, 400, oversized.body);
+      assert.deepEqual(oversized.json(), {
+        error: { code: 'VALIDATION_FAILED', message: 'Request body is too large' },
+      });
+      assert.equal(harness.edge.requests.length, before, 'oversized preview never contacts Edge');
       for (const suffix of ['apply', 'publish', 'diagnostics']) {
         assert.equal(
           (
