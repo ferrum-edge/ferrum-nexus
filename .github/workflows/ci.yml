@@ -56,6 +56,56 @@ jobs:
           fi
       - run: npm run build
 
+  # Stage 1 of #449: preserve the supported floor and existing check contexts.
+  # An owner-approved floor change must update the declarations, matrix and assertions together.
+  supported-node-minimum:
+    name: Supported Node minimum
+    needs: checks
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Report the declared minimum and require matrix qualification
+        if: ${{ always() }}
+        shell: bash
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+        run: |
+          printf 'Existing checks matrix result: `%s`.\n' \
+            "${CHECKS_RESULT:-missing}" >> "$GITHUB_STEP_SUMMARY"
+          declared_range=$(jq -er '.engines.node | select(type == "string")' package.json)
+          declared_nvm=$(cat .nvmrc)
+          {
+            printf 'Declared Node range (package.json): `%s`.\n' "$declared_range"
+            printf 'Declared Node version (.nvmrc): `%s`.\n' "$declared_nvm"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Bind this report to the exact current matrix; reject include/exclude or other drift.
+          checks_matrix=$(sed -n '/^  checks:$/,/^    steps:$/p' .github/workflows/ci.yml \
+            | sed -n '/^      matrix:$/,$p')
+          expected_matrix=$(printf '%s\n' '      matrix:' \
+            "        node: ['22.14.0', '22', '24']" '    steps:')
+          if [ "$declared_range" != '>=22.14' ] || [ "$declared_nvm" != '22.14' ] \
+            || [ "$checks_matrix" != "$expected_matrix" ]; then
+            echo 'Minimum qualification: unverified declaration/matrix alignment.' \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo '::error::Update the minimum declarations, checks matrix and gate together.'
+            exit 1
+          fi
+
+          if [ "$CHECKS_RESULT" != 'success' ]; then
+            echo 'Node 22.14.0 minimum qualification: not successful.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::error::The complete checks matrix must succeed to qualify the Node minimum.'
+            exit 1
+          fi
+          echo 'Node 22.14.0 minimum qualified by the successful checks matrix (22.14.0, 22, 24).' \
+            >> "$GITHUB_STEP_SUMMARY"
+
   # Non-blocking: coverage is reported for visibility, not enforced as a gate.
   # Keep this out of the required-checks list.
   coverage:
