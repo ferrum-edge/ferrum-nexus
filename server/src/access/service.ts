@@ -98,7 +98,7 @@
  * grant restored then would be `active` with no group — and the next rebuild
  * would hand back the access both revocations withdrew. The rollback reads
  * the consumer under its key, which every group writer holds, and restores
- * only a grant whose group is still there.
+ * only a grant with at least one of its authorization groups still there.
  */
 
 import {
@@ -661,7 +661,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   }
 
   /**
-   * Whether `group` is still on the gateway consumer `consumerId`. Read by a
+   * Whether any authorization group of the grant remains on `consumerId`. Read by a
    * caller holding that consumer's key, so no group writer can change the
    * answer before the caller is done.
    *
@@ -677,8 +677,11 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   ): Promise<boolean> {
     try {
       const live = await edge.consumers.get(consumerId);
+      // A partial removal still leaves access to withdraw. Requiring every
+      // group would strand a live REST-only or MCP-only membership behind a
+      // revoked grant, so the provider could never retry its cleanup.
       return (
-        live !== null && [group, ...tools].every((entry) => (live.acl_groups ?? []).includes(entry))
+        live !== null && [group, ...tools].some((entry) => (live.acl_groups ?? []).includes(entry))
       );
     } catch (error) {
       deps.log?.(
@@ -724,8 +727,18 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     const consumerId = consumer.ferrum_consumer_id;
     return edge.serializePerKey(consumerId, async () => {
       const api = await store.apis.findById(claim.api_id);
-      const enrolled = api?.agents?.operations.some((tool) => tool.id !== undefined);
-      const tools = enrolled ? mcpGroupsForGrant(claim.api_id, claim.approved_tools) : [];
+      const published = new Set(
+        api?.agents?.operations.flatMap((tool) => (tool.id ? [tool.id] : [])) ?? [],
+      );
+      // Expired exposure groups cannot authorize any current tool. Their mere
+      // presence must not resurrect a grant after REST membership is gone.
+      const tools =
+        published.size > 0
+          ? mcpGroupsForGrant(
+              claim.api_id,
+              claim.approved_tools?.filter((id) => published.has(id)) ?? null,
+            )
+          : [];
       return underLifecycle(await groupStillOn(consumerId, claim.acl_group, tools));
     });
   }

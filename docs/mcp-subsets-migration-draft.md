@@ -31,6 +31,23 @@ providers must revoke and approve a new request to authorize changed exposure. N
 all-tools holders intentionally continue to receive published tools. Cosmetic tool
 description edits and byte-identical spec republish retain IDs.
 
+Explicit gateway consumer repair replays REST and approved MCP groups from fresh active
+grants for that exact account or application identity, under its provisioning, consumer
+and account lifecycle keys. Null/omitted approval restores MCP-all, explicit empty
+restores REST alone, and explicit subsets restore their recorded exposure groups only.
+It never substitutes current exposure IDs for expired approvals, restores MCP groups
+when agent exposure is disabled, or replays access for a disabled account. Application
+disable and catalog retirement still revoke nothing. Repair revokes the lost consumer's
+live credential metadata and reports the total REST plus MCP group count; holders must
+issue replacement credentials. Existing consumers and operator groups are left intact.
+
+A failed targeted revocation restores its own claimed grant/request if any of its REST
+or approved MCP groups survives, so partial membership can be cleaned up by retrying.
+Restoration is refused when no authorization group remains (expired exposure groups
+alone do not count), the consumer is missing, the grantee is disabled or another
+revocation claim has replaced this one. An unreadable gateway retains the conservative
+rollback behavior.
+
 This deliberate fail-closed behavior can interrupt explicit-subset integrations after
 spec changes. Root must assess this tradeoff and the drain/enrollment plan before merge.
 Hosted checks and acceptance must pass on the exact pushed head; no local execution
