@@ -421,6 +421,103 @@ services: {{app: {{"image": {PIN}, command: "docker pull alpine:3"}}}}
 x-note: {{run: docker pull alpine:3}}
 '''})
 
+    def test_repository_compose_files_accept_quoted_ports(self):
+        for path in ['docker/docker-compose.example.yml', 'e2e/docker-compose.yml']:
+            source = (SCANNER.parent.parent / path).read_text()
+            with self.subTest(path=path):
+                self.assert_scan({path: source})
+            pinned_images = [
+                row for row in source.splitlines()
+                if row.startswith('    image: ') and '@sha256:' in row
+            ]
+            self.assertTrue(pinned_images, path)
+            # Check the first and last declarations so a parser failure or
+            # a skipped document suffix cannot mask an operational image.
+            for image in [pinned_images[0], pinned_images[-1]]:
+                with self.subTest(path=path, image=image):
+                    self.assert_scan(
+                        {path: source.replace(image, '    image: alpine:3', 1)},
+                        ['unpinned image reference: alpine:3'],
+                    )
+
+    def test_block_quoted_scalar_sequences_remain_metadata(self):
+        source = r'''
+x-notes:
+  - 'image: alpine:3'
+  - "run: docker pull alpine:3"
+  - 'can''t parse: uses: docker://alpine:3'
+  - "note: \"image\": alpine:3"
+services:
+  app:
+    ports:
+      - '127.0.0.1:8787:8787'
+      - '127.0.0.1:${MAILPIT_HTTP_PORT:-8025}:8025'
+      - "127.0.0.1:8787:8787"
+      - "127.0.0.1:${MAILPIT_HTTP_PORT:-8025}:8025"
+    labels:
+      - 'note=image: alpine:3'
+      - "note=run: docker pull alpine:3"
+    environment:
+      NOTE: 'uses: docker://alpine:3'
+    "image": TARGET
+'''
+        self.assert_scan({'deploy/compose.yml': source.replace('TARGET', PIN)})
+        self.assert_scan(
+            {'deploy/compose.yml': source.replace('TARGET', 'alpine:3')},
+            ['unpinned image reference: alpine:3'],
+        )
+
+    def test_quoted_workflow_metadata_preserves_operational_steps(self):
+        prefix = '''
+name: 'image: alpine:3'
+on:
+  push:
+    paths:
+      - 'run: docker pull alpine:3'
+      - "uses: docker://alpine:3"
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        note:
+          - 'can''t parse: image: alpine:3'
+          - "parallel: [run: docker pull alpine:3]"
+'''
+        cases = [
+            '    steps:\n      - name: "run: docker pull alpine:3"\n'
+            '        run: "docker pull TARGET"\n',
+            '    steps:\n      - name: "uses: docker://alpine:3"\n'
+            "        'uses': docker://TARGET\n",
+            '    steps: ["run":"docker pull TARGET"]\n',
+            '    steps:\n      - parallel:\n          - parallel:\n'
+            '              - name: "run: docker pull alpine:3"\n'
+            '                "run": docker pull TARGET\n',
+            "    steps: [parallel: [parallel: ['uses':docker://TARGET]]]\n",
+        ]
+        for steps in cases:
+            source = prefix + steps
+            with self.subTest(steps=steps):
+                self.assert_scan({'.github/workflows/test.yml': source.replace('TARGET', PIN)})
+                self.assert_scan(
+                    {'.github/workflows/test.yml': source.replace('TARGET', 'alpine:3')},
+                    ['unpinned image reference: alpine:3'],
+                )
+
+    def test_invalid_quoted_block_scalars_fail_closed(self):
+        cases = [
+            ("'unterminated: metadata", 'unterminated YAML quoted scalar'),
+            ('"unterminated: metadata', 'unterminated YAML quoted scalar'),
+            (r'"invalid: \q"', 'unsupported YAML escape:'),
+            ("'complete: scalar' suffix", 'unexpected content after YAML value'),
+        ]
+        for scalar, message in cases:
+            with self.subTest(scalar=scalar):
+                self.assert_scan({
+                    'deploy/compose.yml': 'x-notes:\n  - ' + scalar
+                    + f'\nservices:\n  app:\n    image: {PIN}\n',
+                }, [message])
+
     def test_workflow_compact_flow_pairs_retain_step_context(self):
         prefix = 'name: pins\non: push\njobs:\n  check:\n    runs-on: ubuntu-latest\n'
         cases = [

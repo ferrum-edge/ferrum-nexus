@@ -733,7 +733,9 @@ class YamlFlow:
         return YamlNode(kind, value, line)
 
 
-yaml_key = r'''(?:"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^:{}\[\],#]+?)'''
+# A leading quote commits to a quoted key. Never fall back to a plain key
+# ending at a colon inside a quoted scalar (e.g. a block sequence port).
+yaml_key = r'''(?:"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|(?!["'])[^:{}\[\],#]+?)'''
 yaml_mapping = re.compile(rf'^({yaml_key})\s*:(.*)')
 
 
