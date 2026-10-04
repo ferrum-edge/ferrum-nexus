@@ -406,6 +406,7 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
             // in the same hour finds the row and queues nothing.
             const queued = await tx.emailOutbox.enqueue({
               to_email: user.email,
+              recipient_user_id: user.id,
               subject: rendered.subject,
               body_html: rendered.html,
               body_text: rendered.text,

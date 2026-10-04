@@ -98,6 +98,7 @@ import {
   clampPageSize,
   DEFAULT_SPEC_ENFORCEMENT,
   emptySpecChangeReport,
+  isReleasedEmail,
   isSpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
 
@@ -758,6 +759,7 @@ function mapOutbox(row: Row): EmailOutboxRecord {
     id: str(row._id),
     generation: str(row.generation ?? ''),
     to_email: str(row.to_email),
+    recipient_user_id: strOrNull(row.recipient_user_id),
     subject: str(row.subject),
     body_html: str(row.body_html),
     body_text: str(row.body_text),
@@ -1467,6 +1469,30 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
     indexes: USER_IDENTITY_INDEXES,
     apply: (db: Db): Promise<void> => createIndexes(db, USER_IDENTITY_INDEXES),
   },
+  {
+    id: '007_outbox_recipient',
+    indexes: [],
+    apply: async (db: Db): Promise<void> => {
+      await db
+        .collection(COLLECTIONS.emailOutbox)
+        .updateMany(
+          { recipient_user_id: { $exists: false } },
+          { $set: { recipient_user_id: null } },
+        );
+    },
+  },
+  {
+    id: '008_email_lifecycle_fence',
+    indexes: [],
+    apply: async (db: Db): Promise<void> => {
+      await db
+        .collection(COLLECTIONS.users)
+        .updateMany(
+          { email_lifecycle_fence: { $exists: false } },
+          { $set: { email_lifecycle_fence: '' } },
+        );
+    },
+  },
 ];
 
 /**
@@ -1724,6 +1750,11 @@ class MongoStore implements NexusStore {
     fn: (tx: MongoStore) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<T> {
+    if (options?.requireAtomic && !this.ctx.supportsTransactions) {
+      return Promise.reject(
+        conflict('This operation requires a MongoDB replica set for atomic transactions'),
+      );
+    }
     // Already inside a transaction body — join it rather than nesting.
     if (this.session) return fn(this);
 
@@ -1823,6 +1854,16 @@ class MongoStore implements NexusStore {
       return row ? mapUser(row) : null;
     },
 
+    lockEmailRecipient: async (id, email) => {
+      if (isReleasedEmail(email)) return false;
+      const result = await this.col(COLLECTIONS.users).updateOne(
+        { _id: id, email: email.trim().toLowerCase() } as Filter<NexusDoc>,
+        { $set: { email_lifecycle_fence: newId() } },
+        this.opts,
+      );
+      return result.modifiedCount > 0;
+    },
+
     findManyByIds: async (ids) => {
       if (ids.length === 0) return [];
       const docs = await this.col(COLLECTIONS.users)
@@ -1849,6 +1890,7 @@ class MongoStore implements NexusStore {
       const guard: Record<string, unknown> = { _id: id };
       if (expected.role !== undefined) guard.role = expected.role;
       if (expected.status !== undefined) guard.status = expected.status;
+      if (expected.email !== undefined) guard.email = expected.email.trim().toLowerCase();
       const query = guard as Filter<NexusDoc>;
 
       const set = setDoc(userUpdateFields(patch));
@@ -3705,43 +3747,79 @@ class MongoStore implements NexusStore {
   /* ── emailOutbox ──────────────────────────────────────────────────────── */
 
   readonly emailOutbox: EmailOutboxRepo = {
-    enqueue: async (input) => {
-      const key = input.idempotency_key ?? null;
-      if (key !== null) {
-        const existing = await this.emailOutbox.findByIdempotencyKey(key);
-        if (existing) return { entry: existing, created: false };
-      }
-      const meta = stamps({ id: input.id });
-      try {
-        await this.col(COLLECTIONS.emailOutbox).insertOne(
+    cancelForReleasedAddress: async (email) =>
+      this.inTransaction(async (tx) => {
+        const query = {
+          to_email: equalsInsensitive(email.trim()),
+          status: { $in: ['pending', 'sending'] },
+        } as Filter<NexusDoc>;
+        const rows = await tx.col(COLLECTIONS.emailOutbox).find(query, tx.opts).toArray();
+        if (rows.some((row) => row.status === 'sending')) {
+          throw conflict('Email delivery is in progress; retry after it settles');
+        }
+        if (rows.length === 0) return 0;
+        // A concurrent worker claim writes the same documents and forces this
+        // transaction to retry; the retry observes sending and refuses release.
+        const result = await tx.col(COLLECTIONS.emailOutbox).updateMany(
+          { _id: { $in: rows.map((row) => row._id) }, status: 'pending' } as Filter<NexusDoc>,
           {
-            _id: meta.id,
-            to_email: input.to_email,
-            subject: input.subject,
-            body_html: input.body_html,
-            body_text: input.body_text,
-            status: 'pending',
-            attempts: 0,
-            generation: '',
-            next_attempt_at: input.next_attempt_at ?? meta.created_at,
-            last_error: null,
-            idempotency_key: key,
-            created_at: meta.created_at,
-            updated_at: meta.updated_at,
-          } as NexusDoc,
-          this.opts,
+            $set: {
+              status: 'failed',
+              next_attempt_at: null,
+              last_error: 'address-released',
+              updated_at: nowIso(),
+              generation: newId(),
+            },
+          },
+          tx.opts,
         );
-      } catch (error) {
-        // Lost a race on the idempotency key — return the winner.
+        return result.modifiedCount;
+      }),
+
+    enqueue: async (input) => {
+      const persist = async (tx: MongoStore) => {
+        const key = input.idempotency_key ?? null;
         if (key !== null) {
-          const existing = await this.emailOutbox.findByIdempotencyKey(key);
+          const existing = await tx.emailOutbox.findByIdempotencyKey(key);
           if (existing) return { entry: existing, created: false };
         }
-        throw error;
-      }
-      const entry = await this.emailOutbox.findById(meta.id);
-      if (!entry) throw new Error('emailOutbox.enqueue: row vanished immediately after insert');
-      return { entry, created: true };
+        const eligible =
+          !input.recipient_user_id ||
+          (await tx.users.lockEmailRecipient(input.recipient_user_id, input.to_email));
+        const meta = stamps({ id: input.id });
+        try {
+          await tx.col(COLLECTIONS.emailOutbox).insertOne(
+            {
+              _id: meta.id,
+              to_email: input.to_email,
+              recipient_user_id: input.recipient_user_id ?? null,
+              subject: input.subject,
+              body_html: input.body_html,
+              body_text: input.body_text,
+              status: eligible ? 'pending' : 'failed',
+              attempts: 0,
+              generation: '',
+              next_attempt_at: eligible ? (input.next_attempt_at ?? meta.created_at) : null,
+              last_error: eligible ? null : 'recipient-address-changed',
+              idempotency_key: key,
+              created_at: meta.created_at,
+              updated_at: meta.updated_at,
+            } as NexusDoc,
+            tx.opts,
+          );
+        } catch (error) {
+          // Lost a race on the idempotency key — return the winner.
+          if (key !== null) {
+            const existing = await tx.emailOutbox.findByIdempotencyKey(key);
+            if (existing) return { entry: existing, created: false };
+          }
+          throw error;
+        }
+        const entry = await tx.emailOutbox.findById(meta.id);
+        if (!entry) throw new Error('emailOutbox.enqueue: row vanished immediately after insert');
+        return { entry, created: true };
+      };
+      return input.recipient_user_id ? this.inTransaction(persist) : persist(this);
     },
 
     findById: async (id) => {
@@ -3756,42 +3834,57 @@ class MongoStore implements NexusStore {
       return row ? mapOutbox(row) : null;
     },
 
-    claimDue: async (now, limit) => {
-      // `findOneAndUpdate` is atomic on its own, so the claim needs no
-      // transaction: a row can only be flipped out of `pending` once, and two
-      // workers therefore never claim the same one.
-      const wanted = Math.max(1, Math.floor(limit));
-      const claimed: EmailOutboxRecord[] = [];
-      for (let i = 0; i < wanted; i += 1) {
-        const doc = await this.col(COLLECTIONS.emailOutbox).findOneAndUpdate(
-          {
-            status: 'pending',
-            $or: [{ next_attempt_at: null }, { next_attempt_at: { $lte: now } }],
-          } as Filter<NexusDoc>,
-          // An aggregation-pipeline update: `$inc` would be equivalent, but
-          // `NexusDoc`'s `unknown` index signature hides `attempts` from the
-          // driver's numeric-field inference, and this form stays typed.
-          [
+    claimDue: async (now, limit) =>
+      this.inTransaction(async (tx) => {
+        const candidates = await tx
+          .col(COLLECTIONS.emailOutbox)
+          .find(
             {
-              $set: {
-                status: 'sending',
-                generation: newId(),
-                updated_at: nowIso(),
-                attempts: { $add: [{ $ifNull: ['$attempts', 0] }, 1] },
+              status: 'pending',
+              $or: [{ next_attempt_at: null }, { next_attempt_at: { $lte: now } }],
+            } as Filter<NexusDoc>,
+            tx.opts,
+          )
+          .sort(OUTBOX_CLAIM_ORDER)
+          .limit(Math.max(1, Math.floor(limit)))
+          .toArray();
+        const claimed: EmailOutboxRecord[] = [];
+        for (const candidate of candidates) {
+          const entry = mapOutbox(candidate as Row);
+          const eligible =
+            !entry.recipient_user_id ||
+            (await tx.users.lockEmailRecipient(entry.recipient_user_id, entry.to_email));
+          const doc = await tx.col(COLLECTIONS.emailOutbox).findOneAndUpdate(
+            { _id: entry.id, status: 'pending' } as Filter<NexusDoc>,
+            [
+              {
+                $set: {
+                  status: eligible ? 'sending' : 'failed',
+                  next_attempt_at: eligible ? entry.next_attempt_at : null,
+                  generation: newId(),
+                  updated_at: nowIso(),
+                  last_error: {
+                    $literal: eligible ? entry.last_error : 'recipient-address-changed',
+                  },
+                  attempts: { $add: [{ $ifNull: ['$attempts', 0] }, 1] },
+                },
               },
-            },
-          ],
-          {
-            ...this.opts,
-            sort: OUTBOX_CLAIM_ORDER,
-            returnDocument: 'after',
-          },
-        );
-        const row = asRow(doc);
-        if (!row) break;
-        claimed.push(mapOutbox(row));
-      }
-      return claimed;
+            ],
+            { ...tx.opts, returnDocument: 'after' },
+          );
+          const row = asRow(doc);
+          if (eligible && row) claimed.push(mapOutbox(row));
+        }
+        return claimed;
+      }),
+
+    beginDelivery: async (entry, at) => {
+      const result = await this.col(COLLECTIONS.emailOutbox).updateOne(
+        { _id: entry.id, generation: entry.generation, status: 'sending' } as Filter<NexusDoc>,
+        { $set: { updated_at: at } },
+        this.opts,
+      );
+      return result.matchedCount > 0;
     },
 
     // Settling matches the claimed generation while it is still `sending`, so a

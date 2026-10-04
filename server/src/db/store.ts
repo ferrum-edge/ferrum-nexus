@@ -159,6 +159,8 @@ export interface TransactionOptions {
    * body atomic against anything it was not already.
    */
   readonly retry?: boolean;
+  /** Refuse degraded MongoDB standalone transactions before running the body. */
+  readonly requireAtomic?: boolean;
 }
 
 /* ── Stored record shapes ───────────────────────────────────────────────── */
@@ -423,6 +425,8 @@ export interface EmailOutboxRecord extends EmailOutboxEntry {
   body_text: string;
   /** Opaque ownership token, replaced on every claim. Internal only. */
   generation: string;
+  /** Intended account, independent of who later holds its former address. */
+  recipient_user_id: Uuid | null;
 }
 
 /**
@@ -754,6 +758,13 @@ export interface UserRepo {
   findByEmail(email: string): Promise<UserRecord | null>;
   /** Batch lookup preserving no particular order; missing ids are simply absent. */
   findManyByIds(ids: Uuid[]): Promise<UserRecord[]>;
+  /**
+   * Write a fresh internal fence only while this account still owns `email`.
+   * Join the enqueue/claim/handoff transaction: the write locks the account on
+   * SQL and causes a MongoDB write conflict with address release, even when
+   * the transaction's snapshot predates it. Released addresses never match.
+   */
+  lockEmailRecipient(id: Uuid, email: string): Promise<boolean>;
   /** Patch mutable columns. Returns `null` when the user does not exist. */
   update(id: Uuid, patch: UpdateInput<UserRecord>): Promise<UserRecord | null>;
   /**
@@ -774,7 +785,7 @@ export interface UserRepo {
    */
   updateIfMatches(
     id: Uuid,
-    expected: { role?: Role; status?: UserStatus },
+    expected: { role?: Role; status?: UserStatus; email?: string },
     patch: UpdateInput<UserRecord>,
   ): Promise<UserRecord | null>;
   /** Record a successful sign-in without rewriting the rest of the row. */
@@ -1529,6 +1540,8 @@ export interface NotificationPreferenceRepo {
 /** Payload accepted by {@link EmailOutboxRepo.enqueue}. */
 export interface EnqueueEmailInput {
   to_email: string;
+  /** Bind account mail to its original recipient; null only for non-account mail. */
+  recipient_user_id?: Uuid | null;
   subject: string;
   body_html: string;
   body_text: string;
@@ -1542,6 +1555,13 @@ export interface EnqueueEmailInput {
 
 /** Transactional email queue drained by the outbox worker. */
 export interface EmailOutboxRepo {
+  /**
+   * Cancel pending mail to a released address, including legacy unbound rows.
+   * Refuse with CONFLICT if any row is sending. Must join the release transaction;
+   * The caller must lock the recipient account before scanning, as enqueue,
+   * claim and handoff do; outbox row locks alone cannot fence new inserts.
+   */
+  cancelForReleasedAddress(email: string): Promise<number>;
   /**
    * Enqueue a message as `pending` with `attempts = 0`. When
    * `idempotency_key` is set and already present, the existing row is returned
@@ -1558,6 +1578,11 @@ export interface EmailOutboxRepo {
    * previous holder cannot settle with.
    */
   claimDue(now: IsoTimestamp, limit: number): Promise<EmailOutboxRecord[]>;
+  /**
+   * Refresh exactly this sending generation immediately before SMTP. Must join
+   * the transaction that locks its recipient. False means the claim moved on.
+   */
+  beginDelivery(entry: EmailOutboxRecord, at: IsoTimestamp): Promise<boolean>;
   /**
    * Delivery succeeded: `status = 'sent'`, `next_attempt_at = null`.
    *

@@ -522,6 +522,7 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
                 });
                 const result = await tx.emailOutbox.enqueue({
                   to_email: recipient.email,
+                  recipient_user_id: recipient.id,
                   subject: rendered.subject,
                   body_html: rendered.html,
                   body_text: rendered.text,

@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { after, before, describe, it } from 'node:test';
 
 import type { ApiErrorBody, MassEmailResponse } from '@ferrum-nexus/shared';
 
 import { DEFAULT_MAX_MASS_EMAIL_BYTES, DEFAULT_MAX_MASS_EMAILS_PER_DAY } from '../config/index.js';
+import type { NexusStore, TransactionOptions } from '../db/store.js';
 import { NexusError } from '../lib/errors.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -862,7 +864,74 @@ describe('mass email chunked fan-out', () => {
       for (const index of [1, 2, 3, 4]) {
         await harness.registerUser({ email: `chunk-client-${index}@example.test`, role: 'client' });
       }
-      const transactions = t.mock.method(harness.store, 'transaction');
+      const recipients = await harness.store.users.listRecipients({ status: 'active' });
+      interface TransactionObservation {
+        emails: string[];
+        fences: { id: string; email: string }[];
+        committed: boolean;
+      }
+      const context = new AsyncLocalStorage<TransactionObservation>();
+      const observations: TransactionObservation[] = [];
+      const events: string[] = [];
+      const transact = harness.store.transaction.bind(harness.store);
+      // Register the continuation outside the store's transaction context too:
+      // clearing only this test's AsyncLocalStorage would still join SQLite's
+      // active transaction and falsely call that an independent writer.
+      let startIndependent!: () => void;
+      let writerStarted = false;
+      const independent = new Promise<void>((resolve) => {
+        startIndependent = resolve;
+      }).then(() =>
+        transact(async (tx) => {
+          await tx.settings.set('chunk-writer', 'ran');
+          events.push('independent-writer');
+        }),
+      );
+      const transactions = t.mock.method(
+        harness.store,
+        'transaction',
+        async <T>(
+          body: (tx: NexusStore) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> => {
+          // Nested recipient fencing joins the current transaction. Observe
+          // committed outer bodies, rather than counting wrapper invocations.
+          if (context.getStore()) return transact(body, options);
+          const observation: TransactionObservation = { emails: [], fences: [], committed: false };
+          observations.push(observation);
+          const result = await transact((tx) => context.run(observation, () => body(tx)), options);
+          observation.committed = true;
+          return result;
+        },
+      );
+      const enqueue = harness.store.emailOutbox.enqueue.bind(harness.store.emailOutbox);
+      const observeEnqueue: typeof enqueue = async (input) => {
+        const transaction = context.getStore();
+        assert.ok(transaction, 'fan-out inserts belong to a transaction');
+        transaction.emails.push(input.to_email);
+        events.push(`enqueue:${input.to_email}`);
+        const started = await harness.store.auditLogs.count({
+          action: 'admin.mass_email',
+          target_id: 'chunked-five',
+        });
+        assert.equal(started, 1, 'the campaign was charged before its first recipient');
+        if (!writerStarted) {
+          // Queue a writer from an unrelated context while the first chunk is
+          // open. It must get its turn before the next fan-out transaction.
+          writerStarted = true;
+          startIndependent();
+        }
+        return enqueue(input);
+      };
+      const enqueues = t.mock.method(harness.store.emailOutbox, 'enqueue', observeEnqueue);
+      const lockRecipient = harness.store.users.lockEmailRecipient.bind(harness.store.users);
+      const observeFence: typeof lockRecipient = async (id, email) => {
+        const transaction = context.getStore();
+        assert.ok(transaction, 'the recipient fence shares the insert transaction');
+        transaction.fences.push({ id, email });
+        return lockRecipient(id, email);
+      };
+      const fences = t.mock.method(harness.store.users, 'lockEmailRecipient', observeFence);
       const response = await harness.authed(admin, {
         method: 'POST',
         url: '/api/admin/mass-email',
@@ -873,7 +942,10 @@ describe('mass email chunked fan-out', () => {
           idempotency_key: 'chunked-five',
         },
       });
-      const calls = transactions.mock.callCount();
+      startIndependent();
+      await independent;
+      fences.mock.restore();
+      enqueues.mock.restore();
       transactions.mock.restore();
       assert.equal(response.statusCode, 200, response.body);
       assert.deepEqual(response.json<MassEmailResponse>(), {
@@ -881,10 +953,28 @@ describe('mass email chunked fan-out', () => {
         recipients: 5,
         batch_id: 'chunked-five',
       });
-      // One for the campaign's own row, then ⌈5 / 2⌉ = 3 for the fan-out.
-      assert.equal(calls, 4);
+      const fanOut = observations.filter((transaction) => transaction.emails.length > 0);
+      assert.ok(fanOut.length > 1, 'the audience spans several committed transactions');
+      for (const transaction of fanOut) {
+        assert.equal(transaction.committed, true);
+        assert.ok(transaction.emails.length <= 2, 'one transaction never exceeds one chunk');
+        assert.deepEqual(
+          transaction.fences.map((fence) => fence.email),
+          transaction.emails,
+          'each recipient gets its own address fence inside the chunk',
+        );
+      }
+      const byId = (a: { id: string }, b: { id: string }): number => a.id.localeCompare(b.id);
+      const observedRecipients = fanOut.flatMap((transaction) => transaction.fences);
+      assert.deepEqual(
+        observedRecipients.sort(byId),
+        recipients.map(({ id, email }) => ({ id, email })).sort(byId),
+      );
+      const turn = events.indexOf('independent-writer');
+      assert.ok(turn > 0, 'another writer ran after fan-out began');
+      assert.ok(turn < events.length - 1, 'another writer ran before fan-out finished');
       const outcome = (await harness.auditRows('admin.mass_email_complete'))[0];
-      assert.equal(outcome?.details.chunks, 3);
+      assert.equal(outcome?.details.chunks, fanOut.length);
       assert.equal(outcome?.details.enqueued, 5);
     } finally {
       await harness.close();

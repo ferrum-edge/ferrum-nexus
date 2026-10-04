@@ -15,7 +15,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
-import type { ApiErrorBody, User } from '@ferrum-nexus/shared';
+import type { ApiErrorBody } from '@ferrum-nexus/shared';
 
 import type { NexusStore, UserRepo } from '../db/store.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
@@ -122,7 +122,7 @@ describe('the last active super_admin, under concurrency', () => {
       payload: { role: 'super_admin' },
     });
     assert.equal(promoted.statusCode, 200, promoted.body);
-    return { ...session, user: promoted.json<{ user: User }>().user };
+    return harness.loginUser(email);
   }
 
   before(async () => {
@@ -299,7 +299,7 @@ describe('the last active super_admin across two instances', () => {
     });
     assert.equal(promoted.statusCode, 200, promoted.body);
     assert.equal(await owner.store.users.countActiveSuperAdmins(), 2);
-    return [incumbent, { ...peer, user: promoted.json<{ user: User }>().user }];
+    return [incumbent, await owner.loginUser(peer.user.email)];
   }
 
   /** Assert exactly one winner, a `LAST_SUPER_ADMIN` loser and a surviving admin. */

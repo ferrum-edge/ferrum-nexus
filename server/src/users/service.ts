@@ -42,6 +42,8 @@
 
 import {
   MIN_PASSWORD_LENGTH,
+  RELEASED_EMAIL_DOMAIN,
+  isReleasedEmail,
   roleAtLeast,
   type GatewayTeardownOutcome,
   type GatewayTeardownState,
@@ -78,7 +80,7 @@ import type {
 } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { conflict, forbidden, lastSuperAdmin, notFound, validationFailed } from '../lib/errors.js';
-import { nowIso } from '../lib/ids.js';
+import { newId, nowIso } from '../lib/ids.js';
 import {
   SUPER_ADMIN_LOCK_KEY,
   userLifecycleLockKey,
@@ -200,6 +202,13 @@ export interface UsersService {
   countPendingGatewayTeardowns(): Promise<number>;
   /** Admin account detail, including any outstanding gateway revocation. */
   getUser(targetId: Uuid): Promise<UserDetail>;
+  /** Release a disabled, unlinked account's address after completed gateway revocation. */
+  releaseAddress(
+    actor: UserRecord,
+    targetId: Uuid,
+    expectedEmail: string,
+    ip?: string | null,
+  ): Promise<User>;
   /** Admin update of another account, with the role and last-super-admin guards. */
   updateUser(
     actor: UserRecord,
@@ -244,6 +253,8 @@ export interface UsersServiceDeps {
   auth: AuthService;
   /** Strips the gateway identity of an account being disabled. */
   credentials: Pick<CredentialsService, 'disableGatewayAccess' | 'restoreGatewayAccess'>;
+  /** Applies the SSO claims trust rule to manual promotions inside the account transaction. */
+  assertManualAdminPromotionAllowed?: (tx: NexusStore, userId: Uuid) => Promise<void>;
   /**
    * Store-level cross-instance lock, built in the composition root from
    * `store.leases`. Every transition that can shrink the active `super_admin`
@@ -506,6 +517,80 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       };
     },
 
+    async releaseAddress(actor, targetId, expectedEmail, ip = null): Promise<User> {
+      if (actor.role !== 'super_admin') {
+        throw forbidden('Only a super admin can release an address');
+      }
+      const email = expectedEmail.trim().toLowerCase();
+      if (!email || email.length > 320 || isReleasedEmail(email)) {
+        throw validationFailed('Supply the account’s current email address');
+      }
+      // Mint outside the retryable body so one operation retains one tombstone.
+      const tombstone = `released-${newId()}@${RELEASED_EMAIL_DOMAIN}`;
+      return locks(userLifecycleLockKey(targetId), () =>
+        store.transaction(
+          async (tx) => {
+            const target = await tx.users.findById(targetId);
+            if (!target) throw notFound('User', targetId);
+            if (target.id === actor.id || target.role === 'super_admin') {
+              throw forbidden('A super admin account cannot have its address released');
+            }
+            if (target.status !== 'disabled' || target.email !== email) {
+              throw conflict('Disable the account and confirm its current address before release');
+            }
+            if ((await tx.userIdentities.listByUser(target.id)).length > 0) {
+              throw conflict('Remove every linked sign-in identity before releasing the address');
+            }
+            const job = await tx.gatewayTeardownJobs.findByUser(target.id);
+            if (job?.status !== 'done') {
+              throw conflict(
+                'Complete the account’s gateway revocation before releasing its address',
+              );
+            }
+            for (const status of ['active', 'retiring'] as const) {
+              if ((await tx.credentials.count({ user_id: target.id, status })) > 0) {
+                throw conflict('The account still has live credential metadata; retry revocation');
+              }
+            }
+            const row = await tx.users.updateIfMatches(
+              target.id,
+              { role: target.role, status: 'disabled', email },
+              { email: tombstone, email_verified: false },
+            );
+            if (!row) throw conflict('That account changed while releasing its address');
+            const terminatedSessions = await tx.sessions.deleteForUser(target.id);
+            const revokedResetLinks = await tx.verificationTokens.deleteForUser(
+              target.id,
+              'password_reset',
+            );
+            const revokedVerificationLinks = await tx.verificationTokens.deleteForUser(
+              target.id,
+              'email_verification',
+            );
+            // Refuse a sender already handing mail to SMTP; queued mail is
+            // cancelled and future stale account-bound mail fails at delivery.
+            const cancelledEmails = await tx.emailOutbox.cancelForReleasedAddress(email);
+            await audit.forStore(tx).record(
+              { id: actor.id, role: actor.role },
+              AuditAction.USER_ADDRESS_RELEASE,
+              { type: 'user', id: target.id },
+              {
+                from_email: email,
+                to_email: tombstone,
+                terminated_sessions: terminatedSessions,
+                revoked_reset_links: revokedResetLinks,
+                revoked_verification_links: revokedVerificationLinks,
+                cancelled_emails: cancelledEmails,
+              },
+              ip,
+            );
+            return toPublicUser(row);
+          },
+          { requireAtomic: true },
+        ),
+      );
+    },
+
     async updateUser(actor, targetId, patch, ip = null): Promise<UpdateUserResult> {
       const target = await store.users.findById(targetId);
       if (!target) throw notFound('User', targetId);
@@ -543,6 +628,8 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         changed.push('role');
       }
 
+      const privilegeIncreased =
+        update.role !== undefined && roleAtLeast(update.role, target.role) && roleChanged;
       const statusChanged = patch.status !== undefined && patch.status !== target.status;
       if (statusChanged && patch.status) {
         if (isElevated(target.role) && !roleAtLeast(actor.role, 'super_admin')) {
@@ -631,8 +718,20 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         job: GatewayTeardownJobRecord | null;
       }> =>
         store.transaction(async (tx) => {
+          const current = await tx.users.findById(target.id);
+          if (update.status === 'active' && current && isReleasedEmail(current.email)) {
+            throw conflict('An account whose address was released must remain disabled');
+          }
           if (guardsLastSuperAdmin && (await tx.users.countActiveSuperAdmins(target.id)) === 0) {
             throw lastSuperAdmin();
+          }
+          if (
+            roleChanged &&
+            !roleAtLeast(target.role, 'admin') &&
+            update.role !== undefined &&
+            roleAtLeast(update.role, 'admin')
+          ) {
+            await deps.assertManualAdminPromotionAllowed?.(tx, target.id);
           }
           const row = await tx.users.updateIfMatches(
             target.id,
@@ -661,6 +760,9 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
               'password_reset',
             );
           }
+          if (privilegeIncreased && update.status !== 'disabled') {
+            terminatedSessions = await tx.sessions.deleteForUser(target.id);
+          }
           // Re-enabling cancels any queued revocation — a retry must never strip
           // the credentials of an account that is live again.
           if (update.status === 'active') {
@@ -680,7 +782,9 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
             changed_fields: changed,
             ...(roleChanged ? { from_role: target.role, to_role: update.role } : {}),
             ...(statusChanged ? { from_status: target.status, to_status: update.status } : {}),
-            ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
+            ...(privilegeIncreased || terminatedSessions > 0
+              ? { terminated_sessions: terminatedSessions }
+              : {}),
             ...(revokedResetLinks > 0 ? { revoked_reset_links: revokedResetLinks } : {}),
             ...(job ? { gateway_teardown: 'queued' } : {}),
           };
@@ -730,14 +834,17 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
           return { row, job };
         });
 
-      // A status flip is also taken under the account's own lifecycle key, the
-      // one the credentials service holds while it registers a new gateway
-      // identity for the account. Without it a provider's first test consumer
-      // could pass its "owner is active" check, be disabled, and only then be
-      // registered — after the teardown had already enumerated nothing. Inside
+      // Every manual role change and status flip is taken under the account's
+      // lifecycle key. An automatic SSO link reads the role while taking this
+      // same key, so a role change cannot race between the link's review and
+      // commit. Status flips also order against gateway identity registration:
+      // a provider's first test consumer cannot pass its "owner is active"
+      // check and register after disable teardown has enumerated nothing. Inside
       // the super-admin key, never around it, so the lock order is fixed.
       const lifecycle = (): ReturnType<typeof transition> =>
-        statusChanged ? locks(userLifecycleLockKey(target.id), transition) : transition();
+        roleChanged || statusChanged
+          ? locks(userLifecycleLockKey(target.id), transition)
+          : transition();
       const result = guardsLastSuperAdmin
         ? await locks(SUPER_ADMIN_LOCK_KEY, lifecycle)
         : await lifecycle();

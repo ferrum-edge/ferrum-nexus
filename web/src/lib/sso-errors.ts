@@ -21,7 +21,7 @@ export const SSO_ERROR_MESSAGES: Readonly<Record<SsoErrorReason, string>> = {
   address_unproven:
     'Single sign-on can only be linked once this portal has confirmed your email address. Use Forgot password to reset your password, which confirms your address, then link again.',
   privileged_account:
-    'An account that is, or that this provider would make, an administrator is never linked automatically. Sign in the way you usually do, then link single sign-on from your profile. If you have no way to sign in to the account that holds your address, ask a super admin to review that account.',
+    'An account that is, or that this provider would make, an administrator is never linked automatically. Sign in the way you usually do, then link single sign-on from your profile. If you cannot sign in to the account holding your address, ask a super admin to review it and use Admin → Users → Release address after disabling it, removing its sign-in links and completing gateway revocation.',
   link_session_mismatch:
     'That link did not come back to the session that started it. Sign in and start the link again from your profile.',
   already_linked:

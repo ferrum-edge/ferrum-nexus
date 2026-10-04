@@ -63,18 +63,22 @@ import {
   createKeyedSerializer,
   SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
 } from '../lib/keyed-serializer.js';
+import { runAccountRecoveryContract } from './account-recovery-contract.js';
 import { runApplicationDeletionContract } from './application-deletion-contract.js';
 import { runApplicationViewerAuditContract } from './application-viewer-audit-contract.js';
 import { runDisableRevokesResetLinksContract } from './disable-revokes-reset-links-contract.js';
 import { faultInjectingStore } from './fault-injection.js';
 import { testCaptchaTransport } from './helpers.js';
 import { runMessageBudgetContract } from './message-budget-contract.js';
+import { runMailLifecycleContract } from './mail-lifecycle-contract.js';
 import { runOutboxFencingContract } from './outbox-fencing-contract.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
 import { runPrivilegedAuditContract } from './privileged-audit-contract.js';
 import { runRecoveryThrottleContract } from './recovery-throttle-contract.js';
 import { runResetLifecycleContract } from './reset-lifecycle-contract.js';
 import { runSealedOutboxContract } from './sealed-outbox-contract.js';
+import { runSsoSettingsLockContract } from './sso-settings-lock-contract.js';
+import { runSsoLinkSessionContract } from './sso-link-session-contract.js';
 import { runSettingsTransactionContract } from './settings-transaction-contract.js';
 import { runTeardownCancellationContract } from './teardown-cancellation-contract.js';
 import { runTeardownFencingContract } from './teardown-fencing-contract.js';
@@ -338,16 +342,20 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
  * whatever `makeStore` returns.
  */
 function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): void {
+  runAccountRecoveryContract(label, makeStore);
   runApplicationDeletionContract(label, makeStore);
   runApplicationViewerAuditContract(label, makeStore);
   runDisableRevokesResetLinksContract(label, makeStore);
   runMessageBudgetContract(label, makeStore);
+  runMailLifecycleContract(label, makeStore);
   runOutboxFencingContract(label, makeStore);
   runPasswordChangeContract(label, makeStore);
   runPrivilegedAuditContract(label, makeStore);
   runRecoveryThrottleContract(label, makeStore);
   runResetLifecycleContract(label, makeStore);
   runSealedOutboxContract(label, makeStore);
+  runSsoSettingsLockContract(label, makeStore);
+  runSsoLinkSessionContract(label, makeStore);
   runSettingsTransactionContract(label, makeStore);
   runTeardownCancellationContract(label, makeStore);
   runTeardownFencingContract(label, makeStore);
@@ -5056,6 +5064,19 @@ describe('mongodb standalone rule', () => {
     try {
       await store.init();
       await store.migrate();
+
+      let ranAtomicBody = false;
+      await assert.rejects(
+        () =>
+          store.transaction(
+            async () => {
+              ranAtomicBody = true;
+            },
+            { requireAtomic: true },
+          ),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+      assert.equal(ranAtomicBody, false);
 
       // The body still runs and still commits its writes; what it loses is
       // atomicity, which is the documented trade of the opt-in.

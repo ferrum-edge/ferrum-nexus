@@ -1,0 +1,6 @@
+{
+  "id": "008_email_lifecycle_fence",
+  "backend": "mongodb",
+  "description": "Snapshot of the 008_email_lifecycle_fence step, which backfills an internal account mail fence and declares no index",
+  "indexes": []
+}

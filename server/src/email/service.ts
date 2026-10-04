@@ -19,9 +19,10 @@
  * the same key returns the existing row and inserts nothing.
  */
 
-import type { Readable } from 'node:stream';
+import { Readable } from 'node:stream';
 
 import nodemailer from 'nodemailer';
+import SMTPConnection from 'nodemailer/lib/smtp-connection';
 
 import type { EmailTemplateKey } from '@ferrum-nexus/shared';
 
@@ -69,7 +70,8 @@ export interface OutboundMail {
  * relay may already hold the message, so the caller must not retry it.
  */
 export interface MailTransport {
-  send(mail: OutboundMail): Promise<void>;
+  /** Settle only after the operation cannot transmit any more message bytes. */
+  send(mail: OutboundMail, options?: { deadline?: number }): Promise<void>;
   close?(): Promise<void> | void;
 }
 
@@ -128,8 +130,8 @@ const SMTP_SOCKET_TIMEOUT_MS = 30_000;
 /**
  * Hard ceiling on one delivery attempt, in milliseconds.
  *
- * This is a deadline, not an estimate: {@link createSmtpTransport} races every
- * `send` against it, so a claim's lifetime is bounded whatever the relay does.
+ * The owned SMTP connection and MIME source are cancelled at this deadline
+ * before `send` settles, so no background operation outlives the claim.
  * The outbox worker re-exports it as `OUTBOX_SEND_BUDGET_MS` and sizes its
  * stale threshold against it — keep the two in step.
  */
@@ -152,8 +154,7 @@ class SmtpBudgetExceededError extends Error {
 /**
  * How far a delivery attempt got before it was cut off.
  *
- * - `unknown` — the message was never compiled, or nodemailer's shape changed
- *   and the hook below never ran;
+ * - `unknown` — MIME compilation has not finished;
  * - `before-data` — compiled, but the body was never streamed: the relay cannot
  *   have the message;
  * - `data-in-flight` — the body was partly written. SMTP only accepts a message
@@ -162,16 +163,6 @@ class SmtpBudgetExceededError extends Error {
  *   it is now unknowable without an acknowledgement.
  */
 type SendPhase = 'unknown' | 'before-data' | 'data-in-flight' | 'data-sent';
-
-/** Mutable per-attempt state the message-source hook writes to. */
-interface SendState {
-  phase: SendPhase;
-}
-
-/** The compiled MIME node, as far as this module needs it. */
-interface CompiledMessage {
-  createReadStream?: (...args: unknown[]) => Readable;
-}
 
 /** A protocol rejection carries the relay's reply; a timeout or a reset does not. */
 function hasServerResponse(error: unknown): boolean {
@@ -193,148 +184,179 @@ function classifySendFailure(error: unknown, phase: SendPhase): unknown {
   const reason = error instanceof Error ? error.message : String(error);
   if (phase === 'data-sent') {
     return new MailDeliveredUnacknowledgedError(
-      `${reason}; the relay already had the whole message`,
-      { cause: error },
-    );
-  }
-  if (error instanceof SmtpBudgetExceededError) {
-    // Nodemailer cannot abort an individual non-pooled send. Even if the MIME
-    // stream has not finished yet, it can continue after our caller's deadline
-    // and hand the message to the relay. Parking is therefore the only safe
-    // outcome: retrying could deliver a duplicate security-sensitive email.
-    return new MailDeliveredUnacknowledgedError(
-      `${reason}; the SMTP operation may still complete in the background`,
+      `${reason}; the relay may already have the whole message`,
       { cause: error },
     );
   }
   return error;
 }
 
-/** Build a nodemailer-backed transport for resolved settings. */
+/** Build a Nodemailer MIME renderer and an explicitly cancellable SMTP connection. */
 export function createSmtpTransport(
   settings: ResolvedSmtpSettings,
   options: SmtpTransportOptions = {},
 ): MailTransport {
   const budgetMs = options.budgetMs ?? SMTP_SEND_BUDGET_MS;
-  const transporter = nodemailer.createTransport({
-    host: settings.host ?? '',
-    port: settings.port,
-    secure: settings.secure,
-    connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
-    greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
-    socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
-    ...(settings.user ? { auth: { user: settings.user, pass: settings.password ?? '' } } : {}),
+  const renderer = nodemailer.createTransport({
+    streamTransport: true,
+    buffer: true,
+    newline: 'windows',
   });
-
-  /** The attempt currently in flight, or `null` between attempts. */
-  let current: SendState | null = null;
-
-  // Nodemailer streams the compiled message into the `DATA` command, so the
-  // moment that source stream is fully consumed is the moment the relay has
-  // seen the end of the message. Wrapping it through the documented `stream`
-  // plugin step is what turns "the attempt timed out" into an answerable
-  // question; it changes nothing about the message itself, and if the hook ever
-  // stops firing the phase simply stays `unknown`.
-  transporter.use('stream', (mail, done) => {
-    const state = current;
-    const message = (mail as unknown as { message?: CompiledMessage }).message;
-    const createReadStream = message?.createReadStream;
-    if (state && message && typeof createReadStream === 'function') {
-      const create = createReadStream.bind(message);
-      state.phase = 'before-data';
-      message.createReadStream = (...args: unknown[]): Readable => {
-        state.phase = 'data-in-flight';
-        const stream = create(...args);
-        stream.once('end', () => {
-          state.phase = 'data-sent';
-        });
-        return stream;
-      };
-    }
-    done();
-  });
-
-  // One underlying attempt at a time, so `current` is never ambiguous and a
-  // relay cannot accumulate live sockets after callers' deadlines expire.
   let queue: Promise<unknown> = Promise.resolve();
-  function serialize<T>(
-    task: (remainingBudgetMs: number) => { result: Promise<T>; settled: Promise<void> },
-  ): Promise<T> {
-    const deadline = Date.now() + budgetMs;
-    let expired = false;
+  let cancelCurrent: ((error: Error) => void) | null = null;
+  let closed = false;
+
+  function attempt(mail: OutboundMail, deadline: number): Promise<void> {
+    let connection: SMTPConnection | null = null;
+    let source: Readable | null = null;
+    let phase: SendPhase = 'unknown';
+    let aborted: Error | null = null;
+    let rejectSmtp: ((error: Error) => void) | null = null;
     let timer: NodeJS.Timeout | undefined;
-    const queueBudget = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        expired = true;
-        reject(new SmtpBudgetExceededError(budgetMs));
-      }, budgetMs);
+
+    function cancel(error: Error): void {
+      if (aborted) return;
+      aborted = error;
+      // close() alone gracefully ends a connected socket. Destroy it first to
+      // discard unsent DATA, including the TLS socket after STARTTLS. The
+      // exported SMTPConnection owns DNS/connect/auth/DATA; close also prevents
+      // a DNS callback from opening a connection after cancellation.
+      source?.destroy();
+      if (connection?._socket) connection._socket.destroy();
+      connection?.close();
+      rejectSmtp?.(error);
+    }
+
+    function checkDeadline(): void {
+      if (closed) cancel(new Error('SMTP transport closed'));
+      if (Date.now() >= deadline) cancel(new SmtpBudgetExceededError(budgetMs));
+      if (aborted) throw aborted;
+    }
+
+    cancelCurrent = cancel;
+    const work = (async (): Promise<void> => {
+      checkDeadline();
+      const compiled = await renderer.sendMail({
+        from: settings.from,
+        to: mail.to,
+        subject: mail.subject,
+        html: mail.html,
+        text: mail.text,
+      });
+      // Compilation can finish after cancellation. It cannot start SMTP then.
+      checkDeadline();
+      if (!Buffer.isBuffer(compiled.message)) {
+        throw new Error('SMTP MIME renderer returned no buffer');
+      }
+      phase = 'before-data';
+      connection = new SMTPConnection({
+        host: settings.host ?? '',
+        port: settings.port,
+        secure: settings.secure,
+        connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+        greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+        socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
+      });
+      // Nodemailer only installs this stream after the relay accepts DATA.
+      // Its readable end includes the SMTP terminator, unlike the MIME source
+      // which Nodemailer also drains on envelope rejection. This narrow view
+      // of the pinned client's internal stream is covered by real relay tests.
+      const smtp = connection as SMTPConnection & { _currentDataStream?: Readable | false };
+      await new Promise<void>((resolve, reject) => {
+        rejectSmtp = reject;
+        let finished = false;
+        const finish = (error?: Error | null): void => {
+          if (finished) return;
+          finished = true;
+          if (aborted) reject(aborted);
+          else if (error) reject(error);
+          else resolve();
+        };
+        smtp.once('error', finish);
+        smtp.once('end', () => finish(new Error('SMTP connection closed without acknowledgement')));
+        const send = (): void => {
+          try {
+            checkDeadline();
+            source = Readable.from([compiled.message]);
+            source.once('resume', () => {
+              if (smtp._currentDataStream) phase = 'data-in-flight';
+            });
+            source.once('end', () => {
+              const data = smtp._currentDataStream;
+              if (!data) return;
+              // Check again before SMTP writes the end-of-data marker. A long
+              // event-loop pause can delay the deadline's timer past recovery.
+              if (Date.now() >= deadline) {
+                cancel(new SmtpBudgetExceededError(budgetMs));
+                return;
+              }
+              data.once('end', () => {
+                phase = 'data-sent';
+              });
+            });
+            smtp.send(compiled.envelope, source, (error) => finish(error));
+          } catch (error) {
+            finish(error instanceof Error ? error : new Error(String(error)));
+          }
+        };
+        smtp.connect((error) => {
+          if (finished || aborted) return;
+          if (error) return finish(error);
+          // SMTP replies can resume before an overdue timer after a process
+          // stall. Cancel before Nodemailer parses one and advances DATA.
+          if (smtp._socket) {
+            smtp._socket.prependListener('data', () => {
+              if (Date.now() >= deadline) cancel(new SmtpBudgetExceededError(budgetMs));
+            });
+          }
+          if (settings.user && smtp.allowsAuth) {
+            smtp.login({ user: settings.user, pass: settings.password ?? '' }, (loginError) => {
+              if (finished || aborted) return;
+              if (loginError) finish(loginError);
+              else send();
+            });
+          } else send();
+        });
+      });
+    })();
+    const budget = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => {
+          const error = new SmtpBudgetExceededError(budgetMs);
+          cancel(error);
+          reject(error);
+        },
+        Math.max(1, deadline - Date.now()),
+      );
       timer.unref?.();
     });
-    const start = (): ReturnType<typeof task> => {
-      if (expired) throw new SmtpBudgetExceededError(budgetMs);
-      if (timer) clearTimeout(timer);
-      return task(Math.max(1, deadline - Date.now()));
-    };
-    const started = queue.then(start, start);
-    queue = started
-      .then(({ settled }) => settled)
-      .then(
-        () => undefined,
-        () => undefined,
-      );
-    return Promise.race([started.then(({ result }) => result), queueBudget]).finally(() => {
-      if (timer) clearTimeout(timer);
-    });
+    return Promise.race([work, budget])
+      .catch((error: unknown) => {
+        // No settling outbox write can precede cancellation of the real attempt.
+        cancel(error instanceof Error ? error : new Error(String(error)));
+        throw classifySendFailure(error, phase);
+      })
+      .finally(() => {
+        if (timer) clearTimeout(timer);
+        source?.destroy();
+        if (connection?._socket) connection._socket.destroy();
+        connection?.close();
+        cancelCurrent = null;
+      });
   }
 
   return {
-    async send(mail) {
-      await serialize((remainingBudgetMs) => {
-        const state: SendState = { phase: 'unknown' };
-        current = state;
-        let timer: NodeJS.Timeout | undefined;
-        const attempt = transporter
-          .sendMail({
-            from: settings.from,
-            to: mail.to,
-            subject: mail.subject,
-            html: mail.html,
-            text: mail.text,
-          })
-          .then((): void => undefined);
-        const result = (async (): Promise<void> => {
-          try {
-            // The race is what makes the budget a bound rather than a comment:
-            // nodemailer's three timeouts are per-phase, so a conforming relay
-            // that answers slowly can otherwise outlive the stale threshold and
-            // have its claim reclaimed mid-flight.
-            await new Promise<void>((resolve, reject) => {
-              timer = setTimeout(
-                () => reject(new SmtpBudgetExceededError(budgetMs)),
-                remainingBudgetMs,
-              );
-              timer.unref?.();
-              attempt.then(resolve, reject);
-            });
-          } catch (error) {
-            throw classifySendFailure(error, state.phase);
-          } finally {
-            if (timer) clearTimeout(timer);
-          }
-        })();
-        const settled = attempt
-          .then(
-            () => undefined,
-            () => undefined,
-          )
-          .finally(() => {
-            current = null;
-          });
-        return { result, settled };
-      });
+    send(mail, sendOptions): Promise<void> {
+      // Queuing spends the same budget; an expired queued attempt opens no socket.
+      const deadline = Math.min(Date.now() + budgetMs, sendOptions?.deadline ?? Infinity);
+      const result = queue.then(() => attempt(mail, deadline));
+      queue = result.catch(() => undefined);
+      return result;
     },
-    close() {
-      transporter.close();
+    close(): void {
+      closed = true;
+      cancelCurrent?.(new Error('SMTP transport closed'));
+      renderer.close();
     },
   };
 }
@@ -345,6 +367,8 @@ export function createSmtpTransport(
 export interface EnqueueEmail {
   /** Recipient address. */
   to: string;
+  /** Intended account for user-directed mail. */
+  recipientUserId?: string;
   templateKey: EmailTemplateKey;
   /** Template variables; the common ones are filled in automatically. */
   vars?: TemplateVars;
@@ -619,6 +643,7 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
         return store.emailOutbox.enqueue(
           sealedEnqueueInput(crypto, {
             to: input.to,
+            recipientUserId: input.recipientUserId,
             content: rendered,
             idempotencyKey: input.idempotencyKey ?? null,
           }),
@@ -626,6 +651,7 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
       }
       return store.emailOutbox.enqueue({
         to_email: input.to,
+        recipient_user_id: input.recipientUserId ?? null,
         subject: rendered.subject,
         body_html: rendered.html,
         body_text: rendered.text,

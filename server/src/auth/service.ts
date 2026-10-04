@@ -39,6 +39,7 @@ import {
   PASSWORD_RESET_TTL_SECONDS,
   VERIFICATION_RESEND_THROTTLE_SECONDS,
   isRegistrableRole,
+  isReleasedEmail,
   roleAtLeast,
   type Capabilities,
   type RegistrableRole,
@@ -632,6 +633,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
     async register(input, context): Promise<RegisterResult> {
       const policy = await getRegistrationPolicy();
       const email = input.email.trim().toLowerCase();
+      if (isReleasedEmail(email)) throw validationFailed('That email domain is reserved');
       const password = input.password;
 
       if (password.length < MIN_PASSWORD_LENGTH) {
@@ -916,46 +918,59 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         const notBefore = new Date(
           Date.parse(issuedAt) - VERIFICATION_RESEND_THROTTLE_SECONDS * 1000,
         ).toISOString();
-        await store.transaction(async (tx) => {
-          // The claim is the *first* write of the mint, not a separate one
-          // before it. It is still the single conditional write that makes
-          // concurrent requests produce exactly one link — but it now commits
-          // with the token and its message or rolls back with them, so a mint
-          // or a queueing that fails leaves the recipient's ten-minute window
-          // unspent (issues #137, #342).
-          if (
-            !(await tx.verificationTokens.claimIssue(
-              record.id,
-              'email_verification',
-              issuedAt,
-              notBefore,
-            ))
-          ) {
-            // Genuinely throttled: another request holds the window.
-            return;
-          }
-          // Supersede the link from registration (or an earlier resend): the
-          // address should only ever have one live verification token.
-          await tx.verificationTokens.deleteForUser(record.id, 'email_verification');
-          const created = await tx.verificationTokens.create({
-            user_id: record.id,
-            token_hash: crypto.hashToken(token),
-            purpose: 'email_verification',
-            expires_at: isoInSeconds(EMAIL_VERIFICATION_TTL_SECONDS),
-          });
-          await audit
-            .forStore(tx)
-            .record(
-              { id: record.id, role: record.role },
-              AuditAction.AUTH_VERIFICATION_RESEND,
-              { type: 'user', id: record.id },
-              { email },
-              context.ip,
-            );
-          // Last, and inside: the delivery is part of what the window was
-          // spent on, so it commits or rolls back with the claim.
-          if (queueEmail) await queueEmail(tx, created.id);
-        });
+        await locks(userLifecycleLockKey(record.id), () =>
+          store.transaction(async (tx) => {
+            // Preparation can wait across disable/address release. The mint
+            // takes the lifecycle lease and re-reads eligibility before any write.
+            const current = await tx.users.findById(record.id);
+            if (
+              !current ||
+              current.status !== 'active' ||
+              current.email !== email ||
+              current.email_verified
+            ) {
+              return;
+            }
+            // The claim is the *first* write of the mint, not a separate one
+            // before it. It is still the single conditional write that makes
+            // concurrent requests produce exactly one link — but it now commits
+            // with the token and its message or rolls back with them, so a mint
+            // or a queueing that fails leaves the recipient's ten-minute window
+            // unspent (issues #137, #342).
+            if (
+              !(await tx.verificationTokens.claimIssue(
+                record.id,
+                'email_verification',
+                issuedAt,
+                notBefore,
+              ))
+            ) {
+              // Genuinely throttled: another request holds the window.
+              return;
+            }
+            // Supersede the link from registration (or an earlier resend): the
+            // address should only ever have one live verification token.
+            await tx.verificationTokens.deleteForUser(record.id, 'email_verification');
+            const created = await tx.verificationTokens.create({
+              user_id: record.id,
+              token_hash: crypto.hashToken(token),
+              purpose: 'email_verification',
+              expires_at: isoInSeconds(EMAIL_VERIFICATION_TTL_SECONDS),
+            });
+            await audit
+              .forStore(tx)
+              .record(
+                { id: record.id, role: record.role },
+                AuditAction.AUTH_VERIFICATION_RESEND,
+                { type: 'user', id: record.id },
+                { email },
+                context.ip,
+              );
+            // Last, and inside: the delivery is part of what the window was
+            // spent on, so it commits or rolls back with the claim.
+            if (queueEmail) await queueEmail(tx, created.id);
+          }),
+        );
       });
     },
 

@@ -89,10 +89,12 @@ import type {
 import {
   DEFAULT_SPEC_ENFORCEMENT,
   emptySpecChangeReport,
+  isReleasedEmail,
   isSpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
 
 import type { NexusConfig } from '../../../config/index.js';
+import { conflict } from '../../../lib/errors.js';
 import { newId, nowIso } from '../../../lib/ids.js';
 import { fenceTransactionBody } from '../../../lib/lease-fence.js';
 import {
@@ -582,6 +584,7 @@ function mapOutbox(row: Row): EmailOutboxRecord {
     id: text(row.id),
     generation: text(row.generation),
     to_email: text(row.to_email),
+    recipient_user_id: textOrNull(row.recipient_user_id),
     subject: text(row.subject),
     body_html: text(row.body_html),
     body_text: text(row.body_text),
@@ -757,14 +760,18 @@ type RepoMethod = (...args: unknown[]) => Promise<unknown>;
 const GUARDED_REPOS = new WeakSet<object>();
 
 /**
- * Return a copy of `repo` whose every method runs through `mediate`.
+ * Return a copy of `repo` gated by mediation or an explicit transaction entry.
  *
  * The repository literals below are written against the bare connection; this
  * is what turns them into the gated surface the rest of the process sees. The
  * methods are arrow functions closed over the store, so detaching them from
  * the literal loses nothing.
  */
-function guardRepo<R extends object>(repo: R, mediate: Mediator): R {
+function guardRepo<R extends object>(
+  repo: R,
+  mediate: Mediator,
+  transactionMethods: readonly (keyof R)[] = [],
+): R {
   const guarded: Record<string, unknown> = {};
   for (const name of Object.keys(repo) as (keyof R & string)[]) {
     const member: unknown = repo[name];
@@ -773,7 +780,11 @@ function guardRepo<R extends object>(repo: R, mediate: Mediator): R {
       continue;
     }
     const method = member as RepoMethod;
-    guarded[name] = (...args: unknown[]): Promise<unknown> => mediate(() => method(...args));
+    // A method that immediately enters store.transaction already owns its
+    // queueing. Mediating it first would let a queued method wait on itself.
+    guarded[name] = transactionMethods.includes(name)
+      ? method
+      : (...args: unknown[]): Promise<unknown> => mediate(() => method(...args));
   }
   GUARDED_REPOS.add(guarded);
   return guarded as unknown as R;
@@ -849,7 +860,7 @@ class SqliteStore implements NexusStore {
     this.messages = guardRepo(this.messages, mediate);
     this.notifications = guardRepo(this.notifications, mediate);
     this.notificationPreferences = guardRepo(this.notificationPreferences, mediate);
-    this.emailOutbox = guardRepo(this.emailOutbox, mediate);
+    this.emailOutbox = guardRepo(this.emailOutbox, mediate, ['enqueue', 'claimDue']);
     this.gatewayTeardownJobs = guardRepo(this.gatewayTeardownJobs, mediate);
     this.auditLogs = guardRepo(this.auditLogs, mediate);
     this.settings = guardRepo(this.settings, mediate);
@@ -922,9 +933,10 @@ class SqliteStore implements NexusStore {
    * and the queue itself only ever settles to `undefined`.
    *
    * Invariant for the repositories: a method that needs atomicity uses the
-   * driver's synchronous `db.transaction(...)`, never `this.transaction(...)`.
-   * A queued call *is* the queue head while it runs, so a `transaction()` it
-   * chained behind itself would wait for it forever.
+   * driver's synchronous `db.transaction(...)`, or is explicitly listed in
+   * guardRepo's transactionMethods so it enters `this.transaction(...)`
+   * directly. A mediated queued call is the queue head while it runs, so a
+   * transaction it chained behind itself would wait for it forever.
    */
   private mediate<T>(work: () => Promise<T>): Promise<T> {
     if (this.activeTx === null || this.ownsOpenTransaction()) {
@@ -1028,6 +1040,14 @@ class SqliteStore implements NexusStore {
       return row ? mapUser(row) : null;
     },
 
+    lockEmailRecipient: async (id, email) =>
+      !isReleasedEmail(email) &&
+      execute(this.db, 'UPDATE users SET email_lifecycle_fence = ? WHERE id = ? AND email = ?', [
+        newId(),
+        id,
+        email.trim().toLowerCase(),
+      ]) > 0,
+
     findManyByIds: async (ids) => {
       if (ids.length === 0) return [];
       const rows = queryAll(
@@ -1057,6 +1077,7 @@ class SqliteStore implements NexusStore {
         .always('id = ?', id)
         .add(expected.role, 'role = ?', expected.role ?? null)
         .add(expected.status, 'status = ?', expected.status ?? null)
+        .add(expected.email, 'email = ?', expected.email?.trim().toLowerCase() ?? null)
         .build();
       const set = setParts(userUpdateColumns(patch));
       if (!set) {
@@ -3004,44 +3025,69 @@ class SqliteStore implements NexusStore {
   /* ── emailOutbox ──────────────────────────────────────────────────────── */
 
   readonly emailOutbox: EmailOutboxRepo = {
-    enqueue: async (input: EnqueueEmailInput) => {
-      const key = input.idempotency_key ?? null;
-      if (key !== null) {
-        const existing = await this.emailOutbox.findByIdempotencyKey(key);
-        if (existing) return { entry: existing, created: false };
-      }
-      const meta = stamps({ id: input.id });
-      try {
-        execute(
+    cancelForReleasedAddress: async (email) =>
+      this.db.transaction(() => {
+        const address = email.trim().toLowerCase();
+        const sending = queryOne(
           this.db,
-          `INSERT INTO email_outbox
-             (id, to_email, subject, body_html, body_text, status, attempts, next_attempt_at,
-              last_error, idempotency_key, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, ?)`,
-          [
-            meta.id,
-            input.to_email,
-            input.subject,
-            input.body_html,
-            input.body_text,
-            input.next_attempt_at ?? meta.created_at,
-            key,
-            meta.created_at,
-            meta.updated_at,
-          ],
+          "SELECT id FROM email_outbox WHERE lower(to_email) = ? AND status = 'sending' LIMIT 1",
+          [address],
         );
-      } catch (error) {
-        // Lost a race on the idempotency key — return the winner.
+        if (sending) throw conflict('Email delivery is in progress; retry after it settles');
+        return execute(
+          this.db,
+          `UPDATE email_outbox SET status = 'failed', next_attempt_at = NULL,
+           last_error = 'address-released', updated_at = ?, generation = ?
+           WHERE lower(to_email) = ? AND status = 'pending'`,
+          [nowIso(), newId(), address],
+        );
+      })(),
+
+    enqueue: async (input: EnqueueEmailInput) =>
+      this.transaction(async () => {
+        const key = input.idempotency_key ?? null;
         if (key !== null) {
           const existing = await this.emailOutbox.findByIdempotencyKey(key);
           if (existing) return { entry: existing, created: false };
         }
-        throw error;
-      }
-      const entry = await this.emailOutbox.findById(meta.id);
-      if (!entry) throw new Error('emailOutbox.enqueue: row vanished immediately after insert');
-      return { entry, created: true };
-    },
+        const eligible =
+          !input.recipient_user_id ||
+          (await this.users.lockEmailRecipient(input.recipient_user_id, input.to_email));
+        const meta = stamps({ id: input.id });
+        try {
+          execute(
+            this.db,
+            `INSERT INTO email_outbox
+               (id, to_email, recipient_user_id, subject, body_html, body_text, status, attempts,
+                next_attempt_at, last_error, idempotency_key, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+            [
+              meta.id,
+              input.to_email,
+              input.recipient_user_id ?? null,
+              input.subject,
+              input.body_html,
+              input.body_text,
+              eligible ? 'pending' : 'failed',
+              eligible ? (input.next_attempt_at ?? meta.created_at) : null,
+              eligible ? null : 'recipient-address-changed',
+              key,
+              meta.created_at,
+              meta.updated_at,
+            ],
+          );
+        } catch (error) {
+          // Lost a race on the idempotency key — return the winner.
+          if (key !== null) {
+            const existing = await this.emailOutbox.findByIdempotencyKey(key);
+            if (existing) return { entry: existing, created: false };
+          }
+          throw error;
+        }
+        const entry = await this.emailOutbox.findById(meta.id);
+        if (!entry) throw new Error('emailOutbox.enqueue: row vanished immediately after insert');
+        return { entry, created: true };
+      }),
 
     findById: async (id) => {
       const row = queryOne(this.db, 'SELECT * FROM email_outbox WHERE id = ?', [id]);
@@ -3053,31 +3099,47 @@ class SqliteStore implements NexusStore {
       return row ? mapOutbox(row) : null;
     },
 
-    claimDue: async (now, limit) => {
-      const claim = this.db.transaction((): EmailOutboxRecord[] => {
-        const ids = queryAll(
+    claimDue: async (now, limit) =>
+      this.transaction(async () => {
+        const candidates = queryAll(
           this.db,
-          `SELECT id FROM email_outbox
+          `SELECT * FROM email_outbox
            WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
            ORDER BY next_attempt_at ASC, created_at ASC LIMIT ?`,
           [now, Math.max(1, Math.floor(limit))],
-        ).map((row) => text(row.id));
-        if (ids.length === 0) return [];
-        execute(
-          this.db,
-          `UPDATE email_outbox
-           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?
-           WHERE id IN (${ids.map(() => '?').join(', ')}) AND status = 'pending'`,
-          [nowIso(), newId(), ...ids],
-        );
-        return queryAll(
-          this.db,
-          `SELECT * FROM email_outbox WHERE id IN (${ids.map(() => '?').join(', ')})`,
-          ids,
         ).map(mapOutbox);
-      });
-      return claim();
-    },
+        const claimed: EmailOutboxRecord[] = [];
+        for (const entry of candidates) {
+          const eligible =
+            !entry.recipient_user_id ||
+            (await this.users.lockEmailRecipient(entry.recipient_user_id, entry.to_email));
+          execute(
+            this.db,
+            `UPDATE email_outbox SET status = ?, next_attempt_at = ?, attempts = attempts + 1,
+             updated_at = ?, generation = ?, last_error = ? WHERE id = ? AND status = 'pending'`,
+            [
+              eligible ? 'sending' : 'failed',
+              eligible ? entry.next_attempt_at : null,
+              nowIso(),
+              newId(),
+              eligible ? entry.last_error : 'recipient-address-changed',
+              entry.id,
+            ],
+          );
+          if (!eligible) continue;
+          const current = await this.emailOutbox.findById(entry.id);
+          if (current) claimed.push(current);
+        }
+        return claimed;
+      }),
+
+    beginDelivery: async (entry, at) =>
+      execute(
+        this.db,
+        `UPDATE email_outbox SET updated_at = ?
+         WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, entry.id, entry.generation],
+      ) > 0,
 
     // A settling write only lands on the exact claim it was issued for: the
     // stale sweep can hand a row to another worker mid-delivery, and the

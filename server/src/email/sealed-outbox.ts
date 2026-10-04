@@ -106,12 +106,18 @@ export function sealMailContent(
  */
 export function sealedEnqueueInput(
   crypto: NexusCrypto,
-  input: { to: string; content: MailContent; idempotencyKey?: string | null },
+  input: {
+    to: string;
+    content: MailContent;
+    idempotencyKey?: string | null;
+    recipientUserId?: string;
+  },
 ): EnqueueEmailInput {
   const id = newId();
   return {
     id,
     to_email: input.to,
+    recipient_user_id: input.recipientUserId ?? null,
     ...sealMailContent(crypto, id, input.to, input.content),
     idempotency_key: input.idempotencyKey ?? null,
   };

@@ -400,6 +400,17 @@ export interface UpdateUserResponse {
   gateway_teardown?: GatewayTeardownOutcome;
 }
 
+/** `POST /api/users/:id/release-address` (super admin, session and CSRF). */
+export interface ReleaseUserAddressRequest {
+  /** Confirm the disabled account's current address to avoid a stale action. */
+  email: string;
+}
+
+export interface ReleaseUserAddressResponse {
+  /** Retained disabled account, now at a reserved non-deliverable address. */
+  user: User;
+}
+
 /** `POST /api/users/:id/gateway-teardown/retry` (admin) */
 export interface RetryGatewayTeardownResponse {
   gateway_teardown: GatewayTeardownOutcome;
