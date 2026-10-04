@@ -61,6 +61,9 @@ and Ferrum Edge 0.9.10 compatibility pins are outside this migration and remain 
 
 ## Hosted locks and qualification
 
+The applied artifact's immutable source SHA, run identity, input/output hashes and resolution
+scope are recorded in [lock provenance](dependency-majors-449-lock-provenance.md).
+
 Both real npm lockfiles must come from GitHub-hosted npm, never a locally run installer or a
 handwritten dependency graph. `.github/workflows/dependency-locks.yml` is an optional artifact
 producer on manifest/workflow pull-request changes (or manual dispatch once available on the
