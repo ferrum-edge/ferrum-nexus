@@ -1414,9 +1414,10 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
               linksRemoved[id] = await tx.userIdentities.deleteByProvider(id);
             }
             const nextProviders = new Map(
-              providersInForce(config, next).map(
-                ({ settings }): [string, SsoProviderSettings] => [settings.id, settings],
-              ),
+              providersInForce(config, next).map(({ settings }): [string, SsoProviderSettings] => [
+                settings.id,
+                settings,
+              ]),
             );
             const providersTrustLowered = providersInForce(config, stored)
               .filter(({ settings }) => {

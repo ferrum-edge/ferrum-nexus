@@ -24,10 +24,7 @@ function barrier(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
-function interceptStore(
-  base: NexusStore,
-  hook: (store: NexusStore) => NexusStore,
-): NexusStore {
+function interceptStore(base: NexusStore, hook: (store: NexusStore) => NexusStore): NexusStore {
   return new Proxy(hook(base), {
     get(target, property, receiver) {
       if (property === 'transaction') {
@@ -200,7 +197,12 @@ export function runMailLifecycleContract(
         let settled = false;
         let enqueue: ReturnType<typeof mail> | null = null;
         try {
-          await scanned.promise;
+          await Promise.race([
+            scanned.promise,
+            releasing.then((response) => {
+              throw new Error(`release missed the cancellation barrier: ${response.body}`);
+            }),
+          ]);
           // A separate store/transaction starts after the scan found no row.
           // Without the recipient write this inserts and can be claimed while
           // the release still exposes the old committed email to readers.
@@ -230,6 +232,46 @@ export function runMailLifecycleContract(
         }
       });
     }
+
+    it('orders a queued claim behind cancellation without reviving mail', async () => {
+      const subject = await disabledAccount();
+      await other.tick();
+      const queued = await mail(subject);
+      const scanned = barrier();
+      const resume = barrier();
+      afterScan = async () => {
+        scanned.resolve();
+        await resume.promise;
+      };
+      const releasing = release(subject);
+      let claiming: ReturnType<NexusStore['emailOutbox']['claimDue']> | null = null;
+      let settled = false;
+      try {
+        await Promise.race([
+          scanned.promise,
+          releasing.then((response) => {
+            throw new Error(`release missed the cancellation barrier: ${response.body}`);
+          }),
+        ]);
+        claiming = peer.emailOutbox.claimDue(isoInSeconds(60), 20).then((rows) => {
+          settled = true;
+          return rows;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.equal(settled, false, 'claim cannot escape the open recipient release');
+        resume.resolve();
+        const released = await releasing;
+        assert.equal(released.statusCode, 200, released.body);
+        assert.deepEqual(await claiming, []);
+        const row = await peer.emailOutbox.findById(queued.entry.id);
+        assert.equal(row?.status, 'failed');
+        assert.equal(row?.last_error, 'address-released');
+      } finally {
+        resume.resolve();
+        await releasing;
+        await claiming;
+      }
+    });
 
     it('keeps late old-account mail bound to the released account', async () => {
       const subject = await disabledAccount();

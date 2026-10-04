@@ -1622,7 +1622,10 @@ describe('single sign-on', () => {
     assert.equal(promotion.statusCode, 409, promotion.body);
     assert.match(promotion.body, /lower_trust_provider_ids/);
     assert.equal((await h.store.users.findById(target.id))?.role, 'client');
-    assert.equal((await h.authed(oldSession, { method: 'GET', url: '/api/auth/me' })).statusCode, 200);
+    assert.equal(
+      (await h.authed(oldSession, { method: 'GET', url: '/api/auth/me' })).statusCode,
+      200,
+    );
 
     const [identity] = await h.store.userIdentities.listByUser(target.id);
     assert.ok(identity);
@@ -1632,14 +1635,20 @@ describe('single sign-on', () => {
     });
     assert.equal(unlinked.statusCode, 200, unlinked.body);
     // Unlinking itself leaves the lower-trust browser signed in.
-    assert.equal((await h.authed(oldSession, { method: 'GET', url: '/api/auth/me' })).statusCode, 200);
+    assert.equal(
+      (await h.authed(oldSession, { method: 'GET', url: '/api/auth/me' })).statusCode,
+      200,
+    );
     const promoted = await h.authed(founder, {
       method: 'PATCH',
       url: `/api/users/${target.id}`,
       payload: { role: 'super_admin' },
     });
     assert.equal(promoted.statusCode, 200, promoted.body);
-    assert.equal((await h.authed(oldSession, { method: 'GET', url: '/api/auth/me' })).statusCode, 401);
+    assert.equal(
+      (await h.authed(oldSession, { method: 'GET', url: '/api/auth/me' })).statusCode,
+      401,
+    );
     const row = (await h.auditRows(AuditAction.USER_ROLE_CHANGE)).find(
       (entry) => entry.target_id === target.id,
     );
@@ -1737,10 +1746,7 @@ describe('single sign-on', () => {
     try {
       const added = await saveProviders([...before.providers, trusted]);
       assert.equal(added.statusCode, 200, added.body);
-      const lowered = await saveProviders([
-        ...before.providers,
-        { ...trusted, sync_roles: false },
-      ]);
+      const lowered = await saveProviders([...before.providers, { ...trusted, sync_roles: false }]);
       assert.equal(lowered.statusCode, 200, lowered.body);
       const row = (await h.auditRows(AuditAction.ADMIN_SETTINGS_UPDATE)).find(
         (entry) =>

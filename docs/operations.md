@@ -678,12 +678,15 @@ PostgreSQL, MySQL and MongoDB run in the `store-contracts` job. Per backend:
 
 - **SQLite, PostgreSQL:** each migration and its ledger row commit in one
   transaction. A failed migration leaves no trace; earlier ones stay applied.
-- **MySQL:** DDL commits statement by statement. The runner accepts only
-  `CREATE TABLE IF NOT EXISTS` statements (replay-safe) and serializes
-  migrators with an advisory lock
-  ([details](#retrying-interrupted-mysql-initialization)). A future migration
-  that needs `ALTER TABLE` or a data change must first add a replay-safe
-  strategy to the MySQL runner.
+- **MySQL:** DDL commits statement by statement. The runner accepts replayable
+  `CREATE TABLE IF NOT EXISTS` statements and additive `VARCHAR` columns that
+  are nullable or have an empty-string default. It checks live column type,
+  nullability, default, inherited collation and generated-column metadata before
+  replaying an ALTER; a mismatched existing column stops the upgrade without
+  recording that step.
+  An advisory lock serializes metadata checks, DDL and ledger writes across
+  instances ([details](#retrying-interrupted-mysql-initialization)). Other ALTERs
+  or data changes need a replay-safe strategy before the runner accepts them.
 - **MongoDB:** a replica set is required. A step is recorded only after it
   completes, so every step must be idempotent. The CI guard freezes a step's
   declared indexes, not document-transforming code; review such steps by hand.
@@ -821,11 +824,14 @@ NEXUS_DB_URL=mysql://nexus:secret@db.internal:3306/nexus
 
 ### Retrying interrupted MySQL initialization
 
-MySQL DDL commits outside the migration ledger. Every migration uses only
-`CREATE TABLE IF NOT EXISTS` with indexes and constraints inline, so re-running
-finishes an interrupted initialization. A database-scoped advisory lock
+MySQL DDL commits outside the migration ledger. Released migrations use
+`CREATE TABLE IF NOT EXISTS` with indexes and constraints inline. Pending
+`007` and `008` add string columns: the runner checks `information_schema.COLUMNS`
+and skips only an exact matching definition after an interrupted ALTER.
+Re-running finishes an interrupted initialization or upgrade without replacing
+tables or changing retained rows. A database-scoped advisory lock
 (`GET_LOCK`) serializes migrators across instances, and a migration is recorded
-only after all its tables succeed. The runner refuses any other statement
+only after all its steps succeed. The runner refuses unsupported statements
 ([Schema versioning and upgrades](#schema-versioning-and-upgrades)).
 
 ### MongoDB
@@ -1266,9 +1272,11 @@ The five-minute threshold is safe because rows are claimed one at a time and
 each send has a hard 60-second deadline (`OUTBOX_SEND_BUDGET_MS`). Nodemailer's
 own timeouts are set to 10 s (connect), 10 s (greeting) and 30 s (socket
 inactivity), but those are per phase, not a total. A send cut off by the
-deadline is recorded as delivered-unacknowledged if the whole message had been
-written, and retried otherwise. The sender owns the actual SMTP connection and
-destroys its socket and MIME source before reporting timeout; compilation or
+deadline is recorded as delivered-unacknowledged if the SMTP DATA stream,
+including its terminating marker, had been written, and retried otherwise.
+Draining the MIME source after an envelope rejection is not delivery evidence.
+The sender owns the actual SMTP connection and destroys its socket and MIME
+source before reporting timeout; compilation or
 DNS finishing later cannot restart the cancelled operation. There is no live
 SMTP attempt hidden behind a `failed` row. Authorization refreshes the claim
 inside the recipient transaction, and a handoff that resumes after its absolute

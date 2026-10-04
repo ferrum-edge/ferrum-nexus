@@ -184,7 +184,7 @@ function classifySendFailure(error: unknown, phase: SendPhase): unknown {
   const reason = error instanceof Error ? error.message : String(error);
   if (phase === 'data-sent') {
     return new MailDeliveredUnacknowledgedError(
-      `${reason}; the relay already had the whole message`,
+      `${reason}; the relay may already have the whole message`,
       { cause: error },
     );
   }
@@ -257,7 +257,11 @@ export function createSmtpTransport(
         greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
         socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
       });
-      const smtp = connection;
+      // Nodemailer only installs this stream after the relay accepts DATA.
+      // Its readable end includes the SMTP terminator, unlike the MIME source
+      // which Nodemailer also drains on envelope rejection. This narrow view
+      // of the pinned client's internal stream is covered by real relay tests.
+      const smtp = connection as SMTPConnection & { _currentDataStream?: Readable | false };
       await new Promise<void>((resolve, reject) => {
         rejectSmtp = reject;
         let finished = false;
@@ -273,16 +277,22 @@ export function createSmtpTransport(
         const send = (): void => {
           try {
             checkDeadline();
-            phase = 'data-in-flight';
             source = Readable.from([compiled.message]);
+            source.once('resume', () => {
+              if (smtp._currentDataStream) phase = 'data-in-flight';
+            });
             source.once('end', () => {
+              const data = smtp._currentDataStream;
+              if (!data) return;
               // Check again before SMTP writes the end-of-data marker. A long
               // event-loop pause can delay the deadline's timer past recovery.
               if (Date.now() >= deadline) {
                 cancel(new SmtpBudgetExceededError(budgetMs));
                 return;
               }
-              phase = 'data-sent';
+              data.once('end', () => {
+                phase = 'data-sent';
+              });
             });
             smtp.send(compiled.envelope, source, (error) => finish(error));
           } catch (error) {

@@ -79,7 +79,8 @@ export function useReleaseUserAddress(): UseMutationResult<
 > {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, email }: { id: string; email: string }) => usersApi.releaseAddress(id, { email }),
+    mutationFn: ({ id, email }: { id: string; email: string }) =>
+      usersApi.releaseAddress(id, { email }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.users.all });
     },

@@ -43,6 +43,8 @@ interface RelayOptions {
   stallAfterData?: boolean;
   /** Refuse the message after end-of-data with a permanent error. */
   rejectAfterData?: boolean;
+  /** Close the socket before permitting DATA, or after its terminating marker. */
+  disconnect?: 'before-data' | 'after-data';
   /** Run before the DATA reply; models a pause without firing the deadline timer. */
   beforeData?: () => void;
 }
@@ -83,6 +85,10 @@ async function startRelay(options: RelayOptions = {}): Promise<Relay> {
         received.push(buffer.slice(0, end));
         buffer = buffer.slice(end + 5);
         inData = false;
+        if (options.disconnect === 'after-data') {
+          socket.destroy();
+          return;
+        }
         // A relay that holds the message and goes quiet is the shape that used
         // to look identical to one that never received it at all.
         if (options.stallAfterData) return;
@@ -97,6 +103,10 @@ async function startRelay(options: RelayOptions = {}): Promise<Relay> {
       const command = line.split(/[\s:]/)[0]?.toUpperCase() ?? '';
       if (command === 'EHLO' || command === 'HELO') reply('250 nexus-budget-fixture\r\n');
       else if (command === 'DATA') {
+        if (options.disconnect === 'before-data') {
+          socket.destroy();
+          return;
+        }
         options.beforeData?.();
         reply('354 send message\r\n');
         inData = true;
@@ -280,5 +290,25 @@ describe('SMTP send budget', { timeout: 30_000 }, () => {
       'the relay answered and refused it; there is nothing queued to duplicate',
     );
     assert.equal(relay.received.length, 1);
+  });
+
+  it('keeps a disconnect before DATA retryable', async () => {
+    const { relay, transport } = await connect({ disconnect: 'before-data' }, 5_000);
+    const error = await failureOf(transport, MAIL);
+    assert.ok(error instanceof Error);
+    assert.equal(isDeliveredUnacknowledged(error), false);
+    assert.deepEqual(relay.received, []);
+  });
+
+  it('parks a disconnect after the SMTP terminator as delivered-unacknowledged', async () => {
+    const { relay, transport } = await connect({ disconnect: 'after-data' }, 5_000);
+    const error = await failureOf(transport, MAIL);
+    assert.ok(error instanceof Error);
+    assert.equal(isDeliveredUnacknowledged(error), true);
+    assert.equal(
+      relay.received.length,
+      1,
+      'the relay received the SMTP terminator before disconnect',
+    );
   });
 });

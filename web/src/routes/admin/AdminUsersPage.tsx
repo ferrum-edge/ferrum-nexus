@@ -336,7 +336,8 @@ function ReleaseAddressDialog({
         <p>
           Use this after reviewing an account that holds someone else’s address. Its ID and history
           are retained, but it stays disabled permanently. Existing sessions, recovery links and
-          queued mail are revoked. The rightful holder gets a separate account on their next sign-in.
+          queued mail are revoked. The rightful holder gets a separate account on their next
+          sign-in.
         </p>
         {detail.isError ? (
           <QueryErrorState onRetry={() => detail.refetch()} retrying={detail.isFetching} />

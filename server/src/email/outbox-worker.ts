@@ -65,7 +65,11 @@
  * no timers involved.
  */
 
-import { isReleasedEmail, OUTBOX_MAX_ATTEMPTS, OUTBOX_POLL_INTERVAL_MS } from '@ferrum-nexus/shared';
+import {
+  isReleasedEmail,
+  OUTBOX_MAX_ATTEMPTS,
+  OUTBOX_POLL_INTERVAL_MS,
+} from '@ferrum-nexus/shared';
 
 import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';

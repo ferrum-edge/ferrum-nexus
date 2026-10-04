@@ -164,11 +164,13 @@ jobs:
           import { loadMigrations } from './server/dist/db/migrate.js';
           assert.ok(Number(process.versions.napi) >= 10);
           for (const dialect of ['sqlite', 'pg', 'mysql']) {
-            assert.deepEqual(loadMigrations(dialect).map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest', '004_api_spec_changes', '005_notification_preferences', '006_user_identities', '007_outbox_recipient']);
+            assert.deepEqual(loadMigrations(dialect).map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest', '004_api_spec_changes', '005_notification_preferences', '006_user_identities', '007_outbox_recipient', '008_email_lifecycle_fence']);
           }
           const db = new Database(':memory:');
           for (const file of loadMigrations('sqlite')) db.exec(file.sql);
           assert.deepEqual(db.prepare('SELECT generation FROM email_outbox').all(), []);
+          assert.deepEqual(db.prepare('SELECT recipient_user_id FROM email_outbox').all(), []);
+          assert.deepEqual(db.prepare('SELECT email_lifecycle_fence FROM users').all(), []);
           assert.deepEqual(db.prepare('SELECT role FROM api_gateway_plugins').all(), []);
           assert.deepEqual(db.prepare('SELECT spec_id FROM api_spec_changes').all(), []);
           assert.deepEqual(db.prepare('SELECT user_id FROM user_notification_preferences').all(), []);

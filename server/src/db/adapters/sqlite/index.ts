@@ -760,14 +760,18 @@ type RepoMethod = (...args: unknown[]) => Promise<unknown>;
 const GUARDED_REPOS = new WeakSet<object>();
 
 /**
- * Return a copy of `repo` whose every method runs through `mediate`.
+ * Return a copy of `repo` gated by mediation or an explicit transaction entry.
  *
  * The repository literals below are written against the bare connection; this
  * is what turns them into the gated surface the rest of the process sees. The
  * methods are arrow functions closed over the store, so detaching them from
  * the literal loses nothing.
  */
-function guardRepo<R extends object>(repo: R, mediate: Mediator): R {
+function guardRepo<R extends object>(
+  repo: R,
+  mediate: Mediator,
+  transactionMethods: readonly (keyof R)[] = [],
+): R {
   const guarded: Record<string, unknown> = {};
   for (const name of Object.keys(repo) as (keyof R & string)[]) {
     const member: unknown = repo[name];
@@ -776,7 +780,11 @@ function guardRepo<R extends object>(repo: R, mediate: Mediator): R {
       continue;
     }
     const method = member as RepoMethod;
-    guarded[name] = (...args: unknown[]): Promise<unknown> => mediate(() => method(...args));
+    // A method that immediately enters store.transaction already owns its
+    // queueing. Mediating it first would let a queued method wait on itself.
+    guarded[name] = transactionMethods.includes(name)
+      ? method
+      : (...args: unknown[]): Promise<unknown> => mediate(() => method(...args));
   }
   GUARDED_REPOS.add(guarded);
   return guarded as unknown as R;
@@ -852,7 +860,7 @@ class SqliteStore implements NexusStore {
     this.messages = guardRepo(this.messages, mediate);
     this.notifications = guardRepo(this.notifications, mediate);
     this.notificationPreferences = guardRepo(this.notificationPreferences, mediate);
-    this.emailOutbox = guardRepo(this.emailOutbox, mediate);
+    this.emailOutbox = guardRepo(this.emailOutbox, mediate, ['enqueue', 'claimDue']);
     this.gatewayTeardownJobs = guardRepo(this.gatewayTeardownJobs, mediate);
     this.auditLogs = guardRepo(this.auditLogs, mediate);
     this.settings = guardRepo(this.settings, mediate);
@@ -925,9 +933,10 @@ class SqliteStore implements NexusStore {
    * and the queue itself only ever settles to `undefined`.
    *
    * Invariant for the repositories: a method that needs atomicity uses the
-   * driver's synchronous `db.transaction(...)`, never `this.transaction(...)`.
-   * A queued call *is* the queue head while it runs, so a `transaction()` it
-   * chained behind itself would wait for it forever.
+   * driver's synchronous `db.transaction(...)`, or is explicitly listed in
+   * guardRepo's transactionMethods so it enters `this.transaction(...)`
+   * directly. A mediated queued call is the queue head while it runs, so a
+   * transaction it chained behind itself would wait for it forever.
    */
   private mediate<T>(work: () => Promise<T>): Promise<T> {
     if (this.activeTx === null || this.ownsOpenTransaction()) {

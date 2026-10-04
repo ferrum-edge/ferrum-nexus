@@ -1473,20 +1473,24 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
     id: '007_outbox_recipient',
     indexes: [],
     apply: async (db: Db): Promise<void> => {
-      await db.collection(COLLECTIONS.emailOutbox).updateMany(
-        { recipient_user_id: { $exists: false } },
-        { $set: { recipient_user_id: null } },
-      );
+      await db
+        .collection(COLLECTIONS.emailOutbox)
+        .updateMany(
+          { recipient_user_id: { $exists: false } },
+          { $set: { recipient_user_id: null } },
+        );
     },
   },
   {
     id: '008_email_lifecycle_fence',
     indexes: [],
     apply: async (db: Db): Promise<void> => {
-      await db.collection(COLLECTIONS.users).updateMany(
-        { email_lifecycle_fence: { $exists: false } },
-        { $set: { email_lifecycle_fence: '' } },
-      );
+      await db
+        .collection(COLLECTIONS.users)
+        .updateMany(
+          { email_lifecycle_fence: { $exists: false } },
+          { $set: { email_lifecycle_fence: '' } },
+        );
     },
   },
 ];

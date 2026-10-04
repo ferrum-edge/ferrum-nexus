@@ -56,6 +56,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   SMTP deadlines destroy the underlying connection before the sending barrier
   is removed, preventing background delivery after recovery. Cross-adapter race
   contracts and real-relay deadline tests cover these interleavings.
+  MySQL upgrades now resume additive string columns after interrupted DDL or
+  ledger writes, checking live definitions under the migrator's advisory lock
+  without modifying released migrations. SQLite outbox operations enter their
+  transaction queue directly, avoiding a deadlock behind address release.
+  SMTP delivery uncertainty is based on the DATA stream's terminating marker;
+  rejected envelopes stay ordinary failures. Hosted regressions cover replay,
+  competing migrators, recipient ordering and bounded campaign transactions.
 
 - **Manual privilege increases end every existing session, and super admins can
   recover a squatted email address without database editing** (#504).
