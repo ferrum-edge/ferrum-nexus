@@ -110,11 +110,14 @@ The following executed evidence applies to code commit
   exposure-ID rotation, explicit-empty versus omitted/null coverage and checks that
   changed or re-enabled exposure cannot revive old IDs.
 
-These passed jobs do not establish that every `0c05113` CI check passed. The final
-documentation and main-integration head requires fresh results for all eight existing
-required contexts: `checks (22.14.0)`, `checks (22)`, `checks (24)`, `store-contracts`,
-`acceptance`, `docker`, `quickstart-config` and `action-pins`. It also requires the
-`Supported Node minimum` gate integrated from main commit
-`48ea760098d1aa858dc7cee06bf7f8fb7536cdaf` ([#520](https://github.com/ferrum-edge/ferrum-nexus/pull/520)),
-the other hosted checks and root's final qualification. No repository code, formatter,
-build or test was executed locally for this documentation and integration update.
+These passed jobs do not establish that every `0c05113` CI check passed. The active
+branch ruleset requires fresh results for these eight contexts on the final documentation
+and main-integration head: `Supported Node minimum`, `checks (22)`, `checks (24)`,
+`store-contracts`, `docker`, `acceptance`, `quickstart-config` and `action-pins`. The
+`checks (22.14.0)` matrix job remains an explicit Node 22.14.0 minimum-version check, but
+is not a separate required context in that ruleset. The `Supported Node minimum` gate was
+integrated from main commit `48ea760098d1aa858dc7cee06bf7f8fb7536cdaf`
+([#520](https://github.com/ferrum-edge/ferrum-nexus/pull/520)). Root's final qualification
+requires fresh results for all reported hosted checks, including `checks (22.14.0)`,
+coverage and quickstart. No repository code, formatter, build or test was executed locally
+for this documentation and integration update.
