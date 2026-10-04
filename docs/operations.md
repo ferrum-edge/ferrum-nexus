@@ -989,8 +989,39 @@ Dependabot proposes digest updates for Compose and Dockerfile images, which are
 reviewed with the source change. GitHub Actions workflow service images and
 images in workflow `docker run` commands are not tracked by Dependabot; refresh
 those digests manually when updating their readable tags. The required `checks`
-job runs `ci/check-image-pins.sh` on every PR and rejects unpinned image
-declarations in Dockerfiles, Compose files, workflows, and CI/acceptance scripts.
+job runs `ci/check-image-pins.sh` on every PR. It scans tracked `Dockerfile`,
+`Dockerfile.*` and `*.Dockerfile` files; `*compose*.yml` and `*compose*.yaml`
+files; YAML files under `.github/workflows/`; `*.sh` files and executable files
+with a shell shebang; and `.env`, `.env.*` and `*.env` files. In these files it
+checks Dockerfile `FROM` and external `COPY --from` images, Compose and workflow
+image fields, workflow `docker://` actions and `run` commands, supported Docker
+`run`/`create`/`pull` commands in shell (including `docker container` forms and
+`docker image pull`), and the `FERRUM_EDGE_IMAGE` and `NEXUS_IMAGE` overrides in
+dotenv files. The shell scan follows recognized command wrappers such as
+`command`, `exec`, `env`, `sudo`, `time` and `nohup`, understands Docker options
+before the image argument, and fails closed on unsupported options. It scans
+commands inside `$(...)` and backticks, including nested substitutions, without
+executing them. Every literal image reference must carry its own full
+`@sha256:` digest of 64 lowercase hexadecimal characters; an unrelated digest
+elsewhere on the line does not count. Version tags can remain before the
+digest. Runtime `$FERRUM_EDGE_IMAGE` and `$NEXUS_IMAGE` references are allowed,
+while any literal fallback they declare is checked.
+
+This is a bounded static scan of tracked operational files, not a shell or YAML
+interpreter. It ignores prose, comments, shell literals used only as data
+(including quoted text passed to recognized non-Docker commands), plain
+heredoc body text, and untracked or generated files. Quoting alone does not
+exempt an image argument: literal quoted image arguments to recognized Docker
+commands are checked. Command substitutions in unquoted heredocs are also
+scanned because the shell can execute them. YAML image fields are read as data,
+not searched as arbitrary text. The scanner does not
+resolve computed command names, shell aliases, `eval`, sourced files or values
+assembled indirectly, so it cannot establish a complete inventory of images
+produced through those mechanisms.
+The local `ferrum-nexus:ci` image in `.github/workflows/ci.yml` and
+`ferrum-nexus:e2e` images in `e2e/docker-compose.yml` and
+`e2e/.env.example` remain allowed because those are locally built acceptance
+images rather than registry references.
 
 The portal is on `http://127.0.0.1:8787` and the gateway proxy listener on
 `http://127.0.0.1:8000`, both bound to loopback. Before adapting it:

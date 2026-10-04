@@ -59,6 +59,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   replay checks cover interrupted column, backfill, index and ledger writes.
   The architecture now names both queued delivery and the inline admin SMTP probe.
 
+- **The required image-pin check now scans the tracked operational files it
+  documents** (#511). It recognizes image references in Dockerfile `FROM` and
+  external `COPY --from`, Compose and workflow image fields, workflow shell
+  commands, Docker commands in shell scripts, and the supported image override
+  dotenv values. The bounded static parser checks for a full SHA-256 digest on
+  each literal image reference, including a variable's literal fallback, while
+  ignoring prose and literal shell data. Computed commands, sourced values and
+  arbitrary `eval` remain outside its interpretation.
+
 - **Explicit SSO links and queued mail cannot bypass account recovery** (#508).
   Link callbacks revalidate the initiating session in their lifecycle transaction,
   including attempts that find an existing link, so promotion during token exchange
