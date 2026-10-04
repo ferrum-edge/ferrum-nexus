@@ -201,6 +201,7 @@ import {
   MAX_PAGE_SIZE,
   TEST_CONSUMER_USERNAME_PREFIX,
   apiIdFromAclGroup,
+  mcpGroupsForGrant,
   consumerUsernameForApplication,
   consumerUsernameForUser,
   roleAtLeast,
@@ -2462,7 +2463,16 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // group outside that namespace is an operator's, and is kept.
           const current = live.acl_groups ?? [];
           const retained = current.filter((group) => apiIdFromAclGroup(group) === null);
-          const groups = [...new Set([...retained, ...grants.map((grant) => grant.acl_group)])];
+          const restored = await Promise.all(
+            grants.map(async (grant) => {
+              const api = await store.apis.findById(grant.api_id);
+              return [
+                grant.acl_group,
+                ...(api?.agents ? mcpGroupsForGrant(grant.api_id, grant.approved_tools) : []),
+              ];
+            }),
+          );
+          const groups = [...new Set([...retained, ...restored.flat()])];
           const stray = current.some(
             (group) => apiIdFromAclGroup(group) !== null && !groups.includes(group),
           );

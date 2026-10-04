@@ -10,8 +10,11 @@ from source `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec` on Node `v22.22.2` / npm 
 The root lock resolves jsdom 30.1.2 and Undici 8.11.2; both include the proposed workspace engines.
 The archive SHA-256 is `06cfb6dd727d02621f026c45c6ba495f4c414803dc08a61a676dfb5809e43bba`;
 the [draft notes](dependency-majors-449-higher-floor-draft.md#hosted-lock-import-qualification-pending)
-record the verified input/output manifests and full import facts. Final-head runtime/CI
-qualification, full root and fresh independent review, and owner approval remain pending.
+record the verified input/output manifests and full import facts. The
+[main integration record](dependency-majors-449-higher-floor-draft.md#main-integration-and-current-gates)
+preserves the original producer/source binding and records the changed CI input alongside
+unchanged lock hashes. The pre-integration candidate passed all 15 hosted checks; combined-head
+qualification and review are pending, and owner approval remains pending.
 
 ## PR #518 provenance
 

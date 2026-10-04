@@ -1,4 +1,4 @@
-# Agent marketplace: phase 1 contract and qualification
+# Agent marketplace: published MCP contract and subset grants
 
 Issue [#446](https://github.com/ferrum-edge/ferrum-nexus/issues/446) exposes explicitly
 selected API operations as MCP tools. Agents are off by default. This document
@@ -52,8 +52,9 @@ unavailable. Supporting HEAD is a future Edge dependency, not an invented API.
 
 The embedded gateway uses `mode: aggregate_router`, an exact `endpoint.path`,
 `policy.default_action: deny`, `policy.hide_denied_tools: true`, and an
-`action: allow`/`allowed_groups: [nexus:api:<id>:approved]` entry for **every**
-selected public namespaced tool. Only tools are advertised; resources, prompts,
+`action: allow` entry for each selected public namespaced tool, with
+`allowed_groups: [nexus:api:<id>:mcp:all, nexus:api:<id>:mcp:tool:<exposure-id>]`.
+The ordinary REST approval group is never a tool policy group. Only tools are advertised; resources, prompts,
 logging, completions, tasks and unknown-method passthrough are disabled. Argument
 validation is enabled. Raw arguments and argument hashes are not enabled in
 gateway observability.
@@ -145,7 +146,8 @@ Required hosted gates include:
   and CSRF checks, audit intent/completion, lost acknowledgements, recorded
   ownership and compensated store failures with operator resource fields retained.
 - `store-contracts` on all four adapters, including retained baseline upgrade,
-  default-off migration `010`, selection round-trip and transaction rollback;
+  default-off migration `010`, subset migration `011`, selection/subset round-trip,
+  production publishing/access mutations and transaction rollback;
   released migration checksums must remain unchanged.
 - Packaged-image acceptance against the exact pin above: normal keyauth,
   basicauth and JWT credentials; account/application isolation; public/private
@@ -156,11 +158,29 @@ Required hosted gates include:
 - Fresh independent security review before merge. Mock config tests do not prove
   real gateway execution or authorization.
 
-## Deferred work
+## Optional subsets and cross-repository follow-up
 
-Phase 2 tool-subset requests/approvals and additional ACL groups are deliberately
-deferred. Whole-API grants cover all exposed tools, including subsequently selected
-ones. Anvil, Alloy and Foundry tracking work is cross-repository follow-up and is
+Optional consumer `requested_tools` and provider `approved_tools` contain server-owned
+exposure IDs from the catalog. Omission/null means all published tools, including future
+ones; explicit `[]` means REST access only. Approval defaults to the requested selection
+and may narrow it, never broaden it. Only currently published IDs can be requested or
+approved. Request and approval admission share the publishing proxy lease.
+
+IDs survive cosmetic descriptions and unchanged republishing. Rename, method/path changes,
+removing and re-adding exposure, or disabling and re-enabling agents mint new IDs. Any
+changed uploaded spec conservatively rotates all IDs, including a spec rollback, because
+references or schemas can change callable semantics. Existing explicit subsets then fail
+closed and do not regain tools if old names return. REST access remains. Null grants
+retain their all-published-tools meaning. Revocation, deletion and bulk teardown remove
+both REST and MCP groups; re-enable rebuilds only active grants, preserving operator groups.
+
+Existing phase-1 APIs require an authenticated provider republish before accepting a
+subset, including empty subsets. See the [draft upgrade tradeoff](mcp-subsets-migration-draft.md).
+Hosted acceptance adds subset discovery/calls for keyauth, basicauth and JWT applications,
+empty/omitted subsets, lifecycle changes and actual PostgreSQL-induced approval/policy
+rollback. The independent-budget proof now uses explicit read-tool subsets.
+
+Anvil, Alloy and Foundry tracking work is cross-repository follow-up and is
 not required to use this phase with an ordinary MCP client. No transcript sink UI
 or arbitrary provider policy editor is introduced.
 

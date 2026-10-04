@@ -876,14 +876,17 @@ supplied policy rules. `ai_transcript_audit`, its sinks and the remaining AI fam
 stay operator-only in Foundry. Prompt shielding is a pattern-based data guard,
 not a general defense against every prompt injection.
 
-MCP requires a requestable `routes` API. Every selected tool carries the existing
-approval group in `allowed_groups`, with default deny and denied tools hidden.
+MCP requires a requestable `routes` API. Tool `allowed_groups` contain a separate
+MCP-all group and that tool's server-owned exposure group, with default deny and denied
+tools hidden. The REST approval group is never a tool-policy group.
 Public catalog visibility does not grant data-plane access. Unapproved and revoked
 identities are refused by `access_control` even for initialize and `tools/list`;
-account and application approvals remain separate. Revocation removes the group,
-so the next call with the same credential/session fails. MCP sessions do not cache
-Nexus approval. Per-tool subset grants are deferred; adding an exposed tool extends
-existing whole-API grants, and the provider must explicitly select mutations.
+account and application approvals remain separate. Revocation removes both group families,
+so the next call with the same credential/session fails. MCP sessions do not cache Nexus
+approval. Explicit subsets cannot be broadened by approval or tool lifecycle changes.
+Omitted/null grants intentionally cover future published tools; `[]` grants none. Changed
+specs rotate exposure IDs conservatively, leaving explicit subsets with REST access only
+until a new approval. Providers must still explicitly select mutations.
 
 Provider `x-ferrum-*` extensions cannot override endpoint, selection, grants or
 governance. Endpoint paths are derived from the namespace/slug and reserve a
@@ -2021,3 +2024,23 @@ Before going live:
       standbys share one PostgreSQL, MySQL or MongoDB database and do no
       gateway-mutating work until promoted
       ([`operations.md`](operations.md#8-scaling)). SQLite is single-instance.
+
+### Proposed service-manifest preview boundary
+
+`POST /api/service-manifests/preview` requires a provider-or-higher session, CSRF,
+and the configured namespace in both the request and manifest (the contract's default
+namespace is `ferrum`). The immutable PROPOSED v1 schema and complete shared fixture
+set are pinned separately in `contracts/ferrum-contracts/SERVICE-MANIFEST-PIN`.
+Strict validation rejects nulls where types prohibit them, unknown keys, unsupported
+schema versions/protocols, noncanonical paths and invalid references. Intake is bounded
+to 32 KiB, 8 levels, 1,024 nodes, 32 array entries and 2,048-character strings, with
+an authenticated per-account burst limit. Failures do not echo source values.
+
+The result includes only a bounded summary; TLS paths, file/telemetry locations,
+upstream hosts and free-form descriptions are omitted and reference values are marked
+`[REDACTED]`. No preview data is retained. The service has no persistence, Edge, HTTP,
+file-intake or TLS reader dependency. It cannot apply/publish, fetch URLs, read declared
+files, access TLS secrets or import diagnostics. Reading the fixed vendored schema at
+startup is the only schema file access. Alloy remains a producer, never a trace store.
+This implements only the Nexus consumer portion of Alloy #27; Anvil diagnostic import
+and contract freeze remain cross-repository work.

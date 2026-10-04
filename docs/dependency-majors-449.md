@@ -56,15 +56,18 @@ and both current locks are imported byte-for-byte from verified hosted artifact 
 The root lock resolves those versions; both locks include the proposed workspace engines.
 Owned transports disable H2 explicitly. Notifications now label buttons from their visible
 title and action and describe them from the visible body and time, retaining role/name and
-visibility assertions. The candidate still needs hosted evidence and fresh independent review.
+visibility assertions. The pre-integration candidate passed all 15 hosted checks; the combined
+head after integrating PR #519 needs fresh hosted evidence and independent review.
 
 The issue body says Dependabot ignores these package majors. At the migration base `2ad4d53`,
 `.github/dependabot.yml` contains no package-specific ignores for them: its npm major ignores
 cover only `@types/node`, and the Docker Node ignore is separate. There is no matching ignore to
 remove. This discrepancy is documented here; the issue and Dependabot configuration are unchanged.
 
-The existing MCP functionality, forward migration `010` on all four stores, vendored contracts,
-and Ferrum Edge 0.9.10 compatibility pins are outside this migration and remain unchanged.
+The authorized merge of main `559c350a5370335791cdc3082225dce6056cf547` brings qualified
+PR #519's MCP subsets, forward migration `011` on all four stores and proposed service-manifest
+consumer into this candidate. Its source, strict fixtures and immutable contract assets are
+preserved without integration edits. Ferrum Edge 0.9.10 compatibility pins remain unchanged.
 
 ## Hosted locks and qualification
 
@@ -96,12 +99,14 @@ checkout, verify `provenance/input.sha256` against that checkout, and verify
 two generated lockfiles to their corresponding paths, inspect the complete diff, and commit with
 hooks disabled before pushing. Keep the provenance artifact/run URL available for review.
 
-The candidate locks are applied; final-head runtime/CI qualification remains pending. The optional
-producer does not replace any required check: all normal required checks must pass on the final head,
+The candidate locks are applied and unchanged after main integration; combined-head runtime/CI
+qualification remains pending. The optional producer does not replace any required check:
+all normal required checks must pass on the final head,
 including `Supported Node minimum`, real Node 22/24 checks, store contracts, Docker, acceptance,
 quickstart configuration and action pins. The candidate's additional per-major minima, Node 26
 and verbatim quickstart jobs must pass too. Coverage remains its existing optional job.
 No local project tooling was run for this migration. Root and a fresh independent reviewer
-must review the full candidate and subsequent fix deltas. Only after that and complete hosted
-qualification may root ask the owner to approve the released-profile change. This draft is
-not merge authorization and does not close #449.
+must review the combined candidate and integration delta, and every hosted gate must pass again.
+Owner approval to change the released profile remains pending; integration does not imply
+approval or authorize another owner request. This draft is not merge authorization and does
+not close #449.

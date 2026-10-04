@@ -202,6 +202,8 @@ import {
   RATE_LIMIT_PLUGIN,
   SPEC_CHANGE_HISTORY_LIMIT,
   aclGroupForApi,
+  isMcpGroupForApi,
+  mcpAllGroupForApi,
   emptySpecChangeReport,
   listenPathFor,
   roleAtLeast,
@@ -285,7 +287,7 @@ import {
   operatorOwnedFields,
   writeBody,
 } from './edge-plugins.js';
-import { validateAgents } from './agents.js';
+import { identifyAgentTools, validateAgents } from './agents.js';
 import { presentApi, type GatewayUrlSource } from './present.js';
 import {
   assertUpstreamAllowed,
@@ -1382,7 +1384,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     const group = aclGroupForApi(apiId);
     await credentials.provisioner.mutateAclGroups(
       consumer.ferrum_consumer_id,
-      (groups) => groups.filter((entry) => entry !== group),
+      (groups) => groups.filter((entry) => entry !== group && !isMcpGroupForApi(entry, apiId)),
       userId,
     );
   }
@@ -1573,6 +1575,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         api.requestable,
         api.allowed_methods,
       );
+      // A changed document may alter referenced schemas or operation semantics.
+      // Conservatively invalidate every explicit subset; null grants remain all.
+      const nextAgents = identifyAgentTools(
+        api.agents ?? null,
+        api.agents ?? null,
+        previous?.raw_spec !== parsed.raw,
+      );
       const writesGateway =
         proxyId !== null && (api.spec_enforcement === 'routes' || backend !== null);
       if (writesGateway) {
@@ -1643,10 +1652,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             });
             await edge.apiSpecs.replace(
               specId,
-              await build(parsed.document, {
-                ...submittableProxyBody(proxy),
-                ...(backend ? backendFields(backend) : {}),
-              }),
+              await buildSpecDocument(
+                parsed.document,
+                {
+                  ...submittableProxyBody(proxy),
+                  ...(backend ? backendFields(backend) : {}),
+                },
+                { ...api, agents: nextAgents },
+              ),
               actor.id,
             );
           } else if (backend) {
@@ -1705,6 +1718,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // back, the compensation below puts the proxy back and the row never
           // claimed the new upstream in the first place.
           const changes: Partial<ApiRecord> = {};
+          if (!isDeepStrictEqual(nextAgents, api.agents ?? null)) changes.agents = nextAgents;
           if (nextVersion !== api.version) changes.version = nextVersion;
           if (movedTo !== null) changes.upstream_url = movedTo;
           const row =
@@ -1911,7 +1925,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // creating a proxy that would then have to be rolled back.
       assertRoutesEnforceable(specEnforcement, parsed.paths);
       assertRoutesSubmittable(specEnforcement, parsed.document);
-      const agents = input.agents ?? null;
+      const agents = identifyAgentTools(input.agents ?? null);
       validateAgents(agents, parsed.document, specEnforcement, input.requestable, methods);
       const agentApi = { id: apiId, slug, agents };
 
@@ -2254,7 +2268,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           details.gateway_untouched = true;
         }
 
-        const nextAgents = patch.agents === undefined ? (api.agents ?? null) : patch.agents;
+        const nextAgents =
+          patch.agents === undefined
+            ? (api.agents ?? null)
+            : identifyAgentTools(patch.agents, api.agents ?? null);
         const agentsMoved = !isDeepStrictEqual(nextAgents, api.agents ?? null);
         const currentSpec =
           nextAgents || agentsMoved ? await store.apiSpecs.findCurrentByApi(api.id) : null;
@@ -4051,7 +4068,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // found again, by the compensation here or by a later teardown.
             attemptedConsumerId = edge.consumers.derivedId(username);
             resolved = await edge.consumers.ensure(
-              { username, custom_id: `nexus-test:${api.id}`, acl_groups: [group] },
+              {
+                username,
+                custom_id: `nexus-test:${api.id}`,
+                acl_groups: current.agents ? [group, mcpAllGroupForApi(api.id)] : [group],
+              },
               actor.id,
             );
             // Answered, so nothing is in doubt any more: a create that landed
@@ -4107,7 +4128,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 id: attemptedConsumerId,
                 username,
                 custom_id: `nexus-test:${api.id}`,
-                acl_groups: [group],
+                acl_groups: current.agents ? [group, mcpAllGroupForApi(api.id)] : [group],
               },
               actor.id,
             );
@@ -4285,6 +4306,29 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     api?: Pick<ApiRecord, 'id' | 'slug' | 'agents'>,
   ): Promise<Record<string, unknown>> {
     if (!api?.agents) return routesSpecDocument(document, { proxy });
+    // Called under the proxy lease, including compensation. Retained phase-1
+    // approvals keep their all-tools meaning when this API first adopts subsets.
+    for (const grant of await store.grants.listActiveByApi(api.id)) {
+      if (grant.approved_tools != null) continue;
+      const consumer = await store.consumers.findByUserAndNamespace(
+        grant.user_id,
+        namespace,
+        grant.application_id,
+      );
+      if (!consumer) continue;
+      await credentials.provisioner.mutateAclGroups(
+        consumer.ferrum_consumer_id,
+        (groups) => {
+          // The REST group proves membership; the active-user guard orders
+          // this enrollment against disable/teardown.
+          return groups.includes(grant.acl_group)
+            ? [...new Set([...groups, mcpAllGroupForApi(api.id)])]
+            : groups;
+        },
+        undefined,
+        { requireActiveUser: grant.user_id },
+      );
+    }
     const proxyId = String(proxy.id);
     const live = await edge.pluginConfigs.listByProxy(proxyId);
     const spec = await edge.apiSpecs.findByProxy(proxyId);

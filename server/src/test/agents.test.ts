@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import {
   aclGroupForApi,
+  mcpAllGroupForApi,
+  mcpToolGroupForApi,
   consumerUsernameForUser,
   type ApiAgents,
   type ApproveAccessRequestResponse,
@@ -15,6 +17,10 @@ import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 const AGENTS: ApiAgents = {
   operations: [{ path: '/items', method: 'GET', name: 'list_items', description: 'List items' }],
 };
+function selections(agents: ApiAgents | null | undefined): ApiAgents | null {
+  return agents ? { operations: agents.operations.map(({ id: _id, ...tool }) => tool) } : null;
+}
+
 const DOCUMENT = {
   openapi: '3.1.0',
   info: { title: 'Agent API', version: '1' },
@@ -95,7 +101,10 @@ describe('agent publishing and Nexus authorization', () => {
     assert.deepEqual(policy.tools, {
       [`${published.api.slug}.list_items`]: {
         action: 'allow',
-        allowed_groups: [aclGroupForApi(published.api.id)],
+        allowed_groups: [
+          mcpAllGroupForApi(published.api.id),
+          mcpToolGroupForApi(published.api.id, published.api.agents?.operations[0]?.id ?? ''),
+        ],
       },
     });
     const routes = configs.find((item) => item.plugin_name === 'openapi_validator');
@@ -316,7 +325,7 @@ describe('agent publishing and Nexus authorization', () => {
       payload: { agents: null },
     });
     assert.equal(failed.statusCode, 500, failed.body);
-    assert.deepEqual((await harness.store.apis.findById(api.id))?.agents, AGENTS);
+    assert.deepEqual(selections((await harness.store.apis.findById(api.id))?.agents), AGENTS);
     const restored = harness.edge
       .effectivePluginsForProxy(api.ferrum_proxy_id ?? '')
       .find((item) => item.plugin_name === 'mcp_gateway');
@@ -353,9 +362,13 @@ describe('agent publishing and Nexus authorization', () => {
       .effectivePluginsForProxy(api.ferrum_proxy_id ?? '')
       .find((item) => item.plugin_name === 'mcp_gateway');
     const policy = (gateway?.config as { policy: { tools: Record<string, unknown> } }).policy;
+    const removeId = (await harness.store.apis.findById(api.id))?.agents?.operations.find(
+      (tool) => tool.name === 'remove',
+    )?.id;
+    assert.ok(removeId);
     assert.deepEqual(policy.tools[`${api.slug}.remove`], {
       action: 'allow',
-      allowed_groups: [aclGroupForApi(api.id)],
+      allowed_groups: [mcpAllGroupForApi(api.id), mcpToolGroupForApi(api.id, removeId)],
     });
     for (const name of [
       'mcp_gateway',
@@ -387,7 +400,7 @@ describe('agent publishing and Nexus authorization', () => {
       },
     });
     assert.equal(changed.statusCode, 409, changed.body);
-    assert.deepEqual((await harness.store.apis.findById(api.id))?.agents, AGENTS);
+    assert.deepEqual(selections((await harness.store.apis.findById(api.id))?.agents), AGENTS);
   });
 
   it('undoes a policy write even when its acknowledgement is lost', async () => {
@@ -399,7 +412,7 @@ describe('agent publishing and Nexus authorization', () => {
       payload: { agents: null },
     });
     assert.ok(failed.statusCode >= 500, failed.body);
-    assert.deepEqual((await harness.store.apis.findById(api.id))?.agents, AGENTS);
+    assert.deepEqual(selections((await harness.store.apis.findById(api.id))?.agents), AGENTS);
     const gateway = harness.edge
       .effectivePluginsForProxy(api.ferrum_proxy_id ?? '')
       .find((item) => item.plugin_name === 'mcp_gateway');
@@ -425,7 +438,7 @@ describe('agent publishing and Nexus authorization', () => {
       payload: { agents: AGENTS, allowed_methods: ['GET', 'POST'] },
     });
     assert.equal(failed.statusCode, 500, failed.body);
-    assert.deepEqual((await harness.store.apis.findById(api.id))?.agents, agents);
+    assert.deepEqual(selections((await harness.store.apis.findById(api.id))?.agents), agents);
     const proxy = harness.edge.proxyServing(api.listen_path);
     assert.ok(proxy);
     assert.equal(proxy?.allowed_methods ?? null, null);
@@ -433,9 +446,13 @@ describe('agent publishing and Nexus authorization', () => {
       .effectivePluginsForProxy(api.ferrum_proxy_id ?? '')
       .find((item) => item.plugin_name === 'mcp_gateway');
     const policy = (gateway?.config as { policy: { tools: Record<string, unknown> } }).policy;
+    const removeId = (await harness.store.apis.findById(api.id))?.agents?.operations.find(
+      (tool) => tool.name === 'remove',
+    )?.id;
+    assert.ok(removeId);
     assert.deepEqual(policy.tools[`${api.slug}.remove`], {
       action: 'allow',
-      allowed_groups: [aclGroupForApi(api.id)],
+      allowed_groups: [mcpAllGroupForApi(api.id), mcpToolGroupForApi(api.id, removeId)],
     });
   });
 
@@ -463,5 +480,124 @@ describe('agent publishing and Nexus authorization', () => {
         .effectivePluginsForProxy(api.ferrum_proxy_id ?? '')
         .some((item) => item.plugin_name === 'mcp_gateway'),
     );
+  });
+  it('validates subsets against published IDs and refuses widening before any gateway mutation', async () => {
+    const { api } = await publish();
+    const id = api.agents?.operations[0]?.id;
+    assert.ok(id);
+    for (const requested_tools of [[id, id], ['00000000-0000-4000-8000-000000000000']]) {
+      const before = harness.edge.requests.length;
+      const response = await harness.authed(client, {
+        method: 'POST',
+        url: '/api/access-requests',
+        payload: { api_id: api.id, justification: 'Bad subset', requested_tools },
+      });
+      assert.equal(response.statusCode, 400, response.body);
+      assert.equal(
+        harness.edge.requests.slice(before).some((request) => request.method !== 'GET'),
+        false,
+      );
+    }
+    const request = await harness.authed(client, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: api.id, justification: 'Only selected', requested_tools: [id] },
+    });
+    const requestId = request.json<CreateAccessRequestResponse>().access_request.id;
+    const widened = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/approve`,
+      payload: { approved_tools: null },
+    });
+    assert.equal(widened.statusCode, 400, widened.body);
+    const narrowed = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/approve`,
+      payload: { approved_tools: [] },
+    });
+    assert.equal(narrowed.statusCode, 200, narrowed.body);
+    const grant = narrowed.json<ApproveAccessRequestResponse>().grant;
+    assert.deepEqual(grant.approved_tools, []);
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(client.user.id));
+    assert.ok(consumer?.acl_groups?.includes(aclGroupForApi(api.id)));
+    assert.equal(
+      consumer?.acl_groups?.some((group) => group.startsWith(`nexus:api:${api.id}:mcp:`)),
+      false,
+    );
+  });
+
+  it('refuses even empty subsets on retained phase-1 exposure until an authenticated republish', async () => {
+    const { api } = await publish();
+    // Retained phase-1 JSON has no server-owned exposure IDs.
+    await harness.store.apis.update(api.id, { agents: AGENTS });
+    const before = harness.edge.requests.length;
+    const request = await harness.authed(client, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: api.id, justification: 'REST only', requested_tools: [] },
+    });
+    assert.equal(request.statusCode, 409, request.body);
+    assert.equal(
+      harness.edge.requests.slice(before).some((item) => item.method !== 'GET'),
+      false,
+    );
+    const enrolled = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: AGENTS },
+    });
+    assert.equal(enrolled.statusCode, 200, enrolled.body);
+    assert.ok(enrolled.json<PublishApiResponse>().api.agents?.operations[0]?.id);
+    const retry = await harness.authed(client, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: api.id, justification: 'REST only', requested_tools: [] },
+    });
+    assert.equal(retry.statusCode, 201, retry.body);
+  });
+
+  it('does not accept a client identity override or revive a renamed or disabled tool identity', async () => {
+    const { api } = await publish();
+    const id = api.agents?.operations[0]?.id;
+    assert.ok(id);
+    const description = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: {
+        agents: {
+          operations: [
+            {
+              ...AGENTS.operations[0],
+              id: '00000000-0000-4000-8000-000000000000',
+              description: 'Cosmetic edit',
+            },
+          ],
+        },
+      },
+    });
+    assert.equal(description.statusCode, 200, description.body);
+    assert.equal(description.json<PublishApiResponse>().api.agents?.operations[0]?.id, id);
+    for (const name of ['renamed', 'list_items']) {
+      const changed = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${api.id}`,
+        payload: { agents: { operations: [{ ...AGENTS.operations[0], name, id }] } },
+      });
+      assert.equal(changed.statusCode, 200, changed.body);
+      assert.notEqual(changed.json<PublishApiResponse>().api.agents?.operations[0]?.id, id);
+    }
+    const disabled = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: null },
+    });
+    assert.equal(disabled.statusCode, 200, disabled.body);
+    const enabled = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: AGENTS },
+    });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    assert.notEqual(enabled.json<PublishApiResponse>().api.agents?.operations[0]?.id, id);
   });
 });

@@ -10,6 +10,7 @@ RUN npm ci --ignore-scripts \
   && npm rebuild esbuild
 
 COPY tsconfig.base.json ./
+COPY contracts/ contracts/
 COPY shared/ shared/
 COPY server/ server/
 COPY web/ web/
@@ -26,6 +27,7 @@ FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddf
 ENV NODE_ENV=production
 WORKDIR /app
 
+COPY --from=build /app/contracts contracts
 COPY --from=build /app/package.json ./
 COPY --from=build /app/node_modules node_modules
 COPY --from=build /app/shared/package.json shared/package.json

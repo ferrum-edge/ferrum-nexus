@@ -8,6 +8,21 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
+- **Optional MCP tool subsets** (Refs #446). Consumers request published exposure IDs;
+  providers can narrow approval. Separate MCP-all/per-tool groups preserve REST access
+  and prevent its approval group bypassing subsets. Null retains all published tools;
+  empty means REST-only. Migration 011 covers all four stores. Exposure changes fail
+  closed. Existing phase-1 APIs require provider opt-in before explicit subsets;
+  deployment must stop and drain older writers and cannot roll back while subset
+  grants exist. See the accepted [unreleased rollout](docs/mcp-subsets-migration-draft.md)
+  and spec-change tradeoff before deployment.
+- **Redacted service-manifest preview** (Refs ferrum-edge/ferrum-alloy#27, Nexus portion).
+  Authenticated namespace-authorized bounded intake validates the exact immutable
+  proposed schema and shared fixtures. Preview has no apply/publish, URL/file/TLS
+  access or diagnostic import. Anvil and Nexus consumers are qualified and merged;
+  the manifest contract remains PROPOSED pending the canonical tracking/freeze
+  decision. See [preview status](docs/service-manifest-preview.md).
+
 - **Agent-ready API listings** (#446, phase 1). Providers can explicitly expose
   selected OpenAPI operations as MCP tools, off by default, on requestable
   `routes` APIs. Existing account/application approvals gate every tool; normal
@@ -16,7 +31,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   Fixed API-scoped governance denies unselected tools, shields MCP arguments and
   budgets 60 tool calls per consumer per minute. Forward migration `010` retains
   existing APIs with agents disabled on all four stores. Hosted acceptance covers
-  the actual digest-pinned Edge release; subset grants remain a phase 2 follow-up.
+  the actual digest-pinned Edge release; subset grants are extended by the unreleased phase 2 change above.
 
 ### Changed
 
@@ -28,10 +43,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   confidential OIDC exchange and CAPTCHA form/redirect behavior. Notification
   controls name their visible title and action and describe their body/time,
   retaining accessible-role assertions under jsdom 30. The existing Node image
-  digest already contains 22.23.3. This draft is **not approved or qualified**:
+  digest already contains 22.23.3. The higher released Node floor is **not approved**:
   both locks are imported byte-for-byte from verified hosted artifact
-  `11308824128`; final-head runtime/CI qualification, full root and fresh
-  independent review, and owner approval remain pending. See the
+  `11308824128`. The pre-integration candidate passed all 15 hosted checks;
+  after integrating qualified main PR #519, the combined head requires fresh
+  hosted qualification, full root and independent review. Owner approval remains pending. See
   [candidate and rollback notes](docs/dependency-majors-449-higher-floor-draft.md).
 
 - **Node 22.14-compatible dependency majors are migrated** (Refs #449).

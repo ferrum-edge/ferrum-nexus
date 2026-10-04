@@ -21,6 +21,8 @@ import {
   ERROR_CODES,
   isErrorCode,
   type AdminSettingsResponse,
+  type PreviewServiceManifestRequest,
+  type PreviewServiceManifestResponse,
   type ApiUsageResponse,
   type ApproveAccessRequestResponse,
   type BrandingResponse,
@@ -714,4 +716,10 @@ export const godApi = {
 
 export const brandingApi = {
   get: (): Promise<BrandingResponse> => get<BrandingResponse>('/branding'),
+};
+
+/** Read-only proposed manifest intake; no apply endpoint exists. */
+export const serviceManifestsApi = {
+  preview: (body: PreviewServiceManifestRequest): Promise<PreviewServiceManifestResponse> =>
+    post<PreviewServiceManifestResponse>('/service-manifests/preview', body),
 };

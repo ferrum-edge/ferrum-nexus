@@ -2,11 +2,14 @@
 
 References [issue #449](https://github.com/ferrum-edge/ferrum-nexus/issues/449).
 Prepared from main `48ea760098d1aa858dc7cee06bf7f8fb7536cdaf` (PR #520).
+This continuation integrates main `559c350a5370335791cdc3082225dce6056cf547`
+(qualified PR #519) into candidate `aa2904bf41784c930f7d41af69603e22a9216a4c`
+through a normal merge.
 **The owner has not approved a higher released Node floor.** This branch and its
 draft PR are a concrete proposal only. Main/released support remains Node 22.14. Root must
-review the full candidate, obtain fresh independent review and qualify every hosted gate
-before asking the owner to approve a released-profile change. Do not merge or mark #449 fixed
-on the strength of this preparation.
+review the combined candidate, obtain fresh independent review and qualify every hosted gate.
+The existing owner decision is pending; this integration neither implies approval nor
+authorizes another owner request. Do not merge or mark #449 fixed on this preparation.
 
 ## Compatibility proposal and primary evidence
 
@@ -160,8 +163,60 @@ This follow-up gives that fixture an explicit `localhost` issuer while retaining
 and signed-token issuer now share one identity. Assertions reject a different origin/path
 and validate the healthy token through the default vetted Undici transport, retaining Basic
 authentication encoding, PKCE and the absence of a form client secret. No production transport
-or security guard is changed. Fresh-head hosted results are required to confirm this correction;
-the earlier job is a failure, and no remediated CI pass is claimed.
+or security guard is changed. The later `aa2904` hosted qualification below includes this
+correction and the exact hosted formatter fixes; the earlier job remains a historical failure.
+
+## Main integration and current gates
+
+Pre-integration candidate `aa2904bf41784c930f7d41af69603e22a9216a4c` passed all 15
+Actions check runs across [CI 37219830100](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37219830100),
+[Verbatim quickstart 37219830156](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37219830156)
+and [Dependency lock artifacts 37219830157](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37219830157).
+Root completed full and independent review of that head and its fix deltas. This is prior-head
+evidence; it does not qualify the combined candidate or approve the released Node profile.
+
+Nexus [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519) was qualified at final head
+`77fdb767ec8ef04e88f13df9fb291bc77fbd0344`: all 11 check runs across
+[CI 37221116488](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221116488)
+and [Verbatim quickstart 37221116610](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221116610)
+passed. Root completed whole and fresh independent reviews before it merged at
+`559c350a5370335791cdc3082225dce6056cf547` on 2026-10-04 at 17:42:42 UTC;
+issue #446 closed at 17:42:43 UTC. Its MCP subsets, migration 011, manifest consumer,
+authorization, claim comparisons, leases, compensation, bounds/redaction and strict fixtures
+are preserved without source edits. The manifest contract remains PROPOSED pending the
+canonical tracking/freeze decision. That main head's implementation and qualification are complete.
+
+The immutable heads share base `48ea760098d1aa858dc7cee06bf7f8fb7536cdaf`. Their only
+overlapping changed files are `.github/workflows/ci.yml`, `CHANGELOG.md` and `README.md`.
+The normal merge is conflict-free: CI retains all six candidate lanes and the fail-closed
+minimum aggregate together with main's migration-011 inventory assertion. Both changelog
+entries remain under Unreleased, and README retains the draft profile and manifest pin.
+Manual documentation edits distinguish the qualified parents from the unqualified combined
+head and preserve the pending owner decision. Candidate H1 opt-outs, canonical OIDC fixture,
+accessible notification regressions and all existing MCP strict fixtures are unchanged.
+
+Main changes no package manifest or lockfile relative to the shared base. Both candidate
+locks remain byte-for-byte the outputs of artifact `11308824128`; no graph regeneration or
+manual dependency edit was needed. The original producer is still run `37217928511`, attempt 1,
+source `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`, and its archive digest remains
+`06cfb6dd727d02621f026c45c6ba495f4c414803dc08a61a676dfb5809e43bba`.
+The five manifest hashes, `.nvmrc` and producer-workflow hash still match the original input
+manifest above. The imported locks retain the original output hashes. Only the CI input
+changes during this integration, to include migration 011; its SHA-256 is recorded below.
+This is an integration record, not a new producer artifact or a relabeling of the old source:
+
+```text
+318c2c47b84d173bd44b7d9fb45d7fa7e9f20ab80ed72dad9831fbe8be8523b4  .github/workflows/ci.yml
+0ed9c2de1dab8e5828e496a135fc1b67f91d2191f4c986e3ea79b19b5e8e6a12  package-lock.json
+c46908b663e2ca75765120e87c6d14688eaa251078cd481e42b30fced790645a  e2e/package-lock.json
+```
+
+Static inspection found no additional integration change needed for TypeScript 7, Zod 4
+or Vitest 5: main already uses the same versions and shared DTOs, and manifest validation
+uses Zod 4's strict objects and public refinements. New subset controls and their exact
+accessible-name fixtures are retained for hosted jsdom 30 execution. Edge mutations continue
+through the candidate's owned H1 Admin agent. This inspection is not runtime qualification;
+no repository code, installer, formatter, build or test was executed locally.
 
 CI runs `checks (22.22.2)`, `checks (22)`, `checks (24.15.0)`, `checks (24)`,
 `checks (26.0.0)` and `checks (26)` with strict engine checks and actual-version assertions.
@@ -170,19 +225,22 @@ and the exact matrix before reporting qualification. It never labels a newer run
 22.14 or treats a missing/minimum failure as success. Existing required context names and
 repository settings are preserved. All four store contracts, SMTP/OIDC/MCP security suites,
 Docker, acceptance, quickstart configuration, action pins and verbatim quickstart remain gates
-for the final candidate. No MCP subset/runtime/service-manifest source is changed here.
+for the combined candidate. Release compatibility and Docker image digests are unchanged.
 
-**Final-head runtime/CI qualification, full root and fresh independent qualification, and
-owner approval remain PENDING.** A successful lock producer does not qualify the application
-or adopt a published Node floor. After all final-head hosted results and full candidate reviews
-are successful and reviewable, root may ask the owner to approve the support-profile tradeoff.
-Fix deltas need review too. This import neither requests nor triggers an automated reviewer,
-authorizes merging draft PR #521, nor closes #449.
+**Combined-head runtime/CI qualification, full root and fresh independent review remain
+PENDING. Owner approval remains PENDING.** Neither the successful parents nor the producer
+qualify this combined head or adopt a published Node floor. Root owns exact-head combined-delta
+review, independent review of any new logic and all fresh hosted CI after this push. This
+continuation neither requests nor triggers an automated reviewer, authorizes merging draft
+PR #521, closes #449, nor asks the owner again.
 
 ## Decline or rollback
 
 If the owner declines, leave main and the released profile at their current floor and retain
-the first-stage dependency upgrades. Do not merge this draft or close #449. This candidate
-adds no schema migration. If a later approved release needs rollback, use the prior complete
-release's manifests, genuine locks, Node declarations and image as one unit, following normal
-backup/upgrade procedures; changing only `.nvmrc` cannot make jsdom 30 install on Node 22.14.
+the first-stage dependency upgrades and main's qualified MCP work. Do not merge this draft
+or close #449. The dependency proposal adds no schema migration; integrated main adds 011.
+The [MCP rollout and rollback limits](mcp-subsets-migration-draft.md) apply: drain older writers
+and do not roll back the application while subset grants exist. If a later approved release
+needs rollback, use the prior complete release's manifests, genuine locks, Node declarations
+and image as one unit, following normal backup/upgrade procedures; changing only `.nvmrc`
+cannot make jsdom 30 install on Node 22.14.

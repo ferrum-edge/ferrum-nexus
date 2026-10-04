@@ -45,6 +45,7 @@ import {
   type RotateCredentialResponse,
 } from '@ferrum-nexus/shared';
 
+import { heldLeaseFences, type LeaseFence } from '../lib/lease-fence.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 import type { StoredConsumer } from './mock-ferrum-edge.js';
 
@@ -61,6 +62,19 @@ function latch(): { wait: Promise<void>; open: () => void } {
     open = resolve;
   });
   return { wait, open };
+}
+
+/** Fail a missing boundary or stalled cleanup instead of hanging the test runner. */
+async function within<T>(promise: Promise<T>, boundary: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timed out waiting for ${boundary}`)), 5_000);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /** Give an operation that is *not* serialised every chance to run ahead. */
@@ -464,10 +478,23 @@ describe('credential and access ownership (issue #341)', () => {
   /* ── 4. Revoke is serialised with approve ───────────────────────────── */
 
   it('orders a revocation and a re-approval of the same API under one proxy lease', async () => {
-    const first = await approve(await requestAccess());
+    const requestId = await requestAccess();
+    const first = await approve(requestId);
     const grantId = first.grant.id;
     const group = aclGroupForApi(apiId);
     assert.deepEqual(groupsOf(owner.user.id), [group]);
+    const api = await harness.store.apis.findById(apiId);
+    assert.ok(api?.ferrum_proxy_id);
+    const proxyKey = `proxy:${api.ferrum_proxy_id}`;
+    const consumer = await harness.store.consumers.findByUserAndNamespace(
+      owner.user.id,
+      NAMESPACE,
+      null,
+    );
+    assert.ok(consumer);
+    assert.equal(consumer.ferrum_username, consumerUsernameForUser(owner.user.id));
+    const edge = harness.edgeClient;
+    assert.equal(edge.namespace, consumer.namespace);
 
     // Record the order the grantee is told things in, and hold the
     // revocation's notice back: were it sent after the lease is released, the
@@ -475,59 +502,142 @@ describe('credential and access ownership (issue #341)', () => {
     const notifier = harness.services.notifications;
     const realNotify = notifier.notify.bind(notifier);
     const told: string[] = [];
+    const noticeArrived = latch();
+    const noticeProceed = latch();
+    let noticeFences: readonly LeaseFence[] = [];
     notifier.notify = async (userId, type, title, body, link) => {
-      if (type === 'access_revoked') await settle();
+      if (userId === owner.user.id && type === 'access_revoked') {
+        noticeFences = heldLeaseFences();
+        noticeArrived.open();
+        await within(noticeProceed.wait, 'revocation notice release');
+      }
       if (userId === owner.user.id) told.push(type);
       return realNotify(userId, type, title, body, link);
     };
 
-    // Park the revocation after its claim and before its ACL removal: the
-    // first thing it does on the way to the gateway is look up the mapping.
-    const repo = harness.store.consumers;
-    const realFind = repo.findByUserAndNamespace.bind(repo);
+    // Park only this owned account's ACL removal, after the durable claim and
+    // inside both the proxy and consumer leases, before the gateway write.
+    const consumers = edge.consumers;
+    const realReplace = consumers.replace.bind(consumers);
     const arrived = latch();
     const proceed = latch();
-    repo.findByUserAndNamespace = async (userId, namespace, applicationId) => {
-      repo.findByUserAndNamespace = realFind;
-      arrived.open();
-      await proceed.wait;
-      return realFind(userId, namespace, applicationId);
+    let removalFences: readonly LeaseFence[] = [];
+    consumers.replace = async (id, body, subject) => {
+      if (
+        id === consumer.ferrum_consumer_id &&
+        subject === owner.user.id &&
+        body.username === consumer.ferrum_username &&
+        body.custom_id === owner.user.id &&
+        body.acl_groups !== undefined &&
+        !body.acl_groups.includes(group)
+      ) {
+        consumers.replace = realReplace;
+        removalFences = heldLeaseFences();
+        arrived.open();
+        await within(proceed.wait, 'revocation ACL write release');
+      }
+      return realReplace(id, body, subject);
     };
+
+    const realSerialize = edge.serializePerKey.bind(edge);
+    const approvalQueued = latch();
+    let approvalEntered = false;
+    let approvalFences: readonly LeaseFence[] = [];
+    const inFlight: Promise<unknown>[] = [];
+    function track<T>(operation: Promise<T>): Promise<T> {
+      inFlight.push(operation);
+      void operation.catch(() => undefined);
+      return operation;
+    }
     try {
-      const revoking = harness.authed(provider, {
-        method: 'POST',
-        url: `/api/grants/${grantId}/revoke`,
-        payload: { reason: 'Contract ended.' },
-      });
-      await arrived.wait;
+      const revoking = track(
+        harness.authed(provider, {
+          method: 'POST',
+          url: `/api/grants/${grantId}/revoke`,
+          payload: { reason: 'Contract ended.' },
+        }),
+      );
+      await within(arrived.wait, 'the owned consumer ACL removal');
       assert.equal((await harness.store.grants.findById(grantId))?.status, 'revoked');
+      assert.equal((await harness.store.accessRequests.findById(requestId))?.status, 'revoked');
+      assert.equal((await auditFor('access.revoke', grantId)).user_id, owner.user.id);
+      assert.deepEqual(groupsOf(owner.user.id), [group], 'the ACL removal has not landed yet');
+      assert.deepEqual(
+        removalFences.map((fence) => fence.key),
+        [consumer.ferrum_consumer_id, proxyKey].sort(),
+      );
+      const proxyFence = removalFences.find((fence) => fence.key === proxyKey);
+      assert.ok(proxyFence);
+      assert.ok(await harness.store.leases.verify(proxyFence.key, proxyFence.token));
 
-      // The client asks again and the provider approves while the revocation
-      // is still on its way to the gateway.
-      const again = await requestAccess();
-      let approvedEarly = false;
-      const approving = harness.authed(provider, {
-        method: 'POST',
-        url: `/api/access-requests/${again}/approve`,
-        payload: {},
+      // Seed the pending decision input: request creation now takes this same
+      // proxy lease, so awaiting its HTTP route while revoke is parked would
+      // deadlock the fixture. Approval still runs through the production route.
+      const again = await harness.store.accessRequests.create({
+        api_id: apiId,
+        user_id: owner.user.id,
+        application_id: null,
+        justification: 'Integration access again',
+        status: 'pending',
       });
-      void approving.then(() => {
-        approvedEarly = true;
-      });
+      edge.serializePerKey = <T>(key: string, fn: () => Promise<T>): Promise<T> => {
+        if (key !== proxyKey) return realSerialize(key, fn);
+        approvalQueued.open();
+        return realSerialize(key, async () => {
+          approvalEntered = true;
+          approvalFences = heldLeaseFences();
+          return fn();
+        });
+      };
+      const approving = track(
+        harness.authed(provider, {
+          method: 'POST',
+          url: `/api/access-requests/${again.id}/approve`,
+          payload: {},
+        }),
+      );
+      await within(approvalQueued.wait, 'approval queueing for the same proxy lease');
       await settle();
-      assert.equal(approvedEarly, false, 'the approval waits for the revocation to finish');
+      assert.equal(approvalEntered, false, 'the approval waits for the revocation to finish');
+      assert.equal((await harness.store.accessRequests.findById(again.id))?.status, 'pending');
 
       proceed.open();
-      const revoked = await revoking;
+      await within(noticeArrived.wait, 'the revocation notice');
+      assert.deepEqual(groupsOf(owner.user.id), [], 'the old group is removed before re-approval');
+      assert.deepEqual(noticeFences, [proxyFence], 'the notice retains the revocation proxy lease');
+      assert.equal(approvalEntered, false, 'the approval also waits for the revocation notice');
+      noticeProceed.open();
+      const [revoked, approved] = await within(
+        Promise.all([revoking, approving]),
+        'revocation and re-approval completion',
+      );
       assert.equal(revoked.statusCode, 200, revoked.body);
-      const approved = await approving;
       assert.equal(approved.statusCode, 200, approved.body);
+      const approvalFence = approvalFences.find((fence) => fence.key === proxyKey);
+      assert.ok(approvalFence, 'the approval acquired the same proxy lease');
+      assert.notEqual(
+        approvalFence.token,
+        proxyFence.token,
+        'the approval owns a fresh acquisition',
+      );
     } finally {
-      repo.findByUserAndNamespace = realFind;
-      notifier.notify = realNotify;
       proceed.open();
+      noticeProceed.open();
+      try {
+        await within(Promise.allSettled(inFlight), 'in-flight access request cleanup');
+      } finally {
+        consumers.replace = realReplace;
+        edge.serializePerKey = realSerialize;
+        notifier.notify = realNotify;
+      }
     }
 
+    assert.equal((await harness.store.grants.findById(grantId))?.status, 'revoked');
+    assert.equal((await harness.store.accessRequests.findById(requestId))?.status, 'revoked');
+    assert.ok(
+      !(await harness.auditRows('access.revoke_rollback')).some((row) => row.target_id === grantId),
+      'the original revocation was never restored',
+    );
     const active = await harness.store.grants.findActiveByApiAndUser(apiId, owner.user.id, null);
     assert.ok(active, 'the re-approval holds an active grant');
     assert.notEqual(active.id, grantId);

@@ -399,6 +399,7 @@ describe('catalog access', () => {
     expect(accessRequestsApi.create).toHaveBeenCalledWith({
       api_id: API.id,
       justification: 'Reconcile invoices',
+      requested_tools: null,
       // The identity defaults to the account itself, which is what every
       // request made before applications existed is (issue #289).
       application_id: null,
@@ -693,6 +694,7 @@ describe('per-identity catalog access (issue #314)', () => {
         api_id: API.id,
         justification: 'Second integration',
         application_id: 'app-b',
+        requested_tools: null,
       }),
     );
   });

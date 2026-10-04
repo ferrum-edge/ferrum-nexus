@@ -161,4 +161,14 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
       mongodb: '88ac21c744286dcc8b737e6fa07440f44fa6afda872ac466154487a143cb94c2',
     },
   },
+  {
+    id: '011_mcp_tool_subsets',
+    release: null,
+    sha256: {
+      sqlite: 'e8e6d9bc74832ae7340568100c6ab5726bdd4e6baf0d88ffb8a36cc72b3ec22f',
+      pg: 'e8e6d9bc74832ae7340568100c6ab5726bdd4e6baf0d88ffb8a36cc72b3ec22f',
+      mysql: 'bf28e71c66f842664a394b889207d3767808b8e909d5de1d299fdc4948c95507',
+      mongodb: 'a41221361220d72fc7a36cedfae10375fe5581dc8c2a4af638d3495b5c86fc30',
+    },
+  },
 ];

@@ -35,7 +35,9 @@ This source branch is a **draft** jsdom 30 / Undici 8 migration. It proposes
 `^22.22.2 || ^24.15.0 || >=26.0.0`; owner approval to change the released Node
 support profile is still pending. The released profile remains Node 22.14+.
 Both candidate locks are imported from verified hosted artifact `11308824128`.
-Final-head runtime/CI qualification and full root and fresh independent review remain pending.
+The pre-integration candidate passed all 15 hosted checks; qualified main PR #519 is now
+integrated, including MCP subsets and the proposed service-manifest preview. The combined
+head still requires fresh hosted qualification, full root review and independent review.
 See the [candidate and rollback notes](docs/dependency-majors-449-higher-floor-draft.md).
 
 - **Production upgrades.** Schema changes ship as forward migrations that
@@ -288,7 +290,12 @@ Ferrum Edge vocabularies it speaks under
 (`contracts-edge-0.9.9`) and per-file SHA-256 in
 [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN). The `shared` contract test
 verifies every digest and checks Nexus's local names against the vendored vocabularies; the
-vendoring and bump procedure is in [`CONTRIBUTING.md`](CONTRIBUTING.md). A shared contract changes
+vendoring and bump procedure is in [`CONTRIBUTING.md`](CONTRIBUTING.md). The unreleased
+[service-manifest preview](docs/service-manifest-preview.md) separately pins its proposed
+schema and shared fixtures to `contracts-edge-0.9.9-r2`, commit
+`591c73a3f965fdab440c3a76b2707accdf491ba5`, in
+[`contracts/ferrum-contracts/SERVICE-MANIFEST-PIN`](contracts/ferrum-contracts/SERVICE-MANIFEST-PIN).
+That pin does not freeze manifest v1 or change the Edge vocabulary pin. A shared contract changes
 in ferrum-contracts first and is then re-vendored here — never edited locally.
 
 ## Documentation

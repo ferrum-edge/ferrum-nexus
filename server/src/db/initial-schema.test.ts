@@ -21,6 +21,7 @@ describe('buildout schema baseline', () => {
           '008_email_lifecycle_fence',
           '009_outbox_priority',
           '010_api_agents',
+          '011_mcp_tool_subsets',
         ],
       );
       const statements = splitSqlStatements(files[0]!.sql);

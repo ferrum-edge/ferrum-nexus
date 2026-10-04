@@ -806,6 +806,12 @@ async function assertPortalInvariants(store: NexusStore): Promise<void> {
   assert.equal((await store.apis.findById(ID.invoices))?.agents, null);
   assert.equal((await store.apis.findById(ID.ledger))?.agents, null);
 
+  // 011 preserves retained phase-1 approvals with null (all published tools).
+  assert.equal((await store.accessRequests.findById(ID.requestAccount))?.requested_tools, null);
+  assert.equal((await store.accessRequests.findById(ID.requestApp))?.approved_tools, null);
+  assert.equal((await store.grants.findById(ID.grantAccount))?.approved_tools, null);
+  assert.equal((await store.grants.findById(ID.grantApp))?.approved_tools, null);
+
   // Public API identity: slug and gateway proxy still resolve to the same id.
   assert.equal((await store.apis.findBySlug('INVOICES'))?.id, ID.invoices);
   assert.equal((await store.apis.findByProxyId('edge-proxy-invoices'))?.id, ID.invoices);
