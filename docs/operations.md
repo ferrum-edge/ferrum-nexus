@@ -1709,6 +1709,20 @@ the affected provider keys in sorted order. A sign-in into an existing account
 takes its `users:lifecycle:<user_id>` key; a callback that also writes a new
 link takes the provider key first, so a claims promotion and an automatic link
 at another provider never miss each other's write.
+
+Returning callbacks authorize at their transaction's settings re-read. In the
+supported topology below, production services share one store object and all
+four adapters serialize its transaction bodies. A settings-save transaction
+cannot commit between that re-read and the callback's commit. Independent store
+objects have independent queues: a PostgreSQL, MySQL or replica-set MongoDB
+peer can disable a provider in that interval, and the already-authorized
+returning callback can still commit. SQLite's `BEGIN IMMEDIATE` blocks that
+ordering; provider removal also conflicts with the returning callback's write
+to its existing identity. A future multi-active-instance feature needs an
+explicitly qualified and tested retirement boundary across independent stores,
+or provider-level returning-callback fencing. See
+[the security contract](security.md#single-sign-on-openid-connect).
+
 Manual role changes take the account lifecycle key as well. A promotion from
 below `admin` to an elevated role is refused while the account has an identity
 at a provider not trusted to grant `admin`; remove that identity or restore the

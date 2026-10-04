@@ -80,6 +80,7 @@ import { runResetLifecycleContract } from './reset-lifecycle-contract.js';
 import { runSealedOutboxContract } from './sealed-outbox-contract.js';
 import { runSsoSettingsLockContract } from './sso-settings-lock-contract.js';
 import { runSsoLinkSessionContract } from './sso-link-session-contract.js';
+import { runSsoRetirementContract } from './sso-retirement-contract.js';
 import { runSettingsTransactionContract } from './settings-transaction-contract.js';
 import { runTeardownCancellationContract } from './teardown-cancellation-contract.js';
 import { runTeardownFencingContract } from './teardown-fencing-contract.js';
@@ -358,6 +359,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
   runSealedOutboxContract(label, makeStore);
   runSsoSettingsLockContract(label, makeStore);
   runSsoLinkSessionContract(label, makeStore);
+  runSsoRetirementContract(label, makeStore);
   runSettingsTransactionContract(label, makeStore);
   runTeardownCancellationContract(label, makeStore);
   runTeardownFencingContract(label, makeStore);
