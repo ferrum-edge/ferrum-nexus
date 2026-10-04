@@ -419,7 +419,8 @@ export function runMcpMembershipContract(
           const [repaired] = await repair(f.client.user.id);
           assert.equal(repaired?.error, null);
           const groups = harness.edge.consumerByUsername(f.row.ferrum_username)?.acl_groups;
-          assert.ok(groups?.includes(aclGroupForApi(f.api.id)));
+          assert.ok(groups);
+          assert.ok(groups.includes(aclGroupForApi(f.api.id)));
           assert.equal(groups.includes(mcpAllGroupForApi(f.api.id)), false);
           const current = await target.store.apis.findById(f.api.id);
           if (change === 'off') {
@@ -438,7 +439,8 @@ export function runMcpMembershipContract(
             for (const tool of current.agents.operations) {
               assert.ok(tool.id && !f.ids.includes(tool.id));
               assert.equal(groups.includes(mcpToolGroupForApi(f.api.id, tool.id)), false);
-              const allowed = policy.tools[`${current.slug}.${tool.name}`]?.allowed_groups;
+              const allowed: string[] | undefined =
+                policy.tools[`${current.slug}.${tool.name}`]?.allowed_groups;
               assert.ok(allowed);
               assert.deepEqual(allowed, [
                 mcpAllGroupForApi(f.api.id),

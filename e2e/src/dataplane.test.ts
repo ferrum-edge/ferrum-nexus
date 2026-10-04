@@ -502,6 +502,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     await portal('POST', `/api/access-requests/${request.access_request.id}/approve`, {
       session: provider,
       body: {},
+      expect: 200,
     });
   }
 
@@ -596,7 +597,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       const approval = await portal<{ grant: { id: string; approved_tools: string[] } }>(
         'POST',
         `/api/access-requests/${request.access_request.id}/approve`,
-        { session: provider, body: { approved_tools: [readId] } },
+        { session: provider, body: { approved_tools: [readId] }, expect: 200 },
       );
       assert.deepEqual(approval.grant.approved_tools, [readId]);
       const sessionHeaders = await initializeAgent(api, headers);
@@ -631,6 +632,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       await portal('POST', `/api/grants/${approval.grant.id}/revoke`, {
         session: provider,
         body: {},
+        expect: 200,
       });
       const beforeRevoke = await upstreamSnapshot();
       for (const method of ['tools/list', 'tools/call']) {
@@ -667,6 +669,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       await portal('POST', `/api/access-requests/${request.access_request.id}/approve`, {
         session: provider,
         body: {},
+        expect: 200,
       });
     }
     const selectedHeaders = authHeadersFor(await issueCredential(selected, 'keyauth'), 'keyauth');
