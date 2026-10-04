@@ -255,8 +255,10 @@ identity. All live partial resources remain untouched: the released owner cannot
 fence their cascade without changing unrelated namespace fields. Unknown or
 changed resources also require operator reconciliation. See the
 [required owner API and release ordering](edge-conversion-recovery-blocker.md).
-Conversion teardown uses `cleanup_orphaned_upstream=false` to preserve the original
-last-referenced hand-owned upstream; recovery never reconstructs a dangling id.
+Initial conversion and failed missing-deployment cleanup refuse before destructive
+delete. Live in-place spec recovery also refuses before PUT. The original identity,
+all unrelated fields and upstreams survive. Failed restore records its attempted
+identity and `withdrawn: false`; no replacement fallback is available in v0.9.11.
 Corrected agent uploads retain the immutable replay baseline and commit their
 authorized catalog shape alongside the revision. Recovery replays the original
 agent shape and applies the corrected document on staging before cutover.
@@ -285,9 +287,11 @@ contain fixed bounded reasons, never policy bodies, CIDRs or secrets.
 
 This proposal is reviewable code, not permission to change released support or a
 claim that GHSA-93rq-89vr-38pc is fixed. Root must obtain the explicit CP/public-profile
-owner decision after exact-head independent review and hosted CI. Root must also
-qualify actual published Edge `v0.9.11` image digests and finish the released canonical
-pin. Existing pins are unchanged; contracts draft PR #13 is not a released pin.
+owner decision after exact-head independent review and hosted CI. The candidate
+now pins the published Edge `v0.9.11` default image and canonical
+`contracts-edge-0.9.11` at `390edbd5b2485af0988e02f7827fde778d76ae0a`.
+See [the adoption facts](edge-0.9.11-adoption.md). Actual packaged acceptance and
+the public-only DNS-rebinding fixture still require exact-head hosted qualification.
 See the separate [unqualified packaged fixture](../e2e/public-only/README.md).
 
 **Fixing a mismatch.** Set the portal's `FERRUM_NAMESPACE` to the gateway's
@@ -1032,7 +1036,7 @@ docker compose up -d
 The four secrets and `FERRUM_EDGE_IMAGE` are required (`${VAR:?…}`); keep the
 secrets stable across restarts. [`release/compatibility.env`](../release/compatibility.env)
 pins the Edge image by digest. The current acceptance suite
-([`e2e/`](../e2e/README.md)) uses Ferrum Edge `v0.9.10`; the released Nexus
+([`e2e/`](../e2e/README.md)) selects published Ferrum Edge `v0.9.11` for candidate qualification; the released Nexus
 `v0.3.0` pairing with Edge `v0.9.9` is recorded in the
 [`v0.3.0` release notes](release-notes.md#supported-combination).
 

@@ -327,7 +327,8 @@ public profile accepts only local-serving/public-only metadata; missing, stale,
 unknown, CP-only, default-both and allow-overlay cases refuse with bounded opaque
 `EDGE_ERROR` / `EDGE_PROTOCOL_ERROR` / `EDGE_UNAVAILABLE` diagnostics. Health's
 cache/coalescing still bounds public probe load. The supported CP/public-profile
-owner decision and actual image/canonical-pin qualification remain pending.
+owner decision and exact-head packaged qualification remain pending. Published
+v0.9.11 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
 
 Whole-consumer metadata replacements pair complete server-only verification with
 the original strong row `If-Match`, using Edge's masked projection and hidden-type
@@ -2480,6 +2481,9 @@ resources; the operator must reconcile those first. The released Edge namespace
 restore would rewrite unrelated fields, so Nexus cannot use it as a safe cascade
 fallback. See the [owner capability blocker](edge-conversion-recovery-blocker.md).
 An unchanged original or an absent identity can still be reconciled or rebuilt.
+In-place spec replacement and initial conversion teardown refuse before live
+mutation until [Edge #6010](https://github.com/ferrum-edge/ferrum-edge/issues/6010)
+is released and adopted.
 The encrypted journal and repair state commit before teardown and clear together
 with catalog, ownership and completion audit under the existing lease fences.
 An uploaded corrected agent specification changes only the authorized catalog
@@ -2506,8 +2510,9 @@ existence, or an incomplete original-id staging proxy, never counts as restored.
 Audit rows: `api.gateway_restore_start` (before the first gateway call; if it
 fails, nothing is built), `api.gateway_restore` with the new proxy id, and on
 failure `api.gateway_restore_failed` (with `stranded_proxy_id` when the cleanup
-delete could not be confirmed). A missing-deployment restore attempts to remove
-what it created and leaves the API `repair_required`. Conversion recovery retains live partial resources and its
+is unavailable). Failed missing-deployment cleanup refuses destructive deletion,
+retains its attempted identity and security configs, and records `withdrawn: false`
+with `repair_required`. Conversion recovery retains live partial resources and its
 encrypted journal until operator reconciliation or a supported atomic removal
 capability becomes available.
 
@@ -3082,7 +3087,7 @@ configured portal namespace (`403 FORBIDDEN` otherwise). The contract defaults a
 omitted gateway namespace to `ferrum`; it does not inherit the caller's selection.
 Maximum body is 32 KiB (`413`), with bounded nesting/strings/references and strict
 schema validation (`400 VALIDATION_FAILED`). Unknown/null fields are not stripped
-or coerced. The result has `preview_only: true`, `contract_status: "proposed"`, the
+or coerced. The result has `preview_only: true`, `contract_status: "implemented"`, the
 immutable contract commit, service/public-path/protocol/auth/agent hints and redacted
 reference-presence flags. No upstream/file/TLS/telemetry values or free-form text
 are echoed. No apply, publishing, fetch or diagnostic-import endpoint exists.

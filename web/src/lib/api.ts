@@ -718,7 +718,7 @@ export const brandingApi = {
   get: (): Promise<BrandingResponse> => get<BrandingResponse>('/branding'),
 };
 
-/** Read-only proposed manifest intake; no apply endpoint exists. */
+/** Read-only shared v1 manifest intake; no apply endpoint exists. */
 export const serviceManifestsApi = {
   preview: (body: PreviewServiceManifestRequest): Promise<PreviewServiceManifestResponse> =>
     post<PreviewServiceManifestResponse>('/service-manifests/preview', body),

@@ -8,7 +8,7 @@ import type { UserRecord } from '../db/store.js';
 import { forbidden, validationFailed } from '../lib/errors.js';
 import { manifestDefaults, manifestSchema, manifestValidator } from './schema.js';
 
-const CONTRACT_COMMIT = '591c73a3f965fdab440c3a76b2707accdf491ba5';
+const CONTRACT_COMMIT = '390edbd5b2485af0988e02f7827fde778d76ae0a';
 
 interface Manifest {
   service: { name: string };
@@ -60,7 +60,7 @@ export function validatedManifest(body: unknown): Manifest {
     throw validationFailed('Manifest budget exceeded');
   }
   const result = manifestValidator.safeParse(body);
-  if (!result.success) throw validationFailed('Invalid proposed service-manifest v1');
+  if (!result.success) throw validationFailed('Invalid service-manifest v1');
   const value = result.data as Record<string, unknown>;
   const manifest = manifestDefaults(manifestSchema, {
     ...value,
@@ -121,7 +121,7 @@ export function createServiceManifestService(namespace: string): ServiceManifest
       const { api, service, upstream, gateway, agents, auth } = manifest;
       return {
         preview_only: true,
-        contract_status: 'proposed',
+        contract_status: 'implemented',
         contract_commit: CONTRACT_COMMIT,
         namespace,
         service: service.name,

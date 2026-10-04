@@ -1858,7 +1858,10 @@ verified original deployment, catalog repair state, journal deletion and audit
 commit together. Successful conversion clears its journal with `api.update`, the
 catalog mode and ownership. No credential-bearing resource body enters either
 audit. Corrected agent revisions commit an authorized comparison shape without
-changing the original replay resources. Live partial cleanup is blocked by the
+changing the original replay resources. Initial conversion now refuses before
+teardown with `mutation_refused: true`; live spec replacement and failed restore
+cleanup also refuse before mutation. The journal and resources remain intact. The
+required successful rollback and vanished-catalog cleanup gates await the
 [released owner capability gap](edge-conversion-recovery-blocker.md).
 
 `api.gateway_repair_required` phases (`details.phase`):
@@ -2067,7 +2070,7 @@ Before going live:
 
 `POST /api/service-manifests/preview` requires a provider-or-higher session, CSRF,
 and the configured namespace in both the request and manifest (the contract's default
-namespace is `ferrum`). The immutable PROPOSED v1 schema and complete shared fixture
+namespace is `ferrum`). The immutable EXISTING shared v1 schema and complete shared fixture
 set are pinned separately in `contracts/ferrum-contracts/SERVICE-MANIFEST-PIN`.
 Strict validation rejects nulls where types prohibit them, unknown keys, unsupported
 schema versions/protocols, noncanonical paths and invalid references. Intake is bounded

@@ -1,7 +1,8 @@
 # Draft conversion recovery: required owner capability
 
 PR #522 remains draft. This source repair does not qualify the public-only
-proposal, change release pins, or declare an advisory fixed.
+proposal or declare an advisory fixed. The candidate adopts the published
+[Edge v0.9.11 baseline](edge-0.9.11-adoption.md), which lacks these owner fences.
 
 ## Released source evidence
 
@@ -36,12 +37,20 @@ through staging, cutover and catalog commit. Ordinary PATCH compensation retains
 its existing field ownership. Corrected agent uploads authorize only the new
 catalog comparison shape; the original replay resources remain immutable.
 
-Recovery can reconcile an unchanged original or rebuild an absent identity. It
-refuses destructive removal of any live partial deployment, leaving operator
-proxy/plugin/spec changes and the journal intact. Conversion teardown and
-missing-deployment restore cleanup pass the released
-`cleanup_orphaned_upstream=false` option, preserving a hand-owned last-referenced
-upstream resource instead of reconstructing a dangling reference.
+Recovery can reconcile an unchanged deployment read-only or rebuild an absent
+identity. It refuses in-place API-spec replacement even after a matching baseline
+read: the importer does not compare an original namespace token inside its write.
+Initial conversion refuses before proxy deletion, preserving the original identity
+and all proxy/spec/plugin fields, upstreams and encrypted replay resources. The
+refusal records repair-required state without invoking rollback or clearing the
+journal. A deliberate read-only reconciliation can subsequently clear a matching
+original; a corrected catalog requiring a live spec replacement cannot.
+
+Live partial cleanup and failed missing-deployment restore cleanup also refuse
+before any cascade. A failed restore retains its attempted proxy id, every plugin
+and operator field, and records `withdrawn: false` with the failure audit and repair
+state. It never deletes security configs from a retained proxy. No proxy row token,
+separate read, longer timeout or namespace replacement supplies the missing fence.
 
 This refusal also blocks automatic rollback of a successful conversion when
 catalog completion fails. If the catalog row disappeared, Nexus cannot safely
@@ -54,7 +63,10 @@ have the same blocker.
 
 ## Required upstream API and ordering
 
-Root must file an Edge owner change for an opt-in, atomic proxy cascade removal.
+The actionable internal dependency is
+[Edge #6010](https://github.com/ferrum-edge/ferrum-edge/issues/6010), covering both
+atomic proxy cascade removal and namespace-conditional API-spec replacement.
+Neither capability exists in released v0.9.11.
 A concrete proposed contract is:
 
 `DELETE /proxies/{id}?conditional=true&cleanup_orphaned_upstream=false`
@@ -72,6 +84,12 @@ The response must unambiguously acknowledge durable completion and successful
 live application; ambiguous acknowledgement requires authoritative verification,
 never a retry under a freshly captured token.
 
+The proposed spec mutation is `PUT /api-specs/{id}?conditional=true` with that same
+original coherent namespace `If-Match`. It must compare within the owner atomic
+persistence/admission fences, preserve unrelated exact fields and reject stale,
+missing, invalid or unavailable authority. A hosts/plugin/spec edit after baseline
+validation must survive refusal. Nexus never calls this proposed endpoint.
+
 The release must also expose enough of the coherent snapshot to validate the
 exact targeted spec and generated plugin bodies that authorize removal. The
 current proxy row token alone cannot provide that dependency coverage.
@@ -80,5 +98,8 @@ Order: owner implementation and concurrent proxy/plugin/spec regressions on all
 stores; immutable Edge release and published contract; Nexus adoption using the
 same original snapshot body/token, transient or encrypted credential handling,
 complete acknowledgement and live-application checks; then exact-head hosted
-four-store and packaged acceptance qualification. Root owns that filing,
-ordering and release decision. No local project execution was used for this repair.
+four-store and packaged acceptance qualification. Root owns that implementation
+ordering and release decision. The next immutable
+Edge release and canonical publication are required before adopting #6010; this
+v0.9.11 baseline does not claim any future API or release. No local project
+execution was used for this repair.

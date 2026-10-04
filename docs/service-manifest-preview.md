@@ -2,15 +2,19 @@
 
 Nexus [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519) implements its
 consumer portion of [Alloy #27](https://github.com/ferrum-edge/ferrum-alloy/issues/27).
-The preview is Unreleased and the cross-repository manifest contract remains
-PROPOSED; this is not a v1 freeze or a released-format claim. The immutable source is
-`contracts-edge-0.9.9-r2`, commit `591c73a3f965fdab440c3a76b2707accdf491ba5` in
-[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts/tree/591c73a3f965fdab440c3a76b2707accdf491ba5).
+The Nexus preview remains Unreleased. Its shared v1 contract is now
+EXISTING/implemented in published `contracts-edge-0.9.11`, commit
+`390edbd5b2485af0988e02f7827fde778d76ae0a` in
+[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts/tree/390edbd5b2485af0988e02f7827fde778d76ae0a).
 [`SERVICE-MANIFEST-PIN`](../contracts/ferrum-contracts/SERVICE-MANIFEST-PIN) records
-SHA-256 for the schema, every shared manifest valid/invalid fixture, and the shared
-invalid-expectations file. The separate Edge vocabulary
-[`PIN`](../contracts/ferrum-contracts/PIN) remains at `contracts-edge-0.9.9`, commit
-`25c4e9e00033d7941a1dd0ab733fa74e735546ae`.
+SHA-256 for the schema, every shared manifest fixture and shared expectations.
+The separate Edge vocabulary [`PIN`](../contracts/ferrum-contracts/PIN) adopts
+the same publication. Alloy owner `81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e`
+remains unreleased. Owner historical PROPOSED descriptions remain byte-paired;
+the copied `x-contract` metadata records the implemented shared status. Prepared
+publication wording in immutable canonical text is historical; the actual tag
+and release are published. The response reports `contract_status: "implemented"`
+and the exact adopted canonical commit without implying production apply.
 
 ## Preview boundary
 
@@ -43,10 +47,10 @@ Its real Alloy producer golden came from source
 artifact `11305688717`. Root verified archive identity, hashes and actual producer
 sources. These are diagnostic-consumer qualification facts, not a manifest v1 freeze.
 
-Alloy #27 remains open. The cross-repository manifest contract remains PROPOSED
-pending this Nexus consumer's final qualification, the canonical tracking/freeze
-decision and root's tracking-issue update. Anvil's merge alone does not complete
-that work. No new release, image, tag or Edge API is introduced here.
+Alloy #27 remains open for owner release/adoption coordination. Canonical
+publication establishes the unchanged shared v1 freeze; it does not publish
+Alloy crates or qualify this changed Nexus head. See
+[the published adoption baseline and remaining gates](edge-0.9.11-adoption.md).
 
 ## Nexus qualification
 
@@ -61,4 +65,5 @@ The executed subset/store qualification and its limits are recorded in the
 Those passed jobs do not claim all CI checks at that commit are green. The final
 documentation and main-integration head still requires all fresh hosted gates,
 including `Supported Node minimum`, and root's final qualification. The declared
-Node 22.14 minimum and existing Edge v0.9.10 image digest remain unchanged.
+Node 22.14 minimum remains unchanged. This candidate adopts the published Edge
+v0.9.11 default image; earlier acceptance does not qualify the new head.

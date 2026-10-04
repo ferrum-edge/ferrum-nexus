@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
 import { buildTestApp } from '../test/helpers.js';
@@ -6,6 +7,42 @@ import { publicEgressPolicy } from '../test/mock-ferrum-edge.js';
 import { parseBackendEgressPolicy, provesLocalPublicEgress } from './egress-policy.js';
 
 describe('closed owner egress contract', () => {
+  it('preserves every field of the published canonical fixtures and rejects all invalid cases', () => {
+    const root = new URL('../../../contracts/ferrum-contracts/', import.meta.url);
+    const pin = readFileSync(new URL('PIN', root), 'utf8');
+    const schema = JSON.parse(
+      readFileSync(new URL('schemas/backend-egress-policy/v1.schema.json', root), 'utf8'),
+    ) as { required: string[]; properties: Record<string, unknown>; additionalProperties: boolean };
+    assert.equal(schema.additionalProperties, false);
+    assert.deepEqual(schema.required.sort(), Object.keys(publicEgressPolicy()).sort());
+    assert.deepEqual(Object.keys(schema.properties).sort(), schema.required);
+    for (const kind of ['valid', 'invalid']) {
+      const base = `fixtures/backend-egress-policy/${kind}/`;
+      for (const name of readdirSync(new URL(base, root))) {
+        const path = base + name;
+        assert.ok(pin.includes(`  ${path}\n`), 'every canonical fixture must be pinned');
+        const bytes = readFileSync(new URL(path, root), 'utf8');
+        const value = JSON.parse(bytes) as Record<string, unknown>;
+        const parsed = parseBackendEgressPolicy(value, String(value.namespace));
+        if (kind === 'invalid') {
+          assert.equal(parsed, null, name);
+          continue;
+        }
+        assert.deepEqual(parsed, value, `${name}: no field may be omitted or inferred`);
+        assert.equal(
+          provesLocalPublicEgress(parsed!),
+          value.enforcement_scope === 'local-data-plane' && value.public_only_guaranteed === true,
+          name,
+        );
+        for (const key of schema.required) {
+          const incomplete = { ...value };
+          delete incomplete[key];
+          assert.equal(parseBackendEgressPolicy(incomplete, String(value.namespace)), null, key);
+        }
+      }
+    }
+  });
+
   it('rejects every missing field, unknown key and inconsistent vocabulary', () => {
     const valid = publicEgressPolicy();
     assert.ok(provesLocalPublicEgress(parseBackendEgressPolicy(valid, 'nexus')!));

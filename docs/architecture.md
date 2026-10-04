@@ -403,8 +403,8 @@ and replacement, including plugin binding and undo; service preflight precedes s
 destructive conversion and spec ACL enrollment. Conversion commits
 `repair_required`, the original owned proxy id, an intent audit and an encrypted
 recovery journal in `app_settings` before resource teardown. Deliberate restore
-takes both API and proxy leases, refuses destructive removal of live partial
-resources, and validates
+takes both API and proxy leases, refuses initial conversion teardown, live spec
+replacement and destructive cleanup without the Edge #6010 owner fence, and validates
 the rebuilt path, configuration, plugins and spec before cutover and completion.
 The journal is removed only with catalog, ownership and completion audit in one
 fenced transaction. Successful rollback reconciles the catalog and journal together.
@@ -415,7 +415,9 @@ operator-established Admin/traffic singleton identity. Process evidence cannot a
 CPs, remote DPs, load-balanced Admin endpoints or fleets. See the pending
 [supported-profile decision](operations.md#draft-backend-egress-adoption-pending-supported-profile-approval)
 and [unqualified packaged fixture](../e2e/public-only/README.md). Source authority is Edge
-`c764084b3b51c3f7ffde268c039688d35e49c553`, not proof of image publication or release pins.
+`c764084b3b51c3f7ffde268c039688d35e49c553`. The candidate now adopts its
+[published image and canonical contracts](edge-0.9.11-adoption.md); hosted
+acceptance and public-only owner approval remain outstanding.
 
 **Leases.** One row per key with an owner token and expiry: 60 s TTL renewed at
 half that, a 30 s wait for a contended key, then `409 CONFLICT` asking the user
@@ -1279,7 +1281,7 @@ Full reference: [`api.md`](api.md).
 | Catalog visibility                          | `catalog/service.ts` (`canList` / `canView`), `catalog/read-access.ts`               |
 | Last-super-admin guard                      | `users/service.ts` and `admin/god-service.ts` (both, on purpose)                     |
 
-### Proposed service-manifest intake
+### Shared v1 service-manifest intake
 
 The preview service is composed in `server/src/index.ts` and injected into its route.
 It compiles the exact vendored schema with the existing Zod dependency, refusing
@@ -1287,5 +1289,5 @@ unsupported schema keywords at startup. Validation precedes defaults; explicit n
 are never interpreted as omission. Local presentation/reference budgets further narrow
 accepted input. The configured Edge namespace is the authorization boundary for this
 single-namespace portal. The service returns an allow-listed redacted DTO from `shared/`
-and has no store, gateway, network or source-file reader dependency. The manifest format
-remains PROPOSED; preview cannot invoke the publishing service or install agent policy.
+and has no store, gateway, network or source-file reader dependency. The shared v1 format is EXISTING/implemented in published contracts-edge-0.9.11;
+Alloy remains unreleased. Preview cannot invoke publishing or install agent policy.

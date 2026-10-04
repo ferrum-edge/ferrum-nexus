@@ -23,20 +23,34 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   teardown requirement. Four-store service/protocol regressions and a separate
   controlled packaged DNS-rebinding fixture are included. This cannot land pending explicit CP/public-profile owner approval,
   exact-head hosted CI/review, actual published-image qualification and released
-  canonical-pin finishing. Versions and current pins remain unchanged; the advisory
+  canonical adoption qualification. The candidate now pins published Edge v0.9.11
+  and contracts-edge-0.9.11; Nexus version markers remain unchanged and the advisory
   is not declared fixed. See [proposal limitations](docs/security.md#1-threat-model).
 
 - **Draft conversion recovery hardening** (PR #522): encrypted baseline, repair
   state and intent audit commit before teardown; catalog mode, ownership,
   completion audit and journal removal commit together. Combined PATCHes capture
   the baseline before gateway writes. Corrected agent uploads preserve original
-  replay resources while authorizing the new catalog tool ids. Conversion and
-  restore cleanup preserve hand-owned orphan upstreams. Credential teardown
+  replay resources while authorizing the new catalog tool ids. Initial conversion
+  teardown, live spec recovery and failed missing-deployment cleanup refuse before
+  unfenced mutations; identities and all operator fields survive. Credential teardown
   removes Nexus-supported keyauth/Basic/JWT state and retains custom/mTLS state.
   Live partial cleanup now refuses without mutation: released Edge namespace
   replacement changes unrelated fields. Automatic rollback and vanished-catalog
-  cleanup remain blocked pending the [owner API](docs/edge-conversion-recovery-blocker.md).
+  cleanup remain required failing gates pending the
+  [owner API](docs/edge-conversion-recovery-blocker.md).
   New four-store interruption and concurrent Admin regressions require hosted CI.
+
+- **Published Edge v0.9.11 candidate baseline** (PR #522): pin immutable owner
+  source `c764084b3b51c3f7ffde268c039688d35e49c553`, the default image index
+  `sha256:2476b502855940e28157858fc24008545cb3baeb3084c9610e1d4505cbe0d36e`,
+  and canonical `contracts-edge-0.9.11` at
+  `390edbd5b2485af0988e02f7827fde778d76ae0a`. Refresh exact-byte vocabulary,
+  schema and fixture digests; assert every egress response field and invalid case.
+  [Edge #6010](https://github.com/ferrum-edge/ferrum-edge/issues/6010) is actionable
+  internal work requiring a future immutable release and canonical adoption.
+  No Nexus release is finalized; hosted acceptance and public-only owner approval
+  remain pending. See [actual publication facts](docs/edge-0.9.11-adoption.md).
 
 - **Optional MCP tool subsets** (Refs #446). Consumers request published exposure IDs;
   providers can narrow approval. Separate MCP-all/per-tool groups preserve REST access
@@ -48,10 +62,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   and spec-change tradeoff before deployment.
 - **Redacted service-manifest preview** (Refs ferrum-edge/ferrum-alloy#27, Nexus portion).
   Authenticated namespace-authorized bounded intake validates the exact immutable
-  proposed schema and shared fixtures. Preview has no apply/publish, URL/file/TLS
+  shared v1 schema and fixtures. Preview has no apply/publish, URL/file/TLS
   access or diagnostic import. Anvil's separate diagnostic consumer is merged, while
-  the manifest contract remains PROPOSED pending Nexus final qualification and the
-  canonical tracking/freeze decision. See [preview status](docs/service-manifest-preview.md).
+  the shared v1 contract is EXISTING/implemented in published contracts-edge-0.9.11.
+  Alloy remains unreleased; Nexus final qualification is still required. See
+  [preview status](docs/service-manifest-preview.md).
 
 - **Agent-ready API listings** (#446, phase 1). Providers can explicitly expose
   selected OpenAPI operations as MCP tools, off by default, on requestable
@@ -100,11 +115,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   classifications so an Edge response that echoes a show-once secret cannot
   expose it through the API. Other Edge endpoints keep their existing
   validation and API-spec diagnostics.
-- **The acceptance suite now pins Ferrum Edge `v0.9.10`** by its published
+- **The acceptance suite first adopted Ferrum Edge `v0.9.10`** by its published
   multi-architecture image digest. This release adds fail-closed handling for
   uninspectable MCP JSON-RPC batches and refuses non-UTF-8 charsets for
   `mcp_gateway` and `ai_prompt_shield`. The opt-in agent marketplace uses that
-  released contract; Nexus itself does not parse data-plane MCP traffic.
+  released contract; this candidate advances the actual pin to v0.9.11. Nexus
+  itself does not parse data-plane MCP traffic.
 - **The Ferrum Edge `gateway-headers` vocabulary is now vendored and pinned**
   alongside the plugin catalog and provisioned-by vocabularies, and the shared
   contract test checks the `X-Ferrum-Namespace`, `X-Ferrum-Namespace-Unserved`

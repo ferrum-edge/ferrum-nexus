@@ -1,0 +1,73 @@
+{
+  "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v1.schema.json",
+  "vocabulary": "backend-egress-policy",
+  "version": 1,
+  "edge_release": "v0.9.11",
+  "description": "Labels for process-scoped, immutable loaded backend policy metadata. Edge v0.9.11 is published with verified upstream distribution; this canonical contracts tag/publication remains pending. Mode lists describe the final evaluation stage, not unconditional effective allows. Classifier meaning changes require versioned coordination.",
+  "provenance": [
+    {
+      "repo": "ferrum-edge/ferrum-edge",
+      "ref": "v0.9.11",
+      "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+      "path": "openapi.yaml",
+      "symbols": [
+        "components.schemas.BackendEgressPolicyResponse"
+      ]
+    },
+    {
+      "repo": "ferrum-edge/ferrum-edge",
+      "ref": "v0.9.11",
+      "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+      "path": "src/admin/backend_egress_policy.rs",
+      "symbols": [
+        "BackendEgressPolicyResponse",
+        "handle_get"
+      ]
+    },
+    {
+      "repo": "ferrum-edge/ferrum-edge",
+      "ref": "v0.9.11",
+      "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+      "path": "src/config/env_config.rs",
+      "symbols": [
+        "BackendEgressPolicy",
+        "BackendEgressPolicy::metadata",
+        "BackendEgressPolicy::deny_reason",
+        "is_private_ip"
+      ]
+    },
+    {
+      "repo": "ferrum-edge/ferrum-edge",
+      "ref": "v0.9.11",
+      "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+      "path": "docs/admin_api.md",
+      "note": "Transcribed GET /backend-egress-policy labels, scope limits, v1 classifier and conservative guarantee rule; no raw CIDRs or credentials."
+    }
+  ],
+  "schema_version": 1,
+  "ip_classification": "ferrum-private-reserved-v1",
+  "policy_scope": "process",
+  "enforcement_scopes": [
+    "local-data-plane",
+    "unserved-namespace",
+    "admission-only",
+    "no-data-plane"
+  ],
+  "modes": [
+    "both",
+    "public",
+    "private"
+  ],
+  "ip_classes": [
+    "public",
+    "private-reserved"
+  ],
+  "evaluation_order": [
+    "allow-cidrs",
+    "deny-cidrs",
+    "dangerous-ranges",
+    "ip-mode"
+  ],
+  "public_only_guaranteed_rule": "True exactly when mode=public and allow_cidr_overrides_present=false; deny overrides only restrict. Even a wholly public undisclosed allow list yields false. The dangerous-range flag alone does not certify public-only egress.",
+  "consumer_rule": "For public-only publication, recognize the complete version/classification/vocabulary, match the requested namespace, require local-data-plane and public_only_guaranteed=true, and check every serving DP after replacement/restart. Missing/unknown values or authorization failure block publication. CP admission-only metadata never attests its DPs."
+}

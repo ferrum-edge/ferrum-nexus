@@ -44,8 +44,8 @@ describe('pinned Ferrum contracts', () => {
   it('keeps every vendored contract file byte-identical to its recorded digest', () => {
     const pin = readFileSync(join(contractsDirectory, 'PIN'), 'utf8');
     const lines = pin.trim().split('\n');
-    assert.equal(lines[0], 'tag: contracts-edge-0.9.9');
-    assert.equal(lines[1], 'commit: 25c4e9e00033d7941a1dd0ab733fa74e735546ae');
+    assert.equal(lines[0], 'tag: contracts-edge-0.9.11');
+    assert.equal(lines[1], 'commit: 390edbd5b2485af0988e02f7827fde778d76ae0a');
 
     const digestLines = lines.slice(2);
     assert.ok(digestLines.length > 0, 'PIN must list the vendored contract file digests');
@@ -68,6 +68,23 @@ describe('pinned Ferrum contracts', () => {
     assert.deepEqual(
       digestLines.map((line) => line.replace(/^sha256: [a-f0-9]{64}  /, '')).sort(),
       [
+        'fixtures/backend-egress-policy/invalid/allow-overlay-guarantee.json',
+        'fixtures/backend-egress-policy/invalid/false-public-guarantee.json',
+        'fixtures/backend-egress-policy/invalid/leaked-cidr-field.json',
+        'fixtures/backend-egress-policy/invalid/mode-class-mismatch.json',
+        'fixtures/backend-egress-policy/invalid/unknown-classification.json',
+        'fixtures/backend-egress-policy/invalid/unknown-enforcement-scope.json',
+        'fixtures/backend-egress-policy/invalid/unknown-mode.json',
+        'fixtures/backend-egress-policy/invalid/unknown-version.json',
+        'fixtures/backend-egress-policy/invalid/wrong-evaluation-stage.json',
+        'fixtures/backend-egress-policy/valid/default-control-plane.json',
+        'fixtures/backend-egress-policy/valid/private-control-plane.json',
+        'fixtures/backend-egress-policy/valid/public-serving.json',
+        'fixtures/backend-egress-policy/valid/public-with-allow-overrides.json',
+        'fixtures/invalid-expectations.json',
+        'schemas/backend-egress-policy/v1.schema.json',
+        'vocabularies/backend-egress-policy.json',
+        'vocabularies/gateway-errors.json',
         'vocabularies/gateway-headers.json',
         'vocabularies/plugin-catalog.json',
         'vocabularies/provisioned-by.json',

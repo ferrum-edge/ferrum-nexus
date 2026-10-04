@@ -1,4 +1,5 @@
-# Unqualified owner-contract fixture. Root must supply distribution-qualified image digests.
+# Published Edge v0.9.11 baseline; load its digest from release/compatibility.env.
+# Root supplies the packaged Nexus digest; hosted qualification and approval remain pending.
 # Separate from ../docker-compose.yml, which deliberately permits private upstreams.
 name: ferrum-nexus-public-only
 

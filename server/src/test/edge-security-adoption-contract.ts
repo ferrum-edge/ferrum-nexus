@@ -826,6 +826,198 @@ export function runEdgeSecurityAdoptionContract(
       });
     }
 
+    for (const level of ['docs_only', 'routes'] as const) {
+      it(`${level}: preserves read-only reconciliation and absent-identity recovery`, async () => {
+        const published = await publish(level);
+        const apiId = published.api.id;
+        const proxyId = published.api.ferrum_proxy_id!;
+        const key = `gateway_recovery:nexus:${apiId}`;
+        const target = level === 'routes' ? 'docs_only' : 'routes';
+        await assert.rejects(
+          harness.services.publishing.update(actor, apiId, { spec_enforcement: target }),
+          /Atomic conversion teardown is unavailable/,
+        );
+        assert.ok((await harness.store.settings.get(key))?.encrypted);
+        const offset = harness.edge.requests.length;
+        const reconciled = await harness.services.publishing.restoreGateway(actor, apiId);
+        assert.equal(reconciled.api.gateway_state, 'deployed');
+        assert.equal(reconciled.api.ferrum_proxy_id, proxyId);
+        assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
+        assert.equal(await harness.store.settings.get(key), null);
+        await assert.rejects(
+          harness.services.publishing.update(actor, apiId, { spec_enforcement: target }),
+          /Atomic conversion teardown is unavailable/,
+        );
+        // Explicit operator removal supplies absence; Nexus never performs an
+        // unfenced live cleanup to obtain replay authorization.
+        await harness.edgeClient.proxies.delete(proxyId, actor.id, {
+          cleanupOrphanedUpstream: false,
+        });
+        const rebuilt = await harness.services.publishing.restoreGateway(actor, apiId);
+        assert.equal(rebuilt.api.gateway_state, 'deployed');
+        assert.equal(rebuilt.api.ferrum_proxy_id, proxyId);
+        assert.equal(rebuilt.api.spec_enforcement, level);
+        assert.equal(await harness.store.settings.get(key), null);
+        assert.ok(harness.edge.proxyServing(`/nexus/${published.api.slug}`));
+      });
+    }
+
+    for (const resource of ['hosts', 'plugin', 'spec'] as const) {
+      it(`refuses in-place recovery after a concurrent Admin ${resource} edit`, async () => {
+        const published = await publish('routes');
+        const apiId = published.api.id;
+        const proxyId = published.api.ferrum_proxy_id!;
+        const key = `gateway_recovery:nexus:${apiId}`;
+        const originalState = (): unknown =>
+          structuredClone({
+            proxies: [...harness.edge.proxies],
+            plugins: [...harness.edge.pluginConfigs],
+            specs: [...harness.edge.apiSpecs],
+            upstreams: [...harness.edge.upstreams],
+          });
+        const before = originalState();
+        const offset = harness.edge.requests.length;
+        await assert.rejects(
+          harness.services.publishing.update(actor, apiId, { spec_enforcement: 'docs_only' }),
+          /Atomic conversion teardown is unavailable/,
+        );
+        assert.deepEqual(originalState(), before, 'initial refusal preserves every Edge field');
+        assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
+        await harness.services.publishing.updateSpec(
+          actor,
+          apiId,
+          SAMPLE_SPEC_YAML.replace('2.4.0', '2.5.0'),
+        );
+        const sealed = await harness.store.settings.get(key);
+        assert.ok(sealed?.encrypted);
+        const catalog = await harness.store.apis.findById(apiId);
+        const revision = await harness.store.apiSpecs.findCurrentByApi(apiId);
+        const successes = await harness.auditRows('api.gateway_restore');
+        const rollbacks = await harness.auditRows('api.gateway_conversion_rollback');
+        const readDocument = harness.edgeClient.apiSpecs.documentByProxy;
+        let edited = false;
+        let baselineReads = 0;
+        let operatorState: unknown;
+        harness.edgeClient.apiSpecs.documentByProxy = async (...args) => {
+          const baseline = await readDocument(...args);
+          if (args[0] !== proxyId || edited || ++baselineReads < 2) return baseline;
+          edited = true;
+          // Return the original baseline after a real Admin write. The caller's
+          // separate reads cannot authorize a subsequent importer replacement.
+          if (resource === 'hosts') {
+            const proxy = (await harness.edgeClient.proxies.get(proxyId))!;
+            await harness.edgeClient.proxies.replace(proxyId, {
+              ...proxy,
+              hosts: ['interleaved.operator.example.test'],
+            });
+          } else if (resource === 'plugin') {
+            const plugin = (await harness.edgeClient.pluginConfigs.listByProxy(proxyId))[0]!;
+            await harness.edgeClient.pluginConfigs.replace(plugin.id, {
+              plugin_name: plugin.plugin_name,
+              scope: plugin.scope,
+              proxy_id: proxyId,
+              enabled: plugin.enabled,
+              config: plugin.config,
+              labels: { operator: 'interleaved' },
+            });
+          } else {
+            const spec = harness.edge.apiSpecForProxy(proxyId)!;
+            await harness.edgeClient.apiSpecs.replace(spec.id, {
+              ...spec.document,
+              info: { title: 'Interleaved operator revision', version: 'operator' },
+            });
+          }
+          operatorState = originalState();
+          return baseline;
+        };
+        restoreMethods.push(() => {
+          harness.edgeClient.apiSpecs.documentByProxy = readDocument;
+        });
+        const recoveryOffset = harness.edge.requests.length;
+        await assert.rejects(
+          harness.services.publishing.restoreGateway(actor, apiId),
+          /Atomic replacement of a conversion specification is unavailable/,
+        );
+        assert.ok(edited, 'the edit interleaves after the captured spec baseline read');
+        assert.deepEqual(originalState(), operatorState);
+        const writes = harness.edge.requests
+          .slice(recoveryOffset)
+          .filter((call) => call.method === 'PUT');
+        assert.equal(writes.length, 1, 'only the operator mutation is sent');
+        assert.ok(
+          !harness.edge.requests.slice(recoveryOffset).some((call) => call.method === 'DELETE'),
+        );
+        assert.deepEqual(await harness.store.settings.get(key), sealed);
+        assert.deepEqual(await harness.store.apis.findById(apiId), catalog);
+        assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(apiId), revision);
+        assert.deepEqual(await harness.auditRows('api.gateway_restore'), successes);
+        assert.deepEqual(await harness.auditRows('api.gateway_conversion_rollback'), rollbacks);
+        assert.ok(
+          (await harness.auditRows('api.gateway_restore_failed')).some(
+            (row) => row.subject_id === apiId,
+          ),
+        );
+      });
+    }
+
+    it('retains a failed missing-deployment restore before any unfenced cleanup', async () => {
+      const published = await publish('docs_only');
+      const apiId = published.api.id;
+      await harness.edgeClient.proxies.delete(published.api.ferrum_proxy_id!);
+      await harness.store.apis.update(apiId, {
+        ferrum_proxy_id: null,
+        gateway_state: 'repair_required',
+      });
+      const replace = harness.edgeClient.proxies.replace;
+      let strandedId: string | null = null;
+      let operatorState: unknown;
+      harness.edgeClient.proxies.replace = async (...args) => {
+        const result = await replace(...args);
+        if (args[1].listen_path === `/nexus/${published.api.slug}`) {
+          strandedId = args[0];
+          const proxy = (await harness.edgeClient.proxies.get(strandedId))!;
+          await replace(strandedId, { ...proxy, hosts: ['stranded.operator.example.test'] });
+          operatorState = structuredClone({
+            proxies: [...harness.edge.proxies],
+            plugins: [...harness.edge.pluginConfigs],
+            specs: [...harness.edge.apiSpecs],
+            upstreams: [...harness.edge.upstreams],
+          });
+        }
+        return result;
+      };
+      restoreMethods.push(() => {
+        harness.edgeClient.proxies.replace = replace;
+      });
+      faults.failNext('apis', 'update', new Error('restore catalog completion refused'));
+      const offset = harness.edge.requests.length;
+      await assert.rejects(
+        harness.services.publishing.restoreGateway(actor, apiId),
+        /restore catalog completion refused/,
+      );
+      assert.ok(strandedId);
+      assert.deepEqual(
+        structuredClone({
+          proxies: [...harness.edge.proxies],
+          plugins: [...harness.edge.pluginConfigs],
+          specs: [...harness.edge.apiSpecs],
+          upstreams: [...harness.edge.upstreams],
+        }),
+        operatorState,
+      );
+      assert.ok(!harness.edge.requests.slice(offset).some((call) => call.method === 'DELETE'));
+      const row = (await harness.store.apis.findById(apiId))!;
+      assert.equal(row.gateway_state, 'repair_required');
+      assert.equal(row.ferrum_proxy_id, strandedId, 'retain the uncertain deployment identity');
+      assert.ok(
+        !(await harness.auditRows('api.gateway_restore')).some((entry) => entry.subject_id === apiId),
+      );
+      const failure = (await harness.auditRows('api.gateway_restore_failed')).find(
+        (entry) => entry.subject_id === apiId,
+      );
+      assert.equal((failure?.details as { withdrawn: boolean }).withdrawn, false);
+    });
+
     it('refuses agent ACL enrollment before changing an active grant or consumer', async () => {
       const published = await publish('routes');
       const session = await harness.registerUser({ role: 'client' });
@@ -948,7 +1140,7 @@ export function runEdgeSecurityAdoptionContract(
       for (const type of ['keyauth', 'basicauth', 'jwt']) {
         assert.ok(harness.edge.callsTo('DELETE', `/consumers/${id}/credentials/${type}`).length > 0);
       }
-      assert.deepEqual(stored.acl_groups, ['operator-group']);
+      assert.deepEqual(stored.acl_groups, []);
       assert.deepEqual(stored.labels, { operator: 'retained' });
       assert.ok(put.ifMatch);
       assert.ok(!JSON.stringify(put.body).includes(password));

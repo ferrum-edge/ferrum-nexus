@@ -1,11 +1,14 @@
 # Public-only DNS rebinding proposal fixture
 
-**Unqualified.** Owner authority is Edge `c764084b3b51c3f7ffde268c039688d35e49c553`
-(tag `v0.9.11`). Root must supply actual distribution-qualified Edge and packaged Nexus
-image index digests, finish the canonical contract pin, and run this in hosted CI.
-No current compatibility pin is changed. The existing pinned v0.9.10 acceptance image
-does not establish support for the new policy/verification endpoints; the existing suite
-also requires endpoint qualification before it can pass this candidate.
+**Hosted qualification pending; owner approval pending.** Owner authority is
+published Edge `v0.9.11`, source `c764084b3b51c3f7ffde268c039688d35e49c553`.
+The candidate compatibility pin selects its default multi-architecture image
+`ferrumedge/ferrum-edge:v0.9.11@sha256:2476b502855940e28157858fc24008545cb3baeb3084c9610e1d4505cbe0d36e`.
+Canonical `contracts-edge-0.9.11` at `390edbd5b2485af0988e02f7827fde778d76ae0a`
+is published and adopted byte-for-byte. See [adoption facts](../../docs/edge-0.9.11-adoption.md).
+Root must supply the packaged Nexus candidate digest and run this in hosted CI.
+Publication establishes artifact identity; it does not attest this fixture or grant
+public-only supported-profile approval. Edge #6010 capabilities are absent.
 
 This stack is separate from the private-opt-in acceptance stack. It admits
 `rebind.fixture.test` while DNS returns `11.203.0.10`, proves real authenticated
@@ -23,10 +26,14 @@ overlapping networks. The network isolation also confines the ordinary provider'
 initial Nexus DNS lookup.
 
 Root's hosted qualification job must generate fresh secrets (at least 32 characters),
-export `NEXUS_SECRET_KEY`, `NEXUS_BOOTSTRAP_TOKEN`, `FERRUM_ADMIN_JWT_SECRET`,
-`FERRUM_EDGE_IMAGE` and `NEXUS_IMAGE`, and use a clean project/volume:
+export `NEXUS_SECRET_KEY`, `NEXUS_BOOTSTRAP_TOKEN`, `FERRUM_ADMIN_JWT_SECRET`
+and `NEXUS_IMAGE`, load `FERRUM_EDGE_IMAGE` from the compatibility record, and use a
+clean project/volume:
 
 ```sh
+set -a
+. ./release/compatibility.env
+set +a
 docker compose -f e2e/public-only/docker-compose.yml up -d --build controlled ferrum-edge nexus
 docker compose -f e2e/public-only/docker-compose.yml run --build --rm probe
 docker compose -f e2e/public-only/docker-compose.yml logs --no-color
@@ -34,7 +41,6 @@ docker compose -f e2e/public-only/docker-compose.yml down -v
 ```
 
 Keep logs as hosted artifacts; do not print session cookies or show-once credentials.
-A missing capability is a failure, never a skip or mocked production pass. Publication
-facts and successful exact-image evidence must replace this unqualified status before
-landing. This tests one operator-established Admin/traffic process pairing, not CPs,
+A missing capability is a failure, never a skip or mocked production pass. Successful
+exact-image hosted evidence and explicit owner approval remain required before landing. This tests one operator-established Admin/traffic process pairing, not CPs,
 load-balanced Admin endpoints, remote data planes, future process replacements or fleets.

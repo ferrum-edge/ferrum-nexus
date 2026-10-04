@@ -230,15 +230,15 @@ describe('ferrum admin client', () => {
       id: 'legacy-objects',
       username: 'legacy-objects',
       credentials: {
-        keyauth: [{ key: 'prefix[REDACTED]suffix', operator: 'kept' }],
         jwt: [{ secret: 'j'.repeat(32) }],
-        custom: [{ marker: '[REDACTED]' }],
       },
     });
     const stored = edge.consumers.get('nexus/legacy-objects')!;
-    // Restore history can still hold single objects; ordinary PUT input cannot.
+    // Deliberate raw historical fixture boundary: unknown owner fields are not
+    // ordinary typed credential input. Restore history can hold single objects.
     const history = stored.credentials as unknown as Record<string, unknown>;
     history.keyauth = { key: 'prefix[REDACTED]suffix', operator: 'kept' };
+    history.custom = [{ marker: '[REDACTED]' }];
     history.jwt = { secret: 'j'.repeat(32), algorithm: 'legacy' };
     const snapshot = await client.consumers.verification(stored.id);
     await client.consumers.replace(

@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ferrum-edge/ferrum-contracts/schemas/backend-egress-policy/v1.schema.json",
+  "title": "Edge backend egress policy response v1",
+  "description": "GET /backend-egress-policy response for the immutable process policy. JWT namespace authorization and Cache-Control: no-store are HTTP/runtime requirements. JSON conformance cannot establish authentication, serving DP identity or actual enforcement; CP metadata is not DP attestation.",
+  "x-contract": {
+    "name": "backend-egress-policy",
+    "version": 1,
+    "status": "implemented",
+    "owner": "ferrum-edge/ferrum-edge",
+    "edge_availability": "Released in Ferrum Edge v0.9.11 at c764084b3b51c3f7ffde268c039688d35e49c553; upstream distribution is verified. Canonical contracts-edge-0.9.11 tag/publication remains pending.",
+    "provenance": [
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.11",
+        "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+        "path": "openapi.yaml",
+        "symbols": [
+          "components.schemas.BackendEgressPolicyResponse"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.11",
+        "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+        "path": "src/admin/backend_egress_policy.rs",
+        "symbols": [
+          "BackendEgressPolicyResponse",
+          "handle_get"
+        ],
+        "note": "Transcribed OpenAPI response shape. Additional cross-field assertions copy the handler's exact mode class lists and public-only guarantee calculation; no authorization or cryptographic validity is modeled as JSON validation."
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.11",
+        "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+        "path": "src/config/env_config.rs",
+        "symbols": [
+          "BackendEgressPolicy::metadata",
+          "BackendEgressPolicy::deny_reason",
+          "is_private_ip"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.11",
+        "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+        "path": "docs/admin_api.md"
+      }
+    ]
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ip_classification",
+    "namespace",
+    "policy_scope",
+    "enforcement_scope",
+    "mode",
+    "mode_allowed_ip_classes",
+    "mode_blocked_ip_classes",
+    "dangerous_ranges_blocked",
+    "allow_cidr_overrides_present",
+    "deny_cidr_overrides_present",
+    "evaluation_order",
+    "public_only_guaranteed"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v1.schema.json#/$defs/SchemaVersion"
+    },
+    "ip_classification": {
+      "$ref": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v1.schema.json#/$defs/IpClassification",
+      "description": "Versioned Edge private/reserved classifier; public is its complement. Exact v1 ranges, recognized IPv4 embeddings and global IETF exceptions are documented in the pinned owner admin_api.md."
+    },
+    "namespace": {
+      "type": "string",
+      "description": "Authorized request namespace; absent request header selects ferrum."
+    },
+    "policy_scope": {
+      "$ref": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v1.schema.json#/$defs/PolicyScope",
+      "description": "Process-wide immutable loaded policy; changing it requires a process restart."
+    },
+    "enforcement_scope": {
+      "$ref": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v1.schema.json#/$defs/EnforcementScope",
+      "description": "local-data-plane serves this namespace; unserved-namespace serves another. admission-only is CP without a local proxy; no-data-plane includes node_agent. CP and non-serving metadata do not attest remote DP policy."
+    },
+    "mode": {
+      "$ref": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v1.schema.json#/$defs/Mode",
+      "description": "Loaded mode; production default is both."
+    },
+    "mode_allowed_ip_classes": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 2,
+      "items": {
+        "$ref": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v1.schema.json#/$defs/IpClass"
+      },
+      "description": "Mode-stage classes only, after overlays and dangerous baseline; not unconditional effective allows."
+    },
+    "mode_blocked_ip_classes": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 1,
+      "items": {
+        "$ref": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v1.schema.json#/$defs/IpClass"
+      },
+      "description": "Mode-stage blocks; explicit allow CIDRs can bypass them."
+    },
+    "dangerous_ranges_blocked": {
+      "type": "boolean",
+      "description": "Loaded dangerous-range baseline, production default true. Explicit allows can bypass it; it permits ordinary loopback/RFC1918/ULA under both mode and alone does not certify public-only egress."
+    },
+    "allow_cidr_overrides_present": {
+      "type": "boolean",
+      "description": "Whether explicit allow CIDRs are loaded; addresses and counts are withheld."
+    },
+    "deny_cidr_overrides_present": {
+      "type": "boolean",
+      "description": "Whether explicit deny CIDRs are loaded; addresses and counts are withheld."
+    },
+    "evaluation_order": {
+      "$ref": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v1.schema.json#/$defs/EvaluationOrder",
+      "description": "First match for each address and recognized embedded IPv4 candidate. Ambiguous local-use NAT64 must pass both decoded candidates and the literal IPv6 policy."
+    },
+    "public_only_guaranteed": {
+      "type": "boolean",
+      "description": "True exactly for public mode without allow overrides. This loaded-policy fact is usable for a serving gateway only with local-data-plane for the requested namespace; it is not DNS validation, a connect test, or external firewall attestation."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "both"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "mode_allowed_ip_classes": {
+            "const": [
+              "public",
+              "private-reserved"
+            ]
+          },
+          "mode_blocked_ip_classes": {
+            "const": []
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "public"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "mode_allowed_ip_classes": {
+            "const": [
+              "public"
+            ]
+          },
+          "mode_blocked_ip_classes": {
+            "const": [
+              "private-reserved"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "private"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "mode_allowed_ip_classes": {
+            "const": [
+              "private-reserved"
+            ]
+          },
+          "mode_blocked_ip_classes": {
+            "const": [
+              "public"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "public"
+          },
+          "allow_cidr_overrides_present": {
+            "const": false
+          }
+        },
+        "required": [
+          "mode",
+          "allow_cidr_overrides_present"
+        ]
+      },
+      "then": {
+        "properties": {
+          "public_only_guaranteed": {
+            "const": true
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "public_only_guaranteed": {
+            "const": false
+          }
+        }
+      }
+    }
+  ]
+}
