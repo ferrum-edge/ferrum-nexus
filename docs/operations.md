@@ -1584,8 +1584,17 @@ re-enables take no lock.
 
 A second key, `users:lifecycle:<user_id>`, orders an account's status changes
 against registering a new gateway identity for it
-([§11](#11-gateway-revocation-for-disabled-accounts)). It is always taken inside
-`users:super-admins` when both are needed.
+([§11](#11-gateway-revocation-for-disabled-accounts)) and password-reset issuance.
+Issuance takes the key before checking eligibility or generating a token and
+holds it through preparation and the fenced mint/outbox transaction. A disable
+that follows deletes the token; a stale issuer whose lease changed hands cannot
+commit after disable/re-enable. A request that takes the key after re-enable
+may issue a fresh link. It is always taken inside `users:super-admins` when both
+are needed.
+
+This reset-issuance ordering requires every issuing instance to run the
+lease-aware version. An older instance can still mint without that key during
+a mixed-version rollout.
 
 Single sign-on uses two of these keys. A callback that writes one of a
 provider's links (a first-time link or a provisioned account) and every save of

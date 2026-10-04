@@ -206,9 +206,16 @@ built to reveal nothing:
   deprovision — deletes every `password_reset` token for the account in the same
   transaction as `status = 'disabled'`, so re-enabling inside the link's
   one-hour lifetime cannot revive a recovery capability an administrator meant
-  to end. A re-enable deletes any `password_reset` row still present as well, so
-  a link minted before this behaviour shipped, or one whose issuance raced the
-  disable, is not revived either. `email_verification` tokens are left alone.
+  to end. Issuance takes the same lifecycle lease before checking eligibility
+  or generating the token, and holds it through preparation and the fenced
+  mint/outbox transaction. A disable waits for that mint and deletes its token;
+  an issuer whose expired lease changed hands cannot commit after a disable
+  and re-enable. A request that acquires the lease after re-enable can issue a
+  new link. Re-enable also deletes stale rows from older versions that did not
+  order issuance this way. Redemption's password write requires an active
+  account at the write itself, so a concurrent disable that wins that write
+  prevents the reset and rolls back its token burn. `email_verification`
+  tokens are left alone.
 - **The link is unreadable in the outbox.** The token is stored only as an
   HMAC, and the queued message that carries it is sealed (AES-256-GCM under a
   key derived from `NEXUS_SECRET_KEY`, bound to the row id and recipient), so

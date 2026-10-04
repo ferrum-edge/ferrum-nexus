@@ -9,7 +9,8 @@
  * paths — `PATCH /api/users/:id` and `POST /api/admin/god/disable-user` — now
  * delete the account's `password_reset` tokens in the transaction that writes
  * `status = 'disabled'`, and the re-enable deletes any token still present, so a
- * link that predates the disable (or raced it) cannot be redeemed either.
+ * stale link from an older version cannot be redeemed either. Issuance races
+ * are exercised through the real preparation path in reset-lifecycle-contract.
  *
  * Cross-adapter: the delete shares one transaction with the status write and
  * the session cut-off, which on Mongo is a multi-document transaction the
@@ -129,9 +130,8 @@ export function runDisableRevokesResetLinksContract(
       assert.equal(disabled.statusCode, 200, disabled.body);
 
       // A link present while the account is disabled is stale by definition: a
-      // leftover from before the revoking behaviour shipped, or an issuance
-      // whose pre-transaction status read raced this disable. Re-enabling must
-      // not revive it, so the re-enable deletes it too.
+      // leftover from a version whose issuance did not take the lifecycle key.
+      // Re-enabling must not revive it, so the re-enable deletes it too.
       const { token, hash } = await issueReset(subject);
       assert.ok(
         await harness.store.verificationTokens.findByTokenHash(hash, 'password_reset'),

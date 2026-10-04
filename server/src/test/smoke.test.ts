@@ -73,6 +73,7 @@ import { runOutboxFencingContract } from './outbox-fencing-contract.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
 import { runPrivilegedAuditContract } from './privileged-audit-contract.js';
 import { runRecoveryThrottleContract } from './recovery-throttle-contract.js';
+import { runResetLifecycleContract } from './reset-lifecycle-contract.js';
 import { runSealedOutboxContract } from './sealed-outbox-contract.js';
 import { runSettingsTransactionContract } from './settings-transaction-contract.js';
 import { runTeardownCancellationContract } from './teardown-cancellation-contract.js';
@@ -345,6 +346,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
   runPasswordChangeContract(label, makeStore);
   runPrivilegedAuditContract(label, makeStore);
   runRecoveryThrottleContract(label, makeStore);
+  runResetLifecycleContract(label, makeStore);
   runSealedOutboxContract(label, makeStore);
   runSettingsTransactionContract(label, makeStore);
   runTeardownCancellationContract(label, makeStore);

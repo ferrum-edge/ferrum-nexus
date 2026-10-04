@@ -667,10 +667,9 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
             await tx.gatewayTeardownJobs.deleteByUser(target.id);
             // A disabled account can never legitimately request a reset, so a
             // `password_reset` row still present at re-enable is stale: a
-            // pre-deploy leftover, or an issuance that committed while the
-            // account was off (its `requestPasswordReset` pre-check read the
-            // status outside the minting transaction). Deleting it here keeps a
-            // re-enable from reviving a link the disable meant to end.
+            // leftover from a version that did not order issuance under the
+            // lifecycle lease. Deleting it here keeps a re-enable from reviving
+            // a link the disable meant to end.
             revokedResetLinks += await tx.verificationTokens.deleteForUser(
               target.id,
               'password_reset',

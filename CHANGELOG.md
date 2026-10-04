@@ -68,9 +68,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `PATCH /api/users/:id` route, god-mode `disable-user` and the SSO deprovision —
   now deletes the account's `password_reset` tokens in the same transaction as
   the status change, on every backend. Re-enabling deletes any `password_reset`
-  row still present as well, so a link minted before this behaviour shipped, or
-  one whose issuance raced the disable, is not revived either. The disable's
-  audit row records how many links it revoked.
+  row still present from older versions as well. Issuance holds the lifecycle
+  lease before checking eligibility or generating the capability, through
+  preparation and the fenced mint/outbox transaction, so a paused issuer cannot
+  mint its old token after disable/re-enable. A request that takes the lease
+  after re-enable may issue a fresh link. Redemption also guards its password
+  write with active status, refusing a disable that won the write race. The
+  disable's audit row records how many links it revoked.
 - **The acceptance runner treats `e2e/.env` as data and protects its secrets** (#497). It rejects
   malformed, duplicate, unsupported, or shell-containing entries without evaluating them, refuses
   symlinks, and creates or secures the file with mode `0600`.

@@ -101,9 +101,8 @@ clears. See [`../operations.md`](../operations.md#11-gateway-revocation-for-disa
 revocation. The user signs in normally. Access groups come back for every grant
 that is still active, but credentials do not: the user issues new ones. Revoked
 grants and test consumers are not recreated. A `password_reset` link left over
-from before the disable — a link minted before the revocation behaviour shipped,
-or one issued while the account was off — is deleted as well, so it cannot be
-redeemed. If restoring the gateway groups fails, the request returns an error
+from a version that did not order issuance with disable is deleted as well, so
+it cannot be redeemed. If restoring the gateway groups fails, the request returns an error
 after the status has changed; enable the account again to finish. It is safe to
 repeat.
 
