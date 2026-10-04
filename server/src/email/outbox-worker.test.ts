@@ -3,6 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 
 import { OUTBOX_MAX_ATTEMPTS } from '@ferrum-nexus/shared';
 
+import { OUTBOX_PRIORITY } from '../db/store.js';
 import { isoInSeconds } from '../lib/ids.js';
 import { buildTestApp, createTestMailbox, type TestApp } from '../test/helpers.js';
 import {
@@ -282,12 +283,17 @@ describe('outbox worker', () => {
 
   it('stops claiming mid-batch once stop() is called, and start() resumes (#334)', async () => {
     const ids: string[] = [];
+    // Distinct due times fix the claim order even when creation timestamps tie
+    // and random UUIDs would otherwise decide which recipient is sent first.
     for (const n of [1, 2, 3]) {
-      const { entry } = await harness.services.email.enqueue({
-        to: `stopping-${n}@example.test`,
-        templateKey: 'mass',
-        vars: { subject: `Stop ${n}`, body_html: '<p>x</p>', body_text: 'x' },
-        idempotencyKey: `worker:stopping:${n}`,
+      const { entry } = await harness.store.emailOutbox.enqueue({
+        to_email: `stopping-${n}@example.test`,
+        priority: OUTBOX_PRIORITY.low,
+        subject: `Stop ${n}`,
+        body_html: '<p>x</p>',
+        body_text: 'x',
+        idempotency_key: `worker:stopping:${n}`,
+        next_attempt_at: `2000-01-0${n}T00:00:00.000Z`,
       });
       ids.push(entry.id);
     }
@@ -326,6 +332,9 @@ describe('outbox worker', () => {
     assert.equal(result.claimed, 1, 'the batch ended after the delivery in flight');
     assert.equal(result.sent, 1);
     assert.deepEqual(delivered, ['stopping-1@example.test']);
+    const first = await harness.store.emailOutbox.findById(ids[0]!);
+    assert.equal(first?.status, 'sent');
+    assert.equal(first?.attempts, 1);
     for (const id of ids.slice(1)) {
       const row = await harness.store.emailOutbox.findById(id);
       assert.equal(row?.status, 'pending', 'unclaimed rows stay queued for the next worker');
@@ -341,7 +350,16 @@ describe('outbox worker', () => {
     } finally {
       await worker.stop();
     }
-    assert.equal(delivered.length, 3);
+    assert.deepEqual(delivered, [
+      'stopping-1@example.test',
+      'stopping-2@example.test',
+      'stopping-3@example.test',
+    ]);
+    for (const id of ids) {
+      const row = await harness.store.emailOutbox.findById(id);
+      assert.equal(row?.status, 'sent');
+      assert.equal(row?.attempts, 1, 'each queued row is claimed and delivered once');
+    }
   });
 
   it('claims nothing while SMTP is unconfigured', async () => {

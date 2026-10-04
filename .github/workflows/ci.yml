@@ -160,16 +160,27 @@ jobs:
         run: >-
           docker run --rm ferrum-nexus:ci node --input-type=module -e
           "import assert from 'node:assert/strict';
+          import { createHash } from 'node:crypto';
           import Database from 'better-sqlite3';
           import { loadMigrations } from './server/dist/db/migrate.js';
           assert.ok(Number(process.versions.napi) >= 10);
+          const priorityHashes = {
+            sqlite: '0ffa16cce8d5a154877a1dadffc52b8ac3ad4cc8346d637b008ded2ec5fde31e',
+            pg: '6bd48d66f70cd8b949dc168991e822db31ae49d3734b3cbcee81115b0d6c8b35',
+            mysql: '633e786effcf93732d5b53987e42e3118bf789394b57295a3764440a69cddc16',
+          };
           for (const dialect of ['sqlite', 'pg', 'mysql']) {
-            assert.deepEqual(loadMigrations(dialect).map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest', '004_api_spec_changes', '005_notification_preferences', '006_user_identities', '007_outbox_recipient', '008_email_lifecycle_fence']);
+            const files = loadMigrations(dialect);
+            assert.deepEqual(files.map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest', '004_api_spec_changes', '005_notification_preferences', '006_user_identities', '007_outbox_recipient', '008_email_lifecycle_fence', '009_outbox_priority']);
+            const priority = files.find((file) => file.id === '009_outbox_priority');
+            assert.ok(priority);
+            assert.equal(createHash('sha256').update(priority.sql).digest('hex'), priorityHashes[dialect]);
           }
           const db = new Database(':memory:');
           for (const file of loadMigrations('sqlite')) db.exec(file.sql);
           assert.deepEqual(db.prepare('SELECT generation FROM email_outbox').all(), []);
           assert.deepEqual(db.prepare('SELECT recipient_user_id FROM email_outbox').all(), []);
+          assert.deepEqual(db.prepare('SELECT priority FROM email_outbox').all(), []);
           assert.deepEqual(db.prepare('SELECT email_lifecycle_fence FROM users').all(), []);
           assert.deepEqual(db.prepare('SELECT role FROM api_gateway_plugins').all(), []);
           assert.deepEqual(db.prepare('SELECT spec_id FROM api_spec_changes').all(), []);

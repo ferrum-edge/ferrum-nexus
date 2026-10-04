@@ -269,6 +269,13 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
     const migration = migrations.find((file) => file.id === '009_outbox_priority');
     assert.ok(migration);
     const steps = splitSqlStatements(migration.sql);
+    const messages: readonly [id: string, key: string, status: 'pending' | 'sent' | 'failed'][] = [
+      ['campaign', 'mass:fixture', 'pending'],
+      ['reset', 'reset:fixture', 'pending'],
+      ['verify', 'verify:fixture', 'sent'],
+      ['parked', 'reset:parked', 'failed'],
+      ['lookalike', 'mass:verify:fixture', 'pending'],
+    ];
     const expected = await fixture(async (pool) => {
       await runMysqlMigrations(pool);
       return schema(pool);
@@ -281,13 +288,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
         );
         await pool.query(`INSERT INTO organizations (id, name, created_at, updated_at)
           VALUES ('preserved', 'Survives restart', '2026-01-01', '2026-01-01')`);
-        for (const [id, key, status] of [
-          ['campaign', 'mass:fixture', 'pending'],
-          ['reset', 'reset:fixture', 'pending'],
-          ['verify', 'verify:fixture', 'sent'],
-          ['parked', 'reset:parked', 'failed'],
-          ['lookalike', 'mass:verify:fixture', 'pending'],
-        ]) {
+        for (const [id, key, status] of messages) {
           await pool.execute(
             `INSERT INTO email_outbox
               (id, to_email, subject, body_html, body_text, status, attempts, generation,
