@@ -1,0 +1,74 @@
+name: Dependency lock artifacts
+
+# Optional producer only. The existing required CI jobs validate the head on
+# which a reviewer applies these artifacts; this workflow never writes to Git.
+on:
+  pull_request:
+    paths:
+      - package.json
+      - shared/package.json
+      - server/package.json
+      - web/package.json
+      - e2e/package.json
+      - .github/workflows/dependency-locks.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  produce-locks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.14.0'
+      - name: Record immutable inputs and generate locks without lifecycle scripts
+        env:
+          npm_config_engine_strict: 'true'
+        run: |
+          mkdir -p lock-artifacts/e2e lock-artifacts/provenance
+          git rev-parse HEAD > lock-artifacts/provenance/source-sha.txt
+          sha256sum package.json shared/package.json server/package.json web/package.json \
+            e2e/package.json package-lock.json e2e/package-lock.json \
+            .github/workflows/dependency-locks.yml > lock-artifacts/provenance/input.sha256
+          node --version > lock-artifacts/provenance/node-version.txt
+          npm --version > lock-artifacts/provenance/npm-version.txt
+          printf '%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > lock-artifacts/provenance/run.txt
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          npm --prefix e2e install --package-lock-only --ignore-scripts --no-audit --no-fund
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const root = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          const e2e = JSON.parse(readFileSync('e2e/package-lock.json', 'utf8'));
+          for (const lock of [root, e2e]) {
+            for (const [path, pkg] of Object.entries(lock.packages)) {
+              if (path.endsWith('node_modules/typescript')) assert.equal(pkg.version, '7.0.2');
+              if (path.endsWith('node_modules/vitest')) assert.equal(pkg.version, '5.0.3');
+              const vitestPackage = path.match(/(?:^|\/)node_modules\/@vitest\/([^/]+)$/)?.[1];
+              if (vitestPackage && !vitestPackage.startsWith('istanbul-lib-')) {
+                assert.equal(pkg.version, '5.0.3', path);
+              }
+              if (path.endsWith('node_modules/jsdom')) assert.match(pkg.version, /^26\./);
+              if (path.endsWith('node_modules/undici')) assert.match(pkg.version, /^7\./);
+            }
+          }
+          JS
+          git diff --check
+          git diff --no-ext-diff -- package-lock.json e2e/package-lock.json > lock-artifacts/locks.diff
+          cp package-lock.json lock-artifacts/package-lock.json
+          cp e2e/package-lock.json lock-artifacts/e2e/package-lock.json
+          cd lock-artifacts
+          sha256sum package-lock.json e2e/package-lock.json locks.diff > provenance/output.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-locks-${{ github.event.pull_request.head.sha || github.sha }}
+          path: lock-artifacts/
+          if-no-files-found: error
+          retention-days: 14

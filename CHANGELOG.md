@@ -20,6 +20,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- **Node 22.14-compatible dependency majors are migrated** (Refs #449).
+  All four TypeScript manifests use 7.0.2; the transactional audit scan uses
+  its native service and AST with the existing structural checks retained.
+  Zod 4.6.5 keeps configuration transforms and diagnostics, and TanStack Table
+  9.2.5 retains server-owned filtering, ordering and pagination with stable
+  entity row ids. Vitest and V8 coverage move together to 5.0.3, with typed
+  jest-dom 7 matcher augmentation. An optional read-only hosted workflow
+  produces both npm locks with immutable input/output provenance. This is
+  partial progress: jsdom 26 and Undici 7 remain, and Node 22.14 support and
+  runtime image pins are unchanged. See [migration notes](docs/dependency-majors-449.md).
+
 - **Returning SSO authorization and deployment boundaries are clarified** (#515).
   Returning callbacks keep their account-only lease and authorize at the
   transactional settings re-read. The supported single-serving-instance topology

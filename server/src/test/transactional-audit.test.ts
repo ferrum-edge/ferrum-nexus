@@ -18,7 +18,9 @@ import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import ts from 'typescript';
+import { API } from 'typescript/unstable/sync';
+import { createVirtualFileSystem } from 'typescript/unstable/fs';
+import * as ts from 'typescript/unstable/ast';
 
 import {
   ALL_AUDIT_ACTIONS,
@@ -81,7 +83,10 @@ function sourceFiles(dir: string): string[] {
 function bindsName(binding: ts.BindingName, name: string): boolean {
   if (ts.isIdentifier(binding)) return binding.text === name;
   return binding.elements.some(
-    (element) => !ts.isOmittedExpression(element) && bindsName(element.name, name),
+    (element) =>
+      !ts.isOmittedExpression(element) &&
+      element.name !== undefined &&
+      bindsName(element.name, name),
   );
 }
 
@@ -139,7 +144,7 @@ type Resolution =
  */
 function resolve(id: ts.Identifier): Resolution | null {
   for (let node: ts.Node | undefined = id.parent; node; node = node.parent) {
-    if (ts.isFunctionLike(node)) {
+    if (ts.isSignatureDeclaration(node)) {
       const index = node.parameters.findIndex((parameter) => bindsName(parameter.name, id.text));
       if (index !== -1) return { kind: 'parameter', fn: node, index };
     } else {
@@ -181,14 +186,14 @@ function callsOf(
     if (
       ts.isIdentifier(node) &&
       node.text === name &&
-      node !== fn.name &&
+      !(ts.isFunctionDeclaration(fn) && node === fn.name) &&
       node !== declaredName(fn)
     ) {
       const parent = node.parent;
       if (ts.isCallExpression(parent) && parent.expression === node) calls.push(parent);
       else escaped = true;
     }
-    ts.forEachChild(node, visit);
+    node.forEachChild(visit);
   };
   visit(source);
   return escaped ? null : calls;
@@ -271,7 +276,7 @@ function writesThrough(fn: ts.Node, store: string): boolean {
         return;
       }
     }
-    ts.forEachChild(node, visit);
+    node.forEachChild(visit);
   };
   visit(fn);
   return found;
@@ -292,7 +297,7 @@ function awaitedDirectly(call: ts.Expression): boolean {
 function exitsEarly(block: ts.Block): boolean {
   let found = false;
   const visit = (node: ts.Node, loops: number, switches: number): void => {
-    if (found || ts.isFunctionLike(node) || ts.isClassLike(node)) return;
+    if (found || ts.isSignatureDeclaration(node) || ts.isClassLikeDeclaration(node)) return;
     if (ts.isReturnStatement(node)) {
       found = true;
     } else if (ts.isBreakStatement(node)) {
@@ -300,12 +305,19 @@ function exitsEarly(block: ts.Block): boolean {
     } else if (ts.isContinueStatement(node)) {
       found = node.label !== undefined || loops === 0;
     } else {
-      const loop = ts.isIterationStatement(node, false) ? 1 : 0;
+      const loop =
+        ts.isForStatement(node) ||
+        ts.isForOfStatement(node) ||
+        ts.isForInStatement(node) ||
+        ts.isWhileStatement(node) ||
+        ts.isDoStatement(node)
+          ? 1
+          : 0;
       const switched = ts.isSwitchStatement(node) ? 1 : 0;
-      ts.forEachChild(node, (child) => visit(child, loops + loop, switches + switched));
+      node.forEachChild((child) => visit(child, loops + loop, switches + switched));
     }
   };
-  ts.forEachChild(block, (child) => visit(child, 0, 0));
+  block.forEachChild((child) => visit(child, 0, 0));
   return found;
 }
 
@@ -464,11 +476,11 @@ function hookMisuse(call: ts.CallExpression, source: ts.SourceFile): string | nu
 /** Whether `name` is the name `node` declares — a parameter, property, variable or function. */
 function isDeclaredName(node: ts.Node, name: ts.Identifier): boolean {
   return (
-    (ts.isParameter(node) ||
-      ts.isPropertySignature(node) ||
+    (ts.isParameterDeclaration(node) ||
+      ts.isPropertySignatureDeclaration(node) ||
       ts.isPropertyDeclaration(node) ||
       ts.isPropertyAssignment(node) ||
-      ts.isMethodSignature(node) ||
+      ts.isMethodSignatureDeclaration(node) ||
       ts.isMethodDeclaration(node) ||
       ts.isFunctionDeclaration(node) ||
       ts.isVariableDeclaration(node) ||
@@ -531,11 +543,58 @@ interface Scan {
   hooks: Set<string>;
 }
 
+/**
+ * TypeScript 7 parses through its native service, then exposes decoded ASTs.
+ * An isolated virtual project contains exactly the supplied source texts; it
+ * needs neither emit nor type checking. Reject parse failures instead of
+ * allowing an incomplete tree to make the audit checks pass vacuously.
+ * Keep a whole server scan in one service/snapshot, and close both on failure.
+ */
+function withParsedSources(
+  inputs: Array<{ label: string; text: string }>,
+  visit: (label: string, source: ts.SourceFile) => void,
+): void {
+  const root = join(SOURCE_ROOT, '__audit_scan__');
+  const config = join(root, 'tsconfig.json');
+  const files = Object.fromEntries(inputs.map(({ label, text }) => [join(root, label), text]));
+  files[config] = JSON.stringify({
+    compilerOptions: { noLib: true, noResolve: true },
+    files: inputs.map(({ label }) => label),
+  });
+  const api = new API({ cwd: root, fs: createVirtualFileSystem(files) });
+  try {
+    const snapshot = api.updateSnapshot({ openProjects: [config] });
+    try {
+      const project = snapshot.getProject(config);
+      assert.ok(project, 'the native audit scan project must load');
+      for (const { label } of inputs) {
+        const path = join(root, label);
+        const source = project.program.getSourceFile(path);
+        assert.ok(source, `the native audit scan must parse ${label}`);
+        assert.deepEqual(project.program.getSyntacticDiagnostics(path), [], `${label} must parse`);
+        visit(label, source);
+      }
+    } finally {
+      snapshot.dispose();
+    }
+  } finally {
+    api.close();
+  }
+}
+
 function scanSource(label: string, text: string): Scan {
+  let scan: Scan | undefined;
+  withParsedSources([{ label, text }], (parsedLabel, source) => {
+    scan = scanParsedSource(parsedLabel, source);
+  });
+  assert.ok(scan, 'the native audit scan must visit its source');
+  return scan;
+}
+
+function scanParsedSource(label: string, source: ts.SourceFile): Scan {
   const findings: string[] = [];
   const recorded = new Set<string>();
   const hooks = new Set<string>();
-  const source = ts.createSourceFile(label, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const where = (node: ts.Node): string => {
     const { line } = source.getLineAndCharacterOfPosition(node.getStart(source));
     return `${label}:${line + 1}`;
@@ -601,7 +660,7 @@ function scanSource(label: string, text: string): Scan {
         else findings.push(`${where(node)} ${name}() ${problem}`);
       }
     }
-    ts.forEachChild(node, visit);
+    node.forEachChild(visit);
   };
   visit(source);
   return { findings, recorded, hooks };
@@ -609,13 +668,15 @@ function scanSource(label: string, text: string): Scan {
 
 function scanServer(): Scan {
   const merged: Scan = { findings: [], recorded: new Set(), hooks: new Set() };
-  for (const path of sourceFiles(SOURCE_ROOT)) {
-    if (path === CATALOG) continue;
-    const scan = scanSource(relative(SOURCE_ROOT, path), readFileSync(path, 'utf8'));
+  const inputs = sourceFiles(SOURCE_ROOT)
+    .filter((path) => path !== CATALOG)
+    .map((path) => ({ label: relative(SOURCE_ROOT, path), text: readFileSync(path, 'utf8') }));
+  withParsedSources(inputs, (label, source) => {
+    const scan = scanParsedSource(label, source);
     merged.findings.push(...scan.findings);
     for (const key of scan.recorded) merged.recorded.add(key);
     for (const name of scan.hooks) merged.hooks.add(name);
-  }
+  });
   return merged;
 }
 
@@ -728,6 +789,161 @@ describe('the transactional audit scan itself', () => {
       `expected a finding containing "${expected}", got:\n${found.join('\n')}`,
     );
   }
+
+  it('rejects a malformed source instead of scanning a recovered partial tree', () => {
+    assert.throws(() => findingsFor('export async function broken( {'), /must parse/);
+  });
+
+  it('uses native AST positions and literal values, including escaped action strings', () => {
+    const found = findingsFor("\nconst action = 'access.\\u0061pprove';");
+    assert.ok(found.some((finding) => finding.startsWith('fixture.ts:3')));
+    assert.ok(found.some((finding) => finding.includes("spells out 'access.approve'")));
+    assertFlags('const action = `access.approve`;', "spells out 'access.approve'");
+  });
+
+  it('checks both conditional actions and rejects unknown or indirect catalog reads', () => {
+    const scan = scanSource(
+      'fixture.ts',
+      PRELUDE +
+        `store.transaction(async (tx) => {
+          await tx.grants.update('id', {});
+          await audit.forStore(tx).record(actor,
+            approved ? AuditAction.ACCESS_APPROVE : AuditAction.ACCESS_REVOKE, target);
+        });`,
+    );
+    assert.deepEqual(scan.findings, []);
+    assert.deepEqual([...scan.recorded].sort(), ['ACCESS_APPROVE', 'ACCESS_REVOKE']);
+    assertFlags('const action = AuditAction.UNKNOWN;', 'is not in the catalog');
+    assertFlags("const action = AuditAction['ACCESS_APPROVE'];", 'other than as AuditAction');
+    assertFlags('const { ACCESS_APPROVE } = AuditAction;', 'other than as AuditAction');
+    assertFlags('consume(AuditAction.ACCESS_APPROVE);', 'not the action argument');
+  });
+
+  it('resolves shadowing in blocks, destructuring, loops and catches', () => {
+    for (const shadow of [
+      '{ const { store: tx } = input; RECORD }',
+      '{ const [, tx] = input; RECORD }',
+      'for (const tx of stores) { RECORD }',
+      'for (const tx in stores) { RECORD }',
+      'for (let tx = store; ready; ready = false) { RECORD }',
+      'try { work(); } catch (tx) { RECORD }',
+      'switch (choice) { case 1: const tx = store; RECORD; break; }',
+      'await (async (other, tx) => { RECORD })(store, store);',
+    ]) {
+      assertFlags(
+        `store.transaction(async (tx) => {
+          await tx.grants.create({});
+          ${shadow.replace(
+            'RECORD',
+            'await audit.forStore(tx).record(actor, AuditAction.ACCESS_APPROVE, target);',
+          )}
+        });`,
+        'not a transaction callback',
+      );
+    }
+  });
+
+  it('requires an immutable scoped audit binding and exactly one transaction store', () => {
+    assertFlags(
+      `store.transaction(async (tx) => {
+        await tx.grants.create({});
+        let scoped = audit.forStore(tx);
+        await scoped.record(actor, AuditAction.ACCESS_APPROVE, target);
+      });`,
+      'root audit service',
+    );
+    for (const argumentsText of ['store', 'tx, store', 'tx.grants']) {
+      assertFlags(
+        `store.transaction(async (tx) => {
+          await tx.grants.create({});
+          await audit.forStore(${argumentsText}).record(actor, AuditAction.ACCESS_APPROVE, target);
+        });`,
+        argumentsText === 'store' ? 'not a transaction callback' : 'other than a transaction store',
+      );
+    }
+  });
+
+  it('follows named arrow helpers but rejects helpers that escape or have an unsafe caller', () => {
+    const helper = `const write = async (tx) => {
+      await tx.grants.create({});
+      await audit.forStore(tx).record(actor, AuditAction.ACCESS_APPROVE, target);
+    };`;
+    assert.deepEqual(findingsFor(helper + 'store.transaction((tx) => write(tx));'), []);
+    for (const unsafe of ['queue(write);', 'const alias = write;', 'write(store);']) {
+      assertFlags(
+        helper + 'store.transaction((tx) => write(tx));' + unsafe,
+        'not a transaction callback',
+      );
+    }
+    assertFlags(helper, 'not a transaction callback');
+  });
+
+  it('accepts parenthesized awaits and nested cleanup exits that do not leave the catch', () => {
+    for (const cleanup of [
+      'for (let i = 0; i < 2; i++) { continue; }',
+      'for (const item of items) { break; }',
+      'for (const key in input) { continue; }',
+      'while (ready) { break; }',
+      'do { break; } while (ready);',
+      'switch (choice) { case 1: break; }',
+      'const cleanup = () => { return; };',
+      'class Cleanup { run() { return; } }',
+    ]) {
+      assert.deepEqual(
+        findingsFor(
+          `store.transaction(async (tx) => {
+            await tx.grants.create({});
+            try {
+              await (audit.forStore(tx).record(actor, AuditAction.ACCESS_APPROVE, target));
+            } catch (error) { ${cleanup} throw error; }
+          });`,
+        ),
+        [],
+      );
+    }
+  });
+
+  it('rejects a labelled exit out of a catch even when a rethrow follows', () => {
+    assertFlags(
+      `await store.transaction(async (tx) => {
+        await tx.grants.create({});
+        outer: while (ready) {
+          try {
+            await audit.forStore(tx).record(actor, AuditAction.ACCESS_APPROVE, target);
+          } catch (error) {
+            if (retryable(error)) break outer;
+            throw error;
+          }
+        }
+      });`,
+      'catch does not always rethrow',
+    );
+  });
+
+  it('checks service hook callbacks and rejects unawaited or nonwriting invocations', () => {
+    assert.deepEqual(
+      findingsFor(
+        `await publishing.remove(id, async (tx) => {
+          await audit.forStore(tx).record(actor, AuditAction.API_DELETE, target);
+        });
+        const options = { recordWithRow: async (tx) => {
+          await audit.forStore(tx).record(actor, AuditAction.CREDENTIAL_ISSUE, target);
+        } };`,
+      ),
+      [],
+    );
+    assertFlags(
+      'store.transaction(async (tx) => { await recordWithRow(tx); });',
+      'writes nothing',
+    );
+    assertFlags(
+      `store.transaction(async (tx) => {
+        await tx.grants.create({});
+        recordWithRevoke(tx);
+      });`,
+      'not awaited directly',
+    );
+  });
 
   it('accepts a record in the transaction that makes the change', () => {
     const scan = scanSource(
