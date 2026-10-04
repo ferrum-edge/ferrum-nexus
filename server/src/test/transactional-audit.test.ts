@@ -186,7 +186,7 @@ function callsOf(
     if (
       ts.isIdentifier(node) &&
       node.text === name &&
-      !(ts.isFunctionDeclaration(fn) && node === fn.name) &&
+      !((ts.isFunctionDeclaration(fn) || ts.isFunctionExpression(fn)) && node === fn.name) &&
       node !== declaredName(fn)
     ) {
       const parent = node.parent;
@@ -875,6 +875,43 @@ describe('the transactional audit scan itself', () => {
         helper + 'store.transaction((tx) => write(tx));' + unsafe,
         'not a transaction callback',
       );
+    }
+    assertFlags(helper, 'not a transaction callback');
+  });
+
+  it('follows a named function expression helper handed only a transaction store', () => {
+    const scan = scanSource(
+      'fixture.ts',
+      PRELUDE +
+        `const write = async function write(tx) {
+          await tx.grants.create({});
+          await audit.forStore(tx).record(actor, AuditAction.ACCESS_APPROVE, target);
+        };
+        await store.transaction((tx) => write(tx));`,
+    );
+    assert.deepEqual(scan.findings, []);
+    assert.deepEqual([...scan.recorded], ['ACCESS_APPROVE']);
+  });
+
+  it('rejects named expression helpers with unsafe callers, escapes or shadowing', () => {
+    const helper = `const write = async function write(tx) {
+      await tx.grants.create({});
+      await audit.forStore(tx).record(actor, AuditAction.ACCESS_APPROVE, target);
+    };`;
+    const safeCall = 'await store.transaction((tx) => write(tx));';
+    for (const unsafe of [
+      'await write(store);',
+      'queue(write);',
+      'const alias = write;',
+      `await store.transaction((tx) => {
+        { const tx = store; return write(tx); }
+      });`,
+      `await store.transaction((tx) => {
+        const write = other;
+        return write(tx);
+      });`,
+    ]) {
+      assertFlags(helper + safeCall + unsafe, 'not a transaction callback');
     }
     assertFlags(helper, 'not a transaction callback');
   });
