@@ -488,7 +488,10 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
                 throw new Error('fixture cleanup failure');
               }
             });
-            await assert.rejects(() => runMysqlMigrations(faulty), (error) => error === aborted);
+            await assert.rejects(
+              () => runMysqlMigrations(faulty),
+              (error) => error === aborted,
+            );
             assert.ok(fired, `${cleanup}: ${after ? 'lost acknowledgement' : 'before write'}`);
             const replacement = await sessionState(migrator);
             assert.notEqual(replacement.id, before.id, 'the uncertain session was discarded');
