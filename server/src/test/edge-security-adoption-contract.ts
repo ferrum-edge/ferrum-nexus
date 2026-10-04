@@ -927,13 +927,16 @@ export function runEdgeSecurityAdoptionContract(
         let edited = false;
         let operatorState: unknown;
         let operatorOffset = 0;
-        let stagedSealed: Awaited<ReturnType<NexusStore['settings']['get']>> = null;
+        const stagedJournal: {
+          value: Awaited<ReturnType<NexusStore['settings']['get']>>;
+        } = { value: null };
         harness.edgeClient.proxies.get = async (...args) => {
           const proxy = await getProxy(...args);
           if (
             args[0] !== proxyId ||
             !proxy ||
             edited ||
+            typeof proxy.listen_path !== 'string' ||
             !proxy.listen_path.includes('/.staging/') ||
             !handOwnedIds.every((id) =>
               proxy.plugins?.some((entry) => entry.plugin_config_id === id),
@@ -946,7 +949,7 @@ export function runEdgeSecurityAdoptionContract(
           // captured proxy after a real admitted Admin write to expose that race.
           if (++completedReads < (boundary === 'cutover' ? 2 : 1)) return proxy;
           edited = true;
-          stagedSealed = await harness.store.settings.get(key);
+          stagedJournal.value = await harness.store.settings.get(key);
           await replaceProxy(proxyId, { ...proxy, hosts: ['recovery.operator.example.test'] });
           operatorState = state();
           operatorOffset = harness.edge.requests.length;
@@ -980,7 +983,11 @@ export function runEdgeSecurityAdoptionContract(
         );
         const sealed = await harness.store.settings.get(key);
         assert.ok(sealed?.encrypted && typeof sealed.value === 'string');
-        assert.deepEqual(sealed, stagedSealed, 'refusal retains the acknowledged staging journal');
+        assert.deepEqual(
+          sealed,
+          stagedJournal.value,
+          'refusal retains the acknowledged staging journal',
+        );
         const recovery = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
           sealed.value,
         );
