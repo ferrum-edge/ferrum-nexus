@@ -6,7 +6,7 @@
  * importing the other.
  */
 
-export const CATALOG_DETAIL_TABS = ['overview', 'docs', 'changes', 'access'] as const;
+export const CATALOG_DETAIL_TABS = ['overview', 'docs', 'changes', 'agents', 'access'] as const;
 
 export type CatalogDetailTab = (typeof CATALOG_DETAIL_TABS)[number];
 

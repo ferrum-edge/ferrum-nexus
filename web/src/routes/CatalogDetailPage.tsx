@@ -17,6 +17,7 @@ import { useCancelAccessRequest, useCreateAccessRequest } from '../hooks/useAcce
 import { useAuth } from '../stores/auth';
 import { useToast } from '../stores/toast';
 import { ACCOUNT_IDENTITY, IdentityPicker } from '../components/applications/IdentityPicker';
+import { AgentToolList, ConnectAgentPanel } from '../components/catalog/ConnectAgentPanel';
 import { CallApiPanel } from '../components/catalog/CallApiPanel';
 import { SpecChangeHistory } from '../components/catalog/SpecChangeHistory';
 import { OpenApiView } from '../components/openapi/OpenApiView';
@@ -522,6 +523,27 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
         </CardBody>
       </Card>
 
+      {api.agents ? (
+        <Card>
+          <CardBody>
+            <AgentToolList
+              agents={api.agents}
+              slug={api.slug}
+              title={canCall ? 'Tools covered by this grant' : 'Tools available after approval'}
+            />
+          </CardBody>
+        </Card>
+      ) : null}
+      {api.agents && canCall ? (
+        <ConnectAgentPanel
+          invokeUrl={api.invoke_url}
+          listenPath={api.listen_path}
+          slug={api.slug}
+          authPlugin={api.auth_plugin}
+          consumer={consumer}
+          holder={holder}
+        />
+      ) : null}
       {canCall ? (
         <CallApiPanel
           invokeUrl={api.invoke_url}
@@ -591,6 +613,7 @@ export function CatalogDetailPage(): ReactElement {
               v{api.version}
             </Badge>
             <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge>
+            {api.agents ? <Badge tone="accent">AI agents</Badge> : null}
             <StatusPill status={api.status} />
             <StatusPill status={api.access_state} />
           </>
@@ -619,7 +642,7 @@ export function CatalogDetailPage(): ReactElement {
       <AtAGlance detail={detail} />
 
       <Tabs
-        value={tab}
+        value={tab === 'agents' && !api.agents ? 'overview' : tab}
         onValueChange={setTab}
         tabs={[
           { value: 'overview', label: 'Overview', content: <Overview detail={detail} /> },
@@ -629,6 +652,15 @@ export function CatalogDetailPage(): ReactElement {
             content: <Documentation slug={slug} hasSpec={detail.spec !== null} />,
           },
           { value: 'changes', label: 'Changes', content: <SpecChangeHistory slug={slug} /> },
+          ...(api.agents
+            ? [
+                {
+                  value: 'agents',
+                  label: 'Agent tools',
+                  content: <AgentToolList agents={api.agents} slug={api.slug} />,
+                },
+              ]
+            : []),
           { value: 'access', label: 'Access', content: <AccessPanel detail={detail} /> },
         ]}
       />

@@ -557,6 +557,7 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'allow_authenticated_identity',
   ],
   rate_limiting: [
+    'mcp_tool_calls',
     'limit_by',
     'expose_headers',
     'limits',
@@ -566,6 +567,38 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'redis_key_prefix',
     'redis_pool_size',
     'redis_failure_policy',
+  ],
+  mcp_gateway: [
+    'enabled',
+    'mode',
+    'endpoint',
+    'servers',
+    'discovery',
+    'sessions',
+    'capabilities',
+    'policy',
+    'validation',
+    'observability',
+  ],
+  ai_tool_governor: [
+    'enabled',
+    'mode',
+    'default_action',
+    'unknown_shape_action',
+    'inspect',
+    'tools',
+    'approval',
+    'response',
+    'observability',
+  ],
+  ai_prompt_shield: [
+    'action',
+    'patterns',
+    'custom_patterns',
+    'scan_fields',
+    'exclude_roles',
+    'redaction_placeholder',
+    'max_scan_bytes',
   ],
   cors: [
     'allowed_origins',
@@ -2330,6 +2363,40 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         }
       }
     }
+    const mcp = body['x-ferrum-mcp'];
+    if (mcp === true || isRecord(mcp)) {
+      if (validate === true || isRecord(validate)) {
+        return parseError(
+          'MalformedExtension',
+          'x-ferrum-mcp cannot be combined with x-ferrum-validate',
+        );
+      }
+      if (isRecord(mcp)) {
+        const keys = [
+          'enabled',
+          'endpoint',
+          'namespace',
+          'include',
+          'exclude',
+          'limits',
+          'forward_request_headers',
+        ];
+        for (const field of Object.keys(mcp)) {
+          if (!keys.includes(field)) {
+            return parseError('MalformedExtension', `unknown x-ferrum-mcp field: ${field}`);
+          }
+        }
+      }
+    }
+    for (const plugin of Array.isArray(body['x-ferrum-plugins']) ? body['x-ferrum-plugins'] : []) {
+      if (!isRecord(plugin) || typeof plugin.plugin_name !== 'string') {
+        return parseError('MalformedExtension', 'Invalid spec plugin');
+      }
+      const problem = validatePluginConfig(plugin.plugin_name, plugin.config);
+      if (problem) return parseError('MalformedExtension', problem);
+      const triggerProblem = validatePluginTrigger(plugin.plugin_name, plugin.trigger);
+      if (triggerProblem) return parseError('MalformedExtension', triggerProblem);
+    }
     const settingsProblem = validateProxySettings(proxy);
     if (settingsProblem) return parseError('MalformedExtension', settingsProblem);
     return { proxy };
@@ -2378,7 +2445,13 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     const generated: string[] = [];
     const validate = document['x-ferrum-validate'];
-    if (validate === true || isRecord(validate)) {
+    const embedded = Array.isArray(document['x-ferrum-plugins'])
+      ? document['x-ferrum-plugins']
+      : [];
+    const embeddedValidator = embedded.find(
+      (plugin) => isRecord(plugin) && plugin.plugin_name === 'openapi_validator',
+    );
+    if ((validate === true || isRecord(validate)) && !embeddedValidator) {
       const config = {
         id: randomUUID(),
         plugin_name: 'openapi_validator',
@@ -2393,6 +2466,29 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       };
       pluginConfigs.set(key(namespace, config.id), config);
       generated.push(config.id);
+    }
+    for (const entry of embedded) {
+      if (!isRecord(entry)) continue;
+      const id = typeof entry.id === 'string' ? entry.id : randomUUID();
+      const settings =
+        entry === embeddedValidator && (validate === true || isRecord(validate))
+          ? {
+              ...generateValidatorConfig(document, isRecord(validate) ? validate : {}),
+              ...(isRecord(entry.config) ? entry.config : {}),
+              operations: generateValidatorConfig(document, isRecord(validate) ? validate : {})
+                .operations,
+            }
+          : entry.config;
+      const config = {
+        ...entry,
+        config: settings,
+        id,
+        namespace,
+        proxy_id: proxyId,
+        api_spec_id: specId,
+      };
+      pluginConfigs.set(key(namespace, id), config);
+      generated.push(id);
     }
     associateOnProxy(proxy, [...generated, ...survivors]);
   }

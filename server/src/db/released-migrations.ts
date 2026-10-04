@@ -151,4 +151,14 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
       mongodb: '69cb26f63681690067159841eaab59788cc075a07beb7bdda3634c22fbfa635c',
     },
   },
+  {
+    id: '010_api_agents',
+    release: null,
+    sha256: {
+      sqlite: '6c443c5d865775a981fe81c31ba8b5b014db89a9327e3bfcdf5ba54368a04cdb',
+      pg: '6c443c5d865775a981fe81c31ba8b5b014db89a9327e3bfcdf5ba54368a04cdb',
+      mysql: '596173cf1eeb814be551f563a6c449724146b7969e2c4cc2441d879048846da7',
+      mongodb: '88ac21c744286dcc8b737e6fa07440f44fa6afda872ac466154487a143cb94c2',
+    },
+  },
 ];

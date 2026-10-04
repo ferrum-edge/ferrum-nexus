@@ -374,6 +374,7 @@ function mapApi(row: Row): ApiRecord {
     timeouts: json<ApiTimeouts | null>(row.timeouts_json, null),
     circuit_breaker: bool(row.circuit_breaker),
     spec_enforcement: specEnforcement(row.spec_enforcement),
+    agents: json<ApiRecord['agents']>(row.agents_json, null),
     status: text(row.status) as ApiStatus,
     visibility: text(row.visibility) as ApiVisibility,
     gateway_state: text(row.gateway_state) as ApiGatewayState,
@@ -1494,8 +1495,8 @@ class SqliteStore implements NexusStore {
              (id, name, slug, description, owner_user_id, ferrum_proxy_id, upstream_url,
               namespace, version, spec_format, requestable, auth_plugin, rate_limit_json,
               cors_json, allowed_methods_json, timeouts_json, circuit_breaker,
-              spec_enforcement, status, visibility, gateway_state, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              spec_enforcement, agents_json, status, visibility, gateway_state, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.name,
@@ -1515,6 +1516,7 @@ class SqliteStore implements NexusStore {
             encodeJson(input.timeouts ?? null),
             encodeBool(input.circuit_breaker ?? false),
             input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT,
+            encodeJson(input.agents ?? null),
             input.status,
             input.visibility,
             input.gateway_state ?? 'deployed',
@@ -1577,6 +1579,7 @@ class SqliteStore implements NexusStore {
         circuit_breaker:
           patch.circuit_breaker === undefined ? undefined : encodeBool(patch.circuit_breaker),
         spec_enforcement: patch.spec_enforcement,
+        agents_json: patch.agents === undefined ? undefined : encodeJson(patch.agents),
         status: patch.status,
         visibility: patch.visibility,
         gateway_state: patch.gateway_state,

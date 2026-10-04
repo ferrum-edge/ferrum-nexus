@@ -13,6 +13,7 @@ import {
   parseAbsoluteHttpUrl,
   slugify,
   type ApiVisibility,
+  type ApiAgents,
   type AuthPluginType,
   type CorsConfig,
   type HttpMethod,
@@ -32,6 +33,7 @@ import {
   type TimeoutDraft,
 } from '../components/publishing/AdvancedProxySettings';
 import { SpecEditor, specProblem } from '../components/publishing/SpecEditor';
+import { AgentOperationPicker } from '../components/publishing/AgentOperationPicker';
 import { SpecEnforcementSelect } from '../components/publishing/SpecEnforcementSelect';
 import { Button } from '../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../components/ui/Card';
@@ -122,6 +124,7 @@ function PublishForm(): ReactElement {
   const [circuitBreaker, setCircuitBreaker] = useState(false);
   const [specEnforcement, setSpecEnforcement] = useState<SpecEnforcementLevel>('docs_only');
   const [spec, setSpec] = useState('');
+  const [agents, setAgents] = useState<ApiAgents | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const effectiveSlug = slugTouched ? slug : slugify(name);
@@ -220,6 +223,7 @@ function PublishForm(): ReactElement {
         timeouts: parsedTimeouts,
         circuit_breaker: circuitBreaker,
         spec_enforcement: specEnforcement,
+        ...(agents ? { agents } : {}),
       },
       {
         onSuccess: (response) => {
@@ -247,6 +251,15 @@ function PublishForm(): ReactElement {
             <SpecEditor value={spec} onChange={setSpec} />
             <div className="border-t border-border pt-5">
               <SpecEnforcementSelect value={specEnforcement} onValueChange={setSpecEnforcement} />
+            </div>
+            <div className="border-t border-border pt-5">
+              <AgentOperationPicker
+                spec={spec}
+                value={agents}
+                onChange={setAgents}
+                enforcement={specEnforcement}
+                requestable={requestable}
+              />
             </div>
           </CardBody>
         </Card>

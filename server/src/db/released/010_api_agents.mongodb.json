@@ -1,0 +1,6 @@
+{
+  "id": "010_api_agents",
+  "backend": "mongodb",
+  "description": "Default retained APIs to agents: null; explicit selections remain opt-in",
+  "indexes": []
+}

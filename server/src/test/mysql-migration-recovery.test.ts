@@ -127,6 +127,66 @@ async function restartAndVerify(pool: mysql.Pool, url: string, expected: string[
 }
 
 describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () => {
+  it('replays agent JSON column interruptions without clearing an explicit selection', async () => {
+    const migration = migrations.find((file) => file.id === '010_api_agents');
+    assert.ok(migration);
+    const expected = await fixture(async (pool) => {
+      await runMysqlMigrations(pool);
+      return schema(pool);
+    });
+    for (const boundary of ['ddl', 'before-ledger', 'after-ledger']) {
+      await fixture(async (pool, url) => {
+        await runMysqlMigrations(
+          pool,
+          migrations.filter((file) => file.id < migration.id),
+        );
+        await pool.query(`INSERT INTO organizations (id, name, created_at, updated_at)
+          VALUES ('preserved', 'Survives restart', '2026-01-01', '2026-01-01')`);
+        let fired = false;
+        const faulty = intercept(pool, (method, sql, params, after) => {
+          if (fired) return;
+          const ddl =
+            boundary === 'ddl' &&
+            method === 'query' &&
+            after &&
+            normalize(sql) === normalize(splitSqlStatements(migration.sql)[0]!);
+          const ledger =
+            method === 'execute' &&
+            sql.startsWith('INSERT INTO schema_migrations ') &&
+            Array.isArray(params) &&
+            params[0] === migration.id &&
+            ((boundary === 'before-ledger' && !after) || (boundary === 'after-ledger' && after));
+          if (ddl || ledger) {
+            fired = true;
+            throw new Error(interruption);
+          }
+        });
+        await assert.rejects(() => runMysqlMigrations(faulty), new RegExp(interruption));
+        assert.ok(fired, boundary);
+        await pool.query(`INSERT INTO users
+          (id, email, password_hash, display_name, role, created_at, updated_at)
+          VALUES ('agent-owner', 'agent@example.test', 'hash', 'Owner', 'provider',
+                  '2026-01-01', '2026-01-01')`);
+        const agents = JSON.stringify({
+          operations: [{ path: '/items', method: 'GET', name: 'items', description: 'List items' }],
+        });
+        await pool.execute(
+          `INSERT INTO apis
+            (id, name, slug, owner_user_id, namespace, version, auth_plugin, agents_json,
+             created_at, updated_at)
+            VALUES ('agent-api', 'Items', 'items', 'agent-owner', 'nexus', '1', 'key_auth', ?,
+                    '2026-01-01', '2026-01-01')`,
+          [agents],
+        );
+        await restartAndVerify(pool, url, expected);
+        const [rows] = await pool.query<mysql.RowDataPacket[]>(
+          "SELECT agents_json FROM apis WHERE id = 'agent-api'",
+        );
+        assert.equal(rows[0]?.agents_json, agents);
+      });
+    }
+  });
+
   it('resumes after every committed CREATE and before recording the baseline', async () => {
     const expected = await fixture(async (pool) => {
       await runMysqlMigrations(pool);

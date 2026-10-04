@@ -1893,6 +1893,42 @@ staging path, gets its auth, ACL, rate-limit and CORS plugins there, and moves
 to `listen_path` as the last gateway write. Until then `listen_path` answers
 `404`, never an unauthenticated `200`.
 
+### AI agent settings
+
+`agents` is `null` (the default), or an explicit object such as:
+
+```json
+{
+  "operations": [
+    {
+      "path": "/invoices",
+      "method": "GET",
+      "name": "list_invoices",
+      "description": "List invoices"
+    }
+  ]
+}
+```
+
+`POST /api/apis` and `PATCH /api/apis/:id` accept this field. Setting it to `null`
+disables MCP; omission preserves it on PATCH. It requires requestable `routes`
+enforcement, one to 256 distinct operation selections and unique names matching
+`[A-Za-z0-9_.-]{1,128}`. Descriptions must be nonempty plain text, at most 2,048
+characters. Only GET, POST, PUT, PATCH and DELETE are bridged. HEAD, OPTIONS and
+TRACE cannot be selected on the pinned release. Each operation must exist and be
+permitted by `allowed_methods`; an explicit allow-list must also permit POST for
+transport. Unknown nested settings, supplied grant groups or endpoint overrides
+are refused. Invalid document/selection combinations return `400 SPEC_INVALID`
+before writes. A revision deleting a selected operation must first change or
+disable the selection.
+
+Catalog `ApiSummary` includes the selection for tool metadata. MCP is served by
+Edge at `<invoke_url>/mcp` with tools named `<slug>.<name>`. A normal Nexus account
+or application credential goes in its existing auth header. The identity must
+hold this API's active grant for discovery and calls; every tool requires that
+same approval group. Revocation applies on the next gateway call. This phase has
+whole-API grants, not tool subsets. See [agent-marketplace.md](agent-marketplace.md).
+
 ### The `Api` object's gateway fields
 
 `listen_path` and `invoke_url` are **derived on every read** from the

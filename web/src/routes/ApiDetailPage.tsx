@@ -18,6 +18,7 @@ import {
   testConsumerUsername,
   type AccessRequest,
   type Api,
+  type ApiAgents,
   type ApiStatus,
   type ApiUsageBackendStatus,
   type ApiUsageResponse,
@@ -76,6 +77,7 @@ import { EmptyState } from '../components/ui/EmptyState';
 import { Icon, type IconName } from '../components/ui/Icon';
 import { Checkbox, LabeledInput, LabeledTextarea } from '../components/ui/Input';
 import { LabeledSelect } from '../components/ui/Select';
+import { AgentOperationPicker } from '../components/publishing/AgentOperationPicker';
 import { SpecEnforcementSelect } from '../components/publishing/SpecEnforcementSelect';
 import { LoadingPanel } from '../components/ui/Spinner';
 import { QueryErrorState } from '../components/ui/QueryErrorState';
@@ -255,6 +257,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   const [specEnforcement, setSpecEnforcement] = useState<SpecEnforcementLevel>(
     api.spec_enforcement,
   );
+  const [agents, setAgents] = useState<ApiAgents | null>(api.agents ?? null);
   const [confirmDisruption, setConfirmDisruption] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -341,6 +344,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
           // consequence, not a standing preference.
           ...(authSwapped && confirmDisruption ? { confirm_access_disruption: true } : {}),
           spec_enforcement: specEnforcement,
+          ...(JSON.stringify(agents) !== JSON.stringify(api.agents ?? null) ? { agents } : {}),
           ...(upstreamUrl.trim() ? { upstream_url: upstreamUrl.trim() } : {}),
         },
       },
@@ -499,6 +503,15 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                   onValueChange={setSpecEnforcement}
                   publishedLevel={api.spec_enforcement}
                 />
+                <div className="md:col-span-2">
+                  <AgentOperationPicker
+                    spec={specQuery.data?.raw_spec ?? ''}
+                    value={agents}
+                    onChange={setAgents}
+                    enforcement={specEnforcement}
+                    requestable={requestable}
+                  />
+                </div>
                 <LabeledTextarea
                   className="md:col-span-2"
                   label="CORS allowed origins"

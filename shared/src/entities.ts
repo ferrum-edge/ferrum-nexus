@@ -12,6 +12,7 @@
  */
 
 import type { Role } from './roles.js';
+import type { ApiAgents } from './agents.js';
 import type {
   AuthPluginType,
   EmailTemplateKey,
@@ -255,6 +256,8 @@ export interface Api {
    * *bodies* are never validated at either level.
    */
   spec_enforcement: SpecEnforcementLevel;
+  /** Explicit agent tools; null/absent keeps the MCP endpoint off. */
+  agents?: ApiAgents | null;
   status: ApiStatus;
   visibility: ApiVisibility;
   /**
@@ -359,6 +362,8 @@ export interface AccessRequest {
 
 /** Compact API reference embedded in requests, grants and threads. */
 export interface ApiSummary {
+  /** Tools covered by an active grant to this API. */
+  agents?: ApiAgents | null;
   id: Uuid;
   name: string;
   slug: string;

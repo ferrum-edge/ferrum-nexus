@@ -43,6 +43,7 @@ function CatalogCard({ api }: { api: CatalogApi }): ReactElement {
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge mono>v{api.version}</Badge>
           <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge>
+          {api.agents ? <Badge tone="accent">AI agents</Badge> : null}
           {api.status === 'retired' ? (
             <Badge>Retired</Badge>
           ) : api.requestable ? (

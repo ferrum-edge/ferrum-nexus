@@ -24,6 +24,7 @@ import {
   grantAccess,
   issueCredential,
   publishApi,
+  UPSTREAM_URL,
   type IssuedCredential,
   type PublishedApi,
 } from './fixtures.js';
@@ -237,6 +238,360 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
   });
 
   /* ── Revocation and rotation, at the gateway ──────────────────────────── */
+
+  /* ── Agent tools, through the same consumer authorization ────────────── */
+
+  interface ToolResult {
+    isError?: boolean;
+    structuredContent?: { method: string; path: string; body: string };
+    tools?: { name: string; description: string; annotations: { readOnlyHint: boolean } }[];
+  }
+
+  async function rpc(
+    api: PublishedApi,
+    headers: Record<string, string>,
+    method: string,
+    params: Record<string, unknown> = {},
+  ): Promise<Response> {
+    return callGateway(`${api.listen_path}/mcp`, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    });
+  }
+
+  async function result(response: Response): Promise<ToolResult> {
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    const body = JSON.parse(text) as { result?: ToolResult; error?: unknown };
+    assert.equal(body.error, undefined, text);
+    assert.ok(body.result, text);
+    return body.result;
+  }
+
+  const agentSelections = [
+    { path: '/invoices', method: 'GET', name: 'list_invoices', description: 'List invoices' },
+  ];
+
+  async function publishAgentApi(
+    slug: string,
+    authPlugin: string,
+    visibility = 'public',
+  ): Promise<PublishedApi> {
+    const response = await portal<{ api: PublishedApi }>('POST', '/api/apis', {
+      session: provider,
+      body: {
+        name: 'Agent acceptance',
+        slug,
+        auth_plugin: authPlugin,
+        visibility,
+        requestable: true,
+        spec_enforcement: 'routes',
+        agents: { operations: agentSelections },
+        spec: JSON.stringify({
+          openapi: '3.1.0',
+          info: { title: 'Agent acceptance', version: '1' },
+          servers: [{ url: UPSTREAM_URL }],
+          // Provider-supplied extensions cannot select tools or replace grants.
+          'x-ferrum-mcp': { endpoint: { path: '/escape' } },
+          'x-ferrum-plugins': [
+            { plugin_name: 'mcp_gateway', config: { policy: { default_action: 'allow' } } },
+          ],
+          paths: {
+            '/invoices': {
+              get: { responses: { '200': { description: 'OK' } } },
+              post: {
+                'x-ferrum-mcp': { expose: true },
+                requestBody: {
+                  required: true,
+                  content: {
+                    'application/json': {
+                      schema: {
+                        type: 'object',
+                        properties: { memo: { type: 'string' } },
+                        required: ['memo'],
+                      },
+                    },
+                  },
+                },
+                responses: { '200': { description: 'OK' } },
+              },
+            },
+            '/invoices/{id}': {
+              parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+              delete: {
+                'x-ferrum-mcp': true,
+                responses: { '200': { description: 'OK' } },
+              },
+            },
+          },
+        }),
+      },
+    });
+    return response.api;
+  }
+
+  for (const flavour of [
+    { plugin: 'key_auth', credential: 'keyauth', visibility: 'public', application: false },
+    { plugin: 'basic_auth', credential: 'basicauth', visibility: 'private', application: false },
+    { plugin: 'jwt_auth', credential: 'jwt', visibility: 'public', application: false },
+    { plugin: 'key_auth', credential: 'keyauth', visibility: 'public', application: true },
+  ] as const) {
+    it(`grants and revokes MCP with ${flavour.credential} ${flavour.application ? 'application' : 'account'} credentials`, async () => {
+      const client = await newClient();
+      const api = await publishAgentApi(
+        `e2e-agents-${flavour.credential}-${flavour.application ? 'app' : 'user'}-${RUN}`,
+        flavour.plugin,
+        flavour.visibility,
+      );
+      const application = flavour.application
+        ? await portal<{ application: { id: string } }>('POST', '/api/applications', {
+            session: client,
+            body: { name: 'Agent acceptance app' },
+          })
+        : null;
+      const applicationId = application?.application.id;
+      const credential = await issueCredential(client, flavour.credential, applicationId);
+      const headers = authHeadersFor(credential, flavour.credential);
+      await waitFor('the unapproved MCP endpoint to refuse access', async () => {
+        return (await rpc(api, headers, 'tools/list')).status === 403;
+      });
+      for (const method of ['initialize', 'tools/list', 'tools/call']) {
+        const refused = await rpc(api, headers, method, { name: `${api.slug}.list_invoices` });
+        assert.equal(refused.status, 403);
+        assert.equal(reachedUpstream(refused), false);
+        assert.equal((await refused.text()).includes('list_invoices'), false);
+      }
+      if (flavour.visibility === 'private') {
+        await portal('POST', `/api/apis/${api.id}/viewers`, {
+          session: provider,
+          body: { user_id: client.userId },
+        });
+      }
+      const { grantId } = await grantAccess(client, provider, api.id, applicationId);
+      let initialized: Response | undefined;
+      await waitFor('the approved MCP endpoint to initialize', async () => {
+        initialized = await rpc(api, headers, 'initialize', {
+          protocolVersion: '2025-03-26',
+          capabilities: {},
+          clientInfo: { name: 'nexus-acceptance', version: '1' },
+        });
+        return initialized.status === 200;
+      });
+      assert.ok(initialized);
+      await result(initialized);
+      const session = initialized.headers.get('mcp-session-id');
+      assert.ok(session, 'initialize must issue a downstream session');
+      const sessionHeaders = {
+        ...headers,
+        'mcp-session-id': session,
+        'mcp-protocol-version': '2025-03-26',
+      };
+      const listed = await result(await rpc(api, sessionHeaders, 'tools/list'));
+      assert.deepEqual(listed.tools?.map((tool) => tool.name), [`${api.slug}.list_invoices`]);
+      assert.equal(listed.tools?.[0]?.description, 'List invoices');
+      assert.equal(listed.tools?.[0]?.annotations.readOnlyHint, true);
+      const called = await result(
+        await rpc(api, sessionHeaders, 'tools/call', {
+          name: `${api.slug}.list_invoices`,
+          arguments: {},
+        }),
+      );
+      assert.equal(called.isError, false);
+      assert.equal(called.structuredContent?.method, 'GET');
+      assert.equal(called.structuredContent?.path, '/invoices');
+      if (applicationId) {
+        const accountCredential = await issueCredential(client, flavour.credential);
+        const unapprovedAccount = await rpc(
+          api,
+          authHeadersFor(accountCredential, flavour.credential),
+          'tools/list',
+        );
+        assert.equal(
+          unapprovedAccount.status,
+          403,
+          'application grants must not reach the account',
+        );
+      }
+
+      const denied = await rpc(api, sessionHeaders, 'tools/call', {
+        name: `${api.slug}.delete_invoice`,
+        arguments: { id: '123' },
+      });
+      assert.equal(denied.status, 403, await denied.text());
+      assert.equal(reachedUpstream(denied), false);
+      const rest = await callGateway(`${api.listen_path}/invoices`, { headers });
+      assert.equal(rest.status, 200);
+      assert.ok(reachedUpstream(rest), 'enabling MCP preserves the REST call path');
+      for (const path of ['/undeclared', '/mcp/child']) {
+        const refused = await callGateway(`${api.listen_path}${path}`, { headers });
+        assert.ok(refused.status >= 400);
+        assert.equal(reachedUpstream(refused), false);
+      }
+
+      // Retain both the credential and session: authorization must be checked
+      // anew on the next call, rather than relying on token/session retirement.
+      await portal('POST', `/api/grants/${grantId}/revoke`, {
+        session: provider,
+        body: {},
+        expect: 200,
+      });
+      for (const method of ['tools/list', 'tools/call']) {
+        const revoked = await rpc(api, sessionHeaders, method, {
+          name: `${api.slug}.list_invoices`,
+          arguments: {},
+        });
+        assert.equal(revoked.status, 403, await revoked.text());
+        assert.equal(reachedUpstream(revoked), false);
+      }
+    });
+  }
+
+  it('requires destructive opt-in and enforces argument shielding and per-consumer budgets', async () => {
+    const client = await newClient();
+    const api = await publishAgentApi(`e2e-agent-governance-${RUN}`, 'key_auth');
+    await grantAccess(client, provider, api.id);
+    const credential = await issueCredential(client, 'keyauth');
+    const headers = authHeadersFor(credential, 'keyauth');
+    const invalidPolicy = await portalRaw('PATCH', `/api/apis/${api.id}`, {
+      session: provider,
+      body: {
+        agents: { operations: agentSelections, allowed_groups: ['everyone'] },
+      },
+    });
+    assert.equal(invalidPolicy.status, 400);
+    for (const plugin of ['ai_tool_governor', 'ai_transcript_audit']) {
+      const editable = await portalRaw('PUT', `/api/apis/${api.id}/plugins/${plugin}`, {
+        session: provider,
+        body: { enabled: true, config: { default_action: 'allow', endpoint_url: UPSTREAM_URL } },
+      });
+      assert.equal(editable.status, plugin === 'ai_tool_governor' ? 400 : 404);
+    }
+    await portal('PATCH', `/api/apis/${api.id}`, {
+      session: provider,
+      body: {
+        agents: {
+          operations: [
+            ...agentSelections,
+            {
+              path: '/invoices',
+              method: 'POST',
+              name: 'create_invoice',
+              description: 'Create invoice',
+            },
+            {
+              path: '/invoices/{id}',
+              method: 'DELETE',
+              name: 'delete_invoice',
+              description: 'Delete invoice',
+            },
+          ],
+        },
+      },
+    });
+    let initialized: Response | undefined;
+    await waitFor('the updated agent policy to initialize', async () => {
+      initialized = await rpc(api, headers, 'initialize', {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: { name: 'nexus-governance', version: '1' },
+      });
+      return initialized.status === 200;
+    });
+    assert.ok(initialized);
+    const session = initialized.headers.get('mcp-session-id');
+    assert.ok(session);
+    const scoped = { ...headers, 'mcp-session-id': session };
+    const tools = await result(await rpc(api, scoped, 'tools/list'));
+    assert.deepEqual(
+      new Set(tools.tools?.map((tool) => tool.name)),
+      new Set([
+        `${api.slug}.list_invoices`,
+        `${api.slug}.create_invoice`,
+        `${api.slug}.delete_invoice`,
+      ]),
+    );
+    assert.equal(
+      tools.tools?.find((tool) => tool.name.endsWith('.delete_invoice'))?.annotations.readOnlyHint,
+      false,
+    );
+    const deleted = await result(
+      await rpc(api, scoped, 'tools/call', {
+        name: `${api.slug}.delete_invoice`,
+        arguments: { id: '123' },
+      }),
+    );
+    assert.equal(deleted.structuredContent?.method, 'DELETE');
+    assert.equal(deleted.structuredContent?.path, '/invoices/123');
+    const shielded = await rpc(api, scoped, 'tools/call', {
+      name: `${api.slug}.create_invoice`,
+      arguments: { body: { memo: 'SSN 123-45-6789' } },
+    });
+    assert.equal(shielded.status, 400, await shielded.text());
+    assert.equal(reachedUpstream(shielded), false);
+    const invalid = await rpc(api, scoped, 'tools/call', {
+      name: `${api.slug}.delete_invoice`,
+      arguments: { id: '../escape' },
+    });
+    const invalidBody = await invalid.text();
+    assert.ok(invalid.status >= 400 || invalidBody.includes('error'), invalidBody);
+    assert.equal(reachedUpstream(invalid), false);
+    const malformed = await callGateway(`${api.listen_path}/mcp`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: 'not-json',
+    });
+    assert.ok(malformed.status >= 400);
+    assert.equal(reachedUpstream(malformed), false);
+
+    // A fresh identity gives a fresh budget. Discovery never spends tool calls.
+    const budgetClient = await newClient();
+    await grantAccess(budgetClient, provider, api.id);
+    const budgetCredential = await issueCredential(budgetClient, 'keyauth');
+    const budgetHeaders = authHeadersFor(budgetCredential, 'keyauth');
+    const init = await rpc(api, budgetHeaders, 'initialize', {
+      protocolVersion: '2025-03-26',
+      capabilities: {},
+      clientInfo: { name: 'nexus-budget', version: '1' },
+    });
+    await result(init);
+    const budgetSession = init.headers.get('mcp-session-id');
+    assert.ok(budgetSession);
+    const budgetScoped = { ...budgetHeaders, 'mcp-session-id': budgetSession };
+    for (let count = 0; count < 61; count += 1) {
+      await result(await rpc(api, budgetScoped, 'tools/list'));
+    }
+    for (let count = 0; count < 60; count += 1) {
+      const called = await result(
+        await rpc(api, budgetScoped, 'tools/call', {
+          name: `${api.slug}.list_invoices`,
+          arguments: {},
+        }),
+      );
+      assert.equal(called.isError, false);
+    }
+    const limited = await rpc(api, budgetScoped, 'tools/call', {
+      name: `${api.slug}.list_invoices`,
+      arguments: {},
+    });
+    assert.equal(limited.status, 429, await limited.text());
+    assert.equal(reachedUpstream(limited), false);
+    const stillDiscoverable = await rpc(api, budgetScoped, 'tools/list');
+    assert.equal(stillDiscoverable.status, 200);
+    const rest = await callGateway(`${api.listen_path}/invoices`, { headers: budgetHeaders });
+    assert.equal(rest.status, 200, 'the MCP-only budget must not consume REST requests');
+    const audit = await portal<{ items: { action: string }[] }>(
+      'GET',
+      `/api/admin/audit-logs?target_id=${api.id}`,
+      { session: provider },
+    );
+    assert.ok(audit.items.some((row) => row.action === 'api.agents_update_start'));
+    assert.ok(audit.items.some((row) => row.action === 'api.update'));
+  });
 
   it('stops an approved client the moment access is revoked', async () => {
     const client = await newClient();

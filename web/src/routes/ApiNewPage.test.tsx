@@ -88,6 +88,24 @@ function submitForm(): void {
 }
 
 describe('API publishing', () => {
+  it('publishes only the operations explicitly selected for agents', async () => {
+    renderPage(<ApiNewPage />);
+    fillIdentity();
+    changeField('OpenAPI enforcement', 'routes');
+    fireEvent.click(screen.getByLabelText('Available to AI agents'));
+    expect(screen.getByLabelText('Expose GET /invoices')).toBeChecked();
+    expect(screen.getByLabelText('Expose POST /invoices')).not.toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Publish API' }));
+    await screen.findByText('API published');
+    expect(apisApi.publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agents: {
+          operations: [expect.objectContaining({ path: '/invoices', method: 'GET' })],
+        },
+      }),
+    );
+  });
+
   it('restricts publishing to providers', () => {
     session.allowed = false;
     renderPage(<ApiNewPage />);

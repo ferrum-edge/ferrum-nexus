@@ -43,6 +43,7 @@ export function presentApi(record: ApiRecord, gatewayPublicUrl: string | null): 
     ...record,
     listen_path: listenPath,
     invoke_url: invokeUrlFor(listenPath, gatewayPublicUrl),
+    agents: record.agents ?? null,
   };
 }
 
@@ -57,5 +58,6 @@ export function presentApiSummary(record: ApiRecord, gatewayPublicUrl: string | 
     owner_user_id: record.owner_user_id,
     listen_path: listenPath,
     invoke_url: invokeUrlFor(listenPath, gatewayPublicUrl),
+    agents: record.agents ?? null,
   };
 }

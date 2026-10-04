@@ -75,11 +75,19 @@ export async function grantAccess(
   client: Session,
   provider: Session,
   apiId: string,
+  applicationId?: string,
 ): Promise<{ requestId: string; grantId: string }> {
   const requested = await portal<{ access_request: { id: string } }>(
     'POST',
     '/api/access-requests',
-    { session: client, body: { api_id: apiId, justification: 'End-to-end acceptance run' } },
+    {
+      session: client,
+      body: {
+        api_id: apiId,
+        justification: 'End-to-end acceptance run',
+        ...(applicationId ? { application_id: applicationId } : {}),
+      },
+    },
   );
   const approved = await portal<{ grant: { id: string } }>(
     'POST',
@@ -100,12 +108,16 @@ export interface IssuedCredential {
 export async function issueCredential(
   client: Session,
   type: 'keyauth' | 'basicauth' | 'jwt',
+  applicationId?: string,
 ): Promise<IssuedCredential> {
   const body = await portal<{
     credential: { id: string };
     consumer_username: string;
     secret: Record<string, string>;
-  }>('POST', '/api/credentials', { session: client, body: { credential_type: type } });
+  }>('POST', '/api/credentials', {
+    session: client,
+    body: { credential_type: type, ...(applicationId ? { application_id: applicationId } : {}) },
+  });
   return {
     id: body.credential.id,
     consumerUsername: body.consumer_username,

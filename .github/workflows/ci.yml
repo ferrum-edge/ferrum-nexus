@@ -171,13 +171,14 @@ jobs:
           };
           for (const dialect of ['sqlite', 'pg', 'mysql']) {
             const files = loadMigrations(dialect);
-            assert.deepEqual(files.map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest', '004_api_spec_changes', '005_notification_preferences', '006_user_identities', '007_outbox_recipient', '008_email_lifecycle_fence', '009_outbox_priority']);
+            assert.deepEqual(files.map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest', '004_api_spec_changes', '005_notification_preferences', '006_user_identities', '007_outbox_recipient', '008_email_lifecycle_fence', '009_outbox_priority', '010_api_agents']);
             const priority = files.find((file) => file.id === '009_outbox_priority');
             assert.ok(priority);
             assert.equal(createHash('sha256').update(priority.sql).digest('hex'), priorityHashes[dialect]);
           }
           const db = new Database(':memory:');
           for (const file of loadMigrations('sqlite')) db.exec(file.sql);
+          assert.deepEqual(db.prepare('SELECT agents_json FROM apis').all(), []);
           assert.deepEqual(db.prepare('SELECT generation FROM email_outbox').all(), []);
           assert.deepEqual(db.prepare('SELECT recipient_user_id FROM email_outbox').all(), []);
           assert.deepEqual(db.prepare('SELECT priority FROM email_outbox').all(), []);

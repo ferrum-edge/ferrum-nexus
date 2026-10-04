@@ -13,6 +13,8 @@ import {
 const digest = (text: string): string => createHash('sha256').update(text).digest('hex');
 const ADD_COLUMN = /^ALTER TABLE ([a-z][a-z0-9_]*) ADD COLUMN ([a-z][a-z0-9_]*) (.+)$/i;
 const STRING_COLUMN = /^(VARCHAR\([1-9][0-9]*\)) (NULL|NOT NULL DEFAULT '')$/i;
+/** Nullable JSON text additions are replay-verified like existing string columns. */
+const NULLABLE_LONGTEXT_COLUMN = /^LONGTEXT DEFAULT NULL$/i;
 const INTEGER_COLUMN = /^INT NOT NULL DEFAULT ([0-9]+)$/i;
 const CREATE_INDEX = /^CREATE INDEX ([a-z][a-z0-9_]*) ON ([a-z][a-z0-9_]*) \((.+)\)$/i;
 // This assignment is idempotent, and changes no delivery state. Do not accept
@@ -65,19 +67,20 @@ function migrationSteps(migration: MigrationFile): (string | AddColumn | AddInde
     const match = ADD_COLUMN.exec(statement);
     const definition = match && STRING_COLUMN.exec(match[3]!);
     const integer = match && INTEGER_COLUMN.exec(match[3]!);
-    if (!match || (!definition && !integer)) {
+    const nullableText = match !== null && NULLABLE_LONGTEXT_COLUMN.test(match[3]!);
+    if (!match || (!definition && !integer && !nullableText)) {
       throw new Error(`MySQL migration ${migration.id} contains unsupported non-replayable DDL`);
     }
-    const nullable = definition?.[2]?.toUpperCase() === 'NULL';
+    const nullable = nullableText || definition?.[2]?.toUpperCase() === 'NULL';
     return {
       kind: 'column',
       statement,
       table: match[1]!,
       column: match[2]!,
-      type: definition ? definition[1]!.toLowerCase() : 'int',
+      type: nullableText ? 'longtext' : definition ? definition[1]!.toLowerCase() : 'int',
       nullable,
-      defaultValue: definition ? (nullable ? null : '') : integer![1]!,
-      stringColumn: definition !== null,
+      defaultValue: nullableText ? null : definition ? (nullable ? null : '') : integer![1]!,
+      stringColumn: nullableText || definition !== null,
     };
   });
 }

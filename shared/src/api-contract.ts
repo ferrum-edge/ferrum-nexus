@@ -8,6 +8,7 @@
  */
 
 import type { RegistrableRole, Role } from './roles.js';
+import type { ApiAgents } from './agents.js';
 import type { ErrorCode } from './error-codes.js';
 import type {
   AuthPluginType,
@@ -591,6 +592,8 @@ export interface PublishApiRequest {
    * not declare. Bodies are never validated.
    */
   spec_enforcement?: SpecEnforcementLevel;
+  /** Requires routes mode, access approval and explicit operation selections. */
+  agents?: ApiAgents | null;
 }
 
 /** `POST /api/apis` */
@@ -640,6 +643,8 @@ export interface UpdateApiRequest {
    * attaches or detaches the gateway's `openapi_validator` accordingly.
    */
   spec_enforcement?: SpecEnforcementLevel;
+  /** Requires routes mode, access approval and explicit operation selections. */
+  agents?: ApiAgents | null;
   status?: ApiStatus;
   /**
    * Acknowledge that changing `auth_plugin` cuts everyone holding a credential
