@@ -27,7 +27,7 @@ export function runSsoSettingsLockContract(
     const acquired: string[] = [];
     let pauseNextSave = false;
     let peerAcquireResolve: (() => void) | null = null;
-    let peerSave: ReturnType<TestApp['authed']> | null = null;
+    const peerSave: { current: ReturnType<TestApp['authed']> | null } = { current: null };
     const peerAcquiring = new Promise<void>((resolve) => {
       peerAcquireResolve = resolve;
     });
@@ -47,7 +47,7 @@ export function runSsoSettingsLockContract(
                 if (result) acquired.push(args[0]);
                 if (result && pauseNextSave && args[0] === SSO_SETTINGS_LOCK_KEY) {
                   pauseNextSave = false;
-                  peerSave = peerHarness.authed(founder, {
+                  peerSave.current = peerHarness.authed(founder, {
                     method: 'PUT',
                     url: '/api/admin/sso',
                     payload: { allowed_email_domains: ['second.example.test'] },
@@ -118,7 +118,7 @@ export function runSsoSettingsLockContract(
     });
 
     it('refuses one of two concurrent settings saves', async () => {
-      peerSave = null;
+      peerSave.current = null;
       pauseNextSave = true;
       const firstSave = harness.authed(founder, {
         method: 'PUT',
@@ -126,8 +126,12 @@ export function runSsoSettingsLockContract(
         payload: { allowed_email_domains: ['first.example.test'] },
       });
       const first = await firstSave;
-      assert.ok(peerSave, 'the second app started its save while the first held the settings key');
-      const second = await peerSave;
+      const startedPeerSave = peerSave.current;
+      assert.ok(
+        startedPeerSave,
+        'the second app started its save while the first held the settings key',
+      );
+      const second = await startedPeerSave;
       assert.deepEqual([first.statusCode, second.statusCode].sort(), [200, 409]);
     });
   });

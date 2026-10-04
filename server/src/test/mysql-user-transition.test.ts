@@ -52,7 +52,7 @@ describe('MySQL conditional user transitions', { skip: !adminUrl, timeout: 30_00
   for (const existingJob of [false, true]) {
     it(`god disable: snapshot predicate loss (existing job=${existingJob})`, async (t) => {
       await fixture(async (a, b) => {
-        let targetId: string | undefined;
+        let targetId: string;
         let reached!: () => void;
         let release!: () => void;
         const paused = new Promise<void>((resolve) => {
