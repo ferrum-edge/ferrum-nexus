@@ -1,5 +1,17 @@
 # Hosted lock provenance for issue #449
 
+## Historical first-stage artifact; higher-floor draft pending
+
+The records below describe the locks from PR #518. This draft still contains those bytes;
+they do **not** resolve its jsdom 30 / Undici 8 declarations or workspace engine changes.
+No candidate artifact has been applied or qualified. The updated producer must generate
+both locks from this candidate's exact immutable head on Node 22.22.2. Root must verify
+its run/source SHA, actual Node/npm versions and every input/output hash before applying
+the outputs and recording new provenance. See the
+[draft notes](dependency-majors-449-higher-floor-draft.md).
+
+## PR #518 provenance
+
 Both committed locks were copied byte-for-byte from the successful
 [producer run 37205184516, attempt 1](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37205184516).
 The producer checked out source commit `d3114c2a439cbd0e7581666efb1309de34975cb1`, used

@@ -938,8 +938,12 @@ docker run --rm -p 127.0.0.1:8787:8787 \
 the generated token from `docker logs` ([First run](#first-run-and-the-bootstrap-token)).
 
 The image ([`docker/Dockerfile`](../docker/Dockerfile)) is a two-stage build on
-a digest-pinned `node:22-bookworm-slim` (Node 22.14 or later is required). It
-sets:
+a digest-pinned `node:22-bookworm-slim`. The released profile requires Node
+22.14 or later. This unreleased draft proposes
+`^22.22.2 || ^24.15.0 || >=26.0.0`, pending owner approval and hosted
+qualification. The existing digest contains Node 22.23.3 on amd64 and arm64;
+the [candidate notes](dependency-majors-449-higher-floor-draft.md) record the
+published OCI evidence and rollback boundary. The image sets:
 
 - `NODE_ENV=production`, and runs as the unprivileged `node` user.
 - `NEXUS_HOST=0.0.0.0`, `NEXUS_PORT=8787`.

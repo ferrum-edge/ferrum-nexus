@@ -508,6 +508,62 @@ describe('discovery', () => {
     );
   });
 
+  it('authenticates a confidential code exchange over the default vetted transport', async () => {
+    const secret = 'test-client-secret +&';
+    const provider = createMockOidcProvider({ clientId: CLIENT_ID, clientSecret: secret });
+    await provider.start();
+    try {
+      const lookedUp: string[] = [];
+      const issuer = provider.issuer.replace('127.0.0.1', 'localhost');
+      provider.discoveryOverrides = {
+        issuer,
+        authorization_endpoint: `${issuer}/authorize`,
+        token_endpoint: `${issuer}/token`,
+        jwks_uri: `${issuer}/jwks`,
+      };
+      const client = createOidcClient({
+        allowHttpLoopback: true,
+        resolve: async () => assert.fail('loopback names must use the vetted loopback lookup'),
+        loopbackLookup: async (host) => {
+          lookedUp.push(host);
+          return [{ address: '127.0.0.1', family: 4 }];
+        },
+      });
+      const discovery = await client.discover(issuer);
+      const verifier = randomUrlToken();
+      const authorized = provider.authorize(
+        authorizationUrl({
+          discovery,
+          clientId: CLIENT_ID,
+          redirectUri: 'http://127.0.0.1/callback',
+          scopes: ['openid'],
+          state: 'confidential-state',
+          nonce: NONCE,
+          codeChallenge: pkceChallenge(verifier),
+        }),
+        { sub: 'subject-1' },
+      );
+      const tokens = await client.exchangeCode({
+        discovery,
+        clientId: CLIENT_ID,
+        clientSecret: secret,
+        code: authorized.code,
+        redirectUri: authorized.redirectUri,
+        codeVerifier: verifier,
+      });
+      assert.ok(tokens.idToken);
+      const sent = provider.tokenRequests.at(-1);
+      const credentials = [CLIENT_ID, secret].map(encodeURIComponent).join(':');
+      assert.equal(sent?.authorization, `Basic ${Buffer.from(credentials).toString('base64')}`);
+      assert.equal(sent?.form.get('code_verifier'), verifier);
+      assert.equal(sent?.form.has('client_secret'), false, 'the secret stays out of the form');
+      assert.ok(lookedUp.length > 0, 'the default transport actually dialled a vetted address');
+      assert.ok(lookedUp.every((host) => host === 'localhost'));
+    } finally {
+      await provider.stop();
+    }
+  });
+
   it('dials a loopback name only at loopback addresses, without the policy resolver', async () => {
     const issuer = idp.issuer.replace('127.0.0.1', 'localhost');
     idp.discoveryOverrides = { issuer };

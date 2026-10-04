@@ -26,7 +26,7 @@
  *   works, before the portal starts demanding a token on every sign-in.
  */
 
-import { request } from 'undici';
+import { Agent, request } from 'undici';
 
 import type {
   CaptchaEnforcement,
@@ -80,12 +80,16 @@ export type CaptchaTransport = (
   params: URLSearchParams,
 ) => Promise<CaptchaVerifyResult>;
 
-/** Default transport: form-encoded POST via undici with a 5 second budget. */
+// Own this pool instead of inheriting Undici 8's H2-enabled global dispatcher.
+const captchaDispatcher = new Agent({ allowH2: false });
+
+/** Default transport: form-encoded H1 POST via undici with a 5 second budget. */
 export const undiciCaptchaTransport: CaptchaTransport = async (url, params) => {
   const response = await request(url, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: params.toString(),
+    dispatcher: captchaDispatcher,
     signal: AbortSignal.timeout(5_000),
   });
   const raw = await response.body.text();

@@ -3,6 +3,9 @@
   "private": true,
   "type": "module",
   "description": "Acceptance suite: the packaged portal against a real Ferrum Edge release.",
+  "engines": {
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
+  },
   "scripts": {
     "test": "tsx --test src/dataplane.test.ts",
     "test:sso": "tsx --test src/sso.test.ts",

@@ -1,9 +1,13 @@
-# Node 22.14-compatible dependency majors
+# Dependency major migrations for issue #449
 
 This is partial progress on [issue #449](https://github.com/ferrum-edge/ferrum-nexus/issues/449).
-The issue remains open for jsdom 30 and Undici 8. No Node support profile change has been approved.
-The minimum remains Node 22.14, including `.nvmrc`, root `engines`, the required
-`checks (22.14.0)` job and the digest-pinned Docker runtime.
+PR #518 completed the Node 22.14-compatible first stage described below. The issue remains
+open for jsdom 30 and Undici 8. This branch prepares that second stage as a **draft**, with
+higher Node minima in its manifests and workflows. No released support-profile change has
+been approved. Main and the released profile retain Node 22.14; PR #520's stable
+`Supported Node minimum` gate qualifies the actual declared minimum through the matrix.
+See the [higher-floor candidate notes](dependency-majors-449-higher-floor-draft.md) for
+compatibility costs, published evidence, pending locks, qualification and rollback.
 
 ## Published versions and migration boundaries
 
@@ -42,14 +46,16 @@ intent/row-only exceptions, conditional actions and read-only filters. Existing 
 retained; new fixtures exercise the AST boundary and migrated predicates. It does not use a
 legacy compiler package, regex replacement for AST traversal, skipped scans or `ts-nocheck`.
 
-## Deferred work and issue discrepancy
+## Remaining candidate and issue discrepancy
 
 [jsdom 30.1.2](https://registry.npmjs.org/jsdom/30.1.2) requires
 `^22.22.2 || ^24.15.0 || >=26.0.0`, and depends on Undici 8.
 [Undici 8.11.2](https://registry.npmjs.org/undici/8.11.2) independently requires Node >=22.19.
-Both exceed the retained minimum. jsdom 26 and Undici 7 therefore remain. A future approved
-profile change must also investigate the jsdom accessible-name regressions and Undici's default
-HTTP/2 behavior while preserving the Admin client's no-write-replay, deadline and redirect rules.
+Both exceed the released minimum. This draft declares jsdom 30.1.2 and Undici 8.11.2,
+but the old locks still resolve jsdom 26 and Undici 7 until a real hosted artifact is applied.
+Owned transports disable H2 explicitly. Notifications now label buttons from their visible
+title and action and describe them from the visible body and time, retaining role/name and
+visibility assertions. The candidate still needs hosted evidence and fresh independent review.
 
 The issue body says Dependabot ignores these package majors. At the migration base `2ad4d53`,
 `.github/dependabot.yml` contains no package-specific ignores for them: its npm major ignores
@@ -61,20 +67,22 @@ and Ferrum Edge 0.9.10 compatibility pins are outside this migration and remain 
 
 ## Hosted locks and qualification
 
-The applied artifact's immutable source SHA, run identity, input/output hashes and resolution
-scope are recorded in [lock provenance](dependency-majors-449-lock-provenance.md).
+The first stage's applied artifact is recorded in
+[lock provenance](dependency-majors-449-lock-provenance.md). It does not qualify this draft.
 
 Both real npm lockfiles must come from GitHub-hosted npm, never a locally run installer or a
 handwritten dependency graph. `.github/workflows/dependency-locks.yml` is an optional artifact
 producer on manifest/workflow pull-request changes (or manual dispatch once available on the
 default branch). It checks out the exact PR head, uses full-SHA-pinned actions and `contents: read`,
-does not persist credentials or use caches/secrets/write permissions, and runs Node 22.14 with
+does not persist credentials or use caches/secrets/write permissions, and now runs Node 22.22.2 with
 strict engine checks and `npm install --package-lock-only --ignore-scripts`. npm 10 retains the
 old optional Vitest/coverage peer cycle during an in-place update, so the producer resolves a
 fresh root graph from the manifests and retains the input lock in the provenance artifact.
 Review any other resolved-version movement in its diff too. It generates both the root and
 separate `e2e` locks, checks the intended dependency families, and uploads both plus a diff,
-source SHA, tool versions, run identity, and SHA-256 input/output manifests.
+source SHA, tool versions, run identity, and SHA-256 input/output manifests. Its exact
+jsdom/Undici version, engine and integrity guards must pass as well as the retained first-stage
+dependency-family guards.
 
 To apply a producer artifact, download it with `gh run download` for the exact source head. Verify
 the successful producer run and its commit SHA, match `provenance/source-sha.txt` to the source
@@ -84,8 +92,11 @@ two generated lockfiles to their corresponding paths, inspect the complete diff,
 hooks disabled before pushing. Keep the provenance artifact/run URL available for review.
 
 A source-only head awaiting its lock artifact is not qualified. The optional producer does not
-replace any required check: all nine normal required checks must pass on the final artifact head,
-including the minimum/current Node checks, store contracts, Docker, acceptance and quickstart
-gates. Coverage remains its existing optional job. No local project tooling was run for this
-migration. Root must independently review the full change, especially the security-sensitive
-audit scanner and new test logic, before merging.
+replace any required check: all normal required checks must pass on the final artifact head,
+including `Supported Node minimum`, real Node 22/24 checks, store contracts, Docker, acceptance,
+quickstart configuration and action pins. The candidate's additional per-major minima, Node 26
+and verbatim quickstart jobs must pass too. Coverage remains its existing optional job.
+No local project tooling was run for this migration. Root and a fresh independent reviewer
+must review the full candidate and subsequent fix deltas. Only after that and complete hosted
+qualification may root ask the owner to approve the released-profile change. This draft is
+not merge authorization and does not close #449.

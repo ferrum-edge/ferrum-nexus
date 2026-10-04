@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/ferrum-edge/ferrum-nexus/actions/workflows/ci.yml"><img src="https://github.com/ferrum-edge/ferrum-nexus/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
   <a href="https://github.com/ferrum-edge/ferrum-nexus/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue" alt="License" /></a>
-  <img src="https://img.shields.io/badge/node-22.14%2B-brightgreen" alt="Node.js 22.14+" />
+  <img src="https://img.shields.io/badge/node-draft%2022.22.2%20%7C%2024.15%20%7C%2026-brightgreen" alt="Draft Node minima: 22.22.2, 24.15.0, 26.0.0" />
   <img src="https://img.shields.io/badge/TypeScript-strict-blue" alt="TypeScript" />
 </p>
 
@@ -30,6 +30,12 @@ row before calling Edge.
 `v0.3.0` is the current release, paired with Ferrum Edge `v0.9.9`; `v0.1.0` was
 the first supported release. The [release notes](docs/release-notes.md) list the
 supported pair, how to upgrade from `v0.2.0`, and the known limitations.
+
+This source branch is a **draft** jsdom 30 / Undici 8 migration. It proposes
+`^22.22.2 || ^24.15.0 || >=26.0.0`; owner approval to change the released Node
+support profile is still pending. The released profile remains Node 22.14+.
+The draft also awaits real hosted lock artifacts and full hosted qualification.
+See the [candidate and rollback notes](docs/dependency-majors-449-higher-floor-draft.md).
 
 - **Production upgrades.** Schema changes ship as forward migrations that
   upgrade a released database in place; upgrades never require a reset. See
@@ -126,7 +132,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the full design.
 ## Quickstart
 
 ```bash
-# Requires Node.js 22.14+ (see .nvmrc)
+# Draft source: Node ^22.22.2 || ^24.15.0 || >=26.0.0 (see .nvmrc)
 npm install
 
 cp .env.example .env

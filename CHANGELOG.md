@@ -20,6 +20,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- **Draft jsdom 30 / Undici 8 candidate** (Refs #449). Proposes Node
+  `^22.22.2 || ^24.15.0 || >=26.0.0`, with exact minima and current majors in
+  hosted CI and aligned workspace declarations. Owned Admin, OIDC and CAPTCHA
+  agents explicitly retain HTTP/1.1. New real-network regressions cover TLS
+  negotiation/reset recovery, no mutation replay, JWT/namespace delivery,
+  confidential OIDC exchange and CAPTCHA form/redirect behavior. Notification
+  controls name their visible title and action and describe their body/time,
+  retaining accessible-role assertions under jsdom 30. The existing Node image
+  digest already contains 22.23.3. This draft is **not approved or qualified**:
+  old locks await the hosted producer, fresh independent review and all hosted
+  gates precede the owner's released-profile decision. See the
+  [candidate and rollback notes](docs/dependency-majors-449-higher-floor-draft.md).
+
 - **Node 22.14-compatible dependency majors are migrated** (Refs #449).
   All four TypeScript manifests use 7.0.2; the transactional audit scan uses
   its native service and AST with the existing structural checks retained.
@@ -28,8 +41,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   entity row ids. Vitest and V8 coverage move together to 5.0.3, with typed
   jest-dom 7 matcher augmentation. An optional read-only hosted workflow
   produces both npm locks with immutable input/output provenance. This is
-  partial progress: jsdom 26 and Undici 7 remain, and Node 22.14 support and
-  runtime image pins are unchanged. See [migration notes](docs/dependency-majors-449.md).
+  partial progress: that first stage retained jsdom 26, Undici 7, Node 22.14
+  support and runtime image pins. See [migration notes](docs/dependency-majors-449.md).
 
 - **Returning SSO authorization and deployment boundaries are clarified** (#515).
   Returning callbacks keep their account-only lease and authorize at the

@@ -32,12 +32,18 @@ without the web UI. The matching UI steps are noted as you go.
 
 ## 1. Prerequisites
 
-- **Node.js 22.14+** (see [`.nvmrc`](../.nvmrc)). The SQLite driver needs
+- **Released support profile: Node.js 22.14+**. The SQLite driver needs
   Node-API 10, which older Node 22 releases lack.
 - **Docker**, for the Ferrum Edge gateway.
 - `curl` and `jq` for the examples.
 
 No database server is needed: Nexus defaults to SQLite.
+
+The Node prerequisite above describes the retained released support profile. This
+unreleased **draft source branch** proposes `^22.22.2 || ^24.15.0 || >=26.0.0`
+and pins [`.nvmrc`](../.nvmrc) to 22.22.2. Its jsdom 30 / Undici 8 migration is awaiting
+owner approval, hosted locks and qualification; see the
+[candidate notes](dependency-majors-449-higher-floor-draft.md).
 
 ---
 
