@@ -1860,8 +1860,12 @@ catalog mode and ownership. No credential-bearing resource body enters either
 audit. Corrected agent revisions commit an authorized comparison shape without
 changing the original replay resources. Initial conversion now refuses before
 teardown with `mutation_refused: true`; live spec replacement and failed restore
-cleanup also refuse before mutation. The journal and resources remain intact. The
-required successful rollback and vanished-catalog cleanup gates await the
+cleanup also refuse before mutation. Absent `routes` conversion recovery refuses
+corrected spec replacement and spec-owned cutover, retaining staging, the encrypted
+journal and operator edits with `withdrawn: false` and no completion audit. Ordinary
+publication and missing-deployment restore retain their released cutover. The
+journal and resources remain intact. The required successful rollback and
+vanished-catalog cleanup gates await the
 [released owner capability gap](edge-conversion-recovery-blocker.md).
 
 `api.gateway_repair_required` phases (`details.phase`):

@@ -2480,8 +2480,12 @@ Recovery retains the original id and refuses deletion of all live partial
 resources; the operator must reconcile those first. The released Edge namespace
 restore would rewrite unrelated fields, so Nexus cannot use it as a safe cascade
 fallback. See the [owner capability blocker](edge-conversion-recovery-blocker.md).
-An unchanged original or an absent identity can still be reconciled or rebuilt.
-In-place spec replacement and initial conversion teardown refuse before live
+An unchanged original can still be reconciled read-only, and an absent `docs_only`
+identity can be rebuilt. Absent `routes` conversion recovery retains its staging
+deployment and journal: both corrected spec replacement and spec-owned cutover
+refuse without overwriting concurrent Admin state or recording completion.
+Ordinary publication and missing-deployment restore keep their existing cutover.
+In-place spec replacement and initial conversion teardown also refuse before live
 mutation until [Edge #6010](https://github.com/ferrum-edge/ferrum-edge/issues/6010)
 is released and adopted.
 The encrypted journal and repair state commit before teardown and clear together

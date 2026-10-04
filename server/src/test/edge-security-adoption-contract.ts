@@ -827,7 +827,7 @@ export function runEdgeSecurityAdoptionContract(
     }
 
     for (const level of ['docs_only', 'routes'] as const) {
-      it(`${level}: preserves read-only reconciliation and absent-identity recovery`, async () => {
+      it(`${level}: preserves read-only reconciliation after conversion refusal`, async () => {
         const published = await publish(level);
         const apiId = published.api.id;
         const proxyId = published.api.ferrum_proxy_id!;
@@ -853,12 +853,177 @@ export function runEdgeSecurityAdoptionContract(
         await harness.edgeClient.proxies.delete(proxyId, actor.id, {
           cleanupOrphanedUpstream: false,
         });
+        if (level === 'routes') {
+          await assert.rejects(
+            harness.services.publishing.restoreGateway(actor, apiId),
+            /Atomic replacement of a conversion specification is unavailable/,
+          );
+          assert.equal((await harness.store.apis.findById(apiId))?.ferrum_proxy_id, proxyId);
+          assert.equal(
+            (await harness.store.apis.findById(apiId))?.gateway_state,
+            'repair_required',
+          );
+          assert.ok((await harness.store.settings.get(key))?.encrypted);
+          assert.ok(harness.edge.proxies.get(`nexus/${proxyId}`));
+          return;
+        }
         const rebuilt = await harness.services.publishing.restoreGateway(actor, apiId);
         assert.equal(rebuilt.api.gateway_state, 'deployed');
         assert.equal(rebuilt.api.ferrum_proxy_id, proxyId);
         assert.equal(rebuilt.api.spec_enforcement, level);
         assert.equal(await harness.store.settings.get(key), null);
         assert.ok(harness.edge.proxyServing(`/nexus/${published.api.slug}`));
+      });
+    }
+
+    for (const boundary of ['corrected-spec', 'cutover'] as const) {
+      it(`refuses absent-identity recovery at ${boundary} after an Admin hosts edit`, async () => {
+        const published = await publish('routes');
+        const apiId = published.api.id;
+        const proxyId = published.api.ferrum_proxy_id!;
+        const key = `gateway_recovery:nexus:${apiId}`;
+        await assert.rejects(
+          harness.services.publishing.update(actor, apiId, { spec_enforcement: 'docs_only' }),
+          /Atomic conversion teardown is unavailable/,
+        );
+        if (boundary === 'corrected-spec') {
+          await harness.services.publishing.updateSpec(
+            actor,
+            apiId,
+            SAMPLE_SPEC_YAML.replace('2.4.0', '2.5.0'),
+          );
+        }
+        const originalSealed = await harness.store.settings.get(key);
+        assert.ok(originalSealed?.encrypted && typeof originalSealed.value === 'string');
+        const original = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
+          originalSealed.value,
+        );
+        // Only an explicit operator removal supplies absence. Recovery must not
+        // delete a live deployment or refresh evidence to obtain replay authority.
+        await harness.edgeClient.proxies.delete(proxyId, actor.id, {
+          cleanupOrphanedUpstream: false,
+        });
+        const catalog = await harness.store.apis.findById(apiId);
+        assert.ok(catalog);
+        const revision = await harness.store.apiSpecs.findCurrentByApi(apiId);
+        const ownership = await harness.store.apiGatewayPlugins.listByApi(apiId);
+        const successes = await harness.auditRows('api.gateway_restore');
+        const rollbacks = await harness.auditRows('api.gateway_conversion_rollback');
+        const state = (): unknown =>
+          structuredClone({
+            proxies: [...harness.edge.proxies],
+            plugins: [...harness.edge.pluginConfigs],
+            specs: [...harness.edge.apiSpecs],
+            upstreams: [...harness.edge.upstreams],
+          });
+        const originalPlugins = original.plugins as { id: string; api_spec_id?: string | null }[];
+        const handOwnedIds = originalPlugins
+          .filter((plugin) => !plugin.api_spec_id)
+          .map((plugin) => plugin.id);
+        assert.ok(handOwnedIds.length > 0);
+        const getProxy = harness.edgeClient.proxies.get;
+        const replaceProxy = harness.edgeClient.proxies.replace;
+        let completedReads = 0;
+        let edited = false;
+        let operatorState: unknown;
+        let operatorOffset = 0;
+        let stagedSealed: Awaited<ReturnType<NexusStore['settings']['get']>> = null;
+        harness.edgeClient.proxies.get = async (...args) => {
+          const proxy = await getProxy(...args);
+          if (
+            args[0] !== proxyId ||
+            !proxy ||
+            edited ||
+            !proxy.listen_path.includes('/.staging/') ||
+            !handOwnedIds.every((id) =>
+              proxy.plugins?.some((entry) => entry.plugin_config_id === id),
+            )
+          ) {
+            return proxy;
+          }
+          // The first complete read precedes corrected replacement, or unchanged
+          // staging validation. The second precedes routes cutover. Return the
+          // captured proxy after a real admitted Admin write to expose that race.
+          if (++completedReads < (boundary === 'cutover' ? 2 : 1)) return proxy;
+          edited = true;
+          stagedSealed = await harness.store.settings.get(key);
+          await replaceProxy(proxyId, { ...proxy, hosts: ['recovery.operator.example.test'] });
+          operatorState = state();
+          operatorOffset = harness.edge.requests.length;
+          return proxy;
+        };
+        restoreMethods.push(() => {
+          harness.edgeClient.proxies.get = getProxy;
+        });
+        const offset = harness.edge.requests.length;
+        await assert.rejects(
+          harness.services.publishing.restoreGateway(actor, apiId),
+          /Atomic replacement of a conversion specification is unavailable/,
+        );
+        assert.ok(edited, 'the operator edit interleaves at the intended replacement boundary');
+        assert.deepEqual(
+          state(),
+          operatorState,
+          'every staged resource and operator field survives',
+        );
+        assert.ok(
+          harness.edge.requests.slice(operatorOffset).every((call) => call.method === 'GET'),
+        );
+        assert.ok(
+          !harness.edge.requests
+            .slice(offset)
+            .some(
+              (call) =>
+                call.method === 'DELETE' ||
+                (call.method === 'PUT' && call.path.startsWith('/api-specs/')),
+            ),
+        );
+        const sealed = await harness.store.settings.get(key);
+        assert.ok(sealed?.encrypted && typeof sealed.value === 'string');
+        assert.deepEqual(sealed, stagedSealed, 'refusal retains the acknowledged staging journal');
+        const recovery = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
+          sealed.value,
+        );
+        for (const field of [
+          'shape',
+          'catalogShape',
+          'proxy',
+          'plugins',
+          'document',
+          'originalSpecDocument',
+        ]) {
+          assert.deepEqual(
+            recovery[field],
+            original[field],
+            `${field} retains original replay data`,
+          );
+        }
+        const repaired = await harness.store.apis.findById(apiId);
+        assert.ok(repaired);
+        assert.deepEqual(repaired, { ...catalog, updated_at: repaired.updated_at });
+        assert.equal(repaired.ferrum_proxy_id, proxyId);
+        assert.equal(repaired.gateway_state, 'repair_required');
+        assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(apiId), revision);
+        assert.deepEqual(await harness.store.apiGatewayPlugins.listByApi(apiId), ownership);
+        assert.deepEqual(await harness.auditRows('api.gateway_restore'), successes);
+        assert.deepEqual(await harness.auditRows('api.gateway_conversion_rollback'), rollbacks);
+        const failure = (await harness.auditRows('api.gateway_restore_failed')).find(
+          (row) => row.target_id === apiId,
+        );
+        assert.ok(failure);
+        assert.equal(failure.details.withdrawn, false);
+        assert.equal(failure.details.proxy_id, proxyId);
+        assert.ok(!harness.edge.proxyServing(`/nexus/${published.api.slug}`));
+        const retryOffset = harness.edge.requests.length;
+        await assert.rejects(
+          harness.services.publishing.restoreGateway(actor, apiId),
+          /partial conversion proxy configuration changed/,
+        );
+        assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
+        assert.deepEqual(state(), operatorState);
+        assert.deepEqual(await harness.store.settings.get(key), sealed);
+        assert.deepEqual(await harness.auditRows('api.gateway_restore'), successes);
+        assert.deepEqual(await harness.auditRows('api.gateway_conversion_rollback'), rollbacks);
       });
     }
 
@@ -948,13 +1113,15 @@ export function runEdgeSecurityAdoptionContract(
           !harness.edge.requests.slice(recoveryOffset).some((call) => call.method === 'DELETE'),
         );
         assert.deepEqual(await harness.store.settings.get(key), sealed);
-        assert.deepEqual(await harness.store.apis.findById(apiId), catalog);
+        const repaired = await harness.store.apis.findById(apiId);
+        assert.ok(repaired);
+        assert.deepEqual(repaired, { ...catalog, updated_at: repaired.updated_at });
         assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(apiId), revision);
         assert.deepEqual(await harness.auditRows('api.gateway_restore'), successes);
         assert.deepEqual(await harness.auditRows('api.gateway_conversion_rollback'), rollbacks);
         assert.ok(
           (await harness.auditRows('api.gateway_restore_failed')).some(
-            (row) => row.subject_id === apiId,
+            (row) => row.target_id === apiId,
           ),
         );
       });
@@ -1010,12 +1177,15 @@ export function runEdgeSecurityAdoptionContract(
       assert.equal(row.gateway_state, 'repair_required');
       assert.equal(row.ferrum_proxy_id, strandedId, 'retain the uncertain deployment identity');
       assert.ok(
-        !(await harness.auditRows('api.gateway_restore')).some((entry) => entry.subject_id === apiId),
+        !(await harness.auditRows('api.gateway_restore')).some(
+          (entry) => entry.target_id === apiId,
+        ),
       );
       const failure = (await harness.auditRows('api.gateway_restore_failed')).find(
-        (entry) => entry.subject_id === apiId,
+        (entry) => entry.target_id === apiId,
       );
-      assert.equal((failure?.details as { withdrawn: boolean }).withdrawn, false);
+      assert.ok(failure);
+      assert.equal(failure.details.withdrawn, false);
     });
 
     it('refuses agent ACL enrollment before changing an active grant or consumer', async () => {

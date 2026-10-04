@@ -38,7 +38,15 @@ its existing field ownership. Corrected agent uploads authorize only the new
 catalog comparison shape; the original replay resources remain immutable.
 
 Recovery can reconcile an unchanged deployment read-only or rebuild an absent
-identity. It refuses in-place API-spec replacement even after a matching baseline
+`docs_only` identity. An absent `routes` identity can be replayed onto staging,
+but recovery refuses both a corrected API-spec replacement and the spec-owned
+listen-path cutover. The acknowledged staging resources and encrypted attempt
+remain intact, and failure records `withdrawn: false` without completion or journal
+deletion. A concurrent Admin hosts edit after either fresh proxy read survives.
+Ordinary publication and missing-deployment restore keep their released cutover;
+the refusal is scoped to conversion recovery.
+
+Recovery also refuses in-place API-spec replacement after a matching baseline
 read: the importer does not compare an original namespace token inside its write.
 Initial conversion refuses before proxy deletion, preserving the original identity
 and all proxy/spec/plugin fields, upstreams and encrypted replay resources. The
@@ -59,7 +67,9 @@ remove the remaining partial proxy graph with the released contract. The existin
 its fault injection still targets catalog completion, after the new repair-state
 write. That expectation is an unresolved owner capability gate, not a passing
 qualification claim. Existing rollback tests that require removing a live partial
-have the same blocker.
+have the same blocker. Staging-policy/interruption, post-deletion compensation and
+corrected agent replay/completion expectations also remain owner-API-dependent
+gates. They are not weakened or skipped to qualify this refusal repair.
 
 ## Required upstream API and ordering
 

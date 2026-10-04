@@ -256,12 +256,17 @@ fence their cascade without changing unrelated namespace fields. Unknown or
 changed resources also require operator reconciliation. See the
 [required owner API and release ordering](edge-conversion-recovery-blocker.md).
 Initial conversion and failed missing-deployment cleanup refuse before destructive
-delete. Live in-place spec recovery also refuses before PUT. The original identity,
-all unrelated fields and upstreams survive. Failed restore records its attempted
+delete. Live in-place spec recovery also refuses before PUT. Absent `routes`
+conversion recovery refuses corrected spec replacement and spec-owned cutover,
+retaining its acknowledged staging resources and encrypted journal. Concurrent
+Admin hosts edits survive refusal; no completion audit or journal deletion occurs.
+Ordinary publication and missing-deployment restore retain their existing cutover.
+The original identity, all unrelated fields and upstreams survive. Failed restore records its attempted
 identity and `withdrawn: false`; no replacement fallback is available in v0.9.11.
 Corrected agent uploads retain the immutable replay baseline and commit their
 authorized catalog shape alongside the revision. Recovery replays the original
-agent shape and applies the corrected document on staging before cutover.
+agent shape; applying a corrected routes document or cutting it over now awaits
+the released dependency fence. Absent `docs_only` recovery remains supported.
 Only a deployment matching the catalog clears the condition; recovery checks it
 on staging before cutover, then again before the fenced completion transaction.
 Reconciliation takes the same proxy lease and retains conversion-owned references

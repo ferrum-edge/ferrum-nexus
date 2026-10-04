@@ -1718,18 +1718,19 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       handOwnedPlugins(recovery.plugins),
       subject,
     );
-    if (corrected && level === 'routes' && specId) {
+    // An unchanged original needs only staging validation and cutover. A corrected
+    // catalog would require another importer replacement before either can complete.
+    const correctionRequired =
+      corrected &&
+      (!isDeepStrictEqual(corrected.document, recovery.document) ||
+        !isDeepStrictEqual(deploymentShape(corrected.api), recovery.shape));
+    if (correctionRequired && level === 'routes' && specId) {
       const live = await edge.proxies.get(recovery.proxy.id);
       if (!live) throw notFound('Proxy', recovery.proxy.id);
-      const submitted = await buildSpecDocument(
-        corrected.document,
-        submittableProxyBody(live),
-        corrected.api,
-      );
-      recovery.attempt!.agents = corrected.api.agents ?? null;
-      recovery.attempt!.documentDigests.push(documentFingerprint(submitted));
-      await saveConversionRecovery(corrected.api, recovery);
-      await edge.apiSpecs.replace(specId, submitted, subject);
+      // Even a newly rebuilt identity can acquire operator state after this read.
+      // Retain the acknowledged staging attempt; an unfenced corrected PUT cannot
+      // authorize catalog completion or replace the immutable replay resources.
+      refuseConversionSpecReplacement(live.id);
     }
     const completedApi = corrected?.api ?? api;
     const completedSpec = corrected?.spec ?? verifyAgainst;
@@ -1750,9 +1751,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       specId,
       subject,
       corrected?.api ?? { ...api, agents },
-      async (document) => {
-        recovery.attempt!.documentDigests.push(documentFingerprint(document));
-        await saveConversionRecovery(api, recovery);
+      {
+        conversionRecovery: true,
+        beforeWrite: async (document) => {
+          recovery.attempt!.documentDigests.push(documentFingerprint(document));
+          await saveConversionRecovery(api, recovery);
+        },
       },
     );
   }
@@ -3960,14 +3964,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   // Separate baseline/proxy reads cannot fence the importer. Edge #6010
                   // must release namespace-conditional spec replacement before adoption.
                   // Refuse before PUT; the catch retains the immutable encrypted journal.
-                  throw conflict(
-                    'Atomic replacement of a conversion specification is unavailable; gateway operator reconciliation is required',
-                    { proxy_id: snapshot.proxy.id, capability: 'conditional_api_spec_replace' },
-                  );
+                  refuseConversionSpecReplacement(snapshot.proxy.id);
                 } else {
                   await removeConversionPartialLocked(snapshot);
-                  // Replay the immutable original shape first. Corrected agent ids
-                  // and the current document are applied on staging, before cutover.
+                  // Replay the immutable original shape first. Corrected routes
+                  // replacement and routes cutover require the released owner fence.
                   await rebuildConversionLocked(
                     baseline,
                     snapshot,
@@ -5122,7 +5123,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     specId: string | null,
     subject: string,
     api?: Pick<ApiRecord, 'id' | 'slug' | 'agents'>,
-    beforeWrite?: (document: Record<string, unknown>) => Promise<void>,
+    options?: {
+      conversionRecovery?: boolean;
+      beforeWrite?: (document: Record<string, unknown>) => Promise<void>;
+    },
   ): Promise<void> {
     if (level !== 'routes') {
       await binder.mutateProxyLocked(
@@ -5134,19 +5138,30 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     }
     const id = specId ?? (await specIdForProxy(proxyId));
     // The caller holds the canonical proxy lease across this fresh read and
-    // whole-resource re-insert, including when this is part of a conversion.
+    // whole-resource re-insert. That lease cannot fence external Admin writers.
     // A fresh read for the same reason `mutateProxy` takes one: the replace is
     // whole-resource, so anything the body omits — an operator's `hosts`, the
     // timeouts and method list written at create — reverts to its default.
     const proxy = await edge.proxies.get(proxyId);
     if (!proxy) throw notFound('Proxy', proxyId);
+    // Conversion recovery must retain its original identity and journal until
+    // Edge #6010 releases a dependency fence for this replacement. Ordinary
+    // publication and missing-deployment restore retain their released cutover.
+    if (options?.conversionRecovery) refuseConversionSpecReplacement(proxyId);
     const submitted = await buildSpecDocument(
       document,
       { ...submittableProxyBody(proxy), listen_path: listenPath },
       api,
     );
-    await beforeWrite?.(submitted);
+    await options?.beforeWrite?.(submitted);
     await edge.apiSpecs.replace(id, submitted, subject);
+  }
+
+  function refuseConversionSpecReplacement(proxyId: string): never {
+    throw conflict(
+      'Atomic replacement of a conversion specification is unavailable; gateway operator reconciliation is required',
+      { proxy_id: proxyId, capability: 'conditional_api_spec_replace' },
+    );
   }
 
   /**
@@ -5167,7 +5182,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * Seal the immutable conversion baseline and refuse before destructive teardown.
    * Edge v0.9.11 has no dependency fence for the spec/plugin cascade. The
    * original identity, repair state and intent audit commit before refusal;
-   * restoreGateway can reconcile it read-only or rebuild an absent identity.
+   * restoreGateway can reconcile it read-only or rebuild an absent docs_only identity.
+   * Routes recovery retains staging until dependency-fenced replacement is released.
    * Keep the undo-shaped boundary for future Edge #6010 adoption. No forward
    * mutation or automatic rollback is authorized by separate baseline reads.
    * The caller holds the canonical proxy lease through catalog persistence.
