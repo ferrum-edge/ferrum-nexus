@@ -547,8 +547,9 @@ class YamlFlow:
     """Read whole flow collections, including continuations, without evaluation.
 
     Quoted strings use YAML 1.2.2 sections 5.7/7.3, not JSON escapes.
-    Flow collections follow section 7.4. Maps retain all
-    entries so duplicate keys cannot hide an earlier unpinned declaration.
+    Flow collections follow section 7.4, including compact sequence pairs.
+    Maps retain all entries so duplicate keys cannot hide an earlier
+    unpinned declaration.
     """
 
     escapes = {
@@ -639,7 +640,30 @@ class YamlFlow:
             raise YamlError(self.line, 'unsupported YAML mapping key')
         return key
 
-    def node(self, depth=0):
+    def sequence_entry(self, depth):
+        # YAML 7.4.2 permits a single mapping pair without braces inside a
+        # flow sequence. Recognize only a real value indicator: colons in
+        # plain image tags, URLs and port mappings remain scalar content.
+        self.skip()
+        start, line = self.pos, self.line
+        key = self.node(depth, implicit_key=True)
+        self.skip()
+        if self.pos == len(self.source) or self.source[self.pos] != ':':
+            return key
+        if '\n' in self.source[start:self.pos] or self.pos - start > 1024:
+            raise YamlError(line, 'unsupported YAML compact mapping key')
+        self.take()
+        self.skip()
+        value = (
+            YamlNode('scalar', '', self.line)
+            if self.pos < len(self.source) and self.source[self.pos] in ',]'
+            else self.node(depth + 1)
+        )
+        if key.kind != 'scalar':
+            return YamlNode('unsupported', 'complex YAML compact mapping key', line)
+        return YamlNode('mapping', [(key.value, value)], line)
+
+    def node(self, depth=0, implicit_key=False):
         if depth > 64:
             raise YamlError(self.line, 'YAML nesting exceeds scanner limit')
         self.skip()
@@ -664,7 +688,7 @@ class YamlFlow:
                     )
                     entries.append((key, value))
                 else:
-                    entries.append(self.node(depth + 1))
+                    entries.append(self.sequence_entry(depth + 1))
                 self.skip()
                 if self.pos < len(self.source) and self.source[self.pos] == ',':
                     self.take()
@@ -694,6 +718,12 @@ class YamlFlow:
         while self.pos < len(self.source) and self.source[self.pos] not in ',{}[]':
             char = self.source[self.pos]
             if char == '#' and (self.pos == start or self.source[self.pos - 1].isspace()):
+                break
+            if implicit_key and char == ':' and (
+                self.pos + 1 == len(self.source)
+                or self.source[self.pos + 1].isspace()
+                or self.source[self.pos + 1] in ',{}[]'
+            ):
                 break
             self.take()
         value = yaml_fold(self.source[start:self.pos].strip())
@@ -873,7 +903,7 @@ def yaml_context(parent, key, workflow):
     if parent in {'service', 'container'}:
         return 'image' if key == 'image' else None
     if parent == 'step':
-        return key if key in {'run', 'uses'} else None
+        return {'run': 'run', 'uses': 'uses', 'parallel': 'parallel'}.get(key)
     return None
 
 
@@ -882,6 +912,12 @@ def visit_yaml(path, node, context, workflow):
         return
     if node.kind == 'unsupported':
         report(path, node.line, 'unsupported operational YAML value')
+        return
+    if context in {'steps', 'parallel'} and node.kind != 'sequence':
+        report(path, node.line, f'expected YAML sequence for {context}')
+        return
+    if context == 'step' and node.kind != 'mapping':
+        report(path, node.line, 'expected YAML mapping for step')
         return
     if node.kind == 'mapping':
         if context in {'image', 'run', 'uses'}:
@@ -893,7 +929,7 @@ def visit_yaml(path, node, context, workflow):
             else:
                 visit_yaml(path, child, yaml_context(context, key, workflow), workflow)
     elif node.kind == 'sequence':
-        child_context = 'step' if workflow and context in {'root', 'steps'} else None
+        child_context = 'step' if workflow and context in {'root', 'steps', 'parallel'} else None
         if child_context is None:
             report(path, node.line, f'unsupported operational YAML sequence for {context}')
         else:
@@ -906,7 +942,7 @@ def visit_yaml(path, node, context, workflow):
         check_image(path, node.line, node.value.strip(), local)
     elif context == 'uses' and node.value.startswith('docker://'):
         check_image(path, node.line, node.value[len('docker://'):])
-    elif context not in {'root', 'step', 'uses'} and node.value:
+    elif context not in {'root', 'uses'} and node.value:
         report(path, node.line, f'expected YAML collection for {context}')
 
 

@@ -421,6 +421,128 @@ services: {{app: {{"image": {PIN}, command: "docker pull alpine:3"}}}}
 x-note: {{run: docker pull alpine:3}}
 '''})
 
+    def test_workflow_compact_flow_pairs_retain_step_context(self):
+        prefix = 'name: pins\non: push\njobs:\n  check:\n    runs-on: ubuntu-latest\n'
+        cases = [
+            '    steps: [run: docker pull alpine:3]\n',
+            '    steps: [uses: docker://alpine:3]\n',
+            '    steps: ["run":"docker pull alpine:3"]\n',
+            "    steps: ['uses':docker://alpine:3]\n",
+            '    steps: [run : "docker pull alpine:3",]\n',
+            r'    steps: ["\x72un": "docker pull alpine:3"]' + '\n',
+            r'    steps: ["\u0075ses": docker://alpine:3]' + '\n',
+            '    steps: [\n      run: docker pull\n        alpine:3,\n    ]\n',
+            '    steps: [\n      "uses":\n        docker://alpine:3\n    ]\n',
+            f'    steps: [{{run: docker pull {PIN}}}, uses: docker://alpine:3]\n',
+            f'    steps: [run: docker pull {PIN}, {{uses: docker://alpine:3}}]\n',
+        ]
+        for steps in cases:
+            source = prefix + steps
+            with self.subTest(source=source):
+                self.assert_scan(
+                    {'.github/workflows/test.yml': source},
+                    ['unpinned image reference: alpine:3'],
+                )
+                self.assert_scan({'.github/workflows/test.yml': source.replace('alpine:3', PIN)})
+        self.assert_scan({'deploy/compose.yml': f'''
+services:
+  app:
+    image: {PIN}
+    ports: [8080:80, "9090:90"]
+    environment: [NOTE=docker://alpine:3]
+'''})
+
+    def test_workflow_parallel_groups_visit_every_child(self):
+        prefix = 'name: pins\non: push\njobs:\n  check:\n    runs-on: ubuntu-latest\n'
+        cases = [
+            '    steps:\n      - parallel:\n          - run: docker pull alpine:3\n',
+            '    steps:\n      - parallel:\n          - uses: docker://alpine:3\n',
+            '    steps:\n      - id: pull\n        background: true\n'
+            '        run: docker pull alpine:3\n      - wait: pull\n',
+            '    steps:\n      - parallel:\n          - name: nested\n'
+            '            parallel:\n              - background: true\n'
+            '                run: |\n                  docker pull alpine:3\n',
+            '    steps:\n      - parallel:\n          - parallel:\n'
+            '              - uses: docker://alpine:3\n',
+            '    steps: [{parallel: [{run: docker pull alpine:3}]}]\n',
+            '    steps: [parallel: [run: docker pull alpine:3]]\n',
+            '    steps: [parallel: [parallel: [uses: docker://alpine:3]]]\n',
+            r'    steps: [{"\u0070arallel": ["uses":docker://alpine:3]}]' + '\n',
+            '    steps: [\n      parallel: [\n        {background: true,\n'
+            '         run: docker pull alpine:3},\n      ],\n    ]\n',
+            f'    steps:\n      - parallel:\n          - run: docker pull {PIN}\n'
+            '          - run: docker pull alpine:3\n',
+            f'    steps: [parallel: [run: docker pull {PIN}], uses: docker://alpine:3]\n',
+        ]
+        for steps in cases:
+            source = prefix + steps
+            with self.subTest(source=source):
+                self.assert_scan(
+                    {'.github/workflows/test.yml': source},
+                    ['unpinned image reference: alpine:3'],
+                )
+                self.assert_scan({'.github/workflows/test.yml': source.replace('alpine:3', PIN)})
+
+    def test_parallel_step_metadata_and_quoted_command_prose_are_inert(self):
+        source = '''
+name: pins
+on: push
+env:
+  run: docker pull alpine:3
+  parallel: '[run: docker pull alpine:3]'
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env: {run: 'docker pull alpine:3', parallel: '[uses: docker://alpine:3]'}
+    steps:
+      - parallel:
+          - name: '[parallel: [run: docker pull alpine:3]]'
+            env: {run: 'docker pull alpine:3', parallel: '[run: docker pull alpine:3]'}
+            run: docker pull TARGET
+          - parallel: [run: "echo 'docker pull alpine:3'"]
+          - uses: actions/example@anything
+            with: {run: 'docker pull alpine:3', parallel: '[run: docker pull alpine:3]'}
+'''
+        self.assert_scan({'.github/workflows/test.yml': source.replace('TARGET', PIN)})
+        self.assert_scan(
+            {'.github/workflows/test.yml': source.replace('TARGET', 'alpine:3')},
+            ['unpinned image reference: alpine:3'],
+        )
+        self.assert_scan({'.github/workflows/test.yml': f'''
+env: {{run: 'docker pull alpine:3', parallel: '[uses: docker://alpine:3]'}}
+jobs: {{check: {{runs-on: ubuntu-latest, steps: [parallel: [
+  {{env: {{run: 'docker pull alpine:3'}}, run: docker pull {PIN}}},
+  parallel: [uses: docker://{PIN}]
+]]}}}}
+'''})
+
+    def test_unsupported_compact_and_parallel_steps_fail_closed(self):
+        cases = [
+            ('["run: docker pull TARGET"]', 'expected YAML mapping for step'),
+            ('{run: docker pull TARGET}', 'expected YAML sequence for steps'),
+            ('[parallel: "run: docker pull TARGET"]', 'expected YAML sequence for parallel'),
+            ('[parallel: {run: docker pull TARGET}]', 'expected YAML sequence for parallel'),
+            ('[parallel: ["run: docker pull TARGET"]]', 'expected YAML mapping for step'),
+            ('[run: *external]', 'unsupported operational YAML'),
+            ('[run: !!str "docker pull TARGET"]', 'unsupported operational YAML'),
+            ('[parallel: *external]', 'unsupported operational YAML'),
+            ('[parallel: [run: *external]]', 'unsupported operational YAML'),
+            ('[parallel: [{<<: *external}]]', 'unsupported operational YAML'),
+            ('[? run: docker pull TARGET]', 'unsupported operational YAML'),
+            ('[[run]: docker pull TARGET]', 'unsupported operational YAML'),
+        ]
+        prefix = 'jobs:\n  check:\n    runs-on: ubuntu-latest\n    steps: '
+        for steps, message in cases:
+            with self.subTest(steps=steps):
+                self.assert_scan(
+                    {'.github/workflows/test.yml': prefix + steps.replace('TARGET', PIN)},
+                    [message],
+                )
+        self.assert_scan({
+            '.github/workflows/test.yml': prefix + '[parallel: [' * 40
+            + f'run: docker pull {PIN}' + ']]' * 40,
+        }, ['YAML nesting exceeds scanner limit'])
+
     def test_compose_env_override_assignment_forms(self):
         for variable in ['NEXUS_IMAGE', 'FERRUM_EDGE_IMAGE']:
             for separator in [' = ', ': ', ' : ', ':']:
