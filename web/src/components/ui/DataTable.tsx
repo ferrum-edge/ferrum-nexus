@@ -14,10 +14,6 @@ import { cn } from '../../lib/cn';
 import { Button } from './Button';
 import { Icon } from './Icon';
 
-/**
- * Column list type used by every page, so table columns are declared with the
- * exact generic arguments {@link DataTable} expects.
- */
 const features = tableFeatures({
   columnFilteringFeature,
   columnVisibilityFeature,
@@ -26,6 +22,10 @@ const features = tableFeatures({
   coreRowModel: createCoreRowModel(),
 });
 
+/**
+ * Column list type used by every page, so table columns are declared with the
+ * exact generic arguments {@link DataTable} expects.
+ */
 export type Columns<TData extends { id: string }> = Array<ColumnDef<typeof features, TData, unknown>>;
 
 export interface DataTableProps<TData extends { id: string }> {

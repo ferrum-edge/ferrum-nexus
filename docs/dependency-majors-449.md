@@ -67,6 +67,8 @@ producer on manifest/workflow pull-request changes (or manual dispatch once avai
 default branch). It checks out the exact PR head, uses full-SHA-pinned actions and `contents: read`,
 does not persist credentials or use caches/secrets/write permissions, and runs Node 22.14 with
 strict engine checks and `npm install --package-lock-only --ignore-scripts`. It generates the root
+lock with a targeted Vitest/coverage update too, so permissive jest-dom peers cannot retain a
+second older hoisted Vitest family. It generates the root
 and separate `e2e` locks, checks the intended dependency families, and uploads both plus a diff,
 source SHA, tool versions, run identity, and SHA-256 input/output manifests.
 

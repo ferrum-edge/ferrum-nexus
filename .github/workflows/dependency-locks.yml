@@ -41,6 +41,10 @@ jobs:
           npm --version > lock-artifacts/provenance/npm-version.txt
           printf '%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > lock-artifacts/provenance/run.txt
           npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          # Refresh permissive jest-dom peers too; install alone can retain a
+          # hoisted Vitest 4 while placing the direct Vitest 5 under web/.
+          npm update --package-lock-only --ignore-scripts --no-audit --no-fund \
+            vitest @vitest/coverage-v8
           npm --prefix e2e install --package-lock-only --ignore-scripts --no-audit --no-fund
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
