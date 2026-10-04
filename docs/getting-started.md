@@ -72,7 +72,10 @@ A bind mount, or a volume created against an older image, keeps its existing
 owner. Fix it before starting the gateway, or SQLite cannot write:
 
 ```bash
-docker run --rm -v ferrum-data:/data alpine chown 65532:65532 /data
+docker run --rm \
+  -v ferrum-data:/data \
+  alpine:3@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 \
+  chown 65532:65532 /data
 ```
 
 See the Edge [Docker guide](https://github.com/ferrum-edge/ferrum-edge/blob/main/docs/docker.md#volume-mounts)
@@ -337,7 +340,8 @@ The gateway needs a backend to forward to. Any HTTP service works; here, run a
 throwaway echo server:
 
 ```bash
-docker run -d --name echo -p 8081:80 ealen/echo-server
+docker run -d --name echo -p 8081:80 \
+  ealen/echo-server:latest@sha256:ec8a6e95890df937a1eb5fafca033a32172d4f43c1fea1f302931d5f230a137f
 ```
 
 This publishes port 8081 on **all** interfaces on purpose. The gateway reaches

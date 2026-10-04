@@ -928,6 +928,23 @@ pins the Edge image by digest. The current acceptance suite
 `v0.3.0` pairing with Edge `v0.9.9` is recorded in the
 [`v0.3.0` release notes](release-notes.md#supported-combination).
 
+The quickstart pins its PostgreSQL and Alpine images by multi-architecture
+digest and sets `FERRUM_BACKEND_ALLOW_IPS=public` on Edge, so the gateway
+rechecks public-address policy when it opens each upstream connection. A
+deployment that sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` must configure
+`FERRUM_BACKEND_ALLOW_CIDRS=<intended private ranges>` while keeping
+`FERRUM_BACKEND_ALLOW_IPS=public`. Public mode also screens plugin endpoints,
+including private Redis URLs. Part B of GHSA-93rq-89vr-38pc remains: Nexus
+cannot detect an Edge deployment without public-only egress; this is tracked in
+[ferrum-edge#5994](https://github.com/ferrum-edge/ferrum-edge/issues/5994).
+
+Dependabot proposes digest updates for Compose and Dockerfile images, which are
+reviewed with the source change. GitHub Actions workflow service images and
+images in workflow `docker run` commands are not tracked by Dependabot; refresh
+those digests manually when updating their readable tags. The required `checks`
+job runs `ci/check-image-pins.sh` on every PR and rejects unpinned image
+declarations in Dockerfiles, Compose files, workflows, and CI/acceptance scripts.
+
 The portal is on `http://127.0.0.1:8787` and the gateway proxy listener on
 `http://127.0.0.1:8000`, both bound to loopback. Before adapting it:
 

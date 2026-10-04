@@ -1128,6 +1128,11 @@ describe('upstream destination policy', () => {
     'host.docker.internal',
     'printer.local',
     'router.home.arpa',
+    // DNS-equivalent spellings: a trailing root label or letter case must not
+    // slip a name past the suffix list.
+    'x.internal.',
+    'X.INTERNAL',
+    'localhost.',
   ];
   const PUBLIC_HOSTS = [
     '93.184.216.34',
@@ -1142,6 +1147,9 @@ describe('upstream destination policy', () => {
     '2002:5db8:d822::1',
     'example.com',
     'api.internal.example.com',
+    // The same normalisation must not over-refuse a genuinely public name.
+    'API.EXAMPLE.COM.',
+    'api.internal.example.com.',
   ];
 
   it('classifies loopback, private, link-local, multicast and internal names as private', () => {
@@ -1171,6 +1179,21 @@ describe('upstream destination policy', () => {
       allowPrivate: false,
       resolve: resolvesTo([{ address: '93.184.216.34', family: 4 }]),
     });
+  });
+
+  it('refuses a fully-qualified or mixed-case denylisted name before any lookup', async () => {
+    for (const [url, host] of [
+      ['https://x.internal./v1', 'x.internal.'],
+      ['https://X.INTERNAL', 'x.internal'],
+      ['http://localhost.', 'localhost.'],
+    ] as const) {
+      const upstream = parseUpstreamUrl(url);
+      assert.ok(upstream, url);
+      const error = await expectSpecInvalidAsync(() =>
+        assertUpstreamAllowed(upstream, { allowPrivate: false, resolve: neverResolve }),
+      );
+      assert.deepEqual(error.details, { field: 'upstream_url', host, reason: 'private_upstream' });
+    }
   });
 });
 

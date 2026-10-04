@@ -92,3 +92,23 @@ updates:
       docker-compose:
         patterns:
           - '*'
+
+  - package-ecosystem: docker-compose
+    directory: /docker
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+    groups:
+      docker-compose:
+        patterns:
+          - '*'
+    ignore:
+      # Existing named volumes use this major's on-disk PostgreSQL format.
+      - dependency-name: postgres
+        update-types:
+          - version-update:semver-major
