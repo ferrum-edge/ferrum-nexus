@@ -8,6 +8,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- **Returning SSO authorization and deployment boundaries are clarified** (#515).
+  Returning callbacks keep their account-only lease and authorize at the
+  transactional settings re-read. The supported single-serving-instance topology
+  uses one store whose transaction queue orders callbacks and settings saves;
+  independent stores do not promise a commit-time provider cutoff. The hosted
+  four-store contract now pauses after authorization and verifies that a real
+  concurrent disable or removal waits for the callback's session and login audit
+  to commit. SSO behavior is unchanged. The architecture also identifies the
+  email service's queued delivery and inline SMTP diagnostic paths.
+
 - **Quickstart and required CI container images are digest-pinned**
   (GHSA-99p3-8fmh-3pfc). Compose and workflow images, plus the acceptance
   upstream base image, retain readable version tags with immutable multi-arch

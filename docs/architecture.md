@@ -107,7 +107,7 @@ docker/    Dockerfile + docker-compose.example.yml
 | `usage/service.ts`                             | Per-API usage and backend health, read from Edge's metrics.                                                                                                            |
 | `messaging/service.ts`                         | 1:1 threads and the platform inbox.                                                                                                                                    |
 | `notifications/service.ts`                     | The header bell and inbox. A courtesy channel, never the record.                                                                                                       |
-| `email/`                                       | `service.ts` (render/enqueue, SMTP transport, inline admin probe), `outbox-worker.ts` (queued sends), `templates.ts`.                                                  |
+| `email/`                                       | `service.ts` (render/enqueue, SMTP transport and inline SMTP diagnostics), `outbox-worker.ts` (queued sends), `templates.ts`.                                          |
 | `admin/`                                       | `settings-service.ts`, `mass-email-service.ts`, `smtp-test-service.ts`, `god-service.ts`, `gateway-reconciliation.ts`, `rotate-key.ts`.                                |
 | `routes/`                                      | One plugin per domain. Routes validate shapes and delegate to the services they are handed.                                                                            |
 | `test/`                                        | `helpers.ts` boots the real app on in-memory SQLite; `mock-ferrum-edge.ts` is a real HTTP server.                                                                      |
@@ -198,6 +198,16 @@ So `transaction()` runs bodies through a per-connection promise queue: one body
 at a time, `BEGIN IMMEDIATE` before it, `COMMIT` on resolve, `ROLLBACK` on
 reject. A nested call joins the running transaction. The other adapters present
 the same contract with their native primitives.
+
+The transaction queue belongs to one store object, including on PostgreSQL,
+MySQL and MongoDB; independent stores do not share it. Production composes all
+services over one store. In the supported single-serving-instance topology,
+that queue orders a returning SSO callback's transactional settings re-read
+and commit against a settings save. Returning callbacks deliberately hold
+only the account lifecycle lease; they do not promise a provider cutoff at
+commit across independent stores. See
+[the SSO authorization boundary](security.md#single-sign-on-openid-connect) and
+[supported topologies](operations.md#supported-topologies).
 
 With one connection, any statement issued while a body holds `BEGIN` would run
 inside that transaction. The adapter therefore gates **every** repository call
@@ -1017,10 +1027,11 @@ which carry ordinals. Operational detail:
 
 **Transactional mail uses the outbox.** `EmailService` renders messages into
 `email_outbox`, and `outbox-worker.ts` delivers them through the SMTP transport
-in `email/service.ts`. The admin SMTP probe (`EmailService.sendTest`, called by
-`admin/smtp-test-service.ts`) uses that transport inline so the settings page
-can report a relay error immediately. A slow or broken relay cannot turn an
-approval into a 502, and queued mail has retries.
+in `email/service.ts`. That service also implements the inline SMTP diagnostic
+(`EmailService.sendTest`, called by `admin/smtp-test-service.ts`), so the
+settings page can report a relay error immediately. Queued transactional
+delivery and this diagnostic share the transport. A slow or broken relay
+cannot turn an approval into a 502, and queued mail has retries.
 
 ```
 service ──enqueue──> email_outbox(pending) ──claim──> sending ──┬─> sent

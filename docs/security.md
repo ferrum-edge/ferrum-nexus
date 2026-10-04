@@ -567,16 +567,16 @@ before the super admin saving it has a link of their own to an enabled
 provider, under the provider's current issuer. The admin API refuses both with
 `400`, so a policy change cannot lock out the person making it.
 
-**Removing or disabling a provider stops sign-ins in flight.** A callback
+**Callbacks authorize against a transactional settings re-read.** A callback
 reads the provider before it redeems the code, and the provider decides how
-long the token exchange takes. So the transaction that commits the sign-in,
+long the token exchange takes. The transaction that commits the sign-in,
 link, provisioning, claims sync or deprovisioning re-reads the settings, and
-commits nothing (`sso_disabled`) unless all of these still hold:
+commits nothing (`sso_disabled`) unless all of these hold at that read:
 
 - the login policy is not `local_only`;
 - the provider is in force and enabled;
 - its settings, mappings included, are exactly those the callback started
-  with. Any edit in the meantime refuses the attempt; the user signs in again.
+  with. A difference at this re-read refuses the attempt; the user signs in again.
 
 The deployment-wide domain list is checked again there too. A callback that
 writes one of the provider's links (a first-time link or a provisioned account)
@@ -584,14 +584,34 @@ and a settings save hold the same per-provider lease (`sso:provider:<id>`). A
 settings save first takes the deployment-wide `sso:settings` key and then the
 key of every provider it can affect, in sorted order, and then,
 inside its transaction, refuses with `409 CONFLICT` unless the stored settings
-are still the ones it worked that set out from. So on every backend, a save
-either commits before the callback's re-read, or waits for the callback to
-commit and then removes its links with the rest
+are still the ones it worked that set out from. For those callbacks, on every
+backend, a save either commits before the callback's re-read, or waits for the
+callback to commit and then removes its links with the rest
 ([Cross-instance locks are fenced at commit](#cross-instance-locks-are-fenced-at-commit)).
-A returning sign-in does not take the lease: it writes nothing a save reads,
-so its re-read orders it alone, and sign-ins at one provider do not queue
-behind each other across the deployment. Sessions issued before the change are
-not ended by it (see **Losing access**).
+
+A returning sign-in deliberately takes only its account lifecycle lease,
+without the provider lease. Its provider authorization is at the settings
+re-read. In the [supported topology](operations.md#supported-topologies), only
+one instance serves requests, and production composes its services over one
+store object. All four adapters serialize transaction bodies on that object.
+A settings save therefore either commits before the callback's re-read, which
+refuses the stale attempt, or waits until the authorized callback commits.
+This ordering does not require returning sign-ins to take a deployment-wide
+provider lease.
+
+**This is not a cross-instance commit-time cutoff for returning sign-ins.**
+Independent PostgreSQL, MySQL or replica-set MongoDB stores have independent
+transaction queues. A peer's provider disable can commit after a returning
+callback's settings re-read and before that callback commits its session.
+SQLite's `BEGIN IMMEDIATE` blocks that write ordering. Provider removal also
+deletes the existing identity that a returning callback must update: the
+conflicting writes order or abort those transactions, rather than letting the
+callback recreate a removed link. The supported single-serving-instance
+topology excludes the independent-store interleaving. A future
+multi-active-instance feature must explicitly qualify and test the returning
+callback boundary across independent stores, or add provider-level fencing
+for returning callbacks. See [the concurrency guidance](operations.md#8-scaling).
+Sessions issued before a settings change are not ended by it (see **Losing access**).
 
 **Secrets and logs.** A settings provider's client secret:
 
