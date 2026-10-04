@@ -490,9 +490,7 @@ export interface NexusConfig {
 
 /* ── Parsing helpers ────────────────────────────────────────────────────── */
 
-const boolish = (
-  defaultValue: boolean,
-): z.ZodType<boolean, string | undefined> =>
+const boolish = (defaultValue: boolean): z.ZodType<boolean, string | undefined> =>
   z
     .string()
     .optional()
@@ -530,9 +528,7 @@ const intish = (
       return value;
     });
 
-const stringish = (
-  defaultValue: string,
-): z.ZodType<string, string | undefined> =>
+const stringish = (defaultValue: string): z.ZodType<string, string | undefined> =>
   z
     .string()
     .optional()

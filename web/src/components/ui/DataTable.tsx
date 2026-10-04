@@ -26,7 +26,9 @@ const features = tableFeatures({
  * Column list type used by every page, so table columns are declared with the
  * exact generic arguments {@link DataTable} expects.
  */
-export type Columns<TData extends { id: string }> = Array<ColumnDef<typeof features, TData, unknown>>;
+export type Columns<TData extends { id: string }> = Array<
+  ColumnDef<typeof features, TData, unknown>
+>;
 
 export interface DataTableProps<TData extends { id: string }> {
   columns: Columns<TData>;

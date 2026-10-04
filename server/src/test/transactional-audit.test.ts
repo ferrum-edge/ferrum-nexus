@@ -147,6 +147,9 @@ function resolve(id: ts.Identifier): Resolution | null {
     if (ts.isSignatureDeclaration(node)) {
       const index = node.parameters.findIndex((parameter) => bindsName(parameter.name, id.text));
       if (index !== -1) return { kind: 'parameter', fn: node, index };
+      if (ts.isFunctionExpression(node) && node.name?.text === id.text) {
+        return { kind: 'local', declaration: node };
+      }
     } else {
       const declaration = localDeclaration(node, id.text);
       if (declaration) return { kind: 'local', declaration };
@@ -171,8 +174,11 @@ function helperName(fn: ts.SignatureDeclaration): string | null {
 }
 
 /**
- * Every call of the helper `name` in the file, or `null` when it is referenced
- * any other way — a helper passed around as a value cannot be followed.
+ * Every call of the helper `name` in the file, including a named function
+ * expression's separate internal binding, or `null` when it is referenced any
+ * other way — a helper passed around as a value cannot be followed. Keep the
+ * outer-name check conservative; a different internal name only belongs to
+ * this helper when lexical resolution reaches the expression itself.
  */
 function callsOf(
   source: ts.SourceFile,
@@ -180,15 +186,20 @@ function callsOf(
   fn: ts.SignatureDeclaration,
 ): ts.CallExpression[] | null {
   const calls: ts.CallExpression[] = [];
+  const internalName = ts.isFunctionExpression(fn) ? fn.name?.text : undefined;
   let escaped = false;
   const visit = (node: ts.Node): void => {
     if (escaped) return;
     if (
       ts.isIdentifier(node) &&
-      node.text === name &&
+      (node.text === name || node.text === internalName) &&
       !((ts.isFunctionDeclaration(fn) || ts.isFunctionExpression(fn)) && node === fn.name) &&
       node !== declaredName(fn)
     ) {
+      if (node.text !== name) {
+        const resolved = resolve(node);
+        if (resolved?.kind !== 'local' || resolved.declaration !== fn) return;
+      }
       const parent = node.parent;
       if (ts.isCallExpression(parent) && parent.expression === node) calls.push(parent);
       else escaped = true;
@@ -916,6 +927,86 @@ describe('the transactional audit scan itself', () => {
     assertFlags(helper, 'not a transaction callback');
   });
 
+  it('checks both bindings of a function expression with a different internal name', () => {
+    const helper = `const write = async function inner(tx) {
+      await tx.grants.create({});
+      await audit.forStore(tx).record(actor, AuditAction.ACCESS_APPROVE, target);
+      INTERNAL
+    };`;
+    const safeCall = 'await store.transaction((tx) => write(tx));';
+    const declaration = helper.replace('INTERNAL', '');
+    const scan = scanSource('fixture.ts', PRELUDE + declaration + safeCall);
+    assert.deepEqual(scan.findings, []);
+    assert.deepEqual([...scan.recorded], ['ACCESS_APPROVE']);
+    assertFlags(declaration, 'not a transaction callback');
+    for (const unsafe of ['await write(store);', 'queue(write);', 'const alias = write;']) {
+      assertFlags(declaration + safeCall + unsafe, 'not a transaction callback');
+    }
+    for (const unsafe of [
+      'await inner(store);',
+      'await inner?.(store);',
+      'queue(inner);',
+      'const alias = inner;',
+      'const later = () => queue(inner);',
+      'return inner;',
+      'await store.transaction((tx) => { const txRoot = store; return inner(txRoot); });',
+      'await store.transaction((tx) => { { const tx = store; return inner(tx); } });',
+    ]) {
+      assertFlags(helper.replace('INTERNAL', unsafe) + safeCall, 'not a transaction callback');
+    }
+  });
+
+  it('allows internal calls whose store is independently proven transactional', () => {
+    const scan = scanSource(
+      'fixture.ts',
+      PRELUDE +
+        `const write = async function inner(tx) {
+          await tx.grants.create({});
+          await audit.forStore(tx).record(actor, AuditAction.ACCESS_APPROVE, target);
+          if (again) await store.transaction((nestedTx) => inner(nestedTx));
+        };
+        await store.transaction((tx) => write(tx));`,
+    );
+    assert.deepEqual(scan.findings, []);
+    assert.deepEqual([...scan.recorded], ['ACCESS_APPROVE']);
+  });
+
+  it('resolves internal names without confusing shadowed or unrelated bindings', () => {
+    assert.deepEqual(
+      findingsFor(
+        `const inner = other;
+        queue(inner);
+        const write = async function inner(tx) {
+          await tx.grants.create({});
+          await audit.forStore(tx).record(actor, AuditAction.ACCESS_APPROVE, target);
+          { const inner = other; queue(inner); }
+          await (async (inner) => { await inner(store); })(other);
+          const shadow = async function inner() { queue(inner); };
+        };
+        await store.transaction((tx) => write(tx));`,
+      ),
+      [],
+    );
+  });
+
+  it('fails closed on recursive internal calls and helper cycles', () => {
+    for (const internal of [
+      'await inner(tx);',
+      `await forward(tx);
+      async function forward(nextTx) { await inner(nextTx); }`,
+    ]) {
+      assertFlags(
+        `const write = async function inner(tx) {
+          await tx.grants.create({});
+          await audit.forStore(tx).record(actor, AuditAction.ACCESS_APPROVE, target);
+          ${internal}
+        };
+        await store.transaction((tx) => write(tx));`,
+        'not a transaction callback',
+      );
+    }
+  });
+
   it('accepts parenthesized awaits and nested cleanup exits that do not leave the catch', () => {
     for (const cleanup of [
       'for (let i = 0; i < 2; i++) { continue; }',
@@ -970,10 +1061,7 @@ describe('the transactional audit scan itself', () => {
       ),
       [],
     );
-    assertFlags(
-      'store.transaction(async (tx) => { await recordWithRow(tx); });',
-      'writes nothing',
-    );
+    assertFlags('store.transaction(async (tx) => { await recordWithRow(tx); });', 'writes nothing');
     assertFlags(
       `store.transaction(async (tx) => {
         await tx.grants.create({});

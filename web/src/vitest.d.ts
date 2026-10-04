@@ -6,6 +6,8 @@ import 'vitest';
 // Extend the supported matcher interface, retaining argument and return types
 // for synchronous assertions and promise assertions (resolves/rejects).
 declare module 'vitest' {
-  interface Matchers<R extends void | Promise<void> = void | Promise<void>, T = unknown>
-    extends TestingLibraryMatchers<T, R> {}
+  interface Matchers<
+    R extends void | Promise<void> = void | Promise<void>,
+    T = unknown,
+  > extends TestingLibraryMatchers<T, R> {}
 }
