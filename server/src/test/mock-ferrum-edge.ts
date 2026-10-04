@@ -346,6 +346,7 @@ export interface MockFerrumEdge {
   readonly consumers: Map<string, StoredConsumer>;
   /** Direct access to stored proxies, keyed `<namespace>/<id>`. */
   readonly proxies: Map<string, Record<string, unknown>>;
+  readonly upstreams: Map<string, Record<string, unknown>>;
   /** Direct access to stored plugin configs, keyed `<namespace>/<id>`. */
   readonly pluginConfigs: Map<string, Record<string, unknown>>;
   /** Direct access to stored API specs, keyed `<namespace>/<id>`. */
@@ -1683,6 +1684,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
   const consumers = new Map<string, StoredConsumer>();
   const proxies = new Map<string, Record<string, unknown>>();
+  const upstreams = new Map<string, Record<string, unknown>>();
   const pluginConfigs = new Map<string, Record<string, unknown>>();
   const apiSpecs = new Map<string, StoredApiSpec>();
   const namespaces = new Map<string, { name: string; description: string | null }>();
@@ -2451,6 +2453,16 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       // is what makes deleting the proxy a complete rollback for a `routes`
       // publish.
       deleteProxyCascade(namespace, id);
+      if (query.get('cleanup_orphaned_upstream') !== 'false' && existing.upstream_id) {
+        const upstreamId = existing.upstream_id;
+        if (
+          ![...proxies.values()].some(
+            (proxy) => proxy.namespace === namespace && proxy.upstream_id === upstreamId,
+          )
+        ) {
+          upstreams.delete(key(namespace, String(upstreamId)));
+        }
+      }
       return send(res, 204);
     }
     return fail(res, 405, 'Method not allowed');
@@ -3270,6 +3282,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     requests,
     consumers,
     proxies,
+    upstreams,
     pluginConfigs,
     apiSpecs,
     setBackendEgressPolicy(payload): void {
@@ -3303,6 +3316,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       egressPolicy = undefined;
       consumers.clear();
       proxies.clear();
+      upstreams.clear();
       pluginConfigs.clear();
       apiSpecs.clear();
       namespaces.clear();

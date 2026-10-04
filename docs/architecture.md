@@ -400,11 +400,15 @@ Leases still order Nexus's multi-step operations and fence its store transaction
 
 Fresh closed `GET /backend-egress-policy` admission lives at every proxy/spec create
 and replacement, including plugin binding and undo; service preflight precedes staging,
-destructive conversion and spec ACL enrollment. Failed conversion compensation
-sets `repair_required`, retains the owned proxy id and seals a recovery journal in
-`app_settings` before resource teardown. Deliberate restore takes both API and proxy
-leases, verifies partial resource ownership, refuses unknown state, and validates
+destructive conversion and spec ACL enrollment. Conversion commits
+`repair_required`, the original owned proxy id, an intent audit and an encrypted
+recovery journal in `app_settings` before resource teardown. Deliberate restore
+takes both API and proxy leases, refuses destructive removal of live partial
+resources, and validates
 the rebuilt path, configuration, plugins and spec before cutover and completion.
+The journal is removed only with catalog, ownership and completion audit in one
+fenced transaction. Successful rollback reconciles the catalog and journal together.
+See the [owner capability blocker](edge-conversion-recovery-blocker.md).
 Health caches observations only.
 The public profile requires namespace-matched local serving/public-only metadata and
 operator-established Admin/traffic singleton identity. Process evidence cannot attest
@@ -692,7 +696,11 @@ undo both take the same staging detour.
 
 **Locking.** API `PATCH` and spec revision share the `proxy:<id>` lease. `PATCH`
 holds it from its catalog re-read through gateway writes, rollback and catalog
-persistence, so a conversion snapshots state only after earlier edits finish.
+persistence. An enforcement conversion runs before the other PATCH gateway writes,
+so its immutable recovery resources and original catalog shape share one baseline.
+Narrow compensation for the other fields runs before the conversion undo. A
+corrected agent specification commits a separate authorized catalog comparison
+shape with its new tool ids; it never overwrites the original replay resources.
 Spec revision re-reads its mode and current revision after taking the lease.
 
 **Spec revision undo.** The undo (previous document and backend, read under

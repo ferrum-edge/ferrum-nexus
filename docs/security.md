@@ -1851,6 +1851,16 @@ a start without completion requires comparing the live spec policy with Nexus.
 | `application.delete`          | `application` | The application and its consumer were deleted; its credentials stop working. `details`: `name`, `consumer_id` (or `null`), `revoked_grants`, `revoked_credentials`, `unmapped_consumer: true` when the consumer was found by its derived id.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `test_consumer.create`        | `api`         | A provider created or replaced the `nexus-test-<api_id>` consumer. `details`: `consumer_username`, `consumer_id`, `credential_type`, `replaced`, `revoked_credentials`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
+`api.gateway_conversion_start` is an intent action committed with the encrypted
+original baseline, retained proxy identity and `repair_required` state before any
+conversion teardown. `api.gateway_conversion_rollback` is transactional: the
+verified original deployment, catalog repair state, journal deletion and audit
+commit together. Successful conversion clears its journal with `api.update`, the
+catalog mode and ownership. No credential-bearing resource body enters either
+audit. Corrected agent revisions commit an authorized comparison shape without
+changing the original replay resources. Live partial cleanup is blocked by the
+[released owner capability gap](edge-conversion-recovery-blocker.md).
+
 `api.gateway_repair_required` phases (`details.phase`):
 
 | Phase            | Meaning                                                                                                                                                                                        | Other `details`                                                                                                                        |
@@ -1862,8 +1872,9 @@ a start without completion requires comparing the live spec policy with Nexus.
 
 Raw proxy and plugin configurations never enter audit rows or logs. Enforcement
 conversion snapshots are sealed in encrypted settings before teardown and removed
-only after recovery or successful compensation; they are not consumer credential
-snapshots and never cross into portal responses.
+only in the matching lease-fenced catalog completion or verified rollback
+transaction; they are not consumer credential snapshots and never cross into
+portal responses.
 
 ### Access workflow
 

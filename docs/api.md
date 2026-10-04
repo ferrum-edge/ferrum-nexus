@@ -2475,8 +2475,15 @@ the API id, so their existing consumer groups match again. After a missing-proxy
 repair, direct gateway changes were deleted with the proxy and are not restored.
 A failed enforcement conversion instead retains an encrypted recovery snapshot of
 the original proxy and plugins, including operator fields.
-Recovery retains the original id and refuses deletion of unknown or changed
-partial resources; the operator must reconcile those first.
+Recovery retains the original id and refuses deletion of all live partial
+resources; the operator must reconcile those first. The released Edge namespace
+restore would rewrite unrelated fields, so Nexus cannot use it as a safe cascade
+fallback. See the [owner capability blocker](edge-conversion-recovery-blocker.md).
+An unchanged original or an absent identity can still be reconciled or rebuilt.
+The encrypted journal and repair state commit before teardown and clear together
+with catalog, ownership and completion audit under the existing lease fences.
+An uploaded corrected agent specification changes only the authorized catalog
+comparison shape; the original replay resources and tool ids remain intact.
 
 What is rebuilt, in publish order: the proxy (through the API-spec importer in
 `routes` mode), the auth plugin, `access_control` when `requestable`, the rate
@@ -2499,8 +2506,10 @@ existence, or an incomplete original-id staging proxy, never counts as restored.
 Audit rows: `api.gateway_restore_start` (before the first gateway call; if it
 fails, nothing is built), `api.gateway_restore` with the new proxy id, and on
 failure `api.gateway_restore_failed` (with `stranded_proxy_id` when the cleanup
-delete could not be confirmed). A failed restore removes what it created and
-leaves the API `repair_required`, ready to retry.
+delete could not be confirmed). A missing-deployment restore attempts to remove
+what it created and leaves the API `repair_required`. Conversion recovery retains live partial resources and its
+encrypted journal until operator reconciliation or a supported atomic removal
+capability becomes available.
 
 ### `POST /api/apis/:id/test-consumer`
 

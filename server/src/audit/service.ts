@@ -118,6 +118,10 @@ export const AuditAction = {
   /* publishing */
   API_PUBLISH: 'api.publish',
   API_UPDATE: 'api.update',
+  /** Committed with the encrypted baseline and repair state, before teardown. */
+  API_GATEWAY_CONVERSION_START: 'api.gateway_conversion_start',
+  /** The original deployment, catalog and journal were reconciled together. */
+  API_GATEWAY_CONVERSION_ROLLBACK: 'api.gateway_conversion_rollback',
   /** Committed before changing a spec-owned MCP policy on Edge. */
   API_AGENTS_UPDATE_START: 'api.agents_update_start',
   API_SPEC_UPDATE: 'api.spec_update',
@@ -571,6 +575,8 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.API_VIEWER_REVOKE]: TRANSACTIONAL,
   [AuditAction.API_GATEWAY_RESTORE]: TRANSACTIONAL,
   [AuditAction.API_GATEWAY_RESTORE_START]: INTENT,
+  [AuditAction.API_GATEWAY_CONVERSION_START]: INTENT,
+  [AuditAction.API_GATEWAY_CONVERSION_ROLLBACK]: TRANSACTIONAL,
   [AuditAction.API_GATEWAY_RESTORE_FAILED]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.API_PUBLISH_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.API_AUTH_PLUGIN_CHANGED]: postCommit(

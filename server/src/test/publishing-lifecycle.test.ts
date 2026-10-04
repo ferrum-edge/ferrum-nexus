@@ -428,7 +428,8 @@ describe('deleting an API that races an enforcement conversion', () => {
     // it is also the moment the row goes.
     const restore = vanishAfter(api.id, (vanish) => {
       const real = harness.store.apis.update.bind(harness.store.apis);
-      harness.store.apis.update = async () => {
+      harness.store.apis.update = async (...args) => {
+        if (args[1].gateway_state === 'repair_required') return real(...args);
         vanish();
         throw new Error('catalog write refused');
       };
@@ -516,7 +517,7 @@ describe('a failed rollback of a successful enforcement conversion', () => {
 
     // The store write that follows a successful conversion, and then the
     // rebuild the resulting rollback needs.
-    faults.failNext('apis', 'update', new Error('catalog write refused'));
+    faults.failAfter('apis', 'update', 1, new Error('catalog write refused'));
     breakRebuild();
     const failed = await harness.authed(provider, {
       method: 'PATCH',
@@ -597,7 +598,7 @@ describe('a failed rollback of a successful enforcement conversion', () => {
     const api = published.json<PublishApiResponse>().api;
     const proxyId = String(api.ferrum_proxy_id);
 
-    faults.failNext('apis', 'update', new Error('catalog write refused'));
+    faults.failAfter('apis', 'update', 1, new Error('catalog write refused'));
     const failed = await harness.authed(provider, {
       method: 'PATCH',
       url: `/api/apis/${api.id}`,

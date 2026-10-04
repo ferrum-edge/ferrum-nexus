@@ -85,7 +85,8 @@ function failNextTransaction(harness: TestApp, message: string, skip = 0): void 
 /** Make the next `store.apis.update(...)` reject, then put the real one back. */
 function failNextApiUpdate(harness: TestApp, message: string): void {
   const real = harness.store.apis.update.bind(harness.store.apis);
-  harness.store.apis.update = async () => {
+  harness.store.apis.update = async (...args) => {
+    if (args[1].gateway_state === 'repair_required') return real(...args);
     harness.store.apis.update = real;
     throw new Error(message);
   };

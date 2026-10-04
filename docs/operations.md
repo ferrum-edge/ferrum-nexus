@@ -240,15 +240,26 @@ exact allowed/blocked class arrays, evaluation order and cross-field consistency
 Unknown/missing/malformed metadata, auth/network/timeout failures, cached answers,
 CP-only/admission-only, unserved/no data plane, mode `both` and any allow-CIDR overlay
 refuse writes. Preflight precedes destructive conversions, staging and ACL building;
-compensation repeats admission and records repair-required failures. A failed
-enforcement conversion retains its original proxy reference and sets
-`gateway_state=repair_required`, even when that id still exists on a staging path.
+compensation repeats admission and records repair-required failures. Before
+teardown, conversion atomically seals its original baseline, retains its proxy
+reference, sets `gateway_state=repair_required` and records an intent audit. The
+condition survives staging, cutover and catalog commit refusal. Completion clears
+the journal with the catalog, ownership and audit in one lease-fenced transaction.
+Successful rollback also clears repair state and the journal atomically.
 The encrypted `gateway_recovery:<namespace>:<api_id>` setting records original
 operator fields, plugin ids and partial rebuild paths/spec ownership. It uses the
 existing settings repository on all four stores; no schema migration is needed.
 `POST /api/apis/:id/restore-gateway` repeats admission, takes the API and proxy
-leases, and verifies resources against that record before removing/rebuilding them.
-Unknown or changed resources require operator reconciliation and remain untouched.
+leases, and verifies resources against that record before rebuilding an absent
+identity. All live partial resources remain untouched: the released owner cannot
+fence their cascade without changing unrelated namespace fields. Unknown or
+changed resources also require operator reconciliation. See the
+[required owner API and release ordering](edge-conversion-recovery-blocker.md).
+Conversion teardown uses `cleanup_orphaned_upstream=false` to preserve the original
+last-referenced hand-owned upstream; recovery never reconstructs a dangling id.
+Corrected agent uploads retain the immutable replay baseline and commit their
+authorized catalog shape alongside the revision. Recovery replays the original
+agent shape and applies the corrected document on staging before cutover.
 Only a deployment matching the catalog clears the condition; recovery checks it
 on staging before cutover, then again before the fenced completion transaction.
 Reconciliation takes the same proxy lease and retains conversion-owned references

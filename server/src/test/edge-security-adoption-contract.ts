@@ -289,6 +289,15 @@ export function runEdgeSecurityAdoptionContract(
           harness.edge.requests.slice(revisionOffset).every((request) => request.method === 'GET'),
           'a corrected catalog revision never writes to a partial gateway deployment',
         );
+        await assert.rejects(
+          harness.services.publishing.restoreGateway(actor, published.api.id),
+          /Atomic removal of a partial conversion is unavailable/,
+        );
+        assert.equal(harness.edge.callsTo('DELETE', `/proxies/${proxyId}`).length, deletes);
+        // Explicit operator reconciliation, not a Nexus recovery fallback.
+        await harness.edgeClient.proxies.delete(proxyId, actor.id, {
+          cleanupOrphanedUpstream: false,
+        });
         const restored = await harness.services.publishing.restoreGateway(actor, published.api.id);
         assert.equal(restored.api.gateway_state, 'deployed');
         assert.equal(restored.api.ferrum_proxy_id, proxyId);
@@ -319,6 +328,230 @@ export function runEdgeSecurityAdoptionContract(
           [...harness.edge.proxies.values()].filter((entry) => entry.id === proxyId).length,
           1,
         );
+      });
+
+      for (const checkpoint of [
+        'before-teardown',
+        'after-teardown',
+        'staging',
+        'cutover',
+      ] as const) {
+        it(`${level}: retains a truthful journal at ${checkpoint}`, async () => {
+          const published = await publish(level);
+          const apiId = published.api.id;
+          const proxyId = published.api.ferrum_proxy_id!;
+          const key = `gateway_recovery:nexus:${apiId}`;
+          const remove = harness.edgeClient.proxies.delete;
+          const createProxy = harness.edgeClient.proxies.create;
+          const createSpec = harness.edgeClient.apiSpecs.create;
+          const replaceProxy = harness.edgeClient.proxies.replace;
+          const replaceSpec = harness.edgeClient.apiSpecs.replace;
+          let interrupted = false;
+          const interrupt = async (): Promise<void> => {
+            const row = await harness.store.apis.findById(apiId);
+            const journal = await harness.store.settings.get(key);
+            assert.equal(row?.gateway_state, 'repair_required');
+            assert.equal(row?.ferrum_proxy_id, proxyId);
+            assert.equal(journal?.encrypted, true);
+            interrupted = true;
+            refusePolicy();
+            throw new Error('injected interruption');
+          };
+          harness.edgeClient.proxies.delete = async (...args) => {
+            assert.deepEqual(args[2], { cleanupOrphanedUpstream: false });
+            if (checkpoint === 'before-teardown') await interrupt();
+            await remove(...args);
+            if (checkpoint === 'after-teardown') await interrupt();
+          };
+          harness.edgeClient.proxies.create = async (...args) => {
+            const result = await createProxy(...args);
+            if (checkpoint === 'staging') await interrupt();
+            return result;
+          };
+          harness.edgeClient.apiSpecs.create = async (...args) => {
+            const result = await createSpec(...args);
+            if (checkpoint === 'staging') await interrupt();
+            return result;
+          };
+          harness.edgeClient.proxies.replace = async (...args) => {
+            const result = await replaceProxy(...args);
+            if (checkpoint === 'cutover') await interrupt();
+            return result;
+          };
+          harness.edgeClient.apiSpecs.replace = async (...args) => {
+            const result = await replaceSpec(...args);
+            if (checkpoint === 'cutover') await interrupt();
+            return result;
+          };
+          const reset = (): void => {
+            harness.edgeClient.proxies.delete = remove;
+            harness.edgeClient.proxies.create = createProxy;
+            harness.edgeClient.apiSpecs.create = createSpec;
+            harness.edgeClient.proxies.replace = replaceProxy;
+            harness.edgeClient.apiSpecs.replace = replaceSpec;
+          };
+          restoreMethods.push(reset);
+          await assert.rejects(
+            harness.services.publishing.update(actor, apiId, {
+              spec_enforcement: level === 'routes' ? 'docs_only' : 'routes',
+            }),
+            /injected interruption/,
+          );
+          assert.ok(interrupted);
+          assert.equal(
+            (await harness.store.apis.findById(apiId))?.gateway_state,
+            'repair_required',
+          );
+          assert.ok(await harness.store.settings.get(key));
+          reset();
+          harness.edge.setBackendEgressPolicy(publicEgressPolicy());
+          if (checkpoint === 'before-teardown' || checkpoint === 'after-teardown') {
+            const restored = await harness.services.publishing.restoreGateway(actor, apiId);
+            assert.equal(restored.api.gateway_state, 'deployed');
+            assert.equal(await harness.store.settings.get(key), null);
+          } else {
+            const live = structuredClone(harness.edge.proxies.get(`nexus/${proxyId}`));
+            const offset = harness.edge.requests.length;
+            await assert.rejects(harness.services.publishing.restoreGateway(actor, apiId));
+            assert.deepEqual(harness.edge.proxies.get(`nexus/${proxyId}`), live);
+            assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
+          }
+        });
+      }
+
+      for (const refusal of ['catalog', 'audit'] as const) {
+        it(`${level}: keeps the journal through ${refusal} commit refusal`, async () => {
+          const published = await publish(level);
+          const key = `gateway_recovery:nexus:${published.api.id}`;
+          faults.failAfter(
+            refusal === 'catalog' ? 'apis' : 'auditLogs',
+            refusal === 'catalog' ? 'update' : 'create',
+            1,
+            new Error('catalog completion refused'),
+          );
+          await assert.rejects(
+            harness.services.publishing.update(actor, published.api.id, {
+              spec_enforcement: level === 'routes' ? 'docs_only' : 'routes',
+            }),
+            /catalog completion refused/,
+          );
+          const row = await harness.store.apis.findById(published.api.id);
+          assert.equal(row?.gateway_state, 'repair_required');
+          assert.equal(row?.spec_enforcement, level);
+          assert.equal(row?.ferrum_proxy_id, published.api.ferrum_proxy_id);
+          assert.equal((await harness.store.settings.get(key))?.encrypted, true);
+          assert.ok(harness.edge.proxyServing(`/nexus/${published.api.slug}`));
+        });
+      }
+
+      it(`${level}: reconciles rollback and completion atomically`, async () => {
+        const published = await publish(level);
+        const key = `gateway_recovery:nexus:${published.api.id}`;
+        harness.edge.queueFailure(
+          503,
+          { error: 'creation refused' },
+          level === 'routes' ? '/proxies' : '/api-specs',
+          'POST',
+        );
+        await assert.rejects(
+          harness.services.publishing.update(actor, published.api.id, {
+            spec_enforcement: level === 'routes' ? 'docs_only' : 'routes',
+          }),
+        );
+        assert.equal(
+          (await harness.store.apis.findById(published.api.id))?.gateway_state,
+          'deployed',
+        );
+        assert.equal(await harness.store.settings.get(key), null);
+        assert.ok(
+          (await harness.auditRows('api.gateway_conversion_rollback')).some(
+            (row) => row.target_id === published.api.id,
+          ),
+        );
+        const updated = await harness.services.publishing.update(actor, published.api.id, {
+          spec_enforcement: level === 'routes' ? 'docs_only' : 'routes',
+        });
+        assert.equal(updated.api.gateway_state, 'deployed');
+        assert.equal(await harness.store.settings.get(key), null);
+        assert.equal(
+          (await harness.store.apis.findById(published.api.id))?.spec_enforcement,
+          updated.api.spec_enforcement,
+        );
+      });
+
+      it(`${level}: retains combined PATCH baseline and operator upstream`, async () => {
+        const published = await publish(level);
+        const proxyId = published.api.ferrum_proxy_id!;
+        const proxy = harness.edge.proxies.get(`nexus/${proxyId}`)!;
+        const upstreamId = newId();
+        const upstream = {
+          id: upstreamId,
+          namespace: 'nexus',
+          name: 'operator-upstream',
+          targets: [{ host: 'operator.example.test', port: 443, weight: 7 }],
+          labels: { operator: 'preserve' },
+          created_at: '2026-01-01T00:00:00Z',
+          updated_at: '2026-01-02T00:00:00Z',
+        };
+        const upstreamBytes = JSON.stringify(upstream);
+        harness.edge.upstreams.set(`nexus/${upstreamId}`, structuredClone(upstream));
+        proxy.upstream_id = upstreamId;
+        proxy.hosts = ['operator.example.test'];
+        const beforeProxy = structuredClone(proxy);
+        const beforePlugins = [...harness.edge.pluginConfigs.values()]
+          .filter((plugin) => plugin.proxy_id === proxyId)
+          .map((plugin) => structuredClone(plugin));
+        const createProxy = harness.edgeClient.proxies.create;
+        const createSpec = harness.edgeClient.apiSpecs.create;
+        harness.edgeClient.proxies.create = async (...args) => {
+          const result = await createProxy(...args);
+          refusePolicy();
+          return result;
+        };
+        harness.edgeClient.apiSpecs.create = async (...args) => {
+          const result = await createSpec(...args);
+          refusePolicy();
+          return result;
+        };
+        const reset = (): void => {
+          harness.edgeClient.proxies.create = createProxy;
+          harness.edgeClient.apiSpecs.create = createSpec;
+        };
+        restoreMethods.push(reset);
+        await assert.rejects(
+          harness.services.publishing.update(actor, published.api.id, {
+            upstream_url: 'https://changed.example.test/v2',
+            auth_plugin: 'basic_auth',
+            cors: { allowed_origins: ['https://client.example.test'], allow_credentials: false },
+            rate_limit: { limit: 30, window_seconds: 60 },
+            allowed_methods: ['GET', 'POST'],
+            spec_enforcement: level === 'routes' ? 'docs_only' : 'routes',
+          }),
+        );
+        const sealed = await harness.store.settings.get(
+          `gateway_recovery:nexus:${published.api.id}`,
+        );
+        assert.ok(sealed?.encrypted && typeof sealed.value === 'string');
+        const journal = harness.app.nexus.crypto.decryptJson<{
+          proxy: unknown;
+          plugins: unknown;
+          shape: { upstream_url: string; auth_plugin: string; cors: unknown };
+        }>(sealed.value);
+        assert.deepEqual(journal.proxy, beforeProxy);
+        assert.deepEqual(journal.plugins, beforePlugins);
+        assert.equal(journal.shape.upstream_url, published.api.upstream_url);
+        assert.equal(journal.shape.auth_plugin, 'key_auth');
+        assert.equal(journal.shape.cors, null);
+        assert.equal(JSON.stringify(harness.edge.upstreams.get(`nexus/${upstreamId}`)), upstreamBytes);
+        reset();
+        harness.edge.setBackendEgressPolicy(publicEgressPolicy());
+        await harness.edgeClient.proxies.delete(proxyId, actor.id, {
+          cleanupOrphanedUpstream: false,
+        });
+        const restored = await harness.services.publishing.restoreGateway(actor, published.api.id);
+        assert.equal(restored.api.gateway_state, 'deployed');
+        assert.equal(harness.edge.proxies.get(`nexus/${proxyId}`)?.upstream_id, upstreamId);
+        assert.equal(JSON.stringify(harness.edge.upstreams.get(`nexus/${upstreamId}`)), upstreamBytes);
       });
 
       it(`${level}: records repair when policy changes after conversion deletion`, async () => {
@@ -379,7 +612,12 @@ export function runEdgeSecurityAdoptionContract(
             harness.edgeClient.apiSpecs.replace = replaceSpec;
             harness.edgeClient.pluginConfigs.replace = replacePlugin;
           });
-          faults.failNext('apis', 'update', new Error('catalog refusal'));
+          faults.failAfter(
+            'apis',
+            'update',
+            operation === 'conversion' ? 1 : 0,
+            new Error('catalog refusal'),
+          );
           const service = harness.services.publishing;
           if (operation === 'backend') {
             await assert.rejects(
@@ -420,6 +658,172 @@ export function runEdgeSecurityAdoptionContract(
           assert.ok(proxyId);
         });
       }
+    }
+
+    it('keeps original agent replay coherent through repaired upload and restore', async () => {
+      const published = await publish('routes');
+      const apiId = published.api.id;
+      const proxyId = published.api.ferrum_proxy_id!;
+      const enabled = await harness.services.publishing.update(actor, apiId, {
+        agents: {
+          operations: [
+            { path: '/invoices', method: 'GET', name: 'list', description: 'List invoices' },
+          ],
+        },
+      });
+      const originalAgents = structuredClone(enabled.api.agents);
+      const createProxy = harness.edgeClient.proxies.create;
+      harness.edgeClient.proxies.create = async (...args) => {
+        const result = await createProxy(...args);
+        refusePolicy();
+        return result;
+      };
+      restoreMethods.push(() => {
+        harness.edgeClient.proxies.create = createProxy;
+      });
+      await assert.rejects(
+        harness.services.publishing.update(actor, apiId, {
+          spec_enforcement: 'docs_only',
+          agents: null,
+        }),
+      );
+      harness.edgeClient.proxies.create = createProxy;
+      harness.edge.setBackendEgressPolicy(publicEgressPolicy());
+      const key = `gateway_recovery:nexus:${apiId}`;
+      const originalSealed = await harness.store.settings.get(key);
+      assert.ok(originalSealed?.encrypted && typeof originalSealed.value === 'string');
+      const original = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
+        originalSealed.value,
+      );
+      const beforeRevision = await harness.store.apiSpecs.findCurrentByApi(apiId);
+      faults.failNext('settings', 'set', new Error('repaired metadata refused'));
+      await assert.rejects(
+        harness.services.publishing.updateSpec(
+          actor,
+          apiId,
+          SAMPLE_SPEC_YAML.replace('2.4.0', '2.5.0'),
+        ),
+        /repaired metadata refused/,
+      );
+      assert.deepEqual((await harness.store.apis.findById(apiId))?.agents, originalAgents);
+      assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(apiId), beforeRevision);
+      assert.deepEqual(await harness.store.settings.get(key), originalSealed);
+      const uploaded = await harness.services.publishing.updateSpec(
+        actor,
+        apiId,
+        SAMPLE_SPEC_YAML.replace('2.4.0', '2.5.0'),
+      );
+      assert.notDeepEqual(uploaded.api.agents, originalAgents);
+      const revisedSealed = await harness.store.settings.get(key);
+      assert.ok(revisedSealed?.encrypted && typeof revisedSealed.value === 'string');
+      const revised = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
+        revisedSealed.value,
+      );
+      for (const field of [
+        'shape',
+        'proxy',
+        'plugins',
+        'document',
+        'originalSpecDocument',
+        'attempt',
+      ]) {
+        assert.deepEqual(revised[field], original[field], `${field} retains the original baseline`);
+      }
+      assert.deepEqual((revised.catalogShape as { agents: unknown }).agents, uploaded.api.agents);
+      await assert.rejects(
+        harness.services.publishing.restoreGateway(actor, apiId),
+        /Atomic removal of a partial conversion is unavailable/,
+      );
+      await harness.edgeClient.proxies.delete(proxyId, actor.id, {
+        cleanupOrphanedUpstream: false,
+      });
+      const restored = await harness.services.publishing.restoreGateway(actor, apiId);
+      assert.equal(restored.api.gateway_state, 'deployed');
+      assert.deepEqual(restored.api.agents, uploaded.api.agents);
+      assert.equal(restored.spec.parsed_version, '2.5.0');
+      assert.equal(await harness.store.settings.get(key), null);
+    });
+
+    for (const resource of ['proxy', 'plugin', 'spec'] as const) {
+      it(`preserves a concurrent Admin ${resource} change at the recovery boundary`, async () => {
+        const published = await publish('docs_only');
+        const apiId = published.api.id;
+        const proxyId = published.api.ferrum_proxy_id!;
+        const createSpec = harness.edgeClient.apiSpecs.create;
+        harness.edgeClient.apiSpecs.create = async (...args) => {
+          const result = await createSpec(...args);
+          refusePolicy();
+          return result;
+        };
+        restoreMethods.push(() => {
+          harness.edgeClient.apiSpecs.create = createSpec;
+        });
+        await assert.rejects(
+          harness.services.publishing.update(actor, apiId, { spec_enforcement: 'routes' }),
+        );
+        harness.edgeClient.apiSpecs.create = createSpec;
+        harness.edge.setBackendEgressPolicy(publicEgressPolicy());
+        const listPlugins = harness.edgeClient.pluginConfigs.listByProxy;
+        const admit = harness.edgeClient.assertBackendEgress;
+        let armed = false;
+        let changed = false;
+        let operatorState = '';
+        const state = (): string =>
+          JSON.stringify({
+            proxies: [...harness.edge.proxies],
+            plugins: [...harness.edge.pluginConfigs],
+            specs: [...harness.edge.apiSpecs],
+          });
+        harness.edgeClient.pluginConfigs.listByProxy = async (...args) => {
+          const result = await listPlugins(...args);
+          if (args[0] === proxyId && !changed) armed = true;
+          return result;
+        };
+        harness.edgeClient.assertBackendEgress = async () => {
+          await admit();
+          if (!armed || changed) return;
+          changed = true;
+          // A real admitted HTTP mutation interleaves after recovery's validation.
+          if (resource === 'proxy') {
+            const live = (await harness.edgeClient.proxies.get(proxyId))!;
+            await harness.edgeClient.proxies.replace(proxyId, {
+              ...live,
+              hosts: ['concurrent.operator.example.test'],
+            });
+          } else if (resource === 'plugin') {
+            const plugin = (await listPlugins(proxyId))[0]!;
+            await harness.edgeClient.pluginConfigs.replace(plugin.id, {
+              plugin_name: plugin.plugin_name,
+              scope: plugin.scope,
+              proxy_id: proxyId,
+              enabled: plugin.enabled,
+              config: plugin.config,
+              labels: { operator: 'concurrent' },
+            });
+          } else {
+            const spec = harness.edge.apiSpecForProxy(proxyId)!;
+            await harness.edgeClient.apiSpecs.replace(spec.id, {
+              ...spec.document,
+              info: {
+                ...(spec.document.info as Record<string, unknown>),
+                title: 'Operator revision',
+              },
+            });
+          }
+          operatorState = state();
+        };
+        restoreMethods.push(() => {
+          harness.edgeClient.pluginConfigs.listByProxy = listPlugins;
+          harness.edgeClient.assertBackendEgress = admit;
+        });
+        const offset = harness.edge.requests.length;
+        await assert.rejects(harness.services.publishing.restoreGateway(actor, apiId));
+        assert.ok(changed);
+        assert.equal(state(), operatorState);
+        assert.ok(!harness.edge.requests.slice(offset).some((call) => call.method === 'DELETE'));
+        assert.ok(await harness.store.settings.get(`gateway_recovery:nexus:${apiId}`));
+        assert.equal((await harness.store.apis.findById(apiId))?.gateway_state, 'repair_required');
+      });
     }
 
     it('refuses agent ACL enrollment before changing an active grant or consumer', async () => {
@@ -495,25 +899,24 @@ export function runEdgeSecurityAdoptionContract(
       assert.deepEqual(stored.labels, { operator: 'retained' });
 
       const verification = harness.edgeClient.consumers.verification;
+      let originalTag: string | undefined;
       harness.edgeClient.consumers.verification = async (...args) => {
         const snapshot = await verification(...args);
+        originalTag = snapshot?.etag;
         stored.credentials.keyauth![0]!.key = `concurrent-${newId()}`;
         return snapshot;
       };
       restoreMethods.push(() => {
         harness.edgeClient.consumers.verification = verification;
       });
-      for (const operation of [
+      const operations = [
         () => provisioner.mutateAclGroups(id, () => ['new-group']),
-        async () => {
-          stored.acl_groups = ['operator-group', 'nexus:api:stray:approved'];
-          await harness.services.credentials.restoreGatewayAccess(user.id, actor.id);
-        },
-        async () => {
-          await harness.store.users.update(user.id, { status: 'disabled' });
-          await harness.services.credentials.disableGatewayAccess(user.id, actor.id);
-        },
-      ]) {
+        () => harness.services.credentials.restoreGatewayAccess(user.id, actor.id),
+        () => harness.services.credentials.disableGatewayAccess(user.id, actor.id),
+      ];
+      for (const [index, operation] of operations.entries()) {
+        if (index === 1) stored.acl_groups = ['operator-group', 'nexus:api:stray:approved'];
+        if (index === 2) await harness.store.users.update(user.id, { status: 'disabled' });
         const groupsBefore = [...stored.acl_groups];
         const offset = harness.edge.requests.length;
         await assert.rejects(operation, (error: unknown) => {
@@ -523,6 +926,8 @@ export function runEdgeSecurityAdoptionContract(
           return true;
         });
         assert.deepEqual(stored.acl_groups, groupsBefore);
+        assert.equal(harness.edge.callsTo('PUT', `/consumers/${id}`).at(-1)?.ifMatch, originalTag);
+        assert.ok(originalTag?.startsWith('"') && originalTag.endsWith('"'));
         assert.ok(
           !harness.edge.requests.slice(offset).some((request) => request.method === 'DELETE'),
         );
@@ -537,9 +942,13 @@ export function runEdgeSecurityAdoptionContract(
       });
       assert.deepEqual(
         stored.credentials,
-        {},
-        'teardown removes hidden/custom types through dedicated endpoints',
+        { custom: expected.custom, mtls_auth: expected.mtls_auth },
+        'teardown removes only the three Nexus-supported credential types',
       );
+      for (const type of ['keyauth', 'basicauth', 'jwt']) {
+        assert.ok(harness.edge.callsTo('DELETE', `/consumers/${id}/credentials/${type}`).length > 0);
+      }
+      assert.deepEqual(stored.acl_groups, ['operator-group']);
       assert.deepEqual(stored.labels, { operator: 'retained' });
       assert.ok(put.ifMatch);
       assert.ok(!JSON.stringify(put.body).includes(password));

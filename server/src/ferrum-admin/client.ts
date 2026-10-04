@@ -279,7 +279,11 @@ export interface FerrumAdminClient {
      * changed fields overwritten — see {@link EdgeProxyReplace}.
      */
     replace(id: string, body: EdgeProxyReplace, subject?: string): Promise<EdgeProxy>;
-    delete(id: string, subject?: string): Promise<void>;
+    delete(
+      id: string,
+      subject?: string,
+      options?: { cleanupOrphanedUpstream: false },
+    ): Promise<void>;
   };
 
   readonly pluginConfigs: {
@@ -1832,8 +1836,16 @@ export function createFerrumAdminClient(
           subject,
         });
       },
-      async delete(id: string, subject?: string): Promise<void> {
-        await call('DELETE', `/proxies/${encodeURIComponent(id)}`, { subject, allow404: true });
+      async delete(
+        id: string,
+        subject?: string,
+        options?: { cleanupOrphanedUpstream: false },
+      ): Promise<void> {
+        await call('DELETE', `/proxies/${encodeURIComponent(id)}`, {
+          subject,
+          allow404: true,
+          query: { cleanup_orphaned_upstream: options?.cleanupOrphanedUpstream },
+        });
       },
     },
 

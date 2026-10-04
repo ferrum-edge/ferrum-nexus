@@ -26,6 +26,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   canonical-pin finishing. Versions and current pins remain unchanged; the advisory
   is not declared fixed. See [proposal limitations](docs/security.md#1-threat-model).
 
+- **Draft conversion recovery hardening** (PR #522): encrypted baseline, repair
+  state and intent audit commit before teardown; catalog mode, ownership,
+  completion audit and journal removal commit together. Combined PATCHes capture
+  the baseline before gateway writes. Corrected agent uploads preserve original
+  replay resources while authorizing the new catalog tool ids. Conversion and
+  restore cleanup preserve hand-owned orphan upstreams. Credential teardown
+  removes Nexus-supported keyauth/Basic/JWT state and retains custom/mTLS state.
+  Live partial cleanup now refuses without mutation: released Edge namespace
+  replacement changes unrelated fields. Automatic rollback and vanished-catalog
+  cleanup remain blocked pending the [owner API](docs/edge-conversion-recovery-blocker.md).
+  New four-store interruption and concurrent Admin regressions require hosted CI.
+
 - **Optional MCP tool subsets** (Refs #446). Consumers request published exposure IDs;
   providers can narrow approval. Separate MCP-all/per-tool groups preserve REST access
   and prevent its approval group bypassing subsets. Null retains all published tools;
