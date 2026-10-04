@@ -49,10 +49,7 @@ export function validatedManifest(body: unknown): Manifest {
       throw validationFailed('Manifest budget exceeded');
     }
     const { value, depth } = entry;
-    if (
-      typeof value === 'string' &&
-      (value.length > 2048 || /[\u0000-\u001f\u007f]/.test(value))
-    ) {
+    if (typeof value === 'string' && (value.length > 2048 || /[\u0000-\u001f\u007f]/.test(value))) {
       throw validationFailed('Manifest presentation string is invalid');
     }
     if (value && typeof value === 'object') {

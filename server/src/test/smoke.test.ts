@@ -2063,9 +2063,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
               paths: { '/items': { get: { responses: { '200': { description: 'OK' } } } } },
             }),
             agents: {
-              operations: [
-                { path: '/items', method: 'GET', name: 'items', description: 'Items' },
-              ],
+              operations: [{ path: '/items', method: 'GET', name: 'items', description: 'Items' }],
             },
           },
         });

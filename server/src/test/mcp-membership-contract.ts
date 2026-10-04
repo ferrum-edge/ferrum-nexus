@@ -538,7 +538,10 @@ export function runMcpMembershipContract(
                 const allowed: string[] | undefined =
                   policy.tools[`${current.slug}.${tool.name}`]?.allowed_groups;
                 assert.ok(allowed);
-                assert.equal(allowed.some((group) => groups.includes(group)), false);
+                assert.equal(
+                  allowed.some((group) => groups.includes(group)),
+                  false,
+                );
               }
               assert.deepEqual(
                 f.live.acl_groups,
@@ -581,7 +584,10 @@ export function runMcpMembershipContract(
                     assert.ok(heldLeaseFences().some((lease) => lease.key === key));
                     assert.deepEqual(live?.acl_groups, groups);
                     const eligible = await target.store.apis.findById(f.api.id);
-                    assert.deepEqual(eligible?.agents?.operations.map((tool) => tool.id), f.ids);
+                    assert.deepEqual(
+                      eligible?.agents?.operations.map((tool) => tool.id),
+                      f.ids,
+                    );
                     await loseProxyLease(key);
                     await rotate();
                   } catch (error) {
@@ -774,7 +780,10 @@ export function runMcpMembershipContract(
                 mcpAllGroupForApi(f.api.id),
                 mcpToolGroupForApi(f.api.id, tool.id),
               ]);
-              assert.equal(allowed.some((group) => groups.includes(group)), false);
+              assert.equal(
+                allowed.some((group) => groups.includes(group)),
+                false,
+              );
             }
           }
           assert.deepEqual((await target.store.grants.findById(f.grant.id))?.approved_tools, f.ids);
@@ -877,7 +886,10 @@ export function runMcpMembershipContract(
                   harness.edge.consumerByUsername(f.row.ferrum_username, f.row.namespace),
                   undefined,
                 );
-                assert.equal(await harness.edgeClient.consumers.get(f.row.ferrum_consumer_id), null);
+                assert.equal(
+                  await harness.edgeClient.consumers.get(f.row.ferrum_consumer_id),
+                  null,
+                );
                 assert.deepEqual(await target.store.consumers.findById(f.row.id), f.row);
                 assert.equal(harness.edge.callsTo('PUT', `/consumers/${f.live.id}`).length, writes);
                 assert.equal(harness.edge.callsTo('POST', '/consumers').length, creations);

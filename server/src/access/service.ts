@@ -520,7 +520,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     await provisioner.mutateAclGroups(
       consumer.ferrum_consumer_id,
       (groups) => {
-        const retained = groups.filter((entry) => entry !== group && !isMcpGroupForApi(entry, apiId));
+        const retained = groups.filter(
+          (entry) => entry !== group && !isMcpGroupForApi(entry, apiId),
+        );
         return present ? [...retained, group, ...toolGroups] : retained;
       },
       user.id,
@@ -1412,7 +1414,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           throw conflict('This identity already has an active grant for this API');
         }
 
-        const tools = approvedTools === undefined ? (request.requested_tools ?? null) : approvedTools;
+        const tools =
+          approvedTools === undefined ? (request.requested_tools ?? null) : approvedTools;
         validateToolSubset(api, tools);
         if (
           request.requested_tools != null &&

@@ -552,7 +552,9 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
           <CardBody>
             <AgentToolList
               agents={
-                canCall ? grantedAgentTools(api.agents, access.data?.grant?.approved_tools) : api.agents
+                canCall
+                  ? grantedAgentTools(api.agents, access.data?.grant?.approved_tools)
+                  : api.agents
               }
               slug={api.slug}
               title={canCall ? 'Tools covered by this grant' : 'Tools available after approval'}

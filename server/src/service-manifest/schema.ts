@@ -76,7 +76,10 @@ function compile(node: SchemaNode): z.ZodType {
       node.additionalProperties === false ? z.strictObject(shape) : z.object(shape).passthrough();
   } else if (node.type === 'array') {
     if (!node.items) throw new Error('Missing service manifest item schema');
-    validator = z.array(compile(node.items)).min(node.minItems ?? 0).max(32);
+    validator = z
+      .array(compile(node.items))
+      .min(node.minItems ?? 0)
+      .max(32);
   } else if (node.type === 'string') {
     validator = z.string().max(Math.min(node.maxLength ?? 2048, 2048));
   } else if (node.type === 'integer' || node.type === 'number') {
@@ -115,12 +118,12 @@ function compile(node: SchemaNode): z.ZodType {
     validator = validator.refine((value) =>
       Boolean(
         value &&
-          typeof value === 'object' &&
-          Object.entries(dependencies).every(
-            ([key, required]) =>
-              !Object.hasOwn(value, key) ||
-              required.every((dependency) => Object.hasOwn(value, dependency)),
-          ),
+        typeof value === 'object' &&
+        Object.entries(dependencies).every(
+          ([key, required]) =>
+            !Object.hasOwn(value, key) ||
+            required.every((dependency) => Object.hasOwn(value, dependency)),
+        ),
       ),
     );
   }

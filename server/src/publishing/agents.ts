@@ -45,7 +45,8 @@ export function identifyAgentTools(
       const prior =
         !rotate &&
         previous?.operations.find(
-          (item) => item.method === tool.method && item.path === tool.path && item.name === tool.name,
+          (item) =>
+            item.method === tool.method && item.path === tool.path && item.name === tool.name,
         );
       return { ...tool, id: prior ? (prior.id ?? newId()) : newId() };
     }),

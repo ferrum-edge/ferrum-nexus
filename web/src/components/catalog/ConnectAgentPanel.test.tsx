@@ -108,5 +108,4 @@ describe('agent connection guidance', () => {
     render(<AgentGrantSummary agents={agents} subset={[]} label="Empty grant" />);
     expect(screen.getByText(/Empty grant: none; REST access only/)).toBeInTheDocument();
   });
-
 });

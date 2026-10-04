@@ -19,7 +19,9 @@ describe('proposed immutable service-manifest consumer', () => {
       const [, digest, path] = /^sha256: ([a-f0-9]{64})  (.+)$/.exec(line) ?? [];
       assert.ok(path);
       assert.equal(
-        createHash('sha256').update(readFileSync(new URL(path, root))).digest('hex'),
+        createHash('sha256')
+          .update(readFileSync(new URL(path, root)))
+          .digest('hex'),
         digest,
       );
     }
@@ -52,7 +54,9 @@ describe('proposed immutable service-manifest consumer', () => {
       assert.throws(() => validatedManifest({ ...original, [key]: null }));
       if (value && typeof value === 'object') {
         for (const field of Object.keys(value)) {
-          assert.throws(() => validatedManifest({ ...original, [key]: { ...value, [field]: null } }));
+          assert.throws(() =>
+            validatedManifest({ ...original, [key]: { ...value, [field]: null } }),
+          );
         }
         assert.throws(() => validatedManifest({ ...original, [key]: { ...value, unknown: true } }));
       }
@@ -89,7 +93,10 @@ describe('proposed immutable service-manifest consumer', () => {
       const before = harness.edge.requests.length;
       const url = '/api/service-manifests/preview';
       assert.equal((await harness.app.inject({ method: 'POST', url, payload })).statusCode, 401);
-      assert.equal((await harness.authed(client, { method: 'POST', url, payload })).statusCode, 403);
+      assert.equal(
+        (await harness.authed(client, { method: 'POST', url, payload })).statusCode,
+        403,
+      );
       assert.equal(
         (
           await harness.app.inject({

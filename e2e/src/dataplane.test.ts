@@ -456,7 +456,12 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     const text = await response.text();
     assert.equal((JSON.parse(text) as { preview_only: boolean }).preview_only, true);
     assert.equal(text.includes('[REDACTED]'), true);
-    for (const secret of ['secret-', 'nonexistent', 'redacted description', 'manifest-must-not-fetch']) {
+    for (const secret of [
+      'secret-',
+      'nonexistent',
+      'redacted description',
+      'manifest-must-not-fetch',
+    ]) {
       assert.equal(text.includes(secret), false, secret);
     }
     const foreign = await portalRaw('POST', '/api/service-manifests/preview', {
@@ -503,15 +508,19 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
   ): Promise<void> {
     const id = api.agents?.operations.find((tool) => tool.name === 'list_invoices')?.id;
     assert.ok(id);
-    const request = await portal<{ access_request: { id: string } }>('POST', '/api/access-requests', {
-      session: client,
-      body: {
-        api_id: api.id,
-        application_id: applicationId,
-        justification: 'Read tool only',
-        requested_tools: [id],
+    const request = await portal<{ access_request: { id: string } }>(
+      'POST',
+      '/api/access-requests',
+      {
+        session: client,
+        body: {
+          api_id: api.id,
+          application_id: applicationId,
+          justification: 'Read tool only',
+          requested_tools: [id],
+        },
       },
-    });
+    );
     await portal('POST', `/api/access-requests/${request.access_request.id}/approve`, {
       session: provider,
       body: {},
@@ -763,14 +772,18 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       [empty, []],
       [all, null],
     ] as const) {
-      const request = await portal<{ access_request: { id: string } }>('POST', '/api/access-requests', {
-        session: client,
-        body: {
-          api_id: api.id,
-          justification: 'Lifecycle acceptance',
-          ...(subset !== null ? { requested_tools: subset } : {}),
+      const request = await portal<{ access_request: { id: string } }>(
+        'POST',
+        '/api/access-requests',
+        {
+          session: client,
+          body: {
+            api_id: api.id,
+            justification: 'Lifecycle acceptance',
+            ...(subset !== null ? { requested_tools: subset } : {}),
+          },
         },
-      });
+      );
       await portal('POST', `/api/access-requests/${request.access_request.id}/approve`, {
         session: provider,
         body: {},
@@ -839,9 +852,8 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         'DROP TRIGGER subset_policy_failure ON apis; DROP FUNCTION subset_policy_failure();',
       );
     }
-    await waitFor(
-      'failed publishing to restore the old subset policy',
-      async () => (await names(selectedSession)).includes(`${api.slug}.list_invoices`),
+    await waitFor('failed publishing to restore the old subset policy', async () =>
+      (await names(selectedSession)).includes(`${api.slug}.list_invoices`),
     );
     const restored = await result(
       await rpc(api, await initializeAgent(api, selectedHeaders), 'tools/call', {

@@ -600,5 +600,4 @@ describe('agent publishing and Nexus authorization', () => {
     assert.equal(enabled.statusCode, 200, enabled.body);
     assert.notEqual(enabled.json<PublishApiResponse>().api.agents?.operations[0]?.id, id);
   });
-
 });
