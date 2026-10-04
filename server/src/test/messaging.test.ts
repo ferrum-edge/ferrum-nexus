@@ -231,6 +231,7 @@ describe('messaging access follows the current role, not the thread’s creator'
       payload: { role: 'super_admin' },
     });
     assert.equal(promoted.statusCode, 200, promoted.body);
+    broadcaster = await harness.loginUser('seat-broadcaster@example.test');
 
     const broadcast = await harness.authed(broadcaster, {
       method: 'POST',

@@ -20,6 +20,7 @@ import {
   CSRF_COOKIE,
   SESSION_COOKIE,
   SSO_TRANSACTION_COOKIE,
+  type ReleaseUserAddressResponse,
   type SsoAdminSettingsResponse,
   type SsoPublicConfigResponse,
   type User,
@@ -1526,6 +1527,21 @@ describe('single sign-on', () => {
       h.authed(founder, { method: 'PUT', url: '/api/admin/sso', payload: { providers } });
     assert.equal((await put([provider])).statusCode, 200);
 
+    const provenLocal = await localAccount('ordered-linked@corp.example.test', true);
+    leases.taken = [];
+    const linked = await signIn(h, corp, 'ordered', {
+      sub: 'ordered-linked-subject',
+      email: provenLocal.email,
+      email_verified: true,
+    });
+    assert.equal((await sessionOf(h, linked)).user.id, provenLocal.id);
+    const linkedLifecycleKey = userLifecycleLockKey(provenLocal.id);
+    assert.deepEqual(
+      leases.taken.filter((key) => key.startsWith('sso:') || key === linkedLifecycleKey),
+      [ssoProviderLockKey('ordered'), linkedLifecycleKey],
+      'a first-time automatic link takes the account lifecycle lock',
+    );
+
     // A returning sign-in holds only its account's key: sign-ins at one
     // provider do not queue behind each other deployment-wide.
     const returning = person('ordered-returning');
@@ -1571,7 +1587,177 @@ describe('single sign-on', () => {
     const removal = (await h.auditRows(AuditAction.ADMIN_SETTINGS_UPDATE)).find(
       (row) => row.target_id === SSO_SETTINGS_KEY,
     );
-    assert.deepEqual(removal?.details.links_removed, { ordered: 2 });
+    assert.deepEqual(removal?.details.links_removed, { ordered: 3 });
+  });
+
+  it('takes the account lifecycle lock for every manual role change', async () => {
+    const target = await localAccount('manual-role-lock@corp.example.test', true);
+    leases.taken = [];
+    const response = await h.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${target.id}`,
+      payload: { role: 'provider' },
+    });
+
+    assert.equal(response.statusCode, 200, response.body);
+    assert.ok(leases.taken.includes(userLifecycleLockKey(target.id)));
+  });
+
+  it('refuses a manual admin promotion while a lower-trust identity is linked', async () => {
+    const target = await localAccount('manual-promotion-trust@corp.example.test', true);
+    const linked = await signIn(h, partner, 'partner', {
+      sub: 'manual-promotion-lower-trust',
+      email: target.email,
+      email_verified: true,
+      groups: ['partners'],
+    });
+    const oldSession = await sessionOf(h, linked);
+    assert.equal(oldSession.user.id, target.id);
+
+    const promotion = await h.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${target.id}`,
+      payload: { role: 'admin' },
+    });
+    assert.equal(promotion.statusCode, 409, promotion.body);
+    assert.match(promotion.body, /lower_trust_provider_ids/);
+    assert.equal((await h.store.users.findById(target.id))?.role, 'client');
+    assert.equal(
+      (await h.authed(oldSession, { method: 'GET', url: '/api/auth/me' })).statusCode,
+      200,
+    );
+
+    const [identity] = await h.store.userIdentities.listByUser(target.id);
+    assert.ok(identity);
+    const unlinked = await h.authed(founder, {
+      method: 'DELETE',
+      url: `/api/users/${target.id}/identities/${identity.id}`,
+    });
+    assert.equal(unlinked.statusCode, 200, unlinked.body);
+    // Unlinking itself leaves the lower-trust browser signed in.
+    assert.equal(
+      (await h.authed(oldSession, { method: 'GET', url: '/api/auth/me' })).statusCode,
+      200,
+    );
+    const promoted = await h.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${target.id}`,
+      payload: { role: 'super_admin' },
+    });
+    assert.equal(promoted.statusCode, 200, promoted.body);
+    assert.equal(
+      (await h.authed(oldSession, { method: 'GET', url: '/api/auth/me' })).statusCode,
+      401,
+    );
+    const row = (await h.auditRows(AuditAction.USER_ROLE_CHANGE)).find(
+      (entry) => entry.target_id === target.id,
+    );
+    assert.equal(row?.details.terminated_sessions, 1);
+  });
+
+  it('releases a squatted address for a separate rightful admin-mapped SSO account', async () => {
+    const who = person('address-recovery');
+    const squatter = await sessionOf(
+      h,
+      await signIn(h, partner, 'partner', {
+        ...who,
+        email_verified: true,
+        groups: ['partners'],
+      }),
+    );
+    const rightfulClaims = {
+      sub: `${who.sub}-rightful`,
+      email: who.email,
+      email_verified: true,
+      groups: ['portal-admins'],
+    };
+    assert.equal(ssoError(await signIn(h, corp, 'corp', rightfulClaims)), 'privileged_account');
+    const disabled = await h.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${squatter.user.id}`,
+      payload: { status: 'disabled' },
+    });
+    assert.equal(disabled.statusCode, 200, disabled.body);
+    const [identity] = await h.store.userIdentities.listByUser(squatter.user.id);
+    assert.ok(identity);
+    const unlinked = await h.authed(founder, {
+      method: 'DELETE',
+      url: `/api/users/${squatter.user.id}/identities/${identity.id}`,
+    });
+    assert.equal(unlinked.statusCode, 200, unlinked.body);
+    // Disable and unlink alone deliberately do not hand off the old account.
+    assert.equal(ssoError(await signIn(h, corp, 'corp', rightfulClaims)), 'privileged_account');
+    const released = await h.authed(founder, {
+      method: 'POST',
+      url: `/api/users/${squatter.user.id}/release-address`,
+      payload: { email: who.email },
+    });
+    assert.equal(released.statusCode, 200, released.body);
+    const rightful = await sessionOf(h, await signIn(h, corp, 'corp', rightfulClaims));
+    assert.notEqual(rightful.user.id, squatter.user.id);
+    assert.equal(rightful.user.email, who.email);
+    assert.equal(rightful.user.role, 'admin');
+    assert.deepEqual(
+      (await h.store.userIdentities.listByUser(rightful.user.id)).map((entry) => entry.provider_id),
+      ['corp'],
+    );
+    assert.equal(
+      (await h.authed(squatter, { method: 'GET', url: '/api/auth/me' })).statusCode,
+      401,
+    );
+    assert.equal((await h.store.users.findById(squatter.user.id))?.status, 'disabled');
+    const oldProvider = await signIn(h, partner, 'partner', {
+      ...who,
+      email_verified: true,
+      groups: ['partners'],
+    });
+    assert.equal(ssoError(oldProvider), 'privileged_account');
+    const retained = released.json<ReleaseUserAddressResponse>().user;
+    const tombstoneAttempt = await signIn(h, corp, 'corp', {
+      sub: `${who.sub}-tombstone`,
+      email: retained.email,
+      email_verified: true,
+    });
+    assert.equal(ssoError(tombstoneAttempt), 'email_required');
+  });
+
+  it('audits providers whose settings stop granting admin trust', async () => {
+    const before = await readStoredSsoSettings(h.store);
+    const trusted = {
+      id: 'trust-lowered',
+      display_name: 'Trust lowered',
+      issuer: 'https://trust-lowered.example.test',
+      client_id: 'nexus-trust-lowered',
+      client_secret: 'test-secret',
+      scopes: ['openid', 'email'],
+      enabled: true,
+      jit_provisioning: true,
+      link_existing_accounts: false,
+      require_verified_email: true,
+      allowed_email_domains: [],
+      disable_local_password_for_linked: false,
+      sync_roles: true,
+      default_role: 'admin',
+      role_mappings: [],
+      org_mappings: [],
+    };
+    const saveProviders = (providers: unknown[]): Promise<LightMyRequestResponse> =>
+      h.authed(founder, { method: 'PUT', url: '/api/admin/sso', payload: { providers } });
+    try {
+      const added = await saveProviders([...before.providers, trusted]);
+      assert.equal(added.statusCode, 200, added.body);
+      const lowered = await saveProviders([...before.providers, { ...trusted, sync_roles: false }]);
+      assert.equal(lowered.statusCode, 200, lowered.body);
+      const row = (await h.auditRows(AuditAction.ADMIN_SETTINGS_UPDATE)).find(
+        (entry) =>
+          entry.target_id === SSO_SETTINGS_KEY &&
+          Array.isArray(entry.details.providers_trust_lowered) &&
+          entry.details.providers_trust_lowered.includes('trust-lowered'),
+      );
+      assert.deepEqual(row?.details.providers_trust_lowered, ['trust-lowered']);
+    } finally {
+      await saveProviders(before.providers);
+    }
   });
 
   it('refuses a settings save when the settings changed after it read them', async () => {

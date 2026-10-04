@@ -1,0 +1,6 @@
+{
+  "id": "007_outbox_recipient",
+  "backend": "mongodb",
+  "description": "Snapshot of the 007_outbox_recipient step, which backfills nullable recipient_user_id and declares no index",
+  "indexes": []
+}

@@ -4,6 +4,7 @@ import {
   DEFAULT_PAGE_SIZE,
   ROLE_LABELS,
   ROLE_ORDER,
+  isReleasedEmail,
   roleAtLeast,
   type GetOrganizationResponse,
   type Organization,
@@ -12,7 +13,15 @@ import {
   type UserStatus,
 } from '@ferrum-nexus/shared';
 import { formatDateTime, formatRelative } from '../../lib/format';
-import { useRetryGatewayTeardown, useUpdateUser, useUser, useUsers } from '../../hooks/useUsers';
+import {
+  useReleaseUserAddress,
+  useRetryGatewayTeardown,
+  useUnlinkUserIdentity,
+  useUpdateUser,
+  useUser,
+  useUserIdentities,
+  useUsers,
+} from '../../hooks/useUsers';
 import { useAuth } from '../../stores/auth';
 import { useToast } from '../../stores/toast';
 import { RoleGuard } from '../../components/layout/RoleGuard';
@@ -58,6 +67,7 @@ function initials(displayName: string): string {
  */
 function roleLockReason(actor: User | null, target: User, lastSuperAdmin: boolean): string | null {
   if (actor === null) return null;
+  if (isReleasedEmail(target.email)) return 'This retained account must remain disabled.';
   if (!roleAtLeast(actor.role, 'super_admin') && roleAtLeast(target.role, 'admin')) {
     return 'Only a super admin can change an administrator’s role.';
   }
@@ -74,6 +84,7 @@ function statusLockReason(
   lastSuperAdmin: boolean,
 ): string | null {
   if (actor === null) return null;
+  if (isReleasedEmail(target.email)) return 'This retained account must remain disabled.';
   if (!roleAtLeast(actor.role, 'super_admin') && roleAtLeast(target.role, 'admin')) {
     return 'Only a super admin can disable or re-enable an administrator.';
   }
@@ -267,6 +278,114 @@ function EditUserDialog({ user, onClose }: { user: User; onClose: () => void }):
   );
 }
 
+function ReleaseAddressDialog({
+  user,
+  onClose,
+}: {
+  user: User;
+  onClose: () => void;
+}): ReactElement {
+  const detail = useUser(user.id);
+  const identities = useUserIdentities(user.id);
+  const unlink = useUnlinkUserIdentity();
+  const release = useReleaseUserAddress();
+  const retry = useRetryGatewayTeardown();
+  const toast = useToast();
+  const ready =
+    detail.isSuccess &&
+    detail.data.user.status === 'disabled' &&
+    detail.data.gateway_teardown?.status === 'done' &&
+    identities.isSuccess &&
+    identities.data.items.length === 0;
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+      title="Release email address"
+      description={user.email}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            variant="ghost-danger"
+            disabled={!ready || unlink.isPending}
+            loading={release.isPending}
+            onClick={() =>
+              release.mutate(
+                { id: user.id, email: user.email },
+                {
+                  onSuccess: () => {
+                    toast.success('Address released; its rightful holder can sign in again');
+                    onClose();
+                  },
+                },
+              )
+            }
+          >
+            Release address
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4 text-sm">
+        <p>
+          Use this after reviewing an account that holds someone else’s address. Its ID and history
+          are retained, but it stays disabled permanently. Existing sessions, recovery links and
+          queued mail are revoked. The rightful holder gets a separate account on their next
+          sign-in.
+        </p>
+        {detail.isError ? (
+          <QueryErrorState onRetry={() => detail.refetch()} retrying={detail.isFetching} />
+        ) : detail.data?.gateway_teardown?.status !== 'done' ? (
+          <div>
+            <p>Complete gateway revocation before releasing the address.</p>
+            <Button
+              size="sm"
+              variant="ghost"
+              loading={retry.isPending}
+              onClick={() => retry.mutate(user.id)}
+            >
+              Retry revocation
+            </Button>
+          </div>
+        ) : (
+          <p>Gateway revocation is complete.</p>
+        )}
+        <p>Remove every linked sign-in identity after reviewing it:</p>
+        {identities.isError ? (
+          <QueryErrorState onRetry={() => identities.refetch()} retrying={identities.isFetching} />
+        ) : identities.isPending ? (
+          <p>Loading linked identities…</p>
+        ) : identities.data.items.length === 0 ? (
+          <p>No linked identities remain.</p>
+        ) : (
+          identities.data.items.map((identity) => (
+            <div key={identity.id} className="flex items-center justify-between gap-2">
+              <span className="break-all">
+                {identity.provider_id}: {identity.subject}
+              </span>
+              <Button
+                size="sm"
+                variant="ghost-danger"
+                loading={unlink.isPending}
+                onClick={() => unlink.mutate({ id: user.id, identityId: identity.id })}
+              >
+                Remove
+              </Button>
+            </div>
+          ))
+        )}
+        <p>If email delivery is in progress, wait for it to settle and retry the release.</p>
+      </div>
+    </Dialog>
+  );
+}
+
 function UsersTable(): ReactElement {
   const [offset, setOffset] = useState(0);
   const [search, setSearch] = useState('');
@@ -312,6 +431,7 @@ function UsersTable(): ReactElement {
   const toast = useToast();
   const [statusTarget, setStatusTarget] = useState<User | null>(null);
   const [editTarget, setEditTarget] = useState<User | null>(null);
+  const [releaseTarget, setReleaseTarget] = useState<User | null>(null);
   // Portal-wide, so a page with no outstanding revocation costs no extra
   // requests at all — the per-row detail is only fetched when this is non-zero.
   const pendingTeardowns = query.data?.pending_gateway_teardowns ?? 0;
@@ -432,6 +552,18 @@ function UsersTable(): ReactElement {
               >
                 Edit
               </Button>
+              {actor?.role === 'super_admin' &&
+              !active &&
+              row.original.role !== 'super_admin' &&
+              !isReleasedEmail(row.original.email) ? (
+                <Button
+                  size="sm"
+                  variant="ghost-danger"
+                  onClick={() => setReleaseTarget(row.original)}
+                >
+                  Release address
+                </Button>
+              ) : null}
               <Button
                 size="sm"
                 variant={active ? 'ghost-danger' : 'ghost'}
@@ -539,6 +671,14 @@ function UsersTable(): ReactElement {
 
       {editTarget ? (
         <EditUserDialog key={editTarget.id} user={editTarget} onClose={() => setEditTarget(null)} />
+      ) : null}
+
+      {releaseTarget ? (
+        <ReleaseAddressDialog
+          key={releaseTarget.id}
+          user={releaseTarget}
+          onClose={() => setReleaseTarget(null)}
+        />
       ) : null}
 
       <ConfirmDialog

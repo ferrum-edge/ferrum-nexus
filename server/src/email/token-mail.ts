@@ -81,6 +81,7 @@ export function emailTokenPreparer(
       await tx.emailOutbox.enqueue(
         sealedEnqueueInput(crypto, {
           to: user.email,
+          recipientUserId: user.id,
           content: rendered,
           idempotencyKey: `${delivery.keyPrefix}:${tokenId}`,
         }),

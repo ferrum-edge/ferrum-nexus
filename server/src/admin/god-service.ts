@@ -705,6 +705,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
               });
               const queued = await store.emailOutbox.enqueue({
                 to_email: recipient.email,
+                recipient_user_id: recipient.id,
                 subject: rendered.subject,
                 body_html: rendered.html,
                 body_text: rendered.text,

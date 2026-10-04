@@ -637,3 +637,11 @@ export function normalizeBrandingHexColor(input: string): string | null {
     .map((digit) => digit + digit)
     .join('')}`;
 }
+
+/** Reserved non-deliverable domain for retained accounts whose address was released. */
+export const RELEASED_EMAIL_DOMAIN = 'released.nexus.invalid';
+
+/** These addresses may never be registered, provisioned, or delivered mail. */
+export function isReleasedEmail(email: string): boolean {
+  return email.trim().toLowerCase().endsWith(`@${RELEASED_EMAIL_DOMAIN}`);
+}

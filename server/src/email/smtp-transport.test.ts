@@ -5,7 +5,12 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import type { ApiErrorBody, SmtpTestResponse } from '@ferrum-nexus/shared';
 
 import { buildTestApp, type TestApp, type TestSession } from '../test/helpers.js';
-import { createSmtpTransport, type MailTransport, type OutboundMail } from './service.js';
+import {
+  createSmtpTransport,
+  isDeliveredUnacknowledged,
+  type MailTransport,
+  type OutboundMail,
+} from './service.js';
 
 const USER = 'fixture-user';
 const PASSWORD = 'fixture-password';
@@ -187,6 +192,19 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
       false,
     );
     assert.equal(relay.messages.length, 0);
+    await transport.send(MAIL);
+    assert.equal(relay.messages.length, 1);
+  });
+
+  it('keeps an empty envelope retryable without claiming delivery', async () => {
+    await assert.rejects(transport.send({ ...MAIL, to: '' }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { code?: string }).code, 'EENVELOPE');
+      assert.equal(isDeliveredUnacknowledged(error), false);
+      return true;
+    });
+    assert.equal(relay.commands.includes('DATA'), false);
+    assert.deepEqual(relay.messages, []);
     await transport.send(MAIL);
     assert.equal(relay.messages.length, 1);
   });

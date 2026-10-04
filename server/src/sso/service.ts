@@ -69,6 +69,7 @@ import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import {
+  isReleasedEmail,
   roleAtLeast,
   SSO_TRANSACTION_TTL_SECONDS,
   type LoginPolicy,
@@ -95,6 +96,7 @@ import { SCRYPT_PARAMS, type NexusCrypto } from '../lib/crypto.js';
 import { conflict, forbidden, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import {
+  SSO_SETTINGS_LOCK_KEY,
   ssoProviderLockKey,
   userLifecycleLockKey,
   type KeyedSerializer,
@@ -207,6 +209,8 @@ export interface SsoService {
     patch: UpdateSsoSettingsRequest,
     ip: string | null,
   ): Promise<SsoAdminSettingsResponse>;
+  /** Refuse a manual admin promotion while lower-trust provider identities remain linked. */
+  assertManualAdminPromotionAllowed(tx: NexusStore, userId: Uuid): Promise<void>;
   listIdentities(userId: Uuid): Promise<UserIdentity[]>;
   /** Remove one link. Unlinking an administrator's identity needs a `super_admin`. */
   unlinkIdentity(
@@ -337,8 +341,13 @@ function grantsAdmin(provider: SsoProviderSettings): boolean {
 
 /** How a sign-in reaches its account. */
 type SignInPlan =
-  | { kind: 'returning'; user: UserRecord; identity: UserIdentityRecord }
-  | { kind: 'link'; user: UserRecord; explicit: boolean }
+  | {
+      kind: 'returning';
+      user: UserRecord;
+      identity: UserIdentityRecord;
+      initiatingSessionId?: Uuid;
+    }
+  | { kind: 'link'; user: UserRecord; explicit: boolean; initiatingSessionId?: Uuid }
   | { kind: 'provision' };
 
 /** Build the single sign-on service. */
@@ -455,6 +464,26 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         trusted.get(identity.provider_id) !== identity.issuer,
     );
     return [...new Set(others.map((identity) => identity.provider_id))].sort();
+  }
+
+  async function lowerTrustProvidersForManualPromotion(
+    tx: NexusStore,
+    userId: Uuid,
+    stored: StoredSsoSettings,
+  ): Promise<string[]> {
+    const trusted = new Map(
+      providersInForce(config, stored)
+        .filter(({ settings }) => grantsAdmin(settings))
+        .map(({ settings }): [string, string] => [settings.id, settings.issuer]),
+    );
+    const identities = await tx.userIdentities.listByUser(userId);
+    return [
+      ...new Set(
+        identities
+          .filter((identity) => trusted.get(identity.provider_id) !== identity.issuer)
+          .map((identity) => identity.provider_id),
+      ),
+    ].sort();
   }
 
   /**
@@ -690,7 +719,12 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       if (identity.user_id !== account.id) {
         throw new OidcError('already_linked', 'The identity is linked to another account');
       }
-      return { kind: 'returning', user: account, identity };
+      return {
+        kind: 'returning',
+        user: account,
+        identity,
+        initiatingSessionId: current.sessionId,
+      };
     }
     const links = await store.userIdentities.listByUser(account.id);
     if (links.some((link) => link.provider_id === settings.id)) {
@@ -707,7 +741,12 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     if (mapping.role === null && account.role !== 'super_admin') {
       throw new OidcError('access_denied', 'The claims map to no role');
     }
-    return { kind: 'link', user: account, explicit: true };
+    return {
+      kind: 'link',
+      user: account,
+      explicit: true,
+      initiatingSessionId: current.sessionId,
+    };
   }
 
   /** Decide which account the claims open, refusing with an {@link OidcError}. */
@@ -743,7 +782,9 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       return { kind: 'returning', user, identity };
     }
 
-    if (email === null) throw new OidcError('email_required', 'The ID token has no usable email');
+    if (email === null || isReleasedEmail(email)) {
+      throw new OidcError('email_required', 'The ID token has no usable email');
+    }
     checkDomains(email, emailVerified, settings.allowed_email_domains);
     const existing = await store.users.findByEmail(email);
     if (existing) {
@@ -869,6 +910,23 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
           if (!current) throw new OidcError('server_error', 'The account no longer exists');
           if (current.status !== 'active') {
             throw new OidcError('account_disabled', 'The account was disabled during sign-in');
+          }
+          if (plan.initiatingSessionId !== undefined) {
+            // The request's authenticated session was cached before token exchange.
+            // Promotion, logout or password recovery may have revoked it meanwhile.
+            // Check under the lifecycle lease, in the transaction that links and
+            // issues the replacement, including an already-linked explicit attempt.
+            const session = await tx.sessions.findById(plan.initiatingSessionId);
+            if (
+              !session ||
+              session.user_id !== current.id ||
+              Date.parse(session.expires_at) <= Date.now()
+            ) {
+              throw new OidcError(
+                'link_session_mismatch',
+                'The initiating session is no longer valid',
+              );
+            }
           }
           user = current;
           if (plan.kind === 'link') {
@@ -1324,53 +1382,76 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         ...providersInForce(config, stored).map(({ settings }) => settings.id),
         ...next.providers.map((provider) => provider.id),
       ];
-      await underProviderLocks(affected, () =>
-        store.transaction(async (tx) => {
-          // A compare-and-swap. Everything above, the keys just taken and the
-          // providers whose links go below included, was worked out from
-          // `stored`, which was read before any key was held. A save that
-          // committed since would make all of it stale: a provider it added
-          // would be dropped unlocked, and its links left behind.
-          if (!isDeepStrictEqual(await readStoredSsoSettings(tx), stored)) {
-            throw conflict(
-              'Single sign-on settings changed since they were read; reload and try again',
+      await locks(SSO_SETTINGS_LOCK_KEY, () =>
+        underProviderLocks(affected, () =>
+          store.transaction(async (tx) => {
+            // A compare-and-swap. Everything above, the keys just taken and the
+            // providers whose links go below included, was worked out from
+            // `stored`, which was read before any key was held. A save that
+            // committed since would make all of it stale: a provider it added
+            // would be dropped unlocked, and its links left behind.
+            if (!isDeepStrictEqual(await readStoredSsoSettings(tx), stored)) {
+              throw conflict(
+                'Single sign-on settings changed since they were read; reload and try again',
+              );
+            }
+            for (const id of reissued) {
+              if ((await tx.userIdentities.countByProvider(id)) > 0) throw issuerHasLinks(id);
+            }
+            await tx.settings.set(SSO_SETTINGS_KEY, next, false);
+            for (const [id, blob] of encrypted) {
+              if (blob === null) await tx.settings.delete(ssoClientSecretKey(id));
+              else await tx.settings.set(ssoClientSecretKey(id), blob, true);
+            }
+            // A removed provider's links go with it, so a provider added later
+            // under the same id starts with none. A stored provider shadowed by an
+            // environment one leaves the links alone: they are the environment
+            // provider's, which stays in force.
+            const envIds = new Set(config.sso.providers.map((provider) => provider.settings.id));
+            const linksRemoved: Record<string, number> = {};
+            for (const id of removed) {
+              if (envIds.has(id)) continue;
+              linksRemoved[id] = await tx.userIdentities.deleteByProvider(id);
+            }
+            const nextProviders = new Map(
+              providersInForce(config, next).map(({ settings }): [string, SsoProviderSettings] => [
+                settings.id,
+                settings,
+              ]),
             );
-          }
-          for (const id of reissued) {
-            if ((await tx.userIdentities.countByProvider(id)) > 0) throw issuerHasLinks(id);
-          }
-          await tx.settings.set(SSO_SETTINGS_KEY, next, false);
-          for (const [id, blob] of encrypted) {
-            if (blob === null) await tx.settings.delete(ssoClientSecretKey(id));
-            else await tx.settings.set(ssoClientSecretKey(id), blob, true);
-          }
-          // A removed provider's links go with it, so a provider added later
-          // under the same id starts with none. A stored provider shadowed by an
-          // environment one leaves the links alone: they are the environment
-          // provider's, which stays in force.
-          const envIds = new Set(config.sso.providers.map((provider) => provider.settings.id));
-          const linksRemoved: Record<string, number> = {};
-          for (const id of removed) {
-            if (envIds.has(id)) continue;
-            linksRemoved[id] = await tx.userIdentities.deleteByProvider(id);
-          }
-          // Key names and provider ids only: never a secret, and never the
-          // mappings themselves, which the settings page shows to admins anyway.
-          await audit.forStore(tx).record(
-            actor,
-            AuditAction.ADMIN_SETTINGS_UPDATE,
-            { type: 'settings', id: SSO_SETTINGS_KEY },
-            {
-              section: 'sso',
-              changed_keys: changed,
-              providers_added: added,
-              providers_removed: removed,
-              links_removed: linksRemoved,
-              client_secrets_changed: [...secretWrites.keys()],
-            },
-            ip,
-          );
-        }),
+            const providersTrustLowered = providersInForce(config, stored)
+              .filter(({ settings }) => {
+                const updated = nextProviders.get(settings.id);
+                return (
+                  updated !== undefined &&
+                  updated.issuer === settings.issuer &&
+                  grantsAdmin(settings) &&
+                  !grantsAdmin(updated)
+                );
+              })
+              .map(({ settings }) => settings.id)
+              .sort();
+            // Key names and provider ids only: never a secret, and never the
+            // mappings themselves, which the settings page shows to admins anyway.
+            await audit.forStore(tx).record(
+              actor,
+              AuditAction.ADMIN_SETTINGS_UPDATE,
+              { type: 'settings', id: SSO_SETTINGS_KEY },
+              {
+                section: 'sso',
+                changed_keys: changed,
+                providers_added: added,
+                providers_removed: removed,
+                links_removed: linksRemoved,
+                client_secrets_changed: [...secretWrites.keys()],
+                ...(providersTrustLowered.length > 0
+                  ? { providers_trust_lowered: providersTrustLowered }
+                  : {}),
+              },
+              ip,
+            );
+          }),
+        ),
       );
       oidc.clearCache();
       return getAdminSettings();
@@ -1379,6 +1460,21 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     async listIdentities(userId): Promise<UserIdentity[]> {
       if (!(await store.users.findById(userId))) throw notFound('User', userId);
       return (await store.userIdentities.listByUser(userId)).map(toUserIdentity);
+    },
+
+    async assertManualAdminPromotionAllowed(tx, userId): Promise<void> {
+      const lowerTrustProviders = await lowerTrustProvidersForManualPromotion(
+        tx,
+        userId,
+        await readStoredSsoSettings(tx),
+      );
+      if (lowerTrustProviders.length > 0) {
+        throw conflict(
+          'Remove or raise the trust of linked single sign-on identities before promoting ' +
+            'this account to admin',
+          { lower_trust_provider_ids: lowerTrustProviders },
+        );
+      }
     },
 
     async unlinkIdentity(actor, userId, identityId, ip): Promise<void> {

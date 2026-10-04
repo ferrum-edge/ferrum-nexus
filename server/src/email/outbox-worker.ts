@@ -65,10 +65,15 @@
  * no timers involved.
  */
 
-import { OUTBOX_MAX_ATTEMPTS, OUTBOX_POLL_INTERVAL_MS } from '@ferrum-nexus/shared';
+import {
+  isReleasedEmail,
+  OUTBOX_MAX_ATTEMPTS,
+  OUTBOX_POLL_INTERVAL_MS,
+} from '@ferrum-nexus/shared';
 
 import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
+import { createKeyedSerializer, userLifecycleLockKey } from '../lib/keyed-serializer.js';
 import { openOutboxRecord, sealLegacyBearerRows, type MailContent } from './sealed-outbox.js';
 import {
   isDeliveredUnacknowledged,
@@ -101,8 +106,9 @@ export const OUTBOX_STALE_AFTER_MS = 5 * 60_000;
 /**
  * Hard ceiling on one delivery attempt.
  *
- * `createSmtpTransport` races every `send` against this deadline, so the number
- * is a bound rather than an estimate. Pinning nodemailer's three timeouts
+ * `createSmtpTransport` destroys its owned connection at this deadline before
+ * `send` settles, so no deliverable operation is hidden behind a failed row.
+ * Pinning Nodemailer's three timeouts
  * (10 s to connect, 10 s for the greeting, 30 s of socket inactivity) is worth
  * doing but is *not* a total: `socketTimeout` measures inactivity between
  * reads, so a relay that answers every command just inside it — or dribbles
@@ -220,6 +226,7 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
   const batchSize = deps.batchSize ?? OUTBOX_BATCH_SIZE;
   const now = deps.now ?? ((): Date => new Date());
   const random = deps.random ?? Math.random;
+  const lifecycle = createKeyedSerializer({ leases: store.leases });
 
   let timer: NodeJS.Timeout | null = null;
   let inFlight: Promise<OutboxTickResult> | null = null;
@@ -235,6 +242,57 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
     result: OutboxTickResult,
     entry: EmailOutboxRecord,
   ): Promise<void> {
+    // This lookup selects the lifecycle key only. Eligibility is a persisted
+    // write inside deliverUnderLifecycle, never this possibly stale snapshot.
+    const recipient = entry.recipient_user_id
+      ? await store.users.findById(entry.recipient_user_id)
+      : await store.users.findByEmail(entry.to_email);
+    const userId = entry.recipient_user_id ?? recipient?.id;
+    const handoff = (): Promise<void> => deliverUnderLifecycle(transport, result, entry);
+    if (userId) await lifecycle(userLifecycleLockKey(userId), handoff);
+    else await handoff();
+  }
+
+  async function deliverUnderLifecycle(
+    transport: MailTransport,
+    result: OutboxTickResult,
+    entry: EmailOutboxRecord,
+  ): Promise<void> {
+    const at = new Date().toISOString();
+    const deadline = Date.parse(at) + OUTBOX_SEND_BUDGET_MS;
+    const authorized = await store.transaction(async (tx) => {
+      const current = await tx.emailOutbox.findById(entry.id);
+      if (current?.status !== 'sending' || current.generation !== entry.generation) return 'lost';
+      const legacyRecipient =
+        entry.recipient_user_id === null ? await tx.users.findByEmail(entry.to_email) : null;
+      const userId = entry.recipient_user_id ?? legacyRecipient?.id;
+      if (
+        isReleasedEmail(entry.to_email) ||
+        (userId && !(await tx.users.lockEmailRecipient(userId, entry.to_email)))
+      ) {
+        return (await tx.emailOutbox.markFailed(entry, 'recipient-address-changed'))
+          ? 'ineligible'
+          : 'lost';
+      }
+      // A real write on both the account and claimed row orders handoff with
+      // release, including an enqueue that missed the release's outbox scan.
+      return (await tx.emailOutbox.beginDelivery(entry, at)) ? 'allowed' : 'lost';
+    });
+    if (authorized === 'lost') {
+      lostClaim(result, entry, 'markSent');
+      return;
+    }
+    if (authorized === 'ineligible') {
+      result.failed += 1;
+      return;
+    }
+    if (Date.now() >= deadline) {
+      // A stalled authorization must not start SMTP after its delivery window.
+      if (await store.emailOutbox.reschedule(entry, now().toISOString(), 'handoff-expired')) {
+        result.rescheduled += 1;
+      } else lostClaim(result, entry, 'reschedule');
+      return;
+    }
     let content: MailContent;
     try {
       content = openOutboxRecord(crypto, entry);
@@ -243,17 +301,19 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
       return;
     }
     try {
-      await transport.send({
-        to: entry.to_email,
-        subject: content.subject,
-        html: content.html,
-        text: content.text,
-      });
+      await transport.send(
+        {
+          to: entry.to_email,
+          subject: content.subject,
+          html: content.html,
+          text: content.text,
+        },
+        { deadline },
+      );
     } catch (error) {
       if (isDeliveredUnacknowledged(error)) {
-        // The attempt was cut off after the relay had the whole message — a
-        // socket timeout past end-of-data, or the send budget. Retrying it is
-        // exactly how the same password reset arrives five times.
+        // The underlying operation has settled or been cancelled, and the relay
+        // may have the whole message. Retrying would deliver a duplicate link.
         await parkUnacknowledged(result, entry, error);
         return;
       }

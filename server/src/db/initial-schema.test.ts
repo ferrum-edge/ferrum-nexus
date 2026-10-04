@@ -17,6 +17,8 @@ describe('buildout schema baseline', () => {
           '004_api_spec_changes',
           '005_notification_preferences',
           '006_user_identities',
+          '007_outbox_recipient',
+          '008_email_lifecycle_fence',
         ],
       );
       const statements = splitSqlStatements(files[0]!.sql);
@@ -101,7 +103,7 @@ describe('buildout schema baseline', () => {
     for (const dialect of ['sqlite', 'pg', 'mysql'] as const) {
       const forward = loadMigrations(dialect).find((file) => file.id === '002_api_gateway_plugins');
       assert.ok(forward, `${dialect} ships 002_api_gateway_plugins`);
-      // The MySQL runner applies nothing but replayable CREATE TABLEs.
+      // This migration is replayable without metadata checks.
       const statements = splitSqlStatements(forward.sql);
       assert.deepEqual(
         statements.map((statement) => /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement)?.[1]),
@@ -193,7 +195,7 @@ describe('buildout schema baseline', () => {
   it('adds the revision change history as a replayable forward migration', () => {
     const mysqlStep = loadMigrations('mysql').find((file) => file.id === '004_api_spec_changes');
     assert.ok(mysqlStep, 'mysql ships 004_api_spec_changes');
-    // The MySQL runner applies nothing but replayable CREATE TABLEs.
+    // This migration is replayable without metadata checks.
     assert.deepEqual(
       splitSqlStatements(mysqlStep.sql).map(
         (statement) => /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement)?.[1],
@@ -235,7 +237,7 @@ describe('buildout schema baseline', () => {
     for (const dialect of ['sqlite', 'pg', 'mysql'] as const) {
       const forward = loadMigrations(dialect).find((file) => file.id === '006_user_identities');
       assert.ok(forward, `${dialect} ships 006_user_identities`);
-      // The MySQL runner applies nothing but replayable CREATE TABLEs.
+      // This migration is replayable without metadata checks.
       const statements = splitSqlStatements(forward.sql);
       assert.deepEqual(
         statements.map((statement) => /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement)?.[1]),

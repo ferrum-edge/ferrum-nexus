@@ -452,3 +452,85 @@ describe('role and status controls', () => {
     );
   });
 });
+
+describe('squatted address recovery', () => {
+  it('requires reviewed link removal before releasing the disabled account address', async () => {
+    const released: User = {
+      ...user,
+      email: 'released-1@released.nexus.invalid',
+      email_verified: false,
+    };
+    const list = vi.spyOn(usersApi, 'list').mockResolvedValue({
+      items: [user],
+      total: 1,
+      pending_gateway_teardowns: 0,
+    });
+    vi.spyOn(usersApi, 'get').mockResolvedValue({ user, gateway_teardown: job('done') });
+    const identities = vi.spyOn(usersApi, 'identities').mockResolvedValue({
+      items: [
+        {
+          id: 'identity-1',
+          user_id: user.id,
+          provider_id: 'partner',
+          issuer: 'https://partner.example.test',
+          subject: 'old-subject',
+          provisioned: true,
+          email: user.email,
+          last_login_at: null,
+          created_at: user.created_at,
+          updated_at: user.updated_at,
+        },
+      ],
+    });
+    const unlink = vi.spyOn(usersApi, 'unlinkIdentity').mockImplementation(async () => {
+      identities.mockResolvedValue({ items: [] });
+      return { ok: true };
+    });
+    const release = vi.spyOn(usersApi, 'releaseAddress').mockImplementation(async () => {
+      list.mockResolvedValue({ items: [released], total: 1, pending_gateway_teardowns: 0 });
+      return { user: released };
+    });
+    renderUsers();
+    await userEvent.click(await screen.findByRole('button', { name: 'Release address' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Release email address' });
+    const submit = within(dialog).getByRole('button', { name: 'Release address' });
+    expect(submit).toBeDisabled();
+    await userEvent.click(await within(dialog).findByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(unlink).toHaveBeenCalledWith(user.id, 'identity-1'));
+    await waitFor(() => expect(submit).toBeEnabled());
+    await userEvent.click(submit);
+    await waitFor(() => expect(release).toHaveBeenCalledWith(user.id, { email: user.email }));
+    expect(await screen.findByText(released.email)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Enable' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Release address' })).not.toBeInTheDocument();
+  });
+
+  it('keeps release unavailable when recovery reads fail', async () => {
+    vi.spyOn(usersApi, 'list').mockResolvedValue({
+      items: [user],
+      total: 1,
+      pending_gateway_teardowns: 0,
+    });
+    vi.spyOn(usersApi, 'get').mockResolvedValue({ user, gateway_teardown: job('done') });
+    vi.spyOn(usersApi, 'identities').mockRejectedValue(new Error('Unavailable'));
+    const release = vi.spyOn(usersApi, 'releaseAddress');
+    renderUsers();
+    await userEvent.click(await screen.findByRole('button', { name: 'Release address' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Release email address' });
+    expect(await within(dialog).findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Release address' })).toBeDisabled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('shows the release operation only to super admins', async () => {
+    session.user = { id: 'plain-admin', role: 'admin' };
+    vi.spyOn(usersApi, 'list').mockResolvedValue({
+      items: [user],
+      total: 1,
+      pending_gateway_teardowns: 0,
+    });
+    renderUsers();
+    await screen.findByText(user.email);
+    expect(screen.queryByRole('button', { name: 'Release address' })).not.toBeInTheDocument();
+  });
+});
