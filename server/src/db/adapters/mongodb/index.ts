@@ -3836,7 +3836,8 @@ class MongoStore implements NexusStore {
 
     claimDue: async (now, limit) =>
       this.inTransaction(async (tx) => {
-        const candidates = await tx.col(COLLECTIONS.emailOutbox)
+        const candidates = await tx
+          .col(COLLECTIONS.emailOutbox)
           .find(
             {
               status: 'pending',

@@ -865,18 +865,14 @@ export interface SqlRepos {
 export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionRunner): SqlRepos {
   const dialect = exec.dialect;
 
-  async function lockEmailRecipient(
-    tx: SqlExecutor,
-    id: string,
-    email: string,
-  ): Promise<boolean> {
+  async function lockEmailRecipient(tx: SqlExecutor, id: string, email: string): Promise<boolean> {
     if (isReleasedEmail(email)) return false;
     return (
-      (await execute(
-        tx,
-        'UPDATE users SET email_lifecycle_fence = ? WHERE id = ? AND email = ?',
-        [newId(), id, email.trim().toLowerCase()],
-      )) > 0
+      (await execute(tx, 'UPDATE users SET email_lifecycle_fence = ? WHERE id = ? AND email = ?', [
+        newId(),
+        id,
+        email.trim().toLowerCase(),
+      ])) > 0
     );
   }
 

@@ -1042,11 +1042,11 @@ class SqliteStore implements NexusStore {
 
     lockEmailRecipient: async (id, email) =>
       !isReleasedEmail(email) &&
-      execute(
-        this.db,
-        'UPDATE users SET email_lifecycle_fence = ? WHERE id = ? AND email = ?',
-        [newId(), id, email.trim().toLowerCase()],
-      ) > 0,
+      execute(this.db, 'UPDATE users SET email_lifecycle_fence = ? WHERE id = ? AND email = ?', [
+        newId(),
+        id,
+        email.trim().toLowerCase(),
+      ]) > 0,
 
     findManyByIds: async (ids) => {
       if (ids.length === 0) return [];

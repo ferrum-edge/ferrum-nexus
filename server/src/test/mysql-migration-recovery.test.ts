@@ -161,7 +161,10 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
     for (const migration of pending) {
       for (const boundary of ['ddl', 'before-ledger', 'after-ledger']) {
         await fixture(async (pool, url) => {
-          await runMysqlMigrations(pool, migrations.filter((file) => file.id < migration.id));
+          await runMysqlMigrations(
+            pool,
+            migrations.filter((file) => file.id < migration.id),
+          );
           await pool.query(`INSERT INTO organizations (id, name, created_at, updated_at)
             VALUES ('preserved', 'Survives restart', '2026-01-01', '2026-01-01')`);
           await pool.query(`INSERT INTO users
@@ -205,7 +208,8 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
           // Work committed after the ALTER must survive a replay too. Existing
           // release fixtures separately assert the new columns' defaults.
           await pool.query("UPDATE email_outbox SET recipient_user_id = 'retained-user'");
-          const retainedFence = migration.id === '008_email_lifecycle_fence' ? 'retained-fence' : '';
+          const retainedFence =
+            migration.id === '008_email_lifecycle_fence' ? 'retained-fence' : '';
           if (retainedFence) {
             await pool.query("UPDATE users SET email_lifecycle_fence = 'retained-fence'");
           }
@@ -218,9 +222,10 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
             `SELECT u.email_lifecycle_fence, e.recipient_user_id
                FROM users u JOIN email_outbox e ON e.to_email = u.email`,
           );
-          assert.deepEqual(bindings.map((row) => ({ ...row })), [
-            { email_lifecycle_fence: retainedFence, recipient_user_id: 'retained-user' },
-          ]);
+          assert.deepEqual(
+            bindings.map((row) => ({ ...row })),
+            [{ email_lifecycle_fence: retainedFence, recipient_user_id: 'retained-user' }],
+          );
         });
       }
     }
@@ -229,8 +234,8 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
   it('refuses incompatible columns without recording the migration', async () => {
     for (const definition of [
       'VARCHAR(35) NULL',
-      'VARCHAR(36) NOT NULL DEFAULT \'\'',
-      'VARCHAR(36) NULL DEFAULT \'unexpected\'',
+      "VARCHAR(36) NOT NULL DEFAULT ''",
+      "VARCHAR(36) NULL DEFAULT 'unexpected'",
       'VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL',
       'VARCHAR(36) GENERATED ALWAYS AS (to_email) VIRTUAL',
     ]) {
@@ -250,7 +255,10 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
 
   it('serializes independent upgrades of a populated released schema', async () => {
     await fixture(async (pool, url) => {
-      await runMysqlMigrations(pool, migrations.filter((file) => file.id < '007_outbox_recipient'));
+      await runMysqlMigrations(
+        pool,
+        migrations.filter((file) => file.id < '007_outbox_recipient'),
+      );
       await pool.query(`INSERT INTO organizations (id, name, created_at, updated_at)
         VALUES ('preserved', 'Survives restart', '2026-01-01', '2026-01-01')`);
       const second = mysql.createPool(url);

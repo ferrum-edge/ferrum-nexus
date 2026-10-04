@@ -320,11 +320,14 @@ export function createSmtpTransport(
       });
     })();
     const budget = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        const error = new SmtpBudgetExceededError(budgetMs);
-        cancel(error);
-        reject(error);
-      }, Math.max(1, deadline - Date.now()));
+      timer = setTimeout(
+        () => {
+          const error = new SmtpBudgetExceededError(budgetMs);
+          cancel(error);
+          reject(error);
+        },
+        Math.max(1, deadline - Date.now()),
+      );
       timer.unref?.();
     });
     return Promise.race([work, budget])
