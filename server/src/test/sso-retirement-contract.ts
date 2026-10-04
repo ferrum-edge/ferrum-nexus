@@ -163,25 +163,22 @@ function watchRetirement(base: NexusStore, current: () => RetirementWatch | null
           const callback = !watch.callbackTransactionStarted;
           watch.callbackTransactionStarted = true;
           if (!callback) watch.saveQueued.release();
-          const result = await target.transaction(
-            async (tx) => {
-              if (callback) return fn(callbackStore(tx, watch));
-              watch.saveBodyRuns += 1;
-              assert.ok(watch.callbackCommitted, 'callback commit precedes the settings body');
-              assert.ok(watch.session, 'the callback issued a real session');
-              assert.deepEqual(await tx.sessions.findById(watch.session.id), watch.session);
-              assert.equal(
-                await tx.auditLogs.count({
-                  action: AuditAction.AUTH_SSO_LOGIN,
-                  target_id: watch.userId,
-                }),
-                1,
-                'the callback login audit committed before settings were written',
-              );
-              return fn(tx);
-            },
-            options,
-          );
+          const result = await target.transaction(async (tx) => {
+            if (callback) return fn(callbackStore(tx, watch));
+            watch.saveBodyRuns += 1;
+            assert.ok(watch.callbackCommitted, 'callback commit precedes the settings body');
+            assert.ok(watch.session, 'the callback issued a real session');
+            assert.deepEqual(await tx.sessions.findById(watch.session.id), watch.session);
+            assert.equal(
+              await tx.auditLogs.count({
+                action: AuditAction.AUTH_SSO_LOGIN,
+                target_id: watch.userId,
+              }),
+              1,
+              'the callback login audit committed before settings were written',
+            );
+            return fn(tx);
+          }, options);
           if (callback) watch.callbackCommitted = true;
           return result;
         };
