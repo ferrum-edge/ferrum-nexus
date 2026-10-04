@@ -502,7 +502,8 @@ function isDeclaredName(node: ts.Node, name: ts.Identifier): boolean {
 function hookAliasing(id: ts.Identifier): string | null {
   const parent = id.parent;
   if (ts.isBindingElement(parent) && parent.propertyName === id) {
-    return ts.isIdentifier(parent.name) && parent.name.text === id.text
+    const name = parent.name;
+    return name !== undefined && ts.isIdentifier(name) && name.text === id.text
       ? null
       : 'is destructured under another name';
   }
@@ -1191,6 +1192,14 @@ describe('the transactional audit scan itself', () => {
       'recordWithRow is bound, passed or read under another name',
     );
     assertFlags("const hooks = { write: input['recordWithRow'] };", 'spells out the hook name');
+  });
+
+  it('rejects missing hook bindings and aliases through elided binding patterns', () => {
+    assert.throws(() => findingsFor('const { recordWithRow: } = input;'), /must parse/);
+    assertFlags(
+      'const { recordWithRow: [,] } = input;',
+      'recordWithRow is destructured under another name',
+    );
   });
 
   it('accepts a hook re-bound, tested and passed on under its own name', () => {
