@@ -12,11 +12,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   providers can narrow approval. Separate MCP-all/per-tool groups preserve REST access
   and prevent its approval group bypassing subsets. Null retains all published tools;
   empty means REST-only. Migration 011 covers all four stores. Exposure changes fail
-  closed; see the draft rollout and spec-change tradeoff before deployment.
+  closed. Existing phase-1 APIs require provider opt-in before explicit subsets;
+  deployment must stop and drain older writers and cannot roll back while subset
+  grants exist. See the accepted [unreleased rollout](docs/mcp-subsets-migration-draft.md)
+  and spec-change tradeoff before deployment.
 - **Redacted service-manifest preview** (Refs ferrum-edge/ferrum-alloy#27, Nexus portion).
   Authenticated namespace-authorized bounded intake validates the exact immutable
   proposed schema and shared fixtures. Preview has no apply/publish, URL/file/TLS
-  access or diagnostic import. The contract remains PROPOSED.
+  access or diagnostic import. Anvil's separate diagnostic consumer is merged, while
+  the manifest contract remains PROPOSED pending Nexus final qualification and the
+  canonical tracking/freeze decision. See [preview status](docs/service-manifest-preview.md).
 
 - **Agent-ready API listings** (#446, phase 1). Providers can explicitly expose
   selected OpenAPI operations as MCP tools, off by default, on requestable
