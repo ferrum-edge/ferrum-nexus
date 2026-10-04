@@ -44,6 +44,64 @@ function expectConfigError(env: EnvRecord, needle: string): void {
 }
 
 describe('loadConfig', () => {
+  it('preserves exact required-secret and minimum-length diagnostics', () => {
+    const cases: Array<{ env: EnvRecord; problems: string[] }> = [
+      {
+        env: {},
+        problems: ['NEXUS_SECRET_KEY is required', 'FERRUM_ADMIN_JWT_SECRET is required'],
+      },
+      {
+        env: baseEnv({ NEXUS_SECRET_KEY: '', FERRUM_ADMIN_JWT_SECRET: 'short' }),
+        problems: [
+          'NEXUS_SECRET_KEY must be at least 32 characters (generate with `openssl rand -hex 32`)',
+          'FERRUM_ADMIN_JWT_SECRET must be at least 32 characters and match the gateway',
+        ],
+      },
+      {
+        env: baseEnv({ NEXUS_ENV: 'staging' }),
+        problems: [
+          "NEXUS_ENV Invalid enum value. Expected 'development' | 'test' | 'production', received 'staging'",
+        ],
+      },
+      {
+        env: baseEnv({ NEXUS_PORT: '1e3', NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'sometimes' }),
+        problems: [
+          'NEXUS_PORT must be an integer between 0 and 65535',
+          'NEXUS_ALLOW_PRIVATE_UPSTREAMS must be true or false',
+        ],
+      },
+    ];
+    for (const { env, problems } of cases) {
+      assert.throws(
+        () => loadConfig(env),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(error.code, 'INTERNAL');
+          assert.equal(error.message, `Invalid configuration: ${problems.join('; ')}`);
+          assert.deepEqual(error.details, { problems });
+          return true;
+        },
+      );
+    }
+  });
+
+  it('preserves absent, blank and trimmed configuration transform inputs', () => {
+    const config = loadConfig(
+      baseEnv({
+        NEXUS_PORT: '  ',
+        NEXUS_HOST: '  localhost  ',
+        NEXUS_SMTP_HOST: '  ',
+        NEXUS_SMTP_USER: '  operator  ',
+        NEXUS_ALLOW_PRIVATE_UPSTREAMS: ' YES ',
+      }),
+    );
+    assert.equal(config.port, 8787);
+    assert.equal(config.host, 'localhost');
+    assert.equal(config.smtp.host, undefined);
+    assert.equal(config.smtp.user, 'operator');
+    assert.equal(config.allowPrivateUpstreams, true);
+  });
+
   it('bounds the independent health deadline below the image healthcheck budget', () => {
     assert.equal(loadConfig(baseEnv()).healthProbeTimeoutMs, 1_500);
     assert.equal(

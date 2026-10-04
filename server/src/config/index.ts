@@ -490,9 +490,7 @@ export interface NexusConfig {
 
 /* ── Parsing helpers ────────────────────────────────────────────────────── */
 
-const boolish = (
-  defaultValue: boolean,
-): z.ZodEffects<z.ZodOptional<z.ZodString>, boolean, string | undefined> =>
+const boolish = (defaultValue: boolean): z.ZodType<boolean, string | undefined> =>
   z
     .string()
     .optional()
@@ -509,7 +507,7 @@ const intish = (
   defaultValue: number,
   min: number,
   max: number,
-): z.ZodEffects<z.ZodOptional<z.ZodString>, number, string | undefined> =>
+): z.ZodType<number, string | undefined> =>
   z
     .string()
     .optional()
@@ -530,20 +528,14 @@ const intish = (
       return value;
     });
 
-const stringish = (
-  defaultValue: string,
-): z.ZodEffects<z.ZodOptional<z.ZodString>, string, string | undefined> =>
+const stringish = (defaultValue: string): z.ZodType<string, string | undefined> =>
   z
     .string()
     .optional()
     .transform((raw) => (raw === undefined || raw.trim() === '' ? defaultValue : raw.trim()));
 
 /** An optional variable: blank and absent both mean "not configured". */
-const optionalString = (): z.ZodEffects<
-  z.ZodOptional<z.ZodString>,
-  string | undefined,
-  string | undefined
-> =>
+const optionalString = (): z.ZodType<string | undefined, string | undefined> =>
   z
     .string()
     .optional()
@@ -558,11 +550,16 @@ function isLoopbackHost(hostname: string): boolean {
 }
 
 const envSchema = z.object({
-  NEXUS_ENV: z.enum(['development', 'test', 'production']).optional(),
+  NEXUS_ENV: z
+    .enum(['development', 'test', 'production'], {
+      error: (issue) =>
+        `Invalid enum value. Expected 'development' | 'test' | 'production', received '${issue.input}'`,
+    })
+    .optional(),
   NODE_ENV: z.string().optional(),
 
   NEXUS_SECRET_KEY: z
-    .string({ required_error: 'is required' })
+    .string({ error: (issue) => (issue.input === undefined ? 'is required' : undefined) })
     .min(32, 'must be at least 32 characters (generate with `openssl rand -hex 32`)'),
 
   NEXUS_BOOTSTRAP_TOKEN: optionalString(),
@@ -645,7 +642,7 @@ const envSchema = z.object({
 
   FERRUM_ADMIN_URL: stringish('http://127.0.0.1:9000'),
   FERRUM_ADMIN_JWT_SECRET: z
-    .string({ required_error: 'is required' })
+    .string({ error: (issue) => (issue.input === undefined ? 'is required' : undefined) })
     .min(32, 'must be at least 32 characters and match the gateway'),
   FERRUM_ADMIN_JWT_TTL: intish(60, 5, 3_600),
   FERRUM_ADMIN_JWT_ISSUER: stringish('ferrum-edge'),

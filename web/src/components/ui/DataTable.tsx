@@ -1,16 +1,36 @@
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table';
+import {
+  columnFilteringFeature,
+  columnVisibilityFeature,
+  createCoreRowModel,
+  flexRender,
+  rowPaginationFeature,
+  rowSortingFeature,
+  tableFeatures,
+  useTable,
+  type ColumnDef,
+} from '@tanstack/react-table';
 import type { ReactElement, ReactNode } from 'react';
 import { cn } from '../../lib/cn';
 import { Button } from './Button';
 import { Icon } from './Icon';
 
+const features = tableFeatures({
+  columnFilteringFeature,
+  columnVisibilityFeature,
+  rowPaginationFeature,
+  rowSortingFeature,
+  coreRowModel: createCoreRowModel(),
+});
+
 /**
  * Column list type used by every page, so table columns are declared with the
  * exact generic arguments {@link DataTable} expects.
  */
-export type Columns<TData> = Array<ColumnDef<TData, unknown>>;
+export type Columns<TData extends { id: string }> = Array<
+  ColumnDef<typeof features, TData, unknown>
+>;
 
-export interface DataTableProps<TData> {
+export interface DataTableProps<TData extends { id: string }> {
   columns: Columns<TData>;
   data: TData[];
   /** Total row count from the server envelope, for the pagination footer. */
@@ -60,7 +80,7 @@ function SkeletonRows({ columns, rows = 5 }: { columns: number; rows?: number })
  * Server-paginated table. Pagination is `manual` — the parent owns
  * `offset`/`limit` and refetches; the table only renders the current page.
  */
-export function DataTable<TData>({
+export function DataTable<TData extends { id: string }>({
   columns,
   data,
   total,
@@ -75,11 +95,16 @@ export function DataTable<TData>({
   bare = false,
   toolbar,
 }: DataTableProps<TData>): ReactElement {
-  const table = useReactTable<TData>({
+  const table = useTable({
+    features,
     data,
     columns,
     manualPagination: true,
-    getCoreRowModel: getCoreRowModel(),
+    // Route queries own filtering and ordering as well as pagination. Never
+    // filter, sort or slice just the page returned by the server a second time.
+    manualFiltering: true,
+    manualSorting: true,
+    getRowId: (row) => row.id,
   });
 
   const rows = table.getRowModel().rows;
