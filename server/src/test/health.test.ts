@@ -403,6 +403,7 @@ describe('health probe caching', () => {
       harness.edgeClient.proxies.create({
         listen_path: '/nexus/stale-health',
         backend_host: 'example.test',
+        backend_port: 80,
       }),
     );
     assert.equal(harness.edge.proxies.size, 0);

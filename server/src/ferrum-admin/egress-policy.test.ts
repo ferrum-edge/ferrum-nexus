@@ -87,6 +87,7 @@ describe('closed owner egress contract', () => {
       id: 'egress-proxy',
       listen_path: '/nexus/egress',
       backend_host: 'example.test',
+      backend_port: 80,
     });
     assert.equal((await edge.probe()).backendEgressVerified, true);
     harness.edge.setBackendEgressPolicy({
@@ -96,7 +97,12 @@ describe('closed owner egress contract', () => {
     });
     const before = harness.edge.requests.length;
     for (const write of [
-      () => edge.proxies.create({ listen_path: '/nexus/another', backend_host: 'example.test' }),
+      () =>
+        edge.proxies.create({
+          listen_path: '/nexus/another',
+          backend_host: 'example.test',
+          backend_port: 80,
+        }),
       () => edge.proxies.replace(proxy.id, { ...proxy }),
       () => edge.apiSpecs.create({}),
       () => edge.apiSpecs.replace('spec', {}),

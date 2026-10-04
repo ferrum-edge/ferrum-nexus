@@ -47,6 +47,7 @@ export function runEdgeSecurityAdoptionContract(
       return harness.services.publishing.publish(actor, {
         name: 'Egress contract',
         slug: `egress-${newId().slice(0, 12)}`,
+        version: '2.4.0',
         spec: SAMPLE_SPEC_YAML,
         auth_plugin: 'key_auth',
         requestable: true,
