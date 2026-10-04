@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactElement, type ReactNode } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   MAX_JUSTIFICATION_LENGTH,
+  grantedAgentTools,
   consumerUsernameForApplication,
   consumerUsernameForUser,
   type CatalogAccessState,
@@ -17,7 +18,12 @@ import { useCancelAccessRequest, useCreateAccessRequest } from '../hooks/useAcce
 import { useAuth } from '../stores/auth';
 import { useToast } from '../stores/toast';
 import { ACCOUNT_IDENTITY, IdentityPicker } from '../components/applications/IdentityPicker';
-import { AgentToolList, ConnectAgentPanel } from '../components/catalog/ConnectAgentPanel';
+import {
+  AgentToolList,
+  AgentSubsetPicker,
+  AgentGrantSummary,
+  ConnectAgentPanel,
+} from '../components/catalog/ConnectAgentPanel';
 import { CallApiPanel } from '../components/catalog/CallApiPanel';
 import { SpecChangeHistory } from '../components/catalog/SpecChangeHistory';
 import { OpenApiView } from '../components/openapi/OpenApiView';
@@ -211,6 +217,7 @@ function IdentityAccess({
   const applicationId = identity === ACCOUNT_IDENTITY ? null : identity;
   const access = useCatalogIdentityAccess(api.slug, applicationId);
   const [justification, setJustification] = useState('');
+  const [requestedTools, setRequestedTools] = useState<string[] | null>(null);
   const createRequest = useCreateAccessRequest();
   const cancelRequest = useCancelAccessRequest();
   const toast = useToast();
@@ -304,6 +311,7 @@ function IdentityAccess({
               api_id: api.id,
               justification: justification.trim(),
               application_id: applicationId,
+              requested_tools: requestedTools,
             },
             {
               onSuccess: () => {
@@ -314,6 +322,13 @@ function IdentityAccess({
           );
         }}
       >
+        {api.agents ? (
+          <AgentSubsetPicker
+            agents={api.agents}
+            value={requestedTools}
+            onChange={setRequestedTools}
+          />
+        ) : null}
         <LabeledTextarea
           label="Why do you need access?"
           required
@@ -348,6 +363,15 @@ function IdentityAccess({
   return (
     <>
       {body}
+      {grant ? (
+        <AgentGrantSummary agents={api.agents} subset={grant.approved_tools} />
+      ) : request ? (
+        <AgentGrantSummary
+          agents={api.agents}
+          subset={request.requested_tools}
+          label="Requested tools"
+        />
+      ) : null}
       {request && request.status !== 'pending' ? (
         <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-border pt-4 text-sm text-fg-muted">
           <span>Last decision{applicationId === null ? '' : ` for ${name}`}:</span>
@@ -527,7 +551,9 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
         <Card>
           <CardBody>
             <AgentToolList
-              agents={api.agents}
+              agents={
+                canCall ? grantedAgentTools(api.agents, access.data?.grant?.approved_tools) : api.agents
+              }
               slug={api.slug}
               title={canCall ? 'Tools covered by this grant' : 'Tools available after approval'}
             />

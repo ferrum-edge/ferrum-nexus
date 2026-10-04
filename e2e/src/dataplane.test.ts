@@ -418,6 +418,397 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     return response.api;
   }
 
+  it('previews proposed manifests in the packaged image without fetching or disclosing references', async () => {
+    const before = await upstreamSnapshot();
+    const manifest = {
+      schema: 'ferrum.service_manifest',
+      schema_version: '1.0',
+      service: { name: 'preview-acceptance', description: 'redacted description' },
+      api: { public_path: '/preview', openapi: '/nonexistent/secret-openapi.json' },
+      upstream: {
+        host: 'secret-upstream.internal',
+        port: 8443,
+        scheme: 'https',
+        gateway_client_cert_path: '/nonexistent/secret-client.pem',
+        gateway_client_key_path: '/nonexistent/secret-client.key',
+        server_ca_path: '/nonexistent/secret-ca.pem',
+      },
+      gateway: { namespace: 'nexus', otel_endpoint: `${UPSTREAM_URL}/manifest-must-not-fetch` },
+    };
+    const response = await portalRaw('POST', '/api/service-manifests/preview', {
+      session: provider,
+      body: { namespace: 'nexus', manifest },
+    });
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.equal((JSON.parse(text) as { preview_only: boolean }).preview_only, true);
+    assert.equal(text.includes('[REDACTED]'), true);
+    for (const secret of ['secret-', 'nonexistent', 'redacted description', 'manifest-must-not-fetch']) {
+      assert.equal(text.includes(secret), false, secret);
+    }
+    const foreign = await portalRaw('POST', '/api/service-manifests/preview', {
+      session: provider,
+      body: { namespace: 'foreign', manifest },
+    });
+    assert.equal(foreign.status, 403);
+    const invalid = await portalRaw('POST', '/api/service-manifests/preview', {
+      session: provider,
+      body: { namespace: 'nexus', manifest: { ...manifest, auth: null } },
+    });
+    assert.equal(invalid.status, 400);
+    assert.deepEqual(await upstreamSnapshot(), before, 'preview performs no upstream request');
+  });
+
+  const createTool = {
+    path: '/invoices',
+    method: 'POST',
+    name: 'create_invoice',
+    description: 'Create invoice',
+  };
+
+  async function initializeAgent(
+    api: PublishedApi,
+    headers: Record<string, string>,
+  ): Promise<Record<string, string>> {
+    let response: Response | undefined;
+    await waitFor('the MCP endpoint policy to initialize', async () => {
+      response = await rpc(api, headers, 'initialize', {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'subset-acceptance', version: '1' },
+      });
+      return response.status === 200;
+    });
+    assert.ok(response);
+    return negotiatedHeaders(response, headers);
+  }
+
+  async function grantToolSubset(
+    client: Session,
+    api: PublishedApi,
+    applicationId?: string,
+  ): Promise<void> {
+    const id = api.agents?.operations.find((tool) => tool.name === 'list_invoices')?.id;
+    assert.ok(id);
+    const request = await portal<{ access_request: { id: string } }>('POST', '/api/access-requests', {
+      session: client,
+      body: {
+        api_id: api.id,
+        application_id: applicationId,
+        justification: 'Read tool only',
+        requested_tools: [id],
+      },
+    });
+    await portal('POST', `/api/access-requests/${request.access_request.id}/approve`, {
+      session: provider,
+      body: {},
+    });
+  }
+
+  for (const flavour of [
+    { plugin: 'key_auth', credential: 'keyauth', application: false },
+    { plugin: 'basic_auth', credential: 'basicauth', application: false },
+    { plugin: 'jwt_auth', credential: 'jwt', application: true },
+  ] as const) {
+    it(`enforces provider-narrowed subsets with ${flavour.credential} ${flavour.application ? 'application' : 'account'} credentials`, async () => {
+      const client = await newClient();
+      let api = await publishAgentApi(`e2e-subsets-${flavour.credential}-${RUN}`, flavour.plugin);
+      api = (
+        await portal<{ api: PublishedApi }>('PATCH', `/api/apis/${api.id}`, {
+          session: provider,
+          body: { agents: { operations: [...agentSelections, createTool] } },
+        })
+      ).api;
+      const readId = api.agents?.operations.find((tool) => tool.name === 'list_invoices')?.id;
+      const createId = api.agents?.operations.find((tool) => tool.name === 'create_invoice')?.id;
+      assert.ok(readId && createId);
+      const application = flavour.application
+        ? await portal<{ application: { id: string } }>('POST', '/api/applications', {
+            session: client,
+            body: { name: 'Subset agent app' },
+          })
+        : null;
+      const applicationId = application?.application.id;
+      const credential = await issueCredential(client, flavour.credential, applicationId);
+      const headers = authHeadersFor(credential, flavour.credential);
+      const request = await portal<{
+        access_request: { id: string; requested_tools: string[] };
+      }>('POST', '/api/access-requests', {
+        session: client,
+        body: {
+          api_id: api.id,
+          application_id: applicationId,
+          justification: 'Use two published tools',
+          requested_tools: [readId, createId],
+        },
+      });
+      assert.deepEqual(request.access_request.requested_tools, [readId, createId]);
+      const broadened = await portalRaw(
+        'POST',
+        `/api/access-requests/${request.access_request.id}/approve`,
+        { session: provider, body: { approved_tools: null } },
+      );
+      assert.equal(broadened.status, 400);
+      if (flavour.credential === 'keyauth') {
+        await inPostgres(
+          'psql',
+          '-U',
+          'nexus',
+          '-d',
+          'nexus',
+          '-v',
+          'ON_ERROR_STOP=1',
+          '-c',
+          `
+          CREATE FUNCTION subset_grant_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN IF NEW.api_id = '${api.id}' THEN RAISE EXCEPTION 'acceptance grant failure'; END IF; RETURN NEW; END $$;
+          CREATE TRIGGER subset_grant_failure BEFORE INSERT ON grants FOR EACH ROW EXECUTE FUNCTION subset_grant_failure();
+        `,
+        );
+        try {
+          const failed = await portalRaw(
+            'POST',
+            `/api/access-requests/${request.access_request.id}/approve`,
+            { session: provider, body: { approved_tools: [readId] } },
+          );
+          assert.equal(failed.status, 500, await failed.text());
+        } finally {
+          await inPostgres(
+            'psql',
+            '-U',
+            'nexus',
+            '-d',
+            'nexus',
+            '-v',
+            'ON_ERROR_STOP=1',
+            '-c',
+            'DROP TRIGGER subset_grant_failure ON grants; DROP FUNCTION subset_grant_failure();',
+          );
+        }
+        const beforeRollback = await upstreamSnapshot();
+        const rolledBack = await rpc(api, headers, 'tools/call', {
+          name: `${api.slug}.list_invoices`,
+          arguments: {},
+        });
+        assert.equal(rolledBack.status, 403, await rolledBack.text());
+        assert.deepEqual(await upstreamSnapshot(), beforeRollback);
+      }
+      const approval = await portal<{ grant: { id: string; approved_tools: string[] } }>(
+        'POST',
+        `/api/access-requests/${request.access_request.id}/approve`,
+        { session: provider, body: { approved_tools: [readId] } },
+      );
+      assert.deepEqual(approval.grant.approved_tools, [readId]);
+      const sessionHeaders = await initializeAgent(api, headers);
+      const list = await result(await rpc(api, sessionHeaders, 'tools/list'));
+      assert.deepEqual(
+        list.tools?.map((tool) => tool.name),
+        [`${api.slug}.list_invoices`],
+      );
+      const beforeDenied = await upstreamSnapshot();
+      const denied = await rpc(api, sessionHeaders, 'tools/call', {
+        name: `${api.slug}.create_invoice`,
+        arguments: { memo: 'subset must deny' },
+      });
+      assert.equal(denied.status, 403, await denied.text());
+      assert.equal(reachedUpstream(denied), false);
+      assert.deepEqual(
+        await upstreamSnapshot(),
+        beforeDenied,
+        'REST approval cannot bypass the MCP subset',
+      );
+      const called = await result(
+        await rpc(api, sessionHeaders, 'tools/call', {
+          name: `${api.slug}.list_invoices`,
+          arguments: {},
+        }),
+      );
+      assert.equal(called.isError, false);
+      const rest = await callGateway(`${api.listen_path}/invoices`, { headers });
+      assert.equal(rest.status, 200);
+      assert.ok(reachedUpstream(rest));
+      await rest.text();
+      await portal('POST', `/api/grants/${approval.grant.id}/revoke`, {
+        session: provider,
+        body: {},
+      });
+      const beforeRevoke = await upstreamSnapshot();
+      for (const method of ['tools/list', 'tools/call']) {
+        const response = await rpc(api, sessionHeaders, method, {
+          name: `${api.slug}.list_invoices`,
+          arguments: {},
+        });
+        assert.equal(response.status, 403, await response.text());
+      }
+      assert.deepEqual(await upstreamSnapshot(), beforeRevoke);
+    });
+  }
+
+  it('keeps empty and omitted subsets distinct; changes, disabling and re-enabling cannot revive old exposure IDs', async () => {
+    let api = await publishAgentApi(`e2e-subset-lifecycle-${RUN}`, 'key_auth');
+    const selected = await newClient();
+    const empty = await newClient();
+    const all = await newClient();
+    const id = api.agents?.operations[0]?.id;
+    assert.ok(id);
+    for (const [client, subset] of [
+      [selected, [id]],
+      [empty, []],
+      [all, null],
+    ] as const) {
+      const request = await portal<{ access_request: { id: string } }>('POST', '/api/access-requests', {
+        session: client,
+        body: {
+          api_id: api.id,
+          justification: 'Lifecycle acceptance',
+          ...(subset !== null ? { requested_tools: subset } : {}),
+        },
+      });
+      await portal('POST', `/api/access-requests/${request.access_request.id}/approve`, {
+        session: provider,
+        body: {},
+      });
+    }
+    const selectedHeaders = authHeadersFor(await issueCredential(selected, 'keyauth'), 'keyauth');
+    const emptyHeaders = authHeadersFor(await issueCredential(empty, 'keyauth'), 'keyauth');
+    const allHeaders = authHeadersFor(await issueCredential(all, 'keyauth'), 'keyauth');
+    const selectedSession = await initializeAgent(api, selectedHeaders);
+    const emptySession = await initializeAgent(api, emptyHeaders);
+    const allSession = await initializeAgent(api, allHeaders);
+    async function names(headers: Record<string, string>): Promise<string[]> {
+      const { 'mcp-session-id': _session, 'mcp-protocol-version': _version, ...auth } = headers;
+      const fresh = await initializeAgent(api, auth);
+      return (await result(await rpc(api, fresh, 'tools/list'))).tools?.map((tool) => tool.name) ?? [];
+    }
+    assert.deepEqual(await names(selectedSession), [`${api.slug}.list_invoices`]);
+    assert.deepEqual(await names(emptySession), []);
+    const beforeEmpty = await upstreamSnapshot();
+    const emptyCall = await rpc(api, emptySession, 'tools/call', {
+      name: `${api.slug}.list_invoices`,
+      arguments: {},
+    });
+    assert.equal(emptyCall.status, 403, await emptyCall.text());
+    assert.deepEqual(await upstreamSnapshot(), beforeEmpty);
+    const emptyRest = await callGateway(`${api.listen_path}/invoices`, { headers: emptyHeaders });
+    assert.equal(emptyRest.status, 200);
+    assert.ok(reachedUpstream(emptyRest));
+    await emptyRest.text();
+
+    // A real database refusal after the Edge write must restore the previous bridge policy.
+    await inPostgres(
+      'psql',
+      '-U',
+      'nexus',
+      '-d',
+      'nexus',
+      '-v',
+      'ON_ERROR_STOP=1',
+      '-c',
+      `
+      CREATE FUNCTION subset_policy_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.id = '${api.id}' THEN RAISE EXCEPTION 'acceptance policy persistence failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER subset_policy_failure BEFORE UPDATE ON apis FOR EACH ROW EXECUTE FUNCTION subset_policy_failure();
+    `,
+    );
+    try {
+      const failed = await portalRaw('PATCH', `/api/apis/${api.id}`, {
+        session: provider,
+        body: { agents: { operations: [{ ...agentSelections[0], name: 'renamed' }] } },
+      });
+      assert.equal(failed.status, 500, await failed.text());
+    } finally {
+      await inPostgres(
+        'psql',
+        '-U',
+        'nexus',
+        '-d',
+        'nexus',
+        '-v',
+        'ON_ERROR_STOP=1',
+        '-c',
+        'DROP TRIGGER subset_policy_failure ON apis; DROP FUNCTION subset_policy_failure();',
+      );
+    }
+    await waitFor(
+      'failed publishing to restore the old subset policy',
+      async () => (await names(selectedSession)).includes(`${api.slug}.list_invoices`),
+    );
+    const restored = await result(
+      await rpc(api, await initializeAgent(api, selectedHeaders), 'tools/call', {
+        name: `${api.slug}.list_invoices`,
+        arguments: {},
+      }),
+    );
+    assert.equal(restored.isError, false);
+
+    for (const name of ['renamed', 'list_invoices']) {
+      api = (
+        await portal<{ api: PublishedApi }>('PATCH', `/api/apis/${api.id}`, {
+          session: provider,
+          body: { agents: { operations: [{ ...agentSelections[0], name }, createTool] } },
+        })
+      ).api;
+      assert.notEqual(api.agents?.operations[0]?.id, id);
+      await waitFor(
+        'renamed tools to fail closed for the old subset',
+        async () => (await names(selectedSession)).length === 0,
+      );
+      assert.deepEqual(await names(emptySession), []);
+      assert.deepEqual(
+        (await names(allSession)).sort(),
+        [`${api.slug}.${name}`, `${api.slug}.create_invoice`].sort(),
+      );
+      const beforeStale = await upstreamSnapshot();
+      const stale = await rpc(api, await initializeAgent(api, selectedHeaders), 'tools/call', {
+        name: `${api.slug}.${name}`,
+        arguments: {},
+      });
+      assert.equal(stale.status, 403, await stale.text());
+      assert.deepEqual(await upstreamSnapshot(), beforeStale);
+    }
+    const currentId = api.agents?.operations[0]?.id;
+    const spec = await portal<{ raw_spec: string }>('GET', `/api/apis/${api.id}/spec`, {
+      session: provider,
+    });
+    const changed = JSON.parse(spec.raw_spec) as { info: { version: string } };
+    changed.info.version = '2';
+    await portal('PUT', `/api/apis/${api.id}/spec`, {
+      session: provider,
+      body: { spec: JSON.stringify(changed) },
+    });
+    const updated = await portal<{ api: PublishedApi }>('GET', `/api/apis/${api.id}`, {
+      session: provider,
+    });
+    assert.notEqual(updated.api.agents?.operations[0]?.id, currentId);
+    assert.deepEqual(await names(selectedSession), []);
+    assert.equal((await names(allSession)).length, 2);
+    await portal('PATCH', `/api/apis/${api.id}`, { session: provider, body: { agents: null } });
+    const disabledRest = await callGateway(`${api.listen_path}/invoices`, {
+      headers: selectedHeaders,
+    });
+    assert.equal(disabledRest.status, 200);
+    await disabledRest.text();
+    api = (
+      await portal<{ api: PublishedApi }>('PATCH', `/api/apis/${api.id}`, {
+        session: provider,
+        body: { agents: { operations: agentSelections } },
+      })
+    ).api;
+    const enabledSelected = await initializeAgent(api, selectedHeaders);
+    const enabledAll = await initializeAgent(api, allHeaders);
+    assert.deepEqual(await names(enabledSelected), []);
+    assert.deepEqual(await names(enabledAll), [`${api.slug}.list_invoices`]);
+    await portal('DELETE', `/api/apis/${api.id}`, { session: provider });
+    const beforeDeleted = await upstreamSnapshot();
+    const deleted = await rpc(api, enabledAll, 'tools/call', {
+      name: `${api.slug}.list_invoices`,
+      arguments: {},
+    });
+    assert.ok(deleted.status >= 400);
+    await deleted.text();
+    assert.deepEqual(await upstreamSnapshot(), beforeDeleted);
+  });
+
   for (const flavour of [
     { plugin: 'key_auth', credential: 'keyauth', visibility: 'public', application: false },
     { plugin: 'basic_auth', credential: 'basicauth', visibility: 'private', application: false },
@@ -711,7 +1102,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
 
     // A fresh identity gives a fresh budget. Discovery never spends tool calls.
     const budgetClient = await newClient();
-    await grantAccess(budgetClient, provider, api.id);
+    await grantToolSubset(budgetClient, api);
     const budgetCredential = await issueCredential(budgetClient, 'keyauth');
     const budgetHeaders = authHeadersFor(budgetCredential, 'keyauth');
     const secondCredential = await issueCredential(budgetClient, 'keyauth');
@@ -724,7 +1115,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       '/api/applications',
       { session: budgetClient, body: { name: 'Independent agent budget' } },
     );
-    await grantAccess(budgetClient, provider, api.id, application.id);
+    await grantToolSubset(budgetClient, api, application.id);
     const applicationCredential = await issueCredential(budgetClient, 'keyauth', application.id);
     assert.equal(applicationCredential.consumerUsername, `nexus-app-${application.id}`);
     assert.notEqual(applicationCredential.consumerUsername, budgetCredential.consumerUsername);
@@ -758,6 +1149,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     assert.ok(reachedUpstream(beforeBudget));
     const baseline = (await beforeBudget.json()) as { routeServed: number };
     assert.ok(Number.isSafeInteger(baseline.routeServed));
+    const budgetTools = await result(await rpc(api, budgetScoped, 'tools/list'));
     const beforeDiscovery = await upstreamSnapshot();
     for (let count = 0; count < 61; count += 1) {
       await result(await rpc(api, budgetScoped, 'tools/list'));
@@ -812,16 +1204,16 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     }
     const stillDiscoverable = await result(await rpc(api, renewedBudget, 'tools/list'));
     assert.ok(stillDiscoverable.tools);
-    assert.ok(tools.tools);
+    assert.ok(budgetTools.tools);
     assert.deepEqual(
       [...stillDiscoverable.tools].sort((left, right) => left.name.localeCompare(right.name)),
-      [...tools.tools].sort((left, right) => left.name.localeCompare(right.name)),
+      [...budgetTools.tools].sort((left, right) => left.name.localeCompare(right.name)),
     );
     const secondDiscoverable = await result(await rpc(api, secondScoped, 'tools/list'));
     assert.ok(secondDiscoverable.tools);
     assert.deepEqual(
       [...secondDiscoverable.tools].sort((left, right) => left.name.localeCompare(right.name)),
-      [...tools.tools].sort((left, right) => left.name.localeCompare(right.name)),
+      [...budgetTools.tools].sort((left, right) => left.name.localeCompare(right.name)),
     );
     assert.deepEqual(await upstreamSnapshot(), exhausted);
     const rest = await callGateway(`${api.listen_path}/invoices`, { headers: budgetHeaders });

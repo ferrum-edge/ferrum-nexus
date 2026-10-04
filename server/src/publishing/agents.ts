@@ -5,7 +5,8 @@ import {
   MAX_AGENT_DESCRIPTION_LENGTH,
   MAX_AGENT_TOOLS,
   OPENAPI_OPERATION_METHODS,
-  aclGroupForApi,
+  mcpAllGroupForApi,
+  mcpToolGroupForApi,
   agentEndpointPath,
   agentOperations,
   agentPathItems,
@@ -19,6 +20,7 @@ import {
 import type { EdgeRateLimitSyncConfig } from '../config/index.js';
 import type { EdgePluginConfig, EdgePluginConfigWrite } from '../ferrum-admin/types.js';
 import { conflict, specInvalid } from '../lib/errors.js';
+import { newId } from '../lib/ids.js';
 import { writeBody } from './edge-plugins.js';
 
 export interface AgentDeployment {
@@ -29,6 +31,25 @@ export interface AgentDeployment {
   /** Fresh, ownership-preserving reads, made under the canonical proxy lease. */
   live?: EdgePluginConfig[];
   specId?: string;
+}
+
+/** Ignore client-supplied IDs. Preserve only a currently published binding. */
+export function identifyAgentTools(
+  next: ApiAgents | null,
+  previous: ApiAgents | null = null,
+  rotate = false,
+): ApiAgents | null {
+  if (!next) return null;
+  return {
+    operations: next.operations.map(({ id: _id, ...tool }) => {
+      const prior =
+        !rotate &&
+        previous?.operations.find(
+          (item) => item.method === tool.method && item.path === tool.path && item.name === tool.name,
+        );
+      return { ...tool, id: prior ? (prior.id ?? newId()) : newId() };
+    }),
+  };
 }
 
 /** Literal escaping matches Edge's regex::escape; slash is not a metacharacter. */
@@ -180,7 +201,14 @@ export function stampAgentDocument(
   const toolPolicy = Object.fromEntries(
     agents.operations.map((tool) => [
       agentToolName(slug, tool),
-      { action: 'allow', allowed_groups: [aclGroupForApi(apiId)] },
+      {
+        action: 'allow',
+        allowed_groups: [
+          mcpAllGroupForApi(apiId),
+          // Legacy selections have no subset identity until an authenticated republish.
+          ...(tool.id ? [mcpToolGroupForApi(apiId, tool.id)] : []),
+        ],
+      },
     ]),
   );
   const governorPolicy = Object.fromEntries(

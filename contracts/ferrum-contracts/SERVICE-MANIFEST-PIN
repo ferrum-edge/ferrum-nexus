@@ -1,0 +1,16 @@
+tag: contracts-edge-0.9.9-r2
+commit: 591c73a3f965fdab440c3a76b2707accdf491ba5
+sha256: 0afdf73c997dff1b82de514af4ef79c76f9a4929ec568c82a166e94e864fceb3  fixtures/invalid-expectations.json
+sha256: db87d1f238f6f81e258dfcc2c7ff400f34c807866fd4cd354258386622130316  fixtures/service-manifest/invalid/agents-bad-namespace.json
+sha256: 112341075e1e64ad0e1c4e652ec78de2eebae3c50303f7d81a1a931309c668c5  fixtures/service-manifest/invalid/agents-enabled-not-boolean.json
+sha256: 07ce370e9fbc5a4f8f704773bda051843704d7be1c8f3a0f92413b9cf2154068  fixtures/service-manifest/invalid/agents-unknown-key.json
+sha256: 11a4e6bb8eb43ee740a49823bf61aa1f1fe07a5bac4334f69ef497b4f1cab847  fixtures/service-manifest/invalid/base-path-without-trailing-slash.json
+sha256: 5b628e77054b4132a3424710cf9420dadb61fc330912406e3c90bf4064130d5c  fixtures/service-manifest/invalid/client-cert-without-key.json
+sha256: 838850fc453772c832cc8d41e31848692489f3e833bf58d6bf7bbde791dae46b  fixtures/service-manifest/invalid/http3-protocol.json
+sha256: 21e4e15ea3e8c218703c7cf478425d8789e84d3780313ae66c819b8a64298417  fixtures/service-manifest/invalid/tls-path-with-http-scheme.json
+sha256: 64efb979feb88b240f3474a94af42d3061e40e98e9066d57488a3e018dd6ab2e  fixtures/service-manifest/invalid/unknown-field.json
+sha256: 5d878d704cc07c2271b0cdb899d645365f8336246089959d416f8f7f8fab3c20  fixtures/service-manifest/invalid/unsupported-major.json
+sha256: f1e8f091f7d5d8e2062721105844dc446176eae3cc36bd86515654a5197a7d6f  fixtures/service-manifest/valid/agents-enabled.json
+sha256: ea0fdf43ee0a88d25e96cb15fdf4980481bbfea41f23807ec98151fbf4ba05e1  fixtures/service-manifest/valid/orders-api.json
+sha256: 406524f908fe1d9bac6f73031cfad3fd4a646cf065872eeeb2b60857e1a98cdd  fixtures/service-manifest/valid/plain-http.json
+sha256: bc06b92a6887194c028e03e47a9a31173f2c16301d6a9ab0d08dd99a7bdbf711  schemas/service-manifest/v1.schema.json

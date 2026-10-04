@@ -1,3 +1,4 @@
+import { AgentGrantSummary } from '../components/catalog/ConnectAgentPanel';
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import {
   DEFAULT_PAGE_SIZE,
@@ -183,6 +184,7 @@ function MyAccessCard(): ReactElement {
                     <Badge tone="neutral">My account</Badge>
                   )}
                 </span>
+                <AgentGrantSummary agents={grant.api?.agents} subset={grant.approved_tools} />
                 {address ? (
                   <CopyableValue label={`${name} address`} value={address} />
                 ) : (

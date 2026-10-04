@@ -118,3 +118,19 @@ responses and never logged.
 Put portal setup in `src/fixtures.ts` and assertions in the suite. Arrange state through the
 portal's **public API**. If a test has to reach around the product to set something up, that setup
 is part of what is being tested, and the assertion is worth less than it looks.
+
+## MCP subsets and proposed manifest preview
+
+The packaged-image data-plane suite extends the pinned v0.9.10 qualification with
+API-key/basic-account and JWT-application subset list/call cases. Approval cannot
+broaden the request; unapproved tools are hidden and denied while REST remains usable.
+Explicit empty and omitted subsets, rename/re-add, changed spec, disable/re-enable,
+revocation and deletion are exercised through production portal routes. Actual
+PostgreSQL triggers force grant and policy persistence failures after Edge mutations;
+compensation is asserted through the live listener and full upstream snapshots.
+The independent account/application tool-call budget proof uses read-tool subsets.
+
+A proposed service-manifest preview case runs against the packaged schema asset,
+checks namespace/null rejection and redaction, and proves no request reaches the
+upstream for declared references. Contract fixture/integrity checks run in the server
+suite. These are hosted CI gates; adding cases does not claim they have passed.

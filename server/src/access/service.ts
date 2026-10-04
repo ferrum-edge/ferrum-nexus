@@ -103,6 +103,9 @@
 
 import {
   MAX_JUSTIFICATION_LENGTH,
+  MAX_AGENT_TOOLS,
+  isMcpGroupForApi,
+  mcpGroupsForGrant,
   aclGroupForApi,
   consumerUsernameForApplication,
   roleAtLeast,
@@ -152,8 +155,6 @@ import type { NotificationsService } from '../notifications/service.js';
 import { presentApiSummary, type GatewayUrlSource } from '../publishing/present.js';
 import {
   canonicalConsumerLockKey,
-  withGroup,
-  withoutGroup,
   type ConsumerProvisioner,
   type MutateAclGroupsOptions,
 } from '../credentials/consumers.js';
@@ -194,6 +195,7 @@ export interface AccessService {
     justification: string,
     applicationId?: Uuid | null,
     ip?: string | null,
+    requestedTools?: string[] | null,
   ): Promise<AccessRequest>;
   /** Requester withdraws their own pending request. */
   cancel(user: UserRecord, requestId: Uuid, ip?: string | null): Promise<AccessRequest>;
@@ -203,6 +205,7 @@ export interface AccessService {
     requestId: Uuid,
     note?: string | null,
     ip?: string | null,
+    approvedTools?: string[] | null,
   ): Promise<{ access_request: AccessRequest; grant: Grant }>;
   /** Provider (or admin) declines. Nothing changes on the gateway. */
   deny(
@@ -473,14 +476,32 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * consumer. `options.absentIsDone` lets a removal treat a consumer that is
    * already gone as done.
    */
+  function validateToolSubset(api: ApiRecord, tools: string[] | null | undefined): void {
+    if (tools == null) return;
+    if (api.agents?.operations.some((tool) => !tool.id)) {
+      throw conflict('The provider must republish this phase-1 API before accepting tool subsets');
+    }
+    const published = new Set(api.agents?.operations.map((tool) => tool.id) ?? []);
+    if (
+      tools.length > MAX_AGENT_TOOLS ||
+      new Set(tools).size !== tools.length ||
+      tools.some((id) => !published.has(id))
+    ) {
+      throw validationFailed('Tool subsets must contain unique currently published exposure IDs');
+    }
+  }
+
   async function setGroupMembership(
     user: UserRecord,
     apiId: Uuid,
     present: boolean,
     applicationId: Uuid | null,
     options: Pick<MutateAclGroupsOptions, 'afterWrite' | 'absentIsDone'> = {},
+    tools: string[] | null = null,
   ): Promise<string> {
     const group = aclGroupForApi(apiId);
+    const api = present ? await store.apis.findById(apiId) : null;
+    const toolGroups = api?.agents ? mcpGroupsForGrant(apiId, tools) : [];
     // The identity, not the account. An application's grant belongs on its own
     // `nexus-app-<id>` consumer — putting it on the account's would hand every
     // one of that account's credentials the access, which is the whole thing
@@ -495,7 +516,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     }
     await provisioner.mutateAclGroups(
       consumer.ferrum_consumer_id,
-      (groups) => (present ? withGroup(groups, group) : withoutGroup(groups, group)),
+      (groups) => {
+        const retained = groups.filter((entry) => entry !== group && !isMcpGroupForApi(entry, apiId));
+        return present ? [...retained, group, ...toolGroups] : retained;
+      },
       user.id,
       // Only the *grant* re-checks the account: an approval that passed its
       // authorisation before the grantee was disabled would otherwise hand a
@@ -646,10 +670,16 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * grant left `revoked` over a live group is the gap the rollback exists to
    * close; restoring as it did before this check is the safer mistake.
    */
-  async function groupStillOn(consumerId: string, group: string): Promise<boolean> {
+  async function groupStillOn(
+    consumerId: string,
+    group: string,
+    tools: string[],
+  ): Promise<boolean> {
     try {
       const live = await edge.consumers.get(consumerId);
-      return live !== null && (live.acl_groups ?? []).includes(group);
+      return (
+        live !== null && [group, ...tools].every((entry) => (live.acl_groups ?? []).includes(entry))
+      );
     } catch (error) {
       deps.log?.(
         {
@@ -692,9 +722,12 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     );
     if (!consumer) return underLifecycle(false);
     const consumerId = consumer.ferrum_consumer_id;
-    return edge.serializePerKey(consumerId, async () =>
-      underLifecycle(await groupStillOn(consumerId, claim.acl_group)),
-    );
+    return edge.serializePerKey(consumerId, async () => {
+      const api = await store.apis.findById(claim.api_id);
+      const enrolled = api?.agents?.operations.some((tool) => tool.id !== undefined);
+      const tools = enrolled ? mcpGroupsForGrant(claim.api_id, claim.approved_tools) : [];
+      return underLifecycle(await groupStillOn(consumerId, claim.acl_group, tools));
+    });
   }
 
   /**
@@ -968,6 +1001,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           decided_by: null,
           decided_at: null,
           decision_note: null,
+          approved_tools: null,
         });
         details.request_released = released !== null;
       } catch (error) {
@@ -1093,6 +1127,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       justification,
       applicationId = null,
       ip = null,
+      requestedTools = null,
     ): Promise<AccessRequest> {
       const trimmed = justification.trim();
       if (trimmed === '') throw validationFailed('A justification is required');
@@ -1139,6 +1174,22 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       }
 
       const admit = async (): Promise<AccessRequestRecord> => {
+        const fresh = await store.apis.findById(api.id);
+        if (
+          !fresh ||
+          fresh.ferrum_proxy_id !== api.ferrum_proxy_id ||
+          fresh.status !== 'published' ||
+          !fresh.requestable
+        ) {
+          throw conflict('This API changed while the request was waiting; reload and retry');
+        }
+        if (
+          fresh.visibility === 'private' &&
+          !canViewApi(user, fresh, await resolveReadAccess(store, user, fresh))
+        ) {
+          throw notFound('API', apiId);
+        }
+        validateToolSubset(fresh, requestedTools);
         // Re-read under the application's key. The route resolved it before
         // this section was entered, and a delete that finished in between
         // left MongoDB — which has no foreign key — holding a pending request
@@ -1165,6 +1216,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
               user_id: user.id,
               application_id: applicationId,
               justification: trimmed,
+              requested_tools: requestedTools,
               status: 'pending',
             });
             // In the transaction: this row is the budget's charge, so it must
@@ -1175,7 +1227,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
                 { id: user.id, role: user.role },
                 AuditAction.ACCESS_REQUEST,
                 { type: 'access_request', id: inserted.id },
-                { api_id: api.id, api_slug: api.slug },
+                { api_id: api.id, api_slug: api.slug, requested_tools: requestedTools },
                 ip,
               );
             return inserted;
@@ -1205,13 +1257,16 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // cascades the request away, and a request that follows finds no
       // application. The budget key is taken inside it, never the reverse.
       // The account's own identity cannot be deleted, so it needs no key.
-      const created =
+      const submit = (): Promise<AccessRequestRecord> =>
         applicationId === null
-          ? await admit()
-          : await edge.serializePerKey(
+          ? admit()
+          : edge.serializePerKey(
               canonicalConsumerLockKey(namespace, consumerUsernameForApplication(applicationId)),
               admit,
             );
+      const created = api.ferrum_proxy_id
+        ? await edge.serializePerKey(`proxy:${api.ferrum_proxy_id}`, submit)
+        : await submit();
 
       const [decorated] = await decorateRequests([created]);
       return decorated ?? created;
@@ -1255,7 +1310,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       return decorated ?? updated;
     },
 
-    async approve(actor, requestId, note = null, ip = null) {
+    async approve(actor, requestId, note = null, ip = null, approvedTools) {
       const initial = await loadRequest(requestId);
       assertCanReview(actor, initial.api);
       // Publishing holds the same proxy lease through catalog policy changes.
@@ -1298,6 +1353,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           throw conflict('This identity already has an active grant for this API');
         }
 
+        const tools = approvedTools === undefined ? (request.requested_tools ?? null) : approvedTools;
+        validateToolSubset(api, tools);
+        if (
+          request.requested_tools != null &&
+          (tools === null || tools.some((id) => !request.requested_tools?.includes(id)))
+        ) {
+          throw validationFailed('Approval cannot broaden the requested tool subset');
+        }
+
         // Step 1 — claim the decision before anything reaches the gateway. A
         // cancellation or a denial racing this approval either loses here, or
         // wins and leaves this call with a CONFLICT and no gateway side effect
@@ -1305,6 +1369,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         const decidedAt = nowIso();
         const updated = await store.accessRequests.updateIfStatus(request.id, 'pending', {
           status: 'approved',
+          approved_tools: tools,
           decided_by: actor.id,
           decided_at: decidedAt,
           decision_note: note ?? null,
@@ -1331,55 +1396,65 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             // foreign key refuses it, but MongoDB has none. A re-enable, which
             // rebuilds the groups from active grants under the same key, is
             // likewise ordered wholly before or after the pair.
-            await setGroupMembership(requester, api.id, true, request.application_id, {
-              afterWrite: async () => {
-                groupPossiblyApplied = false;
-                committed.grant = await store.transaction(async (tx) => {
-                  // Re-read under the key the delete holds: an application
-                  // gone or disabled since the admission check above gets no
-                  // grant, and the catch below takes the group back off.
-                  if (request.application_id !== null) {
-                    const application = await tx.applications.findById(request.application_id);
-                    if (!application || application.owner_user_id !== requester.id) {
-                      throw notFound('Application', request.application_id);
+            await setGroupMembership(
+              requester,
+              api.id,
+              true,
+              request.application_id,
+              {
+                afterWrite: async () => {
+                  groupPossiblyApplied = false;
+                  committed.grant = await store.transaction(async (tx) => {
+                    // Re-read under the key the delete holds: an application
+                    // gone or disabled since the admission check above gets no
+                    // grant, and the catch below takes the group back off.
+                    if (request.application_id !== null) {
+                      const application = await tx.applications.findById(request.application_id);
+                      if (!application || application.owner_user_id !== requester.id) {
+                        throw notFound('Application', request.application_id);
+                      }
+                      if (application.status !== 'active') {
+                        throw conflict('The application this request is for is disabled', {
+                          application_id: request.application_id,
+                        });
+                      }
                     }
-                    if (application.status !== 'active') {
-                      throw conflict('The application this request is for is disabled', {
-                        application_id: request.application_id,
-                      });
-                    }
-                  }
-                  const created = await tx.grants.create({
-                    api_id: api.id,
-                    application_id: request.application_id,
-                    user_id: requester.id,
-                    access_request_id: request.id,
-                    acl_group: group,
-                    status: 'active',
-                    granted_by: actor.id,
-                  });
-                  // The grant and its audit row commit together. Recorded
-                  // after the commit, a failed insert left working access
-                  // granted and unaudited behind a `500`; now it rolls the
-                  // grant back and the catch below takes the group back off
-                  // and returns the request to pending for a retry.
-                  await audit.forStore(tx).record(
-                    { id: actor.id, role: actor.role },
-                    AuditAction.ACCESS_APPROVE,
-                    { type: 'access_request', id: request.id },
-                    {
+                    const created = await tx.grants.create({
                       api_id: api.id,
-                      api_slug: api.slug,
+                      application_id: request.application_id,
                       user_id: requester.id,
-                      grant_id: created.id,
-                      acl_group: created.acl_group,
-                    },
-                    ip,
-                  );
-                  return created;
-                });
+                      access_request_id: request.id,
+                      acl_group: group,
+                      approved_tools: tools,
+                      status: 'active',
+                      granted_by: actor.id,
+                    });
+                    // The grant and its audit row commit together. Recorded
+                    // after the commit, a failed insert left working access
+                    // granted and unaudited behind a `500`; now it rolls the
+                    // grant back and the catch below takes the group back off
+                    // and returns the request to pending for a retry.
+                    await audit.forStore(tx).record(
+                      { id: actor.id, role: actor.role },
+                      AuditAction.ACCESS_APPROVE,
+                      { type: 'access_request', id: request.id },
+                      {
+                        api_id: api.id,
+                        api_slug: api.slug,
+                        user_id: requester.id,
+                        grant_id: created.id,
+                        acl_group: created.acl_group,
+                        requested_tools: request.requested_tools ?? null,
+                        approved_tools: tools,
+                      },
+                      ip,
+                    );
+                    return created;
+                  });
+                },
               },
-            });
+              tools,
+            );
           } catch (error) {
             // The provisioner's active-user guard runs before the ACL write.
             if (isNexusError(error) && error.code === 'USER_DISABLED') {
@@ -1749,7 +1824,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             // it: the access is gone, which is all this removal is for.
             await provisioner.mutateAclGroups(
               consumerId,
-              (groups) => withoutGroup(groups, group),
+              (groups) =>
+                groups.filter((entry) => entry !== group && !isMcpGroupForApi(entry, grant.api_id)),
               userId,
               { absentIsDone: true },
             );

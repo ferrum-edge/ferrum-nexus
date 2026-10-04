@@ -7,12 +7,14 @@
  * reaches around the product to arrange a state a real operator could not.
  */
 
+import type { ApiAgents } from '@ferrum-nexus/shared';
 import { createHmac } from 'node:crypto';
 
 import { portal, type Session } from './harness.js';
 
 /** A published API as the portal describes it. */
 export interface PublishedApi {
+  agents?: ApiAgents | null;
   id: string;
   slug: string;
   listen_path: string;

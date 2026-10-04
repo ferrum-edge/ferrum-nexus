@@ -1050,6 +1050,7 @@ export type ApiUsageBackendStatus = 'healthy' | 'failing' | 'recovering' | 'unkn
 
 /** `POST /api/access-requests` */
 export interface CreateAccessRequestRequest {
+  requested_tools?: string[] | null;
   api_id: Uuid;
   justification: string;
   /**
@@ -1084,6 +1085,8 @@ export type ListAccessRequestsResponse = Paginated<AccessRequest>;
  * `POST /api/access-requests/:id/deny` — the reviewer's optional note.
  */
 export interface DecideAccessRequestRequest {
+  /** Approval only. Omission defaults to the request; null cannot widen a subset. */
+  approved_tools?: string[] | null;
   decision_note?: string | null;
 }
 

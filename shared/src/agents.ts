@@ -3,6 +3,8 @@ import { resolveOpenApiPointer } from './openapi.js';
 
 /** A provider explicitly selected this operation; no spec extension grants access. */
 export interface AgentTool {
+  /** Server-owned exposure identity. Changes to bindings invalidate subset grants. */
+  id?: string;
   path: string;
   method: HttpMethod;
   /** Unqualified tool name. Edge prefixes it with the API slug and a dot. */
@@ -106,4 +108,32 @@ export function agentOperations(document: Record<string, unknown>): AgentOperati
     }
   }
   return operations;
+}
+
+/** null/omitted covers all published tools; [] covers no MCP tools. */
+export function grantedAgentTools(agents: ApiAgents, subset?: string[] | null): ApiAgents {
+  return {
+    operations: agents.operations.filter(
+      (tool) => subset == null || (tool.id && subset.includes(tool.id)),
+    ),
+  };
+}
+
+export function mcpAllGroupForApi(apiId: string): string {
+  return `nexus:api:${apiId}:mcp:all`;
+}
+
+export function mcpToolGroupForApi(apiId: string, toolId: string): string {
+  return `nexus:api:${apiId}:mcp:tool:${toolId}`;
+}
+
+export function mcpGroupsForGrant(apiId: string, subset?: string[] | null): string[] {
+  return subset == null
+    ? [mcpAllGroupForApi(apiId)]
+    : subset.map((id) => mcpToolGroupForApi(apiId, id));
+}
+
+/** Exact API namespace only; unrelated operator groups are preserved. */
+export function isMcpGroupForApi(group: string, apiId: string): boolean {
+  return group === mcpAllGroupForApi(apiId) || group.startsWith(`nexus:api:${apiId}:mcp:tool:`);
 }

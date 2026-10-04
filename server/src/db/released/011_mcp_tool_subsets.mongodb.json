@@ -1,0 +1,6 @@
+{
+  "id": "011_mcp_tool_subsets",
+  "backend": "mongodb",
+  "description": "Default retained requests and grants to null tool subsets (all published tools)",
+  "indexes": []
+}

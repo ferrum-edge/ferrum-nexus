@@ -212,6 +212,10 @@ function accessRequestUpdateColumns(
 ): Record<string, SqlParam | undefined> {
   return {
     justification: patch.justification,
+    requested_tools_json:
+      patch.requested_tools === undefined ? undefined : encodeJson(patch.requested_tools),
+    approved_tools_json:
+      patch.approved_tools === undefined ? undefined : encodeJson(patch.approved_tools),
     status: patch.status,
     decided_by: patch.decided_by,
     decided_at: patch.decided_at,
@@ -224,6 +228,8 @@ function grantUpdateColumns(patch: UpdateInput<GrantRecord>): Record<string, Sql
   return {
     status: patch.status,
     acl_group: patch.acl_group,
+    approved_tools_json:
+      patch.approved_tools === undefined ? undefined : encodeJson(patch.approved_tools),
     access_request_id: patch.access_request_id,
     revoked_by: patch.revoked_by,
     revoked_at: patch.revoked_at,
@@ -419,6 +425,8 @@ function mapAccessRequest(row: Row): AccessRequestRecord {
     user_id: text(row.user_id),
     application_id: textOrNull(row.application_id),
     justification: text(row.justification),
+    requested_tools: json<string[] | null>(row.requested_tools_json, null),
+    approved_tools: json<string[] | null>(row.approved_tools_json, null),
     status: text(row.status) as AccessRequestStatus,
     decided_by: textOrNull(row.decided_by),
     decided_at: textOrNull(row.decided_at),
@@ -436,6 +444,7 @@ function mapGrant(row: Row): GrantRecord {
     application_id: textOrNull(row.application_id),
     access_request_id: textOrNull(row.access_request_id),
     acl_group: text(row.acl_group),
+    approved_tools: json<string[] | null>(row.approved_tools_json, null),
     status: text(row.status) as GrantStatus,
     granted_by: text(row.granted_by),
     revoked_by: textOrNull(row.revoked_by),
@@ -1933,8 +1942,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
           exec,
           `INSERT INTO access_requests
              (id, api_id, user_id, application_id, justification, status, decided_by, decided_at,
-              decision_note, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              decision_note, requested_tools_json, approved_tools_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.api_id,
@@ -1945,6 +1954,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
             input.decided_by ?? null,
             input.decided_at ?? null,
             input.decision_note ?? null,
+            encodeJson(input.requested_tools ?? null),
+            encodeJson(input.approved_tools ?? null),
             meta.created_at,
             meta.updated_at,
           ],
@@ -2080,8 +2091,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
           exec,
           `INSERT INTO grants
              (id, api_id, user_id, application_id, access_request_id, acl_group, status,
-              granted_by, revoked_by, revoked_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              granted_by, revoked_by, revoked_at, approved_tools_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.api_id,
@@ -2093,6 +2104,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
             input.granted_by,
             input.revoked_by ?? null,
             input.revoked_at ?? null,
+            encodeJson(input.approved_tools ?? null),
             meta.created_at,
             meta.updated_at,
           ],

@@ -255,6 +255,8 @@ const agentsSchema = z
       .array(
         z
           .object({
+            // Round-trip presentation IDs are accepted but never trusted.
+            id: z.string().uuid().optional(),
             path: z.string().min(1).max(2_048),
             method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']),
             name: z.string().regex(AGENT_TOOL_NAME_PATTERN),

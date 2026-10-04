@@ -442,6 +442,8 @@ function accessRequestUpdateFields(
 ): Record<string, unknown> {
   return {
     justification: patch.justification,
+    requested_tools: patch.requested_tools,
+    approved_tools: patch.approved_tools,
     status: patch.status,
     decided_by: patch.decided_by,
     decided_at: patch.decided_at,
@@ -454,6 +456,7 @@ function grantUpdateFields(patch: UpdateInput<GrantRecord>): Record<string, unkn
   return {
     status: patch.status,
     acl_group: patch.acl_group,
+    approved_tools: patch.approved_tools,
     access_request_id: patch.access_request_id,
     revoked_by: patch.revoked_by,
     revoked_at: patch.revoked_at,
@@ -652,6 +655,8 @@ function mapAccessRequest(row: Row): AccessRequestRecord {
     user_id: str(row.user_id),
     application_id: strOrNull(row.application_id),
     justification: str(row.justification),
+    requested_tools: (row.requested_tools as string[] | null | undefined) ?? null,
+    approved_tools: (row.approved_tools as string[] | null | undefined) ?? null,
     status: str(row.status) as AccessRequestStatus,
     decided_by: strOrNull(row.decided_by),
     decided_at: strOrNull(row.decided_at),
@@ -669,6 +674,7 @@ function mapGrant(row: Row): GrantRecord {
     application_id: strOrNull(row.application_id),
     access_request_id: strOrNull(row.access_request_id),
     acl_group: str(row.acl_group),
+    approved_tools: (row.approved_tools as string[] | null | undefined) ?? null,
     status: str(row.status) as GrantStatus,
     granted_by: str(row.granted_by),
     revoked_by: strOrNull(row.revoked_by),
@@ -1536,6 +1542,22 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
       await db
         .collection(COLLECTIONS.apis)
         .updateMany({ agents: { $exists: false } }, { $set: { agents: null } });
+    },
+  },
+  {
+    id: '011_mcp_tool_subsets',
+    indexes: [],
+    apply: async (db: Db): Promise<void> => {
+      for (const [collection, fields] of [
+        [COLLECTIONS.accessRequests, ['requested_tools', 'approved_tools']],
+        [COLLECTIONS.grants, ['approved_tools']],
+      ] as const) {
+        for (const field of fields) {
+          await db
+            .collection(collection)
+            .updateMany({ [field]: { $exists: false } }, { $set: { [field]: null } });
+        }
+      }
     },
   },
 ];
@@ -2922,6 +2944,8 @@ class MongoStore implements NexusStore {
             user_id: input.user_id,
             application_id: input.application_id ?? null,
             justification: input.justification,
+            requested_tools: input.requested_tools ?? null,
+            approved_tools: input.approved_tools ?? null,
             status: input.status,
             decided_by: input.decided_by ?? null,
             decided_at: input.decided_at ?? null,
@@ -3042,6 +3066,7 @@ class MongoStore implements NexusStore {
             application_id: input.application_id ?? null,
             access_request_id: input.access_request_id ?? null,
             acl_group: input.acl_group,
+            approved_tools: input.approved_tools ?? null,
             status: input.status,
             granted_by: input.granted_by,
             revoked_by: input.revoked_by ?? null,

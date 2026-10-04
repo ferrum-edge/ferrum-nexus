@@ -13,6 +13,7 @@ import { z } from 'zod';
 
 import {
   MAX_JUSTIFICATION_LENGTH,
+  MAX_AGENT_TOOLS,
   type ApproveAccessRequestResponse,
   type CancelAccessRequestResponse,
   type CreateAccessRequestResponse,
@@ -41,7 +42,10 @@ export interface AccessRoutesOptions {
   applications: ApplicationsService;
 }
 
+const toolSubset = z.array(z.string().uuid()).max(MAX_AGENT_TOOLS).nullable();
+
 const createBody = z.object({
+  requested_tools: toolSubset.optional(),
   api_id: z.string().trim().min(1).max(64),
   justification: z.string().trim().min(1).max(MAX_JUSTIFICATION_LENGTH),
   /**
@@ -51,7 +55,12 @@ const createBody = z.object({
   application_id: z.string().trim().min(1).max(64).nullish(),
 });
 
-const decideBody = z.object({ decision_note: z.string().trim().max(2_000).nullish() });
+const decideBody = z
+  .object({
+    decision_note: z.string().trim().max(2_000).nullish(),
+    approved_tools: toolSubset.optional(),
+  })
+  .strict();
 
 const listRequestsQuery = listQuerySchema.extend({
   mine: booleanQuerySchema,
@@ -117,6 +126,7 @@ export const accessRequestRoutes: FastifyPluginAsync<AccessRoutesOptions> = asyn
         input.justification,
         application?.id ?? null,
         clientIp(request),
+        input.requested_tools ?? null,
       );
       reply.status(201);
       return { access_request: created };
@@ -137,7 +147,13 @@ export const accessRequestRoutes: FastifyPluginAsync<AccessRoutesOptions> = asyn
     const { user } = requireAuth(request);
     const { id } = parseOrThrow(idParamSchema, request.params);
     const body = parseOrThrow(decideBody, request.body ?? {});
-    return access.approve(user, id, body.decision_note ?? null, clientIp(request));
+    return access.approve(
+      user,
+      id,
+      body.decision_note ?? null,
+      clientIp(request),
+      body.approved_tools,
+    );
   });
 
   app.post('/:id/deny', async (request): Promise<DenyAccessRequestResponse> => {

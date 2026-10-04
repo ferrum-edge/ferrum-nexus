@@ -34,8 +34,19 @@ import { MongoClient, type Document } from 'mongodb';
 import mysql from 'mysql2/promise';
 import pg from 'pg';
 
-import { emptySpecChangeReport, type DbDriver, type SpecChangeReport } from '@ferrum-nexus/shared';
+import {
+  emptySpecChangeReport,
+  mcpAllGroupForApi,
+  mcpToolGroupForApi,
+  aclGroupForApi,
+  type PublishApiResponse,
+  type CreateAccessRequestResponse,
+  type ApproveAccessRequestResponse,
+  type DbDriver,
+  type SpecChangeReport,
+} from '@ferrum-nexus/shared';
 
+import { buildTestApp } from './helpers.js';
 import { createAuditService } from '../audit/service.js';
 import { createCaptchaService } from '../auth/captcha.js';
 import {
@@ -2025,6 +2036,104 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         ['auth'],
         'the other API keeps its own record',
       );
+    });
+
+    it('production publishing/access paths persist and enforce subsets on every adapter', async () => {
+      const harness = await buildTestApp({ store });
+      try {
+        await harness.registerUser();
+        const provider = await harness.registerUser({ role: 'provider' });
+        const client = await harness.registerUser({ role: 'client' });
+        const published = await harness.authed(provider, {
+          method: 'POST',
+          url: '/api/apis',
+          payload: {
+            name: 'Subset store contract',
+            slug: `subset-${newId().slice(0, 8)}`,
+            auth_plugin: 'key_auth',
+            requestable: true,
+            spec_enforcement: 'routes',
+            spec: JSON.stringify({
+              openapi: '3.1.0',
+              info: { title: 'Subset', version: '1' },
+              servers: [{ url: 'https://api.example.com' }],
+              paths: { '/items': { get: { responses: { '200': { description: 'OK' } } } } },
+            }),
+            agents: {
+              operations: [
+                { path: '/items', method: 'GET', name: 'items', description: 'Items' },
+              ],
+            },
+          },
+        });
+        assert.equal(published.statusCode, 201, published.body);
+        const api = published.json<PublishApiResponse>().api;
+        const id = api.agents?.operations[0]?.id;
+        assert.ok(id);
+        const request = await harness.authed(client, {
+          method: 'POST',
+          url: '/api/access-requests',
+          payload: { api_id: api.id, justification: 'Subset', requested_tools: [id] },
+        });
+        assert.equal(request.statusCode, 201, request.body);
+        const requestId = request.json<CreateAccessRequestResponse>().access_request.id;
+        assert.deepEqual((await store.accessRequests.findById(requestId))?.requested_tools, [id]);
+        const broadened = await harness.authed(provider, {
+          method: 'POST',
+          url: `/api/access-requests/${requestId}/approve`,
+          payload: { approved_tools: null },
+        });
+        assert.equal(broadened.statusCode, 400, broadened.body);
+        const approved = await harness.authed(provider, {
+          method: 'POST',
+          url: `/api/access-requests/${requestId}/approve`,
+          payload: {},
+        });
+        assert.equal(approved.statusCode, 200, approved.body);
+        const grant = approved.json<ApproveAccessRequestResponse>().grant;
+        assert.deepEqual(grant.approved_tools, [id]);
+        assert.deepEqual((await store.accessRequests.findById(requestId))?.approved_tools, [id]);
+        const consumer = await store.consumers.findByUserAndNamespace(client.user.id, 'nexus');
+        assert.ok(consumer);
+        const live = harness.edge.consumerByUsername(consumer.ferrum_username);
+        assert.ok(live);
+        assert.ok(live.acl_groups?.includes(aclGroupForApi(api.id)));
+        assert.ok(live.acl_groups?.includes(mcpToolGroupForApi(api.id, id)));
+        assert.equal(live.acl_groups?.includes(mcpAllGroupForApi(api.id)), false);
+        live.acl_groups?.push('operator-kept');
+        await harness.services.credentials.restoreGatewayAccess(client.user.id, provider.user.id);
+        const restored = harness.edge.consumerByUsername(consumer.ferrum_username);
+        assert.ok(restored?.acl_groups.includes('operator-kept'));
+        assert.equal(restored?.acl_groups.includes(mcpAllGroupForApi(api.id)), false);
+        await assert.rejects(
+          store.transaction(async (tx) => {
+            await tx.grants.update(grant.id, { approved_tools: [] });
+            await tx.accessRequests.update(requestId, { requested_tools: [], approved_tools: [] });
+            throw new Error('rollback subsets');
+          }),
+          /rollback subsets/,
+        );
+        assert.deepEqual((await store.grants.findById(grant.id))?.approved_tools, [id]);
+        assert.deepEqual((await store.accessRequests.findById(requestId))?.requested_tools, [id]);
+        await store.grants.update(grant.id, { approved_tools: [] });
+        assert.deepEqual((await store.grants.findById(grant.id))?.approved_tools, []);
+        await store.grants.update(grant.id, { approved_tools: [id] });
+        const revoked = await harness.authed(provider, {
+          method: 'POST',
+          url: `/api/grants/${grant.id}/revoke`,
+          payload: {},
+        });
+        assert.equal(revoked.statusCode, 200, revoked.body);
+        assert.equal((await store.grants.findById(grant.id))?.status, 'revoked');
+        assert.equal(
+          harness.edge
+            .consumerByUsername(consumer.ferrum_username)
+            ?.acl_groups.some((group) => group.startsWith(`nexus:api:${api.id}:`)),
+          false,
+        );
+      } finally {
+        await harness.close();
+      }
     });
 
     /* ── access requests ──────────────────────────────────────────────── */
