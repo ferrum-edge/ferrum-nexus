@@ -40,11 +40,11 @@ jobs:
           node --version > lock-artifacts/provenance/node-version.txt
           npm --version > lock-artifacts/provenance/npm-version.txt
           printf '%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > lock-artifacts/provenance/run.txt
+          # npm 10 retains the old optional Vitest/coverage peer cycle when
+          # updating in place. Resolve a fresh root graph on the hosted runner,
+          # preserving the original in Git and the recorded input manifest.
+          mv package-lock.json lock-artifacts/provenance/root-input-lock.json
           npm install --package-lock-only --ignore-scripts --no-audit --no-fund
-          # Refresh permissive jest-dom peers too; install alone can retain a
-          # hoisted Vitest 4 while placing the direct Vitest 5 under web/.
-          npm update --package-lock-only --ignore-scripts --no-audit --no-fund \
-            vitest @vitest/coverage-v8
           npm --prefix e2e install --package-lock-only --ignore-scripts --no-audit --no-fund
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
@@ -55,6 +55,10 @@ jobs:
             for (const [path, pkg] of Object.entries(lock.packages)) {
               if (path.endsWith('node_modules/typescript')) assert.equal(pkg.version, '7.0.2');
               if (path.endsWith('node_modules/vitest')) assert.equal(pkg.version, '5.0.3');
+              if (path.endsWith('node_modules/zod')) assert.equal(pkg.version, '4.6.5');
+              if (path.endsWith('node_modules/@tanstack/react-table')) {
+                assert.equal(pkg.version, '9.2.5');
+              }
               const vitestPackage = path.match(/(?:^|\/)node_modules\/@vitest\/([^/]+)$/)?.[1];
               if (vitestPackage && !vitestPackage.startsWith('istanbul-lib-')) {
                 assert.equal(pkg.version, '5.0.3', path);
