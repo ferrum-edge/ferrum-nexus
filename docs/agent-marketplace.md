@@ -78,6 +78,35 @@ This preserves the REST route gate while the MCP gateway claims that endpoint.
 The governor, shield and budget each have an exact-path trigger. Transcript audit
 sinks and remote approval configuration remain operator-owned.
 
+## MCP client and denial contract at the pin
+
+The released gateway defaults `endpoint.protocol_versions` to **`2025-11-25`**.
+Its admission of a configured `2025-03-26` does not put that version in the default
+set. `initialize` negotiates: a supported request is echoed, and an unsupported
+request receives the preferred version. Clients must check the returned
+`result.protocolVersion` against their own supported versions, then send that
+version in `MCP-Protocol-Version` alongside the returned `Mcp-Session-Id`. Nexus
+acceptance advertises `2025-11-25` and reads both values from the initialize
+response. It also covers fallback from `2025-03-26` and verifies that asserting an
+unsupported version on discovery or a call returns HTTP 400 with JSON-RPC
+`-32600`, without executing a backend operation. See the immutable
+[default and admission](https://github.com/ferrum-edge/ferrum-edge/blob/ee040d5e3281fde424aa65f5b18004852c5b53b0/src/plugins/mcp_gateway.rs#L1413),
+[post-initialize gate](https://github.com/ferrum-edge/ferrum-edge/blob/ee040d5e3281fde424aa65f5b18004852c5b53b0/src/plugins/mcp_gateway.rs#L1776)
+and [negotiation](https://github.com/ferrum-edge/ferrum-edge/blob/ee040d5e3281fde424aa65f5b18004852c5b53b0/src/plugins/mcp_gateway.rs#L6248).
+
+Tool-call quota denial is an MCP application error carried over **HTTP 200**:
+the response has JSON-RPC `error.code: -32015` and message
+`MCP tool-call rate limit exceeded`, with no `result`. It must not execute the
+tool. The release's
+[refusal path](https://github.com/ferrum-edge/ferrum-edge/blob/ee040d5e3281fde424aa65f5b18004852c5b53b0/src/plugins/rate_limiting.rs#L1025)
+and [response builder](https://github.com/ferrum-edge/ferrum-edge/blob/ee040d5e3281fde424aa65f5b18004852c5b53b0/src/plugins/rate_limiting.rs#L1398)
+define this behavior; an HTTP status alone cannot distinguish it from success.
+Acceptance checks the entire error-only envelope, exactly 60 backend executions,
+repeated denials across downstream sessions, another consumer's independent
+budget, discovery without a charge and REST access after exhaustion. Per-route
+upstream counters prove denied calls did not dispatch. A gateway-authored error
+without the upstream marker alone cannot prove that no backend request was made.
+
 ## Hosted qualification
 
 No local project code, build, formatter or tests were executed for this change.

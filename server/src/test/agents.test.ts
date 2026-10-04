@@ -8,6 +8,8 @@ import {
   type CreateAccessRequestResponse,
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
+import type { EdgePluginConfigWrite } from '../ferrum-admin/types.js';
+import { stampAgentDocument } from '../publishing/agents.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 const AGENTS: ApiAgents = {
@@ -97,9 +99,24 @@ describe('agent publishing and Nexus authorization', () => {
       },
     });
     const routes = configs.find((item) => item.plugin_name === 'openapi_validator');
-    assert.deepEqual((routes?.config as Record<string, unknown>).bypass, {
-      paths: [`^/nexus/${published.api.slug}/mcp$`],
+    const bypass = (routes?.config as { bypass: { paths: string[] } }).bypass;
+    assert.deepEqual(bypass, {
+      paths: [`^/nexus/${published.api.slug.replaceAll('-', '\\-')}/mcp$`],
     });
+    const [pattern] = bypass.paths;
+    assert.ok(pattern);
+    const matcher = new RegExp(pattern);
+    const endpoint = `${published.api.listen_path}/mcp`;
+    assert.equal(matcher.test(endpoint), true);
+    for (const alternative of [
+      `${endpoint}/child`,
+      `${endpoint}-sibling`,
+      `/prefix${endpoint}`,
+      endpoint.replace(published.api.slug, `${published.api.slug}-sibling`),
+      endpoint.replace('-', '.'),
+    ]) {
+      assert.equal(matcher.test(alternative), false, alternative);
+    }
     assert.equal(configs.some((item) => item.plugin_name === 'ai_transcript_audit'), false);
     const governor = configs.find((item) => item.plugin_name === 'ai_tool_governor');
     assert.deepEqual((governor?.config as Record<string, unknown>).inspect, {
@@ -119,6 +136,39 @@ describe('agent publishing and Nexus authorization', () => {
     assert.ok(
       (await harness.auditRows('api.publish')).some((row) => row.target_id === published.api.id),
     );
+  });
+
+  it('keeps namespace metacharacters literal in the MCP validator bypass', () => {
+    const document: Record<string, unknown> = structuredClone(DOCUMENT);
+    const listenPath = '/nexus.agents-1/agent-2';
+    stampAgentDocument(
+      document,
+      { id: 'literal-path', listen_path: listenPath },
+      {
+        apiId: 'literal-api',
+        slug: 'agent-2',
+        agents: AGENTS,
+        sync: { syncMode: 'local', redisUrl: undefined, redisTls: false },
+      },
+    );
+    const plugins = document['x-ferrum-plugins'] as EdgePluginConfigWrite[];
+    const routes = plugins.find((plugin) => plugin.plugin_name === 'openapi_validator');
+    const bypass = (routes?.config as { bypass: { paths: string[] } }).bypass;
+    assert.deepEqual(bypass.paths, ['^/nexus\\.agents\\-1/agent\\-2/mcp$']);
+    const [pattern] = bypass.paths;
+    assert.ok(pattern);
+    const matcher = new RegExp(pattern);
+    assert.equal(matcher.test(`${listenPath}/mcp`), true);
+    for (const alternative of [
+      '/nexusXagents-1/agent-2/mcp',
+      '/nexus/agents-1/agent-2/mcp',
+      '/nexus.agents-1/agentX2/mcp',
+      `${listenPath}/mcp/child`,
+      `${listenPath}/mcpx`,
+      `/prefix${listenPath}/mcp`,
+    ]) {
+      assert.equal(matcher.test(alternative), false, alternative);
+    }
   });
 
   it('refuses unsafe selections and dependent settings before gateway mutations', async () => {

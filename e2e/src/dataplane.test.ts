@@ -243,9 +243,12 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
 
   interface ToolResult {
     isError?: boolean;
-    structuredContent?: { method: string; path: string; body: string };
+    structuredContent?: { method: string; path: string; body: string; routeServed: number };
     tools?: { name: string; description: string; annotations: { readOnlyHint: boolean } }[];
   }
+
+  // The default at the immutable v0.9.10 pin; this client supports that version.
+  const MCP_PROTOCOL_VERSION = '2025-11-25';
 
   async function rpc(
     api: PublishedApi,
@@ -264,13 +267,34 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     });
   }
 
-  async function result(response: Response): Promise<ToolResult> {
+  async function result<T = ToolResult>(response: Response): Promise<T> {
     const text = await response.text();
     assert.equal(response.status, 200, text);
-    const body = JSON.parse(text) as { result?: ToolResult; error?: unknown };
+    const body = JSON.parse(text) as { jsonrpc: string; id: number; result?: T; error?: unknown };
+    assert.equal(body.jsonrpc, '2.0', text);
+    assert.equal(body.id, 1, text);
     assert.equal(body.error, undefined, text);
     assert.ok(body.result, text);
     return body.result;
+  }
+
+  async function negotiatedHeaders(
+    response: Response,
+    headers: Record<string, string>,
+  ): Promise<Record<string, string>> {
+    const initialized = await result<{ protocolVersion: string }>(response);
+    assert.equal(
+      initialized.protocolVersion,
+      MCP_PROTOCOL_VERSION,
+      'initialize must negotiate a version supported by this client',
+    );
+    const session = response.headers.get('mcp-session-id');
+    assert.ok(session, 'initialize must issue a downstream session');
+    return {
+      ...headers,
+      'mcp-session-id': session,
+      'mcp-protocol-version': initialized.protocolVersion,
+    };
   }
 
   const agentSelections = [
@@ -376,21 +400,23 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       let initialized: Response | undefined;
       await waitFor('the approved MCP endpoint to initialize', async () => {
         initialized = await rpc(api, headers, 'initialize', {
-          protocolVersion: '2025-03-26',
+          protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {},
           clientInfo: { name: 'nexus-acceptance', version: '1' },
         });
         return initialized.status === 200;
       });
       assert.ok(initialized);
-      await result(initialized);
-      const session = initialized.headers.get('mcp-session-id');
-      assert.ok(session, 'initialize must issue a downstream session');
-      const sessionHeaders = {
-        ...headers,
-        'mcp-session-id': session,
-        'mcp-protocol-version': '2025-03-26',
-      };
+      const sessionHeaders = await negotiatedHeaders(initialized, headers);
+      // An older initialize request negotiates the preferred version. Reusing
+      // the requested version afterwards was the failing fixture's mistake.
+      const fallback = await rpc(api, headers, 'initialize', {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: { name: 'nexus-negotiation', version: '1' },
+      });
+      const fallbackHeaders = await negotiatedHeaders(fallback, headers);
+      await result(await rpc(api, fallbackHeaders, 'tools/list'));
       const listed = await result(await rpc(api, sessionHeaders, 'tools/list'));
       assert.deepEqual(listed.tools?.map((tool) => tool.name), [`${api.slug}.list_invoices`]);
       assert.equal(listed.tools?.[0]?.description, 'List invoices');
@@ -404,6 +430,26 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       assert.equal(called.isError, false);
       assert.equal(called.structuredContent?.method, 'GET');
       assert.equal(called.structuredContent?.path, '/invoices');
+      const upstreamCount = called.structuredContent?.routeServed;
+      assert.ok(upstreamCount !== undefined && Number.isSafeInteger(upstreamCount));
+      for (const version of ['2025-03-26', '2099-01-01']) {
+        for (const method of ['tools/list', 'tools/call']) {
+          const unsupported = await rpc(
+            api,
+            { ...sessionHeaders, 'mcp-protocol-version': version },
+            method,
+            { name: `${api.slug}.list_invoices`, arguments: {} },
+          );
+          const text = await unsupported.text();
+          assert.equal(unsupported.status, 400, text);
+          assert.deepEqual(JSON.parse(text), {
+            jsonrpc: '2.0',
+            id: 1,
+            error: { code: -32600, message: 'Unsupported MCP protocol version' },
+          });
+          assert.equal(reachedUpstream(unsupported), false);
+        }
+      }
       if (applicationId) {
         const accountCredential = await issueCredential(client, flavour.credential);
         const unapprovedAccount = await rpc(
@@ -427,6 +473,12 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       const rest = await callGateway(`${api.listen_path}/invoices`, { headers });
       assert.equal(rest.status, 200);
       assert.ok(reachedUpstream(rest), 'enabling MCP preserves the REST call path');
+      const restBody = (await rest.json()) as { routeServed: number };
+      assert.equal(
+        restBody.routeServed,
+        upstreamCount + 1,
+        'unsupported-version calls never execute upstream',
+      );
       for (const path of ['/undeclared', '/mcp/child']) {
         const refused = await callGateway(`${api.listen_path}${path}`, { headers });
         assert.ok(refused.status >= 400);
@@ -496,16 +548,14 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     let initialized: Response | undefined;
     await waitFor('the updated agent policy to initialize', async () => {
       initialized = await rpc(api, headers, 'initialize', {
-        protocolVersion: '2025-03-26',
+        protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
         clientInfo: { name: 'nexus-governance', version: '1' },
       });
       return initialized.status === 200;
     });
     assert.ok(initialized);
-    const session = initialized.headers.get('mcp-session-id');
-    assert.ok(session);
-    const scoped = { ...headers, 'mcp-session-id': session };
+    const scoped = await negotiatedHeaders(initialized, headers);
     const tools = await result(await rpc(api, scoped, 'tools/list'));
     assert.deepEqual(
       new Set(tools.tools?.map((tool) => tool.name)),
@@ -554,14 +604,18 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     const budgetCredential = await issueCredential(budgetClient, 'keyauth');
     const budgetHeaders = authHeadersFor(budgetCredential, 'keyauth');
     const init = await rpc(api, budgetHeaders, 'initialize', {
-      protocolVersion: '2025-03-26',
+      protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
       clientInfo: { name: 'nexus-budget', version: '1' },
     });
-    await result(init);
-    const budgetSession = init.headers.get('mcp-session-id');
-    assert.ok(budgetSession);
-    const budgetScoped = { ...budgetHeaders, 'mcp-session-id': budgetSession };
+    const budgetScoped = await negotiatedHeaders(init, budgetHeaders);
+    const beforeBudget = await callGateway(`${api.listen_path}/invoices`, {
+      headers: budgetHeaders,
+    });
+    assert.equal(beforeBudget.status, 200);
+    assert.ok(reachedUpstream(beforeBudget));
+    const baseline = (await beforeBudget.json()) as { routeServed: number };
+    assert.ok(Number.isSafeInteger(baseline.routeServed));
     for (let count = 0; count < 61; count += 1) {
       await result(await rpc(api, budgetScoped, 'tools/list'));
     }
@@ -573,17 +627,54 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         }),
       );
       assert.equal(called.isError, false);
+      assert.equal(called.structuredContent?.method, 'GET');
+      assert.equal(called.structuredContent?.path, '/invoices');
+      assert.equal(called.structuredContent?.routeServed, baseline.routeServed + count + 1);
     }
-    const limited = await rpc(api, budgetScoped, 'tools/call', {
-      name: `${api.slug}.list_invoices`,
-      arguments: {},
+    // Reinitializing must not reset a consumer's exhausted budget.
+    const reinitialized = await rpc(api, budgetHeaders, 'initialize', {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: 'nexus-budget-new-session', version: '1' },
     });
-    assert.equal(limited.status, 429, await limited.text());
-    assert.equal(reachedUpstream(limited), false);
-    const stillDiscoverable = await rpc(api, budgetScoped, 'tools/list');
-    assert.equal(stillDiscoverable.status, 200);
+    const renewedBudget = await negotiatedHeaders(reinitialized, budgetHeaders);
+    for (const limitedHeaders of [budgetScoped, budgetScoped, renewedBudget]) {
+      const limited = await rpc(api, limitedHeaders, 'tools/call', {
+        name: `${api.slug}.list_invoices`,
+        arguments: {},
+      });
+      const text = await limited.text();
+      // MCP application errors use HTTP 200. The exact error-only envelope
+      // excludes a tool result, including a disguised successful response.
+      assert.equal(limited.status, 200, text);
+      assert.deepEqual(JSON.parse(text), {
+        jsonrpc: '2.0',
+        id: 1,
+        error: { code: -32015, message: 'MCP tool-call rate limit exceeded' },
+      });
+      assert.equal(reachedUpstream(limited), false);
+    }
+    const stillDiscoverable = await result(await rpc(api, renewedBudget, 'tools/list'));
+    assert.deepEqual(stillDiscoverable.tools, tools.tools);
     const rest = await callGateway(`${api.listen_path}/invoices`, { headers: budgetHeaders });
     assert.equal(rest.status, 200, 'the MCP-only budget must not consume REST requests');
+    assert.ok(reachedUpstream(rest));
+    const afterBudget = (await rest.json()) as { routeServed: number };
+    assert.equal(
+      afterBudget.routeServed,
+      baseline.routeServed + 61,
+      'only the 60 admitted tool calls and this REST probe execute; denials and discovery do not',
+    );
+    const independent = await result(
+      await rpc(api, scoped, 'tools/call', {
+        name: `${api.slug}.list_invoices`,
+        arguments: {},
+      }),
+    );
+    assert.equal(independent.isError, false, 'another approved consumer retains its own budget');
+    assert.equal(independent.structuredContent?.method, 'GET');
+    assert.equal(independent.structuredContent?.path, '/invoices');
+    assert.equal(independent.structuredContent?.routeServed, baseline.routeServed + 62);
     const audit = await portal<{ items: { action: string }[] }>(
       'GET',
       `/api/admin/audit-logs?target_id=${api.id}`,

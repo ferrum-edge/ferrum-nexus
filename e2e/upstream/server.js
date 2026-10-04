@@ -18,8 +18,14 @@ const PORT = Number(process.env.PORT ?? 9100);
 /** Requests served since start — a restart test reads this to prove one. */
 let served = 0;
 
+/** Per-route counts let MCP denials prove no backend dispatch, without health-probe noise. */
+const servedByRoute = new Map();
+
 const server = createServer((request, response) => {
   served += 1;
+  const route = `${request.method} ${request.url}`;
+  const routeServed = (servedByRoute.get(route) ?? 0) + 1;
+  servedByRoute.set(route, routeServed);
   const chunks = [];
   request.on('data', (chunk) => chunks.push(chunk));
   request.on('end', () => {
@@ -31,6 +37,7 @@ const server = createServer((request, response) => {
     response.end(
       JSON.stringify({
         served,
+        routeServed,
         method: request.method,
         path: request.url,
         // Echoed so a test can assert the gateway stripped the credential it
