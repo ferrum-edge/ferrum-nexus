@@ -265,6 +265,121 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
     }
   });
 
+  it('replays every priority migration boundary, preserving delivery state', async () => {
+    const migration = migrations.find((file) => file.id === '009_outbox_priority');
+    assert.ok(migration);
+    const steps = splitSqlStatements(migration.sql);
+    const expected = await fixture(async (pool) => {
+      await runMysqlMigrations(pool);
+      return schema(pool);
+    });
+    for (const boundary of [...steps, 'before-ledger', 'after-ledger']) {
+      await fixture(async (pool, url) => {
+        await runMysqlMigrations(
+          pool,
+          migrations.filter((file) => file.id < migration.id),
+        );
+        await pool.query(`INSERT INTO organizations (id, name, created_at, updated_at)
+          VALUES ('preserved', 'Survives restart', '2026-01-01', '2026-01-01')`);
+        for (const [id, key, status] of [
+          ['campaign', 'mass:fixture', 'pending'],
+          ['reset', 'reset:fixture', 'pending'],
+          ['verify', 'verify:fixture', 'sent'],
+          ['parked', 'reset:parked', 'failed'],
+          ['lookalike', 'mass:verify:fixture', 'pending'],
+        ]) {
+          await pool.execute(
+            `INSERT INTO email_outbox
+              (id, to_email, subject, body_html, body_text, status, attempts, generation,
+               next_attempt_at, last_error, idempotency_key, created_at, updated_at)
+             VALUES (?, 'retained@example.test', 'nexus:sealed:v1', '', 'opaque', ?, 2,
+                     'retained-generation', '2026-01-03', 'retained-error', ?,
+                     '2026-01-01', '2026-01-02')`,
+            [id, status, key],
+          );
+        }
+        const retainedSql =
+          'SELECT id, to_email, subject, body_html, body_text, status, attempts, generation, ' +
+          'next_attempt_at, last_error, idempotency_key, created_at, updated_at ' +
+          'FROM email_outbox ORDER BY id';
+        const [before] = await pool.query(retainedSql);
+        let fired = false;
+        const faulty = intercept(pool, (method, sql, params, after) => {
+          if (fired) return;
+          const step = method === 'query' && after && normalize(sql) === normalize(boundary);
+          const ledger =
+            method === 'execute' &&
+            sql.startsWith('INSERT INTO schema_migrations ') &&
+            Array.isArray(params) &&
+            params[0] === migration.id &&
+            ((boundary === 'before-ledger' && !after) || (boundary === 'after-ledger' && after));
+          if (step || ledger) {
+            fired = true;
+            throw new Error(interruption);
+          }
+        });
+        await assert.rejects(() => runMysqlMigrations(faulty), new RegExp(interruption));
+        assert.ok(fired, boundary);
+        // A new writer may already use the low lane before a restart. Replaying
+        // the default/backfill must preserve that explicit classification.
+        await pool.query("UPDATE email_outbox SET priority = 0 WHERE id = 'campaign'");
+        await restartAndVerify(pool, url, expected);
+        const [after] = await pool.query(retainedSql);
+        assert.deepEqual(after, before);
+        const [priorities] = await pool.query<mysql.RowDataPacket[]>(
+          'SELECT id, priority FROM email_outbox ORDER BY id',
+        );
+        assert.deepEqual(
+          priorities.map((row) => [row.id, Number(row.priority)]),
+          [
+            ['campaign', 0],
+            ['lookalike', 1],
+            ['parked', 2],
+            ['reset', 2],
+            ['verify', 2],
+          ],
+        );
+      });
+    }
+  });
+
+  it('refuses incompatible priority columns and indexes without recording 009', async () => {
+    for (const definition of [
+      'INT NULL',
+      'INT NOT NULL DEFAULT 0',
+      'INT UNSIGNED NOT NULL DEFAULT 1',
+      'BIGINT NOT NULL DEFAULT 1',
+    ]) {
+      await fixture(async (pool) => {
+        await runMysqlMigrations(
+          pool,
+          migrations.filter((file) => file.id < '009_outbox_priority'),
+        );
+        await pool.query(`ALTER TABLE email_outbox ADD COLUMN priority ${definition}`);
+        const [before] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
+        await assert.rejects(() => runMysqlMigrations(pool), /has an incompatible definition/);
+        const [after] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
+        assert.deepEqual(after, before);
+      });
+    }
+    await fixture(async (pool) => {
+      await runMysqlMigrations(
+        pool,
+        migrations.filter((file) => file.id < '009_outbox_priority'),
+      );
+      await pool.query('ALTER TABLE email_outbox ADD COLUMN priority INT NOT NULL DEFAULT 1');
+      await pool.query(`CREATE INDEX ix_email_outbox_priority ON email_outbox
+        (status, priority ASC, next_attempt_at ASC, created_at ASC, id ASC)`);
+      const [before] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
+      await assert.rejects(
+        () => runMysqlMigrations(pool),
+        /index .* has an incompatible definition/,
+      );
+      const [after] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
+      assert.deepEqual(after, before);
+    });
+  });
+
   it('refuses incompatible columns without recording the migration', async () => {
     for (const definition of [
       'VARCHAR(35) NULL',

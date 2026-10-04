@@ -46,6 +46,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Verification and password-recovery mail take priority over queued campaigns**
+  (#500, GHSA-rqrj-7g3f-c6ww phase 2). Every store claims due security mail at
+  high priority, routine notifications at normal priority and new campaigns at
+  low priority, with deterministic due-time, creation-time and id ordering.
+  Priority applies at each claim and cannot preempt an active SMTP send.
+  Forward migration `009_outbox_priority` retains delivery state and account
+  fences, defaults existing rows to normal and promotes durable `verify:` and
+  `reset:` keys to high without reading sealed content. Campaign caps/chunks,
+  retry ownership and SMTP cancellation remain in place. Cross-adapter claim,
+  retry, concurrency and populated-upgrade contracts cover the lanes; MySQL
+  replay checks cover interrupted column, backfill, index and ledger writes.
+  The architecture now names both queued delivery and the inline admin SMTP probe.
+
 - **Explicit SSO links and queued mail cannot bypass account recovery** (#508).
   Link callbacks revalidate the initiating session in their lifecycle transaction,
   including attempts that find an existing link, so promotion during token exchange

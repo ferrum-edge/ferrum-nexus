@@ -5,7 +5,7 @@ import { after, before, describe, it } from 'node:test';
 import type { ApiErrorBody, MassEmailResponse } from '@ferrum-nexus/shared';
 
 import { DEFAULT_MAX_MASS_EMAIL_BYTES, DEFAULT_MAX_MASS_EMAILS_PER_DAY } from '../config/index.js';
-import type { NexusStore, TransactionOptions } from '../db/store.js';
+import { OUTBOX_PRIORITY, type NexusStore, type TransactionOptions } from '../db/store.js';
 import { NexusError } from '../lib/errors.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -64,6 +64,7 @@ describe('mass email', () => {
     assert.equal(await outboxTo('founder@example.test'), 0);
 
     const row = (await harness.outbox()).find((r) => r.to_email === 'client-a@example.test');
+    assert.equal(row?.priority, OUTBOX_PRIORITY.low);
     assert.equal(row?.subject, 'Scheduled maintenance');
     assert.ok(row?.body_html.includes('<b>02:00 UTC</b>'), 'admin html is not escaped');
     assert.equal(

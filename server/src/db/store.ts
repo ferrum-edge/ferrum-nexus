@@ -419,8 +419,13 @@ export type NotificationRecord = Notification;
  */
 export const OUTBOX_SEALED_SUBJECT = 'nexus:sealed:v1';
 
+/** Store-internal delivery lanes; larger values are claimed first. */
+export const OUTBOX_PRIORITY = { low: 0, normal: 1, high: 2 } as const;
+export type OutboxPriority = (typeof OUTBOX_PRIORITY)[keyof typeof OUTBOX_PRIORITY];
+
 /** An `email_outbox` row, including the rendered bodies the worker sends. */
 export interface EmailOutboxRecord extends EmailOutboxEntry {
+  priority: OutboxPriority;
   body_html: string;
   body_text: string;
   /** Opaque ownership token, replaced on every claim. Internal only. */
@@ -1540,6 +1545,8 @@ export interface NotificationPreferenceRepo {
 /** Payload accepted by {@link EmailOutboxRepo.enqueue}. */
 export interface EnqueueEmailInput {
   to_email: string;
+  /** Delivery lane; defaults to normal. Security mail uses high, campaigns low. */
+  priority?: OutboxPriority;
   /** Bind account mail to its original recipient; null only for non-account mail. */
   recipient_user_id?: Uuid | null;
   subject: string;
@@ -1572,10 +1579,12 @@ export interface EmailOutboxRepo {
   findByIdempotencyKey(key: string): Promise<EmailOutboxRecord | null>;
   /**
    * Atomically claim up to `limit` rows that are `pending` with
-   * `next_attempt_at <= now`, flipping them to `sending`, incrementing
-   * `attempts` and replacing `generation`. Two concurrent workers never claim
-   * the same row, and a claim reclaimed by `releaseStale` carries a token the
-   * previous holder cannot settle with.
+   * `next_attempt_at` null or `<= now`, highest priority first, then earliest
+   * due time (null first), oldest `created_at` and ascending id. Flip them to
+   * `sending`, increment `attempts` and replace `generation`. Priority only
+   * applies at claim time; it cannot preempt an active SMTP delivery.
+   * Two concurrent workers never claim the same row. A claim reclaimed by
+   * `releaseStale` carries a token the previous holder cannot settle with.
    */
   claimDue(now: IsoTimestamp, limit: number): Promise<EmailOutboxRecord[]>;
   /**

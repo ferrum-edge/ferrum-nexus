@@ -72,6 +72,7 @@ import { testCaptchaTransport } from './helpers.js';
 import { runMessageBudgetContract } from './message-budget-contract.js';
 import { runMailLifecycleContract } from './mail-lifecycle-contract.js';
 import { runOutboxFencingContract } from './outbox-fencing-contract.js';
+import { runOutboxPriorityContract } from './outbox-priority-contract.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
 import { runPrivilegedAuditContract } from './privileged-audit-contract.js';
 import { runRecoveryThrottleContract } from './recovery-throttle-contract.js';
@@ -349,6 +350,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
   runMessageBudgetContract(label, makeStore);
   runMailLifecycleContract(label, makeStore);
   runOutboxFencingContract(label, makeStore);
+  runOutboxPriorityContract(label, makeStore);
   runPasswordChangeContract(label, makeStore);
   runPrivilegedAuditContract(label, makeStore);
   runRecoveryThrottleContract(label, makeStore);

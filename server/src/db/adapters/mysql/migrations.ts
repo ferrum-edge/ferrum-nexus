@@ -13,31 +13,71 @@ import {
 const digest = (text: string): string => createHash('sha256').update(text).digest('hex');
 const ADD_COLUMN = /^ALTER TABLE ([a-z][a-z0-9_]*) ADD COLUMN ([a-z][a-z0-9_]*) (.+)$/i;
 const STRING_COLUMN = /^(VARCHAR\([1-9][0-9]*\)) (NULL|NOT NULL DEFAULT '')$/i;
+const INTEGER_COLUMN = /^INT NOT NULL DEFAULT ([0-9]+)$/i;
+const CREATE_INDEX = /^CREATE INDEX ([a-z][a-z0-9_]*) ON ([a-z][a-z0-9_]*) \((.+)\)$/i;
+// This assignment is idempotent, and changes no delivery state. Do not accept
+// arbitrary DML here: MySQL can commit it before the ledger is recorded.
+const OUTBOX_PRIORITY_BACKFILL =
+  'UPDATE email_outbox SET priority = 2 WHERE priority = 1 AND ' +
+  "(SUBSTR(idempotency_key, 1, 7) = 'verify:' OR " +
+  "SUBSTR(idempotency_key, 1, 6) = 'reset:')";
 const MAX_LOCK_WAIT_TIMEOUT_SECONDS = 30;
 
 interface AddColumn {
+  kind: 'column';
   statement: string;
   table: string;
   column: string;
   type: string;
   nullable: boolean;
+  defaultValue: string | null;
+  stringColumn: boolean;
 }
 
-/** Only additive string columns with replay-verifiable definitions are supported. */
-function migrationSteps(migration: MigrationFile): (string | AddColumn)[] {
-  return splitSqlStatements(migration.sql).map((statement) => {
-    if (/^CREATE TABLE IF NOT EXISTS\s/i.test(statement)) return statement;
+interface AddIndex {
+  kind: 'index';
+  statement: string;
+  table: string;
+  name: string;
+  columns: { name: string; direction: 'A' | 'D' }[];
+}
+
+/** Only replay-verifiable additions and the idempotent priority backfill are supported. */
+function migrationSteps(migration: MigrationFile): (string | AddColumn | AddIndex)[] {
+  return splitSqlStatements(migration.sql).map<string | AddColumn | AddIndex>((sql) => {
+    const statement = sql.replace(/\s+/g, ' ').trim();
+    if (/^CREATE TABLE IF NOT EXISTS\s/i.test(statement)) return sql;
+    if (migration.id === '009_outbox_priority' && statement === OUTBOX_PRIORITY_BACKFILL) {
+      return statement;
+    }
+    const index = CREATE_INDEX.exec(statement);
+    if (index) {
+      const columns = index[3]!.split(',').map((column) => {
+        const match = /^([a-z][a-z0-9_]*)(?: (ASC|DESC))?$/i.exec(column.trim());
+        if (!match) throw new Error(`MySQL migration ${migration.id} has unsupported index DDL`);
+        return {
+          name: match[1]!,
+          direction: match[2]?.toUpperCase() === 'DESC' ? ('D' as const) : ('A' as const),
+        };
+      });
+      return { kind: 'index', statement, table: index[2]!, name: index[1]!, columns };
+    }
     const match = ADD_COLUMN.exec(statement);
     const definition = match && STRING_COLUMN.exec(match[3]!);
-    if (!match || !definition) {
+    const integer = match && INTEGER_COLUMN.exec(match[3]!);
+    if (!match || (!definition && !integer)) {
       throw new Error(`MySQL migration ${migration.id} contains unsupported non-replayable DDL`);
     }
+    const nullable = definition?.[2]?.toUpperCase() === 'NULL';
     return {
+      kind: 'column',
       statement,
       table: match[1]!,
       column: match[2]!,
-      type: definition[1]!.toLowerCase(),
-      nullable: definition[2]!.toUpperCase() === 'NULL',
+      type: definition ? definition[1]!.toLowerCase() : 'int',
+      nullable,
+      defaultValue: definition ? (nullable ? null : '') : integer![1]!,
+      stringColumn: definition !== null,
     };
   });
 }
@@ -57,12 +97,43 @@ async function columnExists(connection: mysql.PoolConnection, step: AddColumn): 
   if (
     String(column.COLUMN_TYPE).toLowerCase() !== step.type ||
     column.IS_NULLABLE !== (step.nullable ? 'YES' : 'NO') ||
-    column.COLUMN_DEFAULT !== (step.nullable ? null : '') ||
+    (column.COLUMN_DEFAULT === null ? null : String(column.COLUMN_DEFAULT)) !== step.defaultValue ||
     column.EXTRA !== '' ||
-    column.COLLATION_NAME !== column.TABLE_COLLATION
+    column.COLLATION_NAME !== (step.stringColumn ? column.TABLE_COLLATION : null)
   ) {
     throw new Error(
       `MySQL migration column ${step.table}.${step.column} has an incompatible definition`,
+    );
+  }
+  return true;
+}
+
+async function indexExists(connection: mysql.PoolConnection, step: AddIndex): Promise<boolean> {
+  const [rows] = await connection.execute<mysql.RowDataPacket[]>(
+    `SELECT COLUMN_NAME, COLLATION, NON_UNIQUE, SUB_PART, INDEX_TYPE, IS_VISIBLE, EXPRESSION
+       FROM information_schema.STATISTICS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?
+      ORDER BY SEQ_IN_INDEX`,
+    [step.table, step.name],
+  );
+  if (rows.length === 0) return false;
+  if (
+    rows.length !== step.columns.length ||
+    rows.some((row, i) => {
+      const column = step.columns[i]!;
+      return (
+        row.COLUMN_NAME !== column.name ||
+        row.COLLATION !== column.direction ||
+        Number(row.NON_UNIQUE) !== 1 ||
+        row.SUB_PART !== null ||
+        row.INDEX_TYPE !== 'BTREE' ||
+        row.IS_VISIBLE !== 'YES' ||
+        row.EXPRESSION !== null
+      );
+    })
+  ) {
+    throw new Error(
+      `MySQL migration index ${step.table}.${step.name} has an incompatible definition`,
     );
   }
   return true;
@@ -73,17 +144,21 @@ async function applyMigration(
   migration: MigrationFile,
 ): Promise<void> {
   // MySQL DDL commits independently of the ledger. The buildout baseline uses
-  // replayable CREATEs; additive columns are checked against live metadata on
-  // every replay. Validate the whole file before applying any of it. The same
-  // database advisory lock covers metadata reads, DDL and the ledger write.
+  // replayable CREATEs; additive columns and indexes are checked against live
+  // metadata on every replay. Validate the whole file before applying any of
+  // it. The same database advisory lock covers metadata, DDL and the ledger.
   const steps = migrationSteps(migration);
   for (const step of steps) {
     if (typeof step === 'string') {
       await connection.query(step);
-    } else if (!(await columnExists(connection, step))) {
-      await connection.query(step.statement);
-      if (!(await columnExists(connection, step))) {
-        throw new Error(`MySQL migration failed to add ${step.table}.${step.column}`);
+    } else {
+      const present = () =>
+        step.kind === 'column' ? columnExists(connection, step) : indexExists(connection, step);
+      if (!(await present())) {
+        await connection.query(step.statement);
+        if (!(await present())) {
+          throw new Error(`MySQL migration failed to add an object to ${step.table}`);
+        }
       }
     }
   }

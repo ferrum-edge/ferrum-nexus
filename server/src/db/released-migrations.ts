@@ -141,4 +141,14 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
       mongodb: 'e9ce02f689b67ecf81d7c44c58bb8e6c4d37f38a30fcf9936458b51b5deba891',
     },
   },
+  {
+    id: '009_outbox_priority',
+    release: null,
+    sha256: {
+      sqlite: '0ffa16cce8d5a154877a1dadffc52b8ac3ad4cc8346d637b008ded2ec5fde31e',
+      pg: '6bd48d66f70cd8b949dc168991e822db31ae49d3734b3cbcee81115b0d6c8b35',
+      mysql: '633e786effcf93732d5b53987e42e3118bf789394b57295a3764440a69cddc16',
+      mongodb: '69cb26f63681690067159841eaab59788cc075a07beb7bdda3634c22fbfa635c',
+    },
+  },
 ];

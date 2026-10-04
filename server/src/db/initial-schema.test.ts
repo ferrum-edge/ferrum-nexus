@@ -19,6 +19,7 @@ describe('buildout schema baseline', () => {
           '006_user_identities',
           '007_outbox_recipient',
           '008_email_lifecycle_fence',
+          '009_outbox_priority',
         ],
       );
       const statements = splitSqlStatements(files[0]!.sql);
