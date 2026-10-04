@@ -98,6 +98,11 @@ export const SUPER_ADMIN_LOCK_CONFLICT_MESSAGE =
  * other reads, so without one key both could commit and leave a lower-trust
  * identity on an administrator's account.
  *
+ * Password-reset issuance takes it before its eligibility check and token
+ * generation, through email preparation and the fenced mint/outbox transaction.
+ * A disable cannot miss a delayed mint, and a holder whose lease changed hands
+ * cannot insert its old capability after a disable and re-enable.
+ *
  * Per account rather than portal-wide: the invariant is a property of one
  * account, and two different accounts never need to wait for each other. It is
  * always taken **inside** {@link SUPER_ADMIN_LOCK_KEY} and

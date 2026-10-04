@@ -70,8 +70,7 @@ What to expect:
 
 **Profile** lets you change your display name, company and phone, and set a
 new password (you need your current one). Changing your password signs out your
-other sessions. Only an administrator can change your email, role or account
-status.
+other sessions. Only an administrator can change your role or account status.
 
 ---
 

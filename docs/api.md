@@ -474,7 +474,11 @@ Queues a password-reset link to `<public URL>/reset-password?token=…` when the
 address belongs to an active account and none was issued in the last 10
 minutes. The link expires after one hour (`PASSWORD_RESET_TTL_SECONDS`), and
 issuing it supersedes every earlier live reset link for the account, so only the
-newest is valid.
+newest is valid. Issuance holds the account's lifecycle lease from its
+eligibility check and token generation through the mint/outbox transaction.
+A disable that follows revokes that token; an issuer whose lease changed hands
+cannot mint it after a disable/re-enable. A request that acquires the lease
+after re-enable may issue a fresh link.
 
 ### `POST /api/auth/reset-password`
 
@@ -483,7 +487,9 @@ _public_ — body `token` (8–512 chars, from the link) and `new_password`
 
 Burns the link, sets the password, marks the address verified, invalidates
 other reset links, and **ends every session of the account** — including the
-caller's, whose cookies are cleared. Sign in again afterwards.
+caller's, whose cookies are cleared. The password write requires the account
+to still be active; if a concurrent disable wins, the reset rolls back. Sign
+in again afterwards.
 
 Errors: `400 VALIDATION_FAILED` for a token that is unknown, expired or spent
 (one message for all three) or a password below the minimum (checked before the
@@ -740,14 +746,17 @@ Rules:
   (this wins over the self-disable rule).
 - Disabling your own account otherwise → `409 CONFLICT`.
 - `org_id` naming an unknown organization → `404 NOT_FOUND`.
-- Disabling deletes every session the account holds and queues the gateway
-  revocation in the same transaction.
-- Re-enabling cancels any queued revocation and rebuilds each identity's
-  `nexus:api:<id>:approved` ACL groups from its active grants (revoked
-  credentials and test consumers are not restored; groups outside that
-  namespace are kept). If the gateway fails, the status change has already
-  committed and the response is `502 EDGE_ERROR`; repeat the same PATCH to
-  retry.
+- Disabling deletes every session the account holds, revokes every outstanding
+  `password_reset` link, and queues the gateway revocation in the same
+  transaction, so a re-enable inside a link's one-hour lifetime cannot revive
+  it.
+- Re-enabling cancels any queued revocation, deletes any `password_reset` link
+  still present from an older version that did not order issuance with disable,
+  and rebuilds each identity's `nexus:api:<id>:approved` ACL groups from its
+  active grants (revoked credentials and test consumers are not restored; groups
+  outside that namespace are kept). If the gateway fails, the status change has
+  already committed and the response is `502 EDGE_ERROR`; repeat the same PATCH
+  to retry.
 
 ### `POST /api/users/:id/gateway-teardown/retry`
 
@@ -1500,9 +1509,10 @@ Body `{ "user_id", "reason", "revoke_grants"?: boolean }`
 { "user": { … }, "revoked_grants": 3, "terminated_sessions": 2, "gateway_teardown": "ok" }
 ```
 
-Disables the account and ends its sessions. `gateway_teardown` has the same
-values and meaning as on [`PATCH /api/users/:id`](#patch-apiusersid). The
-disable, the session purge, the queued revocation and the `user.disable` and
+Disables the account, ends its sessions and revokes its outstanding
+`password_reset` links. `gateway_teardown` has the same values and meaning as on
+[`PATCH /api/users/:id`](#patch-apiusersid). The disable, the session purge, the
+recovery-link revocation, the queued revocation and the `user.disable` and
 `god.disable_user` audit rows commit in one transaction;
 `god.disable_user_complete` records what followed.
 

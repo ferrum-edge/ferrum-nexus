@@ -65,7 +65,11 @@ import {
   validationFailed,
 } from '../lib/errors.js';
 import { isoInSeconds, nowIso } from '../lib/ids.js';
-import { SUPER_ADMIN_LOCK_KEY, type KeyedSerializer } from '../lib/keyed-serializer.js';
+import {
+  SUPER_ADMIN_LOCK_KEY,
+  userLifecycleLockKey,
+  type KeyedSerializer,
+} from '../lib/keyed-serializer.js';
 import { rewordLeaseLost } from '../lib/lease-fence.js';
 import { localPasswordBlocked, readLoginPolicy } from '../sso/settings.js';
 import type { CaptchaService } from './captcha.js';
@@ -362,6 +366,8 @@ export interface AuthServiceDeps {
    * {@link SUPER_ADMIN_LOCK_KEY} — the same key every transition that can
    * shrink the active `super_admin` set runs under — so two instances cannot
    * each seat a founder, and a bootstrap cannot interleave with a demotion.
+   * Reset issuance takes {@link userLifecycleLockKey} before checking eligibility
+   * or generating a capability, and holds it through the mint's transaction.
    */
   locks: KeyedSerializer;
   /**
@@ -957,71 +963,84 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       await withUniformAnswer('password_reset', async () => {
         const email = rawEmail.trim().toLowerCase();
         const record = await store.users.findByEmail(email);
-        if (!record || record.status !== 'active') return;
-        // No password to reset: such an account signs in with its provider.
-        if (await localPasswordBlocked(config, store, record)) return;
-        const existing = await store.verificationTokens.findLatestLiveForUser(
-          record.id,
-          'password_reset',
-          nowIso(),
-        );
-        if (
-          existing &&
-          Date.parse(existing.created_at) > Date.now() - PASSWORD_RESET_THROTTLE_SECONDS * 1000
-        ) {
-          return;
-        }
-        const token = crypto.newSessionToken();
-        // Rendered before the claim, for the reason `resendVerification` gives.
-        const queueEmail = deps.preparePasswordReset
-          ? await deps.preparePasswordReset({
-              user: toPublicUser(record),
-              token,
-              requestContext: context,
-            })
-          : null;
-        const issuedAt = nowIso();
-        const notBefore = new Date(
-          Date.parse(issuedAt) - PASSWORD_RESET_THROTTLE_SECONDS * 1000,
-        ).toISOString();
-        await store.transaction(async (tx) => {
-          // Inside the transaction, for the reason `resendVerification` gives:
-          // account recovery must not spend the window on a link that was
-          // never minted, or never queued (issues #137, #342).
+        if (!record) return;
+        // Take the lifecycle key before checking eligibility or generating the
+        // capability. Otherwise email preparation can pause while a disable
+        // and re-enable delete all links, then mint one they never saw (#499).
+        await locks(userLifecycleLockKey(record.id), async () => {
+          const current = await store.users.findById(record.id);
+          if (!current || current.status !== 'active') return;
+          // No password to reset: such an account signs in with its provider.
+          if (await localPasswordBlocked(config, store, current)) return;
+          const existing = await store.verificationTokens.findLatestLiveForUser(
+            record.id,
+            'password_reset',
+            nowIso(),
+          );
           if (
-            !(await tx.verificationTokens.claimIssue(
-              record.id,
-              'password_reset',
-              issuedAt,
-              notBefore,
-            ))
+            existing &&
+            Date.parse(existing.created_at) > Date.now() - PASSWORD_RESET_THROTTLE_SECONDS * 1000
           ) {
-            // Genuinely throttled: another request holds the window.
             return;
           }
-          // Supersede any earlier reset link: issuing a new one must revoke the
-          // old, so a leaked or suspected recovery link cannot outlive its
-          // replacement. Only the newest link is ever live.
-          await tx.verificationTokens.deleteForUser(record.id, 'password_reset');
-          const created = await tx.verificationTokens.create({
-            user_id: record.id,
-            token_hash: crypto.hashToken(token),
-            purpose: 'password_reset',
-            expires_at: isoInSeconds(PASSWORD_RESET_TTL_SECONDS),
-          });
+          const token = crypto.newSessionToken();
+          // Rendered before the claim, for the reason `resendVerification` gives.
+          const queueEmail = deps.preparePasswordReset
+            ? await deps.preparePasswordReset({
+                user: toPublicUser(current),
+                token,
+                requestContext: context,
+              })
+            : null;
+          const issuedAt = nowIso();
+          const notBefore = new Date(
+            Date.parse(issuedAt) - PASSWORD_RESET_THROTTLE_SECONDS * 1000,
+          ).toISOString();
+          await store.transaction(async (tx) => {
+            // The lease can change hands during preparation. Recheck in the
+            // fenced transaction; a stale holder cannot commit even if the
+            // account has since been disabled and re-enabled back to active.
+            const eligible = await tx.users.findById(record.id);
+            if (!eligible || eligible.status !== 'active') return;
+            if (await localPasswordBlocked(config, tx, eligible)) return;
+            // Inside the transaction, for the reason `resendVerification` gives:
+            // account recovery must not spend the window on a link that was
+            // never minted, or never queued (issues #137, #342).
+            if (
+              !(await tx.verificationTokens.claimIssue(
+                record.id,
+                'password_reset',
+                issuedAt,
+                notBefore,
+              ))
+            ) {
+              // Genuinely throttled: another request holds the window.
+              return;
+            }
+            // Supersede any earlier reset link: issuing a new one must revoke the
+            // old, so a leaked or suspected recovery link cannot outlive its
+            // replacement. Only the newest link is ever live.
+            await tx.verificationTokens.deleteForUser(record.id, 'password_reset');
+            const created = await tx.verificationTokens.create({
+              user_id: record.id,
+              token_hash: crypto.hashToken(token),
+              purpose: 'password_reset',
+              expires_at: isoInSeconds(PASSWORD_RESET_TTL_SECONDS),
+            });
 
-          // Only the path that actually issued a link is audited, so the log
-          // distinguishes the four outcomes the response cannot.
-          await audit
-            .forStore(tx)
-            .record(
-              { id: record.id, role: record.role },
-              AuditAction.AUTH_PASSWORD_RESET_REQUEST,
-              { type: 'user', id: record.id },
-              { email },
-              context.ip,
-            );
-          if (queueEmail) await queueEmail(tx, created.id);
+            // Only the path that actually issued a link is audited, so the log
+            // distinguishes the four outcomes the response cannot.
+            await audit
+              .forStore(tx)
+              .record(
+                { id: eligible.id, role: eligible.role },
+                AuditAction.AUTH_PASSWORD_RESET_REQUEST,
+                { type: 'user', id: record.id },
+                { email },
+                context.ip,
+              );
+            if (queueEmail) await queueEmail(tx, created.id);
+          });
         });
       });
     },
@@ -1064,12 +1083,19 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
           const burned = await tx.verificationTokens.markUsed(live.id, nowIso());
           if (!burned) throw invalidResetLink();
 
-          const updated = await tx.users.update(record.id, {
-            password_hash: passwordHash,
-            // Redeeming a link mailed to the address proves the mailbox, which is
-            // all verification ever claimed.
-            email_verified: true,
-          });
+          // A lifecycle transition uses a different lease. Under PostgreSQL
+          // READ COMMITTED it can disable the account after the active read
+          // above; guard the write itself and refuse a zero-row match.
+          const updated = await tx.users.updateIfMatches(
+            record.id,
+            { status: 'active' },
+            {
+              password_hash: passwordHash,
+              // Redeeming a link mailed to the address proves the mailbox, which is
+              // all verification ever claimed.
+              email_verified: true,
+            },
+          );
           if (!updated) throw invalidResetLink();
 
           // Redeeming a mailed link proves the mailbox.

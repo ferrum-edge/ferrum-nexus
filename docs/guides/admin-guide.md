@@ -82,6 +82,9 @@ Disabling an account:
 - ends every session it holds, so open browser tabs get `401` on their next
   request;
 - blocks sign-in with `403 USER_DISABLED`;
+- **revokes its outstanding password-reset links**, so a link minted before the
+  disable cannot be redeemed if the account is re-enabled inside its one-hour
+  lifetime;
 - **revokes its gateway access**: every credential of every type on its own
   consumer and on each of its applications is deleted, its access groups are
   removed, and any provider test consumer it created is deleted;
@@ -97,9 +100,11 @@ clears. See [`../operations.md`](../operations.md#11-gateway-revocation-for-disa
 **Re-enabling** sets the status back to active and cancels any queued
 revocation. The user signs in normally. Access groups come back for every grant
 that is still active, but credentials do not: the user issues new ones. Revoked
-grants and test consumers are not recreated. If restoring the gateway groups
-fails, the request returns an error after the status has changed; enable the
-account again to finish. It is safe to repeat.
+grants and test consumers are not recreated. A `password_reset` link left over
+from a version that did not order issuance with disable is deleted as well, so
+it cannot be redeemed. If restoring the gateway groups fails, the request returns an error
+after the status has changed; enable the account again to finish. It is safe to
+repeat.
 
 To also withdraw the account's approvals, use [god mode → Disable an
 account](#disable-an-account) with **Also revoke every grant held by this

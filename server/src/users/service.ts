@@ -25,9 +25,12 @@
  *    SQLite (one connection, bodies drained by a queue) waiting for a lease from
  *    inside a body blocks the very transaction that would release it.
  *
- * Disabling an account also deletes its sessions, so the next request from an
- * open browser tab is a 401 rather than a working page — **and** strips its
- * Ferrum consumer, because an issued API key needs no portal session at all.
+ * Disabling an account also deletes its sessions and any outstanding
+ * `password_reset` link, so the next request from an open browser tab is a 401
+ * rather than a working page, and re-enabling inside the link's lifetime cannot
+ * revive a recovery capability an administrator meant to end. It **also** strips
+ * the account's Ferrum consumer, because an issued API key needs no portal
+ * session at all.
  *
  * That last step is **durable work, not a side effect**. A
  * `gateway_teardown_jobs` row is written in the same transaction as
@@ -653,19 +656,42 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
           // A disabled account must not keep a usable browser session either.
           let job: GatewayTeardownJobRecord | null = null;
           let terminatedSessions = 0;
+          let revokedResetLinks = 0;
           if (update.status === 'disabled') {
             job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
             terminatedSessions = await tx.sessions.deleteForUser(target.id);
+            // An outstanding reset link is an account-recovery capability that
+            // outlives the session cut-off: while the account is disabled
+            // `resetPassword` refuses it, but re-enabling inside the link's
+            // one-hour lifetime would revive a link this disable was meant to
+            // kill. Deleting it in the same transaction as the status flip, on
+            // every backend, is what makes the revocation outlive a re-enable.
+            revokedResetLinks = await tx.verificationTokens.deleteForUser(
+              target.id,
+              'password_reset',
+            );
           }
           // Re-enabling cancels any queued revocation — a retry must never strip
           // the credentials of an account that is live again.
-          if (update.status === 'active') await tx.gatewayTeardownJobs.deleteByUser(target.id);
+          if (update.status === 'active') {
+            await tx.gatewayTeardownJobs.deleteByUser(target.id);
+            // A disabled account can never legitimately request a reset, so a
+            // `password_reset` row still present at re-enable is stale: a
+            // leftover from a version that did not order issuance under the
+            // lifecycle lease. Deleting it here keeps a re-enable from reviving
+            // a link the disable meant to end.
+            revokedResetLinks += await tx.verificationTokens.deleteForUser(
+              target.id,
+              'password_reset',
+            );
+          }
 
           const details = {
             changed_fields: changed,
             ...(roleChanged ? { from_role: target.role, to_role: update.role } : {}),
             ...(statusChanged ? { from_status: target.status, to_status: update.status } : {}),
             ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
+            ...(revokedResetLinks > 0 ? { revoked_reset_links: revokedResetLinks } : {}),
             ...(job ? { gateway_teardown: 'queued' } : {}),
           };
           if (roleChanged) {
