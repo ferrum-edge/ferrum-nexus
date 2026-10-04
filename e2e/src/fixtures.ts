@@ -7,9 +7,10 @@
  * reaches around the product to arrange a state a real operator could not.
  */
 
-import type { ApiAgents } from '@ferrum-nexus/shared';
 import { createHmac } from 'node:crypto';
 
+// E2E installs independently, so read the canonical type without a shared/dist build.
+import type { ApiAgents } from '../../shared/src/agents.js';
 import { portal, type Session } from './harness.js';
 
 /** A published API as the portal describes it. */

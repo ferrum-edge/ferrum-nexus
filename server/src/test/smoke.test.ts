@@ -2052,6 +2052,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
             slug: `subset-${newId().slice(0, 8)}`,
             auth_plugin: 'key_auth',
             requestable: true,
+            visibility: 'public',
             spec_enforcement: 'routes',
             spec: JSON.stringify({
               openapi: '3.1.0',

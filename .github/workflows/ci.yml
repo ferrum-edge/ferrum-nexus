@@ -171,7 +171,7 @@ jobs:
           };
           for (const dialect of ['sqlite', 'pg', 'mysql']) {
             const files = loadMigrations(dialect);
-            assert.deepEqual(files.map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest', '004_api_spec_changes', '005_notification_preferences', '006_user_identities', '007_outbox_recipient', '008_email_lifecycle_fence', '009_outbox_priority', '010_api_agents']);
+            assert.deepEqual(files.map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest', '004_api_spec_changes', '005_notification_preferences', '006_user_identities', '007_outbox_recipient', '008_email_lifecycle_fence', '009_outbox_priority', '010_api_agents', '011_mcp_tool_subsets']);
             const priority = files.find((file) => file.id === '009_outbox_priority');
             assert.ok(priority);
             assert.equal(createHash('sha256').update(priority.sql).digest('hex'), priorityHashes[dialect]);
