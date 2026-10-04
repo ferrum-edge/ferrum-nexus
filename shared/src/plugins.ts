@@ -41,6 +41,9 @@
  *   group is derived from the API id, the validator is generated from the
  *   spec). {@link isFirstClassPlugin} names them so the route can answer with a
  *   message pointing at the right field instead of a bare 404.
+ * - **Agent policy** (`mcp_gateway`, `ai_tool_governor`, `ai_prompt_shield`) is
+ *   fixed by the API's `agents` selection, never editable in the palette.
+ *   `ai_transcript_audit` sinks and the remaining AI family stay operator-owned.
  * - **Operator plugins** — logging sinks, telemetry, mesh, chaos, load
  *   testing. Those are how you *run* the gateway, not how you *sell* an API.
  *
@@ -804,6 +807,9 @@ export const FIRST_CLASS_PLUGIN_FIELDS: Readonly<Record<string, string>> = {
   rate_limiting: 'rate_limit',
   cors: 'cors',
   openapi_validator: 'spec_enforcement',
+  mcp_gateway: 'agents',
+  ai_tool_governor: 'agents',
+  ai_prompt_shield: 'agents',
 };
 
 /** Whether `name` is owned by a first-class API field rather than the palette. */

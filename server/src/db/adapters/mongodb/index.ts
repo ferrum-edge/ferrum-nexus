@@ -560,6 +560,7 @@ function mapApi(row: Row): ApiRecord {
     timeouts: (row.timeouts ?? null) as ApiTimeouts | null,
     circuit_breaker: flag(row.circuit_breaker),
     spec_enforcement: specEnforcement(row.spec_enforcement),
+    agents: (row.agents ?? null) as ApiRecord['agents'],
     status: str(row.status) as ApiStatus,
     visibility: str(row.visibility) as ApiVisibility,
     gateway_state: (str(row.gateway_state) || 'deployed') as ApiGatewayState,
@@ -1528,6 +1529,15 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
       await createIndexes(db, EMAIL_OUTBOX_PRIORITY_INDEXES);
     },
   },
+  {
+    id: '010_api_agents',
+    indexes: [],
+    apply: async (db: Db): Promise<void> => {
+      await db
+        .collection(COLLECTIONS.apis)
+        .updateMany({ agents: { $exists: false } }, { $set: { agents: null } });
+    },
+  },
 ];
 
 /**
@@ -2378,6 +2388,7 @@ class MongoStore implements NexusStore {
             timeouts: normalizeJson(input.timeouts ?? null),
             circuit_breaker: input.circuit_breaker ?? false,
             spec_enforcement: input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT,
+            agents: normalizeJson(input.agents ?? null),
             status: input.status,
             visibility: input.visibility,
             gateway_state: input.gateway_state ?? 'deployed',
@@ -2442,6 +2453,7 @@ class MongoStore implements NexusStore {
         timeouts: patch.timeouts === undefined ? undefined : normalizeJson(patch.timeouts),
         circuit_breaker: patch.circuit_breaker,
         spec_enforcement: patch.spec_enforcement,
+        agents: patch.agents === undefined ? undefined : normalizeJson(patch.agents),
         status: patch.status,
         visibility: patch.visibility,
         gateway_state: patch.gateway_state,

@@ -794,6 +794,40 @@ describe('per-identity catalog access (issue #314)', () => {
     /** The consumer the account-level credential endpoint issues on. */
     const ACCOUNT_CONSUMER = consumerUsernameForUser('user-1');
 
+    it('shows the agent badge and tool coverage only connects an approved identity', async () => {
+      detail = {
+        ...detail,
+        api: catalogEntry({
+          access_state: 'granted',
+          auth_plugin: 'basic_auth',
+          agents: {
+            operations: [
+              { path: '/invoices', method: 'GET', name: 'list', description: 'List invoices' },
+            ],
+          },
+        }),
+        my_grant: grantFor(APP_A),
+      };
+      identities['app-a'] = { application: summary(APP_A), request: null, grant: grantFor(APP_A) };
+      await openDetail('Access');
+      await screen.findByRole('button', { name: 'Request access' });
+      expect(screen.getByText('AI agents')).toBeInTheDocument();
+      expect(screen.queryByText('Connect an agent')).not.toBeInTheDocument();
+      expect(
+        screen.getByRole('region', { name: 'Tools available after approval' }),
+      ).toBeInTheDocument();
+      await chooseIdentity('Application A');
+      await screen.findByText(/Access granted to Application A/);
+      expect(screen.getByText('Connect an agent')).toBeInTheDocument();
+      expect(
+        screen.getByRole('region', { name: 'Tools covered by this grant' }),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/Base64-encode nexus-app-app-a/)).toBeInTheDocument();
+      await chooseIdentity('My account');
+      await screen.findByRole('button', { name: 'Request access' });
+      expect(screen.queryByText('Connect an agent')).not.toBeInTheDocument();
+    });
+
     /** The JWT `sub` the note tells the caller to sign. */
     function jwtSubject(): string {
       return screen.getByText(/claim must be/).querySelectorAll('code')[1]?.textContent ?? '';

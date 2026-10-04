@@ -802,6 +802,32 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.apis.delete(bare2.id), false);
     });
 
+    it('apis: agent selections default off and survive transactions on every adapter', async () => {
+      const owner = await makeUser();
+      const reference = await makeApi(owner.id);
+      assert.equal((await store.apis.findById(reference.id))?.agents, null);
+      const agents = {
+        operations: [
+          { path: '/items', method: 'GET' as const, name: 'items', description: 'List items' },
+        ],
+      };
+      await store.transaction(async (tx) => {
+        const saved = await tx.apis.update(reference.id, { agents });
+        assert.deepEqual(saved?.agents, agents);
+      });
+      assert.deepEqual((await store.apis.findById(reference.id))?.agents, agents);
+      await assert.rejects(
+        store.transaction(async (tx) => {
+          await tx.apis.update(reference.id, { agents: null });
+          throw new Error('rollback agent selection');
+        }),
+        /rollback agent selection/,
+      );
+      assert.deepEqual((await store.apis.findById(reference.id))?.agents, agents);
+      await store.apis.update(reference.id, { agents: null });
+      assert.equal((await store.apis.findById(reference.id))?.agents, null);
+    });
+
     it('apis: round-trips the recorded upstream and the CORS policy', async () => {
       const owner = await makeUser({ role: 'provider' });
       const cors = { allowed_origins: ['https://app.example.com'], allow_credentials: true };

@@ -16,3 +16,4 @@ export * from './publishing.js';
 export * from './sso.js';
 export * from './api-contract.js';
 export * from './openapi.js';
+export * from './agents.js';

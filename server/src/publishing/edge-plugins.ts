@@ -294,42 +294,42 @@ export interface EdgePluginBinder {
   ): Promise<EdgePluginConfig | null>;
 }
 
+/**
+ * The body for a create or a replace: the portal's fields written **over**
+ * whatever `live` already carries, with `trigger` omitted when absent.
+ *
+ * The merge is the whole point. Building the body from scratch resets every
+ * field the portal does not model, because the `PUT` replaces the whole
+ * resource — which is how an operator's `priority_override` used to vanish on
+ * an ordinary palette save (issue #159). Passing `live` is therefore the rule
+ * for every write path that has a resource in hand, not an optimisation.
+ */
+export function writeBody(
+  proxyId: string,
+  pluginName: string,
+  pluginConfig: EdgePluginSettings | null,
+  options: EdgePluginOptions | undefined,
+  live?: EdgePluginConfig,
+): EdgePluginConfigWrite {
+  const trigger = options?.trigger ?? null;
+  return {
+    ...(options?.priorityOverride === undefined
+      ? {}
+      : { priority_override: options.priorityOverride }),
+    ...operatorOwnedFields(live),
+    plugin_name: pluginName,
+    scope: 'proxy',
+    proxy_id: proxyId,
+    enabled: options?.enabled ?? true,
+    config: pluginConfig,
+    // Omitted rather than `null`: Edge validates a closed key set and a
+    // whole-resource `PUT` removes a trigger by not carrying one.
+    ...(trigger === null ? {} : { trigger }),
+  };
+}
+
 /** Build the plugin/proxy binder over one Ferrum Edge Admin client. */
 export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinder {
-  /**
-   * The body for a create or a replace: the portal's fields written **over**
-   * whatever `live` already carries, with `trigger` omitted when absent.
-   *
-   * The merge is the whole point. Building the body from scratch resets every
-   * field the portal does not model, because the `PUT` replaces the whole
-   * resource — which is how an operator's `priority_override` used to vanish on
-   * an ordinary palette save (issue #159). Passing `live` is therefore the rule
-   * for every write path that has a resource in hand, not an optimisation.
-   */
-  function writeBody(
-    proxyId: string,
-    pluginName: string,
-    pluginConfig: EdgePluginSettings | null,
-    options: EdgePluginOptions | undefined,
-    live?: EdgePluginConfig,
-  ): EdgePluginConfigWrite {
-    const trigger = options?.trigger ?? null;
-    return {
-      ...(options?.priorityOverride === undefined
-        ? {}
-        : { priority_override: options.priorityOverride }),
-      ...operatorOwnedFields(live),
-      plugin_name: pluginName,
-      scope: 'proxy',
-      proxy_id: proxyId,
-      enabled: options?.enabled ?? true,
-      config: pluginConfig,
-      // Omitted rather than `null`: Edge validates a closed key set and a
-      // whole-resource `PUT` removes a trigger by not carrying one.
-      ...(trigger === null ? {} : { trigger }),
-    };
-  }
-
   const binder: EdgePluginBinder = {
     async listByProxy(proxyId) {
       if (!proxyId) return [];

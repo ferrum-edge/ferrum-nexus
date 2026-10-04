@@ -97,6 +97,7 @@ import type { SpecEnforcementLevel } from '@ferrum-nexus/shared';
 
 import type { EdgeApiSpecDocument, EdgePluginConfig, EdgeProxy } from '../ferrum-admin/types.js';
 import { specInvalid } from '../lib/errors.js';
+import { stampAgentDocument, type AgentDeployment } from './agents.js';
 
 /** Name of the Edge plugin that enforces the operation table. */
 export const OPENAPI_VALIDATOR_PLUGIN = 'openapi_validator';
@@ -347,6 +348,7 @@ export interface RoutesSpecDocumentOptions {
    * {@link submittableProxyBody} of an existing one for a replace.
    */
   proxy: Record<string, unknown>;
+  agentDeployment?: AgentDeployment;
 }
 
 /**
@@ -408,6 +410,9 @@ export function routesSpecDocument(
   const rewritten = rewriteSpecServers(submitted, '/');
   rewritten['x-ferrum-proxy'] = options.proxy;
   rewritten['x-ferrum-validate'] = { ...ROUTES_VALIDATE_EXTENSION };
+  if (options.agentDeployment) {
+    stampAgentDocument(rewritten, options.proxy, options.agentDeployment);
+  }
   return rewritten;
 }
 

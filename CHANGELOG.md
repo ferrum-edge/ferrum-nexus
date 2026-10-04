@@ -6,6 +6,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Agent-ready API listings** (#446, phase 1). Providers can explicitly expose
+  selected OpenAPI operations as MCP tools, off by default, on requestable
+  `routes` APIs. Existing account/application approvals gate every tool; normal
+  credentials authenticate discovery and calls, and revocation removes access.
+  The catalog includes tool descriptions, grant coverage and connection recipes.
+  Fixed API-scoped governance denies unselected tools, shields MCP arguments and
+  budgets 60 tool calls per consumer per minute. Forward migration `010` retains
+  existing APIs with agents disabled on all four stores. Hosted acceptance covers
+  the actual digest-pinned Edge release; subset grants remain a phase 2 follow-up.
+
 ### Changed
 
 - **Returning SSO authorization and deployment boundaries are clarified** (#515).
@@ -35,8 +47,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **The acceptance suite now pins Ferrum Edge `v0.9.10`** by its published
   multi-architecture image digest. This release adds fail-closed handling for
   uninspectable MCP JSON-RPC batches and refuses non-UTF-8 charsets for
-  `mcp_gateway` and `ai_prompt_shield`; Nexus does not call either plugin or
-  parse MCP JSON-RPC traffic, so its Edge client and test mock need no change.
+  `mcp_gateway` and `ai_prompt_shield`. The opt-in agent marketplace uses that
+  released contract; Nexus itself does not parse data-plane MCP traffic.
 - **The Ferrum Edge `gateway-headers` vocabulary is now vendored and pinned**
   alongside the plugin catalog and provisioned-by vocabularies, and the shared
   contract test checks the `X-Ferrum-Namespace`, `X-Ferrum-Namespace-Unserved`

@@ -208,6 +208,7 @@ import {
   testConsumerUsername,
   type AccessDisruptionDetails,
   type Api,
+  type ApiAgents,
   type ApiSpecSummary,
   type ApiStats,
   type ApiStatus,
@@ -260,6 +261,7 @@ import type {
   EdgeConsumer,
   EdgeCorsConfig,
   EdgePluginConfig,
+  EdgePluginConfigWrite,
   EdgePluginSettings,
   EdgeProxy,
   EdgeProxyWrite,
@@ -277,7 +279,13 @@ import {
 import { newId } from '../lib/ids.js';
 import { apiRestoreLockKey } from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
-import { createEdgePluginBinder, mergeOperatorSettings } from './edge-plugins.js';
+import {
+  createEdgePluginBinder,
+  mergeOperatorSettings,
+  operatorOwnedFields,
+  writeBody,
+} from './edge-plugins.js';
+import { validateAgents } from './agents.js';
 import { presentApi, type GatewayUrlSource } from './present.js';
 import {
   assertUpstreamAllowed,
@@ -1191,6 +1199,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * configs, and `update()` skips those writes when there is no proxy.
    */
   const GATEWAY_SETTING_FIELDS = [
+    'agents',
     'upstream_url',
     'auth_plugin',
     'requestable',
@@ -1248,6 +1257,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       timeouts: api.timeouts,
       circuit_breaker: api.circuit_breaker,
       spec_enforcement: api.spec_enforcement,
+      agents: api.agents ?? null,
     };
   }
 
@@ -1556,6 +1566,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // still leave a row naming who started it. A revision that writes
       // nothing to the gateway — no proxy, or a `docs_only` document that
       // does not move the backend — is atomic without one.
+      validateAgents(
+        api.agents,
+        parsed.document,
+        api.spec_enforcement,
+        api.requestable,
+        api.allowed_methods,
+      );
       const writesGateway =
         proxyId !== null && (api.spec_enforcement === 'routes' || backend !== null);
       if (writesGateway) {
@@ -1595,7 +1612,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             const build = (
               document: Record<string, unknown>,
               proxyBody: Record<string, unknown>,
-            ): Record<string, unknown> => routesSpecDocument(document, { proxy: proxyBody });
+            ): Promise<Record<string, unknown>> => buildSpecDocument(document, proxyBody, api);
 
             const specId = await specIdForProxy(proxyId);
             // Captured before the write: the compensation has to put back the
@@ -1617,7 +1634,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               if (!fresh) throw notFound('Proxy', proxyId);
               await edge.apiSpecs.replace(
                 specId,
-                build(restoreDocument, {
+                await build(restoreDocument, {
                   ...submittableProxyBody(fresh),
                   ...(backend ? restoreBackend : {}),
                 }),
@@ -1626,7 +1643,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             });
             await edge.apiSpecs.replace(
               specId,
-              build(parsed.document, {
+              await build(parsed.document, {
                 ...submittableProxyBody(proxy),
                 ...(backend ? backendFields(backend) : {}),
               }),
@@ -1894,6 +1911,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // creating a proxy that would then have to be rolled back.
       assertRoutesEnforceable(specEnforcement, parsed.paths);
       assertRoutesSubmittable(specEnforcement, parsed.document);
+      const agents = input.agents ?? null;
+      validateAgents(agents, parsed.document, specEnforcement, input.requestable, methods);
+      const agentApi = { id: apiId, slug, agents };
 
       // Where the proxy is *born*. It stays here until every security plugin
       // is attached and associated, and the move to `listenPath` is the last
@@ -1959,6 +1979,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               parsed.document,
               { id: proxyId, ...proxyBody },
               owner.id,
+              agentApi,
             );
             gatewayProxyId = ref.id;
             created.proxyId = ref.id;
@@ -2038,6 +2059,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             parsed.document,
             created.specId ?? null,
             owner.id,
+            agentApi,
           );
 
           // The Nexus rows are written *inside* the compensated block: a store
@@ -2069,6 +2091,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               timeouts,
               circuit_breaker: circuitBreaker,
               spec_enforcement: specEnforcement,
+              agents,
               status: 'published',
               visibility: input.visibility,
             });
@@ -2099,6 +2122,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 timeouts,
                 circuit_breaker: circuitBreaker,
                 spec_enforcement: specEnforcement,
+                agents,
                 upstream: `${upstream.scheme}://${upstream.host}:${upstream.port}`,
                 spec_paths: parsed.pathCount,
                 spec_operations: parsed.operationCount,
@@ -2228,6 +2252,24 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           update.status = patch.status;
           changed.push('status');
           details.gateway_untouched = true;
+        }
+
+        const nextAgents = patch.agents === undefined ? (api.agents ?? null) : patch.agents;
+        const agentsMoved = !isDeepStrictEqual(nextAgents, api.agents ?? null);
+        const currentSpec =
+          nextAgents || agentsMoved ? await store.apiSpecs.findCurrentByApi(api.id) : null;
+        const agentDocument = currentSpec ? safeSpecDocument(currentSpec.raw_spec) : {};
+        validateAgents(
+          nextAgents,
+          agentDocument,
+          patch.spec_enforcement ?? api.spec_enforcement,
+          patch.requestable ?? api.requestable,
+          patch.allowed_methods === undefined ? api.allowed_methods : patch.allowed_methods,
+        );
+        if (agentsMoved) {
+          update.agents = nextAgents;
+          changed.push('agents');
+          details.agents = nextAgents;
         }
 
         const plugins = await pluginsOf(api);
@@ -2427,6 +2469,26 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // the `GET` that produced the "before" snapshot and the `PUT` — the
         // shape `edge-plugins.ts` already uses — so the snapshot and its undo
         // cannot come apart.
+        if (agentsMoved && proxyId) {
+          await store.transaction(async (tx) => {
+            await audit
+              .forStore(tx)
+              .record(
+                { id: actor.id, role: actor.role },
+                AuditAction.API_AGENTS_UPDATE_START,
+                { type: 'api', id: api.id },
+                { proxy_id: proxyId, agents: nextAgents },
+                ip,
+              );
+          });
+        }
+        const agentMethodSnapshot =
+          agentsMoved && proxyId && patch.allowed_methods !== undefined
+            ? await edge.proxies.get(proxyId)
+            : null;
+        if (agentsMoved && proxyId && patch.allowed_methods !== undefined && !agentMethodSnapshot) {
+          throw notFound('Proxy', proxyId);
+        }
         const undo: (() => Promise<void>)[] = [];
         // Index-aligned with `undo`: what each step puts back, for the record a
         // failed unwind writes. Steps the plugin binder pushes itself leave a
@@ -2738,6 +2800,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 document,
                 actor,
                 ip,
+                nextAgents,
+                patch.allowed_methods === undefined ? api.allowed_methods : patch.allowed_methods,
               ),
               // It writes its own `api.gateway_repair_required` row before it
               // throws, carrying the proxy document and plugin configs an
@@ -2856,6 +2920,74 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               update.circuit_breaker = patch.circuit_breaker;
               changed.push('circuit_breaker');
             }
+          }
+
+          if (proxyId && agentsMoved && !enforcementMoved) {
+            const specId = await specIdForProxy(proxyId);
+            const live = await edge.proxies.get(proxyId);
+            if (!live) throw notFound('Proxy', proxyId);
+            // Disabling removes the spec-owned configs. Capture their resource
+            // fields before that write so compensation also restores operator
+            // overrides when a fresh read can no longer find the old rows.
+            const previousPolicy = await buildSpecDocument(
+              agentDocument,
+              submittableProxyBody(live),
+              api,
+            );
+            if (!api.agents) {
+              const validators = plugins.filter(
+                (plugin) =>
+                  plugin.plugin_name === 'openapi_validator' && plugin.api_spec_id === specId,
+              );
+              if (validators.length > 1) {
+                throw conflict('The owning spec has multiple route validators');
+              }
+              const validator = validators[0];
+              if (validator) {
+                previousPolicy['x-ferrum-plugins'] = [
+                  {
+                    id: validator.id,
+                    ...writeBody(
+                      proxyId,
+                      validator.plugin_name,
+                      validator.config,
+                      { enabled: validator.enabled, trigger: validator.trigger },
+                      validator,
+                    ),
+                  },
+                ];
+              }
+            }
+            pushUndo('the agent policy', async () => {
+              const fresh = await edge.proxies.get(proxyId);
+              if (!fresh) throw notFound('Proxy', proxyId);
+              const restoredProxy = submittableProxyBody(fresh);
+              // The previous selection may use a method this PATCH removed.
+              // Restore that field together with the old spec, before Edge
+              // revalidates the bridge; the later proxy undo restores the
+              // remaining runtime settings without widening unrelated fields.
+              if (agentMethodSnapshot) {
+                if (agentMethodSnapshot.allowed_methods === undefined) {
+                  delete restoredProxy.allowed_methods;
+                } else {
+                  restoredProxy.allowed_methods = agentMethodSnapshot.allowed_methods;
+                }
+              }
+              await edge.apiSpecs.replace(
+                specId,
+                { ...previousPolicy, 'x-ferrum-proxy': restoredProxy },
+                actor.id,
+              );
+            });
+            await edge.apiSpecs.replace(
+              specId,
+              await buildSpecDocument(agentDocument, submittableProxyBody(live), {
+                ...api,
+                agents: nextAgents,
+              }),
+              actor.id,
+            );
+            gatewayMutated = true;
           }
 
           // The ownership record moves with the row, in one transaction and
@@ -3271,6 +3403,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         }
 
         const parsed = parseOpenApiSpec(current.raw_spec);
+        validateAgents(
+          api.agents,
+          parsed.document,
+          api.spec_enforcement,
+          api.requestable,
+          api.allowed_methods,
+        );
         // The upstream the row already records wins over whatever the document
         // says: it is what the proxy was serving, and a restore must not
         // quietly re-point an API at a `servers[]` entry the provider moved
@@ -3349,6 +3488,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               parsed.document,
               { id: proxyId, ...proxyBody },
               actor.id,
+              api,
             );
             gatewayProxyId = ref.id;
             created.proxyId = ref.id;
@@ -3434,6 +3574,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             parsed.document,
             created.specId ?? null,
             actor.id,
+            api,
           );
 
           // Written inside the compensated block, like every other
@@ -4137,29 +4278,51 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    */
   /* ── Spec-owned proxies (`routes` mode) ───────────────────────────────── */
 
+  /** Build fixed agent policy from fresh resources under the caller's proxy lease. */
+  async function buildSpecDocument(
+    document: Record<string, unknown>,
+    proxy: Record<string, unknown>,
+    api?: Pick<ApiRecord, 'id' | 'slug' | 'agents'>,
+  ): Promise<Record<string, unknown>> {
+    if (!api?.agents) return routesSpecDocument(document, { proxy });
+    const proxyId = String(proxy.id);
+    const live = await edge.pluginConfigs.listByProxy(proxyId);
+    const spec = await edge.apiSpecs.findByProxy(proxyId);
+    return routesSpecDocument(document, {
+      proxy,
+      agentDeployment: {
+        apiId: api.id,
+        slug: api.slug,
+        agents: api.agents,
+        sync: config.edge.rateLimit,
+        live,
+        specId: spec?.id,
+      },
+    });
+  }
+
   /**
-   * Create a proxy through Edge's spec importer, so it carries an `api_spec`
-   * and the generated `openapi_validator` that only such a proxy may hold.
-   *
-   * The response names the proxy it created; `proxyBody.id` is the fallback for
-   * a gateway that answers without echoing it, and the two always agree because
-   * Edge takes the id from the submitted `x-ferrum-proxy`.
-   *
-   * The spec id comes back too, because the caller's next move is always the
-   * cutover `PUT /api-specs/{id}` and looking it up again would add a round
-   * trip to the window in which the proxy is still on its staging path. A
-   * gateway that answers without one falls back to
-   * {@link specIdForProxy} — `GET /api-specs?proxy_id=…`.
+   * Create through the spec importer so the proxy carries its owning api_spec.
+   * The pre-minted proxy id is the response fallback; the spec id is retained
+   * for cutover without a lookup. Rebuild compensation may carry validated
+   * prior resource fields after the old spec and its configs were deleted.
    */
   async function createSpecOwnedProxy(
     document: Record<string, unknown>,
     proxyBody: Record<string, unknown> & { id: string },
     subject: string,
+    api?: Pick<ApiRecord, 'id' | 'slug' | 'agents'>,
+    preserved?: EdgePluginConfig[],
   ): Promise<{ id: string; specId: string }> {
-    const ref = await edge.apiSpecs.create(
-      routesSpecDocument(document, { proxy: proxyBody }),
-      subject,
-    );
+    const submitted = await buildSpecDocument(document, proxyBody, api);
+    if (preserved && Array.isArray(submitted['x-ferrum-plugins'])) {
+      submitted['x-ferrum-plugins'] = submitted['x-ferrum-plugins'].map((entry) => {
+        const plugin = entry as EdgePluginConfigWrite;
+        const prior = preserved.find((item) => item.id === plugin.id);
+        return prior ? { ...operatorOwnedFields(prior), ...plugin } : plugin;
+      });
+    }
+    const ref = await edge.apiSpecs.create(submitted, subject);
     const id = ref.proxy_id || proxyBody.id;
     return { id, specId: ref.id || (await specIdForProxy(id)) };
   }
@@ -4192,9 +4355,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     document: Record<string, unknown>,
     specId: string | null,
     subject: string,
+    api?: Pick<ApiRecord, 'id' | 'slug' | 'agents'>,
   ): Promise<void> {
     return binder.withProxy(proxyId, () =>
-      cutOverToListenPathLocked(proxyId, level, listenPath, document, specId, subject),
+      cutOverToListenPathLocked(proxyId, level, listenPath, document, specId, subject, api),
     );
   }
 
@@ -4205,6 +4369,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     document: Record<string, unknown>,
     specId: string | null,
     subject: string,
+    api?: Pick<ApiRecord, 'id' | 'slug' | 'agents'>,
   ): Promise<void> {
     if (level !== 'routes') {
       await binder.mutateProxyLocked(
@@ -4224,9 +4389,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     if (!proxy) throw notFound('Proxy', proxyId);
     await edge.apiSpecs.replace(
       id,
-      routesSpecDocument(document, {
-        proxy: { ...submittableProxyBody(proxy), listen_path: listenPath },
-      }),
+      await buildSpecDocument(
+        document,
+        { ...submittableProxyBody(proxy), listen_path: listenPath },
+        api,
+      ),
       subject,
     );
   }
@@ -4295,13 +4462,22 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     document: Record<string, unknown>,
     actor: UserRecord,
     ip: string | null,
+    nextAgents: ApiAgents | null = api.agents ?? null,
+    nextMethods: HttpMethod[] | null = api.allowed_methods,
   ): Promise<() => Promise<void>> {
     const subject = actor.id;
     const before = await edge.proxies.get(proxyId);
     if (!before) throw notFound('Proxy', proxyId);
-    const carried = handOwnedPlugins(await binder.listByProxy(proxyId));
+    const beforePlugins = await binder.listByProxy(proxyId);
+    const carried = handOwnedPlugins(beforePlugins);
     const body = { ...submittableProxyBody(before), id: proxyId };
     const listenPath = listenPathFor(api.namespace, api.slug);
+    // Validate the recorded role ids while their owning spec still exists.
+    // A failed conversion must retain operator resource fields on recreation.
+    if (api.agents) await buildSpecDocument(document, body, api);
+    const preservedAgentPlugins = beforePlugins.filter(
+      (plugin) => plugin.api_spec_id === before.api_spec_id,
+    );
 
     /**
      * Build the proxy back in `level`, **on a fresh staging path**, put its
@@ -4314,12 +4490,30 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
      * path answers `404` for the whole rebuild instead, which is the failure
      * direction a portal is allowed to choose.
      */
-    const rebuild = async (level: SpecEnforcementLevel): Promise<void> => {
+    const rebuild = async (
+      level: SpecEnforcementLevel,
+      agents: ApiAgents | null,
+      forward = false,
+    ): Promise<void> => {
       const stagingPath = stagingListenPath(api.namespace);
-      const staged = { ...body, listen_path: stagingPath };
+      const staged = {
+        ...body,
+        listen_path: stagingPath,
+        ...(forward && nextAgents
+          ? { allowed_methods: proxyAllowedMethods(nextMethods, api.cors) }
+          : {}),
+      };
       let specId: string | null = null;
       if (level === 'routes') {
-        specId = (await createSpecOwnedProxy(document, staged, subject)).specId;
+        specId = (
+          await createSpecOwnedProxy(
+            document,
+            staged,
+            subject,
+            { ...api, agents },
+            forward ? undefined : preservedAgentPlugins,
+          )
+        ).specId;
       } else {
         // A document read off the wire, not one composed here: `EdgeProxyWrite`
         // models only the narrow subset Nexus sets, and every unmodelled key an
@@ -4327,7 +4521,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         await edge.proxies.create(staged as unknown as EdgeProxyWrite, subject);
       }
       await binder.restorePluginsLocked(proxyId, carried, subject);
-      await cutOverToListenPathLocked(proxyId, level, listenPath, document, specId, subject);
+      await cutOverToListenPathLocked(proxyId, level, listenPath, document, specId, subject, {
+        ...api,
+        agents,
+      });
     };
 
     /**
@@ -4362,7 +4559,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     const restore = async (level: SpecEnforcementLevel): Promise<void> => {
       await edge.proxies.delete(proxyId, subject).catch(() => undefined);
       if (!(await apiStillExists())) return;
-      await rebuild(level);
+      await rebuild(level, api.agents ?? null);
     };
 
     // Deleting the proxy cascades its plugin configs and, when it was
@@ -4371,7 +4568,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     await edge.proxies.delete(proxyId, subject);
     try {
       if (!(await apiStillExists())) throw notFound('API', api.id);
-      await rebuild(target);
+      await rebuild(target, nextAgents, true);
     } catch (error) {
       // The original is already gone, and the caller has no undo step for this
       // conversion yet — put the API back here or it stays off the gateway.

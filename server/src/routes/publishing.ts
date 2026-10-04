@@ -15,6 +15,9 @@ import { z } from 'zod';
 
 import {
   AUTH_PLUGIN_TYPES,
+  AGENT_TOOL_NAME_PATTERN,
+  MAX_AGENT_TOOLS,
+  MAX_AGENT_DESCRIPTION_LENGTH,
   DEFAULT_SPEC_ENFORCEMENT,
   HTTP_METHODS,
   MAX_API_SLUG_LENGTH,
@@ -246,6 +249,25 @@ const listApisQuery = listQuerySchema.extend({
   q: z.string().trim().max(200).optional(),
 });
 
+const agentsSchema = z
+  .object({
+    operations: z
+      .array(
+        z
+          .object({
+            path: z.string().min(1).max(2_048),
+            method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']),
+            name: z.string().regex(AGENT_TOOL_NAME_PATTERN),
+            description: z.string().trim().min(1).max(MAX_AGENT_DESCRIPTION_LENGTH),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(MAX_AGENT_TOOLS),
+  })
+  .strict()
+  .nullable();
+
 const publishBody = z.object({
   name: z.string().trim().min(1).max(200),
   // A requested slug is normalized with the shared `slugify` contract, so API
@@ -265,6 +287,7 @@ const publishBody = z.object({
   timeouts: timeoutsSchema.nullish(),
   circuit_breaker: z.boolean().optional(),
   spec_enforcement: z.enum(SPEC_ENFORCEMENT_LEVELS).optional(),
+  agents: agentsSchema.optional(),
 });
 
 const updateBody = z.object({
@@ -282,6 +305,7 @@ const updateBody = z.object({
   circuit_breaker: z.boolean().optional(),
   // `undefined` leaves the level — and therefore the validator plugin — alone.
   spec_enforcement: z.enum(SPEC_ENFORCEMENT_LEVELS).optional(),
+  agents: agentsSchema.optional(),
   status: z.enum(['published', 'retired']).optional(),
   // Acknowledges that an `auth_plugin` change locks every credential of the
   // outgoing flavour out of this API. Only `true` means anything: without it

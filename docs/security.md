@@ -865,6 +865,38 @@ managed from fields on the API row: `key_auth`, `basic_auth`, `jwt_auth`
 `response_caching` is retired: existing installations can be removed but not
 added.
 
+The API's opt-in `agents` selection additionally manages `mcp_gateway`,
+`ai_tool_governor` and `ai_prompt_shield`, plus a separate MCP-only consumer
+`rate_limiting` config and a routes validator. These are fixed policy, not
+free-form provider-editable plugin objects. The governor denies unselected tools;
+the shield scans only tool arguments for the configured sensitive-data patterns;
+the budget counts tool calls only. Their triggers are bounded to this API's exact
+endpoint. They do not accept remote URLs, log sinks, approval webhooks or provider
+supplied policy rules. `ai_transcript_audit`, its sinks and the remaining AI family
+stay operator-only in Foundry. Prompt shielding is a pattern-based data guard,
+not a general defense against every prompt injection.
+
+MCP requires a requestable `routes` API. Every selected tool carries the existing
+approval group in `allowed_groups`, with default deny and denied tools hidden.
+Public catalog visibility does not grant data-plane access. Unapproved and revoked
+identities are refused by `access_control` even for initialize and `tools/list`;
+account and application approvals remain separate. Revocation removes the group,
+so the next call with the same credential/session fails. MCP sessions do not cache
+Nexus approval. Per-tool subset grants are deferred; adding an exposed tool extends
+existing whole-API grants, and the provider must explicitly select mutations.
+
+Provider `x-ferrum-*` extensions cannot override endpoint, selection, grants or
+governance. Endpoint paths are derived from the namespace/slug and reserve a
+collision-checked subtree. The validator bypass is an anchored exact endpoint,
+not a general prefix or a method-wide exemption; the gateway claims it instead
+of passing RPC bodies upstream. REST operations keep the same backend and auth.
+Fixed configs preserve live resource-level operator fields, and only matching
+spec-owned recorded proxy ids are rewritten. Agent descriptions render as text.
+The catalog's connection snippets use credential-header placeholders and a public
+gateway URL without secrets; neither portal cookies nor backend Admin credentials
+belong in MCP clients. See [agent-marketplace.md](agent-marketplace.md) for the
+published contract, per-process versus Redis budget and hosted security gates.
+
 The line is a security boundary:
 
 - **Provider-facing** plugins change how consumers of this one API are
@@ -1757,6 +1789,11 @@ Naming is `<domain>.<verb>`, lowercase snake_case. God-mode actions are `god.*`.
 | `org.update`                           | `organization` | `details`: `changed_fields`.                                                                                                                                                                                                                                                                                                                                           |
 
 ### Publishing
+
+`api.agents_update_start` is an intent event on `api`, committed before an agent
+policy replacement. Details contain `proxy_id` and the explicit `agents` selection
+(no credentials). `api.update` commits the resulting selection with the API row;
+a start without completion requires comparing the live spec policy with Nexus.
 
 | Action                        | Target type   | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ----------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

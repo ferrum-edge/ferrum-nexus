@@ -8,11 +8,19 @@ export interface CopyFieldProps {
   value: string;
   /** Render the value in a monospace block (secrets, ids, URLs). */
   mono?: boolean;
+  /** Keep configuration snippets readable while copying their exact text. */
+  multiline?: boolean;
   className?: string;
 }
 
 /** Read-only value with a copy-to-clipboard affordance. */
-export function CopyField({ label, value, mono = true, className }: CopyFieldProps): ReactElement {
+export function CopyField({
+  label,
+  value,
+  mono = true,
+  multiline = false,
+  className,
+}: CopyFieldProps): ReactElement {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -42,6 +50,7 @@ export function CopyField({ label, value, mono = true, className }: CopyFieldPro
             'transition-colors group-hover:border-border-strong group-hover:bg-surface-hover',
             copied && 'border-success/40',
             mono && 'font-mono text-xs',
+            multiline && 'whitespace-pre-wrap',
           )}
         >
           {value}

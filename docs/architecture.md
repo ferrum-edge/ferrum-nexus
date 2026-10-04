@@ -822,6 +822,45 @@ catalog except for its owner, grantees and admins. `DELETE /api/apis/:id` is the
 destructive path: it revokes grants, strips ACL groups, tears down the Edge
 objects and removes the rows.
 
+### Agent-ready listings
+
+`apis.agents_json` (MongoDB: `apis.agents`) stores an explicit operation selection,
+with `null` meaning off. Forward migration `010` upgrades retained APIs in place
+on SQLite, PostgreSQL, MySQL and MongoDB; no released migration is edited. Wire
+types and the bounded Path Item selection helper live in `shared/src/agents.ts`.
+Publishing, settings updates, revision/rollback and restore validate the selection
+against the document and the method policy before gateway writes. Existing owner
+or admin authorization, session/CSRF checks and transactional completion audits
+apply; settings mutations also record `api.agents_update_start` intent.
+
+The active deployment uses the same spec-owned proxy and backend as REST. Nexus
+strips provider gateway extensions, resolves bounded local Path Item references,
+then stamps every operation with an explicit expose true/false and the selected
+name, description and risk annotations. The released importer cannot combine
+`x-ferrum-validate` with `x-ferrum-mcp`, so agent APIs embed an `openapi_validator`
+operation table with an exact, anchored MCP endpoint bypass. Unknown REST paths
+still fail; `mcp_gateway` claims the endpoint and refuses malformed traffic and
+descendants instead of forwarding them. APIs with agents off keep the existing
+`x-ferrum-validate` path unchanged.
+
+Five spec-owned plugin configs have ids derived from the recorded proxy id:
+routes, MCP gateway, governor, shield and tool-call budget. Existing ids are
+accepted only with matching plugin name and owning spec id. Fresh reads under
+the canonical proxy lease preserve resource-level operator fields with `writeBody`;
+same-name operator configs are never adopted. The spec importer owns creation,
+replacement and removal. Enabling on an existing routes API carries the previous
+spec-generated validator's resource fields into the new fixed validator. Undo
+captures removed resource fields before each spec replacement so a lost
+acknowledgement is compensated along with a failed store/audit commit.
+
+Each selected tool's `policy.tools` entry requires `nexus:api:<id>:approved`.
+Default deny and hidden denied tools prevent implicit exposure. The existing
+`access_control` gate also applies to initialization, discovery and calls. No new
+credential, consumer or grant type is introduced. Fixed governor, argument shield
+and consumer budget triggers match only this API's exact MCP endpoint. Nexus does
+not proxy data-plane MCP or configure transcript sinks. See
+[agent-marketplace.md](agent-marketplace.md) for release provenance and limitations.
+
 ### 5.7 The provider plugin palette
 
 The configs above come from fields on the `apis` row. The **palette** is what

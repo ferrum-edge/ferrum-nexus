@@ -118,6 +118,8 @@ export const AuditAction = {
   /* publishing */
   API_PUBLISH: 'api.publish',
   API_UPDATE: 'api.update',
+  /** Committed before changing a spec-owned MCP policy on Edge. */
+  API_AGENTS_UPDATE_START: 'api.agents_update_start',
   API_SPEC_UPDATE: 'api.spec_update',
   /**
    * A retained revision was redeployed as a **new** revision of the same API.
@@ -541,6 +543,7 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
       'its record commits alone inside the compensated block, so a failed insert undoes the ' +
       'repair.',
   ),
+  [AuditAction.API_AGENTS_UPDATE_START]: INTENT,
   [AuditAction.API_SPEC_UPDATE]: TRANSACTIONAL,
   [AuditAction.API_SPEC_ROLLBACK]: TRANSACTIONAL,
   [AuditAction.API_SPEC_REVISION_START]: INTENT,

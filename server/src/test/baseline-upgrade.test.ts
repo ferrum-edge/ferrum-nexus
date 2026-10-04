@@ -26,6 +26,7 @@
  * adds a nullable account binding without changing retained message contents;
  * `008_email_lifecycle_fence` adds a private account fence without changing user DTOs;
  * `009_outbox_priority` classifies retained mail without changing its delivery state.
+ * `010_api_agents` leaves retained APIs unexposed to agents.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
@@ -800,6 +801,10 @@ async function assertPortalInvariants(store: NexusStore): Promise<void> {
   assert.deepEqual(await store.users.findById(client.id), client);
   assert.ok(await verifyPassword(FIXTURE_PASSWORD, client.password_hash));
   assert.equal(await store.users.countActiveSuperAdmins(), 1);
+
+  // 010 leaves every retained API unexposed to agents.
+  assert.equal((await store.apis.findById(ID.invoices))?.agents, null);
+  assert.equal((await store.apis.findById(ID.ledger))?.agents, null);
 
   // Public API identity: slug and gateway proxy still resolve to the same id.
   assert.equal((await store.apis.findBySlug('INVOICES'))?.id, ID.invoices);

@@ -153,6 +153,50 @@ short-lived tokens themselves.
 > operator has set `FERRUM_BASIC_AUTH_HMAC_SECRET` (at least 32 bytes) on Ferrum
 > Edge. The error carries the gateway's message in `details.gateway_message`.
 
+### Available to AI agents
+
+This setting is **off by default**. Enable it only on an API using **routes**
+enforcement and **Require an approved access request**. The operation picker
+preselects GET operations. POST, PUT, PATCH and DELETE require an explicit tick;
+HEAD is read-only but unavailable in the published Edge bridge, as are OPTIONS
+and TRACE. Choose a unique tool name and a plain-text description for each
+selected operation. Destructive annotations describe risk; a client must still
+decide when to ask its user for confirmation.
+
+The MCP endpoint is `/<namespace>/<slug>/mcp`, and public tool names are
+`<slug>.<tool-name>`. REST calls continue to use the same upstream, authentication
+and declared operation table. If you set a method allow-list, include POST for
+the MCP transport and each selected operation's method. The endpoint reserves
+its subtree: REST paths there, or a first-segment parameter that could match it,
+are refused. Agent APIs require canonical ASCII paths with whole-segment
+parameters; escaped paths, dot segments and path parameters using `;` are refused.
+
+Every exposed tool requires the existing API approval group. A public listing
+is discoverable in the portal; it is **not** anonymous MCP access. Private
+listings keep their existing viewer rules. An account's approval does not grant
+its applications access, or vice versa. Revocation removes the approval group
+and the same credential and MCP session lose access on the next gateway call.
+Approval covers all explicitly exposed tools on this API, including any added
+later; per-tool subset requests are deferred to phase 2.
+
+The picker displays fixed protection: an enforcing tool governor with unselected
+tools denied, argument-only prompt shielding for SSNs, credit cards, API and AWS
+keys, and 60 tool calls per consumer per 60-second window. With local counters
+that budget applies per gateway process; the operator's Redis configuration
+shares it across processes and fails closed on Redis errors. Initialize and
+discovery calls do not spend this budget. The regular REST quota remains separate.
+These plugins are not free-form palette settings. Transcript sinks, remote
+approval webhooks and other AI operator configuration cannot be supplied here.
+
+The catalog shows an **AI agents** badge and your selected tool list. Approved
+consumers see **Connect an agent** with the gateway endpoint, normal credential
+header and copyable VS Code and Claude Code recipes. Recipes contain placeholders,
+never secrets in URLs, portal session cookies or Edge Admin credentials. Updating
+the spec does not automatically select new operations. Remove or change a missing
+selection in Settings before uploading a spec that deletes it.
+
+See the [published contract and qualification gates](../agent-marketplace.md).
+
 ### Require an approved access request
 
 **On** (the normal setting) attaches an `access_control` plugin that admits
