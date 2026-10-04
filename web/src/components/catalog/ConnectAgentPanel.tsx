@@ -1,6 +1,7 @@
 import type { ReactElement } from 'react';
 import {
   agentEndpointPath,
+  grantedAgentTools,
   agentToolName,
   isReadOnlyAgentMethod,
   type ApiAgents,
@@ -118,5 +119,81 @@ export function ConnectAgentPanel({
         </p>
       </CardBody>
     </Card>
+  );
+}
+
+/** Shared consumer request and provider approval controls. */
+export function AgentSubsetPicker({
+  agents,
+  value,
+  onChange,
+  allowAll = true,
+}: {
+  agents: ApiAgents;
+  value: string[] | null;
+  onChange: (value: string[] | null) => void;
+  allowAll?: boolean;
+}): ReactElement {
+  return (
+    <fieldset className="flex flex-col gap-2 rounded-md border border-border p-3">
+      <legend className="text-sm font-semibold">MCP tool access</legend>
+      {allowAll ? (
+        <label className="flex gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={value === null}
+            onChange={(event) => onChange(event.target.checked ? null : [])}
+          />
+          All published tools, including future tools
+        </label>
+      ) : null}
+      <p className="text-xs text-fg-muted">
+        An empty selection keeps REST access and grants no tools.
+      </p>
+      {value !== null
+        ? agents.operations.map((tool) => (
+            <label key={tool.id ?? tool.name} className="flex gap-2 text-sm">
+              <input
+                type="checkbox"
+                disabled={!tool.id}
+                checked={Boolean(tool.id && value.includes(tool.id))}
+                onChange={(event) => {
+                  if (!tool.id) return;
+                  onChange(
+                    event.target.checked
+                      ? [...value, tool.id]
+                      : value.filter((id) => id !== tool.id),
+                  );
+                }}
+              />
+              {tool.name} ({tool.method} {tool.path})
+            </label>
+          ))
+        : null}
+    </fieldset>
+  );
+}
+
+export function AgentGrantSummary({
+  agents,
+  subset,
+  label = 'Approved tools',
+}: {
+  agents?: ApiAgents | null;
+  subset?: string[] | null;
+  label?: string;
+}): ReactElement {
+  const selected = agents ? grantedAgentTools(agents, subset).operations : [];
+  const stale = subset?.filter((id) => !agents?.operations.some((tool) => tool.id === id)) ?? [];
+  return (
+    <p className="mt-2 text-sm text-fg-muted">
+      {label}:{' '}
+      {subset == null
+        ? 'all published tools (including future tools)'
+        : subset.length === 0
+          ? 'none; REST access only'
+          : selected.map((tool) => tool.name).join(', ') || 'none currently published'}
+      {stale.length ? ` · ${stale.length} expired exposure(s); these grant no tool access` : ''}
+    </p>
   );
 }

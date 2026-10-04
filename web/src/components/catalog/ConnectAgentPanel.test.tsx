@@ -1,6 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AgentToolList, ConnectAgentPanel, agentCredentialHeader } from './ConnectAgentPanel';
+import {
+  AgentToolList,
+  AgentSubsetPicker,
+  AgentGrantSummary,
+  ConnectAgentPanel,
+  agentCredentialHeader,
+} from './ConnectAgentPanel';
 
 afterEach(() => {
   cleanup();
@@ -76,5 +82,30 @@ describe('agent connection guidance', () => {
     expect(screen.getByText('Destructive')).toBeInTheDocument();
     expect(screen.getByText('<script>unsafe()</script>')).toBeInTheDocument();
     expect(document.querySelector('script')).toBeNull();
+  });
+  it('keeps all, explicit empty and expired subset coverage distinct', () => {
+    const change = vi.fn();
+    const agents = {
+      operations: [
+        {
+          id: 'read-id',
+          path: '/read',
+          method: 'GET' as const,
+          name: 'Read',
+          description: 'Read',
+        },
+      ],
+    };
+    render(<AgentSubsetPicker agents={agents} value={[]} onChange={change} />);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Read (GET /read)' }));
+    expect(change).toHaveBeenLastCalledWith(['read-id']);
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: 'All published tools, including future tools' }),
+    );
+    expect(change).toHaveBeenLastCalledWith(null);
+    render(<AgentGrantSummary agents={agents} subset={['read-id', 'expired-id']} />);
+    expect(screen.getByText(/Approved tools: Read/)).toHaveTextContent('1 expired exposure');
+    render(<AgentGrantSummary agents={agents} subset={[]} label="Empty grant" />);
+    expect(screen.getByText(/Empty grant: none; REST access only/)).toBeInTheDocument();
   });
 });

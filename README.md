@@ -281,7 +281,12 @@ Ferrum Edge vocabularies it speaks under
 (`contracts-edge-0.9.9`) and per-file SHA-256 in
 [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN). The `shared` contract test
 verifies every digest and checks Nexus's local names against the vendored vocabularies; the
-vendoring and bump procedure is in [`CONTRIBUTING.md`](CONTRIBUTING.md). A shared contract changes
+vendoring and bump procedure is in [`CONTRIBUTING.md`](CONTRIBUTING.md). The unreleased
+[service-manifest preview](docs/service-manifest-preview.md) separately pins its proposed
+schema and shared fixtures to `contracts-edge-0.9.9-r2`, commit
+`591c73a3f965fdab440c3a76b2707accdf491ba5`, in
+[`contracts/ferrum-contracts/SERVICE-MANIFEST-PIN`](contracts/ferrum-contracts/SERVICE-MANIFEST-PIN).
+That pin does not freeze manifest v1 or change the Edge vocabulary pin. A shared contract changes
 in ferrum-contracts first and is then re-vendored here — never edited locally.
 
 ## Documentation

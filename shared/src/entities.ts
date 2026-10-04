@@ -336,6 +336,9 @@ export type AccessRequestStatus = 'pending' | 'approved' | 'denied' | 'revoked' 
 
 /** A client's request for access to a requestable API. */
 export interface AccessRequest {
+  /** Published exposure IDs; null/omitted means all, [] means REST only. */
+  requested_tools?: string[] | null;
+  approved_tools?: string[] | null;
   id: Uuid;
   api_id: Uuid;
   user_id: Uuid;
@@ -380,6 +383,8 @@ export type GrantStatus = 'active' | 'revoked';
 
 /** An active (or historical) authorization binding a user to an API's ACL group. */
 export interface Grant {
+  /** Provider-approved exposure IDs; null/omitted means all published tools. */
+  approved_tools?: string[] | null;
   id: Uuid;
   api_id: Uuid;
   user_id: Uuid;

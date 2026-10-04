@@ -51,8 +51,8 @@
  * `nexus-user-<user_id>` username, `custom_id` back to the Nexus user id, and
  * the derived id `edge.consumers.ensure` assigns — which on a fresh gateway is
  * the same string the portal already held. The `nexus:api:<id>:approved` ACL
- * groups are replayed from the portal's own `active` grants, so approvals that
- * were granted before the retarget work again.
+ * groups and approved MCP groups are replayed from the identity's own `active`
+ * grants, so approvals granted before the retarget work again.
  *
  * Credential *material* is gone for good. It is show-once by design: Nexus
  * stores a SHA-256 fingerprint and the last four characters, never the secret,
@@ -96,6 +96,7 @@
 
 import {
   aclGroupForApi,
+  mcpGroupsForGrant,
   MAX_PAGE_SIZE,
   roleAtLeast,
   type GatewayReconciliationReport,
@@ -115,7 +116,7 @@ import type { NexusStore, UserRecord } from '../db/store.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import { edgeUnavailable, forbidden, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
-import { apiRestoreLockKey, LEASE_TTL_MS } from '../lib/keyed-serializer.js';
+import { apiRestoreLockKey, LEASE_TTL_MS, userLifecycleLockKey } from '../lib/keyed-serializer.js';
 import { isLeaseLost } from '../lib/lease-fence.js';
 import type { NotificationsService } from '../notifications/service.js';
 
@@ -445,14 +446,35 @@ export function createGatewayReconciliationService(
    * application identities exist to prevent (issue #289). `null` is the
    * account's own consumer.
    */
-  async function approvedGroups(userId: Uuid, applicationId: Uuid | null): Promise<string[]> {
+  async function approvedGroups(
+    db: NexusStore,
+    userId: Uuid,
+    applicationId: Uuid | null,
+  ): Promise<string[]> {
+    const owner = await db.users.findById(userId);
+    if (!owner || owner.status !== 'active') return [];
+    if (applicationId) {
+      const application = await db.applications.findById(applicationId);
+      if (!application || application.owner_user_id !== userId) return [];
+      // Application disable revokes nothing; its existing grants still apply.
+    }
     const groups: string[] = [];
     for (let offset = 0; ; offset += MAX_PAGE_SIZE) {
-      const page = await store.grants.list(
+      const page = await db.grants.list(
         { user_id: userId, status: 'active', application_id: applicationId },
         { limit: MAX_PAGE_SIZE, offset },
       );
-      for (const grant of page.items) groups.push(aclGroupForApi(grant.api_id));
+      for (const grant of page.items) {
+        const api = await db.apis.findById(grant.api_id);
+        if (!api || api.namespace !== namespace) continue;
+        // The approved subset is authoritative, never the request or today's
+        // operation names. Expired exposure IDs stay inert; null retains all
+        // tools and [] retains REST alone, just as credential restoration does.
+        groups.push(
+          aclGroupForApi(grant.api_id),
+          ...(api.agents ? mcpGroupsForGrant(grant.api_id, grant.approved_tools) : []),
+        );
+      }
       if (page.items.length === 0 || offset + page.items.length >= page.total) return groups;
     }
   }
@@ -519,7 +541,10 @@ export function createGatewayReconciliationService(
    * Takes the provisioning key `ensureConsumer` uses before the stored
    * consumer-id key used by every ordinary mutation. Keeping that lock order
    * makes recreation race-free with both provisioning and credential/ACL
-   * changes while the portal still exposes the stale id.
+   * changes while the portal still exposes the stale id. Inside the consumer
+   * key, the account lifecycle key orders the grant snapshot, recreation and
+   * fenced relink against account disable. No gateway work runs in a store
+   * transaction body.
    *
    * ## A relink the lease fence refuses
    *
@@ -560,7 +585,7 @@ export function createGatewayReconciliationService(
       error: null,
     };
     try {
-      const groups = await approvedGroups(orphan.user_id, orphan.application_id);
+      let groups: string[] = [];
 
       /** The `gateway.consumer_repair` row's details. */
       const repairDetails = (
@@ -596,7 +621,7 @@ export function createGatewayReconciliationService(
             );
             if (!row) return { kind: 'gone' };
             const staleId = row.ferrum_consumer_id;
-            return edge.serializePerKey(staleId, async (): Promise<ConsumerRepairOutcome> => {
+            const recreate = async (): Promise<ConsumerRepairOutcome> => {
               if ((await edge.consumers.get(staleId)) !== null) {
                 if (kept === null || kept.consumerId !== staleId) {
                   return { kind: 'present', consumerId: staleId };
@@ -647,6 +672,13 @@ export function createGatewayReconciliationService(
                 if (revoked === null) return { kind: 'present', consumerId: staleId };
                 return { kind: 'repaired', consumerId: staleId, revoked };
               }
+
+              // Read grants after taking the identity and lifecycle keys, in a
+              // fenced snapshot. A revocation/disable that won while repair
+              // waited must not be replayed from a pre-lock grant list.
+              groups = await store.transaction((tx) =>
+                approvedGroups(tx, orphan.user_id, orphan.application_id),
+              );
 
               // Read before the consumer exists again: these rows can only
               // name entries of the one that was lost. Under both keys, so no
@@ -732,7 +764,10 @@ export function createGatewayReconciliationService(
                 throw error;
               }
               return { kind: 'repaired', consumerId: consumer.id, revoked };
-            });
+            };
+            return edge.serializePerKey(staleId, () =>
+              edge.serializePerKey(userLifecycleLockKey(orphan.user_id), recreate),
+            );
           },
         );
       };

@@ -1,3 +1,4 @@
+import { AgentSubsetPicker, AgentGrantSummary } from '../components/catalog/ConnectAgentPanel';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import {
   useEffect,
@@ -842,6 +843,7 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
     kind: 'approve' | 'deny';
   } | null>(null);
   const [note, setNote] = useState('');
+  const [approvedTools, setApprovedTools] = useState<string[] | null>(null);
   // The provider guide's first use of Messages is clarifying a thin
   // justification *before* deciding, so the entry point sits on the row.
   const [messageTarget, setMessageTarget] = useState<AccessRequest | null>(null);
@@ -919,6 +921,17 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
                       <blockquote className="mt-2 border-l-2 border-border pl-3 text-sm leading-relaxed whitespace-pre-line text-fg-muted">
                         {request.justification}
                       </blockquote>
+                      <AgentGrantSummary
+                        agents={request.api?.agents}
+                        subset={request.requested_tools}
+                        label="Requested tools"
+                      />
+                      {request.status === 'approved' ? (
+                        <AgentGrantSummary
+                          agents={request.api?.agents}
+                          subset={request.approved_tools}
+                        />
+                      ) : null}
                       {request.decision_note ? (
                         <p className="mt-2 text-xs text-fg-subtle">
                           <span className="font-medium text-fg-muted">Note:</span>{' '}
@@ -947,6 +960,7 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
                           variant="primary"
                           onClick={() => {
                             setNote('');
+                            setApprovedTools(request.requested_tools ?? null);
                             setDecision({ request, kind: 'approve' });
                           }}
                         >
@@ -997,7 +1011,10 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
         loading={approve.isPending || deny.isPending}
         onConfirm={() => {
           if (!decision) return;
-          const body = { decision_note: note.trim() || null };
+          const body = {
+            decision_note: note.trim() || null,
+            ...(decision.kind === 'approve' ? { approved_tools: approvedTools } : {}),
+          };
           const options = {
             onSuccess: () => {
               setDecision(null);
@@ -1008,6 +1025,34 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
           else approve.mutate({ id: decision.request.id, body }, options);
         }}
       >
+        {decision?.kind === 'approve' && decision.request.api?.agents ? (
+          <AgentSubsetPicker
+            agents={{
+              operations: decision.request.api.agents.operations.filter(
+                (tool) =>
+                  decision.request.requested_tools == null ||
+                  (tool.id && decision.request.requested_tools.includes(tool.id)),
+              ),
+            }}
+            value={approvedTools}
+            onChange={setApprovedTools}
+            allowAll={decision.request.requested_tools == null}
+          />
+        ) : null}
+        {decision?.kind === 'approve' && approvedTools !== null ? (
+          <Button
+            variant="secondary"
+            onClick={() =>
+              setApprovedTools(
+                approvedTools.filter((id) =>
+                  decision.request.api?.agents?.operations.some((tool) => tool.id === id),
+                ),
+              )
+            }
+          >
+            Remove expired exposures from approval
+          </Button>
+        ) : null}
         <LabeledTextarea
           label="Decision note"
           rows={3}
@@ -1112,6 +1157,7 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
                       Granted {formatDateTime(grant.created_at)}
                       {grant.revoked_at ? ` · revoked ${formatDateTime(grant.revoked_at)}` : ''}
                     </p>
+                    <AgentGrantSummary agents={grant.api?.agents} subset={grant.approved_tools} />
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">

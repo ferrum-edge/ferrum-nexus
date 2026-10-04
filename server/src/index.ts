@@ -85,6 +85,7 @@ import { createApiViewersService, type ApiViewersService } from './publishing/vi
 import { createApplicationsService, type ApplicationsService } from './applications/service.js';
 import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
+import { createServiceManifestService } from './service-manifest/service.js';
 import { createSsoService, type SsoService } from './sso/service.js';
 import {
   createSpecChangeNotifier,
@@ -101,6 +102,7 @@ import { healthRoutes } from './routes/health.js';
 import { messagingRoutes } from './routes/messaging.js';
 import { notificationsRoutes } from './routes/notifications.js';
 import { publishingRoutes } from './routes/publishing.js';
+import { serviceManifestRoutes } from './routes/service-manifest.js';
 import { organizationRoutes, usersRoutes } from './routes/users.js';
 import { createUsageService, type UsageService } from './usage/service.js';
 import { createUsersService, type UsersService } from './users/service.js';
@@ -890,6 +892,18 @@ export async function buildServer(
       await scope.register(applicationRoutes, { applications });
     },
     { prefix: '/api/applications' },
+  );
+
+  await app.register(
+    async (scope) => {
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(serviceManifestRoutes, {
+        serviceManifest: createServiceManifestService(config.edge.namespace),
+      });
+    },
+    { prefix: '/api/service-manifests' },
   );
 
   registerApiNotFoundRoutes(app);

@@ -1,0 +1,306 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ferrum-edge/ferrum-contracts/schemas/service-manifest/v1.schema.json",
+  "title": "ferrum.service_manifest v1",
+  "description": "PROPOSED. A versioned, reviewable description of how a service is published behind Ferrum Edge, written as TOML (ferrum-service.toml) and described here as its JSON data model. Alloy is the only producer and reader today; field names may change before a consumer implements them.",
+  "x-contract": {
+    "name": "service-manifest",
+    "version": 1,
+    "status": "proposed",
+    "owner": "ferrum-edge/ferrum-alloy",
+    "wire_version": "ferrum.service_manifest 1.x",
+    "provenance": [
+      {
+        "repo": "ferrum-edge/ferrum-alloy",
+        "ref": "main",
+        "commit": "4cba0f4a66f85bcee3140e3b92e299275a2507fb",
+        "availability": "unreleased",
+        "path": "crates/ferrum-alloy-edge/src/manifest.rs",
+        "symbols": [
+          "ServiceManifest",
+          "ManifestService",
+          "ManifestApi",
+          "ManifestUpstream",
+          "ManifestHealth",
+          "ManifestTimeouts",
+          "ManifestGateway",
+          "ManifestAuth",
+          "ManifestAgents",
+          "ServiceManifest::validate"
+        ],
+        "note": "Alloy publishes no JSON Schema for the manifest. This schema transcribes the serde structs (deny_unknown_fields, defaults) and the checks in validate(). Cross-field rules validate() applies after defaults (for example the proxy_id default and agents.endpoint_path being below api.public_path) are not all expressible here."
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.9",
+        "commit": "234717ce41965cd1e2b5c6c761a25475c5d7628c",
+        "path": "docs/api_specs.md",
+        "symbols": [
+          "x-ferrum-mcp (optional)"
+        ],
+        "note": "Edge v0.9.9 documents the MCP namespace character and length rule and requires the MCP endpoint to sit under the proxy listen path."
+      }
+    ]
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "service",
+    "api",
+    "upstream"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ferrum.service_manifest"
+    },
+    "schema_version": {
+      "type": "string",
+      "pattern": "^0*1(\\.|$)",
+      "description": "Major version 1; Alloy writes 1.0."
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+        },
+        "version": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "api": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "public_path"
+      ],
+      "properties": {
+        "public_path": {
+          "type": "string",
+          "pattern": "^(?!.*//)(?!(.*/)?\\.\\.(/|$))/[^{}*~ ?#]*$",
+          "description": "Gateway listen path prefix, a literal absolute path."
+        },
+        "service_base_path": {
+          "type": "string",
+          "default": "/",
+          "allOf": [
+            {
+              "pattern": "^(?!.*//)(?!(.*/)?\\.\\.(/|$))/[^{}*~ ?#]*$"
+            },
+            {
+              "pattern": "/$"
+            }
+          ]
+        },
+        "strip_public_path": {
+          "type": "boolean",
+          "default": true
+        },
+        "openapi": {
+          "type": "string",
+          "description": "Path to the exported OpenAPI document, relative to the manifest."
+        }
+      }
+    },
+    "upstream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "port",
+        "scheme"
+      ],
+      "properties": {
+        "host": {
+          "type": "string",
+          "pattern": "^[^/ @]+$",
+          "description": "Bare host name or address, no scheme."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "scheme": {
+          "enum": [
+            "http",
+            "https"
+          ]
+        },
+        "protocols": {
+          "type": "array",
+          "minItems": 1,
+          "default": [
+            "http1",
+            "http2"
+          ],
+          "items": {
+            "enum": [
+              "http1",
+              "http2"
+            ]
+          }
+        },
+        "gateway_client_cert_path": {
+          "type": "string"
+        },
+        "gateway_client_key_path": {
+          "type": "string"
+        },
+        "server_ca_path": {
+          "type": "string"
+        }
+      },
+      "dependentRequired": {
+        "gateway_client_cert_path": [
+          "gateway_client_key_path"
+        ],
+        "gateway_client_key_path": [
+          "gateway_client_cert_path"
+        ]
+      },
+      "if": {
+        "anyOf": [
+          {
+            "required": [
+              "gateway_client_cert_path"
+            ]
+          },
+          {
+            "required": [
+              "server_ca_path"
+            ]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "scheme": {
+            "const": "https"
+          }
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?!.*//)(?!(.*/)?\\.\\.(/|$))/[^{}*~ ?#]*$"
+        },
+        "interval_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2000
+        }
+      }
+    },
+    "timeouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "connect_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2000
+        },
+        "read_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 30000,
+          "description": "0 disables the read timeout for long-lived streams."
+        },
+        "write_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 30000
+        }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 254,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+          "default": "ferrum"
+        },
+        "proxy_id": {
+          "type": "string",
+          "maxLength": 254,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+          "description": "Defaults to service.name."
+        },
+        "correlation_id": {
+          "type": "boolean",
+          "default": true
+        },
+        "otel_endpoint": {
+          "type": "string",
+          "pattern": "^https?://[^/@]+(/.*)?$",
+          "description": "OTLP/HTTP traces URL without credentials."
+        },
+        "otel_root_sampling_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "none",
+            "gateway",
+            "service"
+          ]
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "endpoint_path": {
+          "type": "string",
+          "pattern": "^(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))/[^{}*~ ?#;%\\\\]*$",
+          "description": "Literal absolute MCP endpoint path below api.public_path."
+        },
+        "namespace": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,64}$",
+          "description": "MCP tool-name prefix; defaults to service.name."
+        }
+      }
+    }
+  }
+}

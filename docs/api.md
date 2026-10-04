@@ -1925,9 +1925,10 @@ disable the selection.
 Catalog `ApiSummary` includes the selection for tool metadata. MCP is served by
 Edge at `<invoke_url>/mcp` with tools named `<slug>.<name>`. A normal Nexus account
 or application credential goes in its existing auth header. The identity must
-hold this API's active grant for discovery and calls; every tool requires that
-same approval group. Revocation applies on the next gateway call. This phase has
-whole-API grants, not tool subsets. See [agent-marketplace.md](agent-marketplace.md).
+hold this API's active REST grant for discovery and calls. Each tool additionally requires
+MCP-all or its own exposure group. `AgentTool.id` is a server-owned identity; providers
+cannot choose it. Revocation applies on the next gateway call. Optional tool subsets
+are described below. See [agent-marketplace.md](agent-marketplace.md).
 
 ### The `Api` object's gateway fields
 
@@ -3003,3 +3004,50 @@ and records `resumed: true`.
   [`guides/provider-guide.md`](guides/provider-guide.md) ·
   [`guides/admin-guide.md`](guides/admin-guide.md)
 - [`security.md`](security.md) — RBAC matrix and the audit event catalog.
+
+## Optional MCP access subsets
+
+`POST /api/access-requests` accepts `requested_tools?: string[] | null`.
+`POST /api/access-requests/:id/approve` accepts `approved_tools?: string[] | null`.
+Both arrays contain unique currently published `AgentTool.id` UUIDs, at most 256.
+Unknown/expired IDs return `400 VALIDATION_FAILED`; legacy phase-1 exposure without IDs
+requires provider republish (`409 CONFLICT`) before subset admission. Omitted/null
+requests mean all published tools, including future tools; `[]` means no MCP tools.
+An omitted approval defaults to the request. Null approval cannot broaden an explicit
+request; an explicit approval must be contained in the request. Ordinary REST access
+is granted in every case. Request rows return both subset fields; grants return
+`approved_tools`. Historical IDs remain visible as expired coverage, never new tools.
+
+Tool IDs persist for an unchanged published binding. Rename, path/method changes,
+removing/re-adding exposure and disable/re-enable mint new IDs. A changed uploaded
+spec (including rollback) rotates every ID conservatively; explicit subsets then
+cover no matching tools until a new approval. Omitted/null grants continue to cover
+all published tools. See [draft migration notes](mcp-subsets-migration-draft.md).
+
+## Proposed service-manifest preview
+
+`POST /api/service-manifests/preview` accepts JSON:
+
+```json
+{
+  "namespace": "nexus",
+  "manifest": {
+    "schema": "ferrum.service_manifest",
+    "schema_version": "1.0",
+    "service": { "name": "orders" },
+    "api": { "public_path": "/orders" },
+    "upstream": { "host": "orders.internal", "port": 8080, "scheme": "http" },
+    "gateway": { "namespace": "nexus" }
+  }
+}
+```
+
+A provider-or-higher session and CSRF are required. Both namespaces must match the
+configured portal namespace (`403 FORBIDDEN` otherwise). The contract defaults an
+omitted gateway namespace to `ferrum`; it does not inherit the caller's selection.
+Maximum body is 32 KiB (`413`), with bounded nesting/strings/references and strict
+schema validation (`400 VALIDATION_FAILED`). Unknown/null fields are not stripped
+or coerced. The result has `preview_only: true`, `contract_status: "proposed"`, the
+immutable contract commit, service/public-path/protocol/auth/agent hints and redacted
+reference-presence flags. No upstream/file/TLS/telemetry values or free-form text
+are echoed. No apply, publishing, fetch or diagnostic-import endpoint exists.

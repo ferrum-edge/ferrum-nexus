@@ -853,10 +853,11 @@ spec-generated validator's resource fields into the new fixed validator. Undo
 captures removed resource fields before each spec replacement so a lost
 acknowledgement is compensated along with a failed store/audit commit.
 
-Each selected tool's `policy.tools` entry requires `nexus:api:<id>:approved`.
+Each selected tool's `policy.tools` entry admits the separate MCP-all group or its
+server-owned exposure group. The REST approval group never authorizes a tool.
 Default deny and hidden denied tools prevent implicit exposure. The existing
-`access_control` gate also applies to initialization, discovery and calls. No new
-credential, consumer or grant type is introduced. Fixed governor, argument shield
+`access_control` gate also applies to initialization, discovery and calls. The existing credential/consumer identity remains the authorization boundary; requests
+and grants add nullable tool subsets with parity across all four stores. Fixed governor, argument shield
 and consumer budget triggers match only this API's exact MCP endpoint. Nexus does
 not proxy data-plane MCP or configure transcript sinks. See
 [agent-marketplace.md](agent-marketplace.md) for release provenance and limitations.
@@ -1245,3 +1246,14 @@ Full reference: [`api.md`](api.md).
 | Audit action catalog and commit classes     | `audit/service.ts` — mirrored in [`security.md`](security.md#10-audit-event-catalog) |
 | Catalog visibility                          | `catalog/service.ts` (`canList` / `canView`), `catalog/read-access.ts`               |
 | Last-super-admin guard                      | `users/service.ts` and `admin/god-service.ts` (both, on purpose)                     |
+
+### Proposed service-manifest intake
+
+The preview service is composed in `server/src/index.ts` and injected into its route.
+It compiles the exact vendored schema with the existing Zod dependency, refusing
+unsupported schema keywords at startup. Validation precedes defaults; explicit nulls
+are never interpreted as omission. Local presentation/reference budgets further narrow
+accepted input. The configured Edge namespace is the authorization boundary for this
+single-namespace portal. The service returns an allow-listed redacted DTO from `shared/`
+and has no store, gateway, network or source-file reader dependency. The manifest format
+remains PROPOSED; preview cannot invoke the publishing service or install agent policy.
