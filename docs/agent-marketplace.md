@@ -102,10 +102,36 @@ tool. The release's
 and [response builder](https://github.com/ferrum-edge/ferrum-edge/blob/ee040d5e3281fde424aa65f5b18004852c5b53b0/src/plugins/rate_limiting.rs#L1398)
 define this behavior; an HTTP status alone cannot distinguish it from success.
 Acceptance checks the entire error-only envelope, exactly 60 backend executions,
-repeated denials across downstream sessions, another consumer's independent
-budget, discovery without a charge and REST access after exhaustion. Per-route
-upstream counters prove denied calls did not dispatch. A gateway-authored error
-without the upstream marker alone cannot prove that no backend request was made.
+repeated denials across downstream sessions, discovery without a charge and REST
+access after exhaustion. A second keyauth credential for the exhausted
+**account consumer** must receive the same exact quota error without a tool result. An
+approved **application of that same account** must retain its own consumer budget
+and execute a tool once. The account/application grants, all three credentials
+and their initial sessions are arranged before exhaustion; no policy replacement,
+restart or rotation occurs during the budget proof, which must finish within
+60 seconds.
+
+The deterministic fixture records the total and the full per-route request counts
+for every HTTP method and raw URL it receives. Repeated requests increment their
+counts; unknown paths, query strings, wrong routes and other methods are retained.
+Only exact **`GET /health`** (Compose's health probe) and exact
+**`GET /__e2e/requests`** (the snapshot read) are excluded. The snapshot is read
+through a separate approved, routes-enforced REST API at the real gateway, not
+through Edge's Admin API or a mocked data plane. The fixture retains up to 1,024
+distinct method/raw-URL pairs; overflow makes the acceptance assertion fail,
+rather than permitting an incomplete comparison. Reading a snapshot never resets
+the counters.
+
+Strict full-snapshot equality around unapproved, revoked, unsupported-version,
+unselected-destructive, shielded, malformed, invalid-argument and quota-denied
+probes establishes zero requests received by this configured upstream between
+the snapshot reads, including dispatches to unintended methods or paths. Exact
+snapshot increments also require one opted-in DELETE, 60 admitted account GETs,
+the REST probe after exhaustion and one same-account application GET. This proof
+covers the tested requests and this fixture; it does not establish behavior at
+other destinations or for untested inputs. A gateway-authored error without the
+upstream marker alone cannot prove that no backend request was made. These are
+hosted acceptance assertions, not a claim that unexecuted gates have passed.
 
 ## Hosted qualification
 

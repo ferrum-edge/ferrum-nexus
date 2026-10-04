@@ -18,14 +18,30 @@ const PORT = Number(process.env.PORT ?? 9100);
 /** Requests served since start — a restart test reads this to prove one. */
 let served = 0;
 
-/** Per-route counts let MCP denials prove no backend dispatch, without health-probe noise. */
+/** Count every method/raw URL pair, including repeated requests and query strings. */
 const servedByRoute = new Map();
+const MAX_OBSERVED_ROUTES = 1024;
+let observed = 0;
+let overflow = false;
 
 const server = createServer((request, response) => {
   served += 1;
   const route = `${request.method} ${request.url}`;
-  const routeServed = (servedByRoute.get(route) ?? 0) + 1;
-  servedByRoute.set(route, routeServed);
+  // Only Compose's exact health probe and the exact snapshot read are noise.
+  // Other methods, paths and query variants are observations, even if unknown.
+  const control = route === 'GET /__e2e/requests';
+  const excluded = control || route === 'GET /health';
+  let routeServed = 0;
+  if (!excluded) {
+    observed += 1;
+    routeServed = (servedByRoute.get(route) ?? 0) + 1;
+    if (servedByRoute.has(route) || servedByRoute.size < MAX_OBSERVED_ROUTES) {
+      servedByRoute.set(route, routeServed);
+    } else {
+      // Bound fixture memory without silently accepting an incomplete snapshot.
+      overflow = true;
+    }
+  }
   const chunks = [];
   request.on('data', (chunk) => chunks.push(chunk));
   request.on('end', () => {
@@ -34,6 +50,12 @@ const server = createServer((request, response) => {
       'content-type': 'application/json',
       'x-upstream': 'ferrum-nexus-e2e',
     });
+    if (control) {
+      response.end(
+        JSON.stringify({ total: observed, byRoute: Object.fromEntries(servedByRoute), overflow }),
+      );
+      return;
+    }
     response.end(
       JSON.stringify({
         served,
