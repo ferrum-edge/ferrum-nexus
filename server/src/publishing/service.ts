@@ -261,6 +261,7 @@ import type {
   EdgeConsumer,
   EdgeCorsConfig,
   EdgePluginConfig,
+  EdgePluginConfigWrite,
   EdgePluginSettings,
   EdgeProxy,
   EdgeProxyWrite,
