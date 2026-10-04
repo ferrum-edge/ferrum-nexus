@@ -341,8 +341,13 @@ function grantsAdmin(provider: SsoProviderSettings): boolean {
 
 /** How a sign-in reaches its account. */
 type SignInPlan =
-  | { kind: 'returning'; user: UserRecord; identity: UserIdentityRecord }
-  | { kind: 'link'; user: UserRecord; explicit: boolean }
+  | {
+      kind: 'returning';
+      user: UserRecord;
+      identity: UserIdentityRecord;
+      initiatingSessionId?: Uuid;
+    }
+  | { kind: 'link'; user: UserRecord; explicit: boolean; initiatingSessionId?: Uuid }
   | { kind: 'provision' };
 
 /** Build the single sign-on service. */
@@ -714,7 +719,12 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       if (identity.user_id !== account.id) {
         throw new OidcError('already_linked', 'The identity is linked to another account');
       }
-      return { kind: 'returning', user: account, identity };
+      return {
+        kind: 'returning',
+        user: account,
+        identity,
+        initiatingSessionId: current.sessionId,
+      };
     }
     const links = await store.userIdentities.listByUser(account.id);
     if (links.some((link) => link.provider_id === settings.id)) {
@@ -731,7 +741,12 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     if (mapping.role === null && account.role !== 'super_admin') {
       throw new OidcError('access_denied', 'The claims map to no role');
     }
-    return { kind: 'link', user: account, explicit: true };
+    return {
+      kind: 'link',
+      user: account,
+      explicit: true,
+      initiatingSessionId: current.sessionId,
+    };
   }
 
   /** Decide which account the claims open, refusing with an {@link OidcError}. */
@@ -895,6 +910,23 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
           if (!current) throw new OidcError('server_error', 'The account no longer exists');
           if (current.status !== 'active') {
             throw new OidcError('account_disabled', 'The account was disabled during sign-in');
+          }
+          if (plan.initiatingSessionId !== undefined) {
+            // The request's authenticated session was cached before token exchange.
+            // Promotion, logout or password recovery may have revoked it meanwhile.
+            // Check under the lifecycle lease, in the transaction that links and
+            // issues the replacement, including an already-linked explicit attempt.
+            const session = await tx.sessions.findById(plan.initiatingSessionId);
+            if (
+              !session ||
+              session.user_id !== current.id ||
+              Date.parse(session.expires_at) <= Date.now()
+            ) {
+              throw new OidcError(
+                'link_session_mismatch',
+                'The initiating session is no longer valid',
+              );
+            }
           }
           user = current;
           if (plan.kind === 'link') {

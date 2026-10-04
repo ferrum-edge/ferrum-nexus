@@ -46,6 +46,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Explicit SSO links and queued mail cannot bypass account recovery** (#508).
+  Link callbacks revalidate the initiating session in their lifecycle transaction,
+  including attempts that find an existing link, so promotion during token exchange
+  cannot revive a revoked session. Account-bound enqueue, claim and SMTP handoff
+  now write a durable recipient fence that orders them with address release,
+  including inserts after its cancellation scan and stale transaction snapshots.
+  Forward migration `008_email_lifecycle_fence` retains account and outbox data.
+  SMTP deadlines destroy the underlying connection before the sending barrier
+  is removed, preventing background delivery after recovery. Cross-adapter race
+  contracts and real-relay deadline tests cover these interleavings.
+
 - **Manual privilege increases end every existing session, and super admins can
   recover a squatted email address without database editing** (#504).
   Promotion revokes sessions in its audited transaction, including cookies

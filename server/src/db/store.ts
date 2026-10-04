@@ -758,6 +758,13 @@ export interface UserRepo {
   findByEmail(email: string): Promise<UserRecord | null>;
   /** Batch lookup preserving no particular order; missing ids are simply absent. */
   findManyByIds(ids: Uuid[]): Promise<UserRecord[]>;
+  /**
+   * Write a fresh internal fence only while this account still owns `email`.
+   * Join the enqueue/claim/handoff transaction: the write locks the account on
+   * SQL and causes a MongoDB write conflict with address release, even when
+   * the transaction's snapshot predates it. Released addresses never match.
+   */
+  lockEmailRecipient(id: Uuid, email: string): Promise<boolean>;
   /** Patch mutable columns. Returns `null` when the user does not exist. */
   update(id: Uuid, patch: UpdateInput<UserRecord>): Promise<UserRecord | null>;
   /**
@@ -1551,7 +1558,8 @@ export interface EmailOutboxRepo {
   /**
    * Cancel pending mail to a released address, including legacy unbound rows.
    * Refuse with CONFLICT if any row is sending. Must join the release transaction;
-   * row locks / write conflicts order this operation against worker claims.
+   * The caller must lock the recipient account before scanning, as enqueue,
+   * claim and handoff do; outbox row locks alone cannot fence new inserts.
    */
   cancelForReleasedAddress(email: string): Promise<number>;
   /**
@@ -1570,6 +1578,11 @@ export interface EmailOutboxRepo {
    * previous holder cannot settle with.
    */
   claimDue(now: IsoTimestamp, limit: number): Promise<EmailOutboxRecord[]>;
+  /**
+   * Refresh exactly this sending generation immediately before SMTP. Must join
+   * the transaction that locks its recipient. False means the claim moved on.
+   */
+  beginDelivery(entry: EmailOutboxRecord, at: IsoTimestamp): Promise<boolean>;
   /**
    * Delivery succeeded: `status = 'sent'`, `next_attempt_at = null`.
    *

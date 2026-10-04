@@ -70,6 +70,7 @@ import { runDisableRevokesResetLinksContract } from './disable-revokes-reset-lin
 import { faultInjectingStore } from './fault-injection.js';
 import { testCaptchaTransport } from './helpers.js';
 import { runMessageBudgetContract } from './message-budget-contract.js';
+import { runMailLifecycleContract } from './mail-lifecycle-contract.js';
 import { runOutboxFencingContract } from './outbox-fencing-contract.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
 import { runPrivilegedAuditContract } from './privileged-audit-contract.js';
@@ -77,6 +78,7 @@ import { runRecoveryThrottleContract } from './recovery-throttle-contract.js';
 import { runResetLifecycleContract } from './reset-lifecycle-contract.js';
 import { runSealedOutboxContract } from './sealed-outbox-contract.js';
 import { runSsoSettingsLockContract } from './sso-settings-lock-contract.js';
+import { runSsoLinkSessionContract } from './sso-link-session-contract.js';
 import { runSettingsTransactionContract } from './settings-transaction-contract.js';
 import { runTeardownCancellationContract } from './teardown-cancellation-contract.js';
 import { runTeardownFencingContract } from './teardown-fencing-contract.js';
@@ -345,6 +347,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
   runApplicationViewerAuditContract(label, makeStore);
   runDisableRevokesResetLinksContract(label, makeStore);
   runMessageBudgetContract(label, makeStore);
+  runMailLifecycleContract(label, makeStore);
   runOutboxFencingContract(label, makeStore);
   runPasswordChangeContract(label, makeStore);
   runPrivilegedAuditContract(label, makeStore);
@@ -352,6 +355,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
   runResetLifecycleContract(label, makeStore);
   runSealedOutboxContract(label, makeStore);
   runSsoSettingsLockContract(label, makeStore);
+  runSsoLinkSessionContract(label, makeStore);
   runSettingsTransactionContract(label, makeStore);
   runTeardownCancellationContract(label, makeStore);
   runTeardownFencingContract(label, makeStore);

@@ -89,6 +89,7 @@ import type {
 import {
   DEFAULT_SPEC_ENFORCEMENT,
   emptySpecChangeReport,
+  isReleasedEmail,
   isSpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
 
@@ -1029,6 +1030,14 @@ class SqliteStore implements NexusStore {
       ]);
       return row ? mapUser(row) : null;
     },
+
+    lockEmailRecipient: async (id, email) =>
+      !isReleasedEmail(email) &&
+      execute(
+        this.db,
+        'UPDATE users SET email_lifecycle_fence = ? WHERE id = ? AND email = ?',
+        [newId(), id, email.trim().toLowerCase()],
+      ) > 0,
 
     findManyByIds: async (ids) => {
       if (ids.length === 0) return [];
@@ -3025,45 +3034,51 @@ class SqliteStore implements NexusStore {
         );
       })(),
 
-    enqueue: async (input: EnqueueEmailInput) => {
-      const key = input.idempotency_key ?? null;
-      if (key !== null) {
-        const existing = await this.emailOutbox.findByIdempotencyKey(key);
-        if (existing) return { entry: existing, created: false };
-      }
-      const meta = stamps({ id: input.id });
-      try {
-        execute(
-          this.db,
-          `INSERT INTO email_outbox
-             (id, to_email, recipient_user_id, subject, body_html, body_text, status, attempts,
-              next_attempt_at, last_error, idempotency_key, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, ?)`,
-          [
-            meta.id,
-            input.to_email,
-            input.recipient_user_id ?? null,
-            input.subject,
-            input.body_html,
-            input.body_text,
-            input.next_attempt_at ?? meta.created_at,
-            key,
-            meta.created_at,
-            meta.updated_at,
-          ],
-        );
-      } catch (error) {
-        // Lost a race on the idempotency key — return the winner.
+    enqueue: async (input: EnqueueEmailInput) =>
+      this.transaction(async () => {
+        const key = input.idempotency_key ?? null;
         if (key !== null) {
           const existing = await this.emailOutbox.findByIdempotencyKey(key);
           if (existing) return { entry: existing, created: false };
         }
-        throw error;
-      }
-      const entry = await this.emailOutbox.findById(meta.id);
-      if (!entry) throw new Error('emailOutbox.enqueue: row vanished immediately after insert');
-      return { entry, created: true };
-    },
+        const eligible =
+          !input.recipient_user_id ||
+          (await this.users.lockEmailRecipient(input.recipient_user_id, input.to_email));
+        const meta = stamps({ id: input.id });
+        try {
+          execute(
+            this.db,
+            `INSERT INTO email_outbox
+               (id, to_email, recipient_user_id, subject, body_html, body_text, status, attempts,
+                next_attempt_at, last_error, idempotency_key, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+            [
+              meta.id,
+              input.to_email,
+              input.recipient_user_id ?? null,
+              input.subject,
+              input.body_html,
+              input.body_text,
+              eligible ? 'pending' : 'failed',
+              eligible ? (input.next_attempt_at ?? meta.created_at) : null,
+              eligible ? null : 'recipient-address-changed',
+              key,
+              meta.created_at,
+              meta.updated_at,
+            ],
+          );
+        } catch (error) {
+          // Lost a race on the idempotency key — return the winner.
+          if (key !== null) {
+            const existing = await this.emailOutbox.findByIdempotencyKey(key);
+            if (existing) return { entry: existing, created: false };
+          }
+          throw error;
+        }
+        const entry = await this.emailOutbox.findById(meta.id);
+        if (!entry) throw new Error('emailOutbox.enqueue: row vanished immediately after insert');
+        return { entry, created: true };
+      }),
 
     findById: async (id) => {
       const row = queryOne(this.db, 'SELECT * FROM email_outbox WHERE id = ?', [id]);
@@ -3075,31 +3090,47 @@ class SqliteStore implements NexusStore {
       return row ? mapOutbox(row) : null;
     },
 
-    claimDue: async (now, limit) => {
-      const claim = this.db.transaction((): EmailOutboxRecord[] => {
-        const ids = queryAll(
+    claimDue: async (now, limit) =>
+      this.transaction(async () => {
+        const candidates = queryAll(
           this.db,
-          `SELECT id FROM email_outbox
+          `SELECT * FROM email_outbox
            WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
            ORDER BY next_attempt_at ASC, created_at ASC LIMIT ?`,
           [now, Math.max(1, Math.floor(limit))],
-        ).map((row) => text(row.id));
-        if (ids.length === 0) return [];
-        execute(
-          this.db,
-          `UPDATE email_outbox
-           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?
-           WHERE id IN (${ids.map(() => '?').join(', ')}) AND status = 'pending'`,
-          [nowIso(), newId(), ...ids],
-        );
-        return queryAll(
-          this.db,
-          `SELECT * FROM email_outbox WHERE id IN (${ids.map(() => '?').join(', ')})`,
-          ids,
         ).map(mapOutbox);
-      });
-      return claim();
-    },
+        const claimed: EmailOutboxRecord[] = [];
+        for (const entry of candidates) {
+          const eligible =
+            !entry.recipient_user_id ||
+            (await this.users.lockEmailRecipient(entry.recipient_user_id, entry.to_email));
+          execute(
+            this.db,
+            `UPDATE email_outbox SET status = ?, next_attempt_at = ?, attempts = attempts + 1,
+             updated_at = ?, generation = ?, last_error = ? WHERE id = ? AND status = 'pending'`,
+            [
+              eligible ? 'sending' : 'failed',
+              eligible ? entry.next_attempt_at : null,
+              nowIso(),
+              newId(),
+              eligible ? entry.last_error : 'recipient-address-changed',
+              entry.id,
+            ],
+          );
+          if (!eligible) continue;
+          const current = await this.emailOutbox.findById(entry.id);
+          if (current) claimed.push(current);
+        }
+        return claimed;
+      }),
+
+    beginDelivery: async (entry, at) =>
+      execute(
+        this.db,
+        `UPDATE email_outbox SET updated_at = ?
+         WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, entry.id, entry.generation],
+      ) > 0,
 
     // A settling write only lands on the exact claim it was issued for: the
     // stale sweep can hand a row to another worker mid-delivery, and the

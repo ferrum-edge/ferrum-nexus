@@ -640,6 +640,18 @@ when that account no longer holds the address. Address recovery cancels all
 pending messages to the old address, including unbound legacy rows, and refuses
 while any is sending. Upgrade every mail-producing instance before using it.
 
+`008_email_lifecycle_fence` (pending release) adds an internal string fence to
+each account, initialized to the empty string on SQL and retained MongoDB
+documents. It preserves account IDs, addresses, history and delivery state.
+Every account-bound enqueue, claim and SMTP authorization writes a fresh fence
+in its transaction while the account still holds the intended address. This
+orders them with address release even when its cancellation scan found no mail,
+or the producer's transaction had already read the old address. A stale enqueue
+is retained as `failed` with `recipient-address-changed`, rather than made
+deliverable to a replacement account. The field is internal and absent from user
+responses. Upgrade all producers and senders before enabling address recovery;
+an older instance does not participate in this fence or SMTP cancellation.
+
 `003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
 `ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,
 which adds the message id (`_id` descending on MongoDB), so finding each
@@ -1255,7 +1267,16 @@ each send has a hard 60-second deadline (`OUTBOX_SEND_BUDGET_MS`). Nodemailer's
 own timeouts are set to 10 s (connect), 10 s (greeting) and 30 s (socket
 inactivity), but those are per phase, not a total. A send cut off by the
 deadline is recorded as delivered-unacknowledged if the whole message had been
-written, and retried otherwise.
+written, and retried otherwise. The sender owns the actual SMTP connection and
+destroys its socket and MIME source before reporting timeout; compilation or
+DNS finishing later cannot restart the cancelled operation. There is no live
+SMTP attempt hidden behind a `failed` row. Authorization refreshes the claim
+inside the recipient transaction, and a handoff that resumes after its absolute
+deadline opens no connection. The lifecycle lease is renewed only while this
+bounded delivery and its bookkeeping run. Address release waits for the sender's
+lease or returns `409 CONFLICT`; crashed claims still recover through the normal
+five-minute sweep. SMTP may have accepted an already-transmitted message before
+cancellation, so delivered-unacknowledged rows remain excluded from retries.
 
 ### Two workers, one row
 

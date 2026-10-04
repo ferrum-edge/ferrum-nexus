@@ -131,4 +131,14 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
       mongodb: '2420be3f83a7ac8679b542a86da48368bdaf0652e7ab9de3f4cfbafb61678afd',
     },
   },
+  {
+    id: '008_email_lifecycle_fence',
+    release: null,
+    sha256: {
+      sqlite: 'e045e7cd6c1fe5185b48407fba1a184f013a144f0e814795bc57dcce367fb228',
+      pg: 'e045e7cd6c1fe5185b48407fba1a184f013a144f0e814795bc57dcce367fb228',
+      mysql: 'e188654d23f1adc941b96a04343f51d018ff31220792ae03d9280a8592c80d5c',
+      mongodb: 'e9ce02f689b67ecf81d7c44c58bb8e6c4d37f38a30fcf9936458b51b5deba891',
+    },
+  },
 ];

@@ -52,6 +52,7 @@ import type {
 import {
   DEFAULT_SPEC_ENFORCEMENT,
   emptySpecChangeReport,
+  isReleasedEmail,
   isSpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
 
@@ -864,6 +865,21 @@ export interface SqlRepos {
 export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionRunner): SqlRepos {
   const dialect = exec.dialect;
 
+  async function lockEmailRecipient(
+    tx: SqlExecutor,
+    id: string,
+    email: string,
+  ): Promise<boolean> {
+    if (isReleasedEmail(email)) return false;
+    return (
+      (await execute(
+        tx,
+        'UPDATE users SET email_lifecycle_fence = ? WHERE id = ? AND email = ?',
+        [newId(), id, email.trim().toLowerCase()],
+      )) > 0
+    );
+  }
+
   /* ── users ──────────────────────────────────────────────────────────── */
 
   const users: UserRepo = {
@@ -908,6 +924,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       ]);
       return row ? mapUser(row) : null;
     },
+
+    lockEmailRecipient: (id, email) => lockEmailRecipient(exec, id, email),
 
     findManyByIds: async (ids) => {
       if (ids.length === 0) return [];
@@ -2959,75 +2977,85 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         );
       }),
 
-    enqueue: async (input) => {
-      const key = input.idempotency_key ?? null;
-      if (key !== null) {
-        const existing = await emailOutbox.findByIdempotencyKey(key);
-        if (existing) return { entry: existing, created: false };
-      }
-      const meta = stamps({ id: input.id });
-      const insertSql = `INSERT INTO email_outbox
-             (id, to_email, recipient_user_id, subject, body_html, body_text, status, attempts,
-              next_attempt_at, last_error, idempotency_key, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, ?)`;
-      const params = [
-        meta.id,
-        input.to_email,
-        input.recipient_user_id ?? null,
-        input.subject,
-        input.body_html,
-        input.body_text,
-        input.next_attempt_at ?? meta.created_at,
-        key,
-        meta.created_at,
-        meta.updated_at,
-      ];
-      if (key === null) {
-        await execute(exec, insertSql, params);
-        const entry = await emailOutbox.findById(meta.id);
-        if (!entry) throw new Error('emailOutbox.enqueue: row vanished immediately after insert');
-        return { entry, created: true };
-      }
+    enqueue: async (input) =>
+      inTransaction(async (tx) => {
+        const key = input.idempotency_key ?? null;
+        if (key !== null) {
+          const existing = await queryOne(
+            tx,
+            'SELECT * FROM email_outbox WHERE idempotency_key = ?',
+            [key],
+          );
+          if (existing) return { entry: mapOutbox(existing), created: false };
+        }
+        const eligible =
+          !input.recipient_user_id ||
+          (await lockEmailRecipient(tx, input.recipient_user_id, input.to_email));
+        const meta = stamps({ id: input.id });
+        const insertSql = `INSERT INTO email_outbox
+               (id, to_email, recipient_user_id, subject, body_html, body_text, status, attempts,
+                next_attempt_at, last_error, idempotency_key, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`;
+        const params = [
+          meta.id,
+          input.to_email,
+          input.recipient_user_id ?? null,
+          input.subject,
+          input.body_html,
+          input.body_text,
+          eligible ? 'pending' : 'failed',
+          eligible ? (input.next_attempt_at ?? meta.created_at) : null,
+          eligible ? null : 'recipient-address-changed',
+          key,
+          meta.created_at,
+          meta.updated_at,
+        ];
+        if (key === null) {
+          await execute(tx, insertSql, params);
+          const entry = await queryOne(tx, 'SELECT * FROM email_outbox WHERE id = ?', [meta.id]);
+          if (!entry) throw new Error('emailOutbox.enqueue: row vanished immediately after insert');
+          return { entry: mapOutbox(entry), created: true };
+        }
 
-      // Losing the idempotency-key race must not be an error (issue #332):
-      // inside a transaction a failed INSERT aborts PostgreSQL's transaction
-      // outright, so a catch-and-re-read cannot run, and MySQL's re-read saw
-      // the transaction's REPEATABLE READ snapshot, from before the winner
-      // committed. So the insert yields to the key instead of failing on it.
-      // MySQL spells that `ON DUPLICATE KEY UPDATE id = id` rather than
-      // `INSERT IGNORE`, which would also downgrade a NOT NULL, length or
-      // CHECK violation to a warning and write an adjusted row. Under
-      // CLIENT_FOUND_ROWS its affected-row count cannot say which way the
-      // upsert went, so the id of the row that now holds the key does.
-      await mapSqlConflict(PINNED_OUTBOX_ID_TAKEN, () =>
-        execute(
-          exec,
-          exec.dialect === 'pg'
-            ? `${insertSql} ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
-               DO NOTHING`
-            : `${insertSql} ON DUPLICATE KEY UPDATE id = id`,
-          params,
-        ),
-      );
-      // A locking read, so MySQL sees the latest committed winner rather than
-      // the snapshot; PostgreSQL's READ COMMITTED gives every statement a
-      // fresh snapshot already.
-      const row = await queryOne(
-        exec,
-        `SELECT * FROM email_outbox WHERE idempotency_key = ?${
-          exec.dialect === 'mysql' ? ' FOR SHARE' : ''
-        }`,
-        [key],
-      );
-      if (!row) {
-        // Only a primary-key collision on a pinned id leaves no row for the
-        // key: MySQL's upsert yields to any unique key, not just this one.
-        // (PostgreSQL's names its conflict target, so it raised instead.)
-        throw new NexusError('CONFLICT', PINNED_OUTBOX_ID_TAKEN);
-      }
-      const entry = mapOutbox(row);
-      return { entry, created: entry.id === meta.id };
-    },
+        // Losing the idempotency-key race must not be an error (issue #332):
+        // inside a transaction a failed INSERT aborts PostgreSQL's transaction
+        // outright, so a catch-and-re-read cannot run, and MySQL's re-read saw
+        // the transaction's REPEATABLE READ snapshot, from before the winner
+        // committed. So the insert yields to the key instead of failing on it.
+        // MySQL spells that `ON DUPLICATE KEY UPDATE id = id` rather than
+        // `INSERT IGNORE`, which would also downgrade a NOT NULL, length or
+        // CHECK violation to a warning and write an adjusted row. Under
+        // CLIENT_FOUND_ROWS its affected-row count cannot say which way the
+        // upsert went, so the id of the row that now holds the key does.
+        await mapSqlConflict(PINNED_OUTBOX_ID_TAKEN, () =>
+          execute(
+            tx,
+            exec.dialect === 'pg'
+              ? `${insertSql} ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
+                 DO NOTHING`
+              : `${insertSql} ON DUPLICATE KEY UPDATE id = id`,
+            params,
+          ),
+        );
+        // A locking read, so MySQL sees the latest committed winner rather than
+        // the snapshot; PostgreSQL's READ COMMITTED gives every statement a
+        // fresh snapshot already.
+        const row = await queryOne(
+          tx,
+          `SELECT * FROM email_outbox WHERE idempotency_key = ?${
+            exec.dialect === 'mysql' ? ' FOR SHARE' : ''
+          }`,
+          [key],
+        );
+        if (!row) {
+          // Only a primary-key collision on a pinned id leaves no row for the
+          // key: MySQL's upsert yields to any unique key, not just this one.
+          // (PostgreSQL's names its conflict target, so it raised instead.)
+          throw new NexusError('CONFLICT', PINNED_OUTBOX_ID_TAKEN);
+        }
+        const entry = mapOutbox(row);
+        return { entry, created: entry.id === meta.id };
+      }),
 
     findById: async (id) => {
       const row = await queryOne(exec, 'SELECT * FROM email_outbox WHERE id = ?', [id]);
@@ -3043,34 +3071,50 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     claimDue: async (now, limit) =>
       inTransaction(async (tx) => {
-        // `FOR UPDATE SKIP LOCKED` is what makes two workers claim disjoint
-        // batches: rows another transaction already holds are passed over
-        // instead of blocking.
-        const ids = (
-          await queryAll(
+        // Lock the recipient before the outbox row, in address release's order.
+        // A CAS below resolves competing claims; the account write fences inserts
+        // and claims even when no matching outbox row existed at release's scan.
+        const candidates = await queryAll(
+          tx,
+          `SELECT * FROM email_outbox
+           WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+           ORDER BY ${nullsFirstAsc('next_attempt_at')}, created_at ASC LIMIT ?`,
+          [now, Math.max(1, Math.floor(limit))],
+        );
+        const claimed: EmailOutboxRecord[] = [];
+        for (const row of candidates) {
+          const entry = mapOutbox(row);
+          const eligible =
+            !entry.recipient_user_id ||
+            (await lockEmailRecipient(tx, entry.recipient_user_id, entry.to_email));
+          const changed = await execute(
             tx,
-            `SELECT id FROM email_outbox
-             WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-             ORDER BY ${nullsFirstAsc('next_attempt_at')}, created_at ASC
-             LIMIT ?${FOR_UPDATE_SKIP_LOCKED}`,
-            [now, Math.max(1, Math.floor(limit))],
-          )
-        ).map((row) => text(row.id));
-        if (ids.length === 0) return [];
-        await execute(
-          tx,
-          `UPDATE email_outbox
-           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?
-           WHERE id IN (${placeholders(ids.length)}) AND status = 'pending'`,
-          [nowIso(), newId(), ...ids],
-        );
-        const rows = await queryAll(
-          tx,
-          `SELECT * FROM email_outbox WHERE id IN (${placeholders(ids.length)})`,
-          ids,
-        );
-        return rows.map(mapOutbox);
+            `UPDATE email_outbox SET status = ?, next_attempt_at = ?, attempts = attempts + 1,
+             updated_at = ?, generation = ?, last_error = ?
+             WHERE id = ? AND status = 'pending'`,
+            [
+              eligible ? 'sending' : 'failed',
+              eligible ? entry.next_attempt_at : null,
+              nowIso(),
+              newId(),
+              eligible ? entry.last_error : 'recipient-address-changed',
+              entry.id,
+            ],
+          );
+          if (!eligible || changed === 0) continue;
+          const current = await queryOne(tx, 'SELECT * FROM email_outbox WHERE id = ?', [entry.id]);
+          if (current) claimed.push(mapOutbox(current));
+        }
+        return claimed;
       }),
+
+    beginDelivery: async (entry, at) =>
+      (await execute(
+        exec,
+        `UPDATE email_outbox SET updated_at = ?
+         WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, entry.id, entry.generation],
+      )) > 0,
 
     // Every settling write moves the row out of `sending`, so a matching row
     // always changes and MySQL's CLIENT_FOUND_ROWS count is still an ownership

@@ -43,6 +43,8 @@ interface RelayOptions {
   stallAfterData?: boolean;
   /** Refuse the message after end-of-data with a permanent error. */
   rejectAfterData?: boolean;
+  /** Run before the DATA reply; models a pause without firing the deadline timer. */
+  beforeData?: () => void;
 }
 
 /** A minimal SMTP sink. No mail leaves the process. */
@@ -95,6 +97,7 @@ async function startRelay(options: RelayOptions = {}): Promise<Relay> {
       const command = line.split(/[\s:]/)[0]?.toUpperCase() ?? '';
       if (command === 'EHLO' || command === 'HELO') reply('250 nexus-budget-fixture\r\n');
       else if (command === 'DATA') {
+        options.beforeData?.();
         reply('354 send message\r\n');
         inData = true;
       } else if (command === 'QUIT') reply('221 2.0.0 goodbye\r\n');
@@ -186,13 +189,13 @@ describe('SMTP send budget', { timeout: 30_000 }, () => {
     assert.ok(elapsed < 5_000, `the send returned after ${elapsed}ms, not on the relay's schedule`);
     assert.equal(
       isDeliveredUnacknowledged(error),
-      true,
-      'the live SMTP operation must not be retried',
+      false,
+      'the SMTP operation was cancelled before DATA and is safe to retry',
     );
     assert.deepEqual(relay.received, [], 'the relay never saw a complete message');
 
-    // The timed-out Nodemailer operation cannot be cancelled. A later caller
-    // must not add another live connection, but waiting for it is bounded too.
+    // The expired attempt owns no live operation. Another attempt has its own
+    // budget and is cancelled as well; neither can deliver after returning.
     const queuedAt = Date.now();
     const queuedError = await failureOf(transport, MAIL);
     assert.ok(Date.now() - queuedAt < 500, 'the queued send observed its own budget');
@@ -202,7 +205,53 @@ describe('SMTP send budget', { timeout: 30_000 }, () => {
       'a send that never started remains safe to retry',
     );
     await new Promise((resolve) => setTimeout(resolve, 750));
-    assert.equal(relay.received.length, 1, 'the original operation continued to delivery');
+    assert.equal(relay.received.length, 0, 'neither cancelled operation continued to delivery');
+  });
+
+  it('spends the same deadline while queued and never starts an expired send', async () => {
+    const { relay, transport } = await connect({ commandDelayMs: 150 }, 250);
+    const first = failureOf(transport, MAIL);
+    const second = failureOf(transport, MAIL);
+    const errors = await Promise.all([first, second]);
+    for (const error of errors) {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /budget/);
+      assert.equal(isDeliveredUnacknowledged(error), false);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    assert.deepEqual(relay.received, [], 'no queued or cancelled send remained deliverable');
+  });
+
+  it('honors an expired handoff deadline without connecting', async () => {
+    const { relay, transport } = await connect({}, 5_000);
+    await assert.rejects(transport.send(MAIL, { deadline: Date.now() - 1 }), /budget/);
+    assert.deepEqual(relay.received, []);
+  });
+
+  it('refuses DATA past the absolute deadline even before its timer fires', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const { relay, transport } = await connect(
+      { beforeData: () => t.mock.timers.tick(5_001) },
+      5_000,
+    );
+    // Only Date is mocked: the real timeout has not elapsed when DATA resumes.
+    const error = await failureOf(transport, MAIL);
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /budget/);
+    assert.equal(isDeliveredUnacknowledged(error), false);
+    assert.deepEqual(relay.received, [], 'the resumed protocol cannot transmit the old message');
+  });
+
+  it('cancels an active operation when the transport closes', async () => {
+    const { relay, transport } = await connect({ commandDelayMs: 150 }, 5_000);
+    const pending = failureOf(transport, MAIL);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await transport.close?.();
+    const error = await pending;
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /closed/);
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    assert.deepEqual(relay.received, [], 'close left no deliverable SMTP operation');
   });
 
   it('treats a stall after end-of-data as delivered-unacknowledged', async () => {

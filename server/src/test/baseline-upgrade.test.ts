@@ -22,8 +22,9 @@
  * `002_api_gateway_plugins` and `003_messages_thread_latest`; from `v0.1.0`
  * and `v0.2.0`, `004_api_spec_changes`, `005_notification_preferences` and
  * `006_user_identities`) is applied here on top of a populated database with
- * no change to the harness. From the newest release (`v0.3.0`), `007_outbox_recipient` adds a nullable
- * account binding without changing retained message contents.
+ * no change to the harness. From the newest release (`v0.3.0`), `007_outbox_recipient`
+ * adds a nullable account binding without changing retained message contents;
+ * `008_email_lifecycle_fence` adds a private account fence without changing user DTOs.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
@@ -712,6 +713,13 @@ async function assertPortalInvariants(store: NexusStore): Promise<void> {
   const client = await store.users.findByEmail('Client@Example.test');
   assert.ok(client, 'the client is found by a case-insensitive email');
   assert.equal(client.id, ID.client);
+  // 008 initializes a private fence without changing any retained account
+  // fields. Upgraded rows can participate in the same mail/release ordering.
+  await store.transaction(async (tx) => {
+    assert.equal(await tx.users.lockEmailRecipient(client.id, client.email.toUpperCase()), true);
+    assert.equal(await tx.users.lockEmailRecipient(client.id, 'other@example.test'), false);
+  });
+  assert.deepEqual(await store.users.findById(client.id), client);
   assert.ok(await verifyPassword(FIXTURE_PASSWORD, client.password_hash));
   assert.equal(await store.users.countActiveSuperAdmins(), 1);
 

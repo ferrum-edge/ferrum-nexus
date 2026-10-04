@@ -398,7 +398,12 @@ or `ES256`, is refused.
 sign-in** (`POST /api/auth/sso/:provider/link`, session and CSRF). The sealed
 attempt records the account and the session that started it, and the callback
 attaches the identity only when it returns to that same session
-(`link_session_mismatch` otherwise). This is the only way an administrator's
+(`link_session_mismatch` otherwise). The callback re-reads the initiating
+session and its expiry under the account lifecycle lease, inside the transaction
+that links and issues a replacement. A promotion that revokes the session during
+token exchange therefore cannot be bypassed by the request's cached session.
+This also applies when the explicit attempt finds the identity already linked.
+This is the only way an administrator's
 account, or one the provider's claims make an administrator's, is ever
 linked. The identity's email address plays no part, because
 the holder is present and chose it. Its claims still promote the account only

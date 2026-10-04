@@ -783,7 +783,10 @@ domain cannot be registered or provisioned. Its history, grants and credential
 metadata remain attached to its ID. The rightful holder’s next SSO sign-in
 creates a separate account; existing ownership or gateway access never transfers.
 Upgrade every mail-producing instance before using this operation so delayed
-mail remains bound to the original account.
+mail remains bound to the original account. Account-bound enqueue, claim and
+SMTP authorization are ordered with release by a persisted recipient write.
+Release waits for an active sender's lifecycle lease or returns `409 CONFLICT`;
+SMTP timeouts cancel the underlying connection before the row stops `sending`.
 
 ### `POST /api/users/:id/gateway-teardown/retry`
 
