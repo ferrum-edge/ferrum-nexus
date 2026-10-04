@@ -28,6 +28,7 @@ export function runSsoSettingsLockContract(
     let pauseNextSave = false;
     let peerAcquireResolve: (() => void) | null = null;
     const peerSave: { current: ReturnType<TestApp['authed']> | null } = { current: null };
+    const getPeerSave = (): ReturnType<TestApp['authed']> | null => peerSave.current;
     const peerAcquiring = new Promise<void>((resolve) => {
       peerAcquireResolve = resolve;
     });
@@ -126,7 +127,7 @@ export function runSsoSettingsLockContract(
         payload: { allowed_email_domains: ['first.example.test'] },
       });
       const first = await firstSave;
-      const startedPeerSave = peerSave.current;
+      const startedPeerSave = getPeerSave();
       assert.ok(
         startedPeerSave,
         'the second app started its save while the first held the settings key',
