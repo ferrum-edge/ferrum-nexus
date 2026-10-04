@@ -35,6 +35,8 @@ export interface MockOidcProviderOptions {
   clientId: string;
   /** `null` registers a public client that authenticates with PKCE alone. */
   clientSecret: string | null;
+  /** Canonical issuer host; the server still binds to `127.0.0.1`. Defaults to `127.0.0.1`. */
+  issuerHostname?: '127.0.0.1' | 'localhost';
   /** Signature algorithm of the provider's key. Defaults to `RS256`. */
   alg?: 'RS256' | 'ES256';
 }
@@ -65,7 +67,7 @@ export interface MockTokenRequest {
 
 /** A running mock provider. */
 export interface MockOidcProvider {
-  /** `http://127.0.0.1:<port>`, once started. */
+  /** `http://<issuerHostname>:<port>`, once started; defaults to `127.0.0.1`. */
   readonly issuer: string;
   start(): Promise<string>;
   stop(): Promise<void>;
@@ -142,6 +144,10 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
 
 /** Build a mock provider; call `start()` before use and `stop()` after. */
 export function createMockOidcProvider(options: MockOidcProviderOptions): MockOidcProvider {
+  const issuerHostname = options.issuerHostname ?? '127.0.0.1';
+  if (issuerHostname !== '127.0.0.1' && issuerHostname !== 'localhost') {
+    throw new Error('mock provider issuer hostname must be 127.0.0.1 or localhost');
+  }
   const alg = options.alg ?? 'RS256';
   const codes = new Map<string, PendingCode>();
   let key: SigningKey | null = null;
@@ -194,7 +200,7 @@ export function createMockOidcProvider(options: MockOidcProviderOptions): MockOi
       server = running;
       await new Promise<void>((resolve) => running.listen(0, '127.0.0.1', () => resolve()));
       const address = running.address() as AddressInfo;
-      issuer = `http://127.0.0.1:${address.port}`;
+      issuer = `http://${issuerHostname}:${address.port}`;
       return issuer;
     },
 

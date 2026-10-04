@@ -150,6 +150,19 @@ store-contracts, acceptance image build and verbatim quickstart stopped on the s
 `Supported Node minimum` then failed because the checks matrix failed. Those logs do not
 establish runtime or application-test results, and no jobs were manually rerun for this import.
 
+On import head `bc389dfe1510692057793930817d35d0c1e18f6a`, `checks (26)` job
+`111484640849` in [run 37218770763](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37218770763)
+installed and typechecked, then reported 2,196 server tests: 2,176 passed, 19 skipped and
+one failed. The new confidential OIDC regression stopped before token exchange: discovery
+advertised `localhost`, while the mock authorizer's canonical issuer was `127.0.0.1`.
+This follow-up gives that fixture an explicit `localhost` issuer while retaining the default
+`127.0.0.1` and loopback-only host options. Discovery, exact authorization endpoint validation
+and signed-token issuer now share one identity. Assertions reject a different origin/path
+and validate the healthy token through the default vetted Undici transport, retaining Basic
+authentication encoding, PKCE and the absence of a form client secret. No production transport
+or security guard is changed. Fresh-head hosted results are required to confirm this correction;
+the earlier job is a failure, and no remediated CI pass is claimed.
+
 CI runs `checks (22.22.2)`, `checks (22)`, `checks (24.15.0)`, `checks (24)`,
 `checks (26.0.0)` and `checks (26)` with strict engine checks and actual-version assertions.
 `Supported Node minimum` requires the entire matrix to succeed and checks all declarations

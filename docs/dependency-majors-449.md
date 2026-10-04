@@ -7,7 +7,7 @@ higher Node minima in its manifests and workflows. No released support-profile c
 been approved. Main and the released profile retain Node 22.14; PR #520's stable
 `Supported Node minimum` gate qualifies the actual declared minimum through the matrix.
 See the [higher-floor candidate notes](dependency-majors-449-higher-floor-draft.md) for
-compatibility costs, published evidence, pending locks, qualification and rollback.
+compatibility costs, published evidence, imported locks, pending qualification and rollback.
 
 ## Published versions and migration boundaries
 
@@ -52,7 +52,8 @@ legacy compiler package, regex replacement for AST traversal, skipped scans or `
 `^22.22.2 || ^24.15.0 || >=26.0.0`, and depends on Undici 8.
 [Undici 8.11.2](https://registry.npmjs.org/undici/8.11.2) independently requires Node >=22.19.
 Both exceed the released minimum. This draft declares jsdom 30.1.2 and Undici 8.11.2,
-but the old locks still resolve jsdom 26 and Undici 7 until a real hosted artifact is applied.
+and both current locks are imported byte-for-byte from verified hosted artifact `11308824128`.
+The root lock resolves those versions; both locks include the proposed workspace engines.
 Owned transports disable H2 explicitly. Notifications now label buttons from their visible
 title and action and describe them from the visible body and time, retaining role/name and
 visibility assertions. The candidate still needs hosted evidence and fresh independent review.
@@ -67,8 +68,12 @@ and Ferrum Edge 0.9.10 compatibility pins are outside this migration and remain 
 
 ## Hosted locks and qualification
 
-The first stage's applied artifact is recorded in
-[lock provenance](dependency-majors-449-lock-provenance.md). It does not qualify this draft.
+The first stage's artifact is preserved as history in
+[lock provenance](dependency-majors-449-lock-provenance.md). The current candidate import from
+producer run `37217928511`, attempt 1, source `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`
+on Node `v22.22.2` / npm `10.9.7` is recorded in the
+[draft notes](dependency-majors-449-higher-floor-draft.md#hosted-lock-import-qualification-pending).
+Neither producer success nor the verified import qualifies the application or adopts a Node floor.
 
 Both real npm lockfiles must come from GitHub-hosted npm, never a locally run installer or a
 handwritten dependency graph. `.github/workflows/dependency-locks.yml` is an optional artifact
@@ -91,8 +96,8 @@ checkout, verify `provenance/input.sha256` against that checkout, and verify
 two generated lockfiles to their corresponding paths, inspect the complete diff, and commit with
 hooks disabled before pushing. Keep the provenance artifact/run URL available for review.
 
-A source-only head awaiting its lock artifact is not qualified. The optional producer does not
-replace any required check: all normal required checks must pass on the final artifact head,
+The candidate locks are applied; final-head runtime/CI qualification remains pending. The optional
+producer does not replace any required check: all normal required checks must pass on the final head,
 including `Supported Node minimum`, real Node 22/24 checks, store contracts, Docker, acceptance,
 quickstart configuration and action pins. The candidate's additional per-major minima, Node 26
 and verbatim quickstart jobs must pass too. Coverage remains its existing optional job.

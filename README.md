@@ -34,7 +34,8 @@ supported pair, how to upgrade from `v0.2.0`, and the known limitations.
 This source branch is a **draft** jsdom 30 / Undici 8 migration. It proposes
 `^22.22.2 || ^24.15.0 || >=26.0.0`; owner approval to change the released Node
 support profile is still pending. The released profile remains Node 22.14+.
-The draft also awaits real hosted lock artifacts and full hosted qualification.
+Both candidate locks are imported from verified hosted artifact `11308824128`.
+Final-head runtime/CI qualification and full root and fresh independent review remain pending.
 See the [candidate and rollback notes](docs/dependency-majors-449-higher-floor-draft.md).
 
 - **Production upgrades.** Schema changes ship as forward migrations that

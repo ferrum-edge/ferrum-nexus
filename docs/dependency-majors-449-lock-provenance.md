@@ -1,18 +1,21 @@
 # Hosted lock provenance for issue #449
 
-## Historical first-stage artifact; higher-floor draft pending
+## Historical first-stage artifact; higher-floor locks imported
 
-The records below describe the locks from PR #518. This draft still contains those bytes;
-they do **not** resolve its jsdom 30 / Undici 8 declarations or workspace engine changes.
-No candidate artifact has been applied or qualified. The updated producer must generate
-both locks from this candidate's exact immutable head on Node 22.22.2. Root must verify
-its run/source SHA, actual Node/npm versions and every input/output hash before applying
-the outputs and recording new provenance. See the
-[draft notes](dependency-majors-449-higher-floor-draft.md).
+The records below preserve PR #518's historical lock provenance. This draft's current locks
+were imported byte-for-byte at `bc389dfe1510692057793930817d35d0c1e18f6a` from verified
+artifact `11308824128`, produced by
+[run 37217928511, attempt 1](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37217928511)
+from source `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec` on Node `v22.22.2` / npm `10.9.7`.
+The root lock resolves jsdom 30.1.2 and Undici 8.11.2; both include the proposed workspace engines.
+The archive SHA-256 is `06cfb6dd727d02621f026c45c6ba495f4c414803dc08a61a676dfb5809e43bba`;
+the [draft notes](dependency-majors-449-higher-floor-draft.md#hosted-lock-import-qualification-pending)
+record the verified input/output manifests and full import facts. Final-head runtime/CI
+qualification, full root and fresh independent review, and owner approval remain pending.
 
 ## PR #518 provenance
 
-Both committed locks were copied byte-for-byte from the successful
+In PR #518, both locks were copied byte-for-byte from the successful
 [producer run 37205184516, attempt 1](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37205184516).
 The producer checked out source commit `d3114c2a439cbd0e7581666efb1309de34975cb1`, used
 Node `v22.14.0` and npm `10.9.2`, disabled lifecycle scripts, and enabled strict engine checks.
@@ -47,13 +50,14 @@ f26b2b4bc2f68800b0a6add2c850947ef92fa71fe51ac3a173a21986aad56a7f  e2e/package-lo
 ```
 
 The root graph was resolved afresh because in-place npm 10 updates retained a Vitest 4 optional
-peer cycle or failed peer resolution. This also refreshes other versions admitted by the existing
+peer cycle or failed peer resolution. This also refreshed other versions admitted by the existing
 manifest ranges, including Vite 8.3.2, Undici 7.30.0, Nodemailer 10.0.14, pg 8.23.1, Node typings
-22.20.5 and TanStack Query/Router patches. Those movements require whole-diff review and the
+22.20.5 and TanStack Query/Router patches. Those movements required whole-diff review and the
 normal hosted runtime/store/acceptance gates; the engine-compatible producer is not evidence
-that application tests pass. The `e2e` graph retains its other locked dependencies.
+that application tests pass. The `e2e` graph retained its other locked dependencies.
 
-The producer confirms TypeScript 7.0.2, Zod 4.6.5, React Table 9.2.5 and matched Vitest peers
-5.0.3, with independently versioned Istanbul libraries. jsdom remains 26.1.0 and Undici remains
-on major 7. Root must still qualify the final commit and independently review the audit scanner,
-security implications and new test logic. No required CI check or baseline was changed.
+The PR #518 producer confirmed TypeScript 7.0.2, Zod 4.6.5, React Table 9.2.5 and matched
+Vitest peers 5.0.3, with independently versioned Istanbul libraries. That artifact resolved
+jsdom 26.1.0 and Undici major 7. Application qualification and independent review of the
+audit scanner, security implications and new test logic were separate gates. No required
+CI check or baseline was changed in that first stage.

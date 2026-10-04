@@ -295,7 +295,23 @@ describe('discovery', () => {
     idp.discoveryFault = null;
   });
 
+  it('restricts the mock issuer hostname to explicit loopback names', () => {
+    for (const hostname of ['idp.example.com', 'localhost.example.com', '127.0.0.2']) {
+      assert.throws(
+        () =>
+          createMockOidcProvider({
+            clientId: CLIENT_ID,
+            clientSecret: null,
+            // Exercise the runtime guard for a caller outside the typed fixture contract.
+            issuerHostname: hostname as 'localhost',
+          }),
+        /mock provider issuer hostname must be 127.0.0.1 or localhost/,
+      );
+    }
+  });
+
   it('refuses a plain-HTTP issuer unless loopback HTTP is explicitly allowed', async () => {
+    assert.equal(new URL(idp.issuer).hostname, '127.0.0.1', 'the fixture default is unchanged');
     await rejectsWith(
       createOidcClient({ allowHttpLoopback: false }).discover(idp.issuer),
       'provider_unavailable',
@@ -510,17 +526,16 @@ describe('discovery', () => {
 
   it('authenticates a confidential code exchange over the default vetted transport', async () => {
     const secret = 'test-client-secret +&';
-    const provider = createMockOidcProvider({ clientId: CLIENT_ID, clientSecret: secret });
+    const provider = createMockOidcProvider({
+      clientId: CLIENT_ID,
+      clientSecret: secret,
+      issuerHostname: 'localhost',
+    });
     await provider.start();
     try {
       const lookedUp: string[] = [];
-      const issuer = provider.issuer.replace('127.0.0.1', 'localhost');
-      provider.discoveryOverrides = {
-        issuer,
-        authorization_endpoint: `${issuer}/authorize`,
-        token_endpoint: `${issuer}/token`,
-        jwks_uri: `${issuer}/jwks`,
-      };
+      const issuer = provider.issuer;
+      assert.equal(new URL(issuer).hostname, 'localhost');
       const client = createOidcClient({
         allowHttpLoopback: true,
         resolve: async () => assert.fail('loopback names must use the vetted loopback lookup'),
@@ -530,19 +545,33 @@ describe('discovery', () => {
         },
       });
       const discovery = await client.discover(issuer);
+      assert.equal(discovery.issuer, issuer);
+      assert.equal(discovery.authorization_endpoint, `${issuer}/authorize`);
+      assert.equal(discovery.token_endpoint, `${issuer}/token`);
+      assert.equal(discovery.jwks_uri, `${issuer}/jwks`);
       const verifier = randomUrlToken();
-      const authorized = provider.authorize(
-        authorizationUrl({
-          discovery,
-          clientId: CLIENT_ID,
-          redirectUri: 'http://127.0.0.1/callback',
-          scopes: ['openid'],
-          state: 'confidential-state',
-          nonce: NONCE,
-          codeChallenge: pkceChallenge(verifier),
-        }),
-        { sub: 'subject-1' },
+      const request = authorizationUrl({
+        discovery,
+        clientId: CLIENT_ID,
+        redirectUri: 'http://127.0.0.1/callback',
+        scopes: ['openid'],
+        state: 'confidential-state',
+        nonce: NONCE,
+        codeChallenge: pkceChallenge(verifier),
+      });
+      const wrongOrigin = new URL(request);
+      wrongOrigin.hostname = '127.0.0.1';
+      assert.throws(
+        () => provider.authorize(wrongOrigin.href, { sub: 'subject-1' }),
+        /not this provider's authorization endpoint/,
       );
+      const wrongPath = new URL(request);
+      wrongPath.pathname = '/elsewhere';
+      assert.throws(
+        () => provider.authorize(wrongPath.href, { sub: 'subject-1' }),
+        /not this provider's authorization endpoint/,
+      );
+      const authorized = provider.authorize(request, { sub: 'subject-1' });
       const tokens = await client.exchangeCode({
         discovery,
         clientId: CLIENT_ID,
@@ -552,6 +581,15 @@ describe('discovery', () => {
         codeVerifier: verifier,
       });
       assert.ok(tokens.idToken);
+      const verified = await client.validateIdToken({
+        idToken: tokens.idToken,
+        discovery,
+        clientId: CLIENT_ID,
+        nonce: NONCE,
+        accessToken: tokens.accessToken,
+      });
+      assert.equal(verified.sub, 'subject-1');
+      assert.equal(verified.iss, issuer);
       const sent = provider.tokenRequests.at(-1);
       const credentials = [CLIENT_ID, secret].map(encodeURIComponent).join(':');
       assert.equal(sent?.authorization, `Basic ${Buffer.from(credentials).toString('base64')}`);

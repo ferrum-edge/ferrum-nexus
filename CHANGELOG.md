@@ -29,8 +29,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   controls name their visible title and action and describe their body/time,
   retaining accessible-role assertions under jsdom 30. The existing Node image
   digest already contains 22.23.3. This draft is **not approved or qualified**:
-  old locks await the hosted producer, fresh independent review and all hosted
-  gates precede the owner's released-profile decision. See the
+  both locks are imported byte-for-byte from verified hosted artifact
+  `11308824128`; final-head runtime/CI qualification, full root and fresh
+  independent review, and owner approval remain pending. See the
   [candidate and rollback notes](docs/dependency-majors-449-higher-floor-draft.md).
 
 - **Node 22.14-compatible dependency majors are migrated** (Refs #449).
