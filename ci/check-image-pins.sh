@@ -31,7 +31,6 @@ in env files. This is a bounded static parser, not a shell/YAML interpreter;
 computed commands, sourced values and arbitrary eval are outside its scope.
 """
 
-import json
 import re
 import shlex
 import subprocess
@@ -92,6 +91,25 @@ class ShellLexer:
 
     def substitution(self, end):
         start = self.pos
+        if end == '`':
+            # Bash removes one escape layer before parsing a backtick body.
+            # In particular, \` inside it becomes an active nested backtick,
+            # while an escaped backtick outside a substitution stays data.
+            line = self.line
+            body = ''
+            while self.pos < len(self.source):
+                char = self.take()
+                if char == '`':
+                    break
+                if char == '\\' and self.pos < len(self.source):
+                    following = self.source[self.pos]
+                    if following in '$`\\':
+                        char = self.take()
+                body += char
+            nested = ShellLexer(body, line)
+            self.nested.append(nested.tokens())
+            self.nested.extend(nested.nested)
+            return self.source[start:self.pos]
         tokens = self.tokens(end)
         self.nested.append(tokens)
         return self.source[start:self.pos]
@@ -382,7 +400,11 @@ def shell_command(path, command):
 
 def scan_shell(path, source, line=1):
     lexer = ShellLexer(source, line)
-    groups = [lexer.tokens(), *lexer.nested]
+    try:
+        groups = [lexer.tokens(), *lexer.nested]
+    except RecursionError:
+        report(path, line, 'shell nesting exceeds scanner limit')
+        return
     for tokens in groups:
         command = []
         for token in [*tokens, ('\n', line, 'separator')]:
@@ -480,51 +502,6 @@ def scan_dockerfile(path, source):
                     check_image(path, line, image)
 
 
-def yaml_scalar(value, flow=False):
-    value = value.strip()
-    if value.startswith("'"):
-        match = re.match(r"'((?:[^']|'')*)'", value)
-        return match[1].replace("''", "'") if match else value
-    if value.startswith('"'):
-        try:
-            return json.JSONDecoder().raw_decode(value)[0]
-        except ValueError:
-            return value
-    value = re.split(r'\s+#', value, maxsplit=1)[0].strip()
-    if flow:
-        depth = 0
-        for pos, char in enumerate(value):
-            if char in ',}]' and depth == 0:
-                return value[:pos].strip()
-            depth += char == '{'
-            depth -= char == '}'
-    return value
-
-
-def yaml_code(row):
-    # Mask strings/comments while retaining offsets for finding flow-map keys.
-    quote = None
-    masked = list(row)
-    pos = 0
-    while pos < len(row):
-        char = row[pos]
-        if quote:
-            masked[pos] = ' '
-            if quote == '"' and char == '\\' and pos + 1 < len(row):
-                pos += 1
-                masked[pos] = ' '
-            elif char == quote:
-                quote = None
-        elif char in "\"'":
-            quote = char
-            masked[pos] = ' '
-        elif char == '#' and (pos == 0 or row[pos - 1].isspace()):
-            masked[pos:] = ' ' * (len(row) - pos)
-            break
-        pos += 1
-    return ''.join(masked)
-
-
 def yaml_block(rows, pos, indent, folded):
     block = []
     while pos < len(rows):
@@ -539,70 +516,499 @@ def yaml_block(rows, pos, indent, folded):
     for index, row in enumerate(block):
         value += row
         following = block[index + 1] if index + 1 < len(block) else ''
-        # YAML folds adjacent ordinary lines into spaces; blank and more-
-        # indented lines retain command boundaries, including shell comments.
+        # Fold ordinary lines, preserving blank/more-indented boundaries.
         ordinary = row and following and not row[0].isspace() and not following[0].isspace()
         value += ' ' if folded and ordinary else '\n'
     return value, pos
 
 
-yaml_key = r'''(?:"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[\w-]+)'''
-yaml_mapping = re.compile(rf'^(\s*)(?:-\s+)?({yaml_key})\s*:\s*(.*)')
+class YamlError(ValueError):
+    def __init__(self, line, message):
+        super().__init__(message)
+        self.line = line
 
 
-def check_yaml_field(path, line, kind, value, workflow, flow=False):
-    value = value.strip()
-    scalar = yaml_scalar(value, flow)
-    if kind == 'run' and workflow:
-        scan_shell(path, scalar, line)
-    elif kind == 'image' or (kind == 'container' and value and not value.startswith('{')):
+class YamlNode:
+    def __init__(self, kind, value, line):
+        self.kind = kind
+        self.value = value
+        self.line = line
+
+
+def yaml_fold(value):
+    def fold(match):
+        count = match[0].count('\n')
+        return ' ' if count == 1 else '\n' * (count - 1)
+
+    return re.sub(r'[ \t]*\n(?:[ \t]*\n)*[ \t]*', fold, value)
+
+
+class YamlFlow:
+    """Read whole flow collections, including continuations, without evaluation.
+
+    Quoted strings use YAML 1.2.2 sections 5.7/7.3, not JSON escapes.
+    Flow collections follow section 7.4. Maps retain all
+    entries so duplicate keys cannot hide an earlier unpinned declaration.
+    """
+
+    escapes = {
+        '0': '\0', 'a': '\a', 'b': '\b', 't': '\t', '\t': '\t', 'n': '\n',
+        'v': '\v', 'f': '\f', 'r': '\r', 'e': '\x1b', ' ': ' ', '"': '"',
+        '/': '/', '\\': '\\', 'N': '\x85', '_': '\xa0', 'L': '\u2028', 'P': '\u2029',
+    }
+
+    def __init__(self, source, line):
+        self.source = source
+        self.pos = 0
+        self.line = line
+
+    def take(self):
+        char = self.source[self.pos]
+        self.pos += 1
+        self.line += char == '\n'
+        return char
+
+    def skip(self):
+        while self.pos < len(self.source):
+            if self.source[self.pos].isspace():
+                self.take()
+            elif self.source[self.pos] == '#':
+                while self.pos < len(self.source) and self.source[self.pos] != '\n':
+                    self.take()
+            else:
+                break
+
+    def line_break(self, escaped=False):
+        # The first newline has already been consumed. YAML folds one break
+        # to a space, and N empty continuation lines to N newlines.
+        count = 0
+        while self.pos < len(self.source) and self.source[self.pos] in ' \t\r\n':
+            count += self.take() == '\n'
+        return '\n' * count if count or escaped else ' '
+
+    def quoted(self):
+        quote = self.take()
+        value = ''
+        while self.pos < len(self.source):
+            char = self.take()
+            if char == quote:
+                if quote == "'" and self.source.startswith("'", self.pos):
+                    self.take()
+                    value += "'"
+                    continue
+                return value
+            if quote == '"' and char == '\\':
+                if self.pos == len(self.source):
+                    break
+                escape = self.take()
+                if escape in self.escapes:
+                    value += self.escapes[escape]
+                elif escape in 'xuU':
+                    width = {'x': 2, 'u': 4, 'U': 8}[escape]
+                    digits = self.source[self.pos:self.pos + width]
+                    if len(digits) != width or not re.fullmatch('[0-9a-fA-F]+', digits):
+                        raise YamlError(self.line, 'invalid YAML hexadecimal escape')
+                    number = int(digits, 16)
+                    if number > 0x10ffff or 0xd800 <= number <= 0xdfff:
+                        raise YamlError(self.line, 'invalid YAML Unicode escape')
+                    self.pos += width
+                    value += chr(number)
+                elif escape == '\n':
+                    value += self.line_break(escaped=True)
+                else:
+                    raise YamlError(self.line, f'unsupported YAML escape: \\{escape}')
+            elif char == '\n':
+                value = value.rstrip(' \t') + self.line_break()
+            else:
+                value += char
+        raise YamlError(self.line, 'unterminated YAML quoted scalar')
+
+    def key(self):
+        quoted = self.pos < len(self.source) and self.source[self.pos] in "\"'"
+        if quoted:
+            key = self.quoted()
+        else:
+            start = self.pos
+            while self.pos < len(self.source) and self.source[self.pos] not in ':,{}[]\n':
+                self.take()
+            key = self.source[start:self.pos].strip()
+        self.skip()
+        if not key or self.pos == len(self.source) or self.take() != ':':
+            raise YamlError(self.line, 'unsupported YAML mapping key')
+        if not quoted and key.startswith(('?', '&', '*', '!')):
+            raise YamlError(self.line, 'unsupported YAML mapping key')
+        return key
+
+    def node(self, depth=0):
+        if depth > 64:
+            raise YamlError(self.line, 'YAML nesting exceeds scanner limit')
+        self.skip()
+        line = self.line
+        if self.pos == len(self.source):
+            raise YamlError(line, 'incomplete YAML flow collection')
+        char = self.source[self.pos]
+        if char in '{[':
+            self.take()
+            mapping = char == '{'
+            end = '}' if mapping else ']'
+            entries = []
+            self.skip()
+            while self.pos < len(self.source) and self.source[self.pos] != end:
+                if mapping:
+                    key = self.key()
+                    self.skip()
+                    value = (
+                        YamlNode('scalar', '', self.line)
+                        if self.pos < len(self.source) and self.source[self.pos] in ',}'
+                        else self.node(depth + 1)
+                    )
+                    entries.append((key, value))
+                else:
+                    entries.append(self.node(depth + 1))
+                self.skip()
+                if self.pos < len(self.source) and self.source[self.pos] == ',':
+                    self.take()
+                    self.skip()
+                elif self.pos == len(self.source) or self.source[self.pos] != end:
+                    raise YamlError(self.line, 'expected YAML flow comma or closing delimiter')
+            if self.pos == len(self.source):
+                raise YamlError(self.line, 'unterminated YAML flow collection')
+            self.take()
+            return YamlNode('mapping' if mapping else 'sequence', entries, line)
+        if char in "\"'":
+            return YamlNode('scalar', self.quoted(), line)
+        if char in '&!':
+            # Consume a property and its node, even in inert metadata, so a
+            # multiline collection cannot leak into a different context.
+            start = self.pos
+            while self.pos < len(self.source) and (
+                not self.source[self.pos].isspace() and self.source[self.pos] not in ',{}[]'
+            ):
+                self.take()
+            marker = self.source[start:self.pos]
+            self.skip()
+            if self.pos < len(self.source) and self.source[self.pos] not in ',}]':
+                self.node(depth + 1)
+            return YamlNode('unsupported', marker, line)
+        start = self.pos
+        while self.pos < len(self.source) and self.source[self.pos] not in ',{}[]':
+            char = self.source[self.pos]
+            if char == '#' and (self.pos == start or self.source[self.pos - 1].isspace()):
+                break
+            self.take()
+        value = yaml_fold(self.source[start:self.pos].strip())
+        if not value:
+            raise YamlError(line, 'unsupported YAML flow scalar')
+        kind = 'unsupported' if value.startswith(('*', '&', '!', '?')) else 'scalar'
+        return YamlNode(kind, value, line)
+
+
+yaml_key = r'''(?:"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^:{}\[\],#]+?)'''
+yaml_mapping = re.compile(rf'^({yaml_key})\s*:(.*)')
+
+
+def yaml_field(text):
+    field = yaml_mapping.match(text)
+    # Colons inside plain strings (e.g. port mappings) are not map entries.
+    if field and (
+        field[1].startswith(('"', "'")) or not field[2]
+        or field[2][0].isspace() or field[2][0] in '{['
+    ):
+        return field
+    return None
+
+
+class YamlParser:
+    """Bounded YAML grammar: block/flow maps and sequences, scalar keys,
+    plain/single/double-quoted scalars and literal/folded block scalars.
+
+    No aliases, anchors, tags, merge keys or explicit/complex mapping keys
+    are resolved. Operational nodes using those forms fail closed. Metadata
+    is parsed for structure but never visited as image or executable fields.
+    Nesting is limited to 64 levels; unsupported syntax is diagnosed.
+    """
+
+    def __init__(self, source):
+        self.rows = source.splitlines()
+        self.pos = 0
+
+    def peek(self):
+        while self.pos < len(self.rows):
+            row = self.rows[self.pos]
+            if not row.strip() or row.lstrip().startswith('#'):
+                self.pos += 1
+            else:
+                width = len(row) - len(row.lstrip())
+                if '\t' in row[:width]:
+                    raise YamlError(self.pos + 1, 'unsupported YAML tab indentation')
+                return width, row.lstrip()
+        return -1, ''
+
+    def value(self, text, line, indent, depth):
+        if not text or text.startswith('#'):
+            width, row = self.peek()
+            if width > indent or (width == indent and re.match(r'-(?:\s|$)', row)):
+                return self.block(width, depth + 1)
+            return YamlNode('scalar', '', line)
+        if re.fullmatch(r'[|>][-+1-9]*\s*(?:#.*)?', text):
+            value, self.pos = yaml_block(self.rows, self.pos, indent, text.startswith('>'))
+            return YamlNode('scalar', value, line + 1)
+        if text.startswith(('{', '[', '"', "'")):
+            flow = YamlFlow('\n'.join([text, *self.rows[self.pos:]]), line)
+            node = flow.node(depth)
+            self.pos += flow.source[:flow.pos].count('\n')
+            suffix = flow.source[flow.pos:].split('\n', 1)[0].strip()
+            if suffix and not suffix.startswith('#'):
+                raise YamlError(flow.line, 'unexpected content after YAML value')
+            return node
+        value = re.split(r'\s+#', text, maxsplit=1)[0].strip()
+        if value.startswith(('*', '&', '!', '?')):
+            # Consume any child collection so it cannot escape this node's
+            # context; the visitor rejects the unresolved operational value.
+            property_value = re.match(r'^[&!][^\s{}\[\],]*\s*(.*)', text)
+            if property_value:
+                self.value(property_value[1], line, indent, depth + 1)
+            else:
+                width, _ = self.peek()
+                if width > indent:
+                    self.block(width, depth + 1)
+            return YamlNode('unsupported', value, line)
+        continuation = []
+        while self.pos < len(self.rows):
+            row = self.rows[self.pos]
+            if row.strip() and len(row) - len(row.lstrip()) <= indent:
+                break
+            if not row.lstrip().startswith('#'):
+                continuation.append(re.split(r'\s+#', row, maxsplit=1)[0])
+            self.pos += 1
+        if continuation:
+            value = yaml_fold(value + '\n' + '\n'.join(continuation)).strip()
+        return YamlNode('scalar', value, line)
+
+    def mapping_entry(self, text, line, indent, depth):
+        field = yaml_field(text)
+        if not field:
+            raise YamlError(line, 'unsupported YAML block mapping')
+        key = field[1].strip()
+        if key.startswith(('"', "'")):
+            key = YamlFlow(key, line).quoted()
+        elif key.startswith(('?', '&', '*', '!')):
+            raise YamlError(line, 'unsupported YAML mapping key')
+        return key, self.value(field[2].lstrip(), line, indent, depth)
+
+    def block(self, indent, depth=0, first=None):
+        if depth > 64:
+            raise YamlError(self.pos + 1, 'YAML nesting exceeds scanner limit')
+        _, row = self.peek() if first is None else (indent, first[0])
+        sequence = bool(re.match(r'-(?:\s|$)', row))
+        if first is None and not sequence and not yaml_field(row):
+            line = self.pos + 1
+            self.pos += 1
+            return self.value(row, line, indent, depth)
+        entries = []
+        line = first[1] if first else self.pos + 1
+        while True:
+            if first:
+                text, number = first
+                first = None
+            else:
+                width, text = self.peek()
+                if width != indent or text in {'---', '...'}:
+                    break
+                number = self.pos + 1
+                self.pos += 1
+            if sequence:
+                marker = re.match(r'-(?:\s+|$)', text)
+                if not marker:
+                    raise YamlError(number, 'mixed YAML mapping and sequence')
+                item = text[marker.end():]
+                if yaml_field(item):
+                    node = self.block(
+                        indent + marker.end(), depth + 1, first=(item, number),
+                    )
+                else:
+                    node = self.value(item, number, indent, depth)
+                entries.append(node)
+            else:
+                entries.append(self.mapping_entry(text, number, indent, depth))
+        return YamlNode('sequence' if sequence else 'mapping', entries, line)
+
+    def documents(self):
+        while True:
+            width, row = self.peek()
+            if width < 0:
+                return
+            if row in {'---', '...'}:
+                self.pos += 1
+                continue
+            if row.startswith(('{', '[')):
+                line = self.pos + 1
+                self.pos += 1
+                yield self.value(row, line, width, 0)
+            else:
+                yield self.block(width)
+
+
+def yaml_context(parent, key, workflow):
+    if parent == 'root':
+        return {
+            'jobs': 'jobs' if workflow else None,
+            'steps': 'steps' if workflow else None,
+            'services': 'services',
+            'container': 'container' if workflow else None,
+            # Preserve isolated declarations/step fragments used by fixtures,
+            # without extending that scope into metadata.
+            'image': 'image',
+            'run': 'run' if workflow else None,
+            'uses': 'uses' if workflow else None,
+        }.get(key)
+    if parent == 'jobs':
+        return 'job'
+    if parent == 'services':
+        return 'service'
+    if parent == 'job':
+        return {
+            'steps': 'steps', 'services': 'services', 'container': 'container',
+        }.get(key)
+    if parent in {'service', 'container'}:
+        return 'image' if key == 'image' else None
+    if parent == 'step':
+        return key if key in {'run', 'uses'} else None
+    return None
+
+
+def visit_yaml(path, node, context, workflow):
+    if context is None:
+        return
+    if node.kind == 'unsupported':
+        report(path, node.line, 'unsupported operational YAML value')
+        return
+    if node.kind == 'mapping':
+        if context in {'image', 'run', 'uses'}:
+            report(path, node.line, f'expected YAML scalar for {context}')
+            return
+        for key, child in node.value:
+            if key == '<<':
+                report(path, child.line, 'unsupported operational YAML merge key')
+            else:
+                visit_yaml(path, child, yaml_context(context, key, workflow), workflow)
+    elif node.kind == 'sequence':
+        child_context = 'step' if workflow and context in {'root', 'steps'} else None
+        if child_context is None:
+            report(path, node.line, f'unsupported operational YAML sequence for {context}')
+        else:
+            for child in node.value:
+                visit_yaml(path, child, child_context, workflow)
+    elif context == 'run':
+        scan_shell(path, node.value, node.line)
+    elif context in {'image', 'container'}:
         local = 'ferrum-nexus:e2e' if path == 'e2e/docker-compose.yml' else None
-        check_image(path, line, scalar, local)
-    elif kind == 'uses' and scalar.startswith('docker://'):
-        check_image(path, line, scalar[len('docker://'):])
+        check_image(path, node.line, node.value.strip(), local)
+    elif context == 'uses' and node.value.startswith('docker://'):
+        check_image(path, node.line, node.value[len('docker://'):])
+    elif context not in {'root', 'step', 'uses'} and node.value:
+        report(path, node.line, f'expected YAML collection for {context}')
 
 
 def scan_yaml(path, source, workflow):
-    rows = source.splitlines()
+    try:
+        for document in YamlParser(source).documents():
+            visit_yaml(path, document, 'root', workflow)
+    except YamlError as error:
+        report(path, error.line, str(error))
+    except RecursionError:
+        report(path, 1, 'YAML nesting exceeds scanner limit')
+
+
+def dotenv_unescape(value):
+    # Compose's dotenv grammar uses shell escapes, not YAML/JSON escapes.
+    escapes = {
+        'a': '\a', 'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t',
+        'v': '\v', '"': '"', '\\': '\\', '$': '$$',
+    }
+
+    def decode(match):
+        escape = match[0][1:]
+        if escape in escapes:
+            return escapes[escape]
+        if re.fullmatch(r'0[0-7]{3}', escape) and int(escape[1:], 8) <= 255:
+            return chr(int(escape[1:], 8))
+        return match[0]
+
+    return re.sub(r'\\(?:[abfnrtv$"\\]|0\d{0,3})', decode, value)
+
+
+def scan_env(path, source):
+    """Read the entire Compose dotenv assignment stream, never shell commands.
+
+    Like compose-go/dotenv/parser.go's locateKeyName/extractVarValue,
+    both separators, optional export, horizontal whitespace and multiline
+    quoted values are supported. Parsing resumes after a closing quote,
+    including on the same line. Unknown suffix syntax is refused instead of
+    dropping it; quoted prose in unrelated variables stays inert.
+    """
     pos = 0
-    while pos < len(rows):
-        row = rows[pos]
-        line = pos + 1
+    line = 1
+    local = 'ferrum-nexus:e2e' if path == 'e2e/.env.example' else None
+    while pos < len(source):
+        if source[pos].isspace():
+            line += source[pos] == '\n'
+            pos += 1
+            continue
+        if source[pos] == '#':
+            end = source.find('\n', pos)
+            pos = len(source) if end < 0 else end
+            continue
+        number = line
+        export = re.match(r'export[^\S\n]+', source[pos:])
+        if export:
+            pos += export.end()
+        key = re.match(r'[\w.\[\]-]+', source[pos:])
+        if not key:
+            report(path, line, 'unsupported dotenv assignment stream')
+            return
+        name = key[0]
+        pos += key.end()
+        while pos < len(source) and source[pos].isspace() and source[pos] != '\n':
+            pos += 1
+        # A bare key inherits the caller's value; it declares no literal pin.
+        if pos == len(source) or source[pos] == '\n':
+            continue
+        if source[pos] not in '=:':
+            report(path, line, 'unsupported dotenv assignment stream')
+            return
         pos += 1
-        if not row.strip() or row.lstrip().startswith('#'):
-            continue
-        field = yaml_mapping.match(row)
-        kind = yaml_scalar(field[2]) if field else None
-        indent = len(row) - len(row.lstrip()) + (2 if row.lstrip().startswith('- ') else 0)
-        if kind == 'run' and workflow:
-            value = field[3]
-            if value.startswith(('|', '>')):
-                source, pos = yaml_block(rows, pos, indent, value.startswith('>'))
-                scan_shell(path, source, line + 1)
+        while pos < len(source) and source[pos].isspace() and source[pos] != '\n':
+            pos += 1
+        if pos < len(source) and source[pos] in "\"'":
+            quote = source[pos]
+            pos += 1
+            value = ''
+            while pos < len(source):
+                char = source[pos]
+                pos += 1
+                line += char == '\n'
+                if char == quote:
+                    break
+                if char == '\\' and pos < len(source):
+                    escaped = source[pos]
+                    pos += 1
+                    line += escaped == '\n'
+                    value += escaped if escaped == quote else '\\' + escaped
+                else:
+                    value += char
             else:
-                scan_shell(path, yaml_scalar(value), line)
-            continue
-        # Other block scalars contain data, e.g. prose in workflow name: |.
-        block = field and re.fullmatch(r'[|>][-+0-9]*\s*(?:#.*)?', field[3])
-        if not field:
-            block = re.match(r'^\s*(?:-\s+)?[^:]+:\s*[|>][-+0-9]*\s*(?:#.*)?$', row)
-        if block:
-            value, pos = yaml_block(rows, pos, indent, '>' in row)
-            check_yaml_field(path, line, kind, value.strip(), workflow)
-            continue
-        if field and kind != 'run':
-            check_yaml_field(path, line, kind, field[3], workflow)
-        code = yaml_code(row)
-        value = field[3].lstrip() if field else re.sub(r'^\s*(?:-\s+)?', '', row)
-        if value.startswith(('{', '[')):
-            for flow in re.finditer(rf'(?:\{{|\[|,)\s*({yaml_key})\s*:', row):
-                # The delimiter and colon must be outside strings/comments;
-                # quoted mapping keys themselves are decoded from the row.
-                if code[flow.start()] not in '{[,' or code[flow.end() - 1] != ':':
-                    continue
-                check_yaml_field(
-                    path, line, yaml_scalar(flow[1]), row[flow.end():], workflow, flow=True,
-                )
+                report(path, number, 'unterminated dotenv quoted value')
+                return
+            if quote == '"':
+                value = dotenv_unescape(value)
+        else:
+            end = source.find('\n', pos)
+            end = len(source) if end < 0 else end
+            value = source[pos:end].split(' #', 1)[0].rstrip()
+            pos = end
+        if name in overrides and value.strip():
+            check_image(path, number, value, local)
 
 
 files = subprocess.check_output(['git', '-C', str(root), 'ls-files', '-z']).decode().split('\0')
@@ -634,13 +1040,7 @@ for path in sorted(filter(None, files)):
     elif workflow or compose:
         scan_yaml(path, source, workflow)
     elif env:
-        for line, row in enumerate(source.splitlines(), 1):
-            match = re.match(
-                r'^\s*(?:export\s+)?(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)\s*[=:]\s*(.*)', row,
-            )
-            if match and match[2].strip():
-                local = 'ferrum-nexus:e2e' if path == 'e2e/.env.example' else None
-                check_image(path, line, yaml_scalar(match[2]), local)
+        scan_env(path, source)
     elif shell or re.match(r'^#![^\n]*\b(?:bash|sh|dash|ksh|zsh)\b', source):
         scan_shell(path, source)
 

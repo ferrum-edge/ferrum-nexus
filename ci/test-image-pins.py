@@ -93,6 +93,30 @@ id="${RESULT:-\`docker pull alpine:3\`}"
             'tools/start.sh': 'id=${RESULT:-\n`docker pull alpine:3`}\n',
         }, ['tools/start.sh:2:', 'alpine:3'])
 
+    def test_nested_backticks_unwrap_each_escape_layer(self):
+        cases = [
+            r'id=${RESULT:-`printf "%s" \`docker pull alpine:3\``}',
+            r'id="${RESULT:-`printf "%s" \`docker pull alpine:3\``}"',
+            r'id=`printf "%s" \`docker container create alpine:3\``',
+            r'id=$(printf "%s" "${RESULT:-`printf "%s" \`docker run alpine:3\``}")',
+            r'id=${RESULT:-`printf "%s" \`printf "%s" \\\`docker pull alpine:3\\\`\``}',
+        ]
+        for source in cases:
+            with self.subTest(source=source):
+                self.assert_scan({'tools/start.sh': source}, ['alpine:3'])
+                self.assert_scan({'tools/start.sh': source.replace('alpine:3', PIN)})
+                # The review's single-quoted counterpart is literal data.
+                self.assert_scan({'tools/start.sh': "id='" + source.split('=', 1)[1] + "'"})
+        self.assert_scan({'tools/start.sh': r'''
+id='${RESULT:-`printf "%s" \`docker pull alpine:3\``}'
+id=${RESULT:-\`docker pull alpine:3\`}
+id="${RESULT:-\`docker pull alpine:3\`}"
+id=`printf '%s' '\`docker pull alpine:3\`'`
+'''})
+        self.assert_scan({'tools/start.sh': r'''
+id=${RESULT:-`printf "%s" \`touch "$SCAN_SENTINEL"; docker pull TARGET\``}
+'''.replace('TARGET', PIN)})
+
     def test_command_positions_and_options(self):
         cases = [
             'docker run --rm -it --name app -p8080:80 alpine:3',
@@ -417,6 +441,195 @@ x-note: {{run: docker pull alpine:3}}
 OTHER_IMAGE: alpine:3
 NEXUS_IMAGE =
 FERRUM_EDGE_IMAGE:
+'''})
+
+    def test_multiline_flow_collections_keep_operational_context(self):
+        compose_cases = [
+            'services:\n  app: {restart: "no",\n'
+            '        hostname: app, image: alpine:3}\n',
+            'services: {\n  app: {\n    restart: "no",\n'
+            '    image: alpine:3,\n  },\n}\n',
+            'services:\n  app:\n    {hostname: app,\n     image: alpine:3}\n',
+        ]
+        workflow_cases = [
+            '      - {name: pull,\n'
+            '         shell: bash, run: docker pull alpine:3}\n',
+            '      - {env: {run: "docker pull alpine:3"},\n'
+            '         name: pull,\n         run: docker pull TARGET}\n',
+            '      - {name: pull,\n'
+            '         uses: docker://alpine:3}\n',
+        ]
+        for source in compose_cases:
+            with self.subTest(source=source):
+                self.assert_scan({'deploy/compose.yml': source}, ['alpine:3'])
+                self.assert_scan({'deploy/compose.yml': source.replace('alpine:3', PIN)})
+        prefix = 'jobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n'
+        for step in workflow_cases:
+            source = prefix + step
+            image = 'TARGET' if 'TARGET' in source else 'alpine:3'
+            with self.subTest(source=source):
+                self.assert_scan(
+                    {'.github/workflows/test.yml': source.replace(image, 'alpine:3')},
+                    ['alpine:3'],
+                )
+                self.assert_scan({'.github/workflows/test.yml': source.replace(image, PIN)})
+        for source in [
+            'jobs: {check: {runs-on: ubuntu-latest,\n'
+            '  steps: [\n    {name: pull,\n     run: docker pull alpine:3}\n  ]}}\n',
+            'jobs: {check: {container: {env: {image: alpine:3},\n'
+            '  image: TARGET}}}\n',
+            'jobs: {check: {services: {app: {env: {run: docker pull alpine:3},\n'
+            '  image: TARGET}}}}\n',
+        ]:
+            image = 'TARGET' if 'TARGET' in source else 'alpine:3'
+            with self.subTest(source=source):
+                self.assert_scan(
+                    {'.github/workflows/test.yml': source.replace(image, 'alpine:3')},
+                    ['alpine:3'],
+                )
+                self.assert_scan({'.github/workflows/test.yml': source.replace(image, PIN)})
+        self.assert_scan({'deploy/compose.yml': f'''
+x-note: {{restart: "no",
+         hostname: app, image: alpine:3}}
+services:
+  app: {{environment: {{image: alpine:3, run: docker pull alpine:3}},
+        image: {PIN}, command: 'docker pull alpine:3'}}
+'''})
+        self.assert_scan({
+            'deploy/compose.yml': f'services:\n  app: {{image: {PIN}}}\n'
+            '  other:\n    image: alpine:3\n',
+        }, ['deploy/compose.yml:4:', 'alpine:3'])
+
+    def test_yaml_quoted_keys_and_values_decode_yaml_escapes(self):
+        cases = [
+            ('deploy/compose.yml', r'services: {app: {"\x69mage": alpine:3}}'),
+            ('deploy/compose.yml', 'services:\n  app:\n    "\\x69mage": alpine:3\n'),
+            ('deploy/compose.yml', r'services: {app: {"\u0069mage": alpine:3}}'),
+            ('deploy/compose.yml', r'services: {app: {"\U00000069mage": alpine:3}}'),
+            ('.github/workflows/test.yml', r'steps: [{"\x72un": "docker pull alpine:3"}]'),
+            ('.github/workflows/test.yml', r'steps: [{"\u0075ses": docker://alpine:3}]'),
+            ('.github/workflows/test.yml', r'jobs: {check: {"\x63ontainer": alpine:3}}'),
+            (
+                '.github/workflows/test.yml',
+                r'"\x6aobs": {check: {"\x73teps": [{"\x72un": docker pull alpine:3}]}}',
+            ),
+            ('.github/workflows/test.yml', r'steps: [{run: "docker\x20pull\x20alpine:3"}]'),
+        ]
+        for path, source in cases:
+            with self.subTest(path=path, source=source):
+                self.assert_scan({path: source}, ['alpine:3'])
+                self.assert_scan({path: source.replace('alpine:3', PIN)})
+        self.assert_scan({
+            'deploy/compose.yml': 'services: {app: {"\\x69mage": "'
+            + PIN.replace('/', r'\/') + '"}}\n',
+            '.github/workflows/test.yml': r'''
+name: "\a\b\e\f\n\r\t\v\0\ \_\N\L\P\x41\u0041\U00000041"
+env: {"\x72un": 'docker pull alpine:3', "\x69mage": alpine:3}
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - {run: "echo '\x64ocker pull alpine:3'"}
+''',
+        })
+        for key, message in [
+            (r'\qimage', 'unsupported YAML escape:'),
+            (r'\xGGmage', 'invalid YAML hexadecimal escape'),
+            (r'\uD800mage', 'invalid YAML Unicode escape'),
+            (r'\U00110000mage', 'invalid YAML Unicode escape'),
+        ]:
+            with self.subTest(key=key):
+                self.assert_scan({
+                    'deploy/compose.yml': 'services: {app: {"' + key + '": ' + PIN + '}}',
+                }, [message])
+
+    def test_workflow_metadata_is_inert_at_every_mapping_depth(self):
+        source = '''
+name: Image pin fixtures
+on: push
+env: {run: 'docker pull alpine:3', image: alpine:3, uses: docker://alpine:3}
+defaults: {run: {shell: bash, working-directory: 'docker pull alpine:3'}}
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      run: 'docker pull alpine:3'
+      image: alpine:3
+    outputs: {run: 'docker pull alpine:3'}
+    steps:
+      - name: '{run: docker pull alpine:3}'
+        env: {run: 'docker pull alpine:3', image: alpine:3}
+        run: docker pull TARGET
+      - uses: actions/example@anything
+        with: {run: 'docker pull alpine:3', image: alpine:3}
+'''
+        self.assert_scan({'.github/workflows/test.yml': source.replace('TARGET', PIN)})
+        self.assert_scan(
+            {'.github/workflows/test.yml': source.replace('TARGET', 'alpine:3')},
+            ['alpine:3'],
+        )
+        self.assert_scan({'.github/workflows/test.yml': f'''
+env: {{run: 'docker pull alpine:3'}}
+jobs: {{check: {{runs-on: ubuntu-latest,
+  env: {{run: 'docker pull alpine:3', image: alpine:3}},
+  steps: [{{env: {{run: 'docker pull alpine:3'}}, run: docker pull {PIN}}}]}}}}
+'''})
+
+    def test_dotenv_reads_assignments_after_quoted_values(self):
+        for variable in ['NEXUS_IMAGE', 'FERRUM_EDGE_IMAGE']:
+            compose = 'services:\n  app:\n    image: ${' + variable + '}\n'
+            cases = [
+                f'export {variable} = "{PIN}" {variable}: TARGET\n',
+                f'{variable}="{PIN}"{variable}=TARGET\n',
+                f"{variable}='{PIN}' export {variable} : 'TARGET'\n",
+                f'NOTES="docker pull alpine:3" {variable} = TARGET\n',
+                f'{variable}="{PIN}" NOTES="docker pull alpine:3" {variable}: "TARGET"\n',
+            ]
+            for source in cases:
+                with self.subTest(variable=variable, source=source):
+                    files = {
+                        'deploy/compose.yml': compose,
+                        'deploy/.env': source.replace('TARGET', 'alpine:3'),
+                    }
+                    self.assert_scan(files, ['deploy/.env:1:', 'alpine:3'])
+                    files['deploy/.env'] = source.replace('TARGET', PIN)
+                    self.assert_scan(files)
+            self.assert_scan({
+                'deploy/compose.yml': compose,
+                'deploy/.env': f'''NOTES='{variable}: alpine:3
+docker pull alpine:3'
+{variable}="{PIN}" # {variable}=alpine:3
+NOTES="export {variable} = \\"{PIN}\\" {variable}: alpine:3"
+''',
+            })
+            self.assert_scan({
+                'deploy/.env': f'{variable}="{PIN}" ; {variable}=alpine:3\n',
+            }, ['unsupported dotenv assignment stream'])
+            self.assert_scan({
+                'deploy/.env': f'{variable}="{PIN}" unexpected suffix\n',
+            }, ['unsupported dotenv assignment stream'])
+            self.assert_scan({
+                'deploy/.env': f'NOTES="quoted\ncommand prose"\n{variable}=alpine:3\n',
+            }, ['deploy/.env:3:', 'alpine:3'])
+
+    def test_unsupported_operational_yaml_cannot_hide_declarations(self):
+        for source in [
+            'services: {app: *external}',
+            'services:\n  app: &external\n    image: alpine:3\n',
+            'services: {app: {<<: *external}}',
+            'services: {app: {image: !!str alpine:3}}',
+        ]:
+            with self.subTest(source=source):
+                self.assert_scan({'deploy/compose.yml': source}, ['unsupported operational YAML'])
+        self.assert_scan({'.github/workflows/test.yml': rf'''
+env: {{run: 'docker pull alpine:3'}}
+name: |
+  services: {{app: {{"\x69mage": alpine:3}}}}
+  - {{run: docker pull alpine:3}}
+steps:
+  - run: |
+      echo 'docker pull alpine:3'
+      docker pull {PIN}
 '''})
 
     def test_operational_scope_anywhere_in_checkout(self):
