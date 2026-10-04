@@ -99,7 +99,10 @@ describe('admin transport after the Undici 8 migration', () => {
       assert.equal(error.code, 'EDGE_UNAVAILABLE');
       return true;
     });
-    assert.deepEqual(requests.map((request) => request.method), ['GET', 'GET', 'GET', 'POST']);
+    assert.deepEqual(
+      requests.map((request) => request.method),
+      ['GET', 'GET', 'GET', 'POST'],
+    );
     assert.equal(resets, 0, 'the write reached the peer once and was not replayed');
     for (const request of requests) {
       assert.equal(request.version, '1.1');

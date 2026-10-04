@@ -55,7 +55,10 @@ describe('CAPTCHA default transport', () => {
       success: false,
       errors: [],
     });
-    assert.deepEqual(requests.map((request) => request.path), ['/verify', '/redirect']);
+    assert.deepEqual(
+      requests.map((request) => request.path),
+      ['/verify', '/redirect'],
+    );
     for (const request of requests) {
       assert.equal(request.method, 'POST');
       assert.equal(request.version, '1.1');
