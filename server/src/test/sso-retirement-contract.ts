@@ -61,6 +61,10 @@ interface RetirementWatch {
   resumeCallback: ReturnType<typeof barrier>;
 }
 
+function observedSession(watch: RetirementWatch): SessionRecord | null {
+  return watch.session;
+}
+
 /** Test-only interception follows the pooled adapters into their scoped store. */
 function watchRetirement(base: NexusStore, current: () => RetirementWatch | null): NexusStore {
   function callbackStore(tx: NexusStore, watch: RetirementWatch): NexusStore {
@@ -349,10 +353,11 @@ export function runSsoRetirementContract(
           const saved = await bounded(pendingSave, 'settings save did not finish after callback');
           assert.equal(saved.statusCode, 200, saved.body);
           assert.equal(race.saveBodyRuns, 1, 'the real settings transaction ran');
-          assert.ok(race.session);
+          const session = observedSession(race);
+          assert.ok(session, 'the callback issued a real session');
           assert.equal(
             (await h.store.sessions.findByTokenHash(h.app.nexus.crypto.hashToken(token)))?.id,
-            race.session.id,
+            session.id,
             'the returned cookie opens the committed session after retirement',
           );
           const me = await h.app.inject({
