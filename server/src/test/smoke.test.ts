@@ -65,6 +65,7 @@ import {
 } from '../lib/keyed-serializer.js';
 import { runApplicationDeletionContract } from './application-deletion-contract.js';
 import { runApplicationViewerAuditContract } from './application-viewer-audit-contract.js';
+import { runDisableRevokesResetLinksContract } from './disable-revokes-reset-links-contract.js';
 import { faultInjectingStore } from './fault-injection.js';
 import { testCaptchaTransport } from './helpers.js';
 import { runMessageBudgetContract } from './message-budget-contract.js';
@@ -72,6 +73,7 @@ import { runOutboxFencingContract } from './outbox-fencing-contract.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
 import { runPrivilegedAuditContract } from './privileged-audit-contract.js';
 import { runRecoveryThrottleContract } from './recovery-throttle-contract.js';
+import { runResetLifecycleContract } from './reset-lifecycle-contract.js';
 import { runSealedOutboxContract } from './sealed-outbox-contract.js';
 import { runSettingsTransactionContract } from './settings-transaction-contract.js';
 import { runTeardownCancellationContract } from './teardown-cancellation-contract.js';
@@ -338,11 +340,13 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
 function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): void {
   runApplicationDeletionContract(label, makeStore);
   runApplicationViewerAuditContract(label, makeStore);
+  runDisableRevokesResetLinksContract(label, makeStore);
   runMessageBudgetContract(label, makeStore);
   runOutboxFencingContract(label, makeStore);
   runPasswordChangeContract(label, makeStore);
   runPrivilegedAuditContract(label, makeStore);
   runRecoveryThrottleContract(label, makeStore);
+  runResetLifecycleContract(label, makeStore);
   runSealedOutboxContract(label, makeStore);
   runSettingsTransactionContract(label, makeStore);
   runTeardownCancellationContract(label, makeStore);
