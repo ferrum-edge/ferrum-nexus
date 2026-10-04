@@ -72,7 +72,7 @@ import {
 
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
-import type { NexusStore, UserFilter, UserRecord } from '../db/store.js';
+import { OUTBOX_PRIORITY, type NexusStore, type UserFilter, type UserRecord } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import { MASS_RAW_HTML_VARS, type RenderedEmail } from '../email/templates.js';
 import { NexusError, isNexusError, quotaExceeded, validationFailed } from '../lib/errors.js';
@@ -522,6 +522,7 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
                 });
                 const result = await tx.emailOutbox.enqueue({
                   to_email: recipient.email,
+                  priority: OUTBOX_PRIORITY.low,
                   recipient_user_id: recipient.id,
                   subject: rendered.subject,
                   body_html: rendered.html,

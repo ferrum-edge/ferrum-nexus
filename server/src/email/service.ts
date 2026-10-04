@@ -1,10 +1,10 @@
 /**
  * Transactional email: template resolution, SMTP settings and the outbox.
  *
- * **Nothing in Nexus sends mail inline.** Every message is rendered here and
- * inserted into `email_outbox`; the {@link ../email/outbox-worker.js outbox
- * worker} drains the queue out of band. That keeps a slow or broken SMTP server
- * from turning an approval into a 502, and gives retries a home.
+ * Transactional messages are rendered here and inserted into `email_outbox`;
+ * the {@link ../email/outbox-worker.js outbox worker} drains the queue out of band. That keeps a slow or broken SMTP server
+ * from turning an approval into a 502, and gives retries a home. The admin's
+ * SMTP configuration probe sends inline through `sendTest`.
  *
  * SMTP configuration is layered: the environment (`NEXUS_SMTP_*`) supplies the
  * deployment default and the `smtp` / `smtp.password` `app_settings` rows
@@ -35,7 +35,7 @@ import {
   type StoredSmtpSettings,
 } from '../admin/settings-service.js';
 import type { NexusConfig } from '../config/index.js';
-import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
+import { OUTBOX_PRIORITY, type EmailOutboxRecord, type NexusStore } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { isBearerTemplate, sealedEnqueueInput } from './sealed-outbox.js';
 import {
@@ -651,6 +651,7 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
       }
       return store.emailOutbox.enqueue({
         to_email: input.to,
+        priority: input.templateKey === 'mass' ? OUTBOX_PRIORITY.low : OUTBOX_PRIORITY.normal,
         recipient_user_id: input.recipientUserId ?? null,
         subject: rendered.subject,
         body_html: rendered.html,

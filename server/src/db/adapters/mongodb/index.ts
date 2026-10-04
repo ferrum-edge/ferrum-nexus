@@ -192,6 +192,7 @@ import type {
 import {
   API_GATEWAY_PLUGIN_ROLES,
   assertLeaseKeyLength,
+  OUTBOX_PRIORITY,
   OUTBOX_SEALED_SUBJECT,
   SPEC_HISTORY_PRUNE_BATCH,
 } from '../../store.js';
@@ -379,6 +380,12 @@ const SPEC_HISTORY_ORDER: Sort = { revision_seq: -1 };
  * first — the same ordering the SQL adapters spell out explicitly.
  */
 const OUTBOX_CLAIM_ORDER: Sort = { next_attempt_at: 1, created_at: 1 };
+const EMAIL_OUTBOX_CLAIM_ORDER: Sort = {
+  priority: -1,
+  next_attempt_at: 1,
+  created_at: 1,
+  _id: 1,
+};
 
 /**
  * Run `fn`, translating a duplicate-key error into `NexusError('CONFLICT', …)`
@@ -756,6 +763,7 @@ function mapNotificationPreferences(row: Row): NotificationPreferencesRecord {
 
 function mapOutbox(row: Row): EmailOutboxRecord {
   return {
+    priority: num(row.priority ?? OUTBOX_PRIORITY.normal) as EmailOutboxRecord['priority'],
     id: str(row._id),
     generation: str(row.generation ?? ''),
     to_email: str(row.to_email),
@@ -1385,6 +1393,15 @@ export const USER_IDENTITY_INDEXES: readonly IndexDefinition[] = [
   },
 ];
 
+/** Claim order; retain the baseline due-time index for eligibility filtering. */
+export const EMAIL_OUTBOX_PRIORITY_INDEXES: readonly IndexDefinition[] = [
+  {
+    collection: 'email_outbox',
+    name: 'ix_email_outbox_priority',
+    key: { status: 1, priority: -1, next_attempt_at: 1, created_at: 1, _id: 1 },
+  },
+];
+
 /** The baseline messages index {@link MESSAGE_THREAD_LATEST_INDEXES} supersedes. */
 const SUPERSEDED_MESSAGES_THREAD_INDEX = 'ix_messages_thread';
 
@@ -1491,6 +1508,24 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
           { email_lifecycle_fence: { $exists: false } },
           { $set: { email_lifecycle_fence: '' } },
         );
+    },
+  },
+  {
+    id: '009_outbox_priority',
+    indexes: EMAIL_OUTBOX_PRIORITY_INDEXES,
+    apply: async (db: Db): Promise<void> => {
+      const outbox = db.collection(COLLECTIONS.emailOutbox);
+      await outbox.updateMany(
+        { priority: { $exists: false } },
+        { $set: { priority: OUTBOX_PRIORITY.normal } },
+      );
+      // Match only the durable namespaces, never subject/body text. Both
+      // updates are replayable without changing delivery state or claim tokens.
+      await outbox.updateMany(
+        { priority: OUTBOX_PRIORITY.normal, idempotency_key: /^(verify:|reset:)/ },
+        { $set: { priority: OUTBOX_PRIORITY.high } },
+      );
+      await createIndexes(db, EMAIL_OUTBOX_PRIORITY_INDEXES);
     },
   },
 ];
@@ -3792,6 +3827,7 @@ class MongoStore implements NexusStore {
             {
               _id: meta.id,
               to_email: input.to_email,
+              priority: input.priority ?? OUTBOX_PRIORITY.normal,
               recipient_user_id: input.recipient_user_id ?? null,
               subject: input.subject,
               body_html: input.body_html,
@@ -3845,7 +3881,7 @@ class MongoStore implements NexusStore {
             } as Filter<NexusDoc>,
             tx.opts,
           )
-          .sort(OUTBOX_CLAIM_ORDER)
+          .sort(EMAIL_OUTBOX_CLAIM_ORDER)
           .limit(Math.max(1, Math.floor(limit)))
           .toArray();
         const claimed: EmailOutboxRecord[] = [];

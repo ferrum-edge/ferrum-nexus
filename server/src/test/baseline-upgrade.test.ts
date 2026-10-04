@@ -24,7 +24,8 @@
  * `006_user_identities`) is applied here on top of a populated database with
  * no change to the harness. From the newest release (`v0.3.0`), `007_outbox_recipient`
  * adds a nullable account binding without changing retained message contents;
- * `008_email_lifecycle_fence` adds a private account fence without changing user DTOs.
+ * `008_email_lifecycle_fence` adds a private account fence without changing user DTOs;
+ * `009_outbox_priority` classifies retained mail without changing its delivery state.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
@@ -61,7 +62,7 @@ import {
   type MigrationFile,
 } from '../db/migrate.js';
 import { RELEASED_MIGRATIONS } from '../db/released-migrations.js';
-import type { NexusStore } from '../db/store.js';
+import { OUTBOX_PRIORITY, type NexusStore } from '../db/store.js';
 import { createCrypto, hashPassword, verifyPassword } from '../lib/crypto.js';
 
 const SECRET = 'baseline-upgrade-secret-0123456789abcdef';
@@ -146,6 +147,15 @@ const ID = {
   audit: '00000000-0000-4000-8000-000000001201',
   template: '00000000-0000-4000-8000-000000001301',
   outbox: '00000000-0000-4000-8000-000000001401',
+  outboxCampaign: '00000000-0000-4000-8000-000000001402',
+  outboxReset: '00000000-0000-4000-8000-000000001403',
+  outboxVerify: '00000000-0000-4000-8000-000000001404',
+  outboxSent: '00000000-0000-4000-8000-000000001405',
+  outboxFailed: '00000000-0000-4000-8000-000000001406',
+  outboxFuture: '00000000-0000-4000-8000-000000001407',
+  outboxLookalike: '00000000-0000-4000-8000-000000001408',
+  outboxUppercase: '00000000-0000-4000-8000-000000001409',
+  outboxNullSchedule: '00000000-0000-4000-8000-000000001410',
 } as const;
 
 const T0 = '2026-09-01T09:00:00.000Z';
@@ -181,6 +191,24 @@ async function buildFixture(): Promise<FixtureRow[]> {
     },
   });
   const decided = { decided_by: ID.provider, decided_at: T1, decision_note: 'Approved' };
+  const mail = (id: string, key: string, extra: Record<string, SqlValue> = {}): FixtureRow => ({
+    table: 'email_outbox',
+    row: {
+      id,
+      to_email: 'client@example.test',
+      subject: 'Retained message',
+      body_html: '<p>Retained</p>',
+      body_text: 'Retained',
+      status: 'pending',
+      attempts: 0,
+      generation: '',
+      next_attempt_at: T2,
+      last_error: null,
+      idempotency_key: key,
+      ...stamps,
+      ...extra,
+    },
+  });
 
   return [
     {
@@ -600,23 +628,31 @@ async function buildFixture(): Promise<FixtureRow[]> {
         created_at: T2,
       },
     },
-    {
-      table: 'email_outbox',
-      row: {
-        id: ID.outbox,
-        to_email: 'client@example.test',
-        subject: 'Retained message',
-        body_html: '<p>Retained</p>',
-        body_text: 'Retained',
-        status: 'pending',
-        attempts: 0,
-        generation: '',
-        next_attempt_at: T2,
-        last_error: null,
-        idempotency_key: 'fixture-message',
-        ...stamps,
-      },
-    },
+    // Insert tied campaign/security rows in reverse id order. 009 must promote
+    // only durable security namespaces, including opaque sealed content.
+    mail(ID.outboxCampaign, 'mass:fixture-campaign'),
+    mail(ID.outbox, 'fixture-message'),
+    mail(ID.outboxVerify, 'verify:fixture-verification', { created_at: T1 }),
+    mail(ID.outboxReset, 'reset:fixture-retry', {
+      subject: 'nexus:sealed:v1',
+      body_html: '',
+      body_text: 'nexus-sealed-v1:fixture-ciphertext',
+      attempts: 2,
+      generation: 'retained-generation',
+      last_error: 'relay down',
+      created_at: T1,
+    }),
+    mail(ID.outboxSent, 'verify:fixture-sent', { status: 'sent', next_attempt_at: null }),
+    mail(ID.outboxFailed, 'reset:fixture-failed', {
+      status: 'failed',
+      next_attempt_at: null,
+      attempts: 5,
+      last_error: 'delivered-unacknowledged: fixture',
+    }),
+    mail(ID.outboxFuture, 'reset:fixture-future', { next_attempt_at: '2999-01-01T00:00:00.000Z' }),
+    mail(ID.outboxLookalike, 'mass:reset:lookalike', { created_at: T2, updated_at: T2 }),
+    mail(ID.outboxUppercase, 'VERIFY:unclassified', { created_at: T1 }),
+    mail(ID.outboxNullSchedule, 'mass:unscheduled', { next_attempt_at: null }),
     {
       table: 'email_templates',
       row: {
@@ -709,6 +745,48 @@ async function assertFixturePreserved(
 /** What the portal needs from that data to keep working, beyond row equality. */
 async function assertPortalInvariants(store: NexusStore): Promise<void> {
   assert.equal((await store.emailOutbox.findById(ID.outbox))?.recipient_user_id, null);
+  for (const id of [
+    ID.outboxReset,
+    ID.outboxVerify,
+    ID.outboxSent,
+    ID.outboxFailed,
+    ID.outboxFuture,
+  ]) {
+    assert.equal((await store.emailOutbox.findById(id))?.priority, OUTBOX_PRIORITY.high);
+  }
+  for (const id of [
+    ID.outbox,
+    ID.outboxCampaign,
+    ID.outboxLookalike,
+    ID.outboxUppercase,
+    ID.outboxNullSchedule,
+  ]) {
+    assert.equal((await store.emailOutbox.findById(id))?.priority, OUTBOX_PRIORITY.normal);
+  }
+  // Claim inside a rollback so the fixture's delivery state is still compared
+  // byte-for-byte after migration replay and restart. Later security wins;
+  // normal campaign ties use creation time and then id, never insertion order.
+  await assert.rejects(
+    () =>
+      store.transaction(async (tx) => {
+        const claimed = await tx.emailOutbox.claimDue(T2, 20);
+        assert.deepEqual(
+          claimed.map((row) => row.id),
+          [
+            ID.outboxReset,
+            ID.outboxVerify,
+            ID.outboxNullSchedule,
+            ID.outbox,
+            ID.outboxCampaign,
+            ID.outboxUppercase,
+            ID.outboxLookalike,
+          ],
+        );
+        assert.equal(claimed[0]?.attempts, 3, 'retained security retry keeps its attempt count');
+        throw new Error('rollback priority claims');
+      }),
+    /rollback priority claims/,
+  );
   // Sign-in: the stored hash still verifies, and the lookup is case-insensitive.
   const client = await store.users.findByEmail('Client@Example.test');
   assert.ok(client, 'the client is found by a case-insensitive email');

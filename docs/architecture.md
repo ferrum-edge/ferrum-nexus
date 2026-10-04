@@ -107,7 +107,7 @@ docker/    Dockerfile + docker-compose.example.yml
 | `usage/service.ts`                             | Per-API usage and backend health, read from Edge's metrics.                                                                                                            |
 | `messaging/service.ts`                         | 1:1 threads and the platform inbox.                                                                                                                                    |
 | `notifications/service.ts`                     | The header bell and inbox. A courtesy channel, never the record.                                                                                                       |
-| `email/`                                       | `service.ts` (render + enqueue), `outbox-worker.ts` (the only SMTP caller), `templates.ts`.                                                                            |
+| `email/`                                       | `service.ts` (render/enqueue, SMTP transport, inline admin probe), `outbox-worker.ts` (queued sends), `templates.ts`.                                                  |
 | `admin/`                                       | `settings-service.ts`, `mass-email-service.ts`, `smtp-test-service.ts`, `god-service.ts`, `gateway-reconciliation.ts`, `rotate-key.ts`.                                |
 | `routes/`                                      | One plugin per domain. Routes validate shapes and delegate to the services they are handed.                                                                            |
 | `test/`                                        | `helpers.ts` boots the real app on in-memory SQLite; `mock-ferrum-edge.ts` is a real HTTP server.                                                                      |
@@ -1015,9 +1015,12 @@ which carry ordinals. Operational detail:
 
 ## 7. Email: the outbox
 
-**Nothing sends mail inline.** `EmailService` renders each message into
-`email_outbox`, and `outbox-worker.ts` drains it. A slow or broken relay cannot
-turn an approval into a 502, and retries have somewhere to live.
+**Transactional mail uses the outbox.** `EmailService` renders messages into
+`email_outbox`, and `outbox-worker.ts` delivers them through the SMTP transport
+in `email/service.ts`. The admin SMTP probe (`EmailService.sendTest`, called by
+`admin/smtp-test-service.ts`) uses that transport inline so the settings page
+can report a relay error immediately. A slow or broken relay cannot turn an
+approval into a 502, and queued mail has retries.
 
 ```
 service ──enqueue──> email_outbox(pending) ──claim──> sending ──┬─> sent
@@ -1027,6 +1030,18 @@ service ──enqueue──> email_outbox(pending) ──claim──> sending �
 
 - The claim is an atomic `pending → sending` flip that increments `attempts`,
   so two workers never claim the same row.
+- Claims choose the highest `priority` among due pending rows: verification
+  (registration and resend) and password recovery are high (`2`), other
+  transactional notifications normal (`1`), and new campaigns low (`0`). Within
+  a lane, the earliest due time comes first (null first), then oldest creation
+  time and ascending id. The worker claims one message at a time, so security
+  mail arriving during a campaign send is considered at the next claim. It
+  cannot preempt active SMTP, bypass backoff or eliminate polling/relay delay.
+  Continuous high-priority traffic can delay lower lanes.
+- Forward `009_outbox_priority` preserves existing rows at normal priority,
+  promoting the durable `verify:` and `reset:` idempotency namespaces to high
+  without inspecting rendered or sealed content. Unclassified legacy messages
+  stay normal; delivery status, retries and recipient/claim fences are retained.
 - Backoff is `30s · 2^attempts`, capped at one hour, plus up to 10% jitter.
   `OUTBOX_MAX_ATTEMPTS` is 5.
 - Every tick first returns rows left `sending` for over five minutes (a crashed
@@ -1051,7 +1066,7 @@ service ──enqueue──> email_outbox(pending) ──claim──> sending �
   worker just before it sends. See
   [security.md](security.md#queued-single-use-links-are-sealed).
 
-Templates: eight keys (`EMAIL_TEMPLATE_KEYS` in `shared/src/constants.ts`),
+Templates: nine keys (`EMAIL_TEMPLATE_KEYS` in `shared/src/constants.ts`),
 each with a built-in default in `email/templates.ts` and an optional admin
 override in `email_templates`. Resolution is override-first, never a mix.
 `{{placeholder}}` values are HTML-escaped in `body_html`; subject and

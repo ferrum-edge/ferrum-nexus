@@ -29,6 +29,7 @@
 import type { EmailTemplateKey } from '@ferrum-nexus/shared';
 
 import {
+  OUTBOX_PRIORITY,
   OUTBOX_SEALED_SUBJECT,
   type EmailOutboxRecord,
   type EnqueueEmailInput,
@@ -98,7 +99,7 @@ export function sealMailContent(
 }
 
 /**
- * An {@link EnqueueEmailInput} whose content is sealed.
+ * A high-priority security-mail {@link EnqueueEmailInput} with sealed content.
  *
  * The row id is minted here because the envelope is bound to it. When the
  * idempotency key already names a row, the store returns that row and this id
@@ -117,6 +118,7 @@ export function sealedEnqueueInput(
   return {
     id,
     to_email: input.to,
+    priority: OUTBOX_PRIORITY.high,
     recipient_user_id: input.recipientUserId ?? null,
     ...sealMailContent(crypto, id, input.to, input.content),
     idempotency_key: input.idempotencyKey ?? null,

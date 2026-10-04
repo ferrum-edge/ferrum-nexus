@@ -22,6 +22,7 @@ import { after, before, describe, it } from 'node:test';
 
 import { REGISTRATION_SETTINGS_KEY } from '../auth/service.js';
 import {
+  OUTBOX_PRIORITY,
   OUTBOX_SEALED_SUBJECT,
   type EmailOutboxFilter,
   type EmailOutboxRecord,
@@ -127,6 +128,7 @@ export function runSealedOutboxContract(
       const queued = await storedKeyed(email, 'reset:');
       assert.equal(queued.length, 1, 'exactly one reset message was queued');
       const row = queued[0] ?? assert.fail('the reset message was queued');
+      assert.equal(row.priority, OUTBOX_PRIORITY.high, 'password recovery uses the high lane');
       assert.equal(row.subject, OUTBOX_SEALED_SUBJECT, 'the stored subject is the sealed marker');
       assert.equal(row.body_html, '', 'no html body is stored');
       assert.ok(row.body_text.startsWith(SEALED_BODY_PREFIX), 'the text body is an envelope');
@@ -191,6 +193,7 @@ export function runSealedOutboxContract(
         const queued = await storedKeyed(email, 'verify:');
         assert.equal(queued.length, 2, 'the registration and the resend each queued a link');
         for (const row of queued) {
+          assert.equal(row.priority, OUTBOX_PRIORITY.high, 'registration and resend use high');
           assert.equal(row.subject, OUTBOX_SEALED_SUBJECT, 'the stored subject is the marker');
           assert.ok(!storedText(row).includes('verify-email'), 'no verification path is stored');
           assert.ok(!storedText(row).includes('token='), 'no token parameter is stored');

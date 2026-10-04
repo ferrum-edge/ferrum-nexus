@@ -184,6 +184,7 @@ import type {
 import {
   API_GATEWAY_PLUGIN_ROLES,
   assertLeaseKeyLength,
+  OUTBOX_PRIORITY,
   OUTBOX_SEALED_SUBJECT,
   SPEC_HISTORY_PRUNE_BATCH,
 } from '../../store.js';
@@ -581,6 +582,7 @@ function mapNotificationPreferences(row: Row): NotificationPreferencesRecord {
 
 function mapOutbox(row: Row): EmailOutboxRecord {
   return {
+    priority: int(row.priority ?? OUTBOX_PRIORITY.normal) as EmailOutboxRecord['priority'],
     id: text(row.id),
     generation: text(row.generation),
     to_email: text(row.to_email),
@@ -3058,12 +3060,13 @@ class SqliteStore implements NexusStore {
           execute(
             this.db,
             `INSERT INTO email_outbox
-               (id, to_email, recipient_user_id, subject, body_html, body_text, status, attempts,
-                next_attempt_at, last_error, idempotency_key, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+               (id, to_email, priority, recipient_user_id, subject, body_html, body_text,
+                status, attempts, next_attempt_at, last_error, idempotency_key, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
             [
               meta.id,
               input.to_email,
+              input.priority ?? OUTBOX_PRIORITY.normal,
               input.recipient_user_id ?? null,
               input.subject,
               input.body_html,
@@ -3105,7 +3108,7 @@ class SqliteStore implements NexusStore {
           this.db,
           `SELECT * FROM email_outbox
            WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-           ORDER BY next_attempt_at ASC, created_at ASC LIMIT ?`,
+           ORDER BY priority DESC, next_attempt_at ASC, created_at ASC, id ASC LIMIT ?`,
           [now, Math.max(1, Math.floor(limit))],
         ).map(mapOutbox);
         const claimed: EmailOutboxRecord[] = [];

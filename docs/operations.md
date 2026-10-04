@@ -100,7 +100,7 @@ See the README for a two-stack example.
 | `NEXUS_MAX_BROADCASTS_PER_DAY`               | `20`                                  | Broadcasts per administrator per rolling 24 h, 0–100 000; `0` disables.                                                                                                                                                                                                                                                                                                                                                                                              |
 | `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`            | `5000`                                | Recipients per mass-email campaign, 0–1 000 000; `0` disables. See [A mass-email campaign is recorded, then queued in chunks](#a-mass-email-campaign-is-recorded-then-queued-in-chunks).                                                                                                                                                                                                                                                                             |
 | `NEXUS_MAX_MASS_EMAIL_BYTES`                 | `67108864`                            | Rendered bytes per mass-email campaign (an upper bound on one message, HTML escaping included, × recipients), 0–17 179 869 184; `0` disables. Default 64 MiB.                                                                                                                                                                                                                                                                                                        |
-| `NEXUS_MAX_MASS_EMAILS_PER_DAY`              | `5`                                   | Mass-email campaigns per administrator per rolling 24 h, 0–100 000; `0` disables. A retry with the same `idempotency_key`, content and audience is not counted again; the same key with anything else is `409 CONFLICT`. Kept low until security mail has its own outbox lane (issue #500).                                                                                                                                                                          |
+| `NEXUS_MAX_MASS_EMAILS_PER_DAY`              | `5`                                   | Mass-email campaigns per administrator per rolling 24 h, 0–100 000; `0` disables. A retry with the same `idempotency_key`, content and audience is not counted again; the same key with anything else is `409 CONFLICT`. Security mail has claim priority; this cap still bounds campaign storage.                                                                                                                                                                   |
 | `NEXUS_ALLOW_PRIVATE_UPSTREAMS`              | `false`                               | Whether an API upstream may be loopback, private (RFC 1918, CGNAT, link-local) or a `.local`/`.internal`/`.localhost`/`.home.arpa` name. At `false` Nexus also resolves every other upstream hostname and refuses it if any answer is private or the name does not resolve, so **the Nexus process needs public DNS**. Refusals are `400 SPEC_INVALID`. Set `true` for internal-only portals and local development. See [`security.md`](security.md#1-threat-model). |
 | `NEXUS_ALLOW_ENV_OVERRIDE`                   | `false`                               | Allow the process environment to override `.env` for `FERRUM_NAMESPACE`/`FERRUM_ADMIN_URL` outside production (see above). No effect in production.                                                                                                                                                                                                                                                                                                                  |
 | `NEXUS_WEB_DIST`                             | _(unset)_                             | Directory of the built SPA. Nexus uses the first of this, `../../web/dist` relative to the server, and `./web/dist` under the working directory that contains an `index.html`; with none, only the API is served.                                                                                                                                                                                                                                                    |
@@ -652,6 +652,24 @@ deliverable to a replacement account. The field is internal and absent from user
 responses. Upgrade all producers and senders before enabling address recovery;
 an older instance does not participate in this fence or SMTP cancellation.
 
+`009_outbox_priority` (pending release) adds an integer priority on all four
+backends: low `0`, normal `1`, high `2`. Retained rows default to normal,
+including campaigns. The migration promotes only exact, case-sensitive
+`verify:` and `reset:` idempotency-key prefixes to high: these durable
+namespaces identify registration/resend verification and password recovery,
+even when the bodies are sealed. There is no stored template key, so messages
+without those keys remain normal rather than being classified from editable
+subjects or bodies. All statuses are retained, with no change to attempts,
+schedules, errors, timestamps, account bindings or claim generations.
+The existing `ix_email_outbox_due` remains; `ix_email_outbox_priority` adds
+`(status, priority DESC, next_attempt_at ASC, created_at ASC, id ASC)` claim
+ordering (`NULLS FIRST` on PostgreSQL and `_id` on MongoDB). Building the new
+index and backfilling a large outbox can delay startup and writes during the
+upgrade. Upgrade all producers and workers to get priority ordering throughout
+the deployment: older SQL writers use the normal default, older MongoDB writers
+omit the field, and older workers still claim by due time. The address recovery
+rollout and atomic-transaction requirements from 007/008 still apply.
+
 `003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
 `ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,
 which adds the message id (`_id` descending on MongoDB), so finding each
@@ -679,11 +697,14 @@ PostgreSQL, MySQL and MongoDB run in the `store-contracts` job. Per backend:
 - **SQLite, PostgreSQL:** each migration and its ledger row commit in one
   transaction. A failed migration leaves no trace; earlier ones stay applied.
 - **MySQL:** DDL commits statement by statement. The runner accepts replayable
-  `CREATE TABLE IF NOT EXISTS` statements and additive `VARCHAR` columns that
-  are nullable or have an empty-string default. It checks live column type,
-  nullability, default, inherited collation and generated-column metadata before
-  replaying an ALTER; a mismatched existing column stops the upgrade without
-  recording that step.
+  `CREATE TABLE IF NOT EXISTS` statements, additive `VARCHAR` columns that
+  are nullable or have an empty-string default, and `INT` columns with a
+  nonnegative default. It checks live column type, nullability, default,
+  collation and generated-column metadata before replaying an ALTER. Added
+  indexes are checked for columns/order, direction, uniqueness, prefixes,
+  visibility and type. A mismatched existing definition stops the upgrade
+  without recording that step. The exact 009 security-priority assignment is
+  idempotent and may replay; arbitrary data changes are still refused.
   An advisory lock serializes metadata checks, DDL and ledger writes across
   instances ([details](#retrying-interrupted-mysql-initialization)). Other ALTERs
   or data changes need a replay-safe strategy before the runner accepts them.
@@ -1229,8 +1250,26 @@ Edge release.
 
 ## 6. The email outbox
 
-Mail is never sent inline. `EmailService.enqueue` renders a template into an
-`email_outbox` row, and a worker polls every 5 seconds to deliver it.
+Transactional mail goes through `email_outbox`: `EmailService.enqueue` renders
+a template, and a worker polls every 5 seconds to deliver it. The admin SMTP
+configuration probe uses `EmailService.sendTest` inline.
+
+### Priority at each claim
+
+Due pending rows are claimed by highest priority first: verification and
+password-reset/recovery messages are high (`2`), routine notifications normal
+(`1`), and new campaigns low (`0`). Within a lane the order is earliest
+`next_attempt_at` (null first), oldest `created_at`, then ascending id. A retry
+keeps its lane and becomes eligible only when its backoff is due; sent and
+failed rows are never claimed.
+
+The worker claims one message at a time. Security mail queued during a campaign
+send passes the remaining queued campaign rows at the next claim, after the
+active send settles. It cannot preempt active SMTP or avoid polling delay,
+recipient-lock contention, other security messages or an unavailable relay.
+The priority decision uses the pending rows visible to that claim transaction;
+a later enqueue is considered by a subsequent claim. Persistent higher-lane
+traffic can delay campaigns. Admin SMTP probes bypass this queue.
 
 ### Statuses
 
@@ -1363,13 +1402,11 @@ and no transaction approaches MongoDB's 16 MB cap.
     whatever this is set to.
   - `NEXUS_MAX_MASS_EMAILS_PER_DAY` (default 5): campaigns per administrator
     per rolling 24 hours, counted under a per-administrator lease. The default
-    keeps a day's campaign backlog to about 320 MiB per administrator while
-    campaign and security mail share one queue; it is expected to rise when
-    security mail gets its own outbox lane (issue #500).
+    keeps a day's campaign backlog to about 320 MiB per administrator. Claim
+    priority does not reduce campaign storage, so the cap remains unchanged.
 
-  **Campaign mail still shares the outbox with security mail.** The worker
-  delivers in the order rows were queued, so a password-reset or verification
-  message queued behind a large campaign waits for it. Keep the bounds close to
+  **Campaign mail uses the low lane in the shared outbox.** Due security mail
+  gets the next claim after an active send settles. Keep the bounds close to
   what the portal needs, and prefer several smaller campaigns.
 
 ### The quiet failure mode to watch for
@@ -1387,7 +1424,7 @@ There is no outbox API; query the table.
 
 ```sql
 -- queue health
-SELECT status, count(*) FROM email_outbox GROUP BY status;
+SELECT status, priority, count(*) FROM email_outbox GROUP BY status, priority;
 
 -- overdue pending rows (substitute now minus 10 minutes)
 SELECT count(*) FROM email_outbox
