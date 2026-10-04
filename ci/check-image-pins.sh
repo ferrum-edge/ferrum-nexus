@@ -41,7 +41,7 @@ from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
 errors = []
-digest = re.compile(r'[^@\s]+@sha256:[0-9a-f]{64}')
+digest = re.compile(r'''[^@\s="'\\]+@sha256:[0-9a-f]{64}''')
 overrides = {'FERRUM_EDGE_IMAGE', 'NEXUS_IMAGE'}
 
 
@@ -57,6 +57,11 @@ def check_image(path, line, image, local_image=None):
     fallback = re.fullmatch(r'\$\{\w+:?-(.+)\}', image)
     if fallback:
         check_image(path, line, fallback[1], local_image)
+        return
+    # An option-valued default cannot establish Docker's image position, even
+    # when an environment/label value in that option contains a full digest.
+    if image.startswith('-'):
+        report(path, line, f'ambiguous image argument: {image}')
         return
     if image == local_image:
         return
@@ -107,15 +112,32 @@ class ShellLexer:
                 value += '`' + self.substitution('`')
             elif quote != "'" and self.source.startswith('${', self.pos):
                 depth = 0
+                parameter_quote = None
                 while self.pos < len(self.source):
-                    if self.source.startswith('$(', self.pos):
+                    char = self.source[self.pos]
+                    if parameter_quote != "'" and char == '\\':
+                        value += self.take()
+                        if self.pos < len(self.source):
+                            value += self.take()
+                        continue
+                    if parameter_quote != "'" and self.source.startswith('$(', self.pos):
                         self.pos += 2
                         value += '$(' + self.substitution(')')
                         continue
+                    if parameter_quote != "'" and char == '`':
+                        self.pos += 1
+                        value += '`' + self.substitution('`')
+                        continue
                     char = self.take()
                     value += char
-                    depth += char == '{'
-                    depth -= char == '}'
+                    if parameter_quote:
+                        if char == parameter_quote:
+                            parameter_quote = None
+                    elif char == '"' or (char == "'" and quote != '"'):
+                        parameter_quote = char
+                    else:
+                        depth += char == '{'
+                        depth -= char == '}'
                     if char == '}' and depth == 0:
                         break
             elif char == '\\' and quote != "'":
@@ -253,7 +275,7 @@ pull_values = {'--platform'}
 pull_switches = {'--all-tags', '-a', '--disable-content-trust', '--quiet', '-q'}
 
 
-def skip_options(words, pos, values, switches):
+def skip_options(words, pos, values, switches, command='Docker'):
     while pos < len(words) and words[pos].startswith('-'):
         option = words[pos]
         pos += 1
@@ -265,7 +287,7 @@ def skip_options(words, pos, values, switches):
         elif flag in switches:
             pass
         elif option.startswith('--'):
-            raise ValueError(f'unsupported Docker option: {option}')
+            raise ValueError(f'unsupported {command} option: {option}')
         else:
             for index, char in enumerate(option[1:], 1):
                 flag = '-' + char
@@ -273,7 +295,7 @@ def skip_options(words, pos, values, switches):
                     pos += index == len(option) - 1
                     break
                 if flag not in switches:
-                    raise ValueError(f'unsupported Docker option: {option}')
+                    raise ValueError(f'unsupported {command} option: {option}')
     return pos
 
 
@@ -282,14 +304,44 @@ def shell_command(path, command):
     if not words:
         return
     pos = 0
+    line = command[0][1]
     # A docker word passed to echo/printf/grep, etc. is data, not a command.
     prefixes = {
         'if', 'then', 'elif', 'else', 'while', 'until', 'do', '!',
-        'exec', 'command', 'time', 'nohup',
     }
     while pos < len(words):
         if words[pos] in prefixes or re.match(r'\w+=', words[pos]):
             pos += 1
+        elif words[pos] in {'exec', 'command', 'time', 'nohup'}:
+            wrapper = words[pos]
+            start = pos + 1
+            if start < len(words) and words[start] in {'--help', '--version'}:
+                return
+            values = {
+                'exec': {'-a'},
+                'command': set(),
+                'time': {'-f', '--format', '-o', '--output'},
+                'nohup': set(),
+            }[wrapper]
+            switches = {
+                'exec': {'-c', '-l'},
+                'command': {'-p', '-v', '-V'},
+                'time': {
+                    '-p', '--portability', '-a', '--append', '-v', '--verbose', '-q', '--quiet',
+                },
+                'nohup': set(),
+            }[wrapper]
+            try:
+                pos = skip_options(words, start, values, switches, wrapper)
+            except ValueError as error:
+                report(path, line, str(error))
+                return
+            # command -v/-V describes a command; it does not execute it.
+            if wrapper == 'command' and any(
+                set(option[1:]) & {'v', 'V'} for option in words[start:pos]
+                if option != '--'
+            ):
+                return
         elif words[pos] == 'sudo':
             pos += 1
             while pos < len(words) and words[pos].startswith('-'):
@@ -302,7 +354,6 @@ def shell_command(path, command):
             break
     if pos >= len(words) or words[pos] != 'docker':
         return
-    line = command[0][1]
     try:
         pos = skip_options(words, pos + 1, global_values, global_switches)
         if pos < len(words) and words[pos] in {'container', 'image'}:
@@ -346,6 +397,32 @@ def scan_shell(path, source, line=1):
                 command.append(token)
 
 
+def dockerfile_heredocs(row):
+    # BuildKit permits heredocs only in non-JSON ADD/COPY/RUN instructions
+    # (including ONBUILD), and only words beginning with [fd]<< are markers.
+    instruction = re.match(r'^\s*(?:ONBUILD\s+)?(?:ADD|COPY|RUN)\s+(.*)', row, re.IGNORECASE)
+    if not instruction:
+        return []
+    words = re.findall(r'''(?:[^\s"'\\]|\\.|"(?:[^"\\]|\\.)*"|'[^']*')+''', instruction[1])
+    pos = 0
+    while pos < len(words) and words[pos].startswith('--'):
+        pos += 1
+    if pos < len(words) and words[pos].startswith('['):
+        return []
+    delimiters = []
+    for word in words[pos:]:
+        marker = re.fullmatch(r'\d*<<(-?)([^<]+)', word)
+        if not marker:
+            continue
+        try:
+            delimiter = shlex.split(marker[2])
+        except ValueError:
+            continue
+        if len(delimiter) == 1:
+            delimiters.append((delimiter[0], bool(marker[1])))
+    return delimiters
+
+
 def logical_lines(source):
     pending = ''
     start = 1
@@ -362,9 +439,7 @@ def logical_lines(source):
             continue
         pending += row.rstrip('\\').strip() + ' ' if row.endswith('\\') else row
         if not row.endswith('\\'):
-            lexer = ShellLexer(pending)
-            lexer.tokens()
-            heredocs = lexer.delimiters
+            heredocs = dockerfile_heredocs(pending)
             yield start, pending
             pending = ''
     if pending:
@@ -419,7 +494,7 @@ def yaml_scalar(value, flow=False):
     if flow:
         depth = 0
         for pos, char in enumerate(value):
-            if char in ',}' and depth == 0:
+            if char in ',}]' and depth == 0:
                 return value[:pos].strip()
             depth += char == '{'
             depth -= char == '}'
@@ -471,6 +546,22 @@ def yaml_block(rows, pos, indent, folded):
     return value, pos
 
 
+yaml_key = r'''(?:"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[\w-]+)'''
+yaml_mapping = re.compile(rf'^(\s*)(?:-\s+)?({yaml_key})\s*:\s*(.*)')
+
+
+def check_yaml_field(path, line, kind, value, workflow, flow=False):
+    value = value.strip()
+    scalar = yaml_scalar(value, flow)
+    if kind == 'run' and workflow:
+        scan_shell(path, scalar, line)
+    elif kind == 'image' or (kind == 'container' and value and not value.startswith('{')):
+        local = 'ferrum-nexus:e2e' if path == 'e2e/docker-compose.yml' else None
+        check_image(path, line, scalar, local)
+    elif kind == 'uses' and scalar.startswith('docker://'):
+        check_image(path, line, scalar[len('docker://'):])
+
+
 def scan_yaml(path, source, workflow):
     rows = source.splitlines()
     pos = 0
@@ -480,9 +571,10 @@ def scan_yaml(path, source, workflow):
         pos += 1
         if not row.strip() or row.lstrip().startswith('#'):
             continue
-        field = re.match(r'^(\s*)(?:-\s+)?(image|container|uses|run):\s*(.*)', row)
+        field = yaml_mapping.match(row)
+        kind = yaml_scalar(field[2]) if field else None
         indent = len(row) - len(row.lstrip()) + (2 if row.lstrip().startswith('- ') else 0)
-        if field and field[2] == 'run' and workflow:
+        if kind == 'run' and workflow:
             value = field[3]
             if value.startswith(('|', '>')):
                 source, pos = yaml_block(rows, pos, indent, value.startswith('>'))
@@ -491,24 +583,26 @@ def scan_yaml(path, source, workflow):
                 scan_shell(path, yaml_scalar(value), line)
             continue
         # Other block scalars contain data, e.g. prose in workflow name: |.
-        block = re.match(r'^(\s*)(?:-\s+)?[^:]+:\s*[|>][-+0-9]*\s*(?:#.*)?$', row)
+        block = field and re.fullmatch(r'[|>][-+0-9]*\s*(?:#.*)?', field[3])
+        if not field:
+            block = re.match(r'^\s*(?:-\s+)?[^:]+:\s*[|>][-+0-9]*\s*(?:#.*)?$', row)
         if block:
             value, pos = yaml_block(rows, pos, indent, '>' in row)
-            if not field:
-                continue
-            row = row[:row.index(':') + 1] + ' ' + value.strip()
-            field = re.match(r'^(\s*)(?:-\s+)?(image|container|uses|run):\s*(.*)', row)
-        if field:
-            kind, value = field[2], field[3]
-            if kind == 'image' or (kind == 'container' and value and not value.startswith('{')):
-                local = 'ferrum-nexus:e2e' if path == 'e2e/docker-compose.yml' else None
-                check_image(path, line, yaml_scalar(value), local)
-            elif kind == 'uses' and yaml_scalar(value).startswith('docker://'):
-                check_image(path, line, yaml_scalar(value)[len('docker://'):])
+            check_yaml_field(path, line, kind, value.strip(), workflow)
+            continue
+        if field and kind != 'run':
+            check_yaml_field(path, line, kind, field[3], workflow)
         code = yaml_code(row)
-        if re.match(r'^\s*(?:-\s+)?(?:[^:]+:\s*)?\{', code):
-            for flow in re.finditer(r'(?:\{|,)\s*image:', code):
-                check_image(path, line, yaml_scalar(row[flow.end():], flow=True))
+        value = field[3].lstrip() if field else re.sub(r'^\s*(?:-\s+)?', '', row)
+        if value.startswith(('{', '[')):
+            for flow in re.finditer(rf'(?:\{{|\[|,)\s*({yaml_key})\s*:', row):
+                # The delimiter and colon must be outside strings/comments;
+                # quoted mapping keys themselves are decoded from the row.
+                if code[flow.start()] not in '{[,' or code[flow.end() - 1] != ':':
+                    continue
+                check_yaml_field(
+                    path, line, yaml_scalar(flow[1]), row[flow.end():], workflow, flow=True,
+                )
 
 
 files = subprocess.check_output(['git', '-C', str(root), 'ls-files', '-z']).decode().split('\0')
@@ -541,7 +635,9 @@ for path in sorted(filter(None, files)):
         scan_yaml(path, source, workflow)
     elif env:
         for line, row in enumerate(source.splitlines(), 1):
-            match = re.match(r'^\s*(?:export\s+)?(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)=(.*)', row)
+            match = re.match(
+                r'^\s*(?:export\s+)?(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)\s*[=:]\s*(.*)', row,
+            )
             if match and match[2].strip():
                 local = 'ferrum-nexus:e2e' if path == 'e2e/.env.example' else None
                 check_image(path, line, yaml_scalar(match[2]), local)

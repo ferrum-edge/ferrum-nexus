@@ -72,6 +72,27 @@ class ImagePinFixtures(unittest.TestCase):
             with self.subTest(source=source):
                 self.assert_scan({'tools/start.sh': source})
 
+    def test_backticks_in_parameter_defaults(self):
+        cases = [
+            'id=${RESULT:-`docker pull alpine:3`}',
+            'id="${RESULT:-`docker run alpine:3`}"',
+            'id=${OUTER:-${RESULT:-`docker container create alpine:3`}}',
+            'id="${RESULT:-\'`docker pull alpine:3`\'}"',
+        ]
+        for source in cases:
+            with self.subTest(source=source):
+                self.assert_scan({'tools/start.sh': source}, ['alpine:3'])
+                self.assert_scan({'tools/start.sh': source.replace('alpine:3', PIN)})
+        self.assert_scan({'tools/start.sh': r'''
+id='${RESULT:-`docker pull alpine:3`}'
+id=${RESULT:-'`docker pull alpine:3`'}
+id=${RESULT:-\`docker pull alpine:3\`}
+id="${RESULT:-\`docker pull alpine:3\`}"
+'''})
+        self.assert_scan({
+            'tools/start.sh': 'id=${RESULT:-\n`docker pull alpine:3`}\n',
+        }, ['tools/start.sh:2:', 'alpine:3'])
+
     def test_command_positions_and_options(self):
         cases = [
             'docker run --rm -it --name app -p8080:80 alpine:3',
@@ -94,6 +115,38 @@ class ImagePinFixtures(unittest.TestCase):
             ['unsupported Docker option: --new-unknown-flag'],
         )
 
+    def test_command_wrapper_options(self):
+        cases = [
+            'command -p docker pull alpine:3',
+            'command -- docker container create alpine:3',
+            'exec -- docker run alpine:3',
+            'exec -cl -a nexus docker run alpine:3',
+            'env SET=1 command -p exec -- docker image pull alpine:3',
+            'time -p docker pull alpine:3',
+            'nohup -- docker run alpine:3',
+        ]
+        for source in cases:
+            with self.subTest(source=source):
+                self.assert_scan({'tools/start.sh': source}, ['alpine:3'])
+                self.assert_scan({'tools/start.sh': source.replace('alpine:3', PIN)})
+        self.assert_scan({'tools/start.sh': '''
+command -v docker
+command -pV docker pull alpine:3
+command -pv docker run alpine:3
+command -p echo docker pull alpine:3
+command -p docker network create sandbox
+exec -- docker compose run web
+exec -a docker echo docker pull alpine:3
+time -f '%e' docker volume create storage
+nohup -- echo docker pull alpine:3
+'''})
+        for wrapper in ['command', 'exec', 'time', 'nohup']:
+            with self.subTest(wrapper=wrapper):
+                self.assert_scan(
+                    {'tools/start.sh': f'{wrapper} --unknown-option docker pull {PIN}'},
+                    [f'unsupported {wrapper} option: --unknown-option'],
+                )
+
     def test_digest_belongs_to_image_argument(self):
         cases = [
             f'docker run -e HASH={OTHER_DIGEST} alpine:3',
@@ -109,6 +162,20 @@ class ImagePinFixtures(unittest.TestCase):
             with self.subTest(source=source):
                 self.assert_scan({'tools/start.sh': source}, ['tools/start.sh:1:'])
         self.assert_scan({'tools/start.sh': f'docker run --env HASH={OTHER_DIGEST} "{PIN}"'})
+
+    def test_option_valued_fallback_is_not_an_image_pin(self):
+        for option in ['--env=HASH=', '-eHASH=', '--label=hash=']:
+            for target in ['alpine:3', PIN]:
+                source = 'docker run ${FLAGS:-' + option + OTHER_DIGEST + '} ' + target
+                with self.subTest(source=source):
+                    self.assert_scan({'tools/start.sh': source}, ['ambiguous image argument:'])
+        self.assert_scan({
+            'tools/start.sh': f'docker run --env=HASH={OTHER_DIGEST} '
+            + '${NEXUS_IMAGE:-' + PIN + '}\n',
+        })
+        self.assert_scan({
+            'tools/start.sh': 'docker run ${FLAGS:-\'--env=HASH=\'' + OTHER_DIGEST + '} alpine:3',
+        }, ['tools/start.sh:1:'])
 
     def test_shell_data_comments_and_other_subcommands(self):
         source = r'''#!/usr/bin/env bash
@@ -141,6 +208,7 @@ EOF
         source = f'''touch "$SCAN_SENTINEL"
 id=$(touch "$SCAN_SENTINEL"; docker run {PIN})
 id=`touch "$SCAN_SENTINEL"; docker pull {PIN}`
+id=${{RESULT:-`touch "$SCAN_SENTINEL"; docker pull {PIN}`}}
 '''
         self.assert_scan({'tools/start.sh': source})
 
@@ -173,6 +241,45 @@ COPY --from=alpine:3 /x /y
 EOF
 COPY --from={PIN} /x /y
 ''', 'other/Dockerfile': f'FROM \\\n  {PIN}\n'})
+
+    def test_dockerfile_heredocs_follow_buildkit_instruction_grammar(self):
+        for instruction in [
+            'LABEL note=<<EOF',
+            'ENV note=<<EOF',
+            'ARG note=<<EOF',
+            'RUN echo note=<<EOF',
+            'RUN echo "<<EOF"',
+            'RUN ["echo", "<<EOF"]',
+            'COPY ["<<EOF", "/notice"]',
+        ]:
+            with self.subTest(instruction=instruction):
+                self.assert_scan({
+                    'Dockerfile': f'FROM {PIN}\n{instruction}\nFROM alpine:3\n',
+                }, ['Dockerfile:3:', 'alpine:3'])
+                self.assert_scan({
+                    'Dockerfile': f'FROM {PIN}\n{instruction}\nFROM {PIN}\n',
+                })
+        for instruction in [
+            "COPY <<'EOF' /notice",
+            'ADD <<EOF /notice',
+            'RUN cat 3<<EOF',
+            'ONBUILD COPY <<EOF /notice',
+            "run --mount=type=tmpfs,target=/tmp <<-'EOF'",
+        ]:
+            with self.subTest(instruction=instruction):
+                self.assert_scan({'Dockerfile': f'''FROM scratch
+{instruction}
+FROM alpine:3
+COPY --from=alpine:3 /x /y
+EOF
+COPY --from={PIN} /x /y
+'''})
+                self.assert_scan({'Dockerfile': f'''FROM scratch
+{instruction}
+FROM alpine:3
+EOF
+FROM alpine:3
+'''}, ['Dockerfile:5:', 'alpine:3'])
 
     def test_variable_defaults_are_checked(self):
         for variable in ['FERRUM_EDGE_IMAGE', 'NEXUS_IMAGE']:
@@ -248,6 +355,69 @@ jobs:
 
   docker pull alpine:3
 '''}, ['alpine:3'])
+
+    def test_yaml_flow_operations_and_quoted_mapping_keys(self):
+        workflow_cases = [
+            '- {run: docker pull alpine:3}',
+            '- {name: pull, run: docker pull alpine:3}',
+            '- {"run": "docker pull alpine:3"}',
+            "- {'run': 'id=`docker run alpine:3`'}",
+            'steps: [{run: docker pull alpine:3}]',
+            '- {uses: docker://alpine:3}',
+            'jobs: {check: {container: alpine:3}}',
+            'container: {"image": alpine:3}',
+            '"run": |\n  docker pull alpine:3\n',
+        ]
+        compose_cases = [
+            'services:\n  app:\n    "image": alpine:3\n',
+            "services:\n  app:\n    'image': alpine:3\n",
+            'services: {app: {"image": alpine:3}}',
+            "services: {app: {'image': alpine:3}}",
+        ]
+        for path, cases in [
+            ('.github/workflows/test.yml', workflow_cases),
+            ('deploy/compose.yml', compose_cases),
+        ]:
+            for source in cases:
+                with self.subTest(path=path, source=source):
+                    self.assert_scan({path: source}, ['alpine:3'])
+                    self.assert_scan({path: source.replace('alpine:3', PIN)})
+        self.assert_scan({'.github/workflows/test.yml': f'''
+"name": |
+  - {{run: docker pull alpine:3}}
+  "image": alpine:3
+steps:
+  - {{name: '{{run: docker pull alpine:3}}', run: docker pull {PIN}}}
+  - {{run: "echo '{{image: alpine:3}}'"}}
+  - {{run: docker network create sandbox}}
+  - {{run: docker compose run web}}
+# {{"run": "docker pull alpine:3"}}
+''', 'deploy/compose.yml': f'''
+services: {{app: {{"image": {PIN}, command: "docker pull alpine:3"}}}}
+x-note: {{run: docker pull alpine:3}}
+'''})
+
+    def test_compose_env_override_assignment_forms(self):
+        for variable in ['NEXUS_IMAGE', 'FERRUM_EDGE_IMAGE']:
+            for separator in [' = ', ': ', ' : ', ':']:
+                for prefix in ['', 'export ']:
+                    with self.subTest(variable=variable, separator=separator, prefix=prefix):
+                        files = {
+                            'deploy/compose.yml': 'services:\n  app:\n    image: ${'
+                            + variable + '}\n',
+                            'deploy/.env': prefix + variable + separator + 'alpine:3\n',
+                        }
+                        self.assert_scan(files, ['deploy/.env:1:', 'alpine:3'])
+                        files['deploy/.env'] = (
+                            prefix + variable + separator + '"' + PIN + '" # pin\n'
+                        )
+                        self.assert_scan(files)
+        self.assert_scan({'deploy/.env': '''
+# NEXUS_IMAGE = alpine:3
+OTHER_IMAGE: alpine:3
+NEXUS_IMAGE =
+FERRUM_EDGE_IMAGE:
+'''})
 
     def test_operational_scope_anywhere_in_checkout(self):
         cases = {
