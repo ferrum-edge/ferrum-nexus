@@ -719,6 +719,20 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         }),
       );
       assert.deepEqual(await upstreamSnapshot(), beforeRestoredDenied);
+      const restoredCall = await result(
+        await rpc(api, restoredSession, 'tools/call', {
+          name: `${api.slug}.list_invoices`,
+          arguments: {},
+        }),
+      );
+      assert.equal(restoredCall.isError, false);
+      assert.equal(restoredCall.structuredContent?.method, 'GET');
+      assert.equal(restoredCall.structuredContent?.path, '/invoices');
+      assert.deepEqual(
+        await upstreamSnapshot(),
+        withUpstreamCalls(beforeRestoredDenied, 'GET /invoices', 1),
+        'the replacement credential dispatches exactly one approved read after re-enable',
+      );
       await portal('POST', `/api/grants/${approval.grant.id}/revoke`, {
         session: provider,
         body: {},

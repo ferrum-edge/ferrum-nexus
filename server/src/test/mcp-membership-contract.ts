@@ -6,6 +6,7 @@ import {
   mcpAllGroupForApi,
   mcpToolGroupForApi,
   type Api,
+  type ApiErrorBody,
   type ApproveAccessRequestResponse,
   type CreateAccessRequestResponse,
   type CreateApplicationResponse,
@@ -372,19 +373,32 @@ export function runMcpMembershipContract(
             harness.edge.queueFailure(503, { error: 'refused' }, `/consumers/${f.live.id}`, 'PUT');
           }
           const writes = harness.edge.callsTo('PUT', `/consumers/${f.live.id}`).length;
+          const creations = harness.edge.callsTo('POST', '/consumers').length;
           const revoked = await revoke(f.grant.id);
-          assert.equal(revoked.statusCode, missing === 'consumer' ? 200 : 502, revoked.body);
+          assert.equal(revoked.statusCode, 502, revoked.body);
           assert.equal((await target.store.grants.findById(f.grant.id))?.status, 'revoked');
           assert.equal(await requestStatus(f.grant), 'revoked');
           assert.equal(await countAudit(AuditAction.ACCESS_REVOKE, f.grant.id), 1);
+          assert.equal(await countAudit(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id), 1);
+          const rollback = await details(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id);
+          assert.equal(rollback?.grant_restored, false);
+          assert.equal(rollback?.restore_skipped_reason, 'group_absent');
           if (missing === 'consumer') {
-            assert.equal(await countAudit(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id), 0);
-            assert.equal(harness.edge.consumerByUsername(f.row.ferrum_username), undefined);
+            assert.deepEqual(revoked.json<ApiErrorBody>(), {
+              error: {
+                code: 'EDGE_ERROR',
+                message: 'The gateway consumer for this account no longer exists',
+                details: { consumer_id: f.row.ferrum_consumer_id },
+              },
+            });
+            assert.equal(
+              harness.edge.consumerByUsername(f.row.ferrum_username, f.row.namespace),
+              undefined,
+            );
+            assert.equal(await harness.edgeClient.consumers.get(f.row.ferrum_consumer_id), null);
+            assert.deepEqual(await target.store.consumers.findById(f.row.id), f.row);
             assert.equal(harness.edge.callsTo('PUT', `/consumers/${f.live.id}`).length, writes);
-          } else {
-            const rollback = await details(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id);
-            assert.equal(rollback?.grant_restored, false);
-            assert.equal(rollback?.restore_skipped_reason, 'group_absent');
+            assert.equal(harness.edge.callsTo('POST', '/consumers').length, creations);
           }
         });
       }
@@ -834,6 +848,8 @@ export function runMcpMembershipContract(
         it(`${scope}: repair re-reads after ${transition}`, async () => {
           const f = await fixture(application);
           await orphanConsumer(f.row);
+          const writes = harness.edge.callsTo('PUT', `/consumers/${f.live.id}`).length;
+          const creations = harness.edge.callsTo('POST', '/consumers').length;
           const key = canonicalConsumerLockKey('nexus', f.row.ferrum_username);
           const serialize = harness.edgeClient.serializePerKey.bind(harness.edgeClient);
           let interleaved = false;
@@ -848,7 +864,24 @@ export function runMcpMembershipContract(
                       url: `/api/users/${f.client.user.id}`,
                       payload: { status: 'disabled' },
                     });
-              assert.equal(response.statusCode, 200, response.body);
+              assert.equal(response.statusCode, transition === 'revoke' ? 502 : 200, response.body);
+              if (transition === 'revoke') {
+                assert.deepEqual(response.json<ApiErrorBody>(), {
+                  error: {
+                    code: 'EDGE_ERROR',
+                    message: 'The gateway consumer for this account no longer exists',
+                    details: { consumer_id: f.row.ferrum_consumer_id },
+                  },
+                });
+                assert.equal(
+                  harness.edge.consumerByUsername(f.row.ferrum_username, f.row.namespace),
+                  undefined,
+                );
+                assert.equal(await harness.edgeClient.consumers.get(f.row.ferrum_consumer_id), null);
+                assert.deepEqual(await target.store.consumers.findById(f.row.id), f.row);
+                assert.equal(harness.edge.callsTo('PUT', `/consumers/${f.live.id}`).length, writes);
+                assert.equal(harness.edge.callsTo('POST', '/consumers').length, creations);
+              }
             }
             return serialize(requested, work);
           };
@@ -864,7 +897,10 @@ export function runMcpMembershipContract(
             assert.equal((await target.store.grants.findById(f.grant.id))?.status, 'revoked');
             assert.equal(await requestStatus(f.grant), 'revoked');
             assert.equal(await countAudit(AuditAction.ACCESS_REVOKE, f.grant.id), 1);
-            assert.equal(await countAudit(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id), 0);
+            assert.equal(await countAudit(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id), 1);
+            const rollback = await details(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id);
+            assert.equal(rollback?.grant_restored, false);
+            assert.equal(rollback?.restore_skipped_reason, 'group_absent');
           } else {
             assert.equal((await target.store.users.findById(f.client.user.id))?.status, 'disabled');
             assert.equal((await target.store.grants.findById(f.grant.id))?.status, 'active');
