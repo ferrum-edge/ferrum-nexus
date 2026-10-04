@@ -350,6 +350,7 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
   // through the cross-instance path rather than the in-process queue alone.
   const edgeClient = createFerrumAdminClient(config.edge, options.edgeLogger, {
     leases: store.leases,
+    allowPrivateUpstreams: config.allowPrivateUpstreams,
   });
   const { mailbox, factory } = createTestMailbox();
   const app = await buildServer(config, {

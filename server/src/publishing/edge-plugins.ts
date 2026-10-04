@@ -376,6 +376,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
     },
 
     async attach(proxyId, pluginName, pluginConfig, subject, options, live) {
+      await edge.assertBackendEgress();
       return edge.pluginConfigs.create(
         {
           ...writeBody(proxyId, pluginName, pluginConfig, options, live),
@@ -438,6 +439,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
     },
 
     async restorePluginsLocked(proxyId, configs, subject) {
+      await edge.assertBackendEgress();
       const ids: string[] = [];
       for (const config of configs) {
         await edge.pluginConfigs.create(
@@ -499,6 +501,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
 
     undoRemovalLocked(proxyId, config, subject) {
       return async () => {
+        await edge.assertBackendEgress();
         const survivor = await edge.pluginConfigs.get(config.id);
         const id = survivor
           ? config.id
@@ -558,6 +561,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
       undo,
       options,
     ) {
+      await edge.assertBackendEgress();
       if (pluginSettings === null) {
         if (!existing) return null;
         undo.push(binder.undoRemovalLocked(proxyId, existing, subject));
@@ -579,6 +583,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
         // this for a `PUT` that never landed rewrites the resource as it
         // already is.
         undo.push(async () => {
+          await edge.assertBackendEgress();
           await edge.pluginConfigs.replace(
             existing.id,
             writeBody(

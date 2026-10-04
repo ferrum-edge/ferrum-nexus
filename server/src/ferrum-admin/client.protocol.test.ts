@@ -4,11 +4,14 @@ import { describe, it, type TestContext } from 'node:test';
 
 import type { EdgeConfig } from '../config/index.js';
 import { isNexusError } from '../lib/errors.js';
+import { publicEgressPolicy } from '../test/mock-ferrum-edge.js';
 import {
   ADMIN_RESPONSE_MAX_BYTES,
   createFerrumAdminClient,
   type FerrumAdminClient,
 } from './client.js';
+
+const ROW_TAG = '"' + 'a'.repeat(32) + '"';
 
 const consumer = {
   id: 'consumer-1',
@@ -34,6 +37,7 @@ async function fixture(t: TestContext) {
     body: string | Buffer;
     location: string;
     disconnect: boolean;
+    headers: Record<string, string>;
     /** Overrides `body` with one computed from the request URL, e.g. to echo a page offset. */
     respond: ((url: URL) => string) | null;
   } = {
@@ -41,6 +45,7 @@ async function fixture(t: TestContext) {
     body: '',
     location: '/redirect-target',
     disconnect: false,
+    headers: {},
     respond: null,
   };
   const requests: string[] = [];
@@ -55,6 +60,7 @@ async function fixture(t: TestContext) {
     res.writeHead(reply.status, {
       'content-type': 'application/json',
       location: reply.location,
+      ...reply.headers,
     });
     res.end(
       reply.respond ? reply.respond(new URL(req.url ?? '/', 'http://edge.test')) : reply.body,
@@ -100,6 +106,53 @@ function protocolFailure(error: unknown): boolean {
 }
 
 describe('Edge response contracts over HTTP sockets', () => {
+  it('requires strong tags and authoritative complete no-store reads', async (t) => {
+    const { client, reply, logs } = await fixture(t);
+    reply.body = JSON.stringify(publicEgressPolicy());
+    const rejectedHeaders: Record<string, string>[] = [
+      {},
+      { 'cache-control': 'public, max-age=60' },
+      { 'cache-control': 'no-store', age: '1' },
+      { 'cache-control': 'no-store', 'x-data-source': 'cache' },
+    ];
+    for (const headers of rejectedHeaders) {
+      reply.headers = headers;
+      await assert.rejects(client.assertBackendEgress(), protocolFailure);
+    }
+    reply.headers = { 'cache-control': 'no-store' };
+    await client.assertBackendEgress();
+    const complete = {
+      ...consumer,
+      credentials: {
+        keyauth: [{ key: 'verification-secret-canary', future: { retained: true } }],
+        basicauth: [{ username: 'legacy', password_hash: 'hmac_sha256:' + 'b'.repeat(64) }],
+        custom: [{ nested: ['hidden-secret-canary'] }],
+      },
+    };
+    reply.body = JSON.stringify(complete);
+    for (const etag of ['', '*', 'W/"weak"', '"a", "b"', 'unquoted']) {
+      reply.headers = { 'cache-control': 'no-store', etag };
+      await assert.rejects(client.consumers.verification('consumer-1'), protocolFailure);
+    }
+    reply.headers = { 'cache-control': 'no-store', etag: ROW_TAG };
+    assert.deepEqual((await client.consumers.verification('consumer-1'))?.consumer, complete);
+    reply.body = JSON.stringify(consumer);
+    await assert.rejects(client.consumers.verification('consumer-1'), protocolFailure);
+    for (const status of [400, 409, 422, 503]) {
+      Object.assign(reply, {
+        status,
+        body: JSON.stringify({ error: 'verification-secret-canary' }),
+      });
+      await assert.rejects(client.consumers.verification('consumer-1'), (error: Error) => {
+        assert.ok(!error.message.includes('verification-secret-canary'));
+        assert.ok(!JSON.stringify(error).includes('verification-secret-canary'));
+        return true;
+      });
+    }
+    assert.ok(!JSON.stringify(logs).includes('verification-secret-canary'));
+    assert.ok(!JSON.stringify(logs).includes('hidden-secret-canary'));
+  });
+
   const resourceReads: [string, (client: FerrumAdminClient) => Promise<unknown>, unknown][] = [
     ['consumer', (client) => client.consumers.get('consumer-1'), consumer],
     ['proxy', (client) => client.proxies.get('proxy-1'), proxy],
@@ -351,7 +404,10 @@ describe('Edge response contracts over HTTP sockets', () => {
     const { client, reply, requests } = await fixture(t);
     for (const [status, write] of [
       [201, () => client.consumers.create({ username: 'alice' })],
-      [200, () => client.consumers.replace('consumer-1', { username: 'alice' })],
+      [
+        200,
+        () => client.consumers.replace('consumer-1', { username: 'alice' }, undefined, ROW_TAG),
+      ],
       [200, () => client.consumers.addCredential('consumer-1', 'keyauth', { key: 'test-key' })],
     ] as const) {
       for (const body of ['', 'null', '{', '<html>private-canary</html>', '{}']) {
@@ -396,7 +452,7 @@ describe('Edge response contracts over HTTP sockets', () => {
     reply.disconnect = true;
     for (const write of [
       () => client.consumers.create({ username: 'alice' }),
-      () => client.consumers.replace('consumer-1', { username: 'alice' }),
+      () => client.consumers.replace('consumer-1', { username: 'alice' }, undefined, ROW_TAG),
       () => client.consumers.delete('consumer-1'),
     ]) {
       const before = requests.length;

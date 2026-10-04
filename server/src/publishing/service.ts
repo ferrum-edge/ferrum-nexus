@@ -1491,6 +1491,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     // re-publish and gated the same way a first publish is.
     assertNamespaceRoutable();
 
+    if (api.ferrum_proxy_id) await edge.assertBackendEgress();
+
     const parsed = parseUploadedOpenApiSpec(specText);
     let previous = await store.apiSpecs.findCurrentByApi(api.id);
     const nextVersion = version?.trim() || parsed.version;
@@ -1585,6 +1587,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const writesGateway =
         proxyId !== null && (api.spec_enforcement === 'routes' || backend !== null);
       if (writesGateway) {
+        await edge.assertBackendEgress();
         await store.transaction(async (tx) => {
           await audit.forStore(tx).record(
             { id: actor.id, role: actor.role },
@@ -1902,6 +1905,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const parsed = parseUploadedOpenApiSpec(input.spec);
       const upstream = resolveUpstream(parsed, input.upstream_url);
       await assertUpstreamAllowed(upstream, upstreamPolicy);
+      await edge.assertBackendEgress();
       const slug = await resolveSlug(input.slug, name);
 
       // The id is minted here because the ACL group name is derived from it and
@@ -1961,6 +1965,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // solved here because solving it needs a counter row the store does not
       // have and a lock the four adapters do not share.
       const persisted = await edge.serializePerKey(`publish-owner:${owner.id}`, async () => {
+        await edge.assertBackendEgress();
         // Before the first gateway write, so a refused publish costs nothing on
         // Edge and leaves nothing to roll back.
         await assertOwnerHasApiRoom(owner.id);
@@ -2236,6 +2241,24 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         } = binder;
         const api = await loadApi(apiId);
         assertCanAdminister(actor, api);
+
+        if (
+          api.ferrum_proxy_id &&
+          [
+            'upstream_url',
+            'auth_plugin',
+            'requestable',
+            'rate_limit',
+            'cors',
+            'allowed_methods',
+            'timeouts',
+            'circuit_breaker',
+            'spec_enforcement',
+            'agents',
+          ].some((key) => Object.hasOwn(patch, key))
+        ) {
+          await edge.assertBackendEgress();
+        }
 
         const update: Partial<ApiRecord> = {};
         const changed: string[] = [];
@@ -3310,6 +3333,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // namespace would take every write below and serve none of them.
       assertNamespaceRoutable();
 
+      await edge.assertBackendEgress();
+
       /** The `api.gateway_restore` row, for either way a restore clears. */
       const restoreDetails = (
         row: ApiRecord,
@@ -3340,6 +3365,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const restored = await edge.serializePerKey(apiRestoreLockKey(apiId), async () => {
         const api = await loadApi(apiId);
         assertCanAdminister(actor, api);
+        await edge.assertBackendEgress();
 
         // What the restore redeploys. A provider may upload a corrected
         // document first — `updateSpec` keeps working on an undeployed API —
@@ -4305,6 +4331,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     proxy: Record<string, unknown>,
     api?: Pick<ApiRecord, 'id' | 'slug' | 'agents'>,
   ): Promise<Record<string, unknown>> {
+    await edge.assertBackendEgress();
     if (!api?.agents) return routesSpecDocument(document, { proxy });
     // Called under the proxy lease, including compensation. Retained phase-1
     // approvals keep their all-tools meaning when this API first adopts subsets.
@@ -4509,6 +4536,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     nextAgents: ApiAgents | null = api.agents ?? null,
     nextMethods: HttpMethod[] | null = api.allowed_methods,
   ): Promise<() => Promise<void>> {
+    await edge.assertBackendEgress();
     const subject = actor.id;
     const before = await edge.proxies.get(proxyId);
     if (!before) throw notFound('Proxy', proxyId);
@@ -4601,6 +4629,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
      * create itself.
      */
     const restore = async (level: SpecEnforcementLevel): Promise<void> => {
+      await edge.assertBackendEgress();
       await edge.proxies.delete(proxyId, subject).catch(() => undefined);
       if (!(await apiStillExists())) return;
       await rebuild(level, api.agents ?? null);
@@ -4609,6 +4638,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     // Deleting the proxy cascades its plugin configs and, when it was
     // spec-owned, the spec and generated validator too — so the recreate starts
     // from nothing whichever direction it runs in.
+    await edge.assertBackendEgress();
     await edge.proxies.delete(proxyId, subject);
     try {
       if (!(await apiStillExists())) throw notFound('API', api.id);

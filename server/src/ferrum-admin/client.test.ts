@@ -73,7 +73,7 @@ describe('ferrum admin client', () => {
     assert.equal(recorded?.claims?.ns, 'nexus', 'the tenancy claim rides on every call');
   });
 
-  it('creates, reads and replaces a consumer with redacted credentials', async () => {
+  it('creates, reads and conditionally replaces from complete consumer verification', async () => {
     const created = await client.consumers.create({
       id: 'user-1',
       username: 'nexus-user-1',
@@ -88,18 +88,48 @@ describe('ferrum admin client', () => {
     assert.equal(fetched?.username, 'nexus-user-1');
     assert.equal(await client.consumers.get('missing'), null, '404 becomes null, not an error');
 
-    const replaced = await client.consumers.replace('user-1', {
-      username: fetched?.username ?? '',
-      custom_id: fetched?.custom_id ?? null,
-      credentials: fetched?.credentials,
-      acl_groups: [aclGroupForApi('api-1')],
-    });
+    const snapshot = await client.consumers.verification('user-1');
+    assert.ok(snapshot);
+    const replaced = await client.consumers.replace(
+      'user-1',
+      {
+        username: fetched?.username ?? '',
+        custom_id: fetched?.custom_id ?? null,
+        credentials: snapshot.consumer.credentials,
+        acl_groups: [aclGroupForApi('api-1')],
+      },
+      undefined,
+      snapshot.etag,
+    );
     assert.deepEqual(replaced.acl_groups, ['nexus:api:api-1:approved']);
     assert.deepEqual(
       replaced.credentials.keyauth,
       [{ key: '[REDACTED]' }],
-      'a [REDACTED] placeholder restores the stored key rather than overwriting it',
+      'ordinary responses stay redacted after a complete replacement',
     );
+    assert.equal(
+      edge.consumers.get('nexus/user-1')?.credentials.keyauth?.[0]?.key,
+      'super-secret-key',
+    );
+  });
+
+  it('refuses missing tags and unmatched redacted credentials without effects', async () => {
+    await client.consumers.create({ id: 'placeholder', username: 'placeholder' });
+    const snapshot = await client.consumers.verification('placeholder');
+    assert.ok(snapshot);
+    const before = structuredClone(edge.consumers.get('nexus/placeholder'));
+    const offset = edge.requests.length;
+    await assert.rejects(client.consumers.replace('placeholder', { username: 'placeholder' }));
+    assert.equal(edge.requests.length, offset, 'missing precondition is refused before dispatch');
+    await assert.rejects(
+      client.consumers.replace(
+        'placeholder',
+        { username: 'placeholder', credentials: { keyauth: [{ key: '[REDACTED]' }] } },
+        undefined,
+        snapshot.etag,
+      ),
+    );
+    assert.deepEqual(edge.consumers.get('nexus/placeholder'), before);
   });
 
   it('attributes every provisioning path while retaining caller labels and actor subjects', async () => {
@@ -532,11 +562,16 @@ describe('ferrum admin client', () => {
 
   describe('error mapping', () => {
     it('restores applied:false details for a non-credential write', async () => {
-      edge.queueFailure(503, {
-        error: 'internal detail nobody outside should see',
-        applied: false,
-        reason: 'private gateway reason',
-      });
+      edge.queueFailure(
+        503,
+        {
+          error: 'internal detail nobody outside should see',
+          applied: false,
+          reason: 'private gateway reason',
+        },
+        '/proxies',
+        'POST',
+      );
       await assert.rejects(
         () =>
           client.proxies.create({
@@ -836,6 +871,7 @@ describe('ferrum admin client', () => {
         // The real minter stamps `ns`, so the ordinary client just works.
         const page = await stamped.consumers.list();
         assert.equal(page.pagination.total, 0);
+        await stamped.assertBackendEgress();
 
         for (const [label, denied] of [
           ['a token with no ns claim', unstamped],
@@ -850,6 +886,14 @@ describe('ferrum admin client', () => {
               return true;
             },
             label,
+          );
+          await assert.rejects(
+            () => denied.assertBackendEgress(),
+            (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
+          );
+          await assert.rejects(
+            () => denied.consumers.verification('missing'),
+            (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
           );
         }
       } finally {
@@ -1065,7 +1109,8 @@ describe('ferrum admin client', () => {
           () => logged.apiSpecs.create(document),
           (error: unknown) => isNexusError(error) && error.code === 'INTERNAL',
         );
-        assert.equal(edge.requests.length, before);
+        assert.equal(edge.requests.length, before + 1, 'only the fresh policy read was dispatched');
+        assert.equal(edge.requests.at(-1)?.path, '/backend-egress-policy');
         assert.equal(logs.at(-1)?.path, '/api-specs');
         assert.equal(logs.at(-1)?.status, undefined);
         assert.equal(messages.at(-1), 'Ferrum Edge Admin API request serialization failed');
@@ -1455,14 +1500,20 @@ describe('ferrum admin client', () => {
       await client.consumers.create({ id: 'ser-1', username: 'nexus-user-ser', acl_groups: [] });
 
       const addGroup = async (apiId: string): Promise<void> => {
-        const current = await client.consumers.get('ser-1');
-        if (!current) throw new Error('consumer vanished');
-        await client.consumers.replace('ser-1', {
-          username: current.username,
-          custom_id: current.custom_id ?? null,
-          credentials: current.credentials,
-          acl_groups: [...current.acl_groups, aclGroupForApi(apiId)],
-        });
+        const snapshot = await client.consumers.verification('ser-1');
+        if (!snapshot) throw new Error('consumer vanished');
+        const current = snapshot.consumer;
+        await client.consumers.replace(
+          'ser-1',
+          {
+            username: current.username,
+            custom_id: current.custom_id ?? null,
+            credentials: current.credentials,
+            acl_groups: [...current.acl_groups, aclGroupForApi(apiId)],
+          },
+          undefined,
+          snapshot.etag,
+        );
       };
 
       await Promise.all([

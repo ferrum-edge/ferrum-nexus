@@ -2447,12 +2447,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // replay that used the account's whole grant list would hand every
           // application every API the account can reach.
           const grants = await store.grants.listActiveByUser(userId, consumer.application_id);
-          const live = await edge.consumers.get(consumer.ferrum_consumer_id);
-          if (!live) {
+          const snapshot = await edge.consumers.verification(consumer.ferrum_consumer_id, subject);
+          if (!snapshot) {
             // Nothing to restore onto, and nothing on it to leave behind.
             if (grants.length === 0) return;
             throw edgeError('The gateway consumer for this identity no longer exists');
           }
+          const { consumer: live, etag } = snapshot;
           // The portal's approval groups come from its active grants and
           // nowhere else (issue #341). Merging the live list back in kept any
           // `nexus:api:<id>:approved` group the portal had already revoked —
@@ -2481,12 +2482,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             live.id,
             {
               id: live.id,
+              labels: live.labels,
               username: live.username,
               custom_id: live.custom_id ?? null,
               credentials: live.credentials,
               acl_groups: groups,
             },
             subject,
+            etag,
           );
         });
       }
@@ -2576,22 +2579,25 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         const id = identity.ferrum_consumer_id;
         await edge.serializePerKey(id, async () => {
           await assertStillDisabled(userId);
-          const live = await edge.consumers.get(id);
+          const snapshot = await edge.consumers.verification(id, subject);
+          const live = snapshot?.consumer;
           removedGroups.push(...(live?.acl_groups ?? []));
 
           if (live) {
-            // Groups first, rebuilt from the GET so redacted credential
-            // placeholders round-trip (§4.4) and nothing is dropped early…
+            // Groups first, preserving the complete stored credentials under
+            // their matching row tag. Secrets remain transient here.
             await edge.consumers.replace(
               id,
               {
                 id: live.id,
+                labels: live.labels,
                 username: live.username,
                 custom_id: live.custom_id ?? null,
                 credentials: live.credentials,
                 acl_groups: [],
               },
               subject,
+              snapshot!.etag,
             );
             // …then every credential type, whether or not the read projection
             // could show it — `basicauth` never appears in a GET. The

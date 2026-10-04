@@ -865,8 +865,10 @@ export type EdgeHealthStatus = 'ok' | 'degraded' | 'not_ready' | 'down';
  * namespace and it is not the one Nexus publishes into, so every proxy the
  * portal has created answers `404` on the listener. See
  * {@link EdgeNamespaceRouting}.
+ * `backend_egress_unverified` — sampled process metadata cannot establish the
+ * configured upstream profile. This observation never authorizes a mutation.
  */
-export type EdgeHealthReason = 'namespace_unserved';
+export type EdgeHealthReason = 'namespace_unserved' | 'backend_egress_unverified';
 
 /**
  * Which namespace the portal writes to and which one the gateway's data plane

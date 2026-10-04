@@ -316,7 +316,24 @@ serves exactly one namespace. Publish into any other and the Admin API answers
 
 `unserved` and `edge.reason` stay public so an anonymous monitor can alert on
 them. A gateway that reports no namespace leaves `active` `null`, `unserved`
-`false` and `checked_at` `null`: an unknown topology never degrades anything.
+`false` and `checked_at` `null`: namespace mismatch alone is not inferred. The
+draft public-egress policy can still degrade this unknown pairing.
+
+The draft egress adoption adds coarse public
+`edge.reason = "backend_egress_unverified"` when fresh sampled policy cannot establish the configured
+profile. This is HTTP-200 degraded liveness, not mutation authorization: every backend
+write obtains its own authenticated namespace policy, including compensation. The
+public profile accepts only local-serving/public-only metadata; missing, stale,
+unknown, CP-only, default-both and allow-overlay cases refuse with bounded opaque
+`EDGE_ERROR` / `EDGE_PROTOCOL_ERROR` / `EDGE_UNAVAILABLE` diagnostics. Health's
+cache/coalescing still bounds public probe load. The supported CP/public-profile
+owner decision and actual image/canonical-pin qualification remain pending.
+
+Whole-consumer replacements use complete server-only verification snapshots and strong
+row `If-Match`. A stale `412` is exposed as `409 CONFLICT`; credential material never
+enters portal responses, persistence or audits. Credential append/delete and show-once
+responses are unchanged. Namespace backup ETags belong to the separate operator
+recovery contract described in operations, never to Nexus gateway rebuild requests.
 
 `edge.reconciliation` reports whether Edge still holds the consumer and proxy
 ids Nexus stored — the failure after `FERRUM_ADMIN_URL` is retargeted at a fresh

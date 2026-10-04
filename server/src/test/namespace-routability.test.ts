@@ -41,12 +41,14 @@ function errorCode(body: string): string {
 }
 
 /** A portal with a founding admin and a provider ready to publish. */
-async function portal(): Promise<{
+async function portal(allowPrivate = false): Promise<{
   harness: TestApp;
   admin: TestSession;
   provider: TestSession;
 }> {
-  const harness = await buildTestApp();
+  const harness = await buildTestApp({
+    env: { NEXUS_ALLOW_PRIVATE_UPSTREAMS: String(allowPrivate) },
+  });
   // The first registration is seated as the portal's super_admin.
   const admin = await harness.registerUser();
   const provider = await harness.registerUser({ role: 'provider' });
@@ -150,16 +152,16 @@ describe('namespace routability', () => {
     assert.equal(published.statusCode, 201, published.body);
   });
 
-  it('changes nothing against a gateway that reports no namespace block', async (t) => {
+  it('refuses missing policy without inventing a namespace mismatch', async (t) => {
     const { harness, admin, provider } = await portal();
     t.after(() => harness.close());
-    // The mock's default health payload — every Edge released before the block.
+    harness.edge.setBackendEgressPolicy(null);
 
     const health = await harness.authed(admin, { method: 'GET', url: '/api/health' });
     const body = health.json<AppHealth>();
-    assert.equal(body.status, 'ok');
-    assert.equal(body.edge.status, 'ok');
-    assert.equal(body.edge.reason, null);
+    assert.equal(body.status, 'degraded');
+    assert.equal(body.edge.status, 'degraded');
+    assert.equal(body.edge.reason, 'backend_egress_unverified');
     // Unknown topology is never a verdict.
     assert.equal(body.edge.namespace_routing.unserved, false);
     assert.equal(body.edge.namespace_routing.active, null);
@@ -171,11 +173,14 @@ describe('namespace routability', () => {
       url: '/api/apis',
       payload: publishPayload('legacy-gateway'),
     });
-    assert.equal(published.statusCode, 201, published.body);
+    assert.equal(published.statusCode, 502, published.body);
+    assert.equal(harness.edge.proxies.size, 0);
   });
 
   it('degrades on the response header alone, without a health block to read', async (t) => {
-    const { harness, admin, provider } = await portal();
+    // Private opt-in accepts recognized unserved metadata. The public profile
+    // refuses before the mutation/header, covered by the adoption contract.
+    const { harness, admin, provider } = await portal(true);
     t.after(() => harness.close());
 
     // The first publish is accepted: nothing has told the portal anything yet.
@@ -214,7 +219,7 @@ describe('namespace routability', () => {
   });
 
   it('never marks a read, and lets the gateway take the verdict back', async (t) => {
-    const { harness, admin, provider } = await portal();
+    const { harness, admin, provider } = await portal(true);
     t.after(() => harness.close());
 
     harness.edge.setServedNamespace('ferrum', { announce: false });

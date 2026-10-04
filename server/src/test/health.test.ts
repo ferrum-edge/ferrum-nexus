@@ -7,12 +7,19 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import type { ApiErrorBody, AppHealth, EdgeHealth } from '@ferrum-nexus/shared';
 
+import { publicEgressPolicy } from './mock-ferrum-edge.js';
 import { OPAQUE_ERROR } from '../routes/health.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 describe('health probe deadline', () => {
   it('bounds a hung version lookup and preserves normal admin deadlines', async (t) => {
     const gateway = createHttpServer((request, response) => {
+      if (request.url === '/backend-egress-policy') {
+        response.setHeader('cache-control', 'no-store');
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify(publicEgressPolicy()));
+        return;
+      }
       if (request.url !== '/health') return;
       void delay(700).then(() => {
         response.setHeader('content-type', 'application/json');
@@ -169,6 +176,29 @@ describe('health endpoints', () => {
   it('needs no authentication', async () => {
     const response = await harness.app.inject({ method: 'GET', url: '/api/health' });
     assert.equal(response.statusCode, 200);
+  });
+
+  it('reports only a coarse policy reason publicly and a bounded admin diagnostic', async (t) => {
+    const portal = await buildTestApp();
+    t.after(() => portal.close());
+    const operator = await portal.registerUser();
+    portal.edge.setBackendEgressPolicy({
+      ...publicEgressPolicy(),
+      secret_unknown_field: 'policy-secret-canary',
+    });
+    const anonymous = await portal.app.inject({ method: 'GET', url: '/api/health/edge' });
+    assert.equal(anonymous.statusCode, 200);
+    assert.equal(anonymous.json<EdgeHealth>().status, 'degraded');
+    assert.equal(anonymous.json<EdgeHealth>().reason, 'backend_egress_unverified');
+    assert.equal(anonymous.json<EdgeHealth>().error, null);
+    const detailed = await portal.authed(operator, { method: 'GET', url: '/api/health/edge' });
+    assert.equal(detailed.statusCode, 200);
+    assert.equal(
+      detailed.json<EdgeHealth>().error,
+      'Required backend egress policy could not be verified; check the configured pairing',
+    );
+    assert.ok(!detailed.body.includes('policy-secret-canary'));
+    assert.ok(!anonymous.body.includes('policy-secret-canary'));
   });
 
   it('reports the gateway on its own endpoint', async () => {
@@ -355,9 +385,28 @@ describe('health probe caching', () => {
         assert.equal(response.json<EdgeHealth>().status, 'ok');
       }
       assert.equal(edgeProbes(harness), 1, 'concurrent callers must share one probe');
+      assert.equal(harness.edge.callsTo('GET', '/backend-egress-policy').length, 1);
     } finally {
       await harness.close();
     }
+  });
+
+  it('never uses a cached healthy policy to authorize a backend mutation', async (t) => {
+    const harness = await buildTestApp({ env: { NEXUS_HEALTH_CACHE_MS: '5000' } });
+    t.after(() => harness.close());
+    const first = await harness.app.inject({ method: 'GET', url: '/api/health/edge' });
+    assert.equal(first.json<EdgeHealth>().status, 'ok');
+    harness.edge.setBackendEgressPolicy(null);
+    const cached = await harness.app.inject({ method: 'GET', url: '/api/health/edge' });
+    assert.equal(cached.json<EdgeHealth>().status, 'ok', 'observation remains cached');
+    await assert.rejects(
+      harness.edgeClient.proxies.create({
+        listen_path: '/nexus/stale-health',
+        backend_host: 'example.test',
+      }),
+    );
+    assert.equal(harness.edge.proxies.size, 0);
+    assert.equal(harness.edge.callsTo('GET', '/backend-egress-policy').length, 2);
   });
 
   it('collapses a burst of /api/health the same way', async () => {

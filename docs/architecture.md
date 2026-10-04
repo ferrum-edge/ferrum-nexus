@@ -364,9 +364,9 @@ while `starting`, `draining` or `unavailable`. `probe()` reports that as
 
 ### 5.2 `serializePerKey`, and the concurrency hazard it fixes
 
-`PUT /consumers/{id}` is a **whole-resource replace with no concurrency
-token** (no ETag, no `If-Match`, no version). Two concurrent read-modify-writes
-on one consumer both read the old state, and one overwrites the other:
+`PUT /consumers/{id}` is a **whole-resource replace**. Without a matching strong
+row `If-Match`, two concurrent read-modify-writes on one consumer can overwrite
+one another:
 
 ```
 t0  approve API-A: GET consumer -> acl_groups = []
@@ -385,9 +385,24 @@ through it: ACL-group changes (`ConsumerProvisioner.mutateAclGroups`),
 credential appends and deletes. A rotation re-reads the consumer _inside_ the
 lock, so the array length it checks and the index it deletes cannot drift.
 
-A `PUT` body must also be built from a fresh `GET` because omitting `keyauth`
-or `jwt` from it **deletes those credentials**. The provisioner echoes
-`current.credentials` back, redacted placeholders and all.
+The draft Edge adoption uses credential-complete `GET /consumers/{id}/verification`
+and its matching strong row ETag at exactly three whole-consumer callers: ACL mutation,
+re-enable and disable. Each preserves labels, Basic hashes, hidden/custom types and
+all unknown credential fields in transient server memory. Missing/unavailable tags
+refuse replacement; stale `412` becomes `CONFLICT`. A retry must re-read and recompute,
+never put a stale body under a fresh tag. Verification error bodies are suppressed
+like credential writes. Dedicated append/delete and show-once paths are unchanged.
+Leases still order Nexus's multi-step operations and fence its store transactions.
+
+Fresh closed `GET /backend-egress-policy` admission lives at every proxy/spec create
+and replacement, including plugin binding and undo; service preflight precedes staging,
+destructive conversion and spec ACL enrollment. Health caches observations only.
+The public profile requires namespace-matched local serving/public-only metadata and
+operator-established Admin/traffic singleton identity. Process evidence cannot attest
+CPs, remote DPs, load-balanced Admin endpoints or fleets. See the pending
+[supported-profile decision](operations.md#draft-backend-egress-adoption-pending-supported-profile-approval)
+and [unqualified packaged fixture](../e2e/public-only/README.md). Source authority is Edge
+`c764084b3b51c3f7ffde268c039688d35e49c553`, not proof of image publication or release pins.
 
 **Leases.** One row per key with an owner token and expiry: 60 s TTL renewed at
 half that, a 30 s wait for a contended key, then `409 CONFLICT` asking the user

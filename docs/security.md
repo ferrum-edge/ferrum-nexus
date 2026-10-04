@@ -89,18 +89,41 @@ mode; it does not name allowed destinations. Public mode also screens plugin
 endpoints, so a private plugin dependency such as Redis must be included in the
 CIDR allowlist.
 
-**Residual risk: time-of-check, not time-of-use.** Nexus resolves the name once,
-when the backend is written; Edge resolves it on every request. DNS rebinding or
-a re-pointed record is invisible to the portal, and Nexus does not pin the
-address because the proxy stores a hostname. Run Ferrum Edge with
-`FERRUM_BACKEND_ALLOW_IPS=public` so the gateway screens the address it actually
-connects to. The quickstart configures this setting. Nexus's check gives the
-provider an immediate `400`; Edge's egress mode holds when the record changes
-later. Deployments that allow private Nexus upstreams must coordinate the Edge
-CIDR allowlist with those destinations. Nexus cannot detect an Edge deployment
-without public-only egress, so such a gateway remains exposed to the rebinding
-path; Part B of GHSA-93rq-89vr-38pc is tracked in
-[ferrum-edge#5994](https://github.com/ferrum-edge/ferrum-edge/issues/5994).
+**Draft Part B adoption proposal; not a remediation or release claim.** The
+public-upstream profile now requires a fresh authenticated, namespace-matched
+`GET /backend-egress-policy` before each proxy/spec create or replacement,
+including staging, rebuilds, plugin association writes and compensation. Service
+preflight runs before destructive conversion and spec ACL enrollment. Schema v1
+must be complete and closed, with exact class arrays and evaluation order; only
+`enforcement_scope=local-data-plane` and `public_only_guaranteed=true` authorize
+public-profile writes. Missing capability, timeouts, authentication failures,
+unknown/inconsistent responses, cache evidence, CP admission-only, unserved/no
+local plane, default `both` and any allow-CIDR override refuse the mutation.
+The dangerous-range baseline alone is insufficient. A refused compensation uses
+existing repair-required reporting; it does not bypass the policy.
+
+The existing private opt-in still skips Nexus DNS admission and permits internal
+or unresolvable upstreams; Edge decides reachability. It accepts all recognized,
+consistent process-policy modes/scopes/overlays, while missing or malformed metadata
+still refuses backend writes. It is never represented as public-only. There is no
+new bypass switch. Public mode also screens private plugin dependencies, and any
+allow override needed for Redis removes public-only certification. Edge's
+`rediss://` hostname limitation remains: TLS Redis hostnames are screened then
+re-resolved by the Redis client; use a literal-IP TLS endpoint or the owner-documented
+plaintext hostname path where appropriate. Metadata does not expand this coverage.
+
+This is process evidence only. Operators must establish that a direct singleton's
+Admin endpoint and traffic listener belong to the same serving process. CP-only,
+remote/fleet/load-balanced Admin pairings cannot acquire that proof from this API.
+Health is sampled, cached and observational, never mutation authorization. Replacing
+or reconfiguring Edge, retargeting Admin or traffic endpoints, and existing traffic
+require operator enforcement and requalification; a startup/sample success does not
+secure future fleet traffic. Current released documentation accepts CP pairings, so
+this proposed narrowing **cannot land until an explicit supported-profile owner
+decision** after exact-head review and hosted CI. Edge source authority is
+`c764084b3b51c3f7ffde268c039688d35e49c553` (`v0.9.11`); published-image qualification
+and released canonical pins remain a separate root finishing dependency. The draft
+GHSA-93rq-89vr-38pc is not declared fixed.
 
 ### Out of scope
 
@@ -1988,7 +2011,8 @@ Before going live:
 - [ ] `NEXUS_ALLOW_PRIVATE_UPSTREAMS` is `false` unless the portal fronts
       internal services, in which case Edge keeps
       `FERRUM_BACKEND_ALLOW_IPS=public` and lists intended private destinations
-      in `FERRUM_BACKEND_ALLOW_CIDRS` (including private plugin endpoints).
+      in `FERRUM_BACKEND_ALLOW_CIDRS` (including private plugin endpoints) only
+      under the private opt-in profile; every allow overlay prevents public-only certification.
 - [ ] The Nexus process can resolve public DNS; with private upstreams refused,
       an unresolvable name cannot be published.
 - [ ] Ferrum Edge runs with `FERRUM_BACKEND_ALLOW_IPS=public` (or an equivalent

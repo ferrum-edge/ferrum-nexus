@@ -58,7 +58,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 
 import { jwtVerify } from 'jose';
@@ -66,6 +66,7 @@ import { FERRUM_PROVISIONED_BY_HEADER } from '@ferrum-nexus/shared';
 
 /** One recorded Admin API call. */
 export interface RecordedRequest {
+  ifMatch?: string;
   provisionedBy?: string;
   method: string;
   /** Path without the query string. */
@@ -244,6 +245,8 @@ interface QueuedFailure {
 
 /** The running mock. */
 export interface MockFerrumEdge {
+  /** Exact owner-contract response; null models the missing capability. */
+  setBackendEgressPolicy(payload: Record<string, unknown> | null): void;
   /** Base URL, e.g. `http://127.0.0.1:54321`. Valid after `start()`. */
   readonly url: string;
   /** Every request the mock has served since the last `reset()`. */
@@ -1564,6 +1567,25 @@ function project(consumer: StoredConsumer): Record<string, unknown> {
   };
 }
 
+/** Public serving singleton fixture; not evidence about a deployed gateway. */
+export function publicEgressPolicy(namespace = 'nexus'): Record<string, unknown> {
+  return {
+    schema_version: 1,
+    ip_classification: 'ferrum-private-reserved-v1',
+    namespace,
+    policy_scope: 'process',
+    enforcement_scope: 'local-data-plane',
+    mode: 'public',
+    mode_allowed_ip_classes: ['public'],
+    mode_blocked_ip_classes: ['private-reserved'],
+    dangerous_ranges_blocked: true,
+    allow_cidr_overrides_present: false,
+    deny_cidr_overrides_present: false,
+    evaluation_order: ['allow-cidrs', 'deny-cidrs', 'dangerous-ranges', 'ip-mode'],
+    public_only_guaranteed: true,
+  };
+}
+
 /** Build (but do not start) the mock. */
 export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrumEdge {
   const secret = new TextEncoder().encode(options.jwtSecret);
@@ -1581,6 +1603,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const failures: QueuedFailure[] = [];
   const lostAcks: QueuedFailure[] = [];
   const delays: QueuedDelay[] = [];
+  let egressPolicy: Record<string, unknown> | null | undefined;
   /**
    * Responses whose acknowledgement is being dropped, keyed by the response
    * object the handler will eventually write to.
@@ -1634,6 +1657,11 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
   function consumersIn(namespace: string): StoredConsumer[] {
     return [...consumers.values()].filter((consumer) => consumer.namespace === namespace);
+  }
+
+  function consumerTag(consumer: StoredConsumer): string {
+    const mac = createHmac('sha256', secret).update(JSON.stringify(consumer)).digest('hex');
+    return '"' + mac.slice(0, 32) + '"';
   }
 
   function identityTaken(namespace: string, values: (string | null)[], selfId?: string): boolean {
@@ -1910,6 +1938,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     namespace: string,
     body: unknown,
     query: URLSearchParams,
+    ifMatch: string | string[] | undefined,
   ): void {
     const [, id, credentialsSegment, credentialType, indexSegment] = segments;
 
@@ -1962,13 +1991,25 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     const stored = consumers.get(key(namespace, id));
 
+    const tag = stored ? consumerTag(stored) : undefined;
+    if (credentialsSegment === 'verification' && method === 'GET') {
+      if (!stored) return fail(res, 404, 'Consumer not found');
+      res.setHeader('cache-control', 'no-store');
+      res.setHeader('etag', tag!);
+      return send(res, 200, stored);
+    }
+
     if (credentialsSegment === undefined) {
       if (method === 'GET') {
         if (!stored) return fail(res, 404, 'Consumer not found');
+        res.setHeader('etag', tag!);
         return send(res, 200, project(stored));
       }
       if (method === 'PUT') {
         if (!stored) return fail(res, 404, 'Consumer not found');
+        if (ifMatch !== undefined && ifMatch !== tag) {
+          return fail(res, 412, 'Precondition failed');
+        }
         if (!isRecord(body)) return fail(res, 400, 'Request body must be a JSON object');
         for (const field of Object.keys(body)) {
           if (!CONSUMER_KEYS.has(field)) return fail(res, 400, `unknown field: ${field}`);
@@ -1982,11 +2023,13 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             'Consumer identity or credential conflicts with another Consumer in the namespace',
           );
         }
+        const credentials = mergeCredentialsOnReplace(stored.credentials, body.credentials);
+        if (credentials === null) return fail(res, 400, 'Unmatched redacted credential');
         if (isRecord(body.labels)) stored.labels = body.labels as Record<string, string>;
         stored.username = username;
         stored.custom_id = customId;
         stored.acl_groups = Array.isArray(body.acl_groups) ? body.acl_groups.map(String) : [];
-        stored.credentials = mergeCredentialsOnReplace(stored.credentials, body.credentials);
+        stored.credentials = credentials;
         stored.updated_at = nowIso();
         return send(res, 200, project(stored));
       }
@@ -2075,12 +2118,20 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   function mergeCredentialsOnReplace(
     stored: Record<string, Record<string, unknown>[]>,
     incoming: unknown,
-  ): Record<string, Record<string, unknown>[]> {
+  ): Record<string, Record<string, unknown>[]> | null {
     const submitted = normaliseCredentials(incoming);
     const result: Record<string, Record<string, unknown>[]> = {};
 
     for (const [type, entries] of Object.entries(submitted)) {
       const previous = stored[type] ?? [];
+      if (
+        entries.some((entry, index) => {
+          const field = type === 'keyauth' ? 'key' : 'secret';
+          return entry[field] === REDACTED && previous[index] === undefined;
+        })
+      ) {
+        return null;
+      }
       result[type] = entries.map((entry, index) => {
         const field = type === 'keyauth' ? 'key' : 'secret';
         if (entry[field] === REDACTED) {
@@ -2898,6 +2949,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     const claims = verified instanceof Error ? null : verified;
     const provisionedBy = req.headers[FERRUM_PROVISIONED_BY_HEADER.toLowerCase()];
     requests.push({
+      ifMatch: typeof req.headers['if-match'] === 'string' ? req.headers['if-match'] : undefined,
       provisionedBy: typeof provisionedBy === 'string' ? provisionedBy : undefined,
       method,
       path: url.pathname,
@@ -2908,14 +2960,20 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     });
 
     if (verified instanceof Error) return fail(res, 401, verified.message);
-    if (claims?.role !== 'admin' && segments[0] === 'consumers') {
+    if (
+      claims?.role !== 'admin' &&
+      (segments[0] === 'consumers' || segments[0] === 'backend-egress-policy')
+    ) {
       return fail(res, 403, `Admin role '${String(claims?.role)}' cannot access this endpoint`);
     }
 
     // Namespace-scoped surfaces are selected by `X-Ferrum-Namespace`; the
     // `/namespaces/{name}` registry routes are selected by the name in the path.
     const scopedNamespace =
-      segments[0] === 'consumers' || segments[0] === 'proxies' || segments[0] === 'api-specs'
+      segments[0] === 'consumers' ||
+      segments[0] === 'proxies' ||
+      segments[0] === 'api-specs' ||
+      segments[0] === 'backend-egress-policy'
         ? namespace
         : segments[0] === 'plugins' && segments[1] === 'config'
           ? namespace
@@ -2990,6 +3048,23 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     }
 
     switch (segments[0]) {
+      case 'backend-egress-policy': {
+        if (method !== 'GET') return fail(res, 405, 'Method not allowed');
+        if (egressPolicy === null) return fail(res, 404, 'Not found');
+        const payload = egressPolicy ?? {
+          ...publicEgressPolicy(namespace),
+          enforcement_scope:
+            health.mode === 'cp'
+              ? 'admission-only'
+              : health.mode === 'node_agent'
+                ? 'no-data-plane'
+                : dataPlaneUnserved(namespace)
+                  ? 'unserved-namespace'
+                  : 'local-data-plane',
+        };
+        res.setHeader('cache-control', 'no-store');
+        return send(res, 200, payload);
+      }
       case 'health':
       case 'status':
         // Edge serves the *complete* payload with a 503 while it is
@@ -3012,7 +3087,15 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       case 'namespaces':
         return handleNamespaces(res, method, segments, body, url.searchParams);
       case 'consumers':
-        return handleConsumers(res, method, segments, namespace, body, url.searchParams);
+        return handleConsumers(
+          res,
+          method,
+          segments,
+          namespace,
+          body,
+          url.searchParams,
+          req.headers['if-match'],
+        );
       case 'proxies':
         return handleProxies(res, method, segments, namespace, body, url.searchParams);
       case 'api-specs':
@@ -3060,6 +3143,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     proxies,
     pluginConfigs,
     apiSpecs,
+    setBackendEgressPolicy(payload): void {
+      egressPolicy = payload;
+    },
 
     async start(): Promise<string> {
       if (server) return baseUrl;
@@ -3085,6 +3171,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     },
 
     reset(): void {
+      egressPolicy = undefined;
       consumers.clear();
       proxies.clear();
       pluginConfigs.clear();

@@ -115,8 +115,8 @@ export interface EdgeConsumer {
  *
  * `namespace` is intentionally absent: the `X-Ferrum-Namespace` header
  * overwrites it on the wire, and sending unknown/read-only fields risks a 400.
- * `PUT` is a whole-resource replace — always build it from a `GET` response so
- * omitted credential types are not deleted.
+ * Whole-resource `PUT` uses EdgeConsumerReplacement, built from a complete
+ * verification snapshot and sent with its matching strong row tag.
  */
 export interface EdgeConsumerWrite {
   labels?: Record<string, string>;
@@ -126,6 +126,16 @@ export interface EdgeConsumerWrite {
   credentials?: EdgeCredentialMap;
   acl_groups?: string[];
 }
+
+/** Complete authoritative server-only row, including hidden/custom credential fields. */
+export type EdgeVerifiedConsumer = Omit<EdgeConsumer, 'credentials'> & {
+  credentials: Record<string, Record<string, unknown>[]>;
+};
+
+/** Whole-consumer writes must preserve the credential-complete snapshot. */
+export type EdgeConsumerReplacement = Omit<EdgeConsumerWrite, 'credentials'> & {
+  credentials?: Record<string, Record<string, unknown>[]>;
+};
 
 /* ── Proxies ────────────────────────────────────────────────────────────── */
 
@@ -612,6 +622,8 @@ export interface EdgeHealth {
 
 /** Result of the Nexus-side Edge probe used by `GET /api/health`. */
 export interface EdgeProbe {
+  /** Sampled observation only; never authorizes a backend mutation. */
+  backendEgressVerified?: boolean;
   /**
    * Whether the gateway answered at all. A gateway that answered `503` because
    * it is `starting`/`draining`/`unavailable` is **reachable** — read `ready`.

@@ -130,7 +130,8 @@ container image.
    - Approval adds ACL group `nexus:api:<api_id>:approved` to the requesting identity's consumer;
      revocation removes it. Requestable APIs get an `access_control` plugin whose `allowed_groups`
      is that group.
-   - Edge's `PUT /consumers/{id}` is a whole-resource replace with no concurrency token, so
+   - Edge's `PUT /consumers/{id}` is a whole-resource replace. The draft adoption uses
+     credential-complete verification with matching strong row `If-Match`; still
      **every consumer mutation must go through `edge.serializePerKey(consumerId, …)`**.
 6. **Show-once credentials.** Plaintext credential material is returned exactly once and never
    stored; only a SHA-256 fingerprint and last4 go into `credential_metadata`. Rotation is

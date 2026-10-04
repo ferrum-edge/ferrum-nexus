@@ -78,6 +78,7 @@ import { runAccountRecoveryContract } from './account-recovery-contract.js';
 import { runApplicationDeletionContract } from './application-deletion-contract.js';
 import { runApplicationViewerAuditContract } from './application-viewer-audit-contract.js';
 import { runDisableRevokesResetLinksContract } from './disable-revokes-reset-links-contract.js';
+import { runEdgeSecurityAdoptionContract } from './edge-security-adoption-contract.js';
 import { faultInjectingStore } from './fault-injection.js';
 import { testCaptchaTransport } from './helpers.js';
 import { runMcpMembershipContract } from './mcp-membership-contract.js';
@@ -360,6 +361,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
   runApplicationDeletionContract(label, makeStore);
   runApplicationViewerAuditContract(label, makeStore);
   runDisableRevokesResetLinksContract(label, makeStore);
+  runEdgeSecurityAdoptionContract(label, makeStore);
   runMcpMembershipContract(label, makeStore);
   runMessageBudgetContract(label, makeStore);
   runMailLifecycleContract(label, makeStore);

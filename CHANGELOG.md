@@ -8,6 +8,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
+- **Draft Edge security adoption proposal** (GHSA-93rq-89vr-38pc Part B): fresh,
+  closed namespace-matched egress admission on all proxy/spec write boundaries,
+  preflight before destructive/staging/ACL effects, fail-closed compensation with
+  repair reporting, and coarse observational degraded health. Three whole-consumer
+  callers use credential-complete verification and matching strong row `If-Match`,
+  preserving labels and hidden/custom data and refusing stale replacements. Four-store
+  service/protocol regressions and a separate controlled packaged DNS-rebinding fixture
+  are included. This cannot land pending explicit CP/public-profile owner approval,
+  exact-head hosted CI/review, actual published-image qualification and released
+  canonical-pin finishing. Versions and current pins remain unchanged; the advisory
+  is not declared fixed. See [proposal limitations](docs/security.md#1-threat-model).
+
 - **Optional MCP tool subsets** (Refs #446). Consumers request published exposure IDs;
   providers can narrow approval. Separate MCP-all/per-tool groups preserve REST access
   and prevent its approval group bypassing subsets. Null retains all published tools;

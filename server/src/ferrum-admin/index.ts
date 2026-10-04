@@ -71,5 +71,8 @@ export function createFerrumAdmin(
   logger: EdgeLogger = silentEdgeLogger,
   leases?: LeaseRepo,
 ): FerrumAdminClient {
-  return createFerrumAdminClient(config.edge, logger, leases === undefined ? {} : { leases });
+  return createFerrumAdminClient(config.edge, logger, {
+    leases,
+    allowPrivateUpstreams: config.allowPrivateUpstreams,
+  });
 }

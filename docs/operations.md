@@ -225,9 +225,47 @@ curl -s "$FERRUM_ADMIN_URL/health" -H "Authorization: Bearer $ADMIN_JWT" | jq .n
 }
 ```
 
-A control plane reports `data_plane_single_namespace: false` and
-`active: null`, and never degrades the portal. A gateway without a `namespace`
-block is treated as unknown, not as a mismatch.
+The released namespace-routing policy accepts a control plane with
+`data_plane_single_namespace: false` and `active: null`; a missing namespace
+block is unknown, not a mismatch. **The draft public-egress proposal below narrows
+that accepted CP pairing and requires an explicit owner decision before landing.**
+
+### Draft backend egress adoption (pending supported-profile approval)
+
+With `NEXUS_ALLOW_PRIVATE_UPSTREAMS=false`, every backend-writing Admin boundary
+requires fresh authenticated, namespace-matched, no-store process metadata from
+`GET /backend-egress-policy`, schema v1. Only `local-data-plane` with
+`public_only_guaranteed=true` passes. Nexus validates the complete closed vocabulary,
+exact allowed/blocked class arrays, evaluation order and cross-field consistency.
+Unknown/missing/malformed metadata, auth/network/timeout failures, cached answers,
+CP-only/admission-only, unserved/no data plane, mode `both` and any allow-CIDR overlay
+refuse writes. Preflight precedes destructive conversions, staging and ACL building;
+compensation repeats admission and records repair-required failures.
+
+`NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` retains its existing DNS-admission opt-in:
+internal and unresolvable names are permitted, and Edge still decides reachability.
+Recognized consistent weaker metadata is accepted in this profile, including CP,
+`both`, `private` and overlays; missing/unknown metadata is still refused. This
+profile is not public-only, and there is no independent bypass switch. Private
+plugin dependencies may require allow CIDRs; any such override removes public-only
+certification even when an operator considers the override harmless. Edge's
+`rediss://` hostname rebinding limitation remains unchanged (see the security guide).
+
+A direct singleton requires operator-established identity of its Admin and traffic
+process. Metadata has no process identity or fleet inventory; it cannot attest a
+remote DP, other process, load-balanced Admin endpoint or future replacement. Check
+both endpoints and configuration on replacement/reconfiguration, and enforce policy
+for existing traffic outside Nexus. Startup and cached health successes authorize no
+mutation. Public health reports only `backend_egress_unverified`, keeps HTTP 200 for
+degraded liveness, and retains probe caching/coalescing. Administrator diagnostics
+contain fixed bounded reasons, never policy bodies, CIDRs or secrets.
+
+This proposal is reviewable code, not permission to change released support or a
+claim that GHSA-93rq-89vr-38pc is fixed. Root must obtain the explicit CP/public-profile
+owner decision after exact-head independent review and hosted CI. Root must also
+qualify actual published Edge `v0.9.11` image digests and finish the released canonical
+pin. Existing pins are unchanged; contracts draft PR #13 is not a released pin.
+See the separate [unqualified packaged fixture](../e2e/public-only/README.md).
 
 **Fixing a mismatch.** Set the portal's `FERRUM_NAMESPACE` to the gateway's
 `active` value, or restart the gateway with the portal's value, then restart
@@ -981,9 +1019,9 @@ rechecks public-address policy when it opens each upstream connection. A
 deployment that sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` must configure
 `FERRUM_BACKEND_ALLOW_CIDRS=<intended private ranges>` while keeping
 `FERRUM_BACKEND_ALLOW_IPS=public`. Public mode also screens plugin endpoints,
-including private Redis URLs. Part B of GHSA-93rq-89vr-38pc remains: Nexus
-cannot detect an Edge deployment without public-only egress; this is tracked in
-[ferrum-edge#5994](https://github.com/ferrum-edge/ferrum-edge/issues/5994).
+including private Redis URLs. Under the draft public profile, any allow-CIDR override
+prevents certification and refuses mutations. See the pending supported-profile
+proposal above; its source contract does not qualify the current pinned image.
 
 Dependabot proposes digest updates for Compose and Dockerfile images, which are
 reviewed with the source change. GitHub Actions workflow service images and
@@ -1125,6 +1163,32 @@ keys and `jwt` secrets unredacted. The Nexus database holds only credential
 fingerprints and last-four characters, but it does hold password hashes,
 session-token hashes and encrypted settings. Encrypt both backups and restrict
 access.
+
+### Conditional Edge snapshots and namespace restore
+
+The Edge `v0.9.11` owner contract adds `GET /backup?conditional=true` for a
+coherent, complete, unfiltered namespace snapshot and matching strong **namespace**
+ETag. Preserve that response header and send it in `If-Match` to
+`POST /restore?confirm=true`. Body metadata, consumer row ETags and wildcard tags
+are not an authorization substitute for that coherent namespace snapshot. Snapshot
+credentials remain live secrets, never Nexus DTOs, logs or audit details.
+
+A malformed/unsupported conditional request is `400`; a stale namespace
+precondition is `412` and must not overwrite concurrent updates. `501` means the
+backend/topology cannot supply the required atomic/coherent capability (for example
+standalone MongoDB); `503` means authoritative snapshot/audit/admission is unavailable.
+Fail closed, resolve the condition and obtain a new coherent snapshot; never retry
+an old restore body under a newly fetched tag. Verify durable/live state after an
+uncertain acknowledgement before retrying. These are distinct from strong **row**
+`If-Match` used by Nexus's three whole-consumer callers with
+`GET /consumers/{id}/verification`.
+
+Nexus has no namespace Admin restore caller. Its API gateway restore rebuilds
+individual resources and repeats egress admission. Conditional Edge backup does not
+make Nexus and Edge backups jointly atomic; keep the writer-drain and paired-backup
+procedure below. This owner-contract recovery path remains unqualified until root
+supplies published-image and canonical-pin facts; do not assume the current old-image
+pin implements it.
 
 ### Ordering and consistency
 

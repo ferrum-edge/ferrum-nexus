@@ -134,3 +134,13 @@ A proposed service-manifest preview case runs against the packaged schema asset,
 checks namespace/null rejection and redaction, and proves no request reaches the
 upstream for declared references. Contract fixture/integrity checks run in the server
 suite. These are hosted CI gates; adding cases does not claim they have passed.
+
+## Draft public-only pairing qualification
+
+The existing stack deliberately sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` and keeps
+its private-service acceptance suite. It cannot prove Part B DNS-rebinding enforcement.
+The separate [public-only fixture](public-only/README.md) uses controlled isolated
+DNS and canaries, with no unrelated public-service traffic. It remains unqualified
+pending root-supplied published image digests and canonical pins. The candidate now
+requires policy/verification capabilities absent from the current old-image pairing;
+that dependency must fail visibly, never be skipped, mocked or satisfied by fake pins.
