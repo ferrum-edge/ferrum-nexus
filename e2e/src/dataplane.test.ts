@@ -29,6 +29,7 @@ import {
   type PublishedApi,
 } from './fixtures.js';
 import {
+  ADMIN_PASSWORD,
   adminSession,
   callGateway,
   clearMail,
@@ -337,6 +338,18 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     return body.result;
   }
 
+  /** The released bridge reports a tool-policy denial as an HTTP 200 RPC error. */
+  async function assertToolPolicyDenied(response: Response): Promise<void> {
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    assert.deepEqual(JSON.parse(text), {
+      jsonrpc: '2.0',
+      id: 1,
+      error: { code: -32001, message: 'MCP tool call denied by gateway policy' },
+    });
+    assert.equal(reachedUpstream(response), false);
+  }
+
   async function negotiatedHeaders(
     response: Response,
     headers: Record<string, string>,
@@ -508,12 +521,18 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
 
   for (const flavour of [
     { plugin: 'key_auth', credential: 'keyauth', application: false },
+    { plugin: 'key_auth', credential: 'keyauth', application: true },
     { plugin: 'basic_auth', credential: 'basicauth', application: false },
+    { plugin: 'basic_auth', credential: 'basicauth', application: true },
+    { plugin: 'jwt_auth', credential: 'jwt', application: false },
     { plugin: 'jwt_auth', credential: 'jwt', application: true },
   ] as const) {
     it(`enforces provider-narrowed subsets with ${flavour.credential} ${flavour.application ? 'application' : 'account'} credentials`, async () => {
       const client = await newClient();
-      let api = await publishAgentApi(`e2e-subsets-${flavour.credential}-${RUN}`, flavour.plugin);
+      let api = await publishAgentApi(
+        `e2e-subsets-${flavour.credential}-${flavour.application ? 'app' : 'user'}-${RUN}`,
+        flavour.plugin,
+      );
       api = (
         await portal<{ api: PublishedApi }>('PATCH', `/api/apis/${api.id}`, {
           session: provider,
@@ -592,6 +611,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
           arguments: {},
         });
         assert.equal(rolledBack.status, 403, await rolledBack.text());
+        assert.equal(reachedUpstream(rolledBack), false);
         assert.deepEqual(await upstreamSnapshot(), beforeRollback);
       }
       const approval = await portal<{ grant: { id: string; approved_tools: string[] } }>(
@@ -609,10 +629,9 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       const beforeDenied = await upstreamSnapshot();
       const denied = await rpc(api, sessionHeaders, 'tools/call', {
         name: `${api.slug}.create_invoice`,
-        arguments: { memo: 'subset must deny' },
+        arguments: { body: { memo: 'subset must deny' } },
       });
-      assert.equal(denied.status, 403, await denied.text());
-      assert.equal(reachedUpstream(denied), false);
+      await assertToolPolicyDenied(denied);
       assert.deepEqual(
         await upstreamSnapshot(),
         beforeDenied,
@@ -625,10 +644,81 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         }),
       );
       assert.equal(called.isError, false);
+      assert.equal(called.structuredContent?.method, 'GET');
+      assert.equal(called.structuredContent?.path, '/invoices');
+      assert.deepEqual(
+        await upstreamSnapshot(),
+        withUpstreamCalls(beforeDenied, 'GET /invoices', 1),
+        'the approved tool dispatches exactly one read',
+      );
+      if (applicationId) {
+        const account = authHeadersFor(
+          await issueCredential(client, flavour.credential),
+          flavour.credential,
+        );
+        const beforeAccount = await upstreamSnapshot();
+        for (const method of ['tools/list', 'tools/call']) {
+          const refused = await rpc(api, account, method, {
+            name: `${api.slug}.list_invoices`,
+            arguments: {},
+          });
+          assert.equal(refused.status, 403, await refused.text());
+          assert.equal(reachedUpstream(refused), false);
+        }
+        assert.deepEqual(await upstreamSnapshot(), beforeAccount);
+      }
       const rest = await callGateway(`${api.listen_path}/invoices`, { headers });
       assert.equal(rest.status, 200);
       assert.ok(reachedUpstream(rest));
       await rest.text();
+      await portal('PATCH', `/api/users/${client.userId}`, {
+        session: provider,
+        body: { status: 'disabled' },
+      });
+      const beforeDisabled = await upstreamSnapshot();
+      for (const method of ['tools/list', 'tools/call']) {
+        const refused = await rpc(api, sessionHeaders, method, {
+          name: `${api.slug}.list_invoices`,
+          arguments: {},
+        });
+        assert.equal(refused.status, 401, await refused.text());
+        assert.equal(reachedUpstream(refused), false);
+      }
+      assert.deepEqual(await upstreamSnapshot(), beforeDisabled);
+      await portal('PATCH', `/api/users/${client.userId}`, {
+        session: provider,
+        body: { status: 'active' },
+      });
+      const beforeRetired = await upstreamSnapshot();
+      const retired = await rpc(api, sessionHeaders, 'tools/call', {
+        name: `${api.slug}.list_invoices`,
+        arguments: {},
+      });
+      assert.equal(retired.status, 401, await retired.text());
+      assert.equal(reachedUpstream(retired), false);
+      assert.deepEqual(await upstreamSnapshot(), beforeRetired);
+      const replacement = authHeadersFor(
+        await issueCredential(
+          await signIn(client.email, ADMIN_PASSWORD),
+          flavour.credential,
+          applicationId,
+        ),
+        flavour.credential,
+      );
+      const restoredSession = await initializeAgent(api, replacement);
+      const restoredList = await result(await rpc(api, restoredSession, 'tools/list'));
+      assert.deepEqual(
+        restoredList.tools?.map((tool) => tool.name),
+        [`${api.slug}.list_invoices`],
+      );
+      const beforeRestoredDenied = await upstreamSnapshot();
+      await assertToolPolicyDenied(
+        await rpc(api, restoredSession, 'tools/call', {
+          name: `${api.slug}.create_invoice`,
+          arguments: { body: { memo: 're-enable must retain the subset' } },
+        }),
+      );
+      assert.deepEqual(await upstreamSnapshot(), beforeRestoredDenied);
       await portal('POST', `/api/grants/${approval.grant.id}/revoke`, {
         session: provider,
         body: {},
@@ -636,11 +726,12 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       });
       const beforeRevoke = await upstreamSnapshot();
       for (const method of ['tools/list', 'tools/call']) {
-        const response = await rpc(api, sessionHeaders, method, {
+        const response = await rpc(api, restoredSession, method, {
           name: `${api.slug}.list_invoices`,
           arguments: {},
         });
         assert.equal(response.status, 403, await response.text());
+        assert.equal(reachedUpstream(response), false);
       }
       assert.deepEqual(await upstreamSnapshot(), beforeRevoke);
     });
@@ -681,7 +772,9 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     async function names(headers: Record<string, string>): Promise<string[]> {
       const { 'mcp-session-id': _session, 'mcp-protocol-version': _version, ...auth } = headers;
       const fresh = await initializeAgent(api, auth);
-      return (await result(await rpc(api, fresh, 'tools/list'))).tools?.map((tool) => tool.name) ?? [];
+      const listed = await result(await rpc(api, fresh, 'tools/list'));
+      assert.ok(listed.tools, 'discovery returns an explicit tool array, even when empty');
+      return listed.tools.map((tool) => tool.name);
     }
     assert.deepEqual(await names(selectedSession), [`${api.slug}.list_invoices`]);
     assert.deepEqual(await names(emptySession), []);
@@ -690,7 +783,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       name: `${api.slug}.list_invoices`,
       arguments: {},
     });
-    assert.equal(emptyCall.status, 403, await emptyCall.text());
+    await assertToolPolicyDenied(emptyCall);
     assert.deepEqual(await upstreamSnapshot(), beforeEmpty);
     const emptyRest = await callGateway(`${api.listen_path}/invoices`, { headers: emptyHeaders });
     assert.equal(emptyRest.status, 200);
@@ -766,7 +859,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         name: `${api.slug}.${name}`,
         arguments: {},
       });
-      assert.equal(stale.status, 403, await stale.text());
+      await assertToolPolicyDenied(stale);
       assert.deepEqual(await upstreamSnapshot(), beforeStale);
     }
     const currentId = api.agents?.operations[0]?.id;
@@ -784,12 +877,24 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     });
     assert.notEqual(updated.api.agents?.operations[0]?.id, currentId);
     assert.deepEqual(await names(selectedSession), []);
-    assert.equal((await names(allSession)).length, 2);
+    assert.deepEqual(
+      (await names(allSession)).sort(),
+      [`${api.slug}.list_invoices`, `${api.slug}.create_invoice`].sort(),
+    );
+    const beforeSpecDenied = await upstreamSnapshot();
+    await assertToolPolicyDenied(
+      await rpc(api, await initializeAgent(api, selectedHeaders), 'tools/call', {
+        name: `${api.slug}.list_invoices`,
+        arguments: {},
+      }),
+    );
+    assert.deepEqual(await upstreamSnapshot(), beforeSpecDenied);
     await portal('PATCH', `/api/apis/${api.id}`, { session: provider, body: { agents: null } });
     const disabledRest = await callGateway(`${api.listen_path}/invoices`, {
       headers: selectedHeaders,
     });
     assert.equal(disabledRest.status, 200);
+    assert.ok(reachedUpstream(disabledRest));
     await disabledRest.text();
     api = (
       await portal<{ api: PublishedApi }>('PATCH', `/api/apis/${api.id}`, {
@@ -801,6 +906,27 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     const enabledAll = await initializeAgent(api, allHeaders);
     assert.deepEqual(await names(enabledSelected), []);
     assert.deepEqual(await names(enabledAll), [`${api.slug}.list_invoices`]);
+    const beforeEnabled = await upstreamSnapshot();
+    await assertToolPolicyDenied(
+      await rpc(api, enabledSelected, 'tools/call', {
+        name: `${api.slug}.list_invoices`,
+        arguments: {},
+      }),
+    );
+    assert.deepEqual(await upstreamSnapshot(), beforeEnabled);
+    const enabledCall = await result(
+      await rpc(api, enabledAll, 'tools/call', {
+        name: `${api.slug}.list_invoices`,
+        arguments: {},
+      }),
+    );
+    assert.equal(enabledCall.isError, false);
+    assert.equal(enabledCall.structuredContent?.method, 'GET');
+    assert.equal(enabledCall.structuredContent?.path, '/invoices');
+    assert.deepEqual(
+      await upstreamSnapshot(),
+      withUpstreamCalls(beforeEnabled, 'GET /invoices', 1),
+    );
     await portal('DELETE', `/api/apis/${api.id}`, { session: provider });
     const beforeDeleted = await upstreamSnapshot();
     const deleted = await rpc(api, enabledAll, 'tools/call', {
@@ -808,6 +934,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       arguments: {},
     });
     assert.ok(deleted.status >= 400);
+    assert.equal(reachedUpstream(deleted), false);
     await deleted.text();
     assert.deepEqual(await upstreamSnapshot(), beforeDeleted);
   });

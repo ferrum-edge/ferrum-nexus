@@ -19,13 +19,14 @@ import { AuditAction } from '../audit/service.js';
 import { canonicalConsumerLockKey } from '../credentials/consumers.js';
 import type {
   AccessRequestRecord,
+  ConsumerRecord,
   GrantRecord,
   NexusStore,
   TransactionOptions,
 } from '../db/store.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
 import { userLifecycleLockKey } from '../lib/keyed-serializer.js';
-import { heldLeaseFences } from '../lib/lease-fence.js';
+import { heldLeaseFences, outsideHeldLeases } from '../lib/lease-fence.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
@@ -51,7 +52,14 @@ export function runMcpMembershipContract(
     before(async () => {
       target = await makeStore();
       faults = faultInjectingStore(target.store);
-      harness = await buildTestApp({ store: faults.store });
+      // Each test gets its own fault queue, including transaction-scoped calls.
+      // An unreached fault still fails cleanup, but cannot poison the next fixture.
+      const store = new Proxy(target.store, {
+        get(_store, property): unknown {
+          return Reflect.get(faults.store, property);
+        },
+      });
+      harness = await buildTestApp({ store });
       peerStore = await target.peer?.();
       peer = await buildTestApp({ store: peerStore ?? target.store, edge: harness.edge });
       founder = await harness.registerUser();
@@ -59,9 +67,19 @@ export function runMcpMembershipContract(
     });
 
     afterEach(() => {
-      for (const restore of patches.splice(0).reverse()) restore();
+      const pending = faults.pending();
+      const failures: unknown[] = [];
+      for (const restore of patches.splice(0).reverse()) {
+        try {
+          restore();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
       harness.edge.clearInjections();
-      assert.deepEqual(faults.pending(), [], 'every armed store fault was reached');
+      faults = faultInjectingStore(target.store);
+      assert.deepEqual(pending, [], 'every armed store fault was reached');
+      if (failures.length > 0) throw new AggregateError(failures, 'fixture patch cleanup failed');
     });
 
     after(async () => {
@@ -173,7 +191,62 @@ export function runMcpMembershipContract(
         payload: { user_ids: [userId], reason: 'Rebuilt consumer' },
       });
       assert.equal(response.statusCode, 200, response.body);
-      return response.json<RepairGatewayReferencesResponse>().consumers;
+      const result = response.json<RepairGatewayReferencesResponse>();
+      for (const repaired of result.consumers) {
+        assert.equal(repaired.user_id, userId);
+        if (repaired.error !== null) continue;
+        const row = await target.store.consumers.findByUserAndNamespace(
+          userId,
+          'nexus',
+          repaired.application_id,
+        );
+        assert.ok(row);
+        assert.equal(row.ferrum_consumer_id, repaired.ferrum_consumer_id);
+        assert.ok(
+          result.report.orphaned_consumers.some(
+            (orphan) =>
+              orphan.user_id === userId &&
+              orphan.application_id === row.application_id &&
+              orphan.ferrum_consumer_id === repaired.previous_ferrum_consumer_id &&
+              orphan.ferrum_username === row.ferrum_username,
+          ),
+          'the production scan detected the exact repaired identity',
+        );
+        const live = await harness.edgeClient.consumers.get(row.ferrum_consumer_id);
+        assert.equal(live?.username, row.ferrum_username);
+        assert.equal(live?.custom_id, row.application_id ?? userId);
+        const audit = await target.store.auditLogs.list({
+          action: AuditAction.GATEWAY_CONSUMER_REPAIR,
+          target_id: userId,
+        });
+        const entries = audit.items.filter(
+          (entry) => entry.details.ferrum_username === row.ferrum_username,
+        );
+        assert.equal(entries.length, 1, 'successful recreation committed its membership audit');
+        assert.equal(entries[0]?.details.consumer_id, row.ferrum_consumer_id);
+        assert.equal(entries[0]?.details.restored_groups, repaired.restored_groups);
+      }
+      return result.consumers;
+    }
+
+    /** Lose only this gateway identity, retaining the mapping production repair scans. */
+    async function orphanConsumer(row: ConsumerRecord): Promise<void> {
+      const key = `${row.namespace}/${row.ferrum_consumer_id}`;
+      const live = harness.edge.consumers.get(key);
+      assert.equal(live?.username, row.ferrum_username);
+      assert.equal(live?.custom_id, row.application_id ?? row.user_id);
+      assert.ok(harness.edge.consumers.delete(key), 'the namespaced consumer was removed');
+      assert.equal(await harness.edgeClient.consumers.get(row.ferrum_consumer_id), null);
+      assert.equal(harness.edge.consumerByUsername(row.ferrum_username, row.namespace), undefined);
+      assert.deepEqual(
+        await target.store.consumers.findByUserAndNamespace(
+          row.user_id,
+          row.namespace,
+          row.application_id,
+        ),
+        row,
+        'the orphan retains its identity-scoped Nexus mapping',
+      );
     }
 
     function countAudit(action: string, targetId: string): Promise<number> {
@@ -290,7 +363,7 @@ export function runMcpMembershipContract(
             });
             assert.equal(changed.statusCode, 200, changed.body);
           }
-          if (missing === 'consumer') harness.edge.consumers.delete(f.live.id);
+          if (missing === 'consumer') await orphanConsumer(f.row);
           else {
             f.live.acl_groups = [
               'operator-kept',
@@ -298,11 +371,21 @@ export function runMcpMembershipContract(
             ];
             harness.edge.queueFailure(503, { error: 'refused' }, `/consumers/${f.live.id}`, 'PUT');
           }
-          assert.equal((await revoke(f.grant.id)).statusCode, 502);
+          const writes = harness.edge.callsTo('PUT', `/consumers/${f.live.id}`).length;
+          const revoked = await revoke(f.grant.id);
+          assert.equal(revoked.statusCode, missing === 'consumer' ? 200 : 502, revoked.body);
           assert.equal((await target.store.grants.findById(f.grant.id))?.status, 'revoked');
-          const rollback = await details(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id);
-          assert.equal(rollback?.grant_restored, false);
-          assert.equal(rollback?.restore_skipped_reason, 'group_absent');
+          assert.equal(await requestStatus(f.grant), 'revoked');
+          assert.equal(await countAudit(AuditAction.ACCESS_REVOKE, f.grant.id), 1);
+          if (missing === 'consumer') {
+            assert.equal(await countAudit(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id), 0);
+            assert.equal(harness.edge.consumerByUsername(f.row.ferrum_username), undefined);
+            assert.equal(harness.edge.callsTo('PUT', `/consumers/${f.live.id}`).length, writes);
+          } else {
+            const rollback = await details(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id);
+            assert.equal(rollback?.grant_restored, false);
+            assert.equal(rollback?.restore_skipped_reason, 'group_absent');
+          }
         });
       }
 
@@ -413,11 +496,14 @@ export function runMcpMembershipContract(
             let rotated = false;
             const rotate = async (): Promise<void> => {
               const writes = harness.edge.callsTo('PUT', `/consumers/${f.live.id}`).length;
-              const changed = await peer.authed(provider, {
-                method: 'PUT',
-                url: `/api/apis/${f.api.id}/spec`,
-                payload: { spec: SAMPLE_SPEC_YAML.replace('version: 2.4.0', 'version: 2.4.1') },
-              });
+              // A separate process does not inherit the revoker's stale fences.
+              const changed = await outsideHeldLeases(() =>
+                peer.authed(provider, {
+                  method: 'PUT',
+                  url: `/api/apis/${f.api.id}/spec`,
+                  payload: { spec: SAMPLE_SPEC_YAML.replace('version: 2.4.0', 'version: 2.4.1') },
+                }),
+              );
               assert.equal(changed.statusCode, 200, changed.body);
               const current = await target.store.apis.findById(f.api.id);
               assert.ok(current?.agents);
@@ -466,17 +552,30 @@ export function runMcpMembershipContract(
             const consumers = harness.edgeClient.consumers;
             const get = consumers.get.bind(consumers);
             let rollbackReads = 0;
+            let lateRead = false;
+            let rotationError: unknown;
             consumers.get = async (...args) => {
               const live = await get(...args);
-              if (args[0] === f.live.id && failedRemoval && ++rollbackReads === 2) {
-                if (timing === 'after-read') {
+              if (args[0] === f.live.id && failedRemoval) {
+                rollbackReads += 1;
+                if (proxyPasses === 2 && timing === 'after-read' && !lateRead) {
+                  lateRead = true;
                   // Publishing expires the exposure after fallback read its IDs
                   // and membership. Only the fresh proxy fence can refuse the
                   // restore: an explicit subset publisher needs no consumer key.
-                  if (heldLeaseFences().some((lease) => lease.key === key)) {
+                  try {
+                    assert.ok(heldLeaseFences().some((lease) => lease.key === key));
+                    assert.deepEqual(live?.acl_groups, groups);
+                    const eligible = await target.store.apis.findById(f.api.id);
+                    assert.deepEqual(eligible?.agents?.operations.map((tool) => tool.id), f.ids);
                     await loseProxyLease(key);
+                    await rotate();
+                  } catch (error) {
+                    // groupStillOn intentionally catches unreadable-gateway errors;
+                    // retain fixture failures so they cannot masquerade as that path.
+                    rotationError = error;
+                    throw error;
                   }
-                  await rotate();
                 }
               }
               return live;
@@ -487,7 +586,9 @@ export function runMcpMembershipContract(
 
             const failed = await revoke(f.grant.id);
             assert.equal(failed.statusCode, 502, failed.body);
+            if (rotationError) throw rotationError;
             assert.ok(rotated, 'a production publisher actually replaced the exposure');
+            assert.equal(lateRead, timing === 'after-read');
             assert.deepEqual(await target.store.grants.findById(f.grant.id), claimed.grant);
             assert.deepEqual(
               await target.store.accessRequests.findById(f.grant.access_request_id!),
@@ -504,7 +605,7 @@ export function runMcpMembershipContract(
             );
             assert.deepEqual(f.live.acl_groups, groups);
 
-            harness.edge.consumers.delete(f.live.id);
+            await orphanConsumer(f.row);
             const [repaired] = await repair(f.client.user.id);
             assert.equal(repaired?.error, null);
             assert.equal(repaired?.restored_groups, 0);
@@ -623,11 +724,16 @@ export function runMcpMembershipContract(
                 },
           );
           assert.equal(updated.statusCode, 200, updated.body);
-          harness.edge.consumers.delete(f.live.id);
+          await orphanConsumer(f.row);
           const [repaired] = await repair(f.client.user.id);
           assert.equal(repaired?.error, null);
           const groups = harness.edge.consumerByUsername(f.row.ferrum_username)?.acl_groups;
           assert.ok(groups);
+          assert.equal(repaired?.restored_groups, groups.length);
+          assert.deepEqual(groups, [
+            aclGroupForApi(f.api.id),
+            ...(change === 'off' ? [] : f.ids.map((id) => mcpToolGroupForApi(f.api.id, id))),
+          ]);
           assert.ok(groups.includes(aclGroupForApi(f.api.id)));
           assert.equal(groups.includes(mcpAllGroupForApi(f.api.id)), false);
           const current = await target.store.apis.findById(f.api.id);
@@ -703,7 +809,7 @@ export function runMcpMembershipContract(
           who.applicationId,
         );
         assert.ok(row);
-        harness.edge.consumers.delete(row.ferrum_consumer_id);
+        await orphanConsumer(row);
         const [repaired] = await repair(who.client.user.id);
         assert.equal(repaired?.error, null);
         assert.equal(repaired?.application_id, who.applicationId);
@@ -727,7 +833,7 @@ export function runMcpMembershipContract(
       for (const transition of ['revoke', 'disable'] as const) {
         it(`${scope}: repair re-reads after ${transition}`, async () => {
           const f = await fixture(application);
-          harness.edge.consumers.delete(f.live.id);
+          await orphanConsumer(f.row);
           const key = canonicalConsumerLockKey('nexus', f.row.ferrum_username);
           const serialize = harness.edgeClient.serializePerKey.bind(harness.edgeClient);
           let interleaved = false;
@@ -742,7 +848,7 @@ export function runMcpMembershipContract(
                       url: `/api/users/${f.client.user.id}`,
                       payload: { status: 'disabled' },
                     });
-              assert.equal(response.statusCode, transition === 'revoke' ? 502 : 200, response.body);
+              assert.equal(response.statusCode, 200, response.body);
             }
             return serialize(requested, work);
           };
@@ -754,23 +860,50 @@ export function runMcpMembershipContract(
           assert.equal(repaired?.error, null);
           assert.equal(repaired?.restored_groups, 0);
           assert.deepEqual(harness.edge.consumerByUsername(f.row.ferrum_username)?.acl_groups, []);
+          if (transition === 'revoke') {
+            assert.equal((await target.store.grants.findById(f.grant.id))?.status, 'revoked');
+            assert.equal(await requestStatus(f.grant), 'revoked');
+            assert.equal(await countAudit(AuditAction.ACCESS_REVOKE, f.grant.id), 1);
+            assert.equal(await countAudit(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id), 0);
+          } else {
+            assert.equal((await target.store.users.findById(f.client.user.id))?.status, 'disabled');
+            assert.equal((await target.store.grants.findById(f.grant.id))?.status, 'active');
+            assert.equal(await requestStatus(f.grant), 'approved');
+            assert.equal(await countAudit(AuditAction.USER_DISABLE, f.client.user.id), 1);
+          }
         });
       }
 
       it(`${scope}: retries an audit-failed repair`, async () => {
         const f = await fixture(application);
-        harness.edge.consumers.delete(f.live.id);
-        faults.failNext('auditLogs', 'create');
+        const issued = await harness.authed(f.client, {
+          method: 'POST',
+          url: '/api/credentials',
+          payload: { credential_type: 'keyauth', application_id: f.applicationId },
+        });
+        assert.equal(issued.statusCode, 201, issued.body);
+        const credential = issued.json<IssueCredentialResponse>().credential;
+        await orphanConsumer(f.row);
+        const cause = new Error('membership repair audit refused');
+        faults.failNext('auditLogs', 'create', cause);
         const [failed] = await repair(f.client.user.id);
-        assert.ok(failed?.error);
+        assert.deepEqual(faults.pending(), [], 'the repair consumed its audit fault');
+        assert.equal(failed?.error, cause.message);
         assert.equal(harness.edge.consumerByUsername(f.row.ferrum_username), undefined);
+        assert.equal((await target.store.credentials.findById(credential.id))?.status, 'active');
+        assert.deepEqual(await target.store.consumers.findById(f.row.id), f.row);
         assert.equal(await countAudit(AuditAction.GATEWAY_CONSUMER_REPAIR, f.client.user.id), 0);
         const [retried] = await repair(f.client.user.id);
         assert.equal(retried?.error, null);
+        assert.equal(retried?.credentials_requiring_reissue, 1);
+        assert.equal((await target.store.credentials.findById(credential.id))?.status, 'revoked');
+        assert.equal((await target.store.grants.findById(f.grant.id))?.status, 'active');
+        assert.equal(await requestStatus(f.grant), 'approved');
         assert.deepEqual(harness.edge.consumerByUsername(f.row.ferrum_username)?.acl_groups, [
           aclGroupForApi(f.api.id),
           ...f.ids.map((id) => mcpToolGroupForApi(f.api.id, id)),
         ]);
+        assert.deepEqual(harness.edge.consumerByUsername(f.row.ferrum_username)?.credentials, {});
       });
     }
 
@@ -787,7 +920,7 @@ export function runMcpMembershipContract(
       f.live.acl_groups = [mcpToolGroupForApi(f.api.id, f.ids[0]!)];
       assert.equal((await revoke(f.grant.id)).statusCode, 502);
       assert.equal((await target.store.grants.findById(f.grant.id))?.status, 'active');
-      harness.edge.consumers.delete(f.live.id);
+      await orphanConsumer(f.row);
       const [repaired] = await repair(f.client.user.id);
       assert.equal(repaired?.error, null);
       assert.deepEqual(harness.edge.consumerByUsername(f.row.ferrum_username)?.acl_groups, [
@@ -802,7 +935,7 @@ export function runMcpMembershipContract(
       // Native retained rows, rather than an application lookup stub: the
       // database foreign keys alone do not establish application ownership.
       assert.ok(await target.store.consumers.delete(f.row.id));
-      await target.store.consumers.create({
+      const mismatched = await target.store.consumers.create({
         user_id: other.user.id,
         application_id: f.applicationId,
         namespace: 'nexus',
@@ -835,7 +968,7 @@ export function runMcpMembershipContract(
         granted_by: provider.user.id,
         approved_tools: null,
       });
-      harness.edge.consumers.delete(f.live.id);
+      await orphanConsumer(mismatched);
       const [repaired] = await repair(other.user.id);
       assert.equal(repaired?.error, null);
       assert.equal(repaired?.restored_groups, 0);
@@ -846,7 +979,7 @@ export function runMcpMembershipContract(
     it('repair ignores grants from a different API namespace', async () => {
       const f = await fixture(false);
       await target.store.apis.update(f.api.id, { namespace: 'another-namespace' });
-      harness.edge.consumers.delete(f.live.id);
+      await orphanConsumer(f.row);
       const [repaired] = await repair(f.client.user.id);
       assert.equal(repaired?.error, null);
       assert.equal(repaired?.restored_groups, 0);
@@ -855,7 +988,7 @@ export function runMcpMembershipContract(
 
     it('repair records before a competing disable', { timeout: 10_000 }, async () => {
       const f = await fixture(true);
-      harness.edge.consumers.delete(f.live.id);
+      await orphanConsumer(f.row);
       const key = userLifecycleLockKey(f.client.user.id);
       let signal!: () => void;
       const attempted = new Promise<void>((resolve) => {
@@ -937,7 +1070,7 @@ export function runMcpMembershipContract(
       });
       assert.equal(issued.statusCode, 201, issued.body);
       const credential = issued.json<IssueCredentialResponse>().credential;
-      harness.edge.consumers.delete(f.live.id);
+      await orphanConsumer(f.row);
       const consumers = harness.edgeClient.consumers;
       const ensure = consumers.ensure.bind(consumers);
       let newerCredentialId: string | undefined;
