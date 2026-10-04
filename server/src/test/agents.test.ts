@@ -117,7 +117,10 @@ describe('agent publishing and Nexus authorization', () => {
     ]) {
       assert.equal(matcher.test(alternative), false, alternative);
     }
-    assert.equal(configs.some((item) => item.plugin_name === 'ai_transcript_audit'), false);
+    assert.equal(
+      configs.some((item) => item.plugin_name === 'ai_transcript_audit'),
+      false,
+    );
     const governor = configs.find((item) => item.plugin_name === 'ai_tool_governor');
     assert.deepEqual((governor?.config as Record<string, unknown>).inspect, {
       mcp_tool_calls: true,
@@ -292,7 +295,9 @@ describe('agent publishing and Nexus authorization', () => {
     const missing = await harness.authed(provider, {
       method: 'PUT',
       url: `/api/apis/${api.id}/spec`,
-      payload: { spec: JSON.stringify({ ...DOCUMENT, paths: { '/new': DOCUMENT.paths['/items'] } }) },
+      payload: {
+        spec: JSON.stringify({ ...DOCUMENT, paths: { '/new': DOCUMENT.paths['/items'] } }),
+      },
     });
     assert.equal(missing.statusCode, 400, missing.body);
     const gateway = harness.edge
@@ -352,7 +357,12 @@ describe('agent publishing and Nexus authorization', () => {
       action: 'allow',
       allowed_groups: [aclGroupForApi(api.id)],
     });
-    for (const name of ['mcp_gateway', 'ai_tool_governor', 'ai_prompt_shield', 'ai_transcript_audit']) {
+    for (const name of [
+      'mcp_gateway',
+      'ai_tool_governor',
+      'ai_prompt_shield',
+      'ai_transcript_audit',
+    ]) {
       const response = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${api.id}/plugins/${name}`,

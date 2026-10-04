@@ -81,7 +81,9 @@ export function validateAgents(
   const selected = new Set<string>();
   for (const tool of agents.operations) {
     const key = `${tool.method} ${tool.path}`;
-    const operation = operations.find((item) => item.method === tool.method && item.path === tool.path);
+    const operation = operations.find(
+      (item) => item.method === tool.method && item.path === tool.path,
+    );
     if (!operation?.supported) invalid(`Unsupported or missing agent operation: ${key}`);
     if (methods !== null && !methods.includes(tool.method)) {
       invalid(`The method allow-list does not permit ${key}`);
@@ -189,7 +191,12 @@ export function stampAgentDocument(
   );
   const trigger = { when: { match: { path: { exact: [endpoint] } } } };
   const plugins: EdgePluginConfigWrite[] = [];
-  const add = (role: string, name: string, settings: Record<string, unknown>, scoped = true): void => {
+  const add = (
+    role: string,
+    name: string,
+    settings: Record<string, unknown>,
+    scoped = true,
+  ): void => {
     // IDs are chosen before every write and regenerated from the recorded proxy
     // identity. Same-name operator rows are neither copied nor deleted.
     const id = `${proxyId}-nexus-${role}`;

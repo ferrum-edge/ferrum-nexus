@@ -1612,8 +1612,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             const build = (
               document: Record<string, unknown>,
               proxyBody: Record<string, unknown>,
-            ): Promise<Record<string, unknown>> =>
-              buildSpecDocument(document, proxyBody, api);
+            ): Promise<Record<string, unknown>> => buildSpecDocument(document, proxyBody, api);
 
             const specId = await specIdForProxy(proxyId);
             // Captured before the write: the compensation has to put back the
@@ -2255,7 +2254,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           details.gateway_untouched = true;
         }
 
-        const nextAgents = patch.agents === undefined ? api.agents ?? null : patch.agents;
+        const nextAgents = patch.agents === undefined ? (api.agents ?? null) : patch.agents;
         const agentsMoved = !isDeepStrictEqual(nextAgents, api.agents ?? null);
         const currentSpec =
           nextAgents || agentsMoved ? await store.apiSpecs.findCurrentByApi(api.id) : null;
@@ -2472,13 +2471,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // cannot come apart.
         if (agentsMoved && proxyId) {
           await store.transaction(async (tx) => {
-            await audit.forStore(tx).record(
-              { id: actor.id, role: actor.role },
-              AuditAction.API_AGENTS_UPDATE_START,
-              { type: 'api', id: api.id },
-              { proxy_id: proxyId, agents: nextAgents },
-              ip,
-            );
+            await audit
+              .forStore(tx)
+              .record(
+                { id: actor.id, role: actor.role },
+                AuditAction.API_AGENTS_UPDATE_START,
+                { type: 'api', id: api.id },
+                { proxy_id: proxyId, agents: nextAgents },
+                ip,
+              );
           });
         }
         const agentMethodSnapshot =
@@ -4520,15 +4521,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         await edge.proxies.create(staged as unknown as EdgeProxyWrite, subject);
       }
       await binder.restorePluginsLocked(proxyId, carried, subject);
-      await cutOverToListenPathLocked(
-        proxyId,
-        level,
-        listenPath,
-        document,
-        specId,
-        subject,
-        { ...api, agents },
-      );
+      await cutOverToListenPathLocked(proxyId, level, listenPath, document, specId, subject, {
+        ...api,
+        agents,
+      });
     };
 
     /**

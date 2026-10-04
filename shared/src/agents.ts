@@ -56,7 +56,9 @@ export function agentPathItems(document: Record<string, unknown>): Record<string
       const ref = item.$ref;
       if (
         typeof ref !== 'string' ||
-        !['#/paths/', '#/components/pathItems/', '#/webhooks/'].some((base) => ref.startsWith(base)) ||
+        !['#/paths/', '#/components/pathItems/', '#/webhooks/'].some((base) =>
+          ref.startsWith(base),
+        ) ||
         seen.has(ref) ||
         seen.size >= 32
       ) {

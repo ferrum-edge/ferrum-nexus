@@ -34,7 +34,10 @@ export function AgentOperationPicker({
     try {
       return { operations: agentOperations(result.spec.doc), error: null };
     } catch (error) {
-      return { operations: [], error: error instanceof Error ? error.message : 'Invalid operations' };
+      return {
+        operations: [],
+        error: error instanceof Error ? error.message : 'Invalid operations',
+      };
     }
   }, [spec]);
   const selected = value?.operations ?? [];
@@ -73,20 +76,25 @@ export function AgentOperationPicker({
       {value ? (
         <>
           <p className="text-xs text-fg-muted">
-            Every exposed tool requires this API’s approval group. Fixed protection denies unselected
-            tools, scans MCP arguments for sensitive data, and limits each consumer to{' '}
+            Every exposed tool requires this API’s approval group. Fixed protection denies
+            unselected tools, scans MCP arguments for sensitive data, and limits each consumer to{' '}
             {AGENT_TOOL_CALL_LIMIT} tool calls per minute per gateway process (shared with operator
             Redis configuration). Transcript sinks are managed by the gateway operator.
           </p>
           {parsed.error ? <p role="alert">{parsed.error}</p> : null}
-          {selected.length === 0 ? <p role="alert">Select at least one supported operation.</p> : null}
+          {selected.length === 0 ? (
+            <p role="alert">Select at least one supported operation.</p>
+          ) : null}
           {parsed.operations.map((operation) => {
             const key = `${operation.method} ${operation.path}`;
             const tool = selected.find(
               (item) => item.method === operation.method && item.path === operation.path,
             );
             return (
-              <fieldset key={key} className="flex flex-col gap-3 rounded-md border border-border p-3">
+              <fieldset
+                key={key}
+                className="flex flex-col gap-3 rounded-md border border-border p-3"
+              >
                 <legend className="font-mono text-xs">{key}</legend>
                 <Badge tone={operation.read_only ? 'info' : 'warning'}>
                   {operation.read_only ? 'Read-only' : 'Destructive opt-in'}

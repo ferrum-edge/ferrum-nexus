@@ -10,7 +10,10 @@ afterEach(() => {
 describe('agent connection guidance', () => {
   it('copies the public endpoint and header-based config without putting credentials in URLs', async () => {
     const copy = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: copy } });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: copy },
+    });
     render(
       <ConnectAgentPanel
         invokeUrl="https://gateway.example.test/nexus/items"
@@ -45,7 +48,9 @@ describe('agent connection guidance', () => {
     expect(screen.getByRole('status')).toHaveTextContent('/nexus/items/mcp');
     expect(screen.queryByRole('button', { name: 'Copy MCP endpoint URL' })).not.toBeInTheDocument();
     expect(agentCredentialHeader('basic_auth', 'nexus-app-123').hint).toContain('nexus-app-123');
-    expect(agentCredentialHeader('jwt_auth', 'nexus-user-123').hint).toContain('sub nexus-user-123');
+    expect(agentCredentialHeader('jwt_auth', 'nexus-user-123').hint).toContain(
+      'sub nexus-user-123',
+    );
   });
 
   it('shows read-only and destructive grant coverage and renders provider text as text', () => {
@@ -55,7 +60,12 @@ describe('agent connection guidance', () => {
         title="Tools covered by this grant"
         agents={{
           operations: [
-            { path: '/items', method: 'GET', name: 'read', description: '<script>unsafe()</script>' },
+            {
+              path: '/items',
+              method: 'GET',
+              name: 'read',
+              description: '<script>unsafe()</script>',
+            },
             { path: '/items', method: 'POST', name: 'create', description: 'Create an item' },
           ],
         }}

@@ -113,8 +113,8 @@ export function ConnectAgentPanel({
         {vscode ? <CopyField label="VS Code .vscode/mcp.json" value={vscode} multiline /> : null}
         {claude ? <CopyField label="Claude Code command" value={claude} /> : null}
         <p className="text-xs text-fg-subtle">
-          Replace placeholders locally. Portal sessions and Edge Admin credentials do not authenticate
-          agent calls.
+          Replace placeholders locally. Portal sessions and Edge Admin credentials do not
+          authenticate agent calls.
         </p>
       </CardBody>
     </Card>

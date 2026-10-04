@@ -32,7 +32,11 @@ describe('agent operation metadata', () => {
   });
 
   it('refuses cyclic, external and out-of-bound Path Item references', () => {
-    for (const reference of ['https://outside.test/path.json', '#/examples/path', '#/paths/~1items']) {
+    for (const reference of [
+      'https://outside.test/path.json',
+      '#/examples/path',
+      '#/paths/~1items',
+    ]) {
       assert.throws(
         () => agentOperations({ paths: { '/items': { $ref: reference } } }),
         /local Path Item reference/,

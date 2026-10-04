@@ -418,8 +418,11 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       const fallbackHeaders = await negotiatedHeaders(fallback, headers);
       await result(await rpc(api, fallbackHeaders, 'tools/list'));
       const listed = await result(await rpc(api, sessionHeaders, 'tools/list'));
-      assert.deepEqual(listed.tools?.map((tool) => tool.name), [`${api.slug}.list_invoices`]);
-      assert.equal(listed.tools?.[0]?.description, 'List invoices');
+      assert.deepEqual(
+        listed.tools?.map((tool) => tool.name),
+        [`${api.slug}.list_invoices`],
+      );
+      assert.equal(listed.tools?.[0]?.description, `[${api.slug}] List invoices`);
       assert.equal(listed.tools?.[0]?.annotations.readOnlyHint, true);
       const called = await result(
         await rpc(api, sessionHeaders, 'tools/call', {
@@ -655,7 +658,12 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       assert.equal(reachedUpstream(limited), false);
     }
     const stillDiscoverable = await result(await rpc(api, renewedBudget, 'tools/list'));
-    assert.deepEqual(stillDiscoverable.tools, tools.tools);
+    assert.ok(stillDiscoverable.tools);
+    assert.ok(tools.tools);
+    assert.deepEqual(
+      [...stillDiscoverable.tools].sort((left, right) => left.name.localeCompare(right.name)),
+      [...tools.tools].sort((left, right) => left.name.localeCompare(right.name)),
+    );
     const rest = await callGateway(`${api.listen_path}/invoices`, { headers: budgetHeaders });
     assert.equal(rest.status, 200, 'the MCP-only budget must not consume REST requests');
     assert.ok(reachedUpstream(rest));
