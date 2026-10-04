@@ -987,10 +987,13 @@ digest. Runtime `$FERRUM_EDGE_IMAGE` and `$NEXUS_IMAGE` references are allowed,
 while any literal fallback they declare is checked.
 
 This is a bounded static scan of tracked operational files, not a shell or YAML
-interpreter. It ignores prose, comments, single-quoted shell text and plain
-heredoc body text, and untracked or generated files. Command substitutions in
-unquoted heredocs are scanned because the shell can execute them. YAML image
-fields are read as data, not searched as arbitrary text. The scanner does not
+interpreter. It ignores prose, comments, shell literals used only as data
+(including quoted text passed to recognized non-Docker commands), plain
+heredoc body text, and untracked or generated files. Quoting alone does not
+exempt an image argument: literal quoted image arguments to recognized Docker
+commands are checked. Command substitutions in unquoted heredocs are also
+scanned because the shell can execute them. YAML image fields are read as data,
+not searched as arbitrary text. The scanner does not
 resolve computed command names, shell aliases, `eval`, sourced files or values
 assembled indirectly, so it cannot establish a complete inventory of images
 produced through those mechanisms.
