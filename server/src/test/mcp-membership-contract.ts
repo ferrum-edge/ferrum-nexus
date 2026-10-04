@@ -17,9 +17,15 @@ import {
 
 import { AuditAction } from '../audit/service.js';
 import { canonicalConsumerLockKey } from '../credentials/consumers.js';
-import type { NexusStore } from '../db/store.js';
+import type {
+  AccessRequestRecord,
+  GrantRecord,
+  NexusStore,
+  TransactionOptions,
+} from '../db/store.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
 import { userLifecycleLockKey } from '../lib/keyed-serializer.js';
+import { heldLeaseFences } from '../lib/lease-fence.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
@@ -209,6 +215,17 @@ export function runMcpMembershipContract(
       });
     }
 
+    /** Simulate takeover of only the proxy lease, leaving inner keys intact. */
+    async function loseProxyLease(key: string): Promise<void> {
+      const fence = heldLeaseFences().find((lease) => lease.key === key);
+      assert.ok(fence, 'the caller holds the proxy acquisition being expired');
+      assert.ok(await target.store.leases.release(key, fence.token));
+      assert.ok(
+        await target.store.leases.acquire(key, 'newer-publisher', isoInSeconds(600), nowIso()),
+      );
+      assert.ok(await target.store.leases.release(key, 'newer-publisher'));
+    }
+
     for (const application of [false, true]) {
       const scope = application ? 'application' : 'account';
 
@@ -317,6 +334,197 @@ export function runMcpMembershipContract(
         );
         assert.equal((await revoke(f.grant.id)).statusCode, 200);
       });
+
+      for (const unreadable of [false, true]) {
+        it(`${scope}: preserves a committed rollback (unreadable=${unreadable})`, async () => {
+          const f = await fixture(application);
+          f.live.acl_groups = [mcpToolGroupForApi(f.api.id, f.ids[0]!)];
+          const before = await target.store.accessRequests.findById(f.grant.access_request_id!);
+          assert.ok(before);
+          const transaction = target.store.transaction.bind(target.store);
+          let dropped = false;
+          target.store.transaction = async <T>(
+            body: (tx: NexusStore) => Promise<T>,
+            options?: TransactionOptions,
+          ): Promise<T> => {
+            const rows = await countAudit(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id);
+            const result = await transaction(body, options);
+            if (
+              !dropped &&
+              (await countAudit(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id)) > rows
+            ) {
+              dropped = true;
+              if (unreadable) faults.failNext('auditLogs', 'list');
+              throw new Error('the rollback committed but its acknowledgement was lost');
+            }
+            return result;
+          };
+          patches.push(() => {
+            target.store.transaction = transaction;
+          });
+          harness.edge.queueFailure(503, { error: 'refused' }, `/consumers/${f.live.id}`, 'PUT');
+          const failed = await revoke(f.grant.id);
+          assert.equal(failed.statusCode, 502, failed.body);
+          assert.ok(dropped);
+          assert.equal((await target.store.grants.findById(f.grant.id))?.status, 'active');
+          const request = await target.store.accessRequests.findById(f.grant.access_request_id!);
+          assert.equal(request?.status, before.status);
+          assert.equal(request?.decided_by, before.decided_by);
+          assert.equal(request?.decided_at, before.decided_at);
+          assert.equal(request?.decision_note, before.decision_note);
+          assert.deepEqual(request?.approved_tools, before.approved_tools);
+          assert.deepEqual(request?.requested_tools, before.requested_tools);
+          assert.deepEqual(f.live.acl_groups, [mcpToolGroupForApi(f.api.id, f.ids[0]!)]);
+          const rows = await target.store.auditLogs.list({
+            action: AuditAction.ACCESS_REVOKE_ROLLBACK,
+            target_id: f.grant.id,
+          });
+          assert.equal(rows.total, unreadable ? 2 : 1);
+          assert.ok(rows.items.every((row) => row.details.grant_restored === true));
+          assert.equal(await countAudit(AuditAction.ACCESS_REVOKE, f.grant.id), 1);
+        });
+      }
+
+      for (const timing of ['before-read', 'after-read'] as const) {
+        it(
+          `${scope}: expires exposure ${timing} during fallback`,
+          { timeout: 10_000 },
+          async () => {
+            const f = await fixture(application);
+            const groups = ['operator-kept', mcpToolGroupForApi(f.api.id, f.ids[0]!)];
+            f.live.acl_groups = [...groups];
+            assert.ok(f.api.ferrum_proxy_id);
+            const key = `proxy:${f.api.ferrum_proxy_id}`;
+            const claimed: { grant?: GrantRecord; request?: AccessRequestRecord } = {};
+            let failedRemoval = false;
+            beforeFailedRemoval(f.live.id, async () => {
+              const grant = await target.store.grants.findById(f.grant.id);
+              assert.ok(grant?.access_request_id);
+              claimed.grant = grant;
+              const request = await target.store.accessRequests.findById(grant.access_request_id);
+              assert.ok(request);
+              claimed.request = request;
+              assert.equal(grant.status, 'revoked');
+              assert.equal(request.status, 'revoked');
+              await loseProxyLease(key);
+              failedRemoval = true;
+            });
+
+            let rotated = false;
+            const rotate = async (): Promise<void> => {
+              const writes = harness.edge.callsTo('PUT', `/consumers/${f.live.id}`).length;
+              const changed = await peer.authed(provider, {
+                method: 'PUT',
+                url: `/api/apis/${f.api.id}/spec`,
+                payload: { spec: SAMPLE_SPEC_YAML.replace('version: 2.4.0', 'version: 2.4.1') },
+              });
+              assert.equal(changed.statusCode, 200, changed.body);
+              const current = await target.store.apis.findById(f.api.id);
+              assert.ok(current?.agents);
+              assert.ok(
+                current.agents.operations.every((tool) => tool.id && !f.ids.includes(tool.id)),
+              );
+              assert.equal(harness.edge.callsTo('PUT', `/consumers/${f.live.id}`).length, writes);
+              const gateway = harness.edge
+                .effectivePluginsForProxy(current.ferrum_proxy_id ?? '')
+                .find((plugin) => plugin.plugin_name === 'mcp_gateway');
+              assert.ok(gateway);
+              const policy = (
+                gateway.config as {
+                  policy: { tools: Record<string, { allowed_groups: string[] }> };
+                }
+              ).policy;
+              for (const tool of current.agents.operations) {
+                const allowed: string[] | undefined =
+                  policy.tools[`${current.slug}.${tool.name}`]?.allowed_groups;
+                assert.ok(allowed);
+                assert.equal(allowed.some((group) => groups.includes(group)), false);
+              }
+              assert.deepEqual(
+                f.live.acl_groups,
+                groups,
+                'the expired group remains inert on Edge',
+              );
+              rotated = true;
+            };
+            const serialize = harness.edgeClient.serializePerKey.bind(harness.edgeClient);
+            let proxyPasses = 0;
+            harness.edgeClient.serializePerKey = async (requested, work) => {
+              if (requested === key && ++proxyPasses === 2) {
+                assert.deepEqual(
+                  heldLeaseFences(),
+                  [],
+                  'all stale keys exited before reacquisition',
+                );
+                if (timing === 'before-read') await rotate();
+              }
+              return serialize(requested, work);
+            };
+            patches.push(() => {
+              harness.edgeClient.serializePerKey = serialize;
+            });
+            const consumers = harness.edgeClient.consumers;
+            const get = consumers.get.bind(consumers);
+            let rollbackReads = 0;
+            consumers.get = async (...args) => {
+              const live = await get(...args);
+              if (args[0] === f.live.id && failedRemoval && ++rollbackReads === 2) {
+                if (timing === 'after-read') {
+                  // Publishing expires the exposure after fallback read its IDs
+                  // and membership. Only the fresh proxy fence can refuse the
+                  // restore: an explicit subset publisher needs no consumer key.
+                  if (heldLeaseFences().some((lease) => lease.key === key)) {
+                    await loseProxyLease(key);
+                  }
+                  await rotate();
+                }
+              }
+              return live;
+            };
+            patches.push(() => {
+              consumers.get = get;
+            });
+
+            const failed = await revoke(f.grant.id);
+            assert.equal(failed.statusCode, 502, failed.body);
+            assert.ok(rotated, 'a production publisher actually replaced the exposure');
+            assert.deepEqual(await target.store.grants.findById(f.grant.id), claimed.grant);
+            assert.deepEqual(
+              await target.store.accessRequests.findById(f.grant.access_request_id!),
+              claimed.request,
+            );
+            assert.equal(proxyPasses, 2, 'fallback reacquired the proxy before its inner keys');
+            assert.equal(rollbackReads, 2);
+            assert.equal(await countAudit(AuditAction.ACCESS_REVOKE, f.grant.id), 1);
+            const rollback = await details(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id);
+            assert.equal(rollback?.grant_restored, false);
+            assert.equal(
+              rollback?.restore_skipped_reason,
+              timing === 'before-read' ? 'group_absent' : undefined,
+            );
+            assert.deepEqual(f.live.acl_groups, groups);
+
+            harness.edge.consumers.delete(f.live.id);
+            const [repaired] = await repair(f.client.user.id);
+            assert.equal(repaired?.error, null);
+            assert.equal(repaired?.restored_groups, 0);
+            for (const status of ['disabled', 'active']) {
+              const response = await peer.authed(founder, {
+                method: 'PATCH',
+                url: `/api/users/${f.client.user.id}`,
+                payload: { status },
+              });
+              assert.equal(response.statusCode, 200, response.body);
+            }
+            assert.deepEqual(
+              harness.edge.consumerByUsername(f.row.ferrum_username)?.acl_groups,
+              [],
+            );
+            assert.deepEqual(await target.store.grants.findById(f.grant.id), claimed.grant);
+            assert.equal(await requestStatus(f.grant), 'revoked');
+          },
+        );
+      }
 
       it(`${scope}: preserves a newer revoked claim`, async () => {
         const f = await fixture(application);
@@ -699,26 +907,26 @@ export function runMcpMembershipContract(
       assert.deepEqual(harness.edge.consumerByUsername(f.row.ferrum_username)?.acl_groups, []);
     });
 
-    it('a fence-refused partial revocation retries outside the stale proxy lease', async () => {
-      const f = await fixture(true);
-      f.live.acl_groups = [mcpToolGroupForApi(f.api.id, f.ids[0]!)];
-      assert.ok(f.api.ferrum_proxy_id);
-      const key = `proxy:${f.api.ferrum_proxy_id}`;
-      beforeFailedRemoval(f.live.id, async () => {
-        await target.store.leases.deleteExpired('9999-01-01T00:00:00.000Z');
-        assert.ok(
-          await target.store.leases.acquire(key, 'newer-holder', isoInSeconds(600), nowIso()),
+    for (const auditFailure of [false, true]) {
+      it(`partial fallback retakes the proxy (audit failure=${auditFailure})`, async () => {
+        const f = await fixture(true);
+        f.live.acl_groups = [mcpToolGroupForApi(f.api.id, f.ids[0]!)];
+        assert.ok(f.api.ferrum_proxy_id);
+        const key = `proxy:${f.api.ferrum_proxy_id}`;
+        beforeFailedRemoval(f.live.id, async () => {
+          await loseProxyLease(key);
+        });
+        if (auditFailure) faults.failAfter('auditLogs', 'create', 1);
+        assert.equal((await revoke(f.grant.id)).statusCode, 502);
+        assert.equal((await target.store.grants.findById(f.grant.id))?.status, 'active');
+        assert.equal(await requestStatus(f.grant), 'approved');
+        assert.equal(
+          (await details(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id))?.grant_restored,
+          true,
         );
+        assert.equal((await revoke(f.grant.id)).statusCode, 200);
       });
-      assert.equal((await revoke(f.grant.id)).statusCode, 502);
-      assert.ok(await target.store.leases.release(key, 'newer-holder'));
-      assert.equal((await target.store.grants.findById(f.grant.id))?.status, 'active');
-      assert.equal(
-        (await details(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id))?.grant_restored,
-        true,
-      );
-      assert.equal((await revoke(f.grant.id)).statusCode, 200);
-    });
+    }
 
     it('fenced repair keeps newer operator membership', async () => {
       const f = await fixture(true);

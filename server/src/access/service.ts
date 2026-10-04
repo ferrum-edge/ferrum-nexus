@@ -99,6 +99,9 @@
  * would hand back the access both revocations withdrew. The rollback reads
  * the consumer under its key, which every group writer holds, and restores
  * only a grant with at least one of its authorization groups still there.
+ * MCP membership also needs a current published exposure, protected by a
+ * proxy lease through the restore commit. A lost proxy lease is reacquired
+ * only after the original section releases all its keys.
  */
 
 import {
@@ -708,10 +711,12 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * check and the restore on any instance. Consumer key first, as the lock
    * order requires. An identity with no consumer row has no group to restore
    * over. The transaction is fenced by both keys and by whatever lease the
-   * caller holds.
+   * caller holds. `proxyId` names the proxy lease protecting MCP eligibility;
+   * without one, only REST membership can justify restoration.
    */
   async function restoreOnce<T>(
     claim: GrantRecord,
+    proxyId: string | null,
     body: (tx: NexusStore, groupPresent: boolean) => Promise<T>,
   ): Promise<T> {
     const underLifecycle = (groupPresent: boolean): Promise<T> =>
@@ -728,7 +733,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     return edge.serializePerKey(consumerId, async () => {
       const api = await store.apis.findById(claim.api_id);
       const published = new Set(
-        api?.agents?.operations.flatMap((tool) => (tool.id ? [tool.id] : [])) ?? [],
+        proxyId && api?.ferrum_proxy_id === proxyId
+          ? (api.agents?.operations.flatMap((tool) => (tool.id ? [tool.id] : [])) ?? [])
+          : [],
       );
       // Expired exposure groups cannot authorize any current tool. Their mere
       // presence must not resurrect a grant after REST membership is gone.
@@ -758,12 +765,50 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   async function restoreUnderKeys<T>(
     claim: GrantRecord,
     since: number,
+    proxyId: string | null,
     body: (tx: NexusStore, groupPresent: boolean) => Promise<T>,
   ): Promise<T> {
     for (;;) {
       const attempt = Date.now();
       try {
-        return await restoreOnce(claim, body);
+        return await restoreOnce(claim, proxyId, body);
+      } catch (error) {
+        if (isLockTimeout(error) && attempt - since <= LEASE_TTL_MS) continue;
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Retake the current proxy before the consumer and lifecycle keys. Called
+   * only after the stale proxy section has exited: the serializer is not
+   * re-entrant, and taking a proxy inside either inner key inverts lock order.
+   * The transaction fences the new lease through restoration, so a publisher
+   * that takes it over cannot expire an exposure behind a successful restore.
+   */
+  async function restoreUnderFreshProxy<T>(
+    claim: GrantRecord,
+    since: number,
+    body: (tx: NexusStore, groupPresent: boolean) => Promise<T>,
+  ): Promise<T> {
+    for (;;) {
+      const attempt = Date.now();
+      const api = await store.apis.findById(claim.api_id);
+      const proxyId = api?.ferrum_proxy_id;
+      // With no published MCP exposure, REST membership is independent of
+      // publishing. Do not wait on its proxy, or count MCP groups if an
+      // exposure appears while this REST-only restore is running.
+      if (!api?.agents || !proxyId) return restoreUnderKeys(claim, since, null, body);
+      try {
+        const result = await edge.serializePerKey(`proxy:${proxyId}`, async () => {
+          const current = await store.apis.findById(claim.api_id);
+          if (current?.ferrum_proxy_id !== proxyId) return null;
+          return { value: await restoreUnderKeys(claim, since, proxyId, body) };
+        });
+        if (result) return result.value;
+        if (attempt - since > LEASE_TTL_MS) {
+          throw conflict('The gateway proxy kept changing while this revocation was rolled back');
+        }
       } catch (error) {
         if (isLockTimeout(error) && attempt - since <= LEASE_TTL_MS) continue;
         throw error;
@@ -796,7 +841,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * {@link restoreRevoked}), and the row says why. A key the restore needs that
    * a crashed instance left held is waited out ({@link restoreUnderKeys}).
    * Every step is best-effort: the caller re-throws the original gateway
-   * failure and an operator needs the trail either way.
+   * failure and an operator needs the trail either way. A returned continuation
+   * must run after the caller releases its proxy section, so lease-loss recovery
+   * can take a fresh proxy before either inner key.
    */
   async function unwindRevocation(input: {
     actor: UserRecord;
@@ -806,7 +853,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     request: AccessRequestRecord | null;
     cause: unknown;
     ip: string | null;
-  }): Promise<void> {
+    proxyId: string | null;
+  }): Promise<(() => Promise<void>) | null> {
     const { actor, claim, request, cause, ip } = input;
     const details: Record<string, unknown> = {
       api_id: claim.api_id,
@@ -821,8 +869,58 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     // so that a failure below can tell whether it committed after all.
     const rollbackId = newId();
     const since = Date.now();
+    const logRestore = (): void => {
+      const skipped = details.restore_skipped_reason as RevocationRestoreSkip | undefined;
+      deps.log?.(
+        details,
+        skipped
+          ? RESTORE_SKIP_MESSAGES[skipped]
+          : 'Rolled back a revocation the gateway would not accept',
+      );
+    };
+    const restoreAlone = async (freshProxy: boolean): Promise<(() => Promise<void>) | null> => {
+      let outcome: RevocationRestore = { restored: false, skipped: null };
+      const restore = (tx: NexusStore, groupPresent: boolean): Promise<RevocationRestore> =>
+        restoreRevoked(tx, claim, request, groupPresent);
+      try {
+        outcome = await (freshProxy
+          ? restoreUnderFreshProxy(claim, since, restore)
+          : restoreUnderKeys(claim, since, input.proxyId, restore));
+      } catch (error) {
+        if (!freshProxy && isLeaseLost(error)) return resumeUnderFreshProxy;
+        deps.log?.(
+          {
+            grant_id: claim.id,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'Could not return a failed revocation to active',
+        );
+      }
+      // An unreadable acknowledgement lookup may have missed a committed
+      // rollback. Preserve that result without changing a newer claim.
+      if (!outcome.restored && outcome.skipped === null) {
+        const current = await store.grants.findById(claim.id).catch(() => null);
+        outcome = { restored: current?.status === 'active', skipped: null };
+      }
+      recordRestore(details, outcome);
+      await audit
+        .record(
+          { id: actor.id, role: actor.role },
+          AuditAction.ACCESS_REVOKE_ROLLBACK,
+          { type: 'grant', id: claim.id },
+          details,
+          ip,
+        )
+        .catch(() => undefined);
+      logRestore();
+      return null;
+    };
+    const resumeUnderFreshProxy = (): Promise<void> =>
+      outsideHeldLeases(async () => {
+        await restoreAlone(true);
+      });
     try {
-      await restoreUnderKeys(claim, since, async (tx, groupPresent) => {
+      await restoreUnderKeys(claim, since, input.proxyId, async (tx, groupPresent) => {
         recordRestore(details, await restoreRevoked(tx, claim, request, groupPresent));
         await audit
           .forStore(tx)
@@ -871,68 +969,16 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           },
           'Could not return a failed revocation to active with its rollback row; retrying alone',
         );
-        let outcome: RevocationRestore = { restored: false, skipped: null };
-        // Fenced by this revocation's proxy lease while it still holds it. Once
-        // the fence has refused — the lease changed hands while the revocation
-        // stalled — a fenced retry could only be refused again, so it runs
-        // outside that lease, fenced by the consumer and lifecycle keys alone:
-        // the compare-and-sets above are what keep it off whatever the new
-        // holder did. A key held past its wait is waited out as above. Any
-        // other refusal, a unique-index one included, is not retried again and
-        // leaves the grant unrestored for an operator to investigate.
-        let unfenced = isLeaseLost(error);
-        for (;;) {
-          const retry = (): Promise<RevocationRestore> =>
-            restoreUnderKeys(claim, since, (tx, groupPresent) =>
-              restoreRevoked(tx, claim, request, groupPresent),
-            );
-          try {
-            outcome = await (unfenced ? outsideHeldLeases(retry) : retry());
-            break;
-          } catch (retryError) {
-            if (!unfenced && isLeaseLost(retryError)) {
-              unfenced = true;
-              continue;
-            }
-            deps.log?.(
-              {
-                grant_id: claim.id,
-                error: retryError instanceof Error ? retryError.message : String(retryError),
-              },
-              'Could not return a failed revocation to active',
-            );
-            break;
-          }
-        }
-        // Had the lookup above failed, a combined write whose acknowledgement
-        // was lost may have committed after all, in which case the retry finds
-        // the grant already back.
-        if (!outcome.restored && outcome.skipped === null) {
-          const current = await store.grants.findById(claim.id).catch(() => null);
-          outcome = { restored: current?.status === 'active', skipped: null };
-        }
-        recordRestore(details, outcome);
-        // Best-effort from here: the caller re-throws the gateway failure, and
-        // this row is the trail of whichever way the restore went.
-        await audit
-          .record(
-            { id: actor.id, role: actor.role },
-            AuditAction.ACCESS_REVOKE_ROLLBACK,
-            { type: 'grant', id: claim.id },
-            details,
-            ip,
-          )
-          .catch(() => undefined);
+        // Retrying under a lost proxy token can only fail again. Release the
+        // original section before retaking the current proxy, then consumer,
+        // then lifecycle. A second fence refusal leaves the claim untouched.
+        if (isLeaseLost(error)) return resumeUnderFreshProxy;
+        return restoreAlone(false);
       }
     }
 
-    const skipped = details.restore_skipped_reason as RevocationRestoreSkip | undefined;
-    deps.log?.(
-      details,
-      skipped
-        ? RESTORE_SKIP_MESSAGES[skipped]
-        : 'Rolled back a revocation the gateway would not accept',
-    );
+    logRestore();
+    return null;
   }
 
   /**
@@ -1588,7 +1634,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       assertCanReview(actor, initialApi);
       if (initial.status !== 'active') throw conflict('This grant is already revoked');
 
-      // The claim, the ACL removal and its compensation all hold the same
+      // The claim, the ACL removal and its ordinary compensation hold the same
       // `proxy:<id>` lease an approval holds through its claim and ACL add
       // (issue #341). Without it a revocation that had claimed the grant but
       // not yet reached the gateway could be overtaken by a re-request and
@@ -1597,8 +1643,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // portal showing access the gateway denies. Under one lease the two are
       // ordered: an approval that goes second adds the group back after this
       // removal, and one that went first holds a grant this claim never
-      // touches.
-      const withdraw = async (): Promise<GrantRecord> => {
+      // touches. Lease-loss compensation exits this section before taking a
+      // fresh proxy lease for MCP eligibility.
+      const withdraw = async (): Promise<GrantRecord | (() => Promise<never>)> => {
         // Re-read under the lease: whatever held it may have revoked this
         // grant or moved the API, and the snapshot above is from before.
         const grant = await store.grants.findById(grantId);
@@ -1671,13 +1718,20 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         try {
           if (grantee) await setGroupMembership(grantee, api.id, false, grant.application_id);
         } catch (error) {
-          await unwindRevocation({
+          const resume = await unwindRevocation({
             actor,
             claim: updated,
             request: movedRequest,
             cause: error,
             ip,
+            proxyId: initialApi.ferrum_proxy_id,
           });
+          if (resume) {
+            return async () => {
+              await resume();
+              throw error;
+            };
+          }
           throw error;
         }
 
@@ -1708,9 +1762,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         return updated;
       };
 
-      const updated = initialApi.ferrum_proxy_id
+      const withdrawn = initialApi.ferrum_proxy_id
         ? await edge.serializePerKey(`proxy:${initialApi.ferrum_proxy_id}`, withdraw)
         : await withdraw();
+      const updated = typeof withdrawn === 'function' ? await withdrawn() : withdrawn;
 
       const [decorated] = await decorateGrants([updated]);
       return decorated ?? updated;
