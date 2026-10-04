@@ -90,25 +90,65 @@ Both Nexus image stages and the acceptance upstream retain this digest. No image
 process was run locally. The hosted Docker, acceptance and verbatim quickstart jobs must
 validate the packaged result; OCI metadata alone does not qualify it.
 
-## Pending lock producer and qualification
+## Hosted lock import; qualification pending
 
-Both checked-in lockfiles are intentionally the unchanged PR #518 artifacts. They are stale
-for this candidate, so ordinary `npm ci`/Docker gates are expected to fail at preparation.
-There is no candidate lock provenance or passing candidate-test claim yet. The read-only
-producer automatically runs for this PR's manifest/workflow changes and checks out the exact
-PR head, not a synthetic merge commit. It selects Node 22.22.2, asserts the actual version,
-records npm's actual version and enables strict engine checks. Lifecycle scripts are disabled.
-The root graph is resolved afresh; the e2e graph is updated from its retained input lock.
-This can move other versions admitted by existing ranges; inspect the whole output diff.
+Both checked-in lockfiles are copied byte-for-byte from the successful
+[producer run 37217928511, attempt 1](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37217928511).
+It checked out exact source `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`, not a synthetic
+merge commit, and ran actual Node `v22.22.2` and npm `10.9.7` with strict engine checks and
+lifecycle scripts disabled. No local installer, formatter, build or test generated the locks,
+and the generated graph and integrity fields were not edited during import.
 
-The artifact records source SHA, run/attempt, all five manifests, both input locks, `.nvmrc`,
-CI/producer workflow hashes, Node/npm versions, both output locks and the lock diff with
-SHA-256 output hashes. Guards require jsdom 30.1.2 and Undici 8.11.2 with the published engines
-and integrity above, plus the unchanged exact first-stage dependency versions.
-Root must collect a successful producer artifact for the actual source SHA, verify every
-input against that immutable checkout and every output against the artifact, and apply the
-real locks in a separate round. A later merge from main needs corresponding provenance if
-it changes any producer input; never attribute an old artifact to a different input graph.
+Artifact `11308824128` is named
+`dependency-locks-15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`. GitHub metadata identifies
+the same source/run and repository `1244400882` (`ferrum-edge/ferrum-nexus`), with expiry
+`2026-10-18T16:45:42Z`; it was nonexpired when verified on 2026-10-04. The downloaded
+archive's SHA-256 matches GitHub's digest:
+`06cfb6dd727d02621f026c45c6ba495f4c414803dc08a61a676dfb5809e43bba`.
+Its ten members are safe relative regular files. Root verified provenance independently;
+the import round rechecked the archive hash, all ten input hashes against immutable source
+Git objects and the clean assigned checkout, and all three output hashes against the extracted
+artifact. The retained root input lock also matches the source lock hash.
+
+The verified input manifest is:
+
+```text
+54eda345e33afbd33910013850cb250193773ae5166ae9446eae1301f42aeeb4  package.json
+3457d1d11dcf0d3fa883dc0093c356b65cb22b4be2f67f879947ab72514f8656  shared/package.json
+cb5020c8613a52edbf613785391f98b6809d3f03a529fc129fb6522e3e528636  server/package.json
+8ef1cb39cb4cafbd19d3b0da589593c6a67b0c6004dbe01c320416a3cf6d534c  web/package.json
+d4c228f0a8fd06be71aa0b19d892021b9283c6bdd0ee4f12a7f27307a6a9c8de  e2e/package.json
+6aa9d160035c01ee2863ecedb3c0cb9a08097958d1a42c0230712f155d5a4a0b  package-lock.json
+f26b2b4bc2f68800b0a6add2c850947ef92fa71fe51ac3a173a21986aad56a7f  e2e/package-lock.json
+4c42fb8d6334c5cdcac68b93f96c581fb83b1f58cda898cff115e5e941ef717d  .nvmrc
+0e11469a8eba880b1e05fcf6888d8751f05df7ccad3ef2c8361192888ed87c9e  .github/workflows/ci.yml
+d84a5593cc6e6665d6dc1bb1ceb42d8ab4333704188de4626f3c5920cd61f444  .github/workflows/dependency-locks.yml
+```
+
+The verified output manifest is:
+
+```text
+0ed9c2de1dab8e5828e496a135fc1b67f91d2191f4c986e3ea79b19b5e8e6a12  package-lock.json
+c46908b663e2ca75765120e87c6d14688eaa251078cd481e42b30fced790645a  e2e/package-lock.json
+3f4129955361d27df6a197c6cf0c9ed8c635f3f6ed134ad099d1dc8b62840380  locks.diff
+```
+
+Static JSON inspection confirms all five manifests match their lock metadata, jsdom 30.1.2
+and Undici 8.11.2 have the published engines and integrity above, and TypeScript 7.0.2,
+Vitest/coverage and coupled peers 5.0.3, Zod 4.6.5 and React Table 9.2.5 remain resolved.
+The fresh root graph updates jsdom's CSS/DOM/URL/cookie dependencies and removes obsolete
+jsdom dependencies. MongoDB's existing URL dependencies move to nested paths with their
+versions and integrity retained; `lru-cache` 11.5.3 becomes shared with `path-scurry`.
+No other direct dependency version moves. The e2e graph retains every dependency entry and
+only adds the proposed engine declaration. Preserve the artifact for review beyond its expiry.
+A later merge from main needs corresponding provenance if it changes a producer input;
+this artifact always describes the preparation source above, not the subsequent import head.
+
+Initial source-head Docker job `111482158543` stopped at `npm ci` with `EUSAGE` because
+the old locks resolved Undici 7.30.0 and jsdom 26.1.0. The six checks lanes, coverage,
+store-contracts, acceptance image build and verbatim quickstart stopped on the same mismatch;
+`Supported Node minimum` then failed because the checks matrix failed. Those logs do not
+establish runtime or application-test results, and no jobs were manually rerun for this import.
 
 CI runs `checks (22.22.2)`, `checks (22)`, `checks (24.15.0)`, `checks (24)`,
 `checks (26.0.0)` and `checks (26)` with strict engine checks and actual-version assertions.
@@ -119,9 +159,12 @@ repository settings are preserved. All four store contracts, SMTP/OIDC/MCP secur
 Docker, acceptance, quickstart configuration, action pins and verbatim quickstart remain gates
 for the final candidate. No MCP subset/runtime/service-manifest source is changed here.
 
-After genuine locks, root and fresh independent review, and all hosted results are reviewable
-on the final head, root may ask the owner to approve the support-profile tradeoff. Fix deltas
-need review too. This preparation neither requests nor triggers an automated reviewer.
+**Final-head runtime/CI qualification, full root and fresh independent qualification, and
+owner approval remain PENDING.** A successful lock producer does not qualify the application
+or adopt a published Node floor. After all final-head hosted results and full candidate reviews
+are successful and reviewable, root may ask the owner to approve the support-profile tradeoff.
+Fix deltas need review too. This import neither requests nor triggers an automated reviewer,
+authorizes merging draft PR #521, nor closes #449.
 
 ## Decline or rollback
 
