@@ -632,6 +632,14 @@ upgraded account has no linked identity, no recorded address proof and no
 password lock. See [§14](#14-single-sign-on-openid-connect) for what a missing
 proof means for linking.
 
+`007_outbox_recipient` (pending release) adds a nullable `recipient_user_id`
+column to the outbox on SQL backends and backfills that field to `null` on
+retained MongoDB documents. Existing messages and delivery state are kept.
+New account mail names its original recipient; the sender refuses delivery
+when that account no longer holds the address. Address recovery cancels all
+pending messages to the old address, including unbound legacy rows, and refuses
+while any is sending. Upgrade every mail-producing instance before using it.
+
 `003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
 `ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,
 which adds the message id (`_id` descending on MongoDB), so finding each
@@ -1607,7 +1615,11 @@ at another provider never miss each other's write.
 Manual role changes take the account lifecycle key as well. A promotion from
 below `admin` to an elevated role is refused while the account has an identity
 at a provider not trusted to grant `admin`; remove that identity or restore the
-provider's admin trust before promoting.
+provider's admin trust before promoting. Every manual privilege increase
+ends all sessions in the promotion transaction (`user.role_change` records
+`terminated_sessions`), including sessions from identities already unlinked.
+Address release also takes the account lifecycle key and requires a disabled,
+unlinked account with completed gateway teardown.
 
 Both behave like gateway leases. A `409 CONFLICT` saying "Another administrator
 change is in flight right now — please retry" means two admins changed
@@ -2583,10 +2595,20 @@ account it is, and a `super_admin` decides:
   withheld until a `super_admin` has reviewed the other identity (above).
 - If it is not, a `super_admin` disables it (`PATCH /api/users/:id` with
   `status: "disabled"`), which ends its sessions and revokes its gateway
-  credentials, and removes its links. The portal has no API that deletes an
-  account or changes its address, so the address stays with the disabled
-  account: the holder gets an account at it only once that account's row is
-  removed from the database, which is a database operator's task.
+  credentials. In **Admin → Users → Release address**, review and remove
+  every identity link and wait for gateway revocation to complete (or use
+  **Retry**). Then release the address: `POST /api/users/:id/release-address`
+  with `{ "email": "the-current-address" }`. This retains the disabled
+  account’s ID and history at a unique reserved `released.nexus.invalid`
+  address, deletes its remaining sessions and verification/reset links, and
+  cancels queued mail in one audited transaction. A send already in progress
+  refuses the release; wait for it to settle and retry. The old account can
+  never be re-enabled. The rightful holder’s next sign-in creates a separate
+  account with its mapped role; no old grants or credentials transfer.
+  `super_admin` accounts cannot be released. A MongoDB replica set is required.
+  Upgrade **all** sender instances before using recovery: new account mail is
+  bound to the original recipient ID and refused after an address change,
+  while an older sender can still enqueue unbound work after release.
 
 **Explicit linking.** A signed-in user links their own account from **Profile →
 Linked sign-in**, whatever address the provider holds. The provider's domain

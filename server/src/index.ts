@@ -944,6 +944,7 @@ function defaultOnRegistered(
         const url = `${config.publicUrl}/verify-email?token=${encodeURIComponent(verificationToken)}`;
         await email.enqueue({
           to: user.email,
+          recipientUserId: user.id,
           templateKey: 'verification',
           idempotencyKey: `verify:${user.id}`,
           vars: {

@@ -72,8 +72,19 @@ On each row you can:
 - choose **Edit** to change the display name or organization;
 - choose **Disable** or **Enable**.
 
-You cannot change an account's email or password. Users change their own
-password from **Profile**; a new email address means a new account.
+Users change their own password from **Profile**; a new email address means
+a new account.
+
+A **super admin** can recover an address another provider claimed first:
+disable the account, then choose **Release address** on its row. Review and
+remove every linked identity in the dialog, and complete gateway revocation
+(use **Retry** if needed). Release retains the old account’s ID and history at
+a reserved non-deliverable address and keeps it disabled permanently. Its
+sessions, recovery links and pending mail are revoked. If mail is already
+being sent, wait and retry. The rightful holder can then sign in through their
+admin-mapped provider to create a separate account. No old grants or gateway
+credentials transfer. `super_admin` accounts cannot be released. See the
+[recovery runbook](../operations.md#how-accounts-are-matched).
 
 ### Disabling an account
 

@@ -355,6 +355,7 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
       try {
         await email.enqueue({
           to: recipient.email,
+          recipientUserId: recipient.id,
           templateKey: 'message_received',
           idempotencyKey: `message_received:${thread.id}:${recipient.id}:${bucket}`,
           vars: {

@@ -46,6 +46,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Manual privilege increases end every existing session, and super admins can
+  recover a squatted email address without database editing** (#504).
+  Promotion revokes sessions in its audited transaction, including cookies
+  from an identity already unlinked. **Admin → Users → Release address** frees
+  only a disabled, unlinked account after completed gateway revocation, retains
+  its ID/history at a reserved non-deliverable address, revokes remaining
+  sessions and tokens, and cancels queued mail. An in-progress sender blocks
+  release; new account mail is bound to its original recipient so delayed work
+  cannot reach the replacement account. Forward migration `007_outbox_recipient`
+  retains existing outbox data. Recovery requires atomic transactions and all
+  mail-producing instances upgraded.
+
 - **SSO settings saves and account role changes are serialized across instances** (#505).
   A deployment-wide lock now protects settings compare-and-swap even when no
   provider locks overlap, and every manual role change shares the account

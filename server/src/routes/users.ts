@@ -20,6 +20,7 @@ import {
   type ListOrganizationsResponse,
   type ListUserIdentitiesResponse,
   type ListUsersResponse,
+  type ReleaseUserAddressResponse,
   type RetryGatewayTeardownResponse,
   type UnlinkUserIdentityResponse,
   type UpdateMeResponse,
@@ -87,6 +88,8 @@ const updateUserBody = z.object({
   display_name: z.string().trim().min(1).max(200).optional(),
 });
 
+const releaseAddressBody = z.object({ email: z.string().trim().min(1).max(320) }).strict();
+
 const createOrganizationBody = z.object({
   name: z.string().trim().min(1).max(200),
   description: z.string().trim().max(2000).nullish(),
@@ -151,6 +154,17 @@ export const usersRoutes: FastifyPluginAsync<UsersRoutesOptions> = async (app, o
       const input = parseOrThrow(updateNotificationPreferencesBody, request.body);
       const preferences = await users.updateNotificationPreferences(user, input, clientIp(request));
       return { preferences };
+    },
+  );
+
+  app.post(
+    '/:id/release-address',
+    { onRequest: requireRole('super_admin') },
+    async (request): Promise<ReleaseUserAddressResponse> => {
+      const { user: actor } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const { email } = parseOrThrow(releaseAddressBody, request.body);
+      return { user: await users.releaseAddress(actor, id, email, clientIp(request)) };
     },
   );
 

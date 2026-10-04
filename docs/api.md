@@ -742,6 +742,10 @@ Rules:
   linked identity at a provider not trusted to grant `admin` → `409 CONFLICT`,
   with `details.lower_trust_provider_ids`. Remove those identities or restore
   the providers' admin trust before retrying.
+- Every manual privilege increase ends all existing sessions in the promotion
+  transaction, including sessions from identities since unlinked.
+  `user.role_change` records `terminated_sessions`, including zero. The holder
+  signs in again to receive the new role.
 - Demoting or disabling the last active `super_admin` → `409 LAST_SUPER_ADMIN`
   (this wins over the self-disable rule).
 - Disabling your own account otherwise → `409 CONFLICT`.
@@ -757,6 +761,29 @@ Rules:
   outside that namespace are kept). If the gateway fails, the status change has
   already committed and the response is `502 EDGE_ERROR`; repeat the same PATCH
   to retry.
+
+### `POST /api/users/:id/release-address`
+
+_super admin, session and CSRF_ — body `{ "email": string }`, the account’s
+current email address (≤ 320 characters). Unknown fields are refused.
+
+→ `{ "user": User }`, the retained disabled account with a unique reserved
+`released.nexus.invalid` email. Audited as `user.address_release` in the same
+transaction as revocation of all sessions, password-reset and verification
+links, and cancellation of pending mail to the old address.
+
+The target must be disabled, have no identity links, hold a completed
+(`done`) gateway teardown and have no active or retiring credential metadata. Missing/pending/sending teardown, an active or linked
+account, a stale email confirmation or a mail delivery in progress → `409 CONFLICT`.
+A `super_admin` account (including the caller) → `403 FORBIDDEN`. MongoDB
+standalone → `409 CONFLICT`; recovery requires atomic transactions.
+
+The retained account cannot be re-enabled (`409 CONFLICT`) and its tombstone
+domain cannot be registered or provisioned. Its history, grants and credential
+metadata remain attached to its ID. The rightful holder’s next SSO sign-in
+creates a separate account; existing ownership or gateway access never transfers.
+Upgrade every mail-producing instance before using this operation so delayed
+mail remains bound to the original account.
 
 ### `POST /api/users/:id/gateway-teardown/retry`
 

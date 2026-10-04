@@ -164,7 +164,7 @@ jobs:
           import { loadMigrations } from './server/dist/db/migrate.js';
           assert.ok(Number(process.versions.napi) >= 10);
           for (const dialect of ['sqlite', 'pg', 'mysql']) {
-            assert.deepEqual(loadMigrations(dialect).map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest', '004_api_spec_changes', '005_notification_preferences', '006_user_identities']);
+            assert.deepEqual(loadMigrations(dialect).map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest', '004_api_spec_changes', '005_notification_preferences', '006_user_identities', '007_outbox_recipient']);
           }
           const db = new Database(':memory:');
           for (const file of loadMigrations('sqlite')) db.exec(file.sql);

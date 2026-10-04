@@ -17,6 +17,7 @@ describe('buildout schema baseline', () => {
           '004_api_spec_changes',
           '005_notification_preferences',
           '006_user_identities',
+          '007_outbox_recipient',
         ],
       );
       const statements = splitSqlStatements(files[0]!.sql);

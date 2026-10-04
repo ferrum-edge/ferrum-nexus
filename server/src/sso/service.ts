@@ -69,6 +69,7 @@ import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import {
+  isReleasedEmail,
   roleAtLeast,
   SSO_TRANSACTION_TTL_SECONDS,
   type LoginPolicy,
@@ -766,7 +767,9 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       return { kind: 'returning', user, identity };
     }
 
-    if (email === null) throw new OidcError('email_required', 'The ID token has no usable email');
+    if (email === null || isReleasedEmail(email)) {
+      throw new OidcError('email_required', 'The ID token has no usable email');
+    }
     checkDomains(email, emailVerified, settings.allowed_email_domains);
     const existing = await store.users.findByEmail(email);
     if (existing) {

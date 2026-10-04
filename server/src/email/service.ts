@@ -345,6 +345,8 @@ export function createSmtpTransport(
 export interface EnqueueEmail {
   /** Recipient address. */
   to: string;
+  /** Intended account for user-directed mail. */
+  recipientUserId?: string;
   templateKey: EmailTemplateKey;
   /** Template variables; the common ones are filled in automatically. */
   vars?: TemplateVars;
@@ -619,6 +621,7 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
         return store.emailOutbox.enqueue(
           sealedEnqueueInput(crypto, {
             to: input.to,
+            recipientUserId: input.recipientUserId,
             content: rendered,
             idempotencyKey: input.idempotencyKey ?? null,
           }),
@@ -626,6 +629,7 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
       }
       return store.emailOutbox.enqueue({
         to_email: input.to,
+        recipient_user_id: input.recipientUserId ?? null,
         subject: rendered.subject,
         body_html: rendered.html,
         body_text: rendered.text,

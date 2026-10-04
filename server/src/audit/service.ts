@@ -99,6 +99,7 @@ export const AuditAction = {
   /** An account changed its own notification preferences; `details.changed` names which. */
   USER_NOTIFICATION_PREFERENCES_UPDATE: 'user.notification_preferences_update',
   USER_ROLE_CHANGE: 'user.role_change',
+  USER_ADDRESS_RELEASE: 'user.address_release',
   USER_DISABLE: 'user.disable',
   USER_ENABLE: 'user.enable',
   /**
@@ -521,6 +522,7 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.USER_UPDATE]: TRANSACTIONAL,
   [AuditAction.USER_NOTIFICATION_PREFERENCES_UPDATE]: TRANSACTIONAL,
   [AuditAction.USER_ROLE_CHANGE]: TRANSACTIONAL,
+  [AuditAction.USER_ADDRESS_RELEASE]: TRANSACTIONAL,
   [AuditAction.USER_DISABLE]: TRANSACTIONAL,
   [AuditAction.USER_ENABLE]: rowOnly(
     'Re-enabling an account that is already active changes no row: it only re-runs the ' +

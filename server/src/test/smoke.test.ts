@@ -63,6 +63,7 @@ import {
   createKeyedSerializer,
   SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
 } from '../lib/keyed-serializer.js';
+import { runAccountRecoveryContract } from './account-recovery-contract.js';
 import { runApplicationDeletionContract } from './application-deletion-contract.js';
 import { runApplicationViewerAuditContract } from './application-viewer-audit-contract.js';
 import { runDisableRevokesResetLinksContract } from './disable-revokes-reset-links-contract.js';
@@ -339,6 +340,7 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
  * whatever `makeStore` returns.
  */
 function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): void {
+  runAccountRecoveryContract(label, makeStore);
   runApplicationDeletionContract(label, makeStore);
   runApplicationViewerAuditContract(label, makeStore);
   runDisableRevokesResetLinksContract(label, makeStore);
@@ -5058,6 +5060,19 @@ describe('mongodb standalone rule', () => {
     try {
       await store.init();
       await store.migrate();
+
+      let ranAtomicBody = false;
+      await assert.rejects(
+        () =>
+          store.transaction(
+            async () => {
+              ranAtomicBody = true;
+            },
+            { requireAtomic: true },
+          ),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+      assert.equal(ranAtomicBody, false);
 
       // The body still runs and still commits its writes; what it loses is
       // atomicity, which is the documented trade of the opt-in.

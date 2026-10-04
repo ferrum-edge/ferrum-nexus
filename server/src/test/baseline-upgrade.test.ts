@@ -22,8 +22,8 @@
  * `002_api_gateway_plugins` and `003_messages_thread_latest`; from `v0.1.0`
  * and `v0.2.0`, `004_api_spec_changes`, `005_notification_preferences` and
  * `006_user_identities`) is applied here on top of a populated database with
- * no change to the harness. From the newest release (`v0.3.0`) nothing is
- * pending, so its run proves the current code opens that database unchanged.
+ * no change to the harness. From the newest release (`v0.3.0`), `007_outbox_recipient` adds a nullable
+ * account binding without changing retained message contents.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
@@ -144,6 +144,7 @@ const ID = {
   gatewayIdentity: '00000000-0000-4000-8000-000000001101',
   audit: '00000000-0000-4000-8000-000000001201',
   template: '00000000-0000-4000-8000-000000001301',
+  outbox: '00000000-0000-4000-8000-000000001401',
 } as const;
 
 const T0 = '2026-09-01T09:00:00.000Z';
@@ -599,6 +600,23 @@ async function buildFixture(): Promise<FixtureRow[]> {
       },
     },
     {
+      table: 'email_outbox',
+      row: {
+        id: ID.outbox,
+        to_email: 'client@example.test',
+        subject: 'Retained message',
+        body_html: '<p>Retained</p>',
+        body_text: 'Retained',
+        status: 'pending',
+        attempts: 0,
+        generation: '',
+        next_attempt_at: T2,
+        last_error: null,
+        idempotency_key: 'fixture-message',
+        ...stamps,
+      },
+    },
+    {
       table: 'email_templates',
       row: {
         id: ID.template,
@@ -658,6 +676,8 @@ async function readBack(store: NexusStore, { table, row }: FixtureRow): Promise<
       });
       return page.items.find((item) => item.id === id) ?? null;
     }
+    case 'email_outbox':
+      return store.emailOutbox.findById(id);
     case 'email_templates':
       return store.emailTemplates.get(String(row.key) as EmailTemplateKey);
     default:
@@ -687,6 +707,7 @@ async function assertFixturePreserved(
 
 /** What the portal needs from that data to keep working, beyond row equality. */
 async function assertPortalInvariants(store: NexusStore): Promise<void> {
+  assert.equal((await store.emailOutbox.findById(ID.outbox))?.recipient_user_id, null);
   // Sign-in: the stored hash still verifies, and the lookup is case-insensitive.
   const client = await store.users.findByEmail('Client@Example.test');
   assert.ok(client, 'the client is found by a case-insensitive email');

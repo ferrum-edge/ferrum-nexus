@@ -620,13 +620,30 @@ Environment secrets stay in the environment. No token, code, verifier, `state`,
   remains linked. The
   `super_admin` must remove the identity or restore that provider's admin trust
   first. The role change and first-time links take the account lifecycle lease,
-  so a link cannot slip between the check and promotion.
+  so a link cannot slip between the check and promotion. Every manual privilege
+  increase, including `client` → `provider` and `admin` → `super_admin`, ends
+  **all** existing sessions in that transaction and records `terminated_sessions`
+  in `user.role_change`. Removing an identity alone leaves its sessions alive;
+  none of those old cookies may inherit a subsequent promotion.
 - An address a lower-trust provider provisioned first leaves its rightful,
   admin-mapped holder refused with `privileged_account`, and with no password
   to sign in and link. A `super_admin` disables that account and removes its
-  links. The portal cannot delete an account or change its address, so freeing
-  the address is a database operator's task
-  ([docs/operations.md](operations.md#how-accounts-are-matched)).
+  links. In **Admin → Users → Release address**, a `super_admin` reviews and
+  removes every link, waits for gateway revocation to complete (use **Retry**
+  if needed), then releases the address with
+  `POST /api/users/:id/release-address` and `{ "email": "the-current-address" }`.
+  The operation requires a session and CSRF and commits `user.address_release`
+  with the email change, session/token revocation and cancellation of pending
+  mail. It refuses active, linked or `super_admin` accounts, an incomplete or
+  missing teardown, live credential metadata, and any mail delivery already in progress. The retained
+  user ID and history move to a unique address under `released.nexus.invalid`;
+  that domain cannot be registered or provisioned and the account stays
+  disabled permanently. The rightful holder's next admin-mapped sign-in
+  creates a separate account with none of the old account's grants, credentials,
+  links or sessions. See [the recovery runbook](operations.md#how-accounts-are-matched).
+  Recovery requires atomic transactions (MongoDB replica set) and every
+  sender instance must be upgraded first: account mail now carries its original
+  recipient ID, so stale work cannot deliver to a replacement account.
 
 - A proof records that someone controlled the mailbox once. An address that
   later changes hands (a recycled mailbox) still carries its old proof.
@@ -1705,7 +1722,8 @@ Naming is `<domain>.<verb>`, lowercase snake_case. God-mode actions are `god.*`.
 | -------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `user.update`                          | `user`         | Profile or account fields changed, without a role or status change. `details`: `self`, `changed_fields` (`password` as a name only), `terminated_sessions` on a self-service password change.                                                                                                                                                                          |
 | `user.notification_preferences_update` | `user`         | An account changed its own notification preferences. `details`: `changed` (the preference names), and every preference's new value.                                                                                                                                                                                                                                    |
-| `user.role_change`                     | `user`         | `details`: `from_role`, `to_role`.                                                                                                                                                                                                                                                                                                                                     |
+| `user.role_change`                     | `user`         | `details`: `from_role`, `to_role`, `terminated_sessions` on every manual privilege increase (all existing sessions ended in the promotion transaction).                                                                                                                                                                                                                |
+| `user.address_release`                 | `user`         | A super admin released a disabled, unlinked account’s address after completed gateway revocation. Committed with its reserved tombstone email, session/token deletion and pending-mail cancellation. `details`: `from_email`, `to_email`, `terminated_sessions`, `revoked_reset_links`, `revoked_verification_links`, `cancelled_emails`.                              |
 | `user.enable`                          | `user`         | An account was re-enabled. `details`: `from_status`, `to_status`, and `revoked_reset_links` when any were deleted. Repeating `status: "active"` on an active account re-runs the gateway restore and records `changed_fields: []` and `gateway_restore_retry: true`.                                                                                                   |
 | `user.disable`                         | `user`         | An account was disabled (ordinary or god mode), committed with the disable, session deletion and teardown job. `details`: `from_status`, `to_status`, `terminated_sessions`, `revoked_reset_links`, `gateway_teardown: "queued"`.                                                                                                                                      |
 | `user.gateway_teardown_complete`       | `user`         | The queued gateway revocation landed. Actor is the system (worker) or the admin whose immediate attempt succeeded (`inline: true`). `details`: `attempts`, `gateway_teardown` (`ok` \| `no_consumer`), `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`, `deleted_consumers`. A failed immediate attempt writes nothing; see the job's `last_error`. |

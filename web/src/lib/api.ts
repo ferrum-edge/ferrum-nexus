@@ -130,6 +130,8 @@ import {
   type ResendVerificationResponse,
   type ResetPasswordRequest,
   type ResetPasswordResponse,
+  type ReleaseUserAddressRequest,
+  type ReleaseUserAddressResponse,
   type RetryGatewayTeardownResponse,
   type RevokeGrantRequest,
   type RevokeGrantResponse,
@@ -417,6 +419,11 @@ export const usersApi = {
     get<GetUserResponse>(`/users/${encodeURIComponent(id)}`),
   update: (id: string, body: UpdateUserRequest): Promise<UpdateUserResponse> =>
     patch<UpdateUserResponse>(`/users/${encodeURIComponent(id)}`, body),
+  releaseAddress: (
+    id: string,
+    body: ReleaseUserAddressRequest,
+  ): Promise<ReleaseUserAddressResponse> =>
+    post<ReleaseUserAddressResponse>(`/users/${encodeURIComponent(id)}/release-address`, body),
   retryGatewayTeardown: (id: string): Promise<RetryGatewayTeardownResponse> =>
     post<RetryGatewayTeardownResponse>(`/users/${encodeURIComponent(id)}/gateway-teardown/retry`),
   /** The signed-in account's own single sign-on links. */

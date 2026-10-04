@@ -15,7 +15,9 @@ import type {
   ListUsersQuery,
   ListUserIdentitiesResponse,
   ListUsersResponse,
+  ReleaseUserAddressResponse,
   RetryGatewayTeardownResponse,
+  UnlinkUserIdentityResponse,
   StartSsoLinkResponse,
   UpdateMeRequest,
   UpdateMeResponse,
@@ -63,6 +65,44 @@ export function useRetryGatewayTeardown(): UseMutationResult<
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => usersApi.retryGatewayTeardown(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.users.all });
+    },
+  });
+}
+
+/** Super admin: free a disabled account's address while retaining its history. */
+export function useReleaseUserAddress(): UseMutationResult<
+  ReleaseUserAddressResponse,
+  Error,
+  { id: string; email: string }
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, email }: { id: string; email: string }) => usersApi.releaseAddress(id, { email }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.users.all });
+    },
+  });
+}
+
+/** Admin: inspect and remove identities from the recovery dialog. */
+export function useUserIdentities(id: string): UseQueryResult<ListUserIdentitiesResponse> {
+  return useQuery({
+    queryKey: queryKeys.users.identities(id),
+    queryFn: () => usersApi.identities(id),
+  });
+}
+
+export function useUnlinkUserIdentity(): UseMutationResult<
+  UnlinkUserIdentityResponse,
+  Error,
+  { id: string; identityId: string }
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, identityId }: { id: string; identityId: string }) =>
+      usersApi.unlinkIdentity(id, identityId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.users.all });
     },

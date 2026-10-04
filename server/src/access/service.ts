@@ -1026,6 +1026,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     try {
       await email.enqueue({
         to: recipient.email,
+        recipientUserId: recipient.id,
         templateKey: mail.templateKey,
         vars: {
           recipient_name: recipient.display_name,

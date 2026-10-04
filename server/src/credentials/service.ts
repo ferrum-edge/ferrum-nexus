@@ -3023,6 +3023,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       await email
         .enqueue({
           to: owner.email,
+          recipientUserId: owner.id,
           templateKey: 'credential_rotated',
           vars: {
             recipient_name: owner.display_name,

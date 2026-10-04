@@ -159,6 +159,8 @@ export interface TransactionOptions {
    * body atomic against anything it was not already.
    */
   readonly retry?: boolean;
+  /** Refuse degraded MongoDB standalone transactions before running the body. */
+  readonly requireAtomic?: boolean;
 }
 
 /* ── Stored record shapes ───────────────────────────────────────────────── */
@@ -423,6 +425,8 @@ export interface EmailOutboxRecord extends EmailOutboxEntry {
   body_text: string;
   /** Opaque ownership token, replaced on every claim. Internal only. */
   generation: string;
+  /** Intended account, independent of who later holds its former address. */
+  recipient_user_id: Uuid | null;
 }
 
 /**
@@ -774,7 +778,7 @@ export interface UserRepo {
    */
   updateIfMatches(
     id: Uuid,
-    expected: { role?: Role; status?: UserStatus },
+    expected: { role?: Role; status?: UserStatus; email?: string },
     patch: UpdateInput<UserRecord>,
   ): Promise<UserRecord | null>;
   /** Record a successful sign-in without rewriting the rest of the row. */
@@ -1529,6 +1533,8 @@ export interface NotificationPreferenceRepo {
 /** Payload accepted by {@link EmailOutboxRepo.enqueue}. */
 export interface EnqueueEmailInput {
   to_email: string;
+  /** Bind account mail to its original recipient; null only for non-account mail. */
+  recipient_user_id?: Uuid | null;
   subject: string;
   body_html: string;
   body_text: string;
@@ -1542,6 +1548,12 @@ export interface EnqueueEmailInput {
 
 /** Transactional email queue drained by the outbox worker. */
 export interface EmailOutboxRepo {
+  /**
+   * Cancel pending mail to a released address, including legacy unbound rows.
+   * Refuse with CONFLICT if any row is sending. Must join the release transaction;
+   * row locks / write conflicts order this operation against worker claims.
+   */
+  cancelForReleasedAddress(email: string): Promise<number>;
   /**
    * Enqueue a message as `pending` with `attempts = 0`. When
    * `idempotency_key` is set and already present, the existing row is returned

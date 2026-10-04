@@ -758,6 +758,7 @@ function mapOutbox(row: Row): EmailOutboxRecord {
     id: str(row._id),
     generation: str(row.generation ?? ''),
     to_email: str(row.to_email),
+    recipient_user_id: strOrNull(row.recipient_user_id),
     subject: str(row.subject),
     body_html: str(row.body_html),
     body_text: str(row.body_text),
@@ -1467,6 +1468,16 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
     indexes: USER_IDENTITY_INDEXES,
     apply: (db: Db): Promise<void> => createIndexes(db, USER_IDENTITY_INDEXES),
   },
+  {
+    id: '007_outbox_recipient',
+    indexes: [],
+    apply: async (db: Db): Promise<void> => {
+      await db.collection(COLLECTIONS.emailOutbox).updateMany(
+        { recipient_user_id: { $exists: false } },
+        { $set: { recipient_user_id: null } },
+      );
+    },
+  },
 ];
 
 /**
@@ -1724,6 +1735,11 @@ class MongoStore implements NexusStore {
     fn: (tx: MongoStore) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<T> {
+    if (options?.requireAtomic && !this.ctx.supportsTransactions) {
+      return Promise.reject(
+        conflict('This operation requires a MongoDB replica set for atomic transactions'),
+      );
+    }
     // Already inside a transaction body — join it rather than nesting.
     if (this.session) return fn(this);
 
@@ -1849,6 +1865,7 @@ class MongoStore implements NexusStore {
       const guard: Record<string, unknown> = { _id: id };
       if (expected.role !== undefined) guard.role = expected.role;
       if (expected.status !== undefined) guard.status = expected.status;
+      if (expected.email !== undefined) guard.email = expected.email.trim().toLowerCase();
       const query = guard as Filter<NexusDoc>;
 
       const set = setDoc(userUpdateFields(patch));
@@ -3705,6 +3722,35 @@ class MongoStore implements NexusStore {
   /* ── emailOutbox ──────────────────────────────────────────────────────── */
 
   readonly emailOutbox: EmailOutboxRepo = {
+    cancelForReleasedAddress: async (email) =>
+      this.inTransaction(async (tx) => {
+        const query = {
+          to_email: equalsInsensitive(email.trim()),
+          status: { $in: ['pending', 'sending'] },
+        } as Filter<NexusDoc>;
+        const rows = await tx.col(COLLECTIONS.emailOutbox).find(query, tx.opts).toArray();
+        if (rows.some((row) => row.status === 'sending')) {
+          throw conflict('Email delivery is in progress; retry after it settles');
+        }
+        if (rows.length === 0) return 0;
+        // A concurrent worker claim writes the same documents and forces this
+        // transaction to retry; the retry observes sending and refuses release.
+        const result = await tx.col(COLLECTIONS.emailOutbox).updateMany(
+          { _id: { $in: rows.map((row) => row._id) }, status: 'pending' } as Filter<NexusDoc>,
+          {
+            $set: {
+              status: 'failed',
+              next_attempt_at: null,
+              last_error: 'address-released',
+              updated_at: nowIso(),
+              generation: newId(),
+            },
+          },
+          tx.opts,
+        );
+        return result.modifiedCount;
+      }),
+
     enqueue: async (input) => {
       const key = input.idempotency_key ?? null;
       if (key !== null) {
@@ -3717,6 +3763,7 @@ class MongoStore implements NexusStore {
           {
             _id: meta.id,
             to_email: input.to_email,
+            recipient_user_id: input.recipient_user_id ?? null,
             subject: input.subject,
             body_html: input.body_html,
             body_text: input.body_text,

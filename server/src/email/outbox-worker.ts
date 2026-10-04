@@ -65,7 +65,7 @@
  * no timers involved.
  */
 
-import { OUTBOX_MAX_ATTEMPTS, OUTBOX_POLL_INTERVAL_MS } from '@ferrum-nexus/shared';
+import { isReleasedEmail, OUTBOX_MAX_ATTEMPTS, OUTBOX_POLL_INTERVAL_MS } from '@ferrum-nexus/shared';
 
 import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
@@ -235,6 +235,28 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
     result: OutboxTickResult,
     entry: EmailOutboxRecord,
   ): Promise<void> {
+    const recipient = entry.recipient_user_id
+      ? await store.users.findById(entry.recipient_user_id)
+      : null;
+    if (
+      isReleasedEmail(entry.to_email) ||
+      (entry.recipient_user_id !== null &&
+        (!recipient || recipient.email.toLowerCase() !== entry.to_email.toLowerCase()))
+    ) {
+      if (await store.emailOutbox.markFailed(entry, 'recipient-address-changed')) {
+        result.failed += 1;
+      } else {
+        lostClaim(result, entry, 'markFailed');
+      }
+      return;
+    }
+    // A worker may have paused after claiming or resolving the recipient.
+    // Recovery can cancel its reclaimed row; never send that stale snapshot.
+    const current = await store.emailOutbox.findById(entry.id);
+    if (current?.status !== 'sending' || current.generation !== entry.generation) {
+      lostClaim(result, entry, 'markSent');
+      return;
+    }
     let content: MailContent;
     try {
       content = openOutboxRecord(crypto, entry);

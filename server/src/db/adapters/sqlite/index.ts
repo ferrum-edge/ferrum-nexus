@@ -93,6 +93,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import type { NexusConfig } from '../../../config/index.js';
+import { conflict } from '../../../lib/errors.js';
 import { newId, nowIso } from '../../../lib/ids.js';
 import { fenceTransactionBody } from '../../../lib/lease-fence.js';
 import {
@@ -582,6 +583,7 @@ function mapOutbox(row: Row): EmailOutboxRecord {
     id: text(row.id),
     generation: text(row.generation),
     to_email: text(row.to_email),
+    recipient_user_id: textOrNull(row.recipient_user_id),
     subject: text(row.subject),
     body_html: text(row.body_html),
     body_text: text(row.body_text),
@@ -1057,6 +1059,7 @@ class SqliteStore implements NexusStore {
         .always('id = ?', id)
         .add(expected.role, 'role = ?', expected.role ?? null)
         .add(expected.status, 'status = ?', expected.status ?? null)
+        .add(expected.email, 'email = ?', expected.email?.trim().toLowerCase() ?? null)
         .build();
       const set = setParts(userUpdateColumns(patch));
       if (!set) {
@@ -3004,6 +3007,24 @@ class SqliteStore implements NexusStore {
   /* ── emailOutbox ──────────────────────────────────────────────────────── */
 
   readonly emailOutbox: EmailOutboxRepo = {
+    cancelForReleasedAddress: async (email) =>
+      this.db.transaction(() => {
+        const address = email.trim().toLowerCase();
+        const sending = queryOne(
+          this.db,
+          "SELECT id FROM email_outbox WHERE lower(to_email) = ? AND status = 'sending' LIMIT 1",
+          [address],
+        );
+        if (sending) throw conflict('Email delivery is in progress; retry after it settles');
+        return execute(
+          this.db,
+          `UPDATE email_outbox SET status = 'failed', next_attempt_at = NULL,
+           last_error = 'address-released', updated_at = ?, generation = ?
+           WHERE lower(to_email) = ? AND status = 'pending'`,
+          [nowIso(), newId(), address],
+        );
+      })(),
+
     enqueue: async (input: EnqueueEmailInput) => {
       const key = input.idempotency_key ?? null;
       if (key !== null) {
@@ -3015,12 +3036,13 @@ class SqliteStore implements NexusStore {
         execute(
           this.db,
           `INSERT INTO email_outbox
-             (id, to_email, subject, body_html, body_text, status, attempts, next_attempt_at,
-              last_error, idempotency_key, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, ?)`,
+             (id, to_email, recipient_user_id, subject, body_html, body_text, status, attempts,
+              next_attempt_at, last_error, idempotency_key, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, ?)`,
           [
             meta.id,
             input.to_email,
+            input.recipient_user_id ?? null,
             input.subject,
             input.body_html,
             input.body_text,

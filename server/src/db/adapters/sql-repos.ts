@@ -541,6 +541,7 @@ function mapOutbox(row: Row): EmailOutboxRecord {
     id: text(row.id),
     generation: text(row.generation),
     to_email: text(row.to_email),
+    recipient_user_id: textOrNull(row.recipient_user_id),
     subject: text(row.subject),
     body_html: text(row.body_html),
     body_text: text(row.body_text),
@@ -937,6 +938,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         .always('id = ?', id)
         .add(expected.role, 'role = ?', expected.role ?? null)
         .add(expected.status, 'status = ?', expected.status ?? null)
+        .add(expected.email, 'email = ?', expected.email?.trim().toLowerCase() ?? null)
         .build();
       const set = setParts(userUpdateColumns(patch));
       if (!set) {
@@ -2936,6 +2938,27 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
   const PINNED_OUTBOX_ID_TAKEN = 'An outbox entry with that id already exists';
 
   const emailOutbox: EmailOutboxRepo = {
+    cancelForReleasedAddress: async (email) =>
+      inTransaction(async (tx) => {
+        const rows = await queryAll(
+          tx,
+          `SELECT id, status FROM email_outbox
+           WHERE lower(to_email) = ? AND status IN ('pending', 'sending') FOR UPDATE`,
+          [email.trim().toLowerCase()],
+        );
+        if (rows.some((row) => row.status === 'sending')) {
+          throw new NexusError('CONFLICT', 'Email delivery is in progress; retry after it settles');
+        }
+        if (rows.length === 0) return 0;
+        return execute(
+          tx,
+          `UPDATE email_outbox SET status = 'failed', next_attempt_at = NULL,
+           last_error = 'address-released', updated_at = ?, generation = ?
+           WHERE id IN (${placeholders(rows.length)}) AND status = 'pending'`,
+          [nowIso(), newId(), ...rows.map((row) => text(row.id))],
+        );
+      }),
+
     enqueue: async (input) => {
       const key = input.idempotency_key ?? null;
       if (key !== null) {
@@ -2944,12 +2967,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       }
       const meta = stamps({ id: input.id });
       const insertSql = `INSERT INTO email_outbox
-             (id, to_email, subject, body_html, body_text, status, attempts, next_attempt_at,
-              last_error, idempotency_key, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, ?)`;
+             (id, to_email, recipient_user_id, subject, body_html, body_text, status, attempts,
+              next_attempt_at, last_error, idempotency_key, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, ?)`;
       const params = [
         meta.id,
         input.to_email,
+        input.recipient_user_id ?? null,
         input.subject,
         input.body_html,
         input.body_text,
