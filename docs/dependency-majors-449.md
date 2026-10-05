@@ -1,13 +1,16 @@
 # Dependency major migrations for issue #449
 
-This is partial progress on [issue #449](https://github.com/ferrum-edge/ferrum-nexus/issues/449).
-PR #518 completed the Node 22.14-compatible first stage described below. The issue remains
-open for jsdom 30 and Undici 8. This branch prepares that second stage as a **draft**, with
-higher Node minima in its manifests and workflows. No released support-profile change has
-been approved. Main and the released profile retain Node 22.14; PR #520's stable
-`Supported Node minimum` gate qualifies the actual declared minimum through the matrix.
-See the [higher-floor candidate notes](dependency-majors-449-higher-floor-draft.md) for
-compatibility costs, published evidence, imported locks, pending qualification and rollback.
+This document preserves the first-stage and pre-approval integration history for
+[issue #449](https://github.com/ferrum-edge/ferrum-nexus/issues/449). PR #518 completed the
+Node 22.14-compatible first stage. The owner has now approved jsdom 30.1.2 / Undici 8.11.2
+and the current unreleased supported range `^22.22.2 || ^24.15.0 || >=26.0.0`.
+Published releases retain their historical Node 22.14+ profile until a new release ships.
+The draft and pending owner/combined-head statements below describe earlier preparation
+snapshots, superseded by explicit approval and the qualification of prior head `059b428`.
+Fresh hosted qualification, full root and fresh independent review remain pending for the
+documentation adoption head. Issue #449 remains open while root completes those gates and
+PR #521's delivery. See the [migration notes](dependency-majors-449-higher-floor-draft.md)
+for current approval, exact-head qualification, preserved lock provenance and rollback.
 
 ## Published versions and migration boundaries
 
@@ -112,8 +115,9 @@ hooks disabled before pushing. Keep the provenance artifact/run URL available fo
 
 The root lock is unchanged; the e2e lock incorporates only main's hosted-verified typings patch
 while preserving the candidate engine declaration. Current input hashes and both historical
-artifact identities are recorded in the draft notes and provenance document. Fresh producer
-verification and combined-head runtime/CI qualification remain pending. The optional producer
+artifact identities are recorded in the draft notes and provenance document. At the PR #523
+integration snapshot, fresh producer verification and combined-head runtime/CI qualification
+were still pending. The optional producer
 does not replace any required check:
 all normal required checks must pass on the final head,
 including `Supported Node minimum`, real Node 22/24 checks, store contracts, Docker, acceptance,
@@ -121,6 +125,7 @@ quickstart configuration and action pins. The candidate's additional per-major m
 and verbatim quickstart jobs must pass too. Coverage remains its existing optional job.
 No local project tooling was run for this migration. Root and a fresh independent reviewer
 must review the combined candidate and integration delta, and every hosted gate must pass again.
-Owner approval to change the released profile remains pending; integration does not imply
-approval or authorize another owner request. This draft is not merge authorization and does
-not close #449.
+At that preparation stage, owner approval to change the released profile was pending;
+integration alone did not imply approval, authorize another owner request or close #449.
+The explicit approval and qualified prior head `059b428` now supersede that historical status;
+the documentation adoption head still requires its own hosted gates and root review.

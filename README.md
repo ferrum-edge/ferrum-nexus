@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/ferrum-edge/ferrum-nexus/actions/workflows/ci.yml"><img src="https://github.com/ferrum-edge/ferrum-nexus/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
   <a href="https://github.com/ferrum-edge/ferrum-nexus/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue" alt="License" /></a>
-  <img src="https://img.shields.io/badge/node-draft%2022.22.2%20%7C%2024.15%20%7C%2026-brightgreen" alt="Draft Node minima: 22.22.2, 24.15.0, 26.0.0" />
+  <img src="https://img.shields.io/badge/node-22.22.2%20%7C%2024.15.0%20%7C%2026.0.0-brightgreen" alt="Supported Node minima (unreleased): 22.22.2, 24.15.0, 26.0.0" />
   <img src="https://img.shields.io/badge/TypeScript-strict-blue" alt="TypeScript" />
 </p>
 
@@ -31,17 +31,20 @@ row before calling Edge.
 the first supported release. The [release notes](docs/release-notes.md) list the
 supported pair, how to upgrade from `v0.2.0`, and the known limitations.
 
-This source branch is a **draft** jsdom 30 / Undici 8 migration. It proposes
-`^22.22.2 || ^24.15.0 || >=26.0.0`; owner approval to change the released Node
-support profile is still pending. The released profile remains Node 22.14+.
+The owner has approved jsdom 30.1.2 / Undici 8.11.2 and the current unreleased
+supported Node range `^22.22.2 || ^24.15.0 || >=26.0.0`. Node 22 remains supported;
+older Node 22/24 patches and Node 23/25 are excluded. Published releases retain
+their historical Node 22.14+ profile until a new release ships.
 Both candidate locks were originally imported byte-for-byte from verified hosted artifact
 `11308824128`, produced by run `37217928511`, attempt 1, from source
 `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`; the root lock is unchanged. The current e2e
 lock incorporates qualified main PR #523's `@types/node` 22.20.4 to 22.20.5 patch while
-preserving the candidate engine. Parent `74bc56c` passed all 15 hosted checks after
+preserving the approved engine range. Prior head `059b428` passed all 15 hosted checks after
 integrating qualified main PRs #519 and #523, including MCP subsets and the proposed
-service-manifest preview. This documentation head still requires fresh hosted qualification,
-full root review and independent review. See the
+service-manifest preview, and completed full root and fresh independent review. Its hosted
+producer artifact `11336281445` verified the current locks with an empty diff. This
+documentation adoption head still requires fresh hosted qualification, full root review
+and independent review. See the
 [candidate and rollback notes](docs/dependency-majors-449-higher-floor-draft.md) for
 historical producer provenance and current hashes in the main integration section.
 
@@ -140,7 +143,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the full design.
 ## Quickstart
 
 ```bash
-# Draft source: Node ^22.22.2 || ^24.15.0 || >=26.0.0 (see .nvmrc)
+# Unreleased source: Node ^22.22.2 || ^24.15.0 || >=26.0.0 (see .nvmrc)
 npm install
 
 cp .env.example .env

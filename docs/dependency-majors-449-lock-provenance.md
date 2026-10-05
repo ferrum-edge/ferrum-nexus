@@ -1,24 +1,30 @@
 # Hosted lock provenance for issue #449
 
+The owner has approved jsdom 30.1.2 / Undici 8.11.2 and the current unreleased supported
+Node range `^22.22.2 || ^24.15.0 || >=26.0.0`. Prior head `059b428` is qualified below;
+fresh hosted qualification and review remain pending for this documentation adoption head.
+Published releases retain their historical Node 22.14+ profile until a new release ships.
+
 ## Historical first-stage artifact; higher-floor locks imported
 
-The records below preserve PR #518's historical lock provenance. This draft's locks were
+The records below preserve PR #518's historical lock provenance. This candidate's locks were
 originally imported byte-for-byte at `bc389dfe1510692057793930817d35d0c1e18f6a` from verified
 artifact `11308824128`, produced by
 [run 37217928511, attempt 1](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37217928511)
 from source `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec` on Node `v22.22.2` / npm `10.9.7`.
-The root lock resolves jsdom 30.1.2 and Undici 8.11.2; both include the proposed workspace engines.
+The root lock resolves jsdom 30.1.2 and Undici 8.11.2; both include the now-approved workspace engines.
 The archive SHA-256 is `06cfb6dd727d02621f026c45c6ba495f4c414803dc08a61a676dfb5809e43bba`;
-the [draft notes](dependency-majors-449-higher-floor-draft.md#hosted-lock-import-qualification-pending)
+the [historical import notes](dependency-majors-449-higher-floor-draft.md#hosted-lock-import-qualification-pending)
 record the verified input/output manifests and full import facts. The
 [main integration record](dependency-majors-449-higher-floor-draft.md#main-integration-and-current-gates)
 preserves that producer/source binding, the prior PR #519 integration and its qualification,
 and the current PR #523 merge inputs. The root lock retains the imported hash; the e2e lock
-now incorporates only main's verified Node typings patch while retaining the proposed engine.
+now incorporates only main's verified Node typings patch while retaining the approved engine range.
 Its current hash differs from the original higher-floor output. Parent `d3347dc` passed all
-15 hosted checks; fresh combined-head qualification and review are pending, as is owner approval.
+15 hosted checks. Combined-head qualification and owner approval were pending at that stage;
+the later `059b428` qualification and explicit owner approval supersede that historical status.
 
-## Historical PR #523 producer; current integration pending
+## Historical PR #523 producer and integration
 
 Main `1a908ea5c81e4685622345954266268684255b86` merged PR #523's qualified source
 `27e4312e97f585e1a2da83d231730033f285e9a8`. Its
@@ -44,10 +50,37 @@ Node 22.22.2 witness and exact jsdom/Undici guards. Current candidate lock hashe
 4f37d761e1d573e90e2667de9df142f420917b81c6f2d059dd78b975ca2cf36e  e2e/package-lock.json
 ```
 
-The draft notes record all ten current producer-input hashes. No new hosted artifact is
-claimed; root owns its download/verification and fresh exact-head review and CI after push.
-Both historical artifact records remain immutable. Released Node 22.14 support and the pending
-owner decision are unchanged.
+The migration notes record all ten producer-input hashes retained at `059b428` and unchanged
+by this documentation adoption. Both historical artifact records keep their original source
+identities and hashes. Their Node 22.14 and original higher-floor producer records are not
+rewritten by the subsequent qualification or owner approval.
+
+## Qualified prior-head producer and current documentation status
+
+[Producer run 37290169451, attempt 1](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37290169451)
+checked out exact source `059b4284bf0aeb003f61a57c11ca9be70140c167` in repository
+`1244400882` (`ferrum-edge/ferrum-nexus`) and used Node `v22.22.2` / npm `10.9.7`.
+Artifact `11336281445` is named
+`dependency-locks-059b4284bf0aeb003f61a57c11ca9be70140c167`; its archive SHA-256 is
+`759eb689a394aac309cc431ceb3c6648164bf8e16f2f9022cc11647dce900244`.
+Root verified the exact repository/source/run binding, all ten input and three output hashes,
+and both complete input/output/current locks byte-for-byte. Its complete output diff is empty:
+
+```text
+0ed9c2de1dab8e5828e496a135fc1b67f91d2191f4c986e3ea79b19b5e8e6a12  package-lock.json
+4f37d761e1d573e90e2667de9df142f420917b81c6f2d059dd78b975ca2cf36e  e2e/package-lock.json
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  locks.diff
+```
+
+That exact prior head passed all 15 hosted checks across CI `37290169452`, producer
+`37290169451` and verbatim quickstart `37290169560`, and completed full root and fresh
+independent review. The [qualification record](dependency-majors-449-higher-floor-draft.md#qualified-prior-head-and-current-documentation-head)
+links those runs and preserves the review history. The explicit owner approval is current;
+the earlier pending decision is historical. No new lock import is needed.
+
+This documentation adoption changes no source, producer input, manifest or lock. Its hosted
+qualification, full root review and fresh independent review remain pending. No artifact or
+successful gate is claimed for the new documentation head; root owns those post-push gates.
 
 ## PR #518 provenance
 

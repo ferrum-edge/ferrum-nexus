@@ -1,28 +1,39 @@
-# Draft jsdom 30 / Undici 8 candidate
+# Approved jsdom 30 / Undici 8 migration (unreleased)
 
 References [issue #449](https://github.com/ferrum-edge/ferrum-nexus/issues/449).
 Prepared from main `48ea760098d1aa858dc7cee06bf7f8fb7536cdaf` (PR #520).
 The prior normal merge integrated main `559c350a5370335791cdc3082225dce6056cf547`
 (qualified PR #519) into candidate `aa2904bf41784c930f7d41af69603e22a9216a4c`.
-This continuation integrates main `1a908ea5c81e4685622345954266268684255b86`
+The next normal merge integrated main `1a908ea5c81e4685622345954266268684255b86`
 (qualified PR #523) into candidate `d3347dcae7b61186debf9457ab572ecd70971ba6`
-through a normal merge.
-**The owner has not approved a higher released Node floor.** This branch and its
-draft PR are a concrete proposal only. Main/released support remains Node 22.14. Root must
-review the combined candidate, obtain fresh independent review and qualify every hosted gate.
-The existing owner decision is pending; this integration neither implies approval nor
-authorizes another owner request. Do not merge or mark #449 fixed on this preparation.
+at `74bc56cc2265e65fed6b4422cae27d2f7e097339`.
 
-## Compatibility proposal and primary evidence
+**Owner approval is complete for the reviewed issue #449 upgrade.** The owner explicitly said,
+“I approve the nexus issue upgrade too for framework/dependency bumps onto newer version.”
+Root received and recorded that decision. It covers jsdom 30.1.2 / Undici 8.11.2 and the
+current unreleased supported Node range `^22.22.2 || ^24.15.0 || >=26.0.0`, including the
+exclusion of older Node 22/24 patches and Node 23/25. It does not approve arbitrary dependency
+versions or other pending product decisions. Published releases and their Node 22.14+ profile
+remain immutable historical facts until a new release ships. The historical filename is retained
+for existing links.
 
-The proposed source range is `^22.22.2 || ^24.15.0 || >=26.0.0`, declared identically in
-the root, shared, server, web and e2e manifests; `.nvmrc` selects exactly 22.22.2. This retains
-the Node 22 major, but excludes 22.14–22.22.1, Node 23/25, and Node 24 below 24.15.0.
-Operators on those versions must upgrade before installing a future approved release.
+Prior head `059b4284bf0aeb003f61a57c11ca9be70140c167` completed root and fresh independent
+review and all hosted gates, as recorded below. This documentation adoption head requires
+fresh hosted qualification, full root review and fresh independent review. Earlier pending
+approval and qualification statements in the historical records describe their preparation
+stage; they are superseded by the approval above and the exact-head qualification below.
+
+## Approved compatibility profile and primary evidence
+
+The current unreleased supported range is `^22.22.2 || ^24.15.0 || >=26.0.0`, declared
+identically in the root, shared, server, web and e2e manifests. `.nvmrc` selects exactly
+22.22.2. This retains the Node 22 major, but excludes 22.14–22.22.1, Node 23/25, and Node 24
+below 24.15.0.
+Operators on those versions must upgrade before installing this source or a release that ships it.
 
 Official npm metadata re-read on 2026-10-04:
 
-- [jsdom 30.1.2](https://registry.npmjs.org/jsdom/30.1.2) requires the proposed range and
+- [jsdom 30.1.2](https://registry.npmjs.org/jsdom/30.1.2) requires this range and
   directly depends on `undici: ^8.11.2`. Its published integrity is
   `sha512-0FFE/jE1rppmVfUrJUgxqXjcwolZYIGtAgj1pTussMhNZxIxi7W/PvfWaMNroGi2B36X1IKHbexpZ9DhkoOPiQ==`.
 - [Undici 8.11.2](https://registry.npmjs.org/undici/8.11.2) requires `>=22.19.0`. Its published
@@ -72,9 +83,10 @@ This has not been locally reproduced. Notification buttons now reference their v
 and current action with `aria-labelledby`, and their visible body/time with `aria-describedby`.
 Tests require exact accessible names, visible text and descriptions, paging/filter/bell behavior
 and an unlinked item's changing action. No hidden-role override, skipped test, CSS visibility
-patch or weakened name matcher is used. Hosted jsdom 30 results must verify the hypothesis.
+patch or weakened name matcher is used. At preparation, hosted jsdom 30 results were required
+to verify the hypothesis; subsequent exact-head qualifications are recorded below.
 
-## Existing Docker pin meets the proposed floor
+## Existing Docker pin meets the approved floor
 
 The Docker Registry HTTP API was read on 2026-10-04 for the existing immutable index:
 
@@ -96,6 +108,9 @@ process was run locally. The hosted Docker, acceptance and verbatim quickstart j
 validate the packaged result; OCI metadata alone does not qualify it.
 
 ## Hosted lock import; qualification pending
+
+This section preserves the original import and its then-pending qualification. Later
+exact-head qualifications are recorded in the main integration section below.
 
 Both lockfiles were originally copied byte-for-byte from the successful
 [producer run 37217928511, attempt 1](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37217928511).
@@ -147,8 +162,8 @@ The fresh root graph updates jsdom's CSS/DOM/URL/cookie dependencies and removes
 jsdom dependencies. MongoDB's existing URL dependencies move to nested paths with their
 versions and integrity retained; `lru-cache` 11.5.3 becomes shared with `path-scurry`.
 No other direct dependency version moved at import. The imported e2e graph retained every
-dependency entry and only added the proposed engine declaration. Preserve the artifact for review
-beyond its expiry.
+dependency entry and only added the then-proposed engine declaration. Preserve the artifact
+for review beyond its expiry.
 A later merge from main needs corresponding provenance if it changes a producer input;
 this artifact always describes the preparation source above, not the subsequent import head.
 
@@ -180,7 +195,8 @@ Actions check runs across [CI 37219830100](https://github.com/ferrum-edge/ferrum
 [Verbatim quickstart 37219830156](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37219830156)
 and [Dependency lock artifacts 37219830157](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37219830157).
 Root completed full and independent review of that head and its fix deltas. This is prior-head
-evidence; it does not qualify the combined candidate or approve the released Node profile.
+evidence. At that point, combined-head qualification and owner approval were still pending;
+this earlier qualification did not itself adopt a released Node profile.
 
 Nexus [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519) was qualified at final head
 `77fdb767ec8ef04e88f13df9fb291bc77fbd0344`: all 11 check runs across
@@ -195,11 +211,11 @@ canonical tracking/freeze decision. That main head's implementation and qualific
 
 The immutable heads share base `48ea760098d1aa858dc7cee06bf7f8fb7536cdaf`. Their only
 overlapping changed files are `.github/workflows/ci.yml`, `CHANGELOG.md` and `README.md`.
-The normal merge is conflict-free: CI retains all six candidate lanes and the fail-closed
+The normal merge was conflict-free: CI retained all six candidate lanes and the fail-closed
 minimum aggregate together with main's migration-011 inventory assertion. Both changelog
-entries remain under Unreleased, and README retains the draft profile and manifest pin.
-Manual documentation edits distinguish the qualified parents from the unqualified combined
-head and preserve the pending owner decision. Candidate H1 opt-outs, canonical OIDC fixture,
+entries remained under Unreleased, and README retained the then-draft profile and manifest pin.
+Manual documentation edits distinguished the qualified parents from the then-unqualified combined
+head and recorded the then-pending owner decision. Candidate H1 opt-outs, canonical OIDC fixture,
 accessible notification regressions and all existing MCP strict fixtures are unchanged.
 
 In that integration, main changed no package manifest or lockfile relative to the shared base.
@@ -231,20 +247,20 @@ Actions checks across [CI 37221897637](https://github.com/ferrum-edge/ferrum-nex
 [Dependency lock artifacts 37221897636](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221897636)
 and [Verbatim quickstart 37221897641](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221897641).
 Root completed whole and fresh independent review of that exact head with no findings.
-This is historical parent evidence, not qualification of the new integration.
+This qualified the PR #519 integration before the later PR #523 merge.
 
-### PR #523 producer-fix integration; fresh qualification pending
+### PR #523 producer-fix integration
 
 Main advanced to `1a908ea5c81e4685622345954266268684255b86` through
 [#523](https://github.com/ferrum-edge/ferrum-nexus/pull/523). Its qualified source is
 `27e4312e97f585e1a2da83d231730033f285e9a8`. Root reviewed the complete four-file delta
 and obtained fresh independent review with no findings; all 11 hosted checks passed.
-The normal merge into `d3347dcae7b61186debf9457ab572ecd70971ba6` conflicts only in
-the producer workflow and `dependency-majors-449.md`. The e2e manifest and lock auto-merge
+The normal merge into `d3347dcae7b61186debf9457ab572ecd70971ba6` resolved conflicts only in
+the producer workflow and `dependency-majors-449.md`. The e2e manifest and lock auto-merged
 the `@types/node` range `^22.10.2` to `^22.20.5` and resolution 22.20.4 to 22.20.5,
 including main's published MIT license and integrity. The candidate engine remains intact.
-No root graph, application, test, MCP, migration, contract, compatibility pin or required
-gate changes in this continuation.
+That integration changed no root graph, application, test, MCP, migration, contract,
+compatibility pin or required gate.
 
 The resolved producer copies both committed locks as resolution inputs instead of removing
 the root lock, checks every manifest entry, and requires complete lock equality when that
@@ -278,10 +294,9 @@ cb5020c8613a52edbf613785391f98b6809d3f03a529fc129fb6522e3e528636  server/package
 3eff672daf435adb891ea4c2d138edaf4670c71bf04e6e5cb9da1840cdbde314  .github/workflows/dependency-locks.yml
 ```
 
-These are static integration hashes, not output claims for a new hosted run. Relative to
-parent `d3347dc`, only the e2e manifest/lock and producer workflow inputs change. Root owns
-fresh hosted producer download/verification, whole integration review, fresh independent
-review and every current-head CI gate after push. No new run or artifact is claimed here.
+These integration inputs were subsequently verified at prior head `059b428`, as recorded below.
+Relative to parent `d3347dc`, only the e2e manifest/lock and producer workflow inputs changed.
+This documentation adoption changes none of the ten inputs or either lock.
 
 CI runs `checks (22.22.2)`, `checks (22)`, `checks (24.15.0)`, `checks (24)`,
 `checks (26.0.0)` and `checks (26)` with strict engine checks and actual-version assertions.
@@ -292,18 +307,44 @@ repository settings are preserved. All four store contracts, SMTP/OIDC/MCP secur
 Docker, acceptance, quickstart configuration, action pins and verbatim quickstart remain gates
 for the combined candidate. Release compatibility and Docker image digests are unchanged.
 
-**Combined-head runtime/CI qualification, full root and fresh independent review remain
-PENDING. Owner approval remains PENDING.** Neither the successful parents nor the producer
-qualify this combined head or adopt a published Node floor. Root owns exact-head combined-delta
-review, independent review of any new logic and all fresh hosted CI after this push. This
-continuation neither requests nor triggers an automated reviewer, authorizes merging draft
-PR #521, closes #449, nor asks the owner again.
+### Qualified prior head and current documentation head
 
-## Decline or rollback
+Prior head `059b4284bf0aeb003f61a57c11ca9be70140c167` passed all 15 hosted Actions checks
+across [CI 37290169452](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37290169452),
+[Dependency lock artifacts 37290169451](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37290169451)
+and [Verbatim quickstart 37290169560](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37290169560).
+All three workflows succeeded, including all 13 actual CI jobs and all eight protected
+contexts from Actions App `15368`. Root reviewed the entire original candidate, the complete
+432-line six-file normal integration delta and the final two-file provenance correction.
+Fresh independent integration review found one stale provenance paragraph, which was fixed;
+fresh focused independent review then reported no findings at immutable `059b428`.
 
-If the owner declines, leave main and the released profile at their current floor and retain
-the first-stage dependency upgrades and main's qualified MCP work. Do not merge this draft
-or close #449. The dependency proposal adds no schema migration; integrated main adds 011.
+Producer run `37290169451`, attempt 1, checked out exact source
+`059b4284bf0aeb003f61a57c11ca9be70140c167` and used Node `v22.22.2` / npm `10.9.7`.
+Its artifact `11336281445` has archive SHA-256
+`759eb689a394aac309cc431ceb3c6648164bf8e16f2f9022cc11647dce900244`.
+Root verified the exact repository/source/run binding, all ten input and three output hashes,
+both complete input/output/current locks byte-for-byte and an empty `locks.diff`. The root
+lock remains `0ed9c2de1dab8e5828e496a135fc1b67f91d2191f4c986e3ea79b19b5e8e6a12`;
+the e2e lock remains `4f37d761e1d573e90e2667de9df142f420917b81c6f2d059dd78b975ca2cf36e`,
+including PR #523's `@types/node` 22.20.5 patch. No new lock import is needed. This artifact
+belongs to `059b428`; it does not relabel the original source `15c47ec` or either historical
+main producer.
+
+**Owner approval is complete. Hosted qualification, full root review and fresh independent
+review are pending for this documentation adoption head.** The successful prior head does
+not qualify this new head, and no new hosted run or artifact is claimed for it. Root owns
+those post-push gates and subsequent PR metadata, protected merge and verified issue closure.
+The source, manifests, locks, workflows, tests, MCP contract status, migration inventory,
+release compatibility and lifecycle/security behavior are unchanged by this adoption.
+
+## Historical decline path and rollback
+
+Before explicit approval, the recorded decline path was to leave main and the released
+profile at their existing floor, retain the first-stage dependency upgrades and main's
+qualified MCP work, and leave draft PR #521 unmerged and #449 open. That pending owner
+decision has now been resolved by approval; this historical path is no longer a current block.
+The dependency upgrade adds no schema migration; integrated main adds 011.
 The [MCP rollout and rollback limits](mcp-subsets-migration-draft.md) apply: drain older writers
 and do not roll back the application while subset grants exist. If a later approved release
 needs rollback, use the prior complete release's manifests, genuine locks, Node declarations
