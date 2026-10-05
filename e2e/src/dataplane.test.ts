@@ -292,9 +292,11 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       '-v',
       'ON_ERROR_STOP=1',
       '-c',
-      `CREATE FUNCTION deployment_commit_refusal() RETURNS trigger LANGUAGE plpgsql AS $$
+      `CREATE SEQUENCE deployment_commit_refusal_seen;
+      CREATE FUNCTION deployment_commit_refusal() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN IF NEW.id = '${api.id}' AND NEW.spec_enforcement <> OLD.spec_enforcement
-      THEN RAISE EXCEPTION 'acceptance conversion commit failure'; END IF; RETURN NEW; END $$;
+      THEN PERFORM nextval('deployment_commit_refusal_seen');
+      RAISE EXCEPTION 'acceptance conversion commit failure'; END IF; RETURN NEW; END $$;
       CREATE TRIGGER deployment_commit_refusal BEFORE UPDATE ON apis
       FOR EACH ROW EXECUTE FUNCTION deployment_commit_refusal();`,
     );
@@ -305,6 +307,18 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       });
       assert.equal(failed.status, 500);
       await failed.arrayBuffer();
+      await inPostgres(
+        'psql',
+        '-U',
+        'nexus',
+        '-d',
+        'nexus',
+        '-v',
+        'ON_ERROR_STOP=1',
+        '-c',
+        `DO $$ BEGIN IF NOT (SELECT is_called FROM deployment_commit_refusal_seen)
+        THEN RAISE EXCEPTION 'catalog refusal trigger was not reached'; END IF; END $$;`,
+      );
     } finally {
       await inPostgres(
         'psql',
@@ -315,7 +329,9 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         '-v',
         'ON_ERROR_STOP=1',
         '-c',
-        'DROP TRIGGER deployment_commit_refusal ON apis; DROP FUNCTION deployment_commit_refusal();',
+        'DROP TRIGGER deployment_commit_refusal ON apis; ' +
+          'DROP FUNCTION deployment_commit_refusal(); ' +
+          'DROP SEQUENCE deployment_commit_refusal_seen;',
       );
     }
     const afterResponse = await gatewayAdmin('GET', '/deployment-snapshot');

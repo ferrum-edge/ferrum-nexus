@@ -61,6 +61,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import type { AddressInfo } from 'node:net';
+import { isDeepStrictEqual } from 'node:util';
 
 import { jwtVerify } from 'jose';
 import { FERRUM_PROVISIONED_BY_HEADER } from '@ferrum-nexus/shared';
@@ -1023,6 +1024,42 @@ function generateValidatorConfig(
   };
 }
 
+/** Edge merges the first embedded validator before plugin admission, regenerating operations. */
+function importedValidatorConfig(
+  document: Record<string, unknown>,
+  validate: Record<string, unknown>,
+  operator: Record<string, unknown>,
+): Record<string, unknown> {
+  const generated = generateValidatorConfig(document, validate);
+  const merged: Record<string, unknown> = {
+    ...generated,
+    ...operator,
+    operations: generated.operations,
+  };
+  if (isRecord(operator.bypass)) {
+    const original: Record<string, unknown> = isRecord(generated.bypass) ? generated.bypass : {};
+    const bypass: Record<string, unknown> = { ...original, ...operator.bypass };
+    for (const field of ['paths', 'methods', 'consumers']) {
+      const added = operator.bypass[field];
+      if (Array.isArray(added)) {
+        const values: unknown[] = Array.isArray(original[field]) ? [...original[field]] : [];
+        for (const candidate of added) {
+          if (!values.some((value) => isDeepStrictEqual(value, candidate))) values.push(candidate);
+        }
+        bypass[field] = values;
+      }
+    }
+    if (isRecord(operator.bypass.header_present)) {
+      bypass.header_present = {
+        ...(isRecord(original.header_present) ? original.header_present : {}),
+        ...operator.bypass.header_present,
+      };
+    }
+    merged.bypass = bypass;
+  }
+  return merged;
+}
+
 /** `Proxy.allowed_methods` entries, from the openapi enum. */
 const PROXY_HTTP_METHODS = new Set([
   'GET',
@@ -1542,6 +1579,25 @@ function triggerNodeError(node: unknown, path: string): string | null {
   return null;
 }
 
+function openapiValidatorBypassError(bypass: unknown): string | null {
+  if (bypass === undefined) return null;
+  if (!isRecord(bypass)) return "openapi_validator: 'bypass' must be an object";
+  for (const field of Object.keys(bypass)) {
+    if (!OPENAPI_BYPASS_KEYS.has(field)) {
+      return `openapi_validator: bypass unknown field '${field}'`;
+    }
+  }
+  for (const field of ['paths', 'methods', 'consumers']) {
+    if (bypass[field] !== undefined && !Array.isArray(bypass[field])) {
+      return `openapi_validator: 'bypass.${field}' must be an array`;
+    }
+  }
+  if (bypass.header_present !== undefined && !isRecord(bypass.header_present)) {
+    return "openapi_validator: 'bypass.header_present' must be an object";
+  }
+  return null;
+}
+
 /**
  * Edge's admission checks for `openapi_validator`, reduced to what Nexus can
  * actually get wrong.
@@ -1588,18 +1644,8 @@ function openapiValidatorError(config: Record<string, unknown>): string | null {
     }
   }
 
-  const bypass = config.bypass;
-  if (bypass !== undefined) {
-    if (!isRecord(bypass)) return "openapi_validator: 'bypass' must be an object";
-    for (const field of Object.keys(bypass)) {
-      if (!OPENAPI_BYPASS_KEYS.has(field)) {
-        return `openapi_validator: bypass unknown field '${field}'`;
-      }
-    }
-    if (bypass.methods !== undefined && !Array.isArray(bypass.methods)) {
-      return "openapi_validator: 'bypass.methods' must be an array of strings";
-    }
-  }
+  const bypassProblem = openapiValidatorBypassError(config.bypass);
+  if (bypassProblem) return bypassProblem;
 
   // A config with no schemas and no unknown-operation check enforces nothing at
   // all, which Edge refuses rather than accepting as a no-op policy.
@@ -2582,6 +2628,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           return parseError('MalformedExtension', `unknown x-ferrum-validate field: ${field}`);
         }
       }
+      const bypassProblem = openapiValidatorBypassError(validate.bypass);
+      if (bypassProblem) return parseError('MalformedExtension', bypassProblem);
     }
     const mcp = body['x-ferrum-mcp'];
     if (mcp === true || isRecord(mcp)) {
@@ -2608,11 +2656,30 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         }
       }
     }
-    for (const plugin of Array.isArray(body['x-ferrum-plugins']) ? body['x-ferrum-plugins'] : []) {
+    const embedded = Array.isArray(body['x-ferrum-plugins']) ? body['x-ferrum-plugins'] : [];
+    const validator = embedded.find(
+      (plugin) => isRecord(plugin) && plugin.plugin_name === 'openapi_validator',
+    );
+    for (const plugin of embedded) {
       if (!isRecord(plugin) || typeof plugin.plugin_name !== 'string') {
         return parseError('MalformedExtension', 'Invalid spec plugin');
       }
-      const problem = validatePluginConfig(plugin.plugin_name, plugin.config);
+      const generated = plugin === validator && (validate === true || isRecord(validate));
+      if (generated && !isRecord(plugin.config)) {
+        return parseError('MalformedExtension', 'openapi_validator config must be an object');
+      }
+      if (generated && isRecord(plugin.config)) {
+        const bypassProblem = openapiValidatorBypassError(plugin.config.bypass);
+        if (bypassProblem) return parseError('MalformedExtension', bypassProblem);
+      }
+      const settings = generated
+        ? importedValidatorConfig(
+            body,
+            isRecord(validate) ? validate : {},
+            plugin.config as Record<string, unknown>,
+          )
+        : plugin.config;
+      const problem = validatePluginConfig(plugin.plugin_name, settings);
       if (problem) return parseError('MalformedExtension', problem);
       const triggerProblem = validatePluginTrigger(plugin.plugin_name, plugin.trigger);
       if (triggerProblem) return parseError('MalformedExtension', triggerProblem);
@@ -2692,12 +2759,11 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       const id = typeof entry.id === 'string' ? entry.id : randomUUID();
       const settings =
         entry === embeddedValidator && (validate === true || isRecord(validate))
-          ? {
-              ...generateValidatorConfig(document, isRecord(validate) ? validate : {}),
-              ...(isRecord(entry.config) ? entry.config : {}),
-              operations: generateValidatorConfig(document, isRecord(validate) ? validate : {})
-                .operations,
-            }
+          ? importedValidatorConfig(
+              document,
+              isRecord(validate) ? validate : {},
+              entry.config as Record<string, unknown>,
+            )
           : entry.config;
       const config = {
         ...entry,

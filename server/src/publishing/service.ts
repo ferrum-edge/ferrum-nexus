@@ -1632,7 +1632,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     if (api.spec_enforcement !== 'routes') return !spec && !live.api_spec_id;
     if (!spec || live.api_spec_id !== spec.id || spec.proxy_id !== live.id) return false;
     const document = await edge.apiSpecs.documentByProxy(live.id);
-    let expectedDocument = routesSpecDocument(parsed.document, {
+    const expectedDocument = routesSpecDocument(parsed.document, {
       proxy: submittableProxyBody(live),
       ...(api.agents
         ? {
@@ -1647,8 +1647,51 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           }
         : {}),
     });
+    let expectedStoredDocument = expectedDocument;
+    let expectedLiveDocument = expectedDocument;
     if (!api.agents && Array.isArray(document?.['x-ferrum-plugins'])) {
-      expectedDocument = preserveRouteValidator(expectedDocument, plugins, spec.id);
+      const embedded = document['x-ferrum-plugins'];
+      if (embedded.length !== 1) return false;
+      const saved = embedded[0] as EdgePluginConfigWrite | null;
+      const validators = plugins.filter(
+        (plugin) => plugin.plugin_name === 'openapi_validator' && plugin.api_spec_id === spec.id,
+      );
+      if (validators.length !== 1) return false;
+      const validator = validators[0];
+      if (
+        !saved ||
+        !validator ||
+        saved.id !== validator.id ||
+        saved.plugin_name !== validator.plugin_name ||
+        saved.enabled !== true ||
+        typeof saved.config !== 'object' ||
+        saved.config === null ||
+        Array.isArray(saved.config) ||
+        saved.trigger != null ||
+        validator.trigger != null
+      ) {
+        return false;
+      }
+      // Direct Admin edits to generated operator fields do not rewrite the stored
+      // document. Validate that complete document against its saved fields, and
+      // the current validator against fixed portal policy separately. Original
+      // owner authority still binds both complete resources before any mutation.
+      expectedStoredDocument = preserveRouteValidator(
+        expectedDocument,
+        [
+          {
+            ...saved,
+            id: validator.id,
+            namespace,
+            scope: 'proxy',
+            proxy_id: live.id,
+            config: saved.config as Record<string, unknown>,
+            api_spec_id: spec.id,
+          },
+        ],
+        spec.id,
+      );
+      expectedLiveDocument = preserveRouteValidator(expectedDocument, plugins, spec.id);
     }
     const documentProxy = document?.['x-ferrum-proxy'] as Record<string, unknown> | undefined;
     if (
@@ -1662,13 +1705,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     // The live proxy was checked above; compare the rest of the complete spec.
     if (
       !isDeepStrictEqual(
-        { ...document, 'x-ferrum-proxy': expectedDocument['x-ferrum-proxy'] },
-        expectedDocument,
+        { ...document, 'x-ferrum-proxy': expectedStoredDocument['x-ferrum-proxy'] },
+        expectedStoredDocument,
       )
     ) {
       return false;
     }
-    const generated = expectedDocument['x-ferrum-plugins'];
+    const generated = expectedLiveDocument['x-ferrum-plugins'];
     for (const value of Array.isArray(generated) ? generated : []) {
       const expectedPlugin = value as EdgePluginConfigWrite;
       const livePlugin = plugins.find((plugin) => plugin.id === expectedPlugin.id);
@@ -1700,6 +1743,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         plugin.api_spec_id !== spec.id ||
         !plugin.enabled ||
         !running.has(plugin.id) ||
+        (!api.agents && plugin.trigger != null) ||
         settings?.enforcement_mode !== 'block' ||
         settings.validate_request !== false ||
         settings.validate_response !== false ||

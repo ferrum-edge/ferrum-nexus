@@ -803,6 +803,48 @@ export function runEdgeSecurityAdoptionContract(
       assert.deepEqual(await completionRows(published.api.id), { restore: [], rollback: [] });
     });
 
+    for (const changed of ['bypass', 'trigger', 'enforcement', 'operations'] as const) {
+      it(`refuses conversion after validator ${changed} policy changes`, async () => {
+        const published = await publish('routes');
+        const proxyId = published.api.ferrum_proxy_id!;
+        const validator = (await harness.edgeClient.pluginConfigs.listByProxy(proxyId)).find(
+          (plugin) => plugin.plugin_name === 'openapi_validator',
+        );
+        assert.ok(validator);
+        const config = { ...validator.config };
+        if (changed === 'bypass') config.bypass = { paths: ['^/.*$'] };
+        if (changed === 'enforcement') config.enforcement_mode = 'log_only';
+        if (changed === 'operations') {
+          config.operations = [
+            { method: 'GET', path_template: '/foreign', path_regex: '^/foreign$' },
+          ];
+        }
+        await harness.edgeClient.pluginConfigs.replace(validator.id, {
+          plugin_name: validator.plugin_name,
+          scope: validator.scope,
+          proxy_id: proxyId,
+          enabled: true,
+          config,
+          ...(changed === 'trigger'
+            ? { trigger: { when: { match: { path: { exact: ['/foreign'] } } } } }
+            : {}),
+        });
+        const state = gatewayState();
+        const offset = harness.edge.requests.length;
+        await assert.rejects(
+          harness.services.publishing.update(actor, published.api.id, {
+            spec_enforcement: 'docs_only',
+          }),
+          /does not match its catalog revision/,
+        );
+        assert.deepEqual(gatewayState(), state);
+        assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
+        assert.deepEqual(await completionRows(published.api.id), { restore: [], rollback: [] });
+        const key = `gateway_recovery:nexus:${published.api.id}`;
+        assert.ok((await harness.store.settings.get(key))?.encrypted);
+      });
+    }
+
     it('replays generated operator fields under native authority after a creation refusal', async () => {
       const published = await publish('routes');
       const proxyId = published.api.ferrum_proxy_id!;

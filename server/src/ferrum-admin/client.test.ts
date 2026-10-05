@@ -1365,6 +1365,53 @@ describe('ferrum admin client', () => {
       ]);
     });
 
+    it('admits embedded validator fields only after regenerating its operation table', async () => {
+      for (const operations of [undefined, [{ method: 'GET', path_regex: '[' }]]) {
+        const id = `embedded-validator-${operations === undefined ? 'missing' : 'stale'}`;
+        const document = specDocument(id, '/nexus/embedded', ['/invoices']);
+        document['x-ferrum-plugins'] = [
+          {
+            id: `${id}-routes`,
+            plugin_name: 'openapi_validator',
+            enabled: true,
+            labels: { operator: 'preserve' },
+            priority_override: 2_900,
+            config: {
+              request_content_types: ['application/problem+json'],
+              ...(operations === undefined ? {} : { operations }),
+            },
+          },
+        ];
+        const ref = await client.apiSpecs.create(document);
+        const validator = edge.pluginForProxy(id, 'openapi_validator');
+        assert.ok(validator);
+        assert.equal(validator.id, `${id}-routes`);
+        assert.deepEqual(validator.labels, { operator: 'preserve' });
+        assert.equal(validator.priority_override, 2_900);
+        assert.deepEqual(
+          (validator.config as Record<string, unknown>).request_content_types,
+          ['application/problem+json'],
+        );
+        assert.deepEqual((validator.config as Record<string, unknown>).operations, [
+          {
+            method: 'GET',
+            path_template: '/nexus/embedded/invoices',
+            path_regex: '^/nexus/embedded/invoices$',
+          },
+        ]);
+        await client.apiSpecs.delete(ref.id);
+      }
+      const invalid = specDocument('invalid-embedded', '/nexus/invalid', ['/invoices']);
+      invalid['x-ferrum-plugins'] = [
+        { plugin_name: 'openapi_validator', config: { unknown_policy_field: true } },
+      ];
+      await assert.rejects(
+        client.apiSpecs.create(invalid),
+        (error: unknown) => isNexusError(error) && error.code === 'EDGE_REJECTED_SPEC',
+      );
+      assert.equal(edge.proxies.has('nexus/invalid-embedded'), false);
+    });
+
     it('models literal root paths and listen/server joins in the importer', async () => {
       const cases = [
         { listen: '/p2/oas2', server: '/', root: '/p2/oas2', item: '/p2/oas2/items/' },
