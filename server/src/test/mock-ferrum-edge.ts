@@ -2596,7 +2596,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   function importedTimestamp(value: unknown): boolean {
     if (typeof value !== 'string') return false;
     const parts = value.match(
-      /^\p{White_Space}*([+-]\d+|\d{1,4})\p{White_Space}*-\p{White_Space}*(\d{1,2})\p{White_Space}*-\p{White_Space}*(\d{1,2})[tT ]\p{White_Space}*(\d{1,2})\p{White_Space}*:\p{White_Space}*(\d{1,2})\p{White_Space}*:\p{White_Space}*(\d{1,2})(?:\.\d+)?\p{White_Space}*(?:[zZ]|[uU][tT][cC]|[+−-](\d{2})[\p{White_Space}:]*(\d{2}))\p{White_Space}*$(?![\s\S])/u,
+      /^\p{White_Space}*([+-]\d+|\d{1,4})\p{White_Space}*-\p{White_Space}*(\d{1,2})\p{White_Space}*-\p{White_Space}*(\d{1,2})[tT ]\p{White_Space}*(\d{1,2})\p{White_Space}*:\p{White_Space}*(\d{1,2})\p{White_Space}*:\p{White_Space}*(\d{1,2})(?:\.\d+)?\p{White_Space}*(?:[zZ]|[uU][tT][cC]|([+−-])(\d{2})[\p{White_Space}:]*(\d{2}))\p{White_Space}*$(?![\s\S])/u,
     );
     if (!parts) return false;
     const [
@@ -2607,6 +2607,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       hourText,
       minuteText,
       secondText,
+      offsetSign,
       offsetHour,
       offsetMinute,
     ] = parts;
@@ -2630,10 +2631,24 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     }
     const calendar = new Date(0);
     calendar.setUTCFullYear(year, month - 1, day);
-    return (
-      calendar.getUTCFullYear() === year &&
-      calendar.getUTCMonth() === month - 1 &&
-      calendar.getUTCDate() === day
+    if (
+      calendar.getUTCFullYear() !== year ||
+      calendar.getUTCMonth() !== month - 1 ||
+      calendar.getUTCDate() !== day
+    ) {
+      return false;
+    }
+    // Chrono encodes :60 as second 59 plus excess nanoseconds. checked_sub_offset
+    // shifts only whole seconds, preserving that fraction even at a date boundary.
+    const localSeconds =
+      Number(hourText) * 3_600 + Number(minuteText) * 60 + Math.min(Number(secondText), 59);
+    const offsetSeconds = Number(offsetHour ?? 0) * 3_600 + Number(offsetMinute ?? 0) * 60;
+    const utcSeconds = localSeconds - (offsetSign === '+' ? offsetSeconds : -offsetSeconds);
+    // Offsets are less than a day, so only the first/last local date can overflow.
+    // Integer seconds avoid rounding accepted subnanosecond input into another day.
+    return !(
+      (year === -262_143 && month === 1 && day === 1 && utcSeconds < 0) ||
+      (year === 262_142 && month === 12 && day === 31 && utcSeconds >= 86_400)
     );
   }
 

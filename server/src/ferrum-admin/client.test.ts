@@ -1701,6 +1701,109 @@ describe('ferrum admin client', () => {
       }
     });
 
+    it('rejects imported timestamp UTC overflow before POST or PUT effects', async () => {
+      const baseline = specDocument(
+        'timestamp-admission',
+        '/nexus/timestamp-admission',
+        ['/invoices'],
+      );
+      baseline['x-ferrum-plugins'] = [
+        { id: 'timestamp-admission-auth', plugin_name: 'basic_auth' },
+      ];
+      const ref = await client.apiSpecs.create(baseline);
+      const companion = specDocument(
+        'timestamp-companion',
+        '/nexus/timestamp-companion',
+        ['/companion'],
+      );
+      companion['x-ferrum-plugins'] = [
+        { id: 'timestamp-companion-auth', plugin_name: 'basic_auth' },
+      ];
+      await client.apiSpecs.create(companion);
+      await client.consumers.create({
+        id: 'timestamp-consumer',
+        username: 'timestamp-consumer',
+        credentials: { keyauth: [{ key: 'timestamp-fixture-key' }] },
+        acl_groups: ['timestamp-approved'],
+      });
+      const minter = createAdminTokenMinter(configFor(edgeUrl));
+      const token = await minter.getToken('timestamp-admission');
+      const state = () =>
+        structuredClone({
+          proxies: [...edge.proxies],
+          plugins: [...edge.pluginConfigs],
+          specs: [...edge.apiSpecs],
+          upstreams: [...edge.upstreams],
+          consumers: [...edge.consumers],
+        });
+      const originalState = state();
+      const originalAuthority = await client.deployments.snapshot();
+      const timestamps = [
+        '+262142-12-31T23:59:59-23:59',
+        '-262143-01-01T00:00:00+23:59',
+        '+262142-12-31T23:59:00-00:01',
+        '-262143-01-01T00:00:59+00:01',
+        '+262142-12-31T23:59:00.0000000001−00:01',
+        '-262143-01-01T00:00:59.999999999+00:01',
+        '+262142-12-31T23:59:60.999999999-00:01',
+        '-262143-01-01T00:00:60.999999999+00:01',
+        '+262142-12-31T23:59:59−2359',
+        '-262143-01-01T0: 0:0+23 : 59',
+      ];
+      for (const method of ['POST', 'PUT'] as const) {
+        const endpoint = method === 'POST' ? '/api-specs' : `/api-specs/${ref.id}`;
+        for (const resource of ['proxy', 'plugin'] as const) {
+          for (const field of ['created_at', 'updated_at'] as const) {
+            for (const timestamp of timestamps) {
+              const document = structuredClone(baseline);
+              const proxy = document['x-ferrum-proxy'] as Record<string, unknown>;
+              if (method === 'POST') {
+                proxy.id = '';
+                proxy.listen_path = '/nexus/timestamp-rejected';
+              }
+              // Deferred plugin admission would let either write regenerate the
+              // validator and create this companion before reaching the bad plugin.
+              const plugin: Record<string, unknown> = {
+                id: method === 'POST' ? '' : 'timestamp-admission-auth',
+                plugin_name: 'basic_auth',
+                labels: { operator: 'changed' },
+              };
+              document['x-ferrum-plugins'] = [
+                { plugin_name: 'basic_auth', labels: { companion: 'new' } },
+                plugin,
+              ];
+              (resource === 'proxy' ? proxy : plugin)[field] = timestamp;
+              const response = await fetch(`${edgeUrl}${endpoint}`, {
+                method,
+                headers: {
+                  authorization: `Bearer ${token}`,
+                  'x-ferrum-namespace': 'nexus',
+                  'x-ferrum-provisioned-by': 'timestamp-import',
+                  'content-type': 'application/json',
+                },
+                body: JSON.stringify(document),
+              });
+              const witness = `${method} ${resource}.${field} ${timestamp}`;
+              assert.equal(response.status, 400, witness);
+              const rejection = (await response.json()) as { code: string; details: string };
+              assert.equal(rejection.code, 'MalformedExtension', witness);
+              assert.equal(rejection.details, `Invalid imported resource ${field}`, witness);
+              assert.deepEqual(
+                state(),
+                originalState,
+                `${witness}: no resource or document effects`,
+              );
+              assert.deepEqual(
+                await client.deployments.snapshot(),
+                originalAuthority,
+                `${witness}: no generation, timestamp, hash or companion effects`,
+              );
+            }
+          }
+        }
+      }
+    });
+
     it('admits valid metadata before generating IDs and server-owned import timestamps', async () => {
       const timestamps = [
         '2024-02-29T12:34:56Z',
@@ -1708,6 +1811,24 @@ describe('ferrum admin client', () => {
         '2020-1-1 1: 2:3 UTC',
         '2016-12-31t23:59:60z',
         '+10000-01-01T00:00:00+0000',
+        '+262142-12-31T23:59:59Z',
+        '+262142-12-31T23:59:59.999999999+00:00',
+        '+262142-12-31T23:59:59.9999999999-0000',
+        '+262142-12-31T23:59:60.999999999Z',
+        '+262142-12-31T23:59:59+23:59',
+        '+262142-12-31T00:00:00−23:59',
+        '+262142-12-31T23:58:59.9999999999-00:01',
+        '+262142-12-31T23:58:60.999999999-00:01',
+        '-262143-01-01T00:00:00Z',
+        '-262143-01-01T00:00:00+0000',
+        '-262143-01-01T00:00:00.0000000009−00:00',
+        '-262143-01-01T00:00:00−23:59',
+        '-262143-01-01T23:59:00+23:59',
+        '-262143-01-01T00:01:00.000000001+00:01',
+        '-262143-01-01T00:00:60.123456789+00:00',
+        '2017-01-01T00:59:60.123456789+01:00',
+        '2016-12-31T23:59:60.123456789123−00:00',
+        '\u2003-262143-1-1t0: 0:0 −00 : 00\u2003',
       ];
       for (const [index, timestamp] of timestamps.entries()) {
         const document = specDocument(
@@ -1746,10 +1867,36 @@ describe('ferrum admin client', () => {
         assert.deepEqual(plugin.labels, live.labels);
         assert.notEqual(live.created_at, timestamp);
         assert.notEqual(plugin.created_at, timestamp);
+        for (const row of [live, plugin]) {
+          assert.equal(row.api_spec_id, ref.id);
+          for (const field of ['created_at', 'updated_at'] as const) {
+            assert.equal(typeof row[field], 'string');
+            assert.notEqual(row[field], timestamp);
+            assert.equal(new Date(row[field] as string).toISOString(), row[field]);
+          }
+        }
+        assert.deepEqual(await client.apiSpecs.documentByProxy(ref.proxy_id), document);
         proxy.id = '';
         delete (document['x-ferrum-plugins'] as Record<string, unknown>[])[0]!.proxy_id;
         await client.apiSpecs.replace(ref.id, document);
-        assert.equal((await client.proxies.get(ref.proxy_id))?.id, ref.proxy_id);
+        const replaced = await client.proxies.get(ref.proxy_id);
+        assert.equal(replaced?.id, ref.proxy_id);
+        assert.equal(replaced?.created_at, live.created_at);
+        const replacedPlugin = (await client.pluginConfigs.listByProxy(ref.proxy_id)).find(
+          (row) => row.plugin_name === 'basic_auth',
+        );
+        assert.ok(replaced && replacedPlugin);
+        for (const row of [replaced, replacedPlugin]) {
+          assert.equal(row.namespace, 'nexus');
+          assert.equal(row.api_spec_id, ref.id);
+          assert.deepEqual(row.labels, live.labels);
+          for (const field of ['created_at', 'updated_at'] as const) {
+            assert.notEqual(row[field], timestamp);
+            assert.equal(new Date(row[field] as string).toISOString(), row[field]);
+          }
+        }
+        assert.equal(replacedPlugin.proxy_id, ref.proxy_id);
+        assert.deepEqual(await client.apiSpecs.documentByProxy(ref.proxy_id), document);
       }
       for (const id of [undefined, '']) {
         const document = specDocument(
