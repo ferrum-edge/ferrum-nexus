@@ -3,6 +3,7 @@ import { after, afterEach, before, describe, it } from 'node:test';
 
 import type { PublishApiResponse } from '@ferrum-nexus/shared';
 
+import { AuditAction } from '../audit/service.js';
 import type { NexusStore, UserRecord } from '../db/store.js';
 import { isNexusError } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
@@ -57,6 +58,85 @@ export function runEdgeSecurityAdoptionContract(
         spec_enforcement: level,
         rate_limit: { limit: 120, window_seconds: 60 },
       });
+    }
+
+    function gatewayState(): unknown {
+      return structuredClone({
+        proxies: [...harness.edge.proxies],
+        plugins: [...harness.edge.pluginConfigs],
+        specs: [...harness.edge.apiSpecs],
+        upstreams: [...harness.edge.upstreams],
+      });
+    }
+
+    async function completionRows(apiId: string): Promise<{
+      restore: Awaited<ReturnType<TestApp['auditRows']>>;
+      rollback: Awaited<ReturnType<TestApp['auditRows']>>;
+    }> {
+      return {
+        restore: (await harness.auditRows(AuditAction.API_GATEWAY_RESTORE)).filter(
+          (row) => row.target_id === apiId,
+        ),
+        rollback: (await harness.auditRows(AuditAction.API_GATEWAY_CONVERSION_ROLLBACK)).filter(
+          (row) => row.target_id === apiId,
+        ),
+      };
+    }
+
+    /** A real admitted Admin write, returning the exact path for its HTTP witness. */
+    async function mutateAdminResource(
+      resource: 'proxy' | 'plugin' | 'spec',
+      proxyId: string,
+    ): Promise<string> {
+      await harness.edgeClient.assertBackendEgress();
+      if (resource === 'proxy') {
+        const live = await harness.edgeClient.proxies.get(proxyId);
+        assert.ok(live);
+        await harness.edgeClient.proxies.replace(
+          proxyId,
+          { ...live, hosts: ['recovery.operator.example.test'] },
+          actor.id,
+        );
+        return `/proxies/${proxyId}`;
+      }
+      if (resource === 'plugin') {
+        const plugin = (await harness.edgeClient.pluginConfigs.listByProxy(proxyId)).find(
+          (row) => !row.api_spec_id,
+        );
+        assert.ok(plugin);
+        await harness.edgeClient.pluginConfigs.replace(
+          plugin.id,
+          {
+            plugin_name: plugin.plugin_name,
+            scope: plugin.scope,
+            proxy_id: proxyId,
+            enabled: plugin.enabled,
+            config: plugin.config,
+            ...(plugin.priority_override != null
+              ? { priority_override: plugin.priority_override }
+              : {}),
+            ...(plugin.trigger ? { trigger: plugin.trigger } : {}),
+            labels: { ...plugin.labels, operator: 'concurrent' },
+          },
+          actor.id,
+        );
+        return `/plugins/config/${plugin.id}`;
+      }
+      const spec = await harness.edgeClient.apiSpecs.findByProxy(proxyId);
+      const document = await harness.edgeClient.apiSpecs.documentByProxy(proxyId);
+      assert.ok(spec && document);
+      await harness.edgeClient.apiSpecs.replace(
+        spec.id,
+        {
+          ...document,
+          info: {
+            ...(document.info as Record<string, unknown>),
+            title: 'Operator revision',
+          },
+        },
+        actor.id,
+      );
+      return `/api-specs/${spec.id}`;
     }
 
     function refusePolicy(): void {
@@ -745,13 +825,17 @@ export function runEdgeSecurityAdoptionContract(
     });
 
     for (const resource of ['proxy', 'plugin', 'spec'] as const) {
-      it(`preserves a concurrent Admin ${resource} change at the recovery boundary`, async () => {
+      it(`unreleased cascade: preserves Admin ${resource} edits after conversion`, async () => {
         const published = await publish('docs_only');
         const apiId = published.api.id;
         const proxyId = published.api.ferrum_proxy_id!;
+        // This original partial-resource scenario requires the next owner release.
+        // Keep it strict; the reachable refusal controls below qualify current behavior.
+        let created = false;
         const createSpec = harness.edgeClient.apiSpecs.create;
         harness.edgeClient.apiSpecs.create = async (...args) => {
           const result = await createSpec(...args);
+          created = true;
           refusePolicy();
           return result;
         };
@@ -760,7 +844,9 @@ export function runEdgeSecurityAdoptionContract(
         });
         await assert.rejects(
           harness.services.publishing.update(actor, apiId, { spec_enforcement: 'routes' }),
+          /required local public egress policy/,
         );
+        assert.ok(created, 'conversion actually created the partial spec-owned deployment');
         harness.edgeClient.apiSpecs.create = createSpec;
         harness.edge.setBackendEgressPolicy(publicEgressPolicy());
         const listPlugins = harness.edgeClient.pluginConfigs.listByProxy;
@@ -833,17 +919,41 @@ export function runEdgeSecurityAdoptionContract(
         const proxyId = published.api.ferrum_proxy_id!;
         const key = `gateway_recovery:nexus:${apiId}`;
         const target = level === 'routes' ? 'docs_only' : 'routes';
+        const originalGateway = gatewayState();
+        const originalCatalog = await harness.store.apis.findById(apiId);
+        const originalSpec = await harness.store.apiSpecs.findCurrentByApi(apiId);
+        const originalOwnership = await harness.store.apiGatewayPlugins.listByApi(apiId);
         await assert.rejects(
           harness.services.publishing.update(actor, apiId, { spec_enforcement: target }),
           /Atomic conversion teardown is unavailable/,
         );
         assert.ok((await harness.store.settings.get(key))?.encrypted);
+        assert.deepEqual(await completionRows(apiId), { restore: [], rollback: [] });
+        assert.deepEqual(gatewayState(), originalGateway);
         const offset = harness.edge.requests.length;
         const reconciled = await harness.services.publishing.restoreGateway(actor, apiId);
         assert.equal(reconciled.api.gateway_state, 'deployed');
         assert.equal(reconciled.api.ferrum_proxy_id, proxyId);
         assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
         assert.equal(await harness.store.settings.get(key), null);
+        assert.deepEqual(gatewayState(), originalGateway, 'reconciliation sends no gateway write');
+        const completedCatalog = await harness.store.apis.findById(apiId);
+        assert.ok(completedCatalog);
+        assert.deepEqual(completedCatalog, {
+          ...originalCatalog,
+          updated_at: completedCatalog.updated_at,
+        });
+        assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(apiId), originalSpec);
+        assert.deepEqual(await harness.store.apiGatewayPlugins.listByApi(apiId), originalOwnership);
+        const completed = await completionRows(apiId);
+        assert.equal(completed.rollback.length, 1);
+        assert.equal(completed.restore.length, 1);
+        assert.deepEqual(completed.rollback[0]!.details, {
+          proxy_id: proxyId,
+          spec_id: published.spec.id,
+          recovery: 'original',
+        });
+        assert.equal(completed.restore[0]!.details.rebuilt, false);
         await assert.rejects(
           harness.services.publishing.update(actor, apiId, { spec_enforcement: target }),
           /Atomic conversion teardown is unavailable/,
@@ -865,6 +975,7 @@ export function runEdgeSecurityAdoptionContract(
           );
           assert.ok((await harness.store.settings.get(key))?.encrypted);
           assert.ok(harness.edge.proxies.get(`nexus/${proxyId}`));
+          assert.deepEqual(await completionRows(apiId), completed);
           return;
         }
         const rebuilt = await harness.services.publishing.restoreGateway(actor, apiId);
@@ -873,11 +984,152 @@ export function runEdgeSecurityAdoptionContract(
         assert.equal(rebuilt.api.spec_enforcement, level);
         assert.equal(await harness.store.settings.get(key), null);
         assert.ok(harness.edge.proxyServing(`/nexus/${published.api.slug}`));
+        const afterRebuild = await completionRows(apiId);
+        assert.deepEqual(
+          afterRebuild.rollback,
+          completed.rollback,
+          'a rebuild is not original rollback',
+        );
+        assert.equal(afterRebuild.restore.length, 2);
       });
     }
 
-    for (const boundary of ['corrected-spec', 'cutover'] as const) {
-      it(`refuses absent-identity recovery at ${boundary} after an Admin hosts edit`, async () => {
+    for (const failedAction of [
+      AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
+      AuditAction.API_GATEWAY_RESTORE,
+    ]) {
+      it(`rolls back original reconciliation when ${failedAction} insertion fails`, async () => {
+        const published = await publish('routes');
+        const apiId = published.api.id;
+        const proxyId = published.api.ferrum_proxy_id!;
+        const key = `gateway_recovery:nexus:${apiId}`;
+        await assert.rejects(
+          harness.services.publishing.update(actor, apiId, { spec_enforcement: 'docs_only' }),
+          /Atomic conversion teardown is unavailable/,
+        );
+        const journal = await harness.store.settings.get(key);
+        assert.ok(journal?.encrypted);
+        const catalog = await harness.store.apis.findById(apiId);
+        const revision = await harness.store.apiSpecs.findCurrentByApi(apiId);
+        const ownership = await harness.store.apiGatewayPlugins.listByApi(apiId);
+        const originalGateway = gatewayState();
+        const forStore = harness.services.audit.forStore;
+        let witnessed = false;
+        harness.services.audit.forStore = (tx) => {
+          const auditStore = Object.create(tx) as NexusStore;
+          Object.defineProperty(auditStore, 'auditLogs', {
+            configurable: true,
+            value: {
+              async create(input: Parameters<NexusStore['auditLogs']['create']>[0]) {
+                if (!witnessed && input.action === failedAction && input.target_id === apiId) {
+                  witnessed = true;
+                  assert.equal(await tx.settings.get(key), null, 'journal deletion was attempted');
+                  assert.equal((await tx.apis.findById(apiId))?.gateway_state, 'deployed');
+                  assert.deepEqual(await tx.apiGatewayPlugins.listByApi(apiId), ownership);
+                  throw new Error('original reconciliation audit insert refused');
+                }
+                return tx.auditLogs.create(input);
+              },
+              list: tx.auditLogs.list.bind(tx.auditLogs),
+              count: tx.auditLogs.count.bind(tx.auditLogs),
+            } satisfies NexusStore['auditLogs'],
+          });
+          return forStore(auditStore);
+        };
+        restoreMethods.push(() => {
+          harness.services.audit.forStore = forStore;
+        });
+        const offset = harness.edge.requests.length;
+        await assert.rejects(
+          harness.services.publishing.restoreGateway(actor, apiId),
+          /original reconciliation audit insert refused/,
+        );
+        assert.ok(witnessed, 'the actual transactional completion audit insert was reached');
+        assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
+        assert.deepEqual(gatewayState(), originalGateway);
+        assert.deepEqual(await harness.store.settings.get(key), journal);
+        const repaired = await harness.store.apis.findById(apiId);
+        assert.ok(repaired);
+        assert.deepEqual(repaired, { ...catalog, updated_at: repaired.updated_at });
+        assert.equal(repaired.ferrum_proxy_id, proxyId);
+        assert.equal(repaired.gateway_state, 'repair_required');
+        assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(apiId), revision);
+        assert.deepEqual(await harness.store.apiGatewayPlugins.listByApi(apiId), ownership);
+        assert.deepEqual(await completionRows(apiId), { restore: [], rollback: [] });
+        const failure = (await harness.auditRows(AuditAction.API_GATEWAY_RESTORE_FAILED)).filter(
+          (row) => row.target_id === apiId,
+        );
+        assert.equal(failure.length, 1);
+        assert.equal(failure[0]!.details.withdrawn, false);
+        const restored = await harness.services.publishing.restoreGateway(actor, apiId);
+        assert.equal(restored.api.gateway_state, 'deployed');
+        assert.equal(await harness.store.settings.get(key), null);
+        const completed = await completionRows(apiId);
+        assert.equal(completed.restore.length, 1);
+        assert.equal(completed.rollback.length, 1);
+      });
+    }
+
+    for (const change of ['corrected-catalog', 'legacy-journal', 'proxy', 'plugin'] as const) {
+      it(`does not claim original rollback after a ${change} change`, async () => {
+        const published = await publish('docs_only');
+        const apiId = published.api.id;
+        const proxyId = published.api.ferrum_proxy_id!;
+        const key = `gateway_recovery:nexus:${apiId}`;
+        await assert.rejects(
+          harness.services.publishing.update(actor, apiId, { spec_enforcement: 'routes' }),
+          /Atomic conversion teardown is unavailable/,
+        );
+        if (change === 'corrected-catalog') {
+          await harness.services.publishing.updateSpec(actor, apiId, SAMPLE_SPEC_YAML);
+          assert.notEqual(
+            (await harness.store.apiSpecs.findCurrentByApi(apiId))?.id,
+            published.spec.id,
+            'even a byte-identical authorized revision has new catalog identity',
+          );
+        } else if (change === 'legacy-journal') {
+          const sealed = await harness.store.settings.get(key);
+          assert.ok(sealed?.encrypted && typeof sealed.value === 'string');
+          const recovery = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
+            sealed.value,
+          );
+          delete recovery.originalSpecId;
+          await harness.store.settings.set(
+            key,
+            harness.app.nexus.crypto.encryptJson(recovery),
+            true,
+          );
+        } else {
+          const offset = harness.edge.requests.length;
+          const path = await mutateAdminResource(change, proxyId);
+          assert.deepEqual(
+            harness.edge.requests
+              .slice(offset)
+              .filter((call) => call.method !== 'GET')
+              .map(({ method, path }) => ({ method, path })),
+            [{ method: 'PUT', path }],
+          );
+        }
+        const originalGateway = gatewayState();
+        const offset = harness.edge.requests.length;
+        const restored = await harness.services.publishing.restoreGateway(actor, apiId);
+        assert.equal(restored.api.gateway_state, 'deployed');
+        assert.equal(await harness.store.settings.get(key), null);
+        assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
+        assert.deepEqual(gatewayState(), originalGateway);
+        const completed = await completionRows(apiId);
+        assert.equal(completed.restore.length, 1);
+        assert.deepEqual(completed.rollback, []);
+      });
+    }
+
+    for (const [boundary, resource] of [
+      ['corrected-spec', 'proxy'],
+      ['corrected-spec', 'plugin'],
+      ['corrected-spec', 'spec'],
+      ['cutover', 'proxy'],
+    ] as const) {
+      it(`refuses ${boundary} recovery after an Admin ${resource} edit`, async () => {
         const published = await publish('routes');
         const apiId = published.api.id;
         const proxyId = published.api.ferrum_proxy_id!;
@@ -922,11 +1174,12 @@ export function runEdgeSecurityAdoptionContract(
           .map((plugin) => plugin.id);
         assert.ok(handOwnedIds.length > 0);
         const getProxy = harness.edgeClient.proxies.get;
-        const replaceProxy = harness.edgeClient.proxies.replace;
         let completedReads = 0;
         let edited = false;
         let operatorState: unknown;
         let operatorOffset = 0;
+        let operatorPath = '';
+        let mutationOffset = 0;
         const stagedJournal: {
           value: Awaited<ReturnType<NexusStore['settings']['get']>>;
         } = { value: null };
@@ -950,7 +1203,8 @@ export function runEdgeSecurityAdoptionContract(
           if (++completedReads < (boundary === 'cutover' ? 2 : 1)) return proxy;
           edited = true;
           stagedJournal.value = await harness.store.settings.get(key);
-          await replaceProxy(proxyId, { ...proxy, hosts: ['recovery.operator.example.test'] });
+          mutationOffset = harness.edge.requests.length;
+          operatorPath = await mutateAdminResource(resource, proxyId);
           operatorState = state();
           operatorOffset = harness.edge.requests.length;
           return proxy;
@@ -964,6 +1218,15 @@ export function runEdgeSecurityAdoptionContract(
           /Atomic replacement of a conversion specification is unavailable/,
         );
         assert.ok(edited, 'the operator edit interleaves at the intended replacement boundary');
+        assert.ok(operatorPath, 'the admitted Admin mutation completed');
+        assert.deepEqual(
+          harness.edge.requests
+            .slice(mutationOffset)
+            .filter((call) => call.method !== 'GET')
+            .map(({ method, path }) => ({ method, path })),
+          [{ method: 'PUT', path: operatorPath }],
+          'exactly the real operator write was sent at the replacement boundary',
+        );
         assert.deepEqual(
           state(),
           operatorState,
@@ -978,7 +1241,9 @@ export function runEdgeSecurityAdoptionContract(
             .some(
               (call) =>
                 call.method === 'DELETE' ||
-                (call.method === 'PUT' && call.path.startsWith('/api-specs/')),
+                (call.method === 'PUT' &&
+                  call.path.startsWith('/api-specs/') &&
+                  call.path !== operatorPath),
             ),
         );
         const sealed = await harness.store.settings.get(key);
@@ -998,6 +1263,7 @@ export function runEdgeSecurityAdoptionContract(
           'plugins',
           'document',
           'originalSpecDocument',
+          'originalSpecId',
         ]) {
           assert.deepEqual(
             recovery[field],
@@ -1024,7 +1290,11 @@ export function runEdgeSecurityAdoptionContract(
         const retryOffset = harness.edge.requests.length;
         await assert.rejects(
           harness.services.publishing.restoreGateway(actor, apiId),
-          /partial conversion proxy configuration changed/,
+          resource === 'proxy'
+            ? /partial conversion proxy configuration changed/
+            : resource === 'plugin'
+              ? /partial conversion has unknown or changed plugin state/
+              : /partial conversion specification changed/,
         );
         assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
         assert.deepEqual(state(), operatorState);

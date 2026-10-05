@@ -120,7 +120,7 @@ export const AuditAction = {
   API_UPDATE: 'api.update',
   /** Committed with the encrypted baseline and repair state, before teardown. */
   API_GATEWAY_CONVERSION_START: 'api.gateway_conversion_start',
-  /** The original deployment, catalog and journal were reconciled together. */
+  /** The observed unchanged original, catalog and journal were reconciled together. */
   API_GATEWAY_CONVERSION_ROLLBACK: 'api.gateway_conversion_rollback',
   /** Committed before changing a spec-owned MCP policy on Edge. */
   API_AGENTS_UPDATE_START: 'api.agents_update_start',

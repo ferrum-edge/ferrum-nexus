@@ -28,6 +28,7 @@ import { after, afterEach, before, describe, it } from 'node:test';
 import type { GetApiResponse, PublishApiResponse } from '@ferrum-nexus/shared';
 
 import type { ApiRecord } from '../db/store.js';
+import { createConversionRaceFixture } from './conversion-race-fixture.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -52,44 +53,6 @@ function publishPayload(
 async function repairRows(app: TestApp, apiId: string): Promise<Record<string, unknown>[]> {
   const rows = await app.auditRows('api.gateway_repair_required');
   return rows.filter((row) => row.target_id === apiId).map((row) => row.details);
-}
-
-/**
- * A one-shot barrier over one Edge client call.
- *
- * {@link Barrier.block} is what the patched method awaits: it announces that
- * the call has arrived and then parks until the test releases it. That is the
- * difference between this and a timed delay — the test knows the first
- * operation is *inside* its lease rather than hoping 400 ms was longer than
- * 120 ms, so the interleaving under assertion is the one that actually ran.
- */
-interface Barrier {
-  /** Resolves once the patched call has been reached. */
-  arrived: Promise<void>;
-  /** Awaited by the patched call; resolves when {@link Barrier.release} runs. */
-  block: () => Promise<void>;
-  /** Lets the held call proceed. Safe to call twice. */
-  release: () => void;
-}
-
-/** A fresh {@link Barrier}. */
-function barrier(): Barrier {
-  let announce = (): void => {};
-  const arrived = new Promise<void>((resolve) => {
-    announce = resolve;
-  });
-  let release = (): void => {};
-  const held = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  return {
-    arrived,
-    block: async () => {
-      announce();
-      await held;
-    },
-    release: () => release(),
-  };
 }
 
 describe('deleting an API that races an enforcement conversion', () => {
@@ -123,8 +86,7 @@ describe('deleting an API that races an enforcement conversion', () => {
    * Publish an API, then run a `DELETE` and a `PATCH {spec_enforcement}`
    * against it under a forced interleaving, and assert the two sides agree.
    *
-   * Nothing here is timed. `hold` parks one gateway call of the operation that
-   * starts first, so it is provably *inside* the proxy lease; the second
+   * `hold` parks one gateway call of the first operation inside its proxy lease; the second
    * operation is started only once that call has arrived, and released only
    * once it has been seen asking for `proxy:<id>` — which is the claim issue
    * #135's fix makes, and the thing a `setTimeout` stagger could only hope for.
@@ -136,108 +98,146 @@ describe('deleting an API that races an enforcement conversion', () => {
    * undo for that patch
    */
   async function assertRaceLeavesNothingOrphaned(
+    signal: AbortSignal,
     slug: string,
     deleteFirst: boolean,
     hold: (block: () => Promise<void>) => () => void,
   ): Promise<void> {
-    const published = await harness.authed(provider, {
-      method: 'POST',
-      url: '/api/apis',
-      payload: publishPayload(slug),
-    });
-    assert.equal(published.statusCode, 201, published.body);
-    const api = published.json<PublishApiResponse>().api;
-    const proxyId = String(api.ferrum_proxy_id);
-    const listenPath = `/nexus/${slug}`;
-    assert.ok(harness.edge.proxyServing(listenPath), 'the API is live before the race');
+    const fixture = createConversionRaceFixture(signal);
+    const restorations: (() => void)[] = [];
+    try {
+      const published = await fixture.within(
+        fixture.own(
+          harness.authed(provider, {
+            method: 'POST',
+            url: '/api/apis',
+            payload: publishPayload(slug),
+          }),
+        ),
+        'race publication',
+      );
+      assert.equal(published.statusCode, 201, published.body);
+      const api = published.json<PublishApiResponse>().api;
+      const proxyId = String(api.ferrum_proxy_id);
+      const listenPath = `/nexus/${slug}`;
+      assert.ok(harness.edge.proxyServing(listenPath), 'the API is live before the race');
 
-    const remove = () => harness.authed(provider, { method: 'DELETE', url: `/api/apis/${api.id}` });
-    const convert = () =>
-      harness.authed(provider, {
-        method: 'PATCH',
-        url: `/api/apis/${api.id}`,
-        payload: { spec_enforcement: 'routes' },
+      const remove = () =>
+        harness.authed(provider, { method: 'DELETE', url: `/api/apis/${api.id}` });
+      const convert = () =>
+        harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${api.id}`,
+          payload: { spec_enforcement: 'routes' },
+        });
+
+      let announce = (): void => {};
+      const arrived = new Promise<void>((resolve) => {
+        announce = resolve;
       });
+      restorations.push(
+        hold(async () => {
+          announce();
+          await fixture.held;
+        }),
+      );
+      // The second operation's own lease request is the proof it contended: both
+      // take `proxy:<id>` through `binder.withProxy`, so the second call for that
+      // key is the one queued behind the held operation.
+      let waiting = (): void => {};
+      const contending = new Promise<void>((resolve) => {
+        waiting = resolve;
+      });
+      const serialize = harness.edgeClient.serializePerKey.bind(harness.edgeClient);
+      restorations.push(() => {
+        harness.edgeClient.serializePerKey = serialize;
+      });
+      let requests = 0;
+      harness.edgeClient.serializePerKey = (key, fn) => {
+        if (key === `proxy:${proxyId}`) {
+          requests += 1;
+          if (requests === 2) waiting();
+        }
+        return serialize(key, fn);
+      };
 
-    const gate = barrier();
-    cleanups.push(gate.release, hold(gate.block));
-    // The second operation's own lease request is the proof it contended: both
-    // take `proxy:<id>` through `binder.withProxy`, so the second call for that
-    // key is the one queued behind the held operation.
-    let waiting = (): void => {};
-    const contending = new Promise<void>((resolve) => {
-      waiting = resolve;
-    });
-    const serialize = harness.edgeClient.serializePerKey.bind(harness.edgeClient);
-    cleanups.push(() => {
-      harness.edgeClient.serializePerKey = serialize;
-    });
-    let requests = 0;
-    harness.edgeClient.serializePerKey = (key, fn) => {
-      if (key === `proxy:${proxyId}`) {
-        requests += 1;
-        if (requests === 2) waiting();
+      const first = fixture.own(deleteFirst ? remove() : convert());
+      await fixture.waitFor(arrived, first, 'first lifecycle gateway mutation');
+      const second = fixture.own(deleteFirst ? convert() : remove());
+      await fixture.waitFor(contending, second, 'second lifecycle proxy lease contention');
+      fixture.release();
+      const responses = await fixture.within(Promise.all([first, second]), 'lifecycle responses');
+
+      // The delete wins in both orderings, and the interleaving decides only how
+      // the conversion is refused: it either ran to completion first and the
+      // teardown followed it, or it woke behind the teardown to find no row left
+      // to convert. What must never happen is the third outcome — rows gone,
+      // proxy back.
+      const removed = deleteFirst ? responses[0] : responses[1];
+      const converted = deleteFirst ? responses[1] : responses[0];
+      assert.equal(removed.statusCode, 200, removed.body);
+      assert.equal(converted.statusCode, deleteFirst ? 404 : 200, converted.body);
+
+      const reread = await fixture.within(
+        fixture.own(harness.authed(provider, { method: 'GET', url: `/api/apis/${api.id}` })),
+        'deleted API read',
+      );
+      assert.equal(reread.statusCode, 404, reread.body);
+      assert.equal(
+        harness.edge.proxyServing(listenPath),
+        undefined,
+        'nothing is left serving the deleted API',
+      );
+      assert.equal(
+        harness.edge.proxies.get(`nexus/${proxyId}`),
+        undefined,
+        'no proxy survived under the API id, on the listen path or a staging one',
+      );
+      assert.equal(harness.edge.apiSpecForProxy(proxyId), undefined, 'no api_spec survived');
+      assert.equal(harness.edge.pluginsForProxy(proxyId).length, 0, 'no plugin config survived');
+      assert.equal(
+        (await harness.auditRows('api.delete')).filter((row) => row.target_id === api.id).length,
+        1,
+        'exactly one api.delete row, written because the teardown held',
+      );
+
+      // And the slug is not burned: republishing it works, which it cannot do
+      // while a proxy named `nexus-<slug>` is still on the gateway.
+      const republished = await fixture.within(
+        fixture.own(
+          harness.authed(provider, {
+            method: 'POST',
+            url: '/api/apis',
+            payload: publishPayload(slug),
+          }),
+        ),
+        'race republication',
+      );
+      assert.equal(republished.statusCode, 201, republished.body);
+      assert.ok(harness.edge.proxyServing(listenPath), 'the republished API is live');
+      await fixture.within(
+        fixture.own(
+          harness.authed(provider, {
+            method: 'DELETE',
+            url: `/api/apis/${republished.json<PublishApiResponse>().api.id}`,
+          }),
+        ),
+        'republished API removal',
+      );
+    } finally {
+      try {
+        await fixture.cleanup();
+      } finally {
+        for (const restore of restorations.reverse()) restore();
       }
-      return serialize(key, fn);
-    };
-
-    const first = deleteFirst ? remove() : convert();
-    await gate.arrived;
-    const second = deleteFirst ? convert() : remove();
-    await contending;
-    gate.release();
-    const responses = await Promise.all([first, second]);
-
-    // The delete wins in both orderings, and the interleaving decides only how
-    // the conversion is refused: it either ran to completion first and the
-    // teardown followed it, or it woke behind the teardown to find no row left
-    // to convert. What must never happen is the third outcome — rows gone,
-    // proxy back.
-    const removed = deleteFirst ? responses[0] : responses[1];
-    const converted = deleteFirst ? responses[1] : responses[0];
-    assert.equal(removed.statusCode, 200, removed.body);
-    assert.equal(converted.statusCode, deleteFirst ? 404 : 200, converted.body);
-
-    const reread = await harness.authed(provider, { method: 'GET', url: `/api/apis/${api.id}` });
-    assert.equal(reread.statusCode, 404, reread.body);
-    assert.equal(
-      harness.edge.proxyServing(listenPath),
-      undefined,
-      'nothing is left serving the deleted API',
-    );
-    assert.equal(
-      harness.edge.proxies.get(`nexus/${proxyId}`),
-      undefined,
-      'no proxy survived under the API id, on the listen path or a staging one',
-    );
-    assert.equal(harness.edge.apiSpecForProxy(proxyId), undefined, 'no api_spec survived');
-    assert.equal(harness.edge.pluginsForProxy(proxyId).length, 0, 'no plugin config survived');
-    assert.equal(
-      (await harness.auditRows('api.delete')).filter((row) => row.target_id === api.id).length,
-      1,
-      'exactly one api.delete row, written because the teardown held',
-    );
-
-    // And the slug is not burned: republishing it works, which it cannot do
-    // while a proxy named `nexus-<slug>` is still on the gateway.
-    const republished = await harness.authed(provider, {
-      method: 'POST',
-      url: '/api/apis',
-      payload: publishPayload(slug),
-    });
-    assert.equal(republished.statusCode, 201, republished.body);
-    assert.ok(harness.edge.proxyServing(listenPath), 'the republished API is live');
-    await harness.authed(provider, {
-      method: 'DELETE',
-      url: `/api/apis/${republished.json<PublishApiResponse>().api.id}`,
-    });
+    }
   }
 
-  it('leaves nothing serving if a delete lands mid-conversion', { timeout: 20_000 }, async () => {
+  it('leaves nothing serving if a delete lands mid-conversion', { timeout: 20_000 }, async (t) => {
     // The conversion is held inside its lease at the point routes mode creates
     // the spec-owned proxy — the window the delete used to run straight
     // through, because `remove()` took no lease at all.
-    await assertRaceLeavesNothingOrphaned('race-convert-first', false, (block) => {
+    await assertRaceLeavesNothingOrphaned(t.signal, 'race-convert-first', false, (block) => {
       const real = harness.edgeClient.apiSpecs.create.bind(harness.edgeClient.apiSpecs);
       harness.edgeClient.apiSpecs.create = async (...args) => {
         harness.edgeClient.apiSpecs.create = real;
@@ -250,11 +250,11 @@ describe('deleting an API that races an enforcement conversion', () => {
     });
   });
 
-  it('leaves nothing serving if a conversion lands mid-delete', { timeout: 20_000 }, async () => {
+  it('leaves nothing serving if a conversion lands mid-delete', { timeout: 20_000 }, async (t) => {
     // The mirror image: the teardown is held inside its lease at the proxy
     // delete, so the conversion arrives while the rows are still there and has
     // to wait rather than rebuild against a row that is being removed.
-    await assertRaceLeavesNothingOrphaned('race-delete-first', true, (block) => {
+    await assertRaceLeavesNothingOrphaned(t.signal, 'race-delete-first', true, (block) => {
       const real = harness.edgeClient.proxies.delete.bind(harness.edgeClient.proxies);
       harness.edgeClient.proxies.delete = async (...args) => {
         harness.edgeClient.proxies.delete = real;

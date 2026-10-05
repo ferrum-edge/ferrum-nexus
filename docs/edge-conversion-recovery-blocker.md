@@ -53,6 +53,15 @@ and all proxy/spec/plugin fields, upstreams and encrypted replay resources. The
 refusal records repair-required state without invoking rollback or clearing the
 journal. A deliberate read-only reconciliation can subsequently clear a matching
 original; a corrected catalog requiring a live spec replacement cannot.
+Only exact current observations of the original proxy, every plugin body and
+specification document, together with the original catalog deployment shape and
+revision identity, qualify `api.gateway_conversion_rollback`. The event and the
+normal `api.gateway_restore` commit with catalog/ownership and journal deletion
+in the existing lease-fenced transaction. Failure of either audit preserves those
+rows and the journal; failed-restore repair bookkeeping remains allowed. Corrected
+revisions, older journals without revision identity, staging and rebuilds do not
+qualify. These separate observations do not assert atomic Edge CAS or fence an
+external Admin writer.
 
 Live partial cleanup and failed missing-deployment restore cleanup also refuse
 before any cascade. A failed restore retains its attempted proxy id, every plugin
@@ -71,12 +80,51 @@ have the same blocker. Staging-policy/interruption, post-deletion compensation a
 corrected agent replay/completion expectations also remain owner-API-dependent
 gates. They are not weakened or skipped to qualify this refusal repair.
 
+## Bounded Nexus runtime repairs and remaining gates
+
+The assessment at `3fa76fcc91a7ee483367de9bb4b1671b0a984960` identified five
+independently actionable defects. The super-admin fixture now permits cancellation
+wrappers without changing its separate-instance lease topology. Catalog faults
+and neighboring transaction interpositions have suite-owned unconditional
+restoration and catalog faults require an intended-call witness. Lifecycle races
+own both operations, observe early request completion, and release/join before
+restoring methods; their outer 20-second limits and conversion/orphan assertions
+remain strict. Reachable corrected-spec recovery controls perform real admitted
+Admin proxy/plugin/spec writes, witness their HTTP calls and assert whole operator
+state, catalog, ownership, journal and audit preservation. The original
+post-conversion partial-resource scenarios remain explicit unreleased-contract
+gates. The rollback audit now has the qualified original-reconciliation producer
+described above, with native four-store audit-failure and false-event controls.
+
+The baseline Node 24 run
+[`37252738825`, job `111583514912`](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37252738825/job/111583514912)
+reported 65 failures and one cancellation. The assessment separately classified
+57 unsuccessful tests against unavailable owner behavior: 33 conversion-teardown
+409 expectations, two staging-policy checks, eight interruption checkpoints, two
+atomic rollback/completion checks, two post-deletion policy checks, three failed
+rollback rebuild/cutover checks, two compensation-audit checks, two conditional
+spec-replacement checks and three failed-restore withdrawal checks. Those strict
+expectations remain. Fixing unreachable fixture waits exposes the real refusal
+promptly; it does not qualify successful conversion. The retained original partial
+controls also require the next owner release. New-head results require hosted CI;
+these source repairs make no passing-test claim.
+
+A failed missing-deployment restore can retain a proxy already cut over before
+catalog/audit failure, because safe withdrawal is unavailable. Its retained id is
+repair bookkeeping, not successful deployment adoption. This serving-state risk
+remains until the owner contract can safely withdraw that graph.
+
 ## Required upstream API and ordering
 
 The actionable internal dependency is
 [Edge #6010](https://github.com/ferrum-edge/ferrum-edge/issues/6010), covering both
 atomic proxy cascade removal and namespace-conditional API-spec replacement.
 Neither capability exists in released v0.9.11.
+The implementation is tracked by
+[Edge PR #6012](https://github.com/ferrum-edge/ferrum-edge/pull/6012), still open
+at this repair. Merge alone is insufficient: its immutable release and canonical
+publication must exist before new Nexus pins or capability adoption. Released
+migrations `001`–`006` and pending `007`–`011` are unchanged by these repairs.
 A concrete proposed contract is:
 
 `DELETE /proxies/{id}?conditional=true&cleanup_orphaned_upstream=false`

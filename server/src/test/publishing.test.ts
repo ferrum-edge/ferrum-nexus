@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 
 import type { LightMyRequestResponse } from 'fastify';
 
@@ -66,8 +66,17 @@ function validationIssues(body: string): { path: string; message: string }[] {
  * through first — a spec revision that rewrites a live proxy commits its
  * `api.spec_revision_start` row in one of its own before the gateway moves.
  */
-function failNextTransaction(harness: TestApp, message: string, skip = 0): void {
+function failNextTransaction(
+  harness: TestApp,
+  message: string,
+  restorations: (() => void)[],
+  skip = 0,
+): void {
   const real = harness.store.transaction.bind(harness.store);
+  const restore = (): void => {
+    harness.store.transaction = real;
+  };
+  restorations.push(restore);
   let remaining = skip;
   harness.store.transaction = async <T>(
     fn: (tx: NexusStore) => Promise<T>,
@@ -77,18 +86,31 @@ function failNextTransaction(harness: TestApp, message: string, skip = 0): void 
       remaining -= 1;
       return real(fn, options);
     }
-    harness.store.transaction = real;
+    restore();
     throw new Error(message);
   };
 }
 
-/** Make the next `store.apis.update(...)` reject, then put the real one back. */
-function failNextApiUpdate(harness: TestApp, message: string): void {
+/** Own a one-shot catalog fault even when an earlier refusal makes it unreachable. */
+function failNextApiUpdate(
+  harness: TestApp,
+  message: string,
+  restorations: (() => void)[],
+): () => void {
   const real = harness.store.apis.update.bind(harness.store.apis);
+  const restore = (): void => {
+    harness.store.apis.update = real;
+  };
+  restorations.push(restore);
+  let triggered = false;
   harness.store.apis.update = async (...args) => {
     if (args[1].gateway_state === 'repair_required') return real(...args);
-    harness.store.apis.update = real;
+    triggered = true;
+    restore();
     throw new Error(message);
+  };
+  return () => {
+    assert.ok(triggered, 'the injected failure reached the intended catalog update');
   };
 }
 
@@ -196,6 +218,7 @@ describe('publishing', () => {
   let provider: TestSession;
   let otherProvider: TestSession;
   let client: TestSession;
+  const restorations: (() => void)[] = [];
 
   before(async () => {
     harness = await buildTestApp();
@@ -210,6 +233,10 @@ describe('publishing', () => {
 
   after(async () => {
     await harness.close();
+  });
+
+  afterEach(() => {
+    for (const restore of restorations.splice(0).reverse()) restore();
   });
 
   describe('publish', () => {
@@ -750,7 +777,7 @@ describe('publishing', () => {
     it('leaves no association behind when the publish is rolled back', async () => {
       // The association write is the last gateway call of a publish, so a store
       // failure after it is the case that would strand one.
-      failNextTransaction(harness, 'database is gone');
+      failNextTransaction(harness, 'database is gone', restorations);
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -836,7 +863,7 @@ describe('publishing', () => {
     it('deletes the Edge objects when the Nexus rows cannot be written', async () => {
       // The rollback used to end before persistence began, so a store failure
       // here left a live proxy nothing in the portal knew about.
-      failNextTransaction(harness, 'database is gone');
+      failNextTransaction(harness, 'database is gone', restorations);
 
       const response = await harness.authed(provider, {
         method: 'POST',
@@ -2125,7 +2152,7 @@ describe('publishing', () => {
 
       // The settings write is the last gateway call of a PATCH, so the row
       // update is the step whose failure has to unwind it.
-      failNextApiUpdate(harness, 'database is gone');
+      const assertUpdateFailed = failNextApiUpdate(harness, 'database is gone', restorations);
       const failed = await harness.authed(provider, {
         method: 'PATCH',
         url: `/api/apis/${apiId}`,
@@ -2135,6 +2162,7 @@ describe('publishing', () => {
           circuit_breaker: true,
         },
       });
+      assertUpdateFailed();
       assert.notEqual(failed.statusCode, 200);
 
       const proxy = storedProxy(harness, proxyId);
@@ -2235,13 +2263,14 @@ describe('publishing', () => {
     });
 
     it('restores the previous auth plugin when the Nexus row update fails', async () => {
-      failNextApiUpdate(harness, 'database is gone');
+      const assertUpdateFailed = failNextApiUpdate(harness, 'database is gone', restorations);
 
       const response = await harness.authed(provider, {
         method: 'PATCH',
         url: `/api/apis/${apiId}`,
         payload: { auth_plugin: 'jwt_auth' },
       });
+      assertUpdateFailed();
       assert.notEqual(response.statusCode, 200);
 
       assert.ok(
@@ -2386,7 +2415,7 @@ describe('publishing', () => {
 
     it('puts the backend back without dropping a later plugin change’s undo', async () => {
       enrichProxy(harness, proxyId);
-      failNextApiUpdate(harness, 'database is gone');
+      const assertUpdateFailed = failNextApiUpdate(harness, 'database is gone', restorations);
 
       const response = await harness.authed(provider, {
         method: 'PATCH',
@@ -2396,6 +2425,7 @@ describe('publishing', () => {
           rate_limit: { limit: 7, window_seconds: 60 },
         },
       });
+      assertUpdateFailed();
       assert.notEqual(response.statusCode, 200);
 
       const proxy = harness.edge.proxies.get(`nexus/${proxyId}`);
@@ -2693,7 +2723,7 @@ describe('publishing', () => {
       const api = published.json<PublishApiResponse>().api;
       const proxyId = String(api.ferrum_proxy_id);
 
-      failNextTransaction(harness, 'database is gone', 1);
+      failNextTransaction(harness, 'database is gone', restorations, 1);
       const response = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${api.id}/spec`,
@@ -3674,12 +3704,13 @@ describe('publishing', () => {
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
       const before = associatedIds(harness, proxyId);
 
-      failNextApiUpdate(harness, 'store offline');
+      const assertUpdateFailed = failNextApiUpdate(harness, 'store offline', restorations);
       const response = await harness.authed(provider, {
         method: 'PATCH',
         url: `/api/apis/${apiId}`,
         payload: { spec_enforcement: 'routes' },
       });
+      assertUpdateFailed();
       assert.equal(response.statusCode, 500, response.body);
 
       // The rebuild has to be rolled back the same way the plugin attach used
@@ -4006,7 +4037,7 @@ describe('publishing', () => {
       const apiId = published.json<PublishApiResponse>().api.id;
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
 
-      failNextTransaction(harness, 'store offline', 1);
+      failNextTransaction(harness, 'store offline', restorations, 1);
       const response = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${apiId}/spec`,
@@ -4058,7 +4089,7 @@ describe('publishing', () => {
     });
 
     it('rolls the spec back when a later publish step fails', async () => {
-      failNextTransaction(harness, 'store offline');
+      failNextTransaction(harness, 'store offline', restorations);
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -4443,12 +4474,13 @@ describe('publishing', () => {
       const before = associatedIds(harness, proxyId);
 
       const from = harness.edge.requests.length;
-      failNextApiUpdate(harness, 'store offline');
+      const assertUpdateFailed = failNextApiUpdate(harness, 'store offline', restorations);
       const response = await harness.authed(provider, {
         method: 'PATCH',
         url: `/api/apis/${apiId}`,
         payload: { spec_enforcement: 'routes' },
       });
+      assertUpdateFailed();
       assert.equal(response.statusCode, 500, response.body);
 
       // Two rebuilds — into `routes`, then back — and *both* of them staged.
@@ -5073,6 +5105,7 @@ describe('per-owner API quota', () => {
 describe('spec upstream following', () => {
   let harness: TestApp;
   let provider: TestSession;
+  const restorations: (() => void)[] = [];
 
   before(async () => {
     harness = await buildTestApp();
@@ -5085,6 +5118,10 @@ describe('spec upstream following', () => {
 
   after(async () => {
     await harness.close();
+  });
+
+  afterEach(() => {
+    for (const restore of restorations.splice(0).reverse()) restore();
   });
 
   /** The proxy's backend, in the same normalized form the `apis` row stores. */
@@ -5223,7 +5260,7 @@ describe('spec upstream following', () => {
         'https://billing.example.com:8443/v2',
       );
 
-      failNextTransaction(harness, 'database is gone', 1);
+      failNextTransaction(harness, 'database is gone', restorations, 1);
       const failed = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${apiId}/spec`,

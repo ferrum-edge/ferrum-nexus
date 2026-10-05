@@ -140,6 +140,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Draft recovery runtime controls** (PR #522): make the two-instance super-admin
+  facade compatible with cancellation wrappers; restore owned catalog/transaction
+  faults after failed assertions; join lifecycle race requests before restoring
+  methods, with bounded waits that surface early refusal. Reachable recovery controls
+  witness real Admin proxy/plugin/spec writes and preserve whole operator state,
+  catalog, ownership and encrypted journals. Original read-only reconciliation now
+  commits `api.gateway_conversion_rollback` with `api.gateway_restore` only after
+  exact original revision, catalog shape and complete resource observations; either
+  audit failure preserves repair state and the journal transactionally. Corrected
+  revisions, rebuilds, staging and refusals emit no false rollback. These observations
+  do not fence external Admin writes. Strict successful-conversion and partial-recovery
+  gates still require the next released owner contract; no advisory is declared fixed.
+
 - **Verification and password-recovery mail take priority over queued campaigns**
   (#500, GHSA-rqrj-7g3f-c6ww phase 2). Every store claims due security mail at
   high priority, routine notifications at normal priority and new campaigns at

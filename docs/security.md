@@ -1853,9 +1853,18 @@ a start without completion requires comparing the live spec policy with Nexus.
 
 `api.gateway_conversion_start` is an intent action committed with the encrypted
 original baseline, retained proxy identity and `repair_required` state before any
-conversion teardown. `api.gateway_conversion_rollback` is transactional: the
-verified original deployment, catalog repair state, journal deletion and audit
-commit together. Successful conversion clears its journal with `api.update`, the
+conversion teardown. `api.gateway_conversion_rollback` is transactional: current
+observations must exactly match the complete original proxy, plugin bodies and
+specification, original revision id and catalog deployment shape, without a rebuild
+or staging attempt. Its bounded details are `proxy_id`, `spec_id` and
+`recovery: "original"`; resource bodies and credentials never enter the event.
+Catalog repair state, ownership, journal deletion, this event and the normal
+`api.gateway_restore` event commit together. Failure of either completion audit
+preserves journal/catalog/ownership, apart from failed-restore repair bookkeeping.
+Corrected revisions, changed operator fields, staging, rebuilds, refusals and older
+journals without revision identity cannot claim original rollback. These are
+separate current gateway observations, not atomic Edge CAS or external-writer
+fencing. Successful conversion clears its journal with `api.update`, the
 catalog mode and ownership. No credential-bearing resource body enters either
 audit. Corrected agent revisions commit an authorized comparison shape without
 changing the original replay resources. Initial conversion now refuses before

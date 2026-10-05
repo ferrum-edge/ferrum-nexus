@@ -2493,6 +2493,16 @@ with catalog, ownership and completion audit under the existing lease fences.
 An uploaded corrected agent specification changes only the authorized catalog
 comparison shape; the original replay resources and tool ids remain intact.
 
+Read-only recovery records `api.gateway_conversion_rollback` alongside
+`api.gateway_restore` only when the original revision id, original catalog
+deployment shape and complete original proxy/plugin/specification observations
+match, with no staging attempt or rebuild. Both audits, catalog/ownership changes
+and journal deletion commit in one Nexus transaction. An audit failure retains
+the journal, ownership and `repair_required` state. Corrected revisions (even an
+identical re-upload), operator edits and older journals without original revision
+identity cannot claim original rollback. The gateway comparisons are observations;
+they do not provide an atomic Edge snapshot or fence external Admin writers.
+
 What is rebuilt, in publish order: the proxy (through the API-spec importer in
 `routes` mode), the auth plugin, `access_control` when `requestable`, the rate
 limit, CORS, and the [plugin palette](#plugin-palette); then the move onto

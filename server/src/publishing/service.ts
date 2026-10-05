@@ -348,6 +348,8 @@ interface ConversionRecovery {
   shape: DeploymentShape;
   /** Only an authorized catalog revision can change this comparison shape. */
   catalogShape?: DeploymentShape;
+  /** Older journals lack revision identity and cannot attest original reconciliation. */
+  originalSpecId?: string;
   originalSpecDocument: Record<string, unknown> | null;
   proxy: EdgeProxy;
   plugins: EdgePluginConfig[];
@@ -1328,6 +1330,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       if (start && (await tx.settings.get(recoveryKey(api.id)))) {
         throw conflict('This API already has an incomplete gateway conversion to recover');
       }
+      if (start) {
+        const current = await tx.apiSpecs.findCurrentByApi(api.id);
+        if (
+          !current ||
+          current.id !== recovery.originalSpecId ||
+          !isDeepStrictEqual(parseOpenApiSpec(current.raw_spec).document, recovery.document)
+        ) {
+          throw conflict('The API specification changed during conversion');
+        }
+      }
       await tx.settings.set(recoveryKey(api.id), sealed, true);
       if (start) {
         const marked = await tx.apis.update(api.id, { gateway_state: 'repair_required' });
@@ -1606,6 +1618,32 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     if (!isDeepStrictEqual(shapes(plugins), shapes(recovery.plugins))) return false;
     const document = await edge.apiSpecs.documentByProxy(live.id);
     return isDeepStrictEqual(document, recovery.originalSpecDocument);
+  }
+
+  /** Observe the entire immutable original, never infer rollback from deployment fitness. */
+  async function originalConversionMatches(
+    api: ApiRecord,
+    current: ApiSpecRecord,
+    recovery: ConversionRecovery,
+  ): Promise<boolean> {
+    if (
+      recovery.attempt !== null ||
+      recovery.originalSpecId !== current.id ||
+      !isDeepStrictEqual(deploymentShape(api), recovery.shape) ||
+      !isDeepStrictEqual(parseOpenApiSpec(current.raw_spec).document, recovery.document)
+    ) {
+      return false;
+    }
+    const live = await edge.proxies.get(recovery.proxy.id);
+    if (!isDeepStrictEqual(live, recovery.proxy)) return false;
+    const plugins = await binder.listByProxy(recovery.proxy.id);
+    const sorted = (rows: EdgePluginConfig[]): EdgePluginConfig[] =>
+      [...rows].sort((left, right) => left.id.localeCompare(right.id));
+    if (!isDeepStrictEqual(sorted(plugins), sorted(recovery.plugins))) return false;
+    return isDeepStrictEqual(
+      await edge.apiSpecs.documentByProxy(recovery.proxy.id),
+      recovery.originalSpecDocument,
+    );
   }
 
   /** Validate partial identity for diagnostics; refuse a cascade without an owner fence. */
@@ -3991,6 +4029,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 latest,
                 await binder.listByProxy(snapshot.proxy.id),
               );
+              // These are current observations under the Nexus lease, not an atomic
+              // Edge snapshot or a fence against external Admin writers. A rebuild,
+              // corrected catalog or staged attempt cannot claim original rollback.
+              const reconciledOriginal =
+                !rebuilt && (await originalConversionMatches(latest, current, snapshot));
               const row = await store.transaction(async (tx) => {
                 const final = await tx.apis.findById(api.id);
                 const finalSpec = await tx.apiSpecs.findCurrentByApi(api.id);
@@ -4009,6 +4052,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 if (!updated) throw notFound('API', api.id);
                 await tx.apiGatewayPlugins.replace(api.id, completedOwnership.ids);
                 await tx.settings.delete(recoveryKey(api.id));
+                if (reconciledOriginal) {
+                  await audit.forStore(tx).record(
+                    { id: actor.id, role: actor.role },
+                    AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
+                    { type: 'api', id: api.id },
+                    { proxy_id: snapshot.proxy.id, spec_id: current.id, recovery: 'original' },
+                    ip,
+                  );
+                }
                 await audit.forStore(tx).record(
                   { id: actor.id, role: actor.role },
                   AuditAction.API_GATEWAY_RESTORE,
@@ -5203,10 +5255,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     if (!before) throw notFound('Proxy', proxyId);
     const beforePlugins = await binder.listByProxy(proxyId);
     const carried = handOwnedPlugins(beforePlugins);
+    const originalSpec = await store.apiSpecs.findCurrentByApi(api.id);
+    if (!originalSpec) throw conflict('This API has no stored specification revision to recover');
     const recovery: ConversionRecovery = {
       apiId: api.id,
       namespace,
       shape: deploymentShape(api),
+      originalSpecId: originalSpec.id,
       originalSpecDocument: await edge.apiSpecs.documentByProxy(proxyId),
       proxy: before,
       plugins: beforePlugins,
