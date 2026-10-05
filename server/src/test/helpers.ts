@@ -7,6 +7,8 @@
  * they are in production.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import type { FastifyInstance, InjectOptions, LightMyRequestResponse } from 'fastify';
 
 import {
@@ -20,7 +22,12 @@ import {
 import type { CaptchaTransport } from '../auth/captcha.js';
 import { loadConfig, type EnvRecord, type NexusConfig } from '../config/index.js';
 import { createStore } from '../db/index.js';
-import type { AuditLogRecord, EmailOutboxRecord, NexusStore } from '../db/store.js';
+import type {
+  AuditLogRecord,
+  EmailOutboxRecord,
+  NexusStore,
+  TransactionOptions,
+} from '../db/store.js';
 import type { MailTransport, MailTransportFactory, OutboundMail } from '../email/service.js';
 import type { OutboxTickResult } from '../email/outbox-worker.js';
 import { openOutboxRecord } from '../email/sealed-outbox.js';
@@ -31,7 +38,81 @@ import {
 } from '../ferrum-admin/index.js';
 import type { ResolvedAddress, UpstreamResolver } from '../publishing/oas.js';
 import { buildServer, type BuildServerDeps, type NexusServices } from '../index.js';
+import { createOwnedOperation, type OwnedOperation } from './conversion-race-fixture.js';
 import { createMockFerrumEdge, type MockFerrumEdge } from './mock-ferrum-edge.js';
+
+interface TestOperationScope {
+  signal: AbortSignal;
+  pending: Set<Promise<unknown>>;
+  ownership: { owned: boolean };
+}
+
+const testOperations = new AsyncLocalStorage<TestOperationScope>();
+
+/** Test interpositions with their own waits must use this signal and join their unwind. */
+export function testOperationSignal(): AbortSignal | undefined {
+  return testOperations.getStore()?.signal;
+}
+
+/**
+ * Cancellation is cooperative at real store/Edge boundaries, including lease
+ * polling and queued transaction bodies. Already-started calls are joined, not
+ * raced away. Edge HTTP retains its client's configured transport deadline.
+ * Lease renewal/release remain available until the serializer's finally joins.
+ */
+function cancellableTestResource<T extends object>(resource: T): T {
+  const wrapped = new WeakMap<object, object>();
+
+  function wrap<R extends object>(base: R, name = ''): R {
+    const existing = wrapped.get(base);
+    if (existing) return existing as R;
+    const proxy = new Proxy(base, {
+      get(target, property, receiver) {
+        const value: unknown = Reflect.get(target, property, receiver);
+        if (typeof value === 'function') {
+          return (...args: unknown[]): unknown => {
+            const scope = testOperations.getStore();
+            const leaseCleanup =
+              name === 'leases' && (property === 'release' || property === 'renew');
+            if (scope?.ownership.owned && !leaseCleanup) {
+              scope.signal.throwIfAborted();
+            }
+            if (property === 'transaction') {
+              const [body, options] = args as [
+                (tx: NexusStore) => Promise<unknown>,
+                TransactionOptions | undefined,
+              ];
+              args = [
+                (tx: NexusStore): Promise<unknown> => {
+                  if (scope?.ownership.owned) scope.signal.throwIfAborted();
+                  return body(wrap(tx));
+                },
+                options,
+              ];
+            }
+            const result: unknown = Reflect.apply(value, target, args);
+            if (scope && result instanceof Promise) {
+              scope.pending.add(result);
+              void result.then(
+                () => scope.pending.delete(result),
+                () => scope.pending.delete(result),
+              );
+            }
+            return result;
+          };
+        }
+        if (value !== null && typeof value === 'object' && typeof property === 'string') {
+          return wrap(value, property);
+        }
+        return value;
+      },
+    });
+    wrapped.set(base, proxy);
+    return proxy;
+  }
+
+  return wrap(resource);
+}
 
 /** 32+ character secrets so config validation passes. */
 export const TEST_SECRET_KEY = 'test-nexus-secret-key-0123456789abcdef';
@@ -263,8 +344,8 @@ export interface TestApp {
   registerUser(overrides?: Partial<RegisterPayload>): Promise<TestSession>;
   /** Sign in an existing account. */
   loginUser(email: string, password?: string): Promise<TestSession>;
-  /** `app.inject` with the session cookies and the CSRF header attached. */
-  authed(session: TestSession, options: InjectOptions): Promise<LightMyRequestResponse>;
+  /** `app.inject` with session/CSRF and cooperative cancel + join ownership. */
+  authed(session: TestSession, options: InjectOptions): OwnedOperation<LightMyRequestResponse>;
   close(): Promise<void>;
 }
 
@@ -344,14 +425,18 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
     await ownedStore.init();
     await ownedStore.migrate();
   }
-  const store = options.wrapStore ? options.wrapStore(ownedStore) : ownedStore;
+  const store = cancellableTestResource(
+    options.wrapStore ? options.wrapStore(ownedStore) : ownedStore,
+  );
 
   // The real composition root passes `store.leases`, so the whole suite runs
   // through the cross-instance path rather than the in-process queue alone.
-  const edgeClient = createFerrumAdminClient(config.edge, options.edgeLogger, {
-    leases: store.leases,
-    allowPrivateUpstreams: config.allowPrivateUpstreams,
-  });
+  const edgeClient = cancellableTestResource(
+    createFerrumAdminClient(config.edge, options.edgeLogger, {
+      leases: store.leases,
+      allowPrivateUpstreams: config.allowPrivateUpstreams,
+    }),
+  );
   const { mailbox, factory } = createTestMailbox();
   const app = await buildServer(config, {
     store,
@@ -434,13 +519,38 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
       return sessionFrom(response, parsed.user);
     },
 
-    async authed(session: TestSession, injectOptions: InjectOptions) {
+    authed(
+      session: TestSession,
+      injectOptions: InjectOptions,
+    ): OwnedOperation<LightMyRequestResponse> {
       const headers: Record<string, string> = {
         cookie: session.cookieHeader,
         [CSRF_HEADER]: session.csrfToken,
         ...((injectOptions.headers ?? {}) as Record<string, string>),
       };
-      return app.inject({ ...injectOptions, headers });
+      const ownership = { owned: false };
+      return createOwnedOperation(
+        (signal) => {
+          const scope: TestOperationScope = { signal, pending: new Set(), ownership };
+          return testOperations.run(scope, async () => {
+            try {
+              // Do not pass the ownership signal to light-my-request: its abort
+              // can finish the transport without stopping a Fastify handler.
+              // Publishing handlers await their services before returning a body.
+              return await app.inject({ ...injectOptions, headers });
+            } finally {
+              // Fixture-owned requests join transaction/serializer finally blocks
+              // and resource work. Ordinary harness calls keep their response timing.
+              while (scope.ownership.owned && scope.pending.size > 0) {
+                await Promise.allSettled([...scope.pending]);
+              }
+            }
+          });
+        },
+        () => {
+          ownership.owned = true;
+        },
+      );
     },
 
     async close(): Promise<void> {
