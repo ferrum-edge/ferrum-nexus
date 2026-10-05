@@ -69,12 +69,18 @@ handwritten dependency graph. `.github/workflows/dependency-locks.yml` is an opt
 producer on manifest/workflow pull-request changes (or manual dispatch once available on the
 default branch). It checks out the exact PR head, uses full-SHA-pinned actions and `contents: read`,
 does not persist credentials or use caches/secrets/write permissions, and runs Node 22.14 with
-strict engine checks and `npm install --package-lock-only --ignore-scripts`. npm 10 retains the
-old optional Vitest/coverage peer cycle during an in-place update, so the producer resolves a
-fresh root graph from the manifests and retains the input lock in the provenance artifact.
-Review any other resolved-version movement in its diff too. It generates both the root and
-separate `e2e` locks, checks the intended dependency families, and uploads both plus a diff,
-source SHA, tool versions, run identity, and SHA-256 input/output manifests.
+strict engine checks and `npm install --package-lock-only --ignore-scripts`. The original
+Vitest 4 to 5 migration required a fresh root graph because npm 10 retained the old optional
+peer cycle; that graph is already committed, and its historical resolution and hashes remain
+recorded in the provenance document. The current producer retains both committed locks as
+resolution inputs and copies both input locks into the provenance artifact. It rejects graph
+changes when that lock's manifest declarations are unchanged, so an `e2e`-only update preserves
+the root graph. TypeScript pins must agree across all four manifests; Vitest and coverage pins
+and installed coupled peers must match. Zod and React Table checks use the input locked versions
+when their declared ranges are unchanged, or the npm-resolved versions when those declarations
+change. jsdom 26 and Undici 7 guards remain until a Node support change is approved. It outputs
+both locks and the complete diff, source SHA, tool versions, run identity, and SHA-256 input/output
+manifests. Review every resolved-version movement before applying an artifact.
 
 To apply a producer artifact, download it with `gh run download` for the exact source head. Verify
 the successful producer run and its commit SHA, match `provenance/source-sha.txt` to the source
