@@ -45,29 +45,89 @@ jobs:
           test "$(cat lock-artifacts/provenance/node-version.txt)" = 'v22.22.2'
           npm --version > lock-artifacts/provenance/npm-version.txt
           printf '%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > lock-artifacts/provenance/run.txt
-          # npm 10 retains the old optional Vitest/coverage peer cycle when
-          # updating in place. Resolve a fresh root graph on the hosted runner,
-          # preserving the original in Git and the recorded input manifest.
-          mv package-lock.json lock-artifacts/provenance/root-input-lock.json
+          # Keep the committed graphs as npm's resolution inputs. The fresh
+          # root graph needed for the Vitest 4 -> 5 migration is already applied.
+          cp package-lock.json lock-artifacts/provenance/root-input-lock.json
+          cp e2e/package-lock.json lock-artifacts/provenance/e2e-input-lock.json
           npm install --package-lock-only --ignore-scripts --no-audit --no-fund
           npm --prefix e2e install --package-lock-only --ignore-scripts --no-audit --no-fund
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
           import { readFileSync } from 'node:fs';
-          const root = JSON.parse(readFileSync('package-lock.json', 'utf8'));
-          const e2e = JSON.parse(readFileSync('e2e/package-lock.json', 'utf8'));
+          import { isDeepStrictEqual } from 'node:util';
+          const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
+          const root = readJson('package-lock.json');
+          const e2e = readJson('e2e/package-lock.json');
+          const rootInput = readJson('lock-artifacts/provenance/root-input-lock.json');
+          const e2eInput = readJson('lock-artifacts/provenance/e2e-input-lock.json');
+          const manifests = Object.fromEntries(
+            ['', 'shared', 'server', 'web'].map((path) => [
+              path,
+              readJson(path ? `${path}/package.json` : 'package.json'),
+            ]),
+          );
+          const e2eManifest = readJson('e2e/package.json');
+          const fields = [
+            'name',
+            'version',
+            'dependencies',
+            'devDependencies',
+            'optionalDependencies',
+            'peerDependencies',
+            'peerDependenciesMeta',
+            'engines',
+            'workspaces',
+          ];
+          for (const [lock, input, sources] of [
+            [root, rootInput, manifests],
+            [e2e, e2eInput, { '': e2eManifest }],
+          ]) {
+            let unchanged = true;
+            for (const [path, manifest] of Object.entries(sources)) {
+              assert.ok(lock.packages[path], `Missing manifest entry: ${path}`);
+              for (const field of fields) {
+                assert.deepEqual(lock.packages[path][field], manifest[field], `${path}: ${field}`);
+                unchanged &&= isDeepStrictEqual(input.packages[path]?.[field], manifest[field]);
+              }
+            }
+            // An e2e-only update must not refresh the root graph (or vice versa).
+            if (unchanged) assert.deepEqual(lock, input, 'Unexpected graph change');
+          }
+          const typescript = manifests.shared.devDependencies.typescript;
+          const vitest = manifests.web.devDependencies.vitest;
+          assert.match(typescript, /^\d+\.\d+\.\d+$/);
+          assert.match(vitest, /^\d+\.\d+\.\d+$/);
+          for (const manifest of [manifests.server, manifests.web, e2eManifest]) {
+            assert.equal(manifest.devDependencies.typescript, typescript);
+          }
+          assert.equal(manifests.web.devDependencies['@vitest/coverage-v8'], vitest);
+          const rangedVersion = (workspace, name) => {
+            const spec = manifests[workspace].dependencies[name];
+            assert.equal(typeof spec, 'string', name);
+            const inputSpec = rootInput.packages[workspace]?.dependencies?.[name];
+            const lock = spec === inputSpec ? rootInput : root;
+            return lock.packages[`node_modules/${name}`].version;
+          };
+          const versions = {
+            typescript,
+            vitest,
+            zod: rangedVersion('server', 'zod'),
+            '@tanstack/react-table': rangedVersion('web', '@tanstack/react-table'),
+          };
+          for (const [name, version] of Object.entries(versions)) {
+            assert.equal(root.packages[`node_modules/${name}`]?.version, version, name);
+          }
+          assert.equal(root.packages['node_modules/@vitest/coverage-v8']?.version, vitest);
+          assert.equal(e2e.packages['node_modules/typescript']?.version, typescript);
           const found = new Set();
           for (const lock of [root, e2e]) {
             for (const [path, pkg] of Object.entries(lock.packages)) {
-              if (path.endsWith('node_modules/typescript')) assert.equal(pkg.version, '7.0.2');
-              if (path.endsWith('node_modules/vitest')) assert.equal(pkg.version, '5.0.3');
-              if (path.endsWith('node_modules/zod')) assert.equal(pkg.version, '4.6.5');
-              if (path.endsWith('node_modules/@tanstack/react-table')) {
-                assert.equal(pkg.version, '9.2.5');
+              for (const [name, version] of Object.entries(versions)) {
+                if (path.endsWith(`node_modules/${name}`)) assert.equal(pkg.version, version, path);
               }
               const vitestPackage = path.match(/(?:^|\/)node_modules\/@vitest\/([^/]+)$/)?.[1];
               if (vitestPackage && !vitestPackage.startsWith('istanbul-lib-')) {
-                assert.equal(pkg.version, '5.0.3', path);
+                assert.equal(pkg.version, vitest, path);
               }
               if (path.endsWith('node_modules/jsdom')) {
                 found.add('jsdom');

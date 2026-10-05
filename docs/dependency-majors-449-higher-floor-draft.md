@@ -2,8 +2,10 @@
 
 References [issue #449](https://github.com/ferrum-edge/ferrum-nexus/issues/449).
 Prepared from main `48ea760098d1aa858dc7cee06bf7f8fb7536cdaf` (PR #520).
-This continuation integrates main `559c350a5370335791cdc3082225dce6056cf547`
-(qualified PR #519) into candidate `aa2904bf41784c930f7d41af69603e22a9216a4c`
+The prior normal merge integrated main `559c350a5370335791cdc3082225dce6056cf547`
+(qualified PR #519) into candidate `aa2904bf41784c930f7d41af69603e22a9216a4c`.
+This continuation integrates main `1a908ea5c81e4685622345954266268684255b86`
+(qualified PR #523) into candidate `d3347dcae7b61186debf9457ab572ecd70971ba6`
 through a normal merge.
 **The owner has not approved a higher released Node floor.** This branch and its
 draft PR are a concrete proposal only. Main/released support remains Node 22.14. Root must
@@ -95,12 +97,14 @@ validate the packaged result; OCI metadata alone does not qualify it.
 
 ## Hosted lock import; qualification pending
 
-Both checked-in lockfiles are copied byte-for-byte from the successful
+Both lockfiles were originally copied byte-for-byte from the successful
 [producer run 37217928511, attempt 1](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37217928511).
 It checked out exact source `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`, not a synthetic
 merge commit, and ran actual Node `v22.22.2` and npm `10.9.7` with strict engine checks and
 lifecycle scripts disabled. No local installer, formatter, build or test generated the locks,
-and the generated graph and integrity fields were not edited during import.
+and the generated graph and integrity fields were not edited during import. The root lock
+still matches this artifact. The current e2e lock also incorporates main's verified typings
+patch, recorded in the integration section below; its hash now differs from this output.
 
 Artifact `11308824128` is named
 `dependency-locks-15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`. GitHub metadata identifies
@@ -142,8 +146,9 @@ Vitest/coverage and coupled peers 5.0.3, Zod 4.6.5 and React Table 9.2.5 remain 
 The fresh root graph updates jsdom's CSS/DOM/URL/cookie dependencies and removes obsolete
 jsdom dependencies. MongoDB's existing URL dependencies move to nested paths with their
 versions and integrity retained; `lru-cache` 11.5.3 becomes shared with `path-scurry`.
-No other direct dependency version moves. The e2e graph retains every dependency entry and
-only adds the proposed engine declaration. Preserve the artifact for review beyond its expiry.
+No other direct dependency version moved at import. The imported e2e graph retained every
+dependency entry and only added the proposed engine declaration. Preserve the artifact for review
+beyond its expiry.
 A later merge from main needs corresponding provenance if it changes a producer input;
 this artifact always describes the preparation source above, not the subsequent import head.
 
@@ -167,6 +172,8 @@ or security guard is changed. The later `aa2904` hosted qualification below incl
 correction and the exact hosted formatter fixes; the earlier job remains a historical failure.
 
 ## Main integration and current gates
+
+### Prior PR #519 integration
 
 Pre-integration candidate `aa2904bf41784c930f7d41af69603e22a9216a4c` passed all 15
 Actions check runs across [CI 37219830100](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37219830100),
@@ -195,15 +202,16 @@ Manual documentation edits distinguish the qualified parents from the unqualifie
 head and preserve the pending owner decision. Candidate H1 opt-outs, canonical OIDC fixture,
 accessible notification regressions and all existing MCP strict fixtures are unchanged.
 
-Main changes no package manifest or lockfile relative to the shared base. Both candidate
-locks remain byte-for-byte the outputs of artifact `11308824128`; no graph regeneration or
-manual dependency edit was needed. The original producer is still run `37217928511`, attempt 1,
-source `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`, and its archive digest remains
+In that integration, main changed no package manifest or lockfile relative to the shared base.
+Both candidate locks remained byte-for-byte the outputs of artifact `11308824128`; no graph
+regeneration or manual dependency edit was needed. The original producer is still run
+`37217928511`, attempt 1, source `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`,
+and its archive digest remains
 `06cfb6dd727d02621f026c45c6ba495f4c414803dc08a61a676dfb5809e43bba`.
-The five manifest hashes, `.nvmrc` and producer-workflow hash still match the original input
-manifest above. The imported locks retain the original output hashes. Only the CI input
-changes during this integration, to include migration 011; its SHA-256 is recorded below.
-This is an integration record, not a new producer artifact or a relabeling of the old source:
+At that integration, the five manifest hashes, `.nvmrc` and producer-workflow hash still matched
+the original input manifest above. The imported locks retained the original output hashes.
+Only the CI input changed, to include migration 011; its SHA-256 is recorded below.
+This historical integration record does not relabel the original producer source:
 
 ```text
 318c2c47b84d173bd44b7d9fb45d7fa7e9f20ab80ed72dad9831fbe8be8523b4  .github/workflows/ci.yml
@@ -217,6 +225,63 @@ uses Zod 4's strict objects and public refinements. New subset controls and thei
 accessible-name fixtures are retained for hosted jsdom 30 execution. Edge mutations continue
 through the candidate's owned H1 Admin agent. This inspection is not runtime qualification;
 no repository code, installer, formatter, build or test was executed locally.
+
+Candidate `d3347dcae7b61186debf9457ab572ecd70971ba6` subsequently passed all 15 hosted
+Actions checks across [CI 37221897637](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221897637),
+[Dependency lock artifacts 37221897636](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221897636)
+and [Verbatim quickstart 37221897641](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221897641).
+Root completed whole and fresh independent review of that exact head with no findings.
+This is historical parent evidence, not qualification of the new integration.
+
+### PR #523 producer-fix integration; fresh qualification pending
+
+Main advanced to `1a908ea5c81e4685622345954266268684255b86` through
+[#523](https://github.com/ferrum-edge/ferrum-nexus/pull/523). Its qualified source is
+`27e4312e97f585e1a2da83d231730033f285e9a8`. Root reviewed the complete four-file delta
+and obtained fresh independent review with no findings; all 11 hosted checks passed.
+The normal merge into `d3347dcae7b61186debf9457ab572ecd70971ba6` conflicts only in
+the producer workflow and `dependency-majors-449.md`. The e2e manifest and lock auto-merge
+the `@types/node` range `^22.10.2` to `^22.20.5` and resolution 22.20.4 to 22.20.5,
+including main's published MIT license and integrity. The candidate engine remains intact.
+No root graph, application, test, MCP, migration, contract, compatibility pin or required
+gate changes in this continuation.
+
+The resolved producer copies both committed locks as resolution inputs instead of removing
+the root lock, checks every manifest entry, and requires complete lock equality when that
+graph's declarations are unchanged. TypeScript pins agree across all four manifests;
+Vitest, coverage and coupled peers agree. Zod and React Table use the input locked versions
+for unchanged ranges. The candidate retains Node 22.22.2, strict engines, the actual-version
+witness, `.nvmrc` and CI provenance inputs, and exact jsdom/Undici version, engine, integrity
+and presence guards. Actions stay SHA-pinned with read-only permissions, no credential
+persistence or cache, and no lifecycle scripts. The fresh-graph workaround remains historical.
+
+Main's [producer run 37284706045, attempt 1](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37284706045)
+created artifact `11333906619` at source `27e4312e97f585e1a2da83d231730033f285e9a8`
+using Node `v22.14.0` / npm `10.9.2`. Root verified its archive digest
+`9d2b39759f335280bd2dd06e3bc8ed7a251cf2c67885cecd4a359e024ce0116d`, all input/output
+hashes and both locks against that immutable source; its complete lock diff is empty.
+This main artifact qualifies the typings patch's origin, not the merged candidate locks.
+It and higher-floor artifact `11308824128` keep their original source identities and hashes.
+
+Current merged producer inputs are:
+
+```text
+54eda345e33afbd33910013850cb250193773ae5166ae9446eae1301f42aeeb4  package.json
+3457d1d11dcf0d3fa883dc0093c356b65cb22b4be2f67f879947ab72514f8656  shared/package.json
+cb5020c8613a52edbf613785391f98b6809d3f03a529fc129fb6522e3e528636  server/package.json
+8ef1cb39cb4cafbd19d3b0da589593c6a67b0c6004dbe01c320416a3cf6d534c  web/package.json
+48d811f5448be4bb40c6a6f5889c4b8d922a899ac4937d8dda3693531c191dac  e2e/package.json
+0ed9c2de1dab8e5828e496a135fc1b67f91d2191f4c986e3ea79b19b5e8e6a12  package-lock.json
+4f37d761e1d573e90e2667de9df142f420917b81c6f2d059dd78b975ca2cf36e  e2e/package-lock.json
+4c42fb8d6334c5cdcac68b93f96c581fb83b1f58cda898cff115e5e941ef717d  .nvmrc
+318c2c47b84d173bd44b7d9fb45d7fa7e9f20ab80ed72dad9831fbe8be8523b4  .github/workflows/ci.yml
+3eff672daf435adb891ea4c2d138edaf4670c71bf04e6e5cb9da1840cdbde314  .github/workflows/dependency-locks.yml
+```
+
+These are static integration hashes, not output claims for a new hosted run. Relative to
+parent `d3347dc`, only the e2e manifest/lock and producer workflow inputs change. Root owns
+fresh hosted producer download/verification, whole integration review, fresh independent
+review and every current-head CI gate after push. No new run or artifact is claimed here.
 
 CI runs `checks (22.22.2)`, `checks (22)`, `checks (24.15.0)`, `checks (24)`,
 `checks (26.0.0)` and `checks (26)` with strict engine checks and actual-version assertions.

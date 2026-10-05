@@ -52,12 +52,14 @@ legacy compiler package, regex replacement for AST traversal, skipped scans or `
 `^22.22.2 || ^24.15.0 || >=26.0.0`, and depends on Undici 8.
 [Undici 8.11.2](https://registry.npmjs.org/undici/8.11.2) independently requires Node >=22.19.
 Both exceed the released minimum. This draft declares jsdom 30.1.2 and Undici 8.11.2,
-and both current locks are imported byte-for-byte from verified hosted artifact `11308824128`.
-The root lock resolves those versions; both locks include the proposed workspace engines.
+and both locks were imported byte-for-byte from verified hosted artifact `11308824128`.
+The root lock still matches that artifact; the e2e lock now includes PR #523's verified
+Node typings patch. Both retain the proposed workspace engines.
 Owned transports disable H2 explicitly. Notifications now label buttons from their visible
 title and action and describe them from the visible body and time, retaining role/name and
-visibility assertions. The pre-integration candidate passed all 15 hosted checks; the combined
-head after integrating PR #519 needs fresh hosted evidence and independent review.
+visibility assertions. Candidate `d3347dcae7b61186debf9457ab572ecd70971ba6` passed all 15
+hosted checks after integrating PR #519. The new combined head after integrating PR #523
+needs fresh hosted evidence and independent review.
 
 The issue body says Dependabot ignores these package majors. At the migration base `2ad4d53`,
 `.github/dependabot.yml` contains no package-specific ignores for them: its npm major ignores
@@ -68,11 +70,14 @@ The authorized merge of main `559c350a5370335791cdc3082225dce6056cf547` brings q
 PR #519's MCP subsets, forward migration `011` on all four stores and proposed service-manifest
 consumer into this candidate. Its source, strict fixtures and immutable contract assets are
 preserved without integration edits. Ferrum Edge 0.9.10 compatibility pins remain unchanged.
+The subsequent authorized merge of main `1a908ea5c81e4685622345954266268684255b86`
+brings PR #523's deterministic lock producer and e2e `@types/node` 22.20.4 to 22.20.5 patch.
+It preserves all candidate application, MCP, migration and support-proposal changes.
 
 ## Hosted locks and qualification
 
 The first stage's artifact is preserved as history in
-[lock provenance](dependency-majors-449-lock-provenance.md). The current candidate import from
+[lock provenance](dependency-majors-449-lock-provenance.md). The original candidate import from
 producer run `37217928511`, attempt 1, source `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`
 on Node `v22.22.2` / npm `10.9.7` is recorded in the
 [draft notes](dependency-majors-449-higher-floor-draft.md#hosted-lock-import-qualification-pending).
@@ -83,14 +88,20 @@ handwritten dependency graph. `.github/workflows/dependency-locks.yml` is an opt
 producer on manifest/workflow pull-request changes (or manual dispatch once available on the
 default branch). It checks out the exact PR head, uses full-SHA-pinned actions and `contents: read`,
 does not persist credentials or use caches/secrets/write permissions, and now runs Node 22.22.2 with
-strict engine checks and `npm install --package-lock-only --ignore-scripts`. npm 10 retains the
-old optional Vitest/coverage peer cycle during an in-place update, so the producer resolves a
-fresh root graph from the manifests and retains the input lock in the provenance artifact.
-Review any other resolved-version movement in its diff too. It generates both the root and
-separate `e2e` locks, checks the intended dependency families, and uploads both plus a diff,
-source SHA, tool versions, run identity, and SHA-256 input/output manifests. Its exact
-jsdom/Undici version, engine and integrity guards must pass as well as the retained first-stage
-dependency-family guards.
+strict engine checks and `npm install --package-lock-only --ignore-scripts`. The original
+Vitest 4 to 5 migration required a fresh root graph because npm 10 retained the old optional
+peer cycle; that graph is already committed, and its historical resolution and hashes remain
+recorded in the provenance document. The current producer retains both committed locks as
+resolution inputs and copies both input locks into the provenance artifact. It rejects graph
+changes when that lock's manifest declarations are unchanged, so an `e2e`-only update preserves
+the root graph. TypeScript pins must agree across all four manifests; Vitest and coverage pins
+and installed coupled peers must match. Zod and React Table checks use the input locked versions
+when their declared ranges are unchanged, or the npm-resolved versions when those declarations
+change. This draft retains exact jsdom 30.1.2 and Undici 8.11.2 version, engine, integrity and
+presence guards; main retains its Node 22.14 producer and jsdom 26 / Undici 7 profile. The
+candidate also records `.nvmrc` and CI as inputs and checks its actual Node version. It outputs
+both locks and the complete diff, source SHA, tool versions, run identity, and SHA-256 input/output
+manifests. Review every resolved-version movement before applying an artifact.
 
 To apply a producer artifact, download it with `gh run download` for the exact source head. Verify
 the successful producer run and its commit SHA, match `provenance/source-sha.txt` to the source
@@ -99,8 +110,11 @@ checkout, verify `provenance/input.sha256` against that checkout, and verify
 two generated lockfiles to their corresponding paths, inspect the complete diff, and commit with
 hooks disabled before pushing. Keep the provenance artifact/run URL available for review.
 
-The candidate locks are applied and unchanged after main integration; combined-head runtime/CI
-qualification remains pending. The optional producer does not replace any required check:
+The root lock is unchanged; the e2e lock incorporates only main's hosted-verified typings patch
+while preserving the candidate engine declaration. Current input hashes and both historical
+artifact identities are recorded in the draft notes and provenance document. Fresh producer
+verification and combined-head runtime/CI qualification remain pending. The optional producer
+does not replace any required check:
 all normal required checks must pass on the final head,
 including `Supported Node minimum`, real Node 22/24 checks, store contracts, Docker, acceptance,
 quickstart configuration and action pins. The candidate's additional per-major minima, Node 26

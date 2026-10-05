@@ -2,8 +2,8 @@
 
 ## Historical first-stage artifact; higher-floor locks imported
 
-The records below preserve PR #518's historical lock provenance. This draft's current locks
-were imported byte-for-byte at `bc389dfe1510692057793930817d35d0c1e18f6a` from verified
+The records below preserve PR #518's historical lock provenance. This draft's locks were
+originally imported byte-for-byte at `bc389dfe1510692057793930817d35d0c1e18f6a` from verified
 artifact `11308824128`, produced by
 [run 37217928511, attempt 1](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37217928511)
 from source `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec` on Node `v22.22.2` / npm `10.9.7`.
@@ -12,9 +12,42 @@ The archive SHA-256 is `06cfb6dd727d02621f026c45c6ba495f4c414803dc08a61a676dfb58
 the [draft notes](dependency-majors-449-higher-floor-draft.md#hosted-lock-import-qualification-pending)
 record the verified input/output manifests and full import facts. The
 [main integration record](dependency-majors-449-higher-floor-draft.md#main-integration-and-current-gates)
-preserves the original producer/source binding and records the changed CI input alongside
-unchanged lock hashes. The pre-integration candidate passed all 15 hosted checks; combined-head
-qualification and review are pending, and owner approval remains pending.
+preserves that producer/source binding, the prior PR #519 integration and its qualification,
+and the current PR #523 merge inputs. The root lock retains the imported hash; the e2e lock
+now incorporates only main's verified Node typings patch while retaining the proposed engine.
+Its current hash differs from the original higher-floor output. Parent `d3347dc` passed all
+15 hosted checks; fresh combined-head qualification and review are pending, as is owner approval.
+
+## Historical PR #523 producer; current integration pending
+
+Main `1a908ea5c81e4685622345954266268684255b86` merged PR #523's qualified source
+`27e4312e97f585e1a2da83d231730033f285e9a8`. Its
+[producer run 37284706045, attempt 1](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37284706045)
+used Node `v22.14.0` / npm `10.9.2`, strict engines and no lifecycle scripts. Root verified
+artifact `11333906619`, archive SHA-256
+`9d2b39759f335280bd2dd06e3bc8ed7a251cf2c67885cecd4a359e024ce0116d`, every input/output
+hash and both output locks byte-for-byte against that source. The complete output diff was empty:
+
+```text
+6aa9d160035c01ee2863ecedb3c0cb9a08097958d1a42c0230712f155d5a4a0b  package-lock.json
+48444847efb1d6252f0ae60c064712402caf0ec0dcabd15ee57d6fc80893ea3b  e2e/package-lock.json
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  locks.diff
+```
+
+These historical main outputs retain their original identity; they are not current candidate
+outputs. The normal merge incorporates main's e2e `@types/node` 22.20.4 to 22.20.5 patch
+without regenerating either graph. It combines the deterministic producer with the candidate's
+Node 22.22.2 witness and exact jsdom/Undici guards. Current candidate lock hashes are:
+
+```text
+0ed9c2de1dab8e5828e496a135fc1b67f91d2191f4c986e3ea79b19b5e8e6a12  package-lock.json
+4f37d761e1d573e90e2667de9df142f420917b81c6f2d059dd78b975ca2cf36e  e2e/package-lock.json
+```
+
+The draft notes record all ten current producer-input hashes. No new hosted artifact is
+claimed; root owns its download/verification and fresh exact-head review and CI after push.
+Both historical artifact records remain immutable. Released Node 22.14 support and the pending
+owner decision are unchanged.
 
 ## PR #518 provenance
 
