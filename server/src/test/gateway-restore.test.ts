@@ -117,7 +117,7 @@ describe('restoring a missing gateway deployment', () => {
     return harness.services.reconciliation.scan();
   }
 
-  async function restore(session: TestSession, id: string): ReturnType<TestApp['authed']> {
+  function restore(session: TestSession, id: string): ReturnType<TestApp['authed']> {
     return harness.authed(session, {
       method: 'POST',
       url: `/api/apis/${id}/restore-gateway`,

@@ -317,7 +317,7 @@ export function runMailLifecycleContract(
         }),
       });
       const tick = worker.tick();
-      let releasing: ReturnType<typeof release> | null = null;
+      let releasing: Promise<Awaited<ReturnType<typeof release>>> | null = null;
       try {
         await Promise.race([
           handingOff.promise,
@@ -326,16 +326,17 @@ export function runMailLifecycleContract(
           }),
         ]);
         let finished = false;
-        releasing = release(subject).then((response) => {
+        const releaseOperation = release(subject).then((response) => {
           finished = true;
           return response;
         });
+        releasing = releaseOperation;
         await new Promise((resolve) => setTimeout(resolve, 50));
         assert.equal(finished, false, 'release cannot overtake the live handoff');
         assert.equal((await peer.emailOutbox.findById(queued.entry.id))?.status, 'sending');
         settle.resolve();
         assert.equal((await tick).sent, 1);
-        const released = await releasing;
+        const released = await releaseOperation;
         assert.equal(released.statusCode, 200, released.body);
       } finally {
         settle.resolve();
