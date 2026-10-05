@@ -773,7 +773,7 @@ export function runEdgeSecurityAdoptionContract(
       }
     }
 
-    it('keeps original agent replay coherent through repaired upload and restore', async () => {
+    it('unreleased cascade: replays agents after staging creation', async () => {
       const published = await publish('routes');
       const apiId = published.api.id;
       const proxyId = published.api.ferrum_proxy_id!;
@@ -786,19 +786,37 @@ export function runEdgeSecurityAdoptionContract(
       });
       const originalAgents = structuredClone(enabled.api.agents);
       const createProxy = harness.edgeClient.proxies.create;
+      let stagingCreates = 0;
+      let stagingAcknowledgements = 0;
       harness.edgeClient.proxies.create = async (...args) => {
+        assert.equal(args[0].id, proxyId);
+        assert.ok(String(args[0].listen_path).includes('/.staging/'));
+        stagingCreates += 1;
         const result = await createProxy(...args);
+        stagingAcknowledgements += 1;
         refusePolicy();
         return result;
       };
       restoreMethods.push(() => {
         harness.edgeClient.proxies.create = createProxy;
       });
+      // This strict control requires the owner teardown API. An earlier refusal
+      // cannot stand in for the intended post-creation policy failure.
+      const conversionOffset = harness.edge.requests.length;
       await assert.rejects(
         harness.services.publishing.update(actor, apiId, {
           spec_enforcement: 'docs_only',
           agents: null,
         }),
+        /required local public egress policy/,
+      );
+      assert.equal(stagingCreates, 1, 'the intended staging-create method was reached once');
+      assert.equal(stagingAcknowledgements, 1, 'the real staging creation was acknowledged');
+      assert.equal(
+        harness.edge.requests
+          .slice(conversionOffset)
+          .filter((call) => call.method === 'POST' && call.path === '/proxies').length,
+        1,
       );
       harness.edgeClient.proxies.create = createProxy;
       harness.edge.setBackendEgressPolicy(publicEgressPolicy());
@@ -809,15 +827,20 @@ export function runEdgeSecurityAdoptionContract(
         originalSealed.value,
       );
       const beforeRevision = await harness.store.apiSpecs.findCurrentByApi(apiId);
-      faults.failNext('settings', 'set', new Error('repaired metadata refused'));
+      const metadataError = new Error('repaired metadata refused');
+      faults.failNext('settings', 'set', metadataError);
       await assert.rejects(
         harness.services.publishing.updateSpec(
           actor,
           apiId,
           SAMPLE_SPEC_YAML.replace('2.4.0', '2.5.0'),
         ),
-        /repaired metadata refused/,
+        (error: unknown) => {
+          assert.equal(error, metadataError, 'the intended settings.set fault was reached');
+          return true;
+        },
       );
+      assert.deepEqual(faults.pending(), [], 'the transaction consumed the metadata fault');
       assert.deepEqual((await harness.store.apis.findById(apiId))?.agents, originalAgents);
       assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(apiId), beforeRevision);
       assert.deepEqual(await harness.store.settings.get(key), originalSealed);
@@ -838,6 +861,7 @@ export function runEdgeSecurityAdoptionContract(
         'plugins',
         'document',
         'originalSpecDocument',
+        'originalSpecId',
         'attempt',
       ]) {
         assert.deepEqual(revised[field], original[field], `${field} retains the original baseline`);
@@ -855,6 +879,326 @@ export function runEdgeSecurityAdoptionContract(
       assert.deepEqual(restored.api.agents, uploaded.api.agents);
       assert.equal(restored.spec.parsed_version, '2.5.0');
       assert.equal(await harness.store.settings.get(key), null);
+    });
+
+    it('replays original agents after teardown refusal and corrected upload', async () => {
+      const published = await publish('routes');
+      const apiId = published.api.id;
+      const proxyId = published.api.ferrum_proxy_id!;
+      const key = `gateway_recovery:nexus:${apiId}`;
+      const enabled = await harness.services.publishing.update(actor, apiId, {
+        agents: {
+          operations: [
+            { path: '/invoices', method: 'GET', name: 'list', description: 'List invoices' },
+          ],
+        },
+      });
+      const originalAgents = structuredClone(enabled.api.agents);
+      const originalGateway = gatewayState();
+      const originalCatalog = await harness.store.apis.findById(apiId);
+      const originalRevision = await harness.store.apiSpecs.findCurrentByApi(apiId);
+      const ownership = await harness.store.apiGatewayPlugins.listByApi(apiId);
+      assert.ok(originalCatalog && originalRevision);
+      assert.equal(await harness.store.settings.get(key), null);
+      const createProxy = harness.edgeClient.proxies.create;
+      const createSpec = harness.edgeClient.apiSpecs.create;
+      let proxyCreates = 0;
+      let specCreates = 0;
+      let specAcknowledgements = 0;
+      const replayDocuments: Record<string, unknown>[] = [];
+      harness.edgeClient.proxies.create = async (...args) => {
+        proxyCreates += 1;
+        return createProxy(...args);
+      };
+      harness.edgeClient.apiSpecs.create = async (...args) => {
+        specCreates += 1;
+        replayDocuments.push(structuredClone(args[0]));
+        const result = await createSpec(...args);
+        specAcknowledgements += 1;
+        return result;
+      };
+      restoreMethods.push(() => {
+        harness.edgeClient.proxies.create = createProxy;
+        harness.edgeClient.apiSpecs.create = createSpec;
+      });
+      const conversionOffset = harness.edge.requests.length;
+      await assert.rejects(
+        harness.services.publishing.update(actor, apiId, {
+          spec_enforcement: 'docs_only',
+          agents: null,
+        }),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(error.code, 'CONFLICT');
+          assert.match(error.message, /Atomic conversion teardown is unavailable/);
+          assert.deepEqual(error.details, {
+            proxy_id: proxyId,
+            capability: 'conditional_proxy_cascade',
+          });
+          return true;
+        },
+      );
+      assert.equal(proxyCreates, 0, 'initial teardown refusal never reaches staging creation');
+      assert.equal(specCreates, 0, 'initial teardown refusal never reaches spec creation');
+      assert.equal(specAcknowledgements, 0);
+      assert.ok(
+        harness.edge.requests.slice(conversionOffset).every((call) => call.method === 'GET'),
+      );
+      assert.deepEqual(gatewayState(), originalGateway);
+      assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(apiId), originalRevision);
+      assert.deepEqual(await harness.store.apiGatewayPlugins.listByApi(apiId), ownership);
+      const refusedCatalog = await harness.store.apis.findById(apiId);
+      assert.ok(refusedCatalog);
+      assert.deepEqual(refusedCatalog, {
+        ...originalCatalog,
+        gateway_state: 'repair_required',
+        updated_at: refusedCatalog.updated_at,
+      });
+      assert.deepEqual(refusedCatalog.agents, originalAgents);
+      assert.deepEqual(await completionRows(apiId), { restore: [], rollback: [] });
+      const originalSealed = await harness.store.settings.get(key);
+      assert.ok(originalSealed?.encrypted && typeof originalSealed.value === 'string');
+      const original = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
+        originalSealed.value,
+      );
+      assert.equal(original.attempt, null);
+      assert.equal(original.originalSpecId, originalRevision.id);
+      assert.deepEqual((original.shape as { agents: unknown }).agents, originalAgents);
+
+      const metadataError = new Error('repaired metadata refused');
+      faults.failNext('settings', 'set', metadataError);
+      const failedUploadOffset = harness.edge.requests.length;
+      let metadataRefusals = 0;
+      await assert.rejects(
+        harness.services.publishing.updateSpec(
+          actor,
+          apiId,
+          SAMPLE_SPEC_YAML.replace('2.4.0', '2.5.0'),
+        ),
+        (error: unknown) => {
+          assert.equal(error, metadataError, 'the intended settings.set fault was reached');
+          metadataRefusals += 1;
+          return true;
+        },
+      );
+      assert.equal(metadataRefusals, 1);
+      assert.deepEqual(faults.pending(), [], 'the transaction consumed the metadata fault');
+      assert.deepEqual(await harness.store.apis.findById(apiId), refusedCatalog);
+      assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(apiId), originalRevision);
+      assert.deepEqual(await harness.store.settings.get(key), originalSealed);
+      assert.deepEqual(await harness.store.apiGatewayPlugins.listByApi(apiId), ownership);
+      assert.deepEqual(gatewayState(), originalGateway);
+      assert.ok(
+        harness.edge.requests.slice(failedUploadOffset).every((call) => call.method === 'GET'),
+      );
+      assert.deepEqual(await completionRows(apiId), { restore: [], rollback: [] });
+
+      const uploadOffset = harness.edge.requests.length;
+      const uploaded = await harness.services.publishing.updateSpec(
+        actor,
+        apiId,
+        SAMPLE_SPEC_YAML.replace('2.4.0', '2.5.0'),
+      );
+      assert.notDeepEqual(uploaded.api.agents, originalAgents);
+      assert.equal(uploaded.spec.parsed_version, '2.5.0');
+      const catalog = await harness.store.apis.findById(apiId);
+      const revision = await harness.store.apiSpecs.findCurrentByApi(apiId);
+      assert.ok(catalog && revision);
+      assert.deepEqual(catalog, {
+        ...refusedCatalog,
+        agents: uploaded.api.agents,
+        version: '2.5.0',
+        updated_at: catalog.updated_at,
+      });
+      assert.notEqual(revision.id, originalRevision.id);
+      assert.equal(revision.parsed_version, '2.5.0');
+      const revisedSealed = await harness.store.settings.get(key);
+      assert.ok(revisedSealed?.encrypted && typeof revisedSealed.value === 'string');
+      const revised = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
+        revisedSealed.value,
+      );
+      assert.deepEqual(revised, {
+        ...original,
+        catalogShape: {
+          ...(original.shape as Record<string, unknown>),
+          agents: uploaded.api.agents,
+        },
+      });
+      assert.deepEqual(gatewayState(), originalGateway);
+      assert.deepEqual(await harness.store.apiGatewayPlugins.listByApi(apiId), ownership);
+      assert.ok(harness.edge.requests.slice(uploadOffset).every((call) => call.method === 'GET'));
+      assert.equal(proxyCreates, 0);
+      assert.equal(specCreates, 0);
+      assert.deepEqual(await completionRows(apiId), { restore: [], rollback: [] });
+
+      const restoreOffset = harness.edge.requests.length;
+      await assert.rejects(
+        harness.services.publishing.restoreGateway(actor, apiId),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(error.code, 'CONFLICT');
+          assert.match(
+            error.message,
+            /Atomic replacement of a conversion specification is unavailable/,
+          );
+          assert.deepEqual(error.details, {
+            proxy_id: proxyId,
+            capability: 'conditional_api_spec_replace',
+          });
+          return true;
+        },
+      );
+      assert.equal(proxyCreates, 0);
+      assert.equal(specCreates, 0, 'live baseline recovery never attempts reconstruction');
+      assert.ok(harness.edge.requests.slice(restoreOffset).every((call) => call.method === 'GET'));
+      assert.deepEqual(gatewayState(), originalGateway);
+      assert.deepEqual(await harness.store.settings.get(key), revisedSealed);
+      const afterRefusal = await harness.store.apis.findById(apiId);
+      assert.ok(afterRefusal);
+      assert.deepEqual(afterRefusal, { ...catalog, updated_at: afterRefusal.updated_at });
+      assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(apiId), revision);
+      assert.deepEqual(await harness.store.apiGatewayPlugins.listByApi(apiId), ownership);
+      assert.deepEqual(await completionRows(apiId), { restore: [], rollback: [] });
+
+      // A real operator deletion supplies absence. Production can reconstruct
+      // the immutable original on staging, but applying the correction and
+      // completing routes recovery still requires the internal owner API adoption.
+      const deletionOffset = harness.edge.requests.length;
+      await harness.edgeClient.proxies.delete(proxyId, actor.id, {
+        cleanupOrphanedUpstream: false,
+      });
+      assert.deepEqual(
+        harness.edge.requests
+          .slice(deletionOffset)
+          .filter((call) => call.method !== 'GET')
+          .map(({ method, path }) => ({ method, path })),
+        [{ method: 'DELETE', path: `/proxies/${proxyId}` }],
+      );
+      const getProxy = harness.edgeClient.proxies.get;
+      const handOwnedIds = (original.plugins as { id: string; api_spec_id?: string | null }[])
+        .filter((plugin) => !plugin.api_spec_id)
+        .map((plugin) => plugin.id);
+      assert.ok(handOwnedIds.length > 0);
+      const replacement: {
+        reads: number;
+        offset: number;
+        gateway?: unknown;
+        journal: Awaited<ReturnType<NexusStore['settings']['get']>>;
+      } = { reads: 0, offset: 0, journal: null };
+      harness.edgeClient.proxies.get = async (...args) => {
+        const live = await getProxy(...args);
+        if (
+          args[0] === proxyId &&
+          live &&
+          String(live.listen_path).includes('/.staging/') &&
+          handOwnedIds.every((id) => live.plugins?.some((entry) => entry.plugin_config_id === id))
+        ) {
+          replacement.reads += 1;
+          replacement.offset = harness.edge.requests.length;
+          replacement.gateway = gatewayState();
+          replacement.journal = await harness.store.settings.get(key);
+        }
+        return live;
+      };
+      restoreMethods.push(() => {
+        harness.edgeClient.proxies.get = getProxy;
+      });
+      const replayOffset = harness.edge.requests.length;
+      await assert.rejects(
+        harness.services.publishing.restoreGateway(actor, apiId),
+        /Atomic replacement of a conversion specification is unavailable/,
+      );
+      assert.equal(proxyCreates, 0, 'routes reconstruction uses the real spec importer');
+      assert.equal(specCreates, 1, 'exactly one original reconstruction was attempted');
+      assert.equal(specAcknowledgements, 1, 'the original staging reconstruction was acknowledged');
+      assert.equal(
+        replacement.reads,
+        1,
+        'the fully associated staging replacement boundary was reached',
+      );
+      assert.equal(
+        harness.edge.requests
+          .slice(replayOffset)
+          .filter((call) => call.method === 'POST' && call.path === '/api-specs').length,
+        1,
+      );
+      const replayDocument = replayDocuments[0];
+      assert.ok(replayDocument);
+      assert.equal((replayDocument.info as { version: string }).version, '2.4.0');
+      const replayPlugins = replayDocument['x-ferrum-plugins'] as {
+        id: string;
+        plugin_name: string;
+        config: { policy?: unknown };
+      }[];
+      const replayMcp = replayPlugins.find((plugin) => plugin.plugin_name === 'mcp_gateway');
+      const originalMcp = (
+        original.plugins as { id: string; plugin_name: string; config: { policy?: unknown } }[]
+      ).find((plugin) => plugin.plugin_name === 'mcp_gateway');
+      assert.ok(replayMcp && originalMcp);
+      assert.equal(replayMcp.id, originalMcp.id);
+      assert.deepEqual(
+        replayMcp.config.policy,
+        originalMcp.config.policy,
+        'the real replay submits the original tool ids and access policy',
+      );
+      assert.deepEqual(
+        gatewayState(),
+        replacement.gateway,
+        'refusal preserves the entire staged graph',
+      );
+      assert.ok(
+        harness.edge.requests.slice(replacement.offset).every((call) => call.method === 'GET'),
+      );
+      assert.ok(
+        harness.edge.requests
+          .slice(replayOffset)
+          .every(
+            (call) =>
+              call.method !== 'DELETE' &&
+              !(call.method === 'PUT' && call.path.startsWith('/api-specs/')),
+          ),
+      );
+      assert.ok(replacement.journal?.encrypted && typeof replacement.journal.value === 'string');
+      assert.deepEqual(await harness.store.settings.get(key), replacement.journal);
+      const replayed = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
+        replacement.journal.value,
+      );
+      const attempt = replayed.attempt as {
+        level: string;
+        agents: unknown;
+        proxy: { id: string; listen_path: string };
+        specId: string;
+        documentDigests: string[];
+      };
+      assert.deepEqual(replayed, { ...revised, attempt: replayed.attempt });
+      assert.equal(attempt.level, 'routes');
+      assert.deepEqual(attempt.agents, originalAgents);
+      assert.equal(attempt.proxy.id, proxyId);
+      assert.ok(attempt.proxy.listen_path.includes('/.staging/'));
+      assert.equal(attempt.documentDigests.length, 1);
+      assert.match(attempt.documentDigests[0]!, /^[a-f0-9]{64}$/);
+      const stagedSpec = await harness.edgeClient.apiSpecs.findByProxy(proxyId);
+      assert.ok(stagedSpec);
+      assert.equal(attempt.specId, stagedSpec.id);
+      assert.equal(harness.edge.proxyServing(`/nexus/${published.api.slug}`), undefined);
+      const replayCatalog = await harness.store.apis.findById(apiId);
+      assert.ok(replayCatalog);
+      assert.deepEqual(replayCatalog, { ...afterRefusal, updated_at: replayCatalog.updated_at });
+      assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(apiId), revision);
+      assert.deepEqual(await harness.store.apiGatewayPlugins.listByApi(apiId), ownership);
+      assert.deepEqual(await completionRows(apiId), { restore: [], rollback: [] });
+      const failures = (await harness.auditRows(AuditAction.API_GATEWAY_RESTORE_FAILED)).filter(
+        (row) => row.target_id === apiId,
+      );
+      assert.equal(failures.length, 2);
+      for (const failure of failures) {
+        assert.equal(failure.details.withdrawn, false);
+        assert.equal(failure.details.proxy_id, proxyId);
+        assert.match(
+          String(failure.details.error),
+          /Atomic replacement of a conversion specification/,
+        );
+      }
     });
 
     for (const resource of ['proxy', 'plugin', 'spec'] as const) {
