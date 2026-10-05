@@ -684,10 +684,11 @@ describe('released deployment authority over HTTP sockets', () => {
     const { client, reply, requests, logs } = await fixture(t);
     const snapshot = original();
     reply.body = JSON.stringify(snapshot);
-    for (const headers of [
+    const headersToRefuse: Record<string, string>[] = [
       { 'cache-control': 'no-store', etag: ROW_TAG },
       { 'cache-control': 'no-store', etag: snapshot.namespace_etag, age: '1' },
-    ]) {
+    ];
+    for (const headers of headersToRefuse) {
       reply.headers = headers;
       await assert.rejects(client.deployments.snapshot(), protocolFailure);
     }

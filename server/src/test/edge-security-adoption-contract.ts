@@ -3,6 +3,7 @@ import { after, afterEach, before, describe, it } from 'node:test';
 
 import type { PublishApiResponse } from '@ferrum-nexus/shared';
 
+import { rotateEncryptedSettings } from '../admin/rotate-key.js';
 import { AuditAction } from '../audit/service.js';
 import {
   API_GATEWAY_PLUGIN_ROLES,
@@ -10,8 +11,15 @@ import {
   type NexusStore,
   type UserRecord,
 } from '../db/store.js';
+import type { EdgeDeploymentSnapshot } from '../ferrum-admin/types.js';
+import { createCrypto } from '../lib/crypto.js';
 import { isNexusError } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
+import {
+  deleteRecoveryJournal,
+  readRecoveryJournal,
+  writeRecoveryJournal,
+} from '../publishing/recovery-storage.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, specWithServer, type TestApp } from './helpers.js';
 import { mockBasicPasswordHash, publicEgressPolicy } from './mock-ferrum-edge.js';
@@ -181,6 +189,469 @@ export function runEdgeSecurityAdoptionContract(
       );
     }
 
+    /** Unknown credentials occur in both interpreted and raw owner evidence, without redaction. */
+    async function enlargeNamespace(characters = 21 * 128 * 1024): Promise<void> {
+      const mapping = await harness.services.credentials.provisioner.ensureConsumer(actor);
+      const consumer = harness.edge.consumers.get(`nexus/${mapping.ferrum_consumer_id}`)!;
+      const credentials = structuredClone(consumer.credentials);
+      restoreMethods.push(() => {
+        consumer.credentials = credentials;
+      });
+      consumer.credentials = {
+        ...credentials,
+        future_credential: [
+          {
+            secret: 'complete-storage-canary-' + 'q'.repeat(characters),
+            nested: { unknown: ['preserve', '[REDACTED]', '🔒', 'line\n"quoted"'] },
+          },
+        ],
+      };
+    }
+
+    async function journalRows(
+      key: string,
+    ): Promise<Awaited<ReturnType<NexusStore['settings']['all']>>> {
+      return (await harness.store.settings.all()).filter((row) => {
+        if (row.key === key) return true;
+        if (!row.key.startsWith('gateway_recovery_chunk:')) return false;
+        assert.ok(row.encrypted && typeof row.value === 'string');
+        return harness.app.nexus.crypto.decryptJson<{ key: string }>(row.value).key === key;
+      });
+    }
+
+    interface LargeJournal {
+      originalAuthority: EdgeDeploymentSnapshot;
+      mutations: { original: EdgeDeploymentSnapshot; acknowledged: boolean }[];
+      attempt: { observed: { authority: EdgeDeploymentSnapshot } };
+    }
+
+    async function readJournal<T>(key: string): Promise<T> {
+      const journal = await readRecoveryJournal<T>(harness.store, harness.app.nexus.crypto, key);
+      assert.ok(journal);
+      return journal;
+    }
+
+    async function readLargeJournal(key: string): Promise<LargeJournal> {
+      return readJournal<LargeJournal>(key);
+    }
+
+    it('upgrades large legacy custody and rotates authenticated chunks', async () => {
+      await publish('routes');
+      await enlargeNamespace();
+      const original = await harness.edgeClient.deployments.snapshot(actor.id);
+      const crypto = harness.app.nexus.crypto;
+      const key = `gateway_recovery:nexus:storage-${newId()}`;
+      const journal: LargeJournal = {
+        originalAuthority: original,
+        mutations: [{ original, acknowledged: false }],
+        attempt: { observed: { authority: original } },
+      };
+      const legacy = { ...journal, attempt: null };
+      const sealed = crypto.encryptJson(legacy);
+      assert.ok(Buffer.byteLength(sealed) > 12 * 1024 * 1024);
+      assert.ok(Buffer.byteLength(sealed) < 16 * 1024 * 1024);
+      await harness.store.settings.set(key, sealed, true);
+      assert.deepEqual(await readRecoveryJournal(harness.store, crypto, key), legacy);
+      assert.ok(Buffer.byteLength(crypto.encryptJson(journal)) > 16 * 1024 * 1024);
+      await writeRecoveryJournal(harness.store, crypto, key, journal);
+      assert.deepEqual(await readLargeJournal(key), journal);
+      const rows = await journalRows(key);
+      assert.ok(rows.length > 2);
+      for (const row of rows) {
+        assert.equal(row.encrypted, true);
+        assert.ok(Buffer.byteLength(JSON.stringify(row)) < 1024 * 1024);
+        assert.ok(!JSON.stringify(row).includes('complete-storage-canary'));
+      }
+      const next = createCrypto('recovery-chunk-rotation-secret-0123456789ab');
+      try {
+        const rotated = await rotateEncryptedSettings(harness.store, crypto, next);
+        for (const row of rows) assert.ok(rotated.keys.includes(row.key));
+        assert.deepEqual(await readRecoveryJournal(harness.store, next, key), journal);
+      } finally {
+        await rotateEncryptedSettings(harness.store, next, crypto);
+      }
+      await deleteRecoveryJournal(harness.store, crypto, key);
+      assert.deepEqual(await journalRows(key), []);
+    });
+
+    it('retains complete prior custody across storage failures', async () => {
+      await publish('routes');
+      await enlargeNamespace();
+      const original = await harness.edgeClient.deployments.snapshot(actor.id);
+      const crypto = harness.app.nexus.crypto;
+      const key = `gateway_recovery:nexus:storage-${newId()}`;
+      const journal: LargeJournal = {
+        originalAuthority: original,
+        mutations: [{ original, acknowledged: false }],
+        attempt: { observed: { authority: original } },
+      };
+      await writeRecoveryJournal(harness.store, crypto, key, journal);
+      const rows = await journalRows(key);
+      const manifest = await harness.store.settings.get(key);
+      assert.ok(manifest?.encrypted && typeof manifest.value === 'string');
+      const { count } = crypto.decryptJson<{ count: number }>(manifest.value);
+      const next = { ...journal, mutations: [{ original, acknowledged: true }] };
+      for (const boundary of [0, 1, count]) {
+        faults.failAfter('settings', 'set', boundary, new Error('journal publication refused'));
+        await assert.rejects(
+          writeRecoveryJournal(harness.store, crypto, key, next),
+          /journal publication refused/,
+        );
+        assert.deepEqual(await journalRows(key), rows);
+        assert.deepEqual(await readLargeJournal(key), journal);
+      }
+      faults.failAfter('settings', 'delete', 1, new Error('old generation retirement refused'));
+      await assert.rejects(
+        writeRecoveryJournal(harness.store, crypto, key, next),
+        /old generation retirement refused/,
+      );
+      assert.deepEqual(await journalRows(key), rows);
+      faults.failAfter('settings', 'get', 2, new Error('chunk read refused'));
+      await assert.rejects(readLargeJournal(key), /chunk read refused/);
+      assert.deepEqual(await journalRows(key), rows);
+      faults.failAfter('settings', 'delete', 1, new Error('completion custody refused'));
+      await assert.rejects(
+        deleteRecoveryJournal(harness.store, crypto, key),
+        /completion custody refused/,
+      );
+      assert.deepEqual(await journalRows(key), rows);
+      assert.deepEqual(await readLargeJournal(key), journal);
+      await writeRecoveryJournal(harness.store, crypto, key, next);
+      assert.deepEqual(await readLargeJournal(key), next);
+      await deleteRecoveryJournal(harness.store, crypto, key);
+      assert.deepEqual(await journalRows(key), []);
+    });
+
+    it('refuses substituted or missing chunks without erasing evidence', async () => {
+      await enlargeNamespace();
+      const original = await harness.edgeClient.deployments.snapshot(actor.id);
+      const crypto = harness.app.nexus.crypto;
+      const key = `gateway_recovery:nexus:storage-${newId()}`;
+      await writeRecoveryJournal(harness.store, crypto, key, { originalAuthority: original });
+      const rows = await journalRows(key);
+      const chunks = rows.filter((row) => row.key !== key);
+      const first = chunks[0]!;
+      const second = chunks[1]!;
+      await harness.store.settings.set(first.key, second.value, true);
+      const corrupted = await journalRows(key);
+      await assert.rejects(
+        readRecoveryJournal(harness.store, crypto, key),
+        /chunk does not match its manifest/,
+      );
+      await assert.rejects(
+        deleteRecoveryJournal(harness.store, crypto, key),
+        /chunk does not match its manifest/,
+      );
+      assert.deepEqual(await journalRows(key), corrupted);
+      await harness.store.settings.set(first.key, first.value, true);
+      await harness.store.settings.delete(second.key);
+      const incomplete = await journalRows(key);
+      await assert.rejects(
+        writeRecoveryJournal(harness.store, crypto, key, { changed: true }),
+        /chunk is unavailable/,
+      );
+      assert.deepEqual(await journalRows(key), incomplete);
+      await harness.store.settings.set(second.key, second.value, true);
+      assert.deepEqual(await readRecoveryJournal(harness.store, crypto, key), {
+        originalAuthority: original,
+      });
+      await deleteRecoveryJournal(harness.store, crypto, key);
+    });
+
+    it('converts through journal growth beyond 16 MiB', async () => {
+      const published = await publish('docs_only');
+      await enlargeNamespace();
+      const original = await harness.edgeClient.deployments.snapshot(actor.id);
+      const key = `gateway_recovery:nexus:${published.api.id}`;
+      const replace = harness.edgeClient.deployments.replace;
+      let cutover = false;
+      harness.edgeClient.deployments.replace = async (...args) => {
+        cutover = true;
+        const journal = await readLargeJournal(key);
+        assert.deepEqual(journal.originalAuthority, original);
+        assert.deepEqual(journal.mutations[0]!.original, original);
+        assert.equal(journal.mutations[0]!.acknowledged, true);
+        assert.deepEqual(journal.attempt.observed.authority, args[2]);
+        assert.deepEqual(journal.mutations.at(-1)!.original, args[2]);
+        assert.equal(journal.mutations.at(-1)!.acknowledged, false);
+        assert.ok(
+          Buffer.byteLength(harness.app.nexus.crypto.encryptJson(journal)) > 16 * 1024 * 1024,
+        );
+        for (const row of await journalRows(key)) {
+          assert.ok(Buffer.byteLength(JSON.stringify(row)) < 1024 * 1024);
+        }
+        return replace(...args);
+      };
+      restoreMethods.push(() => {
+        harness.edgeClient.deployments.replace = replace;
+      });
+      const converted = await harness.services.publishing.update(actor, published.api.id, {
+        spec_enforcement: 'routes',
+      });
+      assert.ok(cutover, 'native conditional cutover reached a durable journal beyond 16 MiB');
+      assert.equal(converted.api.gateway_state, 'deployed');
+      assert.equal(converted.api.ferrum_proxy_id, published.api.ferrum_proxy_id);
+      assert.deepEqual(await journalRows(key), []);
+      assert.ok(harness.edge.proxyServing(`/nexus/${published.api.slug}`));
+    });
+
+    it('rolls back with large authority and generated plugin fields', async () => {
+      const published = await publish('routes');
+      const proxyId = published.api.ferrum_proxy_id!;
+      const validator = (await harness.edgeClient.pluginConfigs.listByProxy(proxyId)).find(
+        (plugin) => plugin.plugin_name === 'openapi_validator',
+      );
+      assert.ok(validator);
+      const generated = await harness.edgeClient.pluginConfigs.replace(validator.id, {
+        plugin_name: validator.plugin_name,
+        scope: validator.scope,
+        proxy_id: proxyId,
+        enabled: validator.enabled,
+        config: { ...validator.config, request_content_types: ['application/problem+json'] },
+        labels: { operator: 'complete-large-replay' },
+        priority_override: 2_900,
+      });
+      await enlargeNamespace();
+      const original = await harness.edgeClient.deployments.snapshot(actor.id);
+      const key = `gateway_recovery:nexus:${published.api.id}`;
+      const replace = harness.edgeClient.deployments.replace;
+      let replayed = false;
+      harness.edgeClient.deployments.replace = async (...args) => {
+        replayed = true;
+        const journal = await readLargeJournal(key);
+        assert.deepEqual(journal.originalAuthority, original);
+        assert.deepEqual(journal.mutations[0]!.original, original);
+        assert.deepEqual(journal.attempt.observed.authority, args[2]);
+        assert.equal(journal.mutations.at(-1)!.acknowledged, false);
+        return replace(...args);
+      };
+      restoreMethods.push(() => {
+        harness.edgeClient.deployments.replace = replace;
+      });
+      harness.edge.queueFailure(503, { error: 'conversion create refused' }, '/proxies', 'POST');
+      await assert.rejects(
+        harness.services.publishing.update(actor, published.api.id, {
+          spec_enforcement: 'docs_only',
+        }),
+      );
+      assert.ok(replayed, 'rollback used native conditional spec-owned cutover');
+      const row = await harness.store.apis.findById(published.api.id);
+      assert.equal(row?.gateway_state, 'deployed');
+      assert.equal(row?.spec_enforcement, 'routes');
+      assert.equal(
+        (await harness.store.apiSpecs.findCurrentByApi(published.api.id))?.id,
+        published.spec.id,
+      );
+      const restored = await harness.edgeClient.pluginConfigs.get(generated.id);
+      assert.ok(restored);
+      assert.deepEqual(restored.config, generated.config);
+      assert.deepEqual(restored.labels, generated.labels);
+      assert.equal(restored.priority_override, generated.priority_override);
+      assert.deepEqual(await journalRows(key), []);
+      assert.equal((await completionRows(published.api.id)).rollback.length, 1);
+      assert.ok(harness.edge.proxyServing(`/nexus/${published.api.slug}`));
+    });
+
+    it('cleans acknowledged orphan custody beyond 16 MiB', async () => {
+      const published = await publish('docs_only');
+      const apiId = published.api.id;
+      const proxyId = published.api.ferrum_proxy_id!;
+      await enlargeNamespace();
+      const original = await harness.edgeClient.deployments.snapshot(actor.id);
+      const key = `gateway_recovery:nexus:${apiId}`;
+      const replace = harness.edgeClient.deployments.replace;
+      const snapshot = harness.edgeClient.deployments.snapshot;
+      const remove = harness.edgeClient.deployments.remove;
+      let cutover = false;
+      let vanished = false;
+      let orphanAdmission = false;
+      harness.edgeClient.deployments.replace = async (...args) => {
+        await replace(...args);
+        cutover = true;
+      };
+      harness.edgeClient.deployments.snapshot = async (...args) => {
+        const authority = await snapshot(...args);
+        if (cutover && !vanished) {
+          const journal = await readLargeJournal(key);
+          assert.equal(journal.mutations.at(-1)!.acknowledged, true);
+          await harness.store.transaction(async (tx) => {
+            await tx.apiGatewayPlugins.deleteByApi(apiId);
+            await tx.apiSpecs.deleteByApi(apiId);
+            assert.equal(await tx.apis.delete(apiId), true);
+          });
+          vanished = true;
+        }
+        return authority;
+      };
+      harness.edgeClient.deployments.remove = async (...args) => {
+        if (vanished) {
+          orphanAdmission = true;
+          assert.equal(await harness.store.apis.findById(apiId), null);
+          const journal = await readLargeJournal(key);
+          assert.deepEqual(journal.originalAuthority, original);
+          assert.deepEqual(journal.mutations[0]!.original, original);
+          assert.deepEqual(journal.attempt.observed.authority, args[1]);
+          assert.deepEqual(journal.mutations.at(-1)!.original, args[1]);
+          assert.equal(journal.mutations.at(-1)!.acknowledged, false);
+          assert.ok(
+            Buffer.byteLength(harness.app.nexus.crypto.encryptJson(journal)) > 16 * 1024 * 1024,
+          );
+        }
+        return remove(...args);
+      };
+      restoreMethods.push(() => {
+        harness.edgeClient.deployments.replace = replace;
+        harness.edgeClient.deployments.snapshot = snapshot;
+        harness.edgeClient.deployments.remove = remove;
+      });
+      await assert.rejects(
+        harness.services.publishing.update(actor, apiId, { spec_enforcement: 'routes' }),
+      );
+      assert.ok(vanished && orphanAdmission, 'acknowledged orphan removal used durable custody');
+      assert.equal(harness.edge.proxies.has(`nexus/${proxyId}`), false);
+      assert.equal(await harness.store.apis.findById(apiId), null);
+      assert.deepEqual(await journalRows(key), []);
+      const completed = await completionRows(apiId);
+      assert.equal(completed.rollback.length, 1);
+      assert.equal(completed.rollback[0]!.details.recovery, 'orphan_removed');
+      assert.equal(completed.restore.length, 0);
+    });
+
+    it('keeps failed-restore cutover custody through large cleanup admission', async () => {
+      const published = await publish('routes');
+      await enlargeNamespace(33 * 128 * 1024);
+      await harness.edgeClient.proxies.delete(published.api.ferrum_proxy_id!, actor.id, {
+        cleanupOrphanedUpstream: false,
+      });
+      const key = `gateway_restore_cleanup:nexus:${published.api.id}`;
+      const replace = harness.edgeClient.deployments.replace;
+      const remove = harness.edgeClient.deployments.remove;
+      let cutover: EdgeDeploymentSnapshot | undefined;
+      let cleanup = false;
+      harness.edgeClient.deployments.replace = async (...args) => {
+        cutover = args[2];
+        return replace(...args);
+      };
+      harness.edgeClient.deployments.remove = async (...args) => {
+        cleanup = true;
+        const journal = await readJournal<{
+          original: EdgeDeploymentSnapshot;
+          cutover: { original: EdgeDeploymentSnapshot; acknowledged: boolean };
+          acknowledged: boolean;
+        }>(key);
+        assert.deepEqual(journal.original, args[1]);
+        assert.deepEqual(journal.cutover.original, cutover);
+        assert.equal(journal.cutover.acknowledged, true);
+        assert.equal(journal.acknowledged, false);
+        assert.ok(
+          Buffer.byteLength(harness.app.nexus.crypto.encryptJson(journal)) > 16 * 1024 * 1024,
+        );
+        return remove(...args);
+      };
+      restoreMethods.push(() => {
+        harness.edgeClient.deployments.replace = replace;
+        harness.edgeClient.deployments.remove = remove;
+      });
+      faults.failNext('apiGatewayPlugins', 'replace', new Error('restore ownership commit refused'));
+      await assert.rejects(
+        harness.services.publishing.restoreGateway(actor, published.api.id),
+        /restore ownership commit refused/,
+      );
+      assert.ok(cutover && cleanup, 'native cleanup retained its acknowledged cutover authority');
+      assert.deepEqual(await journalRows(key), []);
+      const row = await harness.store.apis.findById(published.api.id);
+      assert.equal(row?.ferrum_proxy_id, null);
+      assert.equal(row?.gateway_state, 'repair_required');
+      const failed = (await harness.auditRows(AuditAction.API_GATEWAY_RESTORE_FAILED)).filter(
+        (entry) => entry.target_id === published.api.id,
+      );
+      assert.equal(failed.length, 1);
+      assert.equal(failed[0]!.details.withdrawn, true);
+    });
+
+    it('refuses large authority admission before gateway mutation', async () => {
+      const published = await publish('docs_only');
+      await enlargeNamespace();
+      const key = `gateway_recovery:nexus:${published.api.id}`;
+      const snapshot = harness.edgeClient.deployments.snapshot;
+      let retained: Awaited<ReturnType<typeof journalRows>> = [];
+      harness.edgeClient.deployments.snapshot = async (...args) => {
+        const original = await snapshot(...args);
+        retained = await journalRows(key);
+        faults.failAfter('settings', 'set', 2, new Error('large authority admission refused'));
+        return original;
+      };
+      restoreMethods.push(() => {
+        harness.edgeClient.deployments.snapshot = snapshot;
+      });
+      const state = gatewayState();
+      const offset = harness.edge.requests.length;
+      await assert.rejects(
+        harness.services.publishing.update(actor, published.api.id, { spec_enforcement: 'routes' }),
+        /large authority admission refused/,
+      );
+      assert.equal(retained.length, 1, 'the committed baseline preceded authority admission');
+      assert.deepEqual(await journalRows(key), retained);
+      assert.deepEqual(gatewayState(), state);
+      assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
+      assert.equal(
+        (await harness.store.apis.findById(published.api.id))?.gateway_state,
+        'repair_required',
+      );
+    });
+
+    for (const failure of ['owner-reply', 'journal-acknowledgement'] as const) {
+      it(`large journal retains uncertain ${failure}`, async () => {
+        const published = await publish('docs_only');
+        await enlargeNamespace();
+        const original = await harness.edgeClient.deployments.snapshot(actor.id);
+        const key = `gateway_recovery:nexus:${published.api.id}`;
+        if (failure === 'owner-reply') {
+          harness.edge.queueLostAck(
+            503,
+            { error: 'removal acknowledgement lost' },
+            `/proxies/${published.api.ferrum_proxy_id}`,
+            'DELETE',
+          );
+        } else {
+          const remove = harness.edgeClient.deployments.remove;
+          harness.edgeClient.deployments.remove = async (...args) => {
+            await remove(...args);
+            faults.failAfter(
+              'settings',
+              'set',
+              2,
+              new Error('large journal acknowledgement refused'),
+            );
+          };
+          restoreMethods.push(() => {
+            harness.edgeClient.deployments.remove = remove;
+          });
+        }
+        const offset = harness.edge.requests.length;
+        await assert.rejects(
+          harness.services.publishing.update(actor, published.api.id, {
+            spec_enforcement: 'routes',
+          }),
+        );
+        assert.equal(harness.edge.proxies.has(`nexus/${published.api.ferrum_proxy_id}`), false);
+        assert.ok(!harness.edge.requests.slice(offset).some((call) => call.method === 'POST'));
+        const journal = await readLargeJournal(key);
+        assert.deepEqual(journal.originalAuthority, original);
+        assert.deepEqual(journal.mutations[0]!.original, original);
+        assert.equal(journal.mutations[0]!.acknowledged, false);
+        const rows = await journalRows(key);
+        const retryOffset = harness.edge.requests.length;
+        await assert.rejects(
+          harness.services.publishing.restoreGateway(actor, published.api.id),
+          /mutation is unconfirmed/,
+        );
+        assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
+        assert.deepEqual(await journalRows(key), rows);
+        assert.deepEqual(await completionRows(published.api.id), { restore: [], rollback: [] });
+      });
+    }
+
     for (const level of ['docs_only', 'routes'] as const) {
       it(`${level}: converts with released authority without touching unrelated resources`, async () => {
         const published = await publish(level);
@@ -274,10 +745,10 @@ export function runEdgeSecurityAdoptionContract(
         assert.equal(removal[0]!.ifMatch, expectedTag);
         const sealed = await harness.store.settings.get(key);
         assert.ok(sealed?.encrypted && typeof sealed.value === 'string');
-        const journal = harness.app.nexus.crypto.decryptJson<{
+        const journal = await readJournal<{
           originalAuthority: { namespace_etag: string; evidence: unknown };
           mutations: { original: unknown; acknowledged: boolean }[];
-        }>(sealed.value);
+        }>(key);
         assert.equal(journal.originalAuthority.namespace_etag, expectedTag);
         assert.ok(journal.originalAuthority.evidence);
         assert.deepEqual(journal.mutations[0]!.original, journal.originalAuthority);
@@ -306,7 +777,7 @@ export function runEdgeSecurityAdoptionContract(
         }),
       );
       const live = await harness.edgeClient.proxies.get(proxyId);
-      assert.ok(live && live.listen_path.includes('/.staging/'));
+      assert.ok(live && live.listen_path?.includes('/.staging/'));
       assert.equal(live.api_spec_id ?? null, null);
       const calls = harness.edge.requests.slice(offset);
       assert.equal(calls.filter((call) => call.method === 'POST').length, 1);
@@ -314,10 +785,10 @@ export function runEdgeSecurityAdoptionContract(
       const state = gatewayState();
       const sealed = await harness.store.settings.get(key);
       assert.ok(sealed?.encrypted && typeof sealed.value === 'string');
-      const journal = harness.app.nexus.crypto.decryptJson<{
+      const journal = await readJournal<{
         attempt: { observed?: unknown };
         mutations: { original: { evidence: unknown }; acknowledged: boolean }[];
-      }>(sealed.value);
+      }>(key);
       assert.equal(journal.attempt.observed, undefined);
       assert.ok(journal.mutations[0]!.original.evidence);
       assert.equal(journal.mutations[0]!.acknowledged, true);
@@ -417,9 +888,9 @@ export function runEdgeSecurityAdoptionContract(
         assert.ok(!harness.edge.requests.slice(offset).some((call) => call.method === 'POST'));
         const sealed = await harness.store.settings.get(key);
         assert.ok(sealed?.encrypted && typeof sealed.value === 'string');
-        const journal = harness.app.nexus.crypto.decryptJson<{
+        const journal = await readJournal<{
           mutations: { original: { evidence: unknown }; acknowledged: boolean }[];
-        }>(sealed.value);
+        }>(key);
         assert.ok(journal.mutations[0]!.original.evidence);
         assert.equal(journal.mutations[0]!.acknowledged, false);
         const retryOffset = harness.edge.requests.length;
@@ -900,11 +1371,11 @@ export function runEdgeSecurityAdoptionContract(
           `gateway_recovery:nexus:${published.api.id}`,
         );
         assert.ok(sealed?.encrypted && typeof sealed.value === 'string');
-        const journal = harness.app.nexus.crypto.decryptJson<{
+        const journal = await readJournal<{
           proxy: unknown;
           plugins: unknown;
           shape: { upstream_url: string; auth_plugin: string; cors: unknown };
-        }>(sealed.value);
+        }>(`gateway_recovery:nexus:${published.api.id}`);
         assert.deepEqual(journal.proxy, beforeProxy);
         assert.deepEqual(journal.plugins, beforePlugins);
         assert.equal(journal.shape.upstream_url, published.api.upstream_url);
@@ -1083,9 +1554,7 @@ export function runEdgeSecurityAdoptionContract(
       const key = `gateway_recovery:nexus:${apiId}`;
       const originalSealed = await harness.store.settings.get(key);
       assert.ok(originalSealed?.encrypted && typeof originalSealed.value === 'string');
-      const original = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
-        originalSealed.value,
-      );
+      const original = await readJournal<Record<string, unknown>>(key);
       const beforeRevision = await harness.store.apiSpecs.findCurrentByApi(apiId);
       const metadataError = new Error('repaired metadata refused');
       faults.failNext('settings', 'set', metadataError);
@@ -1112,9 +1581,7 @@ export function runEdgeSecurityAdoptionContract(
       assert.notDeepEqual(uploaded.api.agents, originalAgents);
       const revisedSealed = await harness.store.settings.get(key);
       assert.ok(revisedSealed?.encrypted && typeof revisedSealed.value === 'string');
-      const revised = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
-        revisedSealed.value,
-      );
+      const revised = await readJournal<Record<string, unknown>>(key);
       for (const field of [
         'shape',
         'proxy',
@@ -1222,9 +1689,7 @@ export function runEdgeSecurityAdoptionContract(
       assert.deepEqual(await completionRows(apiId), { restore: [], rollback: [] });
       const originalSealed = await harness.store.settings.get(key);
       assert.ok(originalSealed?.encrypted && typeof originalSealed.value === 'string');
-      const original = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
-        originalSealed.value,
-      );
+      const original = await readJournal<Record<string, unknown>>(key);
       assert.equal(original.attempt, null);
       assert.equal(original.originalSpecId, originalRevision.id);
       assert.deepEqual((original.shape as { agents: unknown }).agents, originalAgents);
@@ -1278,9 +1743,7 @@ export function runEdgeSecurityAdoptionContract(
       assert.equal(revision.parsed_version, '2.5.0');
       const revisedSealed = await harness.store.settings.get(key);
       assert.ok(revisedSealed?.encrypted && typeof revisedSealed.value === 'string');
-      const revised = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
-        revisedSealed.value,
-      );
+      const revised = await readJournal<Record<string, unknown>>(key);
       assert.deepEqual(revised, {
         ...original,
         catalogSpecId: revision.id,
@@ -1411,9 +1874,7 @@ export function runEdgeSecurityAdoptionContract(
       assert.ok(!harness.edge.requests.slice(replayOffset).some((call) => call.method === 'DELETE'));
       assert.ok(replacement.journal?.encrypted && typeof replacement.journal.value === 'string');
       assert.deepEqual(await harness.store.settings.get(key), replacement.journal);
-      const replayed = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
-        replacement.journal.value,
-      );
+      const replayed = await readJournal<Record<string, unknown>>(key);
       const attempt = replayed.attempt as {
         level: string;
         agents: unknown;
@@ -1732,15 +2193,9 @@ export function runEdgeSecurityAdoptionContract(
         } else if (change === 'legacy-journal') {
           const sealed = await harness.store.settings.get(key);
           assert.ok(sealed?.encrypted && typeof sealed.value === 'string');
-          const recovery = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
-            sealed.value,
-          );
+          const recovery = await readJournal<Record<string, unknown>>(key);
           delete recovery.originalSpecId;
-          await harness.store.settings.set(
-            key,
-            harness.app.nexus.crypto.encryptJson(recovery),
-            true,
-          );
+          await writeRecoveryJournal(harness.store, harness.app.nexus.crypto, key, recovery);
         } else {
           const offset = harness.edge.requests.length;
           const path = await mutateAdminResource(change, proxyId);
@@ -1790,9 +2245,7 @@ export function runEdgeSecurityAdoptionContract(
         }
         const originalSealed = await harness.store.settings.get(key);
         assert.ok(originalSealed?.encrypted && typeof originalSealed.value === 'string');
-        const original = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
-          originalSealed.value,
-        );
+        const original = await readJournal<Record<string, unknown>>(key);
         // Only an explicit operator removal supplies absence. Recovery must not
         // delete a live deployment or refresh evidence to obtain replay authority.
         await harness.edgeClient.proxies.delete(proxyId, actor.id, {
@@ -1896,9 +2349,7 @@ export function runEdgeSecurityAdoptionContract(
           stagedJournal.value,
           'refusal retains the acknowledged staging journal',
         );
-        const recovery = harness.app.nexus.crypto.decryptJson<Record<string, unknown>>(
-          sealed.value,
-        );
+        const recovery = await readJournal<Record<string, unknown>>(key);
         for (const field of [
           'shape',
           'catalogShape',

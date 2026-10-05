@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import type { PublishApiResponse, SpecEnforcementLevel } from '@ferrum-nexus/shared';
 
+import { readRecoveryJournal } from '../publishing/recovery-storage.js';
 import { createConversionRaceFixture } from './conversion-race-fixture.js';
 import { buildTestApp, specWithServer, type TestApp } from './helpers.js';
 
@@ -16,6 +17,7 @@ for (const initial of ['routes', 'docs_only'] as const) {
           const one = await buildTestApp();
           const fixture = createConversionRaceFixture(t.signal);
           let two: TestApp | undefined;
+          let restoreBarrier = () => {};
           try {
             two = await buildTestApp({ store: one.store, edge: one.edge });
             await one.registerUser({ email: 'founder@example.test' });
@@ -66,28 +68,55 @@ for (const initial of ['routes', 'docs_only'] as const) {
             const arrived = new Promise<void>((resolve) => {
               announce = resolve;
             });
+            let intercepted = 0;
             const block = async () => {
+              intercepted += 1;
               announce();
               await fixture.held;
             };
             if (conversionFirst) {
-              const real = one.edgeClient.proxies.delete.bind(one.edgeClient.proxies);
-              one.edgeClient.proxies.delete = async (...args) => {
-                one.edgeClient.proxies.delete = real;
+              const original = one.edgeClient.deployments.remove;
+              const real = original.bind(one.edgeClient.deployments);
+              restoreBarrier = () => {
+                one.edgeClient.deployments.remove = original;
+              };
+              one.edgeClient.deployments.remove = async (...args) => {
+                restoreBarrier();
+                assert.equal(args[0], proxyId);
+                assert.equal(args[1].profile, 'deployment-v1');
+                assert.equal(args[1].namespace, 'nexus');
+                assert.equal(args[2], provider.user.id);
+                const journal = await readRecoveryJournal<{ mutations: { original: unknown }[] }>(
+                  one.store,
+                  one.app.nexus.crypto,
+                  `gateway_recovery:nexus:${api.id}`,
+                );
+                assert.deepEqual(journal?.mutations[0]?.original, args[1]);
                 await block();
                 return real(...args);
               };
             } else if (rival === 'spec' && initial === 'routes') {
-              const real = one.edgeClient.apiSpecs.replace.bind(one.edgeClient.apiSpecs);
+              const original = one.edgeClient.apiSpecs.replace;
+              const real = original.bind(one.edgeClient.apiSpecs);
+              restoreBarrier = () => {
+                one.edgeClient.apiSpecs.replace = original;
+              };
               one.edgeClient.apiSpecs.replace = async (...args) => {
-                one.edgeClient.apiSpecs.replace = real;
+                restoreBarrier();
+                assert.equal(args[2], provider.user.id);
                 await block();
                 return real(...args);
               };
             } else {
-              const real = one.edgeClient.proxies.replace.bind(one.edgeClient.proxies);
+              const original = one.edgeClient.proxies.replace;
+              const real = original.bind(one.edgeClient.proxies);
+              restoreBarrier = () => {
+                one.edgeClient.proxies.replace = original;
+              };
               one.edgeClient.proxies.replace = async (...args) => {
-                one.edgeClient.proxies.replace = real;
+                restoreBarrier();
+                assert.equal(args[0], proxyId);
+                assert.equal(args[2], provider.user.id);
                 await block();
                 return real(...args);
               };
@@ -107,6 +136,7 @@ for (const initial of ['routes', 'docs_only'] as const) {
             await fixture.waitFor(contending, second, 'second proxy lease contention');
             fixture.release();
             const responses = await fixture.within(Promise.all([first, second]), 'race responses');
+            assert.equal(intercepted, 1, 'the first request reached its actual gateway mutation');
             for (const response of responses) assert.equal(response.statusCode, 200, response.body);
 
             const row = await one.store.apis.findById(api.id);
@@ -133,7 +163,11 @@ for (const initial of ['routes', 'docs_only'] as const) {
             assert.ok(plugins.includes('access_control'));
             assert.equal(plugins.includes('openapi_validator'), target === 'routes');
           } finally {
-            await fixture.cleanup(two, one);
+            try {
+              await fixture.cleanup(two, one);
+            } finally {
+              restoreBarrier();
+            }
           }
         },
       );

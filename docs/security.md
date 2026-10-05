@@ -1867,15 +1867,24 @@ separate current gateway observations, not atomic Edge CAS or external-writer
 fencing. Successful conversion clears its journal with `api.update`, the
 catalog mode and ownership. No credential-bearing resource body enters either
 audit. Corrected agent revisions commit an authorized comparison shape without
-changing the original replay resources. Initial conversion now refuses before
-teardown with `mutation_refused: true`; live spec replacement and failed restore
-cleanup also refuse before mutation. Absent `routes` conversion recovery refuses
-corrected spec replacement and spec-owned cutover, retaining staging, the encrypted
-journal and operator edits with `withdrawn: false` and no completion audit. Ordinary
-publication and missing-deployment restore retain their released cutover. The
-journal and resources remain intact. The required successful rollback and
-vanished-catalog cleanup gates await the
-[released owner capability gap](edge-conversion-recovery-blocker.md).
+changing the original replay resources. Conversion teardown, selected partial
+cleanup, corrected spec replacement and spec-owned cutover now use the published
+Edge v0.9.12 conditional deployment protocol. Complete original secret-bearing
+namespace evidence and its quoted token are durable before each HTTP mutation.
+Dependent recovery requires the expected committed/applied acknowledgement,
+explicit cleanup authorization and applicable covering cursor. Stale authority,
+unknown or changed resources, lost replies and uncertain acknowledgements retain
+staging, the journal and operator edits with `withdrawn: false` and no completion
+audit; no fresh-token retry or unconditional fallback is allowed. Large journals
+are stored as individually encrypted chunks whose identity, order and complete
+content are authenticated by an encrypted manifest. Publication and retirement
+commit atomically through `NexusStore`; a failed update retains all prior committed
+custody, and a missing or substituted chunk blocks replay and completion. No raw
+owner evidence or credential is trimmed to fit a database row. Existing single-row
+journals remain readable, and every chunk participates in encrypted-setting key
+rotation. See the [released protocol and replay limits](edge-conversion-recovery-blocker.md).
+Exact-head hosted/native-store/packaged qualification and the CP/public-profile
+owner decision remain pending. Advisory Part B remains open.
 
 `api.gateway_repair_required` phases (`details.phase`):
 

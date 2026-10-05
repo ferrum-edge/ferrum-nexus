@@ -2476,22 +2476,29 @@ the API id, so their existing consumer groups match again. After a missing-proxy
 repair, direct gateway changes were deleted with the proxy and are not restored.
 A failed enforcement conversion instead retains an encrypted recovery snapshot of
 the original proxy and plugins, including operator fields.
-Recovery retains the original id and refuses deletion of all live partial
-resources; the operator must reconcile those first. The released Edge namespace
-restore would rewrite unrelated fields, so Nexus cannot use it as a safe cascade
-fallback. See the [owner capability blocker](edge-conversion-recovery-blocker.md).
-An unchanged original can still be reconciled read-only, and an absent `docs_only`
-identity can be rebuilt. Absent `routes` conversion recovery retains its staging
-deployment and journal: both corrected spec replacement and spec-owned cutover
-refuse without overwriting concurrent Admin state or recording completion.
-Ordinary publication and missing-deployment restore keep their existing cutover.
-In-place spec replacement and initial conversion teardown also refuse before live
-mutation until [Edge #6010](https://github.com/ferrum-edge/ferrum-edge/issues/6010)
-is released and adopted.
+Recovery retains the original id and uses released Edge v0.9.12 selected
+conditional removal and spec replacement. Each operation durably records its
+complete original namespace snapshot and quoted `deployment-v1` token before HTTP;
+only the expected committed/applied result, explicit recovery-cleanup authorization
+and applicable covering cursor permit dependent work. Stale authority, changed
+partial resources, lost replies and uncertain acknowledgements retain the journal
+and block cleanup or replay. Nexus never refreshes a token to retry the old body,
+uses unconditional deletion as a fallback, or restores an entire namespace.
+An unchanged original can still be reconciled read-only. An absent identity can
+be rebuilt from the retained original resources on staging; corrected `routes`
+replacement and spec-owned cutover each require their own recorded authority.
+Frozen external references and resources Nexus cannot replay require operator
+resolution. See the [released protocol and replay limits](edge-conversion-recovery-blocker.md).
 The encrypted journal and repair state commit before teardown and clear together
 with catalog, ownership and completion audit under the existing lease fences.
+Large journals use encrypted, authenticated chunks and a manifest committed in one
+atomic store transaction, preserving complete credentials and raw owner evidence
+without exceeding a setting's physical storage limit. Failed reads or writes retain
+the previous committed generation; incomplete custody cannot authorize completion.
 An uploaded corrected agent specification changes only the authorized catalog
 comparison shape; the original replay resources and tool ids remain intact.
+Exact-head hosted qualification and the CP/public-profile owner decision remain
+pending; adopting published capabilities does not close advisory Part B.
 
 Read-only recovery records `api.gateway_conversion_rollback` alongside
 `api.gateway_restore` only when the original revision id, original catalog

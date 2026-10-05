@@ -249,6 +249,20 @@ Successful rollback also clears repair state and the journal atomically.
 The encrypted `gateway_recovery:<namespace>:<api_id>` setting records original
 operator fields, plugin ids and partial rebuild paths/spec ownership. It uses the
 existing settings repository on all four stores; no schema migration is needed.
+Large journals use an encrypted manifest at that key and individually encrypted
+`gateway_recovery_chunk:<generation>:<index>` rows. Each chunk stays below 1 MiB,
+including encryption and encoding overhead, so growing namespace evidence cannot
+cross [MongoDB's 16 MiB document limit](https://www.mongodb.com/docs/manual/reference/limits/#bson-document-size).
+The complete generation, manifest and old
+chunk retirement commit in one atomic transaction (MongoDB requires a replica set).
+Reads authenticate identity, order and complete content in a coherent transaction;
+missing/substituted chunks refuse replay and completion. Failed publication retains
+the previous generation, including every original credential, raw row, spec and
+token. Treat these rows as one journal in paired backups and writer-drain procedures;
+never manually trim or remove chunks. Existing single-row journals remain readable,
+and normal encrypted-setting key rotation includes each manifest and chunk.
+The `gateway_restore_cleanup:<namespace>:<api_id>` cutover/cleanup journal uses the
+same format and custody rules.
 `POST /api/apis/:id/restore-gateway` repeats admission, takes the API and proxy
 leases, and verifies resources against that record before rebuilding an absent
 identity. Live selected removal and API-spec replacement use the released v0.9.12

@@ -321,6 +321,11 @@ import {
   routesSpecDocument,
   submittableProxyBody,
 } from './spec-document.js';
+import {
+  deleteRecoveryJournal,
+  readRecoveryJournal,
+  writeRecoveryJournal,
+} from './recovery-storage.js';
 
 /** What a spec revision's gateway-and-store step committed. */
 interface AppliedRevision {
@@ -1340,7 +1345,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     if (api.namespace !== namespace || recovery.proxy.namespace !== namespace) {
       throw conflict('Gateway recovery cannot cross the configured namespace');
     }
-    const sealed = deps.crypto.encryptJson(recovery);
     await store.transaction(async (tx) => {
       const latest = await tx.apis.findById(api.id);
       if (!latest) throw notFound('API', api.id);
@@ -1369,7 +1373,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           throw conflict('The API specification changed during conversion');
         }
       }
-      await tx.settings.set(recoveryKey(api.id), sealed, true);
+      await writeRecoveryJournal(tx, deps.crypto, recoveryKey(api.id), recovery);
       if (start) {
         const marked = await tx.apis.update(api.id, { gateway_state: 'repair_required' });
         if (!marked) throw notFound('API', api.id);
@@ -1385,12 +1389,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   async function readConversionRecovery(api: ApiRecord): Promise<ConversionRecovery | null> {
-    const row = await store.settings.get(recoveryKey(api.id));
-    if (!row) return null;
-    if (!row.encrypted || typeof row.value !== 'string') {
-      throw conflict('The encrypted gateway recovery record is unavailable');
-    }
-    const recovery = deps.crypto.decryptJson<ConversionRecovery>(row.value);
+    const recovery = await readRecoveryJournal<ConversionRecovery>(
+      store,
+      deps.crypto,
+      recoveryKey(api.id),
+    );
+    if (!recovery) return null;
     if (
       recovery.apiId !== api.id ||
       api.namespace !== namespace ||
@@ -1491,12 +1495,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       if (kind !== 'remove') throw notFound('API', api.id);
       // A vanished catalog may still owe removal of an acknowledged, recorded
       // partial. Its encrypted original journal outlives the API row.
-      const sealed = deps.crypto.encryptJson(recovery);
       await store.transaction(async (tx) => {
         if ((await tx.apis.findById(api.id)) || !(await tx.settings.get(recoveryKey(api.id)))) {
           throw conflict('The orphan conversion identity changed before cleanup admission');
         }
-        await tx.settings.set(recoveryKey(api.id), sealed, true);
+        await writeRecoveryJournal(tx, deps.crypto, recoveryKey(api.id), recovery);
       });
     };
     await persist();
@@ -2452,15 +2455,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // Authorize the corrected catalog shape without changing the original
             // replay document, tool ids, plugins or proxy. Both revisions commit
             // together under the retained proxy lease.
-            await tx.settings.set(
-              recoveryKey(api.id),
-              deps.crypto.encryptJson({
-                ...repairRecovery,
-                catalogShape: deploymentShape(row),
-                catalogSpecId: revision.id,
-              }),
-              true,
-            );
+            await writeRecoveryJournal(tx, deps.crypto, recoveryKey(api.id), {
+              ...repairRecovery,
+              catalogShape: deploymentShape(row),
+              catalogSpecId: revision.id,
+            });
           }
           // The completion row commits with the revision: a failed insert rolls
           // the revision back, and the catch below compensates the gateway
@@ -3821,17 +3820,19 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           updated = await store.transaction(async (tx) => {
             if (enforcementMoved) {
               const latest = await tx.apis.findById(api.id);
-              const sealed = await tx.settings.get(recoveryKey(api.id));
+              const recovery = await readRecoveryJournal<ConversionRecovery>(
+                tx,
+                deps.crypto,
+                recoveryKey(api.id),
+              );
               if (
                 !latest ||
                 latest.ferrum_proxy_id !== proxyId ||
                 !isDeepStrictEqual(deploymentShape(latest), deploymentShape(api)) ||
-                !sealed?.encrypted ||
-                typeof sealed.value !== 'string'
+                !recovery
               ) {
                 throw conflict('The API changed before its conversion could commit');
               }
-              const recovery = deps.crypto.decryptJson<ConversionRecovery>(sealed.value);
               assertRecoveryAcknowledged(recovery);
               if (
                 (await tx.apiSpecs.findCurrentByApi(api.id))?.id !==
@@ -3847,7 +3848,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               row = persisted;
             }
             if (recordOwnership) await tx.apiGatewayPlugins.replace(api.id, nextOwned);
-            if (enforcementMoved) await tx.settings.delete(recoveryKey(api.id));
+            if (enforcementMoved) await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
             await audit
               .forStore(tx)
               .record(
@@ -4266,7 +4267,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 });
                 if (!updated) throw notFound('API', api.id);
                 await tx.apiGatewayPlugins.replace(api.id, completedOwnership.ids);
-                await tx.settings.delete(recoveryKey(api.id));
+                await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
                 if (reconciledOriginal) {
                   await audit.forStore(tx).record(
                     { id: actor.id, role: actor.role },
@@ -4616,7 +4617,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   ) {
                     throw conflict('The restore changed before conditional cutover admission');
                   }
-                  await tx.settings.set(cleanupKey, deps.crypto.encryptJson(journal), true);
+                  await writeRecoveryJournal(tx, deps.crypto, cleanupKey, journal);
                 });
               };
               await persist(true);
@@ -4666,16 +4667,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 { api_id: api.id },
               );
             }
-            const sealed = await tx.settings.get(cleanupKey);
-            if (sealed) {
-              if (!sealed.encrypted || typeof sealed.value !== 'string') {
-                throw conflict('The conditional restore journal is unavailable');
-              }
-              const journal = deps.crypto.decryptJson<{ acknowledged: boolean }>(sealed.value);
+            const journal = await readRecoveryJournal<{ acknowledged: boolean }>(
+              tx,
+              deps.crypto,
+              cleanupKey,
+            );
+            if (journal) {
               if (journal.acknowledged !== true) {
                 throw conflict('The conditional restore application remains unconfirmed');
               }
-              await tx.settings.delete(cleanupKey);
+              await deleteRecoveryJournal(tx, deps.crypto, cleanupKey);
             }
             const updated = await tx.apis.update(api.id, {
               ferrum_proxy_id: gatewayProxyId,
@@ -4802,28 +4803,20 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               // Complete original evidence is durable before the selected HTTP
               // operation. No fresh authority or fallback follows a refusal.
               await store.transaction(async (tx) => {
-                const sealed = await tx.settings.get(cleanupKey);
-                let cutover: unknown = null;
-                if (sealed) {
-                  if (!sealed.encrypted || typeof sealed.value !== 'string') {
-                    throw conflict('The failed restore journal is unavailable');
-                  }
-                  const previous = deps.crypto.decryptJson<{ acknowledged: boolean }>(sealed.value);
-                  if (previous.acknowledged !== true) {
-                    throw conflict('The failed restore already has pending cleanup');
-                  }
-                  cutover = previous;
-                }
-                await tx.settings.set(
+                const previous = await readRecoveryJournal<{ acknowledged: boolean }>(
+                  tx,
+                  deps.crypto,
                   cleanupKey,
-                  deps.crypto.encryptJson({
-                    original,
-                    cutover,
-                    proxyId: present.id,
-                    acknowledged: false,
-                  }),
-                  true,
                 );
+                if (previous && previous.acknowledged !== true) {
+                  throw conflict('The failed restore already has pending cleanup');
+                }
+                await writeRecoveryJournal(tx, deps.crypto, cleanupKey, {
+                  original,
+                  cutover: previous,
+                  proxyId: present.id,
+                  acknowledged: false,
+                });
               });
               await edge.deployments.remove(present.id, original, actor.id);
               strandedProxyId = null;
@@ -4868,7 +4861,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 },
                 ip,
               );
-              if (strandedProxyId === null) await tx.settings.delete(cleanupKey);
+              if (strandedProxyId === null) {
+                await deleteRecoveryJournal(tx, deps.crypto, cleanupKey);
+              }
             })
             .catch(() => undefined);
           if (strandedProxyId !== null) {
@@ -5046,7 +5041,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               await tx.accessRequests.deleteByApi(api.id);
               await tx.apiPlugins.deleteByApi(api.id);
               await tx.apiGatewayPlugins.deleteByApi(api.id);
-              await tx.settings.delete(recoveryKey(api.id));
+              await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
               await tx.apiViewers.deleteByApi(api.id);
               await tx.apiSpecChanges.deleteByApi(api.id);
               await tx.apiSpecs.deleteByApi(api.id);
@@ -5767,16 +5762,17 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             if (await tx.apis.findById(api.id)) {
               throw conflict('The catalog identity returned before orphan recovery completion');
             }
-            const sealed = await tx.settings.get(recoveryKey(api.id));
-            if (!sealed?.encrypted || typeof sealed.value !== 'string') {
-              throw conflict('The orphan recovery journal is unavailable');
-            }
-            const pending = deps.crypto.decryptJson<ConversionRecovery>(sealed.value);
+            const pending = await readRecoveryJournal<ConversionRecovery>(
+              tx,
+              deps.crypto,
+              recoveryKey(api.id),
+            );
+            if (!pending) throw conflict('The orphan recovery journal is unavailable');
             assertRecoveryAcknowledged(pending);
             if (!pending.mutations?.some((mutation) => mutation.kind === 'remove')) {
               throw conflict('The orphan removal has no acknowledged deployment operation');
             }
-            await tx.settings.delete(recoveryKey(api.id));
+            await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
             await audit.forStore(tx).record(
               { id: actor.id, role: actor.role },
               AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
@@ -5812,7 +5808,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         }
         await tx.apis.update(api.id, { gateway_state: 'deployed' });
         await tx.apiGatewayPlugins.replace(api.id, ownership.ids);
-        await tx.settings.delete(recoveryKey(api.id));
+        await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
         await audit.forStore(tx).record(
           { id: actor.id, role: actor.role },
           AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,

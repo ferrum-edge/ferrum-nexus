@@ -8,7 +8,15 @@ Canonical `contracts-edge-0.9.12` at `31f0a21d707795be293d15837c2f77c3d84219d8`
 is published and adopted byte-for-byte. See [adoption facts](../../docs/edge-0.9.11-adoption.md).
 Root must supply the packaged Nexus candidate digest and run this in hosted CI.
 Publication establishes artifact identity; it does not attest this fixture or grant
-public-only supported-profile approval. Edge #6010 capabilities are absent.
+public-only supported-profile approval. The candidate adopts released selected
+conditional removal and API-spec replacement: full original deployment authority
+is durable before HTTP, and committed/applied acknowledgement with explicit cleanup
+authorization is required before dependent recovery. Uncertain results retain the
+encrypted journal and attempted identity without fresh-token retry or unconditional
+cleanup. Large journals preserve complete evidence in authenticated encrypted chunks
+committed atomically with their manifest. This DNS fixture does not qualify conversion
+custody, native-store boundaries or every recovery interleaving; those require their
+own exact-head hosted gates. Advisory Part B remains open.
 
 This stack is separate from the private-opt-in acceptance stack. It admits
 `rebind.fixture.test` while DNS returns `11.203.0.10`, proves real authenticated
