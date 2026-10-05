@@ -4,12 +4,45 @@ import { after, afterEach, before, describe, it } from 'node:test';
 import type { PublishApiResponse } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
-import type { NexusStore, UserRecord } from '../db/store.js';
+import {
+  API_GATEWAY_PLUGIN_ROLES,
+  type ApiGatewayPluginRecord,
+  type NexusStore,
+  type UserRecord,
+} from '../db/store.js';
 import { isNexusError } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, specWithServer, type TestApp } from './helpers.js';
 import { mockBasicPasswordHash, publicEgressPolicy } from './mock-ferrum-edge.js';
+
+/** Ownership replacement preserves every field except its intentional update stamp. */
+function assertRefreshedOwnership(
+  actual: ApiGatewayPluginRecord[],
+  original: ApiGatewayPluginRecord[],
+  startedAt: number,
+  finishedAt: number,
+): void {
+  assert.deepEqual(
+    original.map((row) => row.role),
+    API_GATEWAY_PLUGIN_ROLES,
+    'the baseline records all four ownership roles, including null ownership',
+  );
+  assert.equal(actual.length, original.length, 'no ownership row is added or omitted');
+  for (const [index, row] of original.entries()) {
+    const refreshed = actual[index];
+    assert.ok(refreshed);
+    assert.deepEqual(refreshed, { ...row, updated_at: refreshed.updated_at });
+    const updatedAt = Date.parse(refreshed.updated_at);
+    assert.ok(Number.isFinite(updatedAt), 'the refreshed ownership stamp is a valid timestamp');
+    assert.equal(new Date(updatedAt).toISOString(), refreshed.updated_at);
+    assert.ok(updatedAt >= Date.parse(row.updated_at), 'the ownership stamp never moves backward');
+    assert.ok(
+      updatedAt >= startedAt && updatedAt <= finishedAt,
+      'ownership is refreshed within the restore attempt, allowing the same millisecond',
+    );
+  }
+}
 
 /** Runs production service paths with native store transactions on all four adapters. */
 export function runEdgeSecurityAdoptionContract(
@@ -931,7 +964,9 @@ export function runEdgeSecurityAdoptionContract(
         assert.deepEqual(await completionRows(apiId), { restore: [], rollback: [] });
         assert.deepEqual(gatewayState(), originalGateway);
         const offset = harness.edge.requests.length;
+        const restoreStartedAt = Date.now();
         const reconciled = await harness.services.publishing.restoreGateway(actor, apiId);
+        const restoreFinishedAt = Date.now();
         assert.equal(reconciled.api.gateway_state, 'deployed');
         assert.equal(reconciled.api.ferrum_proxy_id, proxyId);
         assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
@@ -944,7 +979,12 @@ export function runEdgeSecurityAdoptionContract(
           updated_at: completedCatalog.updated_at,
         });
         assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(apiId), originalSpec);
-        assert.deepEqual(await harness.store.apiGatewayPlugins.listByApi(apiId), originalOwnership);
+        assertRefreshedOwnership(
+          await harness.store.apiGatewayPlugins.listByApi(apiId),
+          originalOwnership,
+          restoreStartedAt,
+          restoreFinishedAt,
+        );
         const completed = await completionRows(apiId);
         assert.equal(completed.rollback.length, 1);
         assert.equal(completed.restore.length, 1);
@@ -1022,10 +1062,15 @@ export function runEdgeSecurityAdoptionContract(
             value: {
               async create(input: Parameters<NexusStore['auditLogs']['create']>[0]) {
                 if (!witnessed && input.action === failedAction && input.target_id === apiId) {
-                  witnessed = true;
                   assert.equal(await tx.settings.get(key), null, 'journal deletion was attempted');
                   assert.equal((await tx.apis.findById(apiId))?.gateway_state, 'deployed');
-                  assert.deepEqual(await tx.apiGatewayPlugins.listByApi(apiId), ownership);
+                  assertRefreshedOwnership(
+                    await tx.apiGatewayPlugins.listByApi(apiId),
+                    ownership,
+                    restoreStartedAt,
+                    Date.now(),
+                  );
+                  witnessed = true;
                   throw new Error('original reconciliation audit insert refused');
                 }
                 return tx.auditLogs.create(input);
@@ -1040,6 +1085,7 @@ export function runEdgeSecurityAdoptionContract(
           harness.services.audit.forStore = forStore;
         });
         const offset = harness.edge.requests.length;
+        const restoreStartedAt = Date.now();
         await assert.rejects(
           harness.services.publishing.restoreGateway(actor, apiId),
           /original reconciliation audit insert refused/,
@@ -1061,6 +1107,7 @@ export function runEdgeSecurityAdoptionContract(
         );
         assert.equal(failure.length, 1);
         assert.equal(failure[0]!.details.withdrawn, false);
+        harness.services.audit.forStore = forStore;
         const restored = await harness.services.publishing.restoreGateway(actor, apiId);
         assert.equal(restored.api.gateway_state, 'deployed');
         assert.equal(await harness.store.settings.get(key), null);
