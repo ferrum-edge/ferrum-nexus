@@ -1590,6 +1590,185 @@ describe('ferrum admin client', () => {
       }
     });
 
+    it('rejects malformed submitted import metadata before POST or PUT effects', async () => {
+      const baseline = specDocument('import-admission', '/nexus/import-admission', ['/invoices']);
+      baseline['x-ferrum-plugins'] = [{ id: 'import-admission-auth', plugin_name: 'basic_auth' }];
+      const ref = await client.apiSpecs.create(baseline);
+      const token = await createAdminTokenMinter(configFor(edgeUrl)).getToken('import-admission');
+      const state = () =>
+        structuredClone({
+          proxies: [...edge.proxies],
+          plugins: [...edge.pluginConfigs],
+          specs: [...edge.apiSpecs],
+          upstreams: [...edge.upstreams],
+          consumers: [...edge.consumers],
+        });
+      const metadata: Record<string, unknown>[] = [
+        ...[null, 1, 'bad id', '/bad', '_bad', 'bad\n', 'é', 'a'.repeat(255)].map((id) => ({ id })),
+        ...['created_at', 'updated_at'].flatMap((field) =>
+          [
+            null,
+            1,
+            '',
+            'yesterday',
+            '2026-02-30T12:00:00Z',
+            '2026-01-01T24:00:00Z',
+            '2026-01-01T00:60:00Z',
+            '2026-01-01T00:00:61Z',
+            '2026-01-01T00:00:00+24:00',
+            '2026-01-01T00:00:00',
+            '2026-01-01',
+            '2026-01-01T00:00:00Zjunk',
+          ].map((value) => ({ [field]: value })),
+        ),
+        { namespace: null },
+        { namespace: 1 },
+        { labels: null },
+        { labels: [] },
+        { labels: { operator: 1 } },
+      ];
+      for (const method of ['POST', 'PUT'] as const) {
+        const endpoint = method === 'POST' ? '/api-specs' : `/api-specs/${ref.id}`;
+        const cases: {
+          resource: string;
+          fields: Record<string, unknown>;
+          status: number;
+          code: string;
+        }[] = [
+          ...metadata.flatMap((fields) =>
+            (['proxy', 'plugin'] as const).map((resource) => ({
+              resource,
+              fields,
+              status: 400,
+              code: 'MalformedExtension',
+            })),
+          ),
+          { resource: 'plugin', fields: { proxy_id: 1 }, status: 400, code: 'MalformedExtension' },
+          {
+            resource: 'plugin',
+            fields: { proxy_id: 'other-proxy' },
+            status: 422,
+            code: 'PluginProxyIdMismatch',
+          },
+          ...[null, {}, 'plugins', true].map((value) => ({
+            resource: 'extension',
+            fields: { value },
+            status: 400,
+            code: 'MalformedExtension',
+          })),
+          { resource: 'duplicates', fields: {}, status: 400, code: 'MalformedExtension' },
+        ];
+        for (const testCase of cases) {
+          const document = structuredClone(baseline);
+          if (testCase.resource === 'proxy') {
+            document['x-ferrum-proxy'] = {
+              ...(document['x-ferrum-proxy'] as Record<string, unknown>),
+              ...testCase.fields,
+            };
+          } else if (testCase.resource === 'extension') {
+            document['x-ferrum-plugins'] = testCase.fields.value;
+          } else {
+            const plugin = {
+              id: 'import-admission-auth',
+              plugin_name: 'basic_auth',
+              ...testCase.fields,
+            };
+            document['x-ferrum-plugins'] =
+              testCase.resource === 'duplicates' ? [plugin, { ...plugin }] : [plugin];
+          }
+          const beforeState = state();
+          const response = await fetch(`${edgeUrl}${endpoint}`, {
+            method,
+            headers: {
+              authorization: `Bearer ${token}`,
+              'x-ferrum-namespace': 'nexus',
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify(document),
+          });
+          const witness = `${method} ${testCase.resource} ${JSON.stringify(testCase.fields)}`;
+          assert.equal(response.status, testCase.status, witness);
+          const rejection = (await response.json()) as { code: string };
+          assert.equal(rejection.code, testCase.code, witness);
+          assert.deepEqual(state(), beforeState, `${witness}: no importer effects`);
+        }
+      }
+    });
+
+    it('admits valid metadata before generating IDs and server-owned import timestamps', async () => {
+      const timestamps = [
+        '2024-02-29T12:34:56Z',
+        '2020-01-01T12:34:56.123456789+01:30',
+        '2020-1-1 1: 2:3 UTC',
+        '2016-12-31t23:59:60z',
+        '+10000-01-01T00:00:00+0000',
+      ];
+      for (const [index, timestamp] of timestamps.entries()) {
+        const document = specDocument(
+          `valid-metadata-${index}`,
+          `/nexus/valid-metadata-${index}`,
+          ['/invoices'],
+        );
+        const proxy = document['x-ferrum-proxy'] as Record<string, unknown>;
+        proxy.created_at = timestamp;
+        proxy.updated_at = timestamp;
+        proxy.namespace = 'submitted-namespace';
+        proxy.labels = { operator: 'preserve' };
+        const pluginId = index === 0 ? 'A.a_9-' : index === 1 ? 'a'.repeat(254) : '';
+        document['x-ferrum-plugins'] = [
+          {
+            id: pluginId,
+            plugin_name: 'basic_auth',
+            proxy_id: proxy.id,
+            namespace: 'submitted-namespace',
+            labels: { operator: 'preserve' },
+            created_at: timestamp,
+            updated_at: timestamp,
+          },
+        ];
+        const ref = await client.apiSpecs.create(document);
+        const live = (await client.proxies.get(ref.proxy_id))!;
+        const plugin = (await client.pluginConfigs.listByProxy(ref.proxy_id)).find(
+          (row) => row.plugin_name === 'basic_auth',
+        );
+        assert.ok(plugin && plugin.id);
+        if (pluginId !== '') assert.equal(plugin.id, pluginId);
+        assert.equal(live.namespace, 'nexus');
+        assert.equal(plugin.namespace, 'nexus');
+        assert.equal(plugin.proxy_id, live.id);
+        assert.deepEqual(live.labels, { operator: 'preserve', 'provisioned-by': 'ferrum-nexus' });
+        assert.deepEqual(plugin.labels, live.labels);
+        assert.notEqual(live.created_at, timestamp);
+        assert.notEqual(plugin.created_at, timestamp);
+        proxy.id = '';
+        delete (document['x-ferrum-plugins'] as Record<string, unknown>[])[0]!.proxy_id;
+        await client.apiSpecs.replace(ref.id, document);
+        assert.equal((await client.proxies.get(ref.proxy_id))?.id, ref.proxy_id);
+      }
+      for (const id of [undefined, '']) {
+        const document = specDocument(
+          'omitted-import-id',
+          '/nexus/omitted-import-id',
+          ['/invoices'],
+        );
+        const proxy = document['x-ferrum-proxy'] as Record<string, unknown>;
+        if (id === undefined) delete proxy.id;
+        else proxy.id = id;
+        document['x-ferrum-plugins'] = [{ plugin_name: 'basic_auth', proxy_id: null }];
+        const ref = await client.apiSpecs.create(document);
+        assert.ok(ref.proxy_id);
+        document['x-ferrum-plugins'] = [];
+        await client.apiSpecs.replace(ref.id, document);
+        assert.equal(
+          (await client.pluginConfigs.listByProxy(ref.proxy_id)).some(
+            (plugin) => plugin.plugin_name === 'basic_auth',
+          ),
+          false,
+        );
+        await client.proxies.delete(ref.proxy_id);
+      }
+    });
+
     it('models literal root paths and listen/server joins in the importer', async () => {
       const cases = [
         { listen: '/p2/oas2', server: '/', root: '/p2/oas2', item: '/p2/oas2/items/' },

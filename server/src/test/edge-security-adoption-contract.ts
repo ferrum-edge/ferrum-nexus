@@ -110,6 +110,51 @@ export function runEdgeSecurityAdoptionContract(
       });
     }
 
+    async function assertDeleteRetainsCustody(apiId: string): Promise<void> {
+      const catalog = async () => ({
+        api: await harness.store.apis.findById(apiId),
+        revisions: await harness.store.apiSpecs.list({ api_id: apiId }),
+        changes: await harness.store.apiSpecChanges.listByApi(apiId),
+        grants: await harness.store.grants.list({ api_id: apiId }),
+        requests: await harness.store.accessRequests.list({ api_id: apiId }),
+        palette: await harness.store.apiPlugins.listByApi(apiId),
+        ownership: await harness.store.apiGatewayPlugins.listByApi(apiId),
+        credentials: await harness.store.credentials.list({ user_id: actor.id }),
+        identity: await harness.store.gatewayIdentities.findByUsername(
+          'nexus',
+          `nexus-test-${apiId}`,
+        ),
+        settings: (await harness.store.settings.all()).sort((a, b) => a.key.localeCompare(b.key)),
+        audit: await harness.store.auditLogs.list({}),
+      });
+      const before = await catalog();
+      const gateway = structuredClone({
+        state: gatewayState(),
+        consumers: [...harness.edge.consumers],
+      });
+      const offset = harness.edge.requests.length;
+      await assert.rejects(
+        harness.services.publishing.remove(actor, apiId),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+      assert.deepEqual(
+        await catalog(),
+        before,
+        'all catalog, audit and encrypted custody bytes remain',
+      );
+      assert.deepEqual(
+        structuredClone({ state: gatewayState(), consumers: [...harness.edge.consumers] }),
+        gateway,
+      );
+      assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
+      for (const action of [AuditAction.API_DELETE_START, AuditAction.API_DELETE]) {
+        assert.equal(
+          (await harness.auditRows(action)).filter((row) => row.target_id === apiId).length,
+          0,
+        );
+      }
+    }
+
     async function completionRows(apiId: string): Promise<{
       restore: Awaited<ReturnType<TestApp['auditRows']>>;
       rollback: Awaited<ReturnType<TestApp['auditRows']>>;
@@ -603,6 +648,7 @@ export function runEdgeSecurityAdoptionContract(
     for (const failure of ['owner-reply', 'journal-acknowledgement'] as const) {
       it(`large journal retains uncertain ${failure}`, async () => {
         const published = await publish('docs_only');
+        await harness.services.publishing.createTestConsumer(actor, published.api.id);
         await enlargeNamespace();
         const original = await harness.edgeClient.deployments.snapshot(actor.id);
         const key = `gateway_recovery:nexus:${published.api.id}`;
@@ -649,6 +695,88 @@ export function runEdgeSecurityAdoptionContract(
         assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
         assert.deepEqual(await journalRows(key), rows);
         assert.deepEqual(await completionRows(published.api.id), { restore: [], rollback: [] });
+        await assertDeleteRetainsCustody(published.api.id);
+        assert.deepEqual(
+          await journalRows(key),
+          rows,
+          'deletion never replaces the original generation',
+        );
+      });
+    }
+
+    for (const failure of ['cutover-reply', 'cutover-persistence', 'cleanup-reply'] as const) {
+      it(`refuses deletion with failed restore ${failure} custody`, async () => {
+        const published = await publish('routes');
+        const apiId = published.api.id;
+        await harness.services.publishing.createTestConsumer(actor, apiId);
+        await harness.edgeClient.proxies.delete(published.api.ferrum_proxy_id!, actor.id, {
+          cleanupOrphanedUpstream: false,
+        });
+        await harness.store.apis.update(apiId, {
+          ferrum_proxy_id: null,
+          gateway_state: 'repair_required',
+        });
+        const key = `gateway_restore_cleanup:nexus:${apiId}`;
+        const replace = harness.edgeClient.deployments.replace;
+        const remove = harness.edgeClient.deployments.remove;
+        let pendingRows: Awaited<ReturnType<typeof journalRows>> = [];
+        let admitted = false;
+        harness.edgeClient.deployments.replace = async (...args) => {
+          if (failure === 'cutover-reply') {
+            pendingRows = await journalRows(key);
+            admitted = true;
+            harness.edge.queueLostAck(
+              503,
+              { error: 'cutover reply lost' },
+              `/api-specs/${args[0]}`,
+              'PUT',
+            );
+          }
+          await replace(...args);
+          if (failure === 'cutover-persistence') {
+            pendingRows = await journalRows(key);
+            admitted = true;
+            faults.failNext(
+              'settings',
+              'set',
+              new Error('cutover acknowledgement persistence refused'),
+            );
+          }
+        };
+        harness.edgeClient.deployments.remove = async (...args) => {
+          if (failure === 'cleanup-reply') {
+            pendingRows = await journalRows(key);
+            admitted = true;
+            harness.edge.queueLostAck(
+              503,
+              { error: 'cleanup reply lost' },
+              `/proxies/${args[0]}`,
+              'DELETE',
+            );
+          }
+          await remove(...args);
+        };
+        restoreMethods.push(() => {
+          harness.edgeClient.deployments.replace = replace;
+          harness.edgeClient.deployments.remove = remove;
+        });
+        if (failure === 'cleanup-reply') {
+          faults.failNext(
+            'apiGatewayPlugins',
+            'replace',
+            new Error('restore ownership commit refused'),
+          );
+        }
+        await assert.rejects(harness.services.publishing.restoreGateway(actor, apiId));
+        assert.ok(
+          admitted && pendingRows.length > 0,
+          'the original pending owner operation was admitted',
+        );
+        assert.deepEqual(await journalRows(key), pendingRows);
+        const journal = await readJournal<{ acknowledged: boolean }>(key);
+        assert.equal(journal.acknowledged, false);
+        await assertDeleteRetainsCustody(apiId);
+        assert.deepEqual(await journalRows(key), pendingRows);
       });
     }
 
@@ -941,6 +1069,7 @@ export function runEdgeSecurityAdoptionContract(
       assert.equal(journal.attempt.observed, undefined);
       assert.ok(journal.mutations[0]!.original.evidence);
       assert.equal(journal.mutations[0]!.acknowledged, true);
+      await assertDeleteRetainsCustody(published.api.id);
       const retryOffset = harness.edge.requests.length;
       await assert.rejects(
         harness.services.publishing.restoreGateway(actor, published.api.id),

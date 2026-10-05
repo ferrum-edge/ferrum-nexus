@@ -2267,13 +2267,19 @@ _provider_, owner or admin → `{ "ok": true }`.
 
 In order:
 
-1. The Edge proxy is deleted first, cascading its plugin associations and
+1. Under the API lease and then the canonical proxy lease, retained conversion
+   and failed-restore journals are authenticated in an atomic transaction before
+   deletion intent. Unacknowledged mutations, unconfirmed staging creation and
+   unresolved restore cleanup refuse deletion without gateway or credential changes.
+   Their original encrypted custody remains intact; standalone MongoDB refuses
+   deletion with either journal before effects.
+2. The Edge proxy is deleted first, cascading its plugin associations and
    proxy-scoped configs; any config the cascade missed is removed after.
-2. The API's test identity (`nexus-test-<api_id>` consumer, its credentials and
+3. The API's test identity (`nexus-test-<api_id>` consumer, its credentials and
    ACL group) is torn down.
-3. Grants, requests, spec revisions, spec change summaries and the API row are
+4. Grants, requests, spec revisions, spec change summaries and the API row are
    deleted in one transaction, with the `api.delete` audit row.
-4. The ACL group is stripped from each grantee's consumer (outside the proxy
+5. The ACL group is stripped from each grantee's consumer (outside the proxy
    lease; a failure is logged, not retried — the group has nothing left to
    authorize), and grantees are notified.
 

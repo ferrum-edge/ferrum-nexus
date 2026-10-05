@@ -7,6 +7,7 @@ import { AuditAction } from '../audit/service.js';
 import { loadConfig } from '../config/index.js';
 import { createStore } from '../db/index.js';
 import type { NexusStore, UserRecord } from '../db/store.js';
+import type { EdgeDeploymentSnapshot } from '../ferrum-admin/types.js';
 import { isNexusError } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
 import { parseOpenApiSpec } from '../publishing/oas.js';
@@ -131,7 +132,12 @@ export function runGatewayRecoveryAtomicityContract(
       });
     }
 
-    async function retainJournal(apiId: string, format: 'inline' | 'chunks'): Promise<void> {
+    async function retainJournal(
+      apiId: string,
+      format: 'inline' | 'chunks',
+      amend?: (journal: Record<string, unknown>) => Record<string, unknown>,
+      key = recoveryKey(apiId),
+    ): Promise<void> {
       const api = await harness.store.apis.findById(apiId);
       const spec = await harness.store.apiSpecs.findCurrentByApi(apiId);
       assert.ok(api && spec && api.ferrum_proxy_id);
@@ -168,9 +174,8 @@ export function runGatewayRecoveryAtomicityContract(
           ? { retainedEvidence: 'custody-canary-' + 'q'.repeat(600_000) }
           : {}),
       };
-      const key = recoveryKey(apiId);
       const crypto = harness.app.nexus.crypto;
-      await writeRecoveryJournal(custody, crypto, key, journal);
+      await writeRecoveryJournal(custody, crypto, key, amend ? amend(journal) : journal);
       const rows = await journalRows(custody, key);
       assert.equal(rows.length > 1, format === 'chunks');
       for (const row of rows) await harness.store.settings.set(row.key, row.value, row.encrypted);
@@ -211,6 +216,7 @@ export function runGatewayRecoveryAtomicityContract(
     async function refusesWithoutEffects(
       apiId: string,
       operation: () => Promise<unknown>,
+      message = /replica set/,
     ): Promise<void> {
       const beforeCatalog = await catalog(apiId);
       const beforeGateway = gateway();
@@ -218,7 +224,7 @@ export function runGatewayRecoveryAtomicityContract(
       await assert.rejects(
         operation(),
         (error: unknown) =>
-          isNexusError(error) && error.code === 'CONFLICT' && /replica set/.test(error.message),
+          isNexusError(error) && error.code === 'CONFLICT' && message.test(error.message),
       );
       assert.deepEqual(await catalog(apiId), beforeCatalog);
       assert.deepEqual(gateway(), beforeGateway);
@@ -226,6 +232,80 @@ export function runGatewayRecoveryAtomicityContract(
     }
 
     for (const format of ['inline', 'chunks'] as const) {
+      for (const condition of [
+        'pending-mutation',
+        'invalid-acknowledgement',
+        'missing-acknowledgement',
+        'staging-create',
+      ] as const) {
+        it(`${format}: deletion retains ${condition} custody before effects`, async () => {
+          const apiId = await publish();
+          await retainJournal(apiId, format, (journal) => ({
+            ...journal,
+            ...(condition === 'staging-create'
+              ? {
+                  attempt: {
+                    level: 'routes',
+                    agents: null,
+                    proxy: journal.proxy,
+                    documentDigests: [],
+                    specId: null,
+                  },
+                }
+              : {
+                  mutations: [
+                    {
+                      kind: 'remove',
+                      id: (journal.proxy as { id: string }).id,
+                      original: journal.originalAuthority,
+                      ...(condition === 'missing-acknowledgement'
+                        ? {}
+                        : { acknowledged: condition === 'pending-mutation' ? false : 'true' }),
+                    },
+                  ],
+                }),
+          }));
+          await refusesWithoutEffects(
+            apiId,
+            () => harness.services.publishing.remove(actor, apiId),
+            atomic ? /unconfirmed|journal/ : /replica set/,
+          );
+        });
+      }
+
+      for (const phase of ['cleanup', 'cutover'] as const) {
+        it(`${format}: deletion retains unresolved restore ${phase} custody`, async () => {
+          const apiId = await publish('routes');
+          if (atomic && phase === 'cutover') await retainJournal(apiId, format);
+          await retainJournal(
+            apiId,
+            format,
+            (journal) => ({
+              original: journal.originalAuthority,
+              proxyId: (journal.proxy as { id: string }).id,
+              acknowledged: phase === 'cutover',
+              ...(phase === 'cutover'
+                ? {
+                    phase,
+                    apiId,
+                    catalogSpecId: journal.catalogSpecId,
+                    catalogShape: journal.catalogShape,
+                    specId: (journal.proxy as { api_spec_id: string }).api_spec_id,
+                    document: journal.originalSpecDocument,
+                  }
+                : { cutover: null }),
+              ...(format === 'chunks' ? { retainedEvidence: journal.retainedEvidence } : {}),
+            }),
+            `gateway_restore_cleanup:nexus:${apiId}`,
+          );
+          await refusesWithoutEffects(
+            apiId,
+            () => harness.services.publishing.remove(actor, apiId),
+            atomic ? /unresolved deployment cleanup/ : /replica set/,
+          );
+        });
+      }
+
       if (!atomic) {
         for (const operation of [
           'upload',
@@ -347,7 +427,33 @@ export function runGatewayRecoveryAtomicityContract(
 
       it(`${format}: native deletion rolls back catalog and chunks`, async () => {
         const apiId = await publish();
-        await retainJournal(apiId, format);
+        await retainJournal(apiId, format, (journal) => ({
+          ...journal,
+          mutations: [
+            {
+              kind: 'remove',
+              id: (journal.proxy as { id: string }).id,
+              original: journal.originalAuthority,
+              acknowledged: false,
+            },
+          ],
+        }));
+        const key = recoveryKey(apiId);
+        const recovery = await readRecoveryJournal<{
+          proxy: { id: string };
+          originalAuthority: EdgeDeploymentSnapshot;
+          mutations: { acknowledged: boolean }[];
+        }>(harness.store, harness.app.nexus.crypto, key);
+        assert.ok(recovery && recovery.mutations[0]);
+        // Only the real released client acknowledgement authorizes this update;
+        // no lost reply or failed persistence is defaulted to acknowledged.
+        await harness.edgeClient.deployments.remove(
+          recovery.proxy.id,
+          recovery.originalAuthority,
+          actor.id,
+        );
+        recovery.mutations[0].acknowledged = true;
+        await writeRecoveryJournal(harness.store, harness.app.nexus.crypto, key, recovery);
         const before = await catalog(apiId);
         let reached = false;
         await assert.rejects(

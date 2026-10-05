@@ -2592,6 +2592,80 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     ];
   }
 
+  /** Chrono 0.4.44 DateTime serde uses its relaxed RFC3339 parser before import stamping. */
+  function importedTimestamp(value: unknown): boolean {
+    if (typeof value !== 'string') return false;
+    const parts = value.match(
+      /^\p{White_Space}*([+-]\d+|\d{1,4})\p{White_Space}*-\p{White_Space}*(\d{1,2})\p{White_Space}*-\p{White_Space}*(\d{1,2})[tT ]\p{White_Space}*(\d{1,2})\p{White_Space}*:\p{White_Space}*(\d{1,2})\p{White_Space}*:\p{White_Space}*(\d{1,2})(?:\.\d+)?\p{White_Space}*(?:[zZ]|[uU][tT][cC]|[+−-](\d{2})[\p{White_Space}:]*(\d{2}))\p{White_Space}*$(?![\s\S])/u,
+    );
+    if (!parts) return false;
+    const [
+      ,
+      yearText,
+      monthText,
+      dayText,
+      hourText,
+      minuteText,
+      secondText,
+      offsetHour,
+      offsetMinute,
+    ] = parts;
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const day = Number(dayText);
+    if (
+      year < -262_143 ||
+      year > 262_142 ||
+      month < 1 ||
+      month > 12 ||
+      day < 1 ||
+      day > 31 ||
+      Number(hourText) > 23 ||
+      Number(minuteText) > 59 ||
+      Number(secondText) > 60 ||
+      Number(offsetHour ?? 0) > 23 ||
+      Number(offsetMinute ?? 0) > 59
+    ) {
+      return false;
+    }
+    const calendar = new Date(0);
+    calendar.setUTCFullYear(year, month - 1, day);
+    return (
+      calendar.getUTCFullYear() === year &&
+      calendar.getUTCMonth() === month - 1 &&
+      calendar.getUTCDate() === day
+    );
+  }
+
+  /** Native typed decoding/ID admission runs before generated IDs, namespace and times. */
+  function importedResourceProblem(resource: Record<string, unknown>): string | null {
+    if (
+      resource.id !== undefined &&
+      (typeof resource.id !== 'string' ||
+        (resource.id !== '' &&
+          (resource.id.length > 254 ||
+            !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$(?![\s\S])/.test(resource.id))))
+    ) {
+      return 'Invalid imported resource id';
+    }
+    if (resource.namespace !== undefined && typeof resource.namespace !== 'string') {
+      return 'Imported resource namespace must be a string';
+    }
+    if (
+      resource.labels !== undefined &&
+      (!isRecord(resource.labels) ||
+        Object.values(resource.labels).some((value) => typeof value !== 'string'))
+    ) {
+      return 'Imported resource labels must be a string map';
+    }
+    for (const field of ['created_at', 'updated_at']) {
+      if (resource[field] !== undefined && !importedTimestamp(resource[field])) {
+        return `Invalid imported resource ${field}`;
+      }
+    }
+    return null;
+  }
+
   /**
    * The structural checks `POST` and `PUT /api-specs` share, returning the
    * `x-ferrum-proxy` body once the document passes.
@@ -2600,7 +2674,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     body: unknown,
   ):
     | { error: string; code: string; details: string; status: number }
-    | { proxy: Record<string, unknown> } {
+    | { proxy: Record<string, unknown>; plugins: Record<string, unknown>[] } {
     const parseError = (code: string, details: string, status = 400) => ({
       error: 'Spec parse failed',
       code,
@@ -2636,6 +2710,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         );
       }
     }
+    const proxyMetadataProblem = importedResourceProblem(proxy);
+    if (proxyMetadataProblem) return parseError('MalformedExtension', proxyMetadataProblem);
     const validate = body['x-ferrum-validate'];
     if (isRecord(validate)) {
       for (const field of Object.keys(validate)) {
@@ -2671,7 +2747,11 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         }
       }
     }
-    const embedded = Array.isArray(body['x-ferrum-plugins']) ? body['x-ferrum-plugins'] : [];
+    const submittedPlugins = body['x-ferrum-plugins'];
+    if (submittedPlugins !== undefined && !Array.isArray(submittedPlugins)) {
+      return parseError('MalformedExtension', 'x-ferrum-plugins must be an array');
+    }
+    const embedded = submittedPlugins ?? [];
     const validator = embedded.find(
       (plugin) => isRecord(plugin) && plugin.plugin_name === 'openapi_validator',
     );
@@ -2685,6 +2765,25 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         if (!PLUGIN_CONFIG_KEYS.has(field)) {
           return parseError('MalformedExtension', `unknown spec plugin field: ${field}`);
         }
+      }
+      const metadataProblem = importedResourceProblem(plugin);
+      if (metadataProblem) return parseError('MalformedExtension', metadataProblem);
+      if (plugin.proxy_id != null && typeof plugin.proxy_id !== 'string') {
+        return parseError('MalformedExtension', 'Spec plugin proxy_id must be a string or null');
+      }
+      if (plugin.proxy_id != null && plugin.proxy_id !== (proxy.id ?? '')) {
+        return parseError(
+          'PluginProxyIdMismatch',
+          'Spec plugin proxy_id must match the proxy id',
+          422,
+        );
+      }
+      if (
+        typeof plugin.id === 'string' &&
+        plugin.id !== '' &&
+        embedded.some((other) => other !== plugin && isRecord(other) && other.id === plugin.id)
+      ) {
+        return parseError('MalformedExtension', 'Duplicate spec plugin id');
       }
       if (plugin.scope !== undefined && plugin.scope !== 'proxy') {
         return parseError('MalformedExtension', 'Spec plugins must have proxy scope');
@@ -2733,7 +2832,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     }
     const settingsProblem = validateProxySettings(proxy);
     if (settingsProblem) return parseError('MalformedExtension', settingsProblem);
-    return { proxy };
+    return { proxy, plugins: embedded as Record<string, unknown>[] };
   }
 
   /**
@@ -2749,6 +2848,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     proxyId: string,
     document: Record<string, unknown>,
     proxyBody: Record<string, unknown>,
+    embedded: Record<string, unknown>[],
     createdAt: string,
     provisionedBy?: string,
   ): void {
@@ -2800,12 +2900,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     const generated: string[] = [];
     const validate = document['x-ferrum-validate'];
-    const embedded = Array.isArray(document['x-ferrum-plugins'])
-      ? document['x-ferrum-plugins']
-      : [];
-    const embeddedValidator = embedded.find(
-      (plugin) => isRecord(plugin) && plugin.plugin_name === 'openapi_validator',
-    );
+    const embeddedValidator = embedded.find((plugin) => plugin.plugin_name === 'openapi_validator');
     if ((validate === true || isRecord(validate)) && !embeddedValidator) {
       const config = {
         id: randomUUID(),
@@ -2824,7 +2919,6 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       generated.push(config.id);
     }
     for (const entry of embedded) {
-      if (!isRecord(entry)) continue;
       const id = typeof entry.id === 'string' && entry.id !== '' ? entry.id : randomUUID();
       const previous = previousPlugins.get(id);
       const settings =
@@ -2949,6 +3043,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         proxyId,
         document,
         proxyBody,
+        checked.plugins,
         spec.created_at,
         provisionedBy,
       );
@@ -2973,7 +3068,11 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
       const document = body as Record<string, unknown>;
       const proxyBody = checked.proxy;
-      if (typeof proxyBody.id === 'string' && proxyBody.id !== existing.proxy_id) {
+      if (
+        typeof proxyBody.id === 'string' &&
+        proxyBody.id !== '' &&
+        proxyBody.id !== existing.proxy_id
+      ) {
         return fail(res, 409, 'x-ferrum-proxy.id may not move an existing spec to another proxy');
       }
       if (typeof proxyBody.listen_path !== 'string' || !proxyBody.listen_path.startsWith('/')) {
@@ -3008,6 +3107,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         existing.proxy_id,
         document,
         proxyBody,
+        checked.plugins,
         typeof proxy?.created_at === 'string' ? proxy.created_at : nowIso(),
         provisionedBy,
       );

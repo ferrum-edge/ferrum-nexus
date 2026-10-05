@@ -271,9 +271,11 @@ import type {
   EdgeProxyWrite,
 } from '../ferrum-admin/types.js';
 import {
+  assertDeploymentEvidence,
   deploymentProxyShape,
   deploymentSpecDocument,
   deploymentTarget,
+  isDeploymentSnapshot,
 } from '../ferrum-admin/deployment.js';
 import {
   accessDisruptionConfirmationRequired,
@@ -1411,9 +1413,161 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return recovery;
   }
 
-  function assertRecoveryAcknowledged(recovery: ConversionRecovery): void {
-    if (recovery.mutations?.some((mutation) => !mutation.acknowledged)) {
+  function assertRecoveryAcknowledged(recovery: Pick<ConversionRecovery, 'mutations'>): void {
+    if (recovery.mutations?.some((mutation) => mutation.acknowledged !== true)) {
       throw conflict('A gateway deployment mutation is unconfirmed; retain its original journal');
+    }
+  }
+
+  /** Authenticated custody is read-only admission, never a new operation or authority. */
+  async function assertDeletionCustody(tx: NexusStore, api: ApiRecord): Promise<void> {
+    const record = (value: unknown): value is Record<string, unknown> =>
+      typeof value === 'object' && value !== null && !Array.isArray(value);
+    const authority = (value: unknown): value is EdgeDeploymentSnapshot => {
+      if (!isDeploymentSnapshot(value) || value.namespace !== namespace) return false;
+      assertDeploymentEvidence(value, namespace);
+      return true;
+    };
+    const conversionRow = await tx.settings.get(recoveryKey(api.id));
+    const recovery = await readRecoveryJournal<unknown>(tx, deps.crypto, recoveryKey(api.id));
+    if (conversionRow && recovery === null) {
+      throw conflict(
+        'The API deletion recovery journal is unavailable; retain its original custody',
+      );
+    }
+    if (recovery !== null) {
+      const proxy = record(recovery) && record(recovery.proxy) ? recovery.proxy : null;
+      const proxyId = proxy?.id;
+      if (
+        !record(recovery) ||
+        recovery.apiId !== api.id ||
+        api.namespace !== namespace ||
+        recovery.namespace !== namespace ||
+        !proxy ||
+        typeof proxyId !== 'string' ||
+        proxyId === '' ||
+        proxy.namespace !== namespace ||
+        !Array.isArray(proxy.plugins) ||
+        !proxy.plugins.every(
+          (association) => record(association) && typeof association.plugin_config_id === 'string',
+        ) ||
+        (api.ferrum_proxy_id !== null && proxyId !== api.ferrum_proxy_id) ||
+        !record(recovery.shape) ||
+        !isDeepStrictEqual(recovery.catalogShape ?? recovery.shape, deploymentShape(api)) ||
+        !record(recovery.document) ||
+        (recovery.originalSpecId !== undefined && typeof recovery.originalSpecId !== 'string') ||
+        (recovery.catalogSpecId !== undefined && typeof recovery.catalogSpecId !== 'string') ||
+        !(recovery.originalSpecDocument === null || record(recovery.originalSpecDocument)) ||
+        !Array.isArray(recovery.plugins) ||
+        !recovery.plugins.every(
+          (plugin) =>
+            record(plugin) &&
+            typeof plugin.id === 'string' &&
+            plugin.namespace === namespace &&
+            plugin.proxy_id === proxyId,
+        ) ||
+        !(recovery.attempt === null || record(recovery.attempt)) ||
+        (recovery.originalAuthority !== undefined && !authority(recovery.originalAuthority))
+      ) {
+        throw conflict(
+          'The API deletion recovery journal is invalid or belongs to another deployment',
+        );
+      }
+      if (isDeploymentSnapshot(recovery.originalAuthority)) {
+        assertSnapshotTarget(recovery.originalAuthority, {
+          proxy: proxy as unknown as EdgeProxy,
+          plugins: recovery.plugins as EdgePluginConfig[],
+          document: recovery.originalSpecDocument as Record<string, unknown> | null,
+        });
+      }
+      if (
+        recovery.catalogSpecId !== undefined &&
+        (await tx.apiSpecs.findCurrentByApi(api.id))?.id !== recovery.catalogSpecId
+      ) {
+        throw conflict('The API specification changed since its deletion custody was recorded');
+      }
+      if (recovery.mutations !== undefined) {
+        if (
+          !Array.isArray(recovery.mutations) ||
+          !recovery.mutations.every(
+            (mutation) =>
+              record(mutation) &&
+              (mutation.kind === 'remove' || mutation.kind === 'replace') &&
+              typeof mutation.id === 'string' &&
+              typeof mutation.acknowledged === 'boolean' &&
+              authority(mutation.original) &&
+              (mutation.kind === 'remove'
+                ? mutation.id === proxyId &&
+                  deploymentTarget(mutation.original, proxyId).proxy?.id === proxyId
+                : deploymentTarget(mutation.original, proxyId).spec?.id === mutation.id),
+          )
+        ) {
+          throw conflict(
+            'The API deletion mutation journal is invalid; retain its original custody',
+          );
+        }
+        assertRecoveryAcknowledged({
+          mutations: recovery.mutations as NonNullable<ConversionRecovery['mutations']>,
+        });
+      }
+      if (record(recovery.attempt)) {
+        const observed = recovery.attempt.observed;
+        if (
+          !['docs_only', 'routes'].includes(String(recovery.attempt.level)) ||
+          !(recovery.attempt.agents === null || record(recovery.attempt.agents)) ||
+          !record(recovery.attempt.proxy) ||
+          !Array.isArray(recovery.attempt.documentDigests) ||
+          !recovery.attempt.documentDigests.every((digest) => typeof digest === 'string') ||
+          !(recovery.attempt.specId === null || typeof recovery.attempt.specId === 'string') ||
+          !Array.isArray(recovery.mutations) ||
+          recovery.mutations.length === 0 ||
+          !record(observed) ||
+          !record(observed.proxy) ||
+          observed.proxy.id !== proxyId ||
+          observed.proxy.namespace !== namespace ||
+          !Array.isArray(observed.plugins) ||
+          !(observed.document === null || record(observed.document)) ||
+          !authority(observed.authority)
+        ) {
+          throw conflict('The staged conversion is unconfirmed; retain its original journal');
+        }
+      }
+    }
+    const cleanupKey = `gateway_restore_cleanup:${namespace}:${api.id}`;
+    const cleanupRow = await tx.settings.get(cleanupKey);
+    const cleanup = await readRecoveryJournal<unknown>(tx, deps.crypto, cleanupKey);
+    if (cleanupRow && cleanup === null) {
+      throw conflict('The failed restore journal is unavailable; retain its original custody');
+    }
+    if (cleanup !== null) {
+      if (
+        !record(cleanup) ||
+        typeof cleanup.proxyId !== 'string' ||
+        (api.ferrum_proxy_id !== null && cleanup.proxyId !== api.ferrum_proxy_id) ||
+        typeof cleanup.acknowledged !== 'boolean' ||
+        !authority(cleanup.original) ||
+        deploymentTarget(cleanup.original, cleanup.proxyId).proxy?.id !== cleanup.proxyId ||
+        (cleanup.phase === 'cutover'
+          ? cleanup.apiId !== api.id ||
+            typeof cleanup.catalogSpecId !== 'string' ||
+            !isDeepStrictEqual(cleanup.catalogShape, deploymentShape(api)) ||
+            typeof cleanup.specId !== 'string' ||
+            deploymentTarget(cleanup.original, cleanup.proxyId).spec?.id !== cleanup.specId ||
+            !record(cleanup.document)
+          : cleanup.phase !== undefined ||
+            (cleanup.cutover !== null &&
+              (!record(cleanup.cutover) ||
+                cleanup.cutover.phase !== 'cutover' ||
+                cleanup.cutover.apiId !== api.id ||
+                cleanup.cutover.proxyId !== cleanup.proxyId ||
+                cleanup.cutover.acknowledged !== true ||
+                !authority(cleanup.cutover.original))))
+      ) {
+        throw conflict('The failed restore journal is invalid; retain its original custody');
+      }
+      // Even an acknowledged cutover retained here has not completed catalog
+      // adoption/cleanup. Deletion cannot substitute for that unresolved work.
+      throw conflict('A failed restore has unresolved deployment cleanup; retain its journal');
     }
   }
 
@@ -5066,10 +5220,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // A retained legacy or chunked journal makes deletion an atomic custody
         // operation. Admit it before the intent audit, proxy or consumer teardown;
         // standalone MongoDB cannot undo any of those effects after a late refusal.
-        const hasRecoveryJournal = (await store.settings.get(recoveryKey(api.id))) !== null;
-        if (hasRecoveryJournal) {
-          await readRecoveryJournal(store, deps.crypto, recoveryKey(api.id));
-        }
+        const hasRecoveryJournal =
+          (await store.settings.get(recoveryKey(api.id))) !== null ||
+          (await store.settings.get(`gateway_restore_cleanup:${namespace}:${api.id}`)) !== null;
 
         // 0. Record the attempt before the gateway is touched. The teardown
         //    below cannot be rolled back, so a failure to record the delete
@@ -5096,6 +5249,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         }
         const startedId = await store.transaction(
           async (tx) => {
+            await assertDeletionCustody(tx, api);
             const started = await audit.forStore(tx).record(
               { id: actor.id, role: actor.role },
               AuditAction.API_DELETE_START,
@@ -5202,8 +5356,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 await tx.apiSpecChanges.deleteByApi(api.id);
                 await tx.apiSpecs.deleteByApi(api.id);
                 // Nothing matched: a concurrent deletion got here first — the
-                // lease above does not serialise an API with no proxy, and an
-                // expired one serialises nothing. Only one of them may answer
+                // API lease orders deletes without a proxy too, and the commit
+                // fence refuses an expired holder. Only one of them may answer
                 // `200` and write `api.delete`.
                 if (!(await tx.apis.delete(api.id))) throw notFound('API', apiId);
                 // A teardown that found the consumer already gone follows an
@@ -5270,9 +5424,32 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // else — and they run only after `apply` returned, which is what makes
       // `api.delete` mean "the gateway teardown held" rather than "a delete was
       // attempted".
-      const { grants, api } = initial.ferrum_proxy_id
-        ? await binder.withProxy(initial.ferrum_proxy_id, apply)
-        : await apply();
+      const { grants, api } = await edge.serializePerKey(apiRestoreLockKey(apiId), async () => {
+        const latest = await loadApi(apiId);
+        assertCanAdminister(actor, latest);
+        // Restore already uses API then proxy. Never invert that order, and
+        // never reacquire the proxy inside apply or inside a store transaction.
+        const recovery =
+          latest.ferrum_proxy_id === null
+            ? await readRecoveryJournal<{ proxy?: { id?: unknown } }>(
+                store,
+                deps.crypto,
+                recoveryKey(apiId),
+              )
+            : null;
+        const cleanup =
+          latest.ferrum_proxy_id === null
+            ? await readRecoveryJournal<{ proxyId?: unknown }>(
+                store,
+                deps.crypto,
+                `gateway_restore_cleanup:${namespace}:${apiId}`,
+              )
+            : null;
+        const retainedId = recovery?.proxy?.id ?? cleanup?.proxyId;
+        const proxyId =
+          latest.ferrum_proxy_id ?? (typeof retainedId === 'string' ? retainedId : null);
+        return proxyId ? binder.withProxy(proxyId, apply) : apply();
+      });
 
       // 4. Strip the ACL group from every grantee. The group is already inert —
       //    the proxy that consulted it is gone — but leaving 500-capped junk on
