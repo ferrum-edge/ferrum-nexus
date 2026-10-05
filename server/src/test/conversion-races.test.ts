@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import type { PublishApiResponse, SpecEnforcementLevel } from '@ferrum-nexus/shared';
 
+import { createConversionRaceFixture } from './conversion-race-fixture.js';
 import { buildTestApp, specWithServer, type TestApp } from './helpers.js';
 
 for (const initial of ['routes', 'docs_only'] as const) {
@@ -11,11 +12,12 @@ for (const initial of ['routes', 'docs_only'] as const) {
       test(
         `conversion from ${initial} vs ${rival}, conversion first: ${conversionFirst}`,
         { timeout: 20_000 },
-        async () => {
+        async (t) => {
           const one = await buildTestApp();
-          const two = await buildTestApp({ store: one.store, edge: one.edge });
-          let release = () => {};
+          const fixture = createConversionRaceFixture(t.signal);
+          let two: TestApp | undefined;
           try {
+            two = await buildTestApp({ store: one.store, edge: one.edge });
             await one.registerUser({ email: 'founder@example.test' });
             const provider = await one.registerUser({
               email: 'provider@example.test',
@@ -64,12 +66,9 @@ for (const initial of ['routes', 'docs_only'] as const) {
             const arrived = new Promise<void>((resolve) => {
               announce = resolve;
             });
-            const held = new Promise<void>((resolve) => {
-              release = resolve;
-            });
             const block = async () => {
               announce();
-              await held;
+              await fixture.held;
             };
             if (conversionFirst) {
               const real = one.edgeClient.proxies.delete.bind(one.edgeClient.proxies);
@@ -102,12 +101,12 @@ for (const initial of ['routes', 'docs_only'] as const) {
               if (key === `proxy:${proxyId}`) waiting();
               return serialize(key, fn);
             };
-            const first = conversionFirst ? convert(one) : other(one);
-            await arrived;
-            const second = conversionFirst ? other(two) : convert(two);
-            await contending;
-            release();
-            const responses = await Promise.all([first, second]);
+            const first = fixture.own(conversionFirst ? convert(one) : other(one));
+            await fixture.waitFor(arrived, first, 'first gateway mutation');
+            const second = fixture.own(conversionFirst ? other(two) : convert(two));
+            await fixture.waitFor(contending, second, 'second proxy lease contention');
+            fixture.release();
+            const responses = await fixture.within(Promise.all([first, second]), 'race responses');
             for (const response of responses) assert.equal(response.statusCode, 200, response.body);
 
             const row = await one.store.apis.findById(api.id);
@@ -134,9 +133,7 @@ for (const initial of ['routes', 'docs_only'] as const) {
             assert.ok(plugins.includes('access_control'));
             assert.equal(plugins.includes('openapi_validator'), target === 'routes');
           } finally {
-            release();
-            await two.close();
-            await one.close();
+            await fixture.cleanup(two, one);
           }
         },
       );
