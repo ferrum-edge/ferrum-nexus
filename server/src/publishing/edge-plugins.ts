@@ -383,6 +383,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
           ...(options?.id === undefined ? {} : { id: options.id }),
         },
         subject,
+        live && options?.id === live.id ? { preserveLabels: true } : undefined,
       );
     },
 
@@ -457,6 +458,9 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
             ...(config.trigger ? { trigger: config.trigger } : {}),
           },
           subject,
+          // These ids recreate retained resources. Absence of an origin label
+          // is original metadata too; native POST must not reattribute them.
+          { preserveLabels: true },
         );
         ids.push(config.id);
       }

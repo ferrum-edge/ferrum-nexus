@@ -705,6 +705,155 @@ export function runEdgeSecurityAdoptionContract(
       });
     }
 
+    for (const level of ['docs_only', 'routes'] as const) {
+      it(`${level}: preserves operator label maps without reattributing recreated ids`, async () => {
+        const published = await publish(level);
+        const proxyId = published.api.ferrum_proxy_id!;
+        const proxy = await harness.edgeClient.proxies.get(proxyId);
+        assert.ok(proxy);
+        const labels = { operator: 'retained-identity' };
+        await harness.edgeClient.proxies.replace(proxyId, { ...proxy, labels }, actor.id);
+        const handOwned = (await harness.edgeClient.pluginConfigs.listByProxy(proxyId)).filter(
+          (plugin) => !plugin.api_spec_id,
+        );
+        assert.ok(handOwned.length > 0);
+        for (const plugin of handOwned) {
+          await harness.edgeClient.pluginConfigs.replace(
+            plugin.id,
+            {
+              plugin_name: plugin.plugin_name,
+              scope: plugin.scope,
+              proxy_id: proxyId,
+              enabled: plugin.enabled,
+              config: plugin.config,
+              labels,
+            },
+            actor.id,
+          );
+        }
+        const original = await harness.edgeClient.deployments.snapshot(actor.id);
+        const offset = harness.edge.requests.length;
+        await harness.services.publishing.update(actor, published.api.id, {
+          spec_enforcement: level === 'routes' ? 'docs_only' : 'routes',
+        });
+        assert.deepEqual((await harness.edgeClient.proxies.get(proxyId))?.labels, labels);
+        for (const plugin of handOwned) {
+          assert.deepEqual((await harness.edgeClient.pluginConfigs.get(plugin.id))?.labels, labels);
+        }
+        const writes = harness.edge.requests.slice(offset).filter((call) => call.method !== 'GET');
+        const removal = writes.find((call) => call.method === 'DELETE');
+        assert.equal(removal?.ifMatch, original.namespace_etag);
+        const creates = writes.filter((call) => call.method === 'POST');
+        assert.equal(creates.length, handOwned.length + 1);
+        for (const call of creates) {
+          assert.equal(call.provisionedBy, undefined);
+          assert.equal(call.namespace, 'nexus');
+          assert.equal(call.claims?.sub, actor.id);
+        }
+        assert.equal((await harness.store.apis.findById(published.api.id))?.gateway_state, 'deployed');
+        assert.equal(
+          await harness.store.settings.get(`gateway_recovery:nexus:${published.api.id}`),
+          null,
+        );
+      });
+    }
+
+    it('refuses disabled agent policy after native import adds live metadata', async () => {
+      const published = await publish('routes');
+      const apiId = published.api.id;
+      const proxyId = published.api.ferrum_proxy_id!;
+      await harness.services.publishing.update(actor, apiId, {
+        agents: {
+          operations: [
+            { path: '/invoices', method: 'GET', name: 'list', description: 'List invoices' },
+          ],
+        },
+      });
+      const plugin = (await harness.edgeClient.pluginConfigs.listByProxy(proxyId)).find(
+        (row) => row.plugin_name === 'mcp_gateway',
+      );
+      assert.ok(plugin);
+      assert.ok(plugin.labels?.['provisioned-by']);
+      await harness.edgeClient.pluginConfigs.replace(plugin.id, {
+        plugin_name: plugin.plugin_name,
+        scope: plugin.scope,
+        proxy_id: proxyId,
+        enabled: false,
+        config: plugin.config,
+      });
+      const state = gatewayState();
+      const offset = harness.edge.requests.length;
+      await assert.rejects(
+        harness.services.publishing.update(actor, apiId, {
+          spec_enforcement: 'docs_only',
+          agents: null,
+        }),
+        /does not match its catalog revision/,
+      );
+      assert.deepEqual(gatewayState(), state);
+      assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
+      assert.deepEqual(await completionRows(apiId), { restore: [], rollback: [] });
+    });
+
+    it('replays complete agent resources after a refused plain staging creation', async () => {
+      const published = await publish('routes');
+      const apiId = published.api.id;
+      const proxyId = published.api.ferrum_proxy_id!;
+      await harness.services.publishing.update(actor, apiId, {
+        agents: {
+          operations: [
+            { path: '/invoices', method: 'GET', name: 'list', description: 'List invoices' },
+          ],
+        },
+      });
+      const generated = (await harness.edgeClient.pluginConfigs.listByProxy(proxyId)).filter(
+        (plugin) => plugin.api_spec_id,
+      );
+      assert.equal(generated.length, 5);
+      for (const [index, plugin] of generated.entries()) {
+        await harness.edgeClient.pluginConfigs.replace(
+          plugin.id,
+          {
+            plugin_name: plugin.plugin_name,
+            scope: plugin.scope,
+            proxy_id: proxyId,
+            enabled: plugin.enabled,
+            config: plugin.config,
+            labels: { operator: 'retained-agent' },
+            priority_override: 2_900 + index,
+            ...(plugin.trigger ? { trigger: plugin.trigger } : {}),
+          },
+          actor.id,
+        );
+      }
+      const original = (await harness.edgeClient.pluginConfigs.listByProxy(proxyId)).filter(
+        (plugin) => plugin.api_spec_id,
+      );
+      harness.edge.queueFailure(503, { error: 'staging creation refused' }, '/proxies', 'POST');
+      await assert.rejects(
+        harness.services.publishing.update(actor, apiId, {
+          spec_enforcement: 'docs_only',
+          agents: null,
+        }),
+      );
+      const spec = await harness.edgeClient.apiSpecs.findByProxy(proxyId);
+      assert.ok(spec);
+      for (const plugin of original) {
+        const restored = await harness.edgeClient.pluginConfigs.get(plugin.id);
+        assert.ok(restored);
+        assert.ok(restored.created_at && restored.updated_at);
+        assert.deepEqual(restored, {
+          ...plugin,
+          api_spec_id: spec.id,
+          created_at: restored.created_at,
+          updated_at: restored.updated_at,
+        });
+      }
+      assert.equal((await harness.store.apis.findById(apiId))?.gateway_state, 'deployed');
+      assert.equal(await harness.store.settings.get(`gateway_recovery:nexus:${apiId}`), null);
+      assert.equal((await completionRows(apiId)).rollback.length, 1);
+    });
+
     for (const resource of ['proxy', 'plugin', 'spec'] as const) {
       it(`retains original authority after a stale conditional teardown caused by ${resource}`, async () => {
         const published = await publish('routes');

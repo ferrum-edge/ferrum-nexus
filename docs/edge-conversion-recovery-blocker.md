@@ -71,13 +71,16 @@ A shared proxy-group owner or an association with fields Nexus cannot reconstruc
 is refused. Initial conversion also refuses a stored frozen external-reference
 snapshot that ordinary importer replay cannot preserve. Generated validator
 resource/config fields are carried in an explicit original-id extension; only the
-owner regenerates operation schemas. Unsupported closed-body fields refuse the
-write rather than being discarded. These are representability limits, not
-missing released conditional APIs. No full-snapshot mutation acceptance or original
-timestamps are manufactured. Already retained legacy journals without original
-replacement authority cannot authorize in-place corrected replacement; unchanged
-original reconciliation remains read-only, and separately absent identities may be
-rebuilt with newly acknowledged staging authority. A present partial with no
+owner regenerates operation schemas. Recovery creation omits the informational
+provisioner header so original labels, including an absent origin, survive replay.
+Snapshot comparisons still include every label and timestamp. Unsupported
+closed-body fields refuse the write rather than being discarded. These are
+representability limits, not missing released conditional APIs. No full-snapshot
+mutation acceptance or original timestamps are manufactured. Already retained
+legacy journals without original replacement authority cannot authorize in-place
+corrected replacement; unchanged original reconciliation remains read-only, and
+separately absent identities may be rebuilt with newly acknowledged staging
+authority. A present partial with no
 acknowledged staging authority, including a lost create response, cannot acquire
 cleanup permission from a fresh snapshot.
 

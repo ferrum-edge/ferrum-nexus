@@ -353,9 +353,86 @@ describe('ferrum admin client', () => {
       team: 'platform',
     });
     assert.equal(consumer?.claims?.sub, 'admin-user');
+    assert.deepEqual((await client.proxies.get('attribution-proxy'))?.labels, {
+      'provisioned-by': 'ferrum-nexus',
+    });
+    assert.deepEqual((await client.pluginConfigs.get('attribution-cors'))?.labels, {
+      'provisioned-by': 'ferrum-nexus',
+    });
     assert.deepEqual((await client.consumers.get('attribution-user'))?.labels, {
       team: 'platform',
     });
+  });
+
+  it('recreates retained labels without adding origin while keeping namespace and actor', async () => {
+    const labelMaps: (Record<string, string> | undefined)[] = [
+      undefined,
+      { operator: 'preserve' },
+      { operator: 'preserve', 'provisioned-by': 'operator-origin' },
+    ];
+    for (const [index, labels] of labelMaps.entries()) {
+      const proxyId = `replay-labels-${index}`;
+      const proxy = await client.proxies.create(
+        { id: proxyId, listen_path: `/nexus/${proxyId}`, backend_host: 'example.com', labels },
+        'replay-actor',
+        { preserveLabels: true },
+      );
+      assert.deepEqual(proxy.labels, labels);
+      const plugin = await client.pluginConfigs.create(
+        {
+          id: `${proxyId}-auth`,
+          plugin_name: 'basic_auth',
+          scope: 'proxy',
+          proxy_id: proxyId,
+          enabled: true,
+          config: null,
+          labels,
+        },
+        'replay-actor',
+        { preserveLabels: true },
+      );
+      assert.deepEqual(plugin.labels, labels);
+      const imported = await client.apiSpecs.create(
+        {
+          openapi: '3.0.3',
+          info: { title: 'Retained labels', version: '1' },
+          paths: {},
+          'x-ferrum-proxy': {
+            id: `${proxyId}-spec`,
+            listen_path: `/nexus/${proxyId}-spec`,
+            backend_host: 'example.com',
+            labels,
+          },
+          'x-ferrum-plugins': [{ id: `${proxyId}-embedded`, plugin_name: 'basic_auth', labels }],
+        },
+        'replay-actor',
+        { preserveLabels: true },
+      );
+      assert.deepEqual((await client.proxies.get(imported.proxy_id))?.labels, labels);
+      assert.deepEqual((await client.pluginConfigs.get(`${proxyId}-embedded`))?.labels, labels);
+      for (const path of ['/proxies', '/plugins/config', '/api-specs']) {
+        const request = edge.callsTo('POST', path).at(-1);
+        assert.ok(request);
+        assert.equal(request.provisionedBy, undefined);
+        assert.equal(request.namespace, 'nexus');
+        assert.equal(request.claims?.sub, 'replay-actor');
+      }
+      // CRUD PUT preserves an omitted label map.
+      await client.pluginConfigs.replace(plugin.id, {
+        plugin_name: plugin.plugin_name,
+        scope: plugin.scope,
+        proxy_id: proxy.id,
+        enabled: plugin.enabled,
+        config: plugin.config,
+      });
+      assert.deepEqual((await client.pluginConfigs.get(plugin.id))?.labels, labels);
+      await client.proxies.replace(proxy.id, {
+        id: proxy.id,
+        listen_path: proxy.listen_path,
+        backend_host: proxy.backend_host,
+      });
+      assert.deepEqual((await client.proxies.get(proxy.id))?.labels, labels);
+    }
   });
 
   it('finds a consumer by username by scanning the list endpoint', async () => {

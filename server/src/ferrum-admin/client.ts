@@ -158,6 +158,8 @@ interface CallOptions {
   ifMatch?: string;
   /** Released deployment-v1 partial write, with its own response and secret boundary. */
   deployment?: boolean;
+  /** Recreate retained resources without adding informational origin labels. */
+  preserveLabels?: true;
   /** Keep the matching response headers with this call, never in shared state. */
   responseHeaders?: (headers: Record<string, string | string[] | undefined>) => void;
 }
@@ -296,7 +298,11 @@ export interface FerrumAdminClient {
   readonly proxies: {
     list(query?: EdgeListQuery): Promise<EdgePage<EdgeProxy>>;
     get(id: string): Promise<EdgeProxy | null>;
-    create(body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy>;
+    create(
+      body: EdgeProxyWrite,
+      subject?: string,
+      options?: { preserveLabels: true },
+    ): Promise<EdgeProxy>;
     /**
      * Whole-resource replace. The body must be a `GET` response with the
      * changed fields overwritten — see {@link EdgeProxyReplace}.
@@ -322,7 +328,11 @@ export interface FerrumAdminClient {
      */
     listByProxy(proxyId: string): Promise<EdgePluginConfig[]>;
     get(id: string): Promise<EdgePluginConfig | null>;
-    create(body: EdgePluginConfigWrite, subject?: string): Promise<EdgePluginConfig>;
+    create(
+      body: EdgePluginConfigWrite,
+      subject?: string,
+      options?: { preserveLabels: true },
+    ): Promise<EdgePluginConfig>;
     replace(id: string, body: EdgePluginConfigWrite, subject?: string): Promise<EdgePluginConfig>;
     delete(id: string, subject?: string): Promise<void>;
   };
@@ -350,7 +360,11 @@ export interface FerrumAdminClient {
      * that already has a spec, so converting a hand-owned proxy to a
      * spec-owned one means deleting it first.
      */
-    create(document: EdgeApiSpecDocument, subject?: string): Promise<EdgeApiSpecRef>;
+    create(
+      document: EdgeApiSpecDocument,
+      subject?: string,
+      options?: { preserveLabels: true },
+    ): Promise<EdgeApiSpecRef>;
     /**
      * Replace the document. Edge re-inserts the proxy **from the submitted
      * `x-ferrum-proxy`** and regenerates the spec-owned plugins; hand-owned
@@ -1033,7 +1047,9 @@ export function createFerrumAdminClient(
     const headers: Record<string, string> = {
       authorization: `Bearer ${token}`,
       [FERRUM_NAMESPACE_HEADER.toLowerCase()]: namespace,
-      [FERRUM_PROVISIONED_BY_HEADER.toLowerCase()]: FERRUM_PROVISIONED_BY_VALUE,
+      ...(options.preserveLabels
+        ? {}
+        : { [FERRUM_PROVISIONED_BY_HEADER.toLowerCase()]: FERRUM_PROVISIONED_BY_VALUE }),
       accept: 'application/json',
     };
     const hasBody = options.body !== undefined;
@@ -1955,9 +1971,13 @@ export function createFerrumAdminClient(
       async get(id: string): Promise<EdgeProxy | null> {
         return call<EdgeProxy>('GET', `/proxies/${encodeURIComponent(id)}`, { allow404: true });
       },
-      async create(body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy> {
+      async create(
+        body: EdgeProxyWrite,
+        subject?: string,
+        options?: { preserveLabels: true },
+      ): Promise<EdgeProxy> {
         await assertBackendEgress();
-        return callRequired<EdgeProxy>('POST', '/proxies', { body, subject });
+        return callRequired<EdgeProxy>('POST', '/proxies', { body, subject, ...options });
       },
       async replace(id: string, body: EdgeProxyReplace, subject?: string): Promise<EdgeProxy> {
         await assertBackendEgress();
@@ -2019,8 +2039,12 @@ export function createFerrumAdminClient(
           allow404: true,
         });
       },
-      async create(body: EdgePluginConfigWrite, subject?: string): Promise<EdgePluginConfig> {
-        return callRequired<EdgePluginConfig>('POST', '/plugins/config', { body, subject });
+      async create(
+        body: EdgePluginConfigWrite,
+        subject?: string,
+        options?: { preserveLabels: true },
+      ): Promise<EdgePluginConfig> {
+        return callRequired<EdgePluginConfig>('POST', '/plugins/config', { body, subject, ...options });
       },
       async replace(
         id: string,
@@ -2041,9 +2065,17 @@ export function createFerrumAdminClient(
     },
 
     apiSpecs: {
-      async create(document: EdgeApiSpecDocument, subject?: string): Promise<EdgeApiSpecRef> {
+      async create(
+        document: EdgeApiSpecDocument,
+        subject?: string,
+        options?: { preserveLabels: true },
+      ): Promise<EdgeApiSpecRef> {
         await assertBackendEgress();
-        return callRequired<EdgeApiSpecRef>('POST', '/api-specs', { body: document, subject });
+        return callRequired<EdgeApiSpecRef>('POST', '/api-specs', {
+          body: document,
+          subject,
+          ...options,
+        });
       },
       async replace(
         id: string,

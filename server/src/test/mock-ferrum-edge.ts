@@ -2444,6 +2444,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     namespace: string,
     body: unknown,
     query: URLSearchParams,
+    provisionedBy?: string,
   ): void {
     const id = segments[1];
     if (id === undefined) {
@@ -2472,6 +2473,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         if (associationProblem) return fail(res, 400, associationProblem);
         const proxy = {
           ...body,
+          ...createdLabels(body, provisionedBy),
           id: newId,
           namespace,
           strip_listen_path: body.strip_listen_path ?? true,
@@ -2508,6 +2510,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
       const updated = {
         ...body,
+        ...(body.labels === undefined && existing.labels ? { labels: existing.labels } : {}),
         id,
         namespace,
         plugins: body.plugins === undefined ? existing.plugins : body.plugins,
@@ -2547,6 +2550,18 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
    * cascades are real: deleting the spec deletes the proxy, and deleting the
    * proxy deletes the spec.
    */
+
+  /** Native CRUD stamps only creates; explicit update labels can remove origin. */
+  function createdLabels(
+    resource: Record<string, unknown>,
+    provisionedBy?: string,
+  ): Record<string, unknown> {
+    const labels = { ...(isRecord(resource.labels) ? resource.labels : {}) };
+    if (provisionedBy !== undefined && labels['provisioned-by'] === undefined) {
+      labels['provisioned-by'] = provisionedBy.trim();
+    }
+    return Object.keys(labels).length === 0 ? {} : { labels };
+  }
 
   /** The spec that owns `proxyId`, or `undefined`. */
   function specForProxy(namespace: string, proxyId: string): StoredApiSpec | undefined {
@@ -3053,6 +3068,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     namespace: string,
     body: unknown,
     query: URLSearchParams,
+    provisionedBy?: string,
   ): void {
     const id = segments[2];
     if (id === undefined) {
@@ -3123,6 +3139,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         if (triggerProblem) return fail(res, 400, triggerProblem);
         const config = {
           ...body,
+          ...createdLabels(body, provisionedBy),
           id: typeof body.id === 'string' && body.id !== '' ? body.id : randomUUID(),
           namespace,
           enabled: body.enabled ?? true,
@@ -3163,6 +3180,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
       const updated = {
         ...body,
+        ...(body.labels === undefined && existing.labels ? { labels: existing.labels } : {}),
         id,
         namespace,
         // Server-owned: a replace cannot claim or disclaim spec ownership.
@@ -3566,7 +3584,15 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           req.headers['if-match'],
         );
       case 'proxies':
-        return handleProxies(res, method, segments, namespace, body, url.searchParams);
+        return handleProxies(
+          res,
+          method,
+          segments,
+          namespace,
+          body,
+          url.searchParams,
+          typeof provisionedBy === 'string' ? provisionedBy : undefined,
+        );
       case 'api-specs':
         return handleApiSpecs(
           res,
@@ -3579,7 +3605,15 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         );
       case 'plugins':
         if (segments[1] === 'config') {
-          return handlePluginConfigs(res, method, segments, namespace, body, url.searchParams);
+          return handlePluginConfigs(
+            res,
+            method,
+            segments,
+            namespace,
+            body,
+            url.searchParams,
+            typeof provisionedBy === 'string' ? provisionedBy : undefined,
+          );
         }
         if (method === 'GET') {
           // The plugins Nexus writes: the six first-class ones plus every

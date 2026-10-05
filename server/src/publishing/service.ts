@@ -1432,6 +1432,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       plugins: EdgePluginConfig[];
       document: Record<string, unknown> | null;
     },
+    message = 'The gateway deployment changed before its original authority was captured',
   ): void {
     const target = deploymentTarget(original, expected.proxy.id);
     const sorted = (plugins: EdgePluginConfig[]): EdgePluginConfig[] =>
@@ -1441,7 +1442,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       !isDeepStrictEqual(sorted(target.plugins), sorted(expected.plugins)) ||
       !isDeepStrictEqual(target.spec ? deploymentSpecDocument(target.spec) : null, expected.document)
     ) {
-      throw conflict('The gateway deployment changed before its original authority was captured');
+      throw conflict(message);
     }
   }
 
@@ -1472,7 +1473,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       throw conflict('The staged conversion changed before its deployment authority was captured');
     }
     const original = await edge.deployments.snapshot();
-    assertSnapshotTarget(original, observed);
+    assertSnapshotTarget(
+      original,
+      observed,
+      'The staged conversion changed before its deployment authority was captured',
+    );
     recovery.attempt.observed = { ...observed, authority: original };
     await saveConversionRecovery(api, recovery);
   }
@@ -1655,6 +1660,47 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     });
     let expectedStoredDocument = expectedDocument;
     let expectedLiveDocument = expectedDocument;
+    if (api.agents) {
+      const embedded = document?.['x-ferrum-plugins'];
+      if (!Array.isArray(embedded)) return false;
+      const saved: EdgePluginConfig[] = [];
+      for (const entry of embedded) {
+        if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return false;
+        const plugin = entry as EdgePluginConfigWrite;
+        if (
+          typeof plugin.id !== 'string' ||
+          !plugins.some(
+            (live) =>
+              live.id === plugin.id &&
+              live.plugin_name === plugin.plugin_name &&
+              live.api_spec_id === spec.id,
+          )
+        ) {
+          return false;
+        }
+        saved.push({
+          ...plugin,
+          id: plugin.id,
+          namespace,
+          api_spec_id: spec.id,
+          config: plugin.config as Record<string, unknown> | null,
+        });
+      }
+      // Import stamps live labels after storing the submitted document. Rebuild
+      // its fixed policy from the saved resource metadata, while live policy
+      // and complete original deployment authority remain independently checked.
+      expectedStoredDocument = routesSpecDocument(parsed.document, {
+        proxy: submittableProxyBody(live),
+        agentDeployment: {
+          apiId: api.id,
+          slug: api.slug,
+          agents: api.agents,
+          sync: config.edge.rateLimit,
+          live: saved,
+          specId: spec.id,
+        },
+      });
+    }
     if (!api.agents && Array.isArray(document?.['x-ferrum-plugins'])) {
       const embedded = document['x-ferrum-plugins'];
       if (embedded.length !== 1) return false;
@@ -1965,12 +2011,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           recovery.attempt!.documentDigests.push(documentFingerprint(document));
           await saveConversionRecovery(api, recovery);
         },
+        { preserveLabels: true },
       );
       specId = ref.specId;
       recovery.attempt!.specId = specId;
       await saveConversionRecovery(api, recovery);
     } else {
-      await edge.proxies.create(staged as unknown as EdgeProxyWrite, subject);
+      await edge.proxies.create(staged as unknown as EdgeProxyWrite, subject, {
+        preserveLabels: true,
+      });
     }
     await observeConversionAttempt(api, recovery);
     await binder.restorePluginsLocked(
@@ -3013,7 +3062,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     async update(actor, apiId, patch, ip = null): Promise<UpdateApiResponse> {
       const initial = await loadApi(apiId);
       assertCanAdminister(actor, initial);
-      assertGatewaySettingsWritable(initial, patch);
       // The read, gateway mutations, rollback, and catalog write are one
       // canonical proxy operation. Helpers inside must not reacquire the key.
       const apply = async (): Promise<UpdateApiResponse> => {
@@ -3027,6 +3075,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         } = binder;
         const api = await loadApi(apiId);
         assertCanAdminister(actor, api);
+        // Conversion seals a temporary repair flag while holding this lease.
+        // Wait for its completion before judging whether settings are writable.
         assertGatewaySettingsWritable(api, patch);
 
         if (
@@ -5678,6 +5728,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     api?: Pick<ApiRecord, 'id' | 'slug' | 'agents'>,
     preserved?: EdgePluginConfig[],
     beforeWrite?: (document: Record<string, unknown>) => Promise<void>,
+    options?: { preserveLabels: true },
   ): Promise<{ id: string; specId: string }> {
     let submitted = await buildSpecDocument(document, proxyBody, api);
     if (preserved && !api?.agents) {
@@ -5691,7 +5742,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       });
     }
     await beforeWrite?.(submitted);
-    const ref = await edge.apiSpecs.create(submitted, subject);
+    const ref = await edge.apiSpecs.create(submitted, subject, options);
     const id = ref.proxy_id || proxyBody.id;
     return { id, specId: ref.id || (await specIdForProxy(id)) };
   }

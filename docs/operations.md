@@ -2964,9 +2964,13 @@ in development needs the same arrangement, or an HTTPS issuer both can reach.
 
 ## Gateway resource attribution
 
-Every Admin API call sends `X-Ferrum-Provisioned-By: ferrum-nexus`. A gateway
+Initial provisioning sends `X-Ferrum-Provisioned-By: ferrum-nexus`. A gateway
 with resource-label support records `labels: {provisioned-by: ferrum-nexus}` on
 consumers, proxies and plugin configs Nexus creates, including resources
 generated from API specs. Labels survive later updates. Gateways without label
 support ignore the header. Labels are informational: Nexus's stored ids remain
-authoritative, and JWT subjects still identify the acting user.
+authoritative, and JWT subjects still identify the acting user. Recovery recreation
+omits the informational header and carries the retained resource labels exactly,
+including an absent origin that an operator removed. Native import replacement
+preserves the labels of those same resource ids. Original deployment evidence,
+conditional authority, actor subjects and namespace admission remain required.

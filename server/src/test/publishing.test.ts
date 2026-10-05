@@ -3232,6 +3232,7 @@ describe('publishing', () => {
       assert.deepEqual(document['x-ferrum-proxy'], {
         id: proxyId,
         name: 'nexus-enf-routes',
+        labels: { 'provisioned-by': 'ferrum-nexus' },
         listen_path: '/nexus/enf-routes',
         backend_scheme: 'https',
         backend_host: 'billing.example.com',
