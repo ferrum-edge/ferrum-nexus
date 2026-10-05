@@ -255,6 +255,10 @@ including encryption and encoding overhead, so growing namespace evidence cannot
 cross [MongoDB's 16 MiB document limit](https://www.mongodb.com/docs/manual/reference/limits/#bson-document-size).
 The complete generation, manifest and old
 chunk retirement commit in one atomic transaction (MongoDB requires a replica set).
+Existing inline legacy journals require the same atomic admission. Updating or deleting
+an API with a journal, enforcement conversion and restore rebuilds refuse opted-in
+standalone MongoDB before catalog, audit or gateway effects. Ordinary catalog revisions,
+live reconciliation and deletion without a journal retain their standalone behavior.
 Reads authenticate identity, order and complete content in a coherent transaction;
 missing/substituted chunks refuse replay and completion. Failed publication retains
 the previous generation, including every original credential, raw row, spec and
@@ -1247,9 +1251,10 @@ never accepted by verification; an invalid hidden Basic shape reports
 Nexus has no namespace Admin restore caller. Its API gateway restore rebuilds
 individual resources and repeats egress admission. Conditional Edge backup does not
 make Nexus and Edge backups jointly atomic; keep the writer-drain and paired-backup
-procedure below. This owner-contract recovery path remains unqualified until root
-supplies published-image and canonical-pin facts; do not assume the current old-image
-pin implements it.
+procedure below. The current unreleased candidate selects published Edge `v0.9.12`
+and `contracts-edge-0.9.12` pins; its exact-head recovery and packaged-image
+qualification remains pending. Historical Nexus `v0.3.0` remains paired with Edge
+`v0.9.9`. See [the adoption facts and remaining gates](edge-0.9.11-adoption.md).
 
 ### Ordering and consistency
 

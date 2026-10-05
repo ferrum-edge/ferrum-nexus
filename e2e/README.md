@@ -141,6 +141,9 @@ The existing stack deliberately sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` and ke
 its private-service acceptance suite. It cannot prove Part B DNS-rebinding enforcement.
 The separate [public-only fixture](public-only/README.md) uses controlled isolated
 DNS and canaries, with no unrelated public-service traffic. It remains unqualified
-pending root-supplied published image digests and canonical pins. The candidate now
-requires policy/verification capabilities absent from the current old-image pairing;
-that dependency must fail visibly, never be skipped, mocked or satisfied by fake pins.
+pending a packaged Nexus digest, hosted qualification and an explicit supported-profile
+owner decision. The current candidate selects published Edge `v0.9.12` and canonical
+`contracts-edge-0.9.12` pins with the required policy/verification capabilities; selecting
+those artifacts does not establish a passing fixture. Historical Nexus `v0.3.0` remains
+paired with Edge `v0.9.9`. Any unavailable dependency must fail visibly, never be skipped,
+mocked or satisfied by fake pins. See [the adoption facts](../docs/edge-0.9.11-adoption.md).

@@ -55,6 +55,9 @@ qualification and an explicit supported-profile owner decision. Internal deploym
 API adoption does not supply that decision or close advisory Part B. Private-opt-in
 acceptance does not qualify public-only support.
 
-Nexus version markers, Node 22.14 minimum and Node 24 qualification remain unchanged.
+Nexus version markers remain unchanged. The owner-approved unreleased Node range is
+`^22.22.2 || ^24.15.0 || >=26.0.0`, adopted through #521; the candidate still requires
+exact-head qualification of every declared minimum and current major. Historical
+Nexus releases retain their published Node support facts.
 Released migrations 001–006 and hashes are immutable; prepared 007–011 remain
 unreleased. No Nexus tag, release or advisory completion is created here.

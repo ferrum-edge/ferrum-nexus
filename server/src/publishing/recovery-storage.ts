@@ -94,7 +94,7 @@ async function load(
   };
 }
 
-/** Read one coherent generation; legacy single-row journals remain readable. */
+/** Admit atomic custody for every existing journal, including legacy single-row authority. */
 export async function readRecoveryJournal<T>(
   store: NexusStore,
   crypto: NexusCrypto,
@@ -102,11 +102,8 @@ export async function readRecoveryJournal<T>(
 ): Promise<T | null> {
   const row = await store.settings.get(key);
   if (!row) return null;
-  if (!row.encrypted || typeof row.value !== 'string') {
-    throw conflict('The encrypted gateway recovery record is unavailable');
-  }
-  const value = crypto.decryptJson<unknown>(row.value);
-  if (!manifestFor(value, key)) return value as T;
+  // Legacy inline authority also authorizes operations that later replace or
+  // delete the journal. Refuse standalone before any caller can act on it.
   return store.transaction(
     async (tx) => {
       const journal = await load(tx, crypto, key);

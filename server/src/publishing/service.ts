@@ -1345,47 +1345,50 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     if (api.namespace !== namespace || recovery.proxy.namespace !== namespace) {
       throw conflict('Gateway recovery cannot cross the configured namespace');
     }
-    await store.transaction(async (tx) => {
-      const latest = await tx.apis.findById(api.id);
-      if (!latest) throw notFound('API', api.id);
-      if (
-        latest.ferrum_proxy_id !== api.ferrum_proxy_id ||
-        !isDeepStrictEqual(deploymentShape(latest), recovery.catalogShape ?? recovery.shape)
-      ) {
-        throw conflict('The API gateway reference changed during conversion');
-      }
-      if (start && (await tx.settings.get(recoveryKey(api.id)))) {
-        throw conflict('This API already has an incomplete gateway conversion to recover');
-      }
-      if (
-        recovery.catalogSpecId &&
-        (await tx.apiSpecs.findCurrentByApi(api.id))?.id !== recovery.catalogSpecId
-      ) {
-        throw conflict('The API specification changed before gateway recovery admission');
-      }
-      if (start) {
-        const current = await tx.apiSpecs.findCurrentByApi(api.id);
+    await store.transaction(
+      async (tx) => {
+        const latest = await tx.apis.findById(api.id);
+        if (!latest) throw notFound('API', api.id);
         if (
-          !current ||
-          current.id !== recovery.originalSpecId ||
-          !isDeepStrictEqual(parseOpenApiSpec(current.raw_spec).document, recovery.document)
+          latest.ferrum_proxy_id !== api.ferrum_proxy_id ||
+          !isDeepStrictEqual(deploymentShape(latest), recovery.catalogShape ?? recovery.shape)
         ) {
-          throw conflict('The API specification changed during conversion');
+          throw conflict('The API gateway reference changed during conversion');
         }
-      }
-      await writeRecoveryJournal(tx, deps.crypto, recoveryKey(api.id), recovery);
-      if (start) {
-        const marked = await tx.apis.update(api.id, { gateway_state: 'repair_required' });
-        if (!marked) throw notFound('API', api.id);
-        await audit.forStore(tx).record(
-          { id: start.actor.id, role: start.actor.role },
-          AuditAction.API_GATEWAY_CONVERSION_START,
-          { type: 'api', id: api.id },
-          { proxy_id: recovery.proxy.id, attempted_spec_enforcement: start.target },
-          start.ip,
-        );
-      }
-    });
+        if (start && (await tx.settings.get(recoveryKey(api.id)))) {
+          throw conflict('This API already has an incomplete gateway conversion to recover');
+        }
+        if (
+          recovery.catalogSpecId &&
+          (await tx.apiSpecs.findCurrentByApi(api.id))?.id !== recovery.catalogSpecId
+        ) {
+          throw conflict('The API specification changed before gateway recovery admission');
+        }
+        if (start) {
+          const current = await tx.apiSpecs.findCurrentByApi(api.id);
+          if (
+            !current ||
+            current.id !== recovery.originalSpecId ||
+            !isDeepStrictEqual(parseOpenApiSpec(current.raw_spec).document, recovery.document)
+          ) {
+            throw conflict('The API specification changed during conversion');
+          }
+        }
+        await writeRecoveryJournal(tx, deps.crypto, recoveryKey(api.id), recovery);
+        if (start) {
+          const marked = await tx.apis.update(api.id, { gateway_state: 'repair_required' });
+          if (!marked) throw notFound('API', api.id);
+          await audit.forStore(tx).record(
+            { id: start.actor.id, role: start.actor.role },
+            AuditAction.API_GATEWAY_CONVERSION_START,
+            { type: 'api', id: api.id },
+            { proxy_id: recovery.proxy.id, attempted_spec_enforcement: start.target },
+            start.ip,
+          );
+        }
+      },
+      { requireAtomic: true },
+    );
   }
 
   async function readConversionRecovery(api: ApiRecord): Promise<ConversionRecovery | null> {
@@ -1495,12 +1498,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       if (kind !== 'remove') throw notFound('API', api.id);
       // A vanished catalog may still owe removal of an acknowledged, recorded
       // partial. Its encrypted original journal outlives the API row.
-      await store.transaction(async (tx) => {
-        if ((await tx.apis.findById(api.id)) || !(await tx.settings.get(recoveryKey(api.id)))) {
-          throw conflict('The orphan conversion identity changed before cleanup admission');
-        }
-        await writeRecoveryJournal(tx, deps.crypto, recoveryKey(api.id), recovery);
-      });
+      await store.transaction(
+        async (tx) => {
+          if ((await tx.apis.findById(api.id)) || !(await tx.settings.get(recoveryKey(api.id)))) {
+            throw conflict('The orphan conversion identity changed before cleanup admission');
+          }
+          await writeRecoveryJournal(tx, deps.crypto, recoveryKey(api.id), recovery);
+        },
+        { requireAtomic: true },
+      );
     };
     await persist();
     if (kind === 'remove') {
@@ -2445,104 +2451,105 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           }
         }
 
-        return await store.transaction(async (tx) => {
-          const revision = await tx.apiSpecs.create({
-            api_id: api.id,
-            version: nextVersion,
-            raw_spec: parsed.raw,
-            parsed_title: parsed.title,
-            parsed_version: parsed.version,
-            is_current: true,
-            created_by: actor.id,
-            // Provenance, not a dependency: retention will eventually drop
-            // the revision this one restored, and the column goes to `null`
-            // rather than holding the rollback hostage.
-            rolled_back_from_id: restoredFrom?.id ?? null,
-          });
-          await tx.apiSpecs.setCurrent(api.id, revision.id);
-          // Bounded retention, in the *same* transaction that made the new
-          // revision current: a rollback takes the prune with it, and by this
-          // point the revision a rollback would restore is the newest
-          // non-current one, which the limit's minimum of 1 always keeps.
-          pruned = await tx.apiSpecs.pruneHistory(api.id, config.specHistoryLimit);
-          // The consumer-facing summary commits with the revision it
-          // describes, and is bounded by its own retention: it outlives the
-          // document the prune above may just have dropped.
-          let change: ApiSpecChangeRecord | null = null;
-          if (replaced && specChanges) {
-            change = await tx.apiSpecChanges.create({
+        return await store.transaction(
+          async (tx) => {
+            const revision = await tx.apiSpecs.create({
               api_id: api.id,
-              revision_id: revision.id,
-              previous_revision_id: replaced.id,
-              kind: restoredFrom ? 'rollback' : 'update',
               version: nextVersion,
-              previous_version: replaced.version,
-              revision_seq: revision.revision_seq,
-              report: specChanges,
+              raw_spec: parsed.raw,
+              parsed_title: parsed.title,
+              parsed_version: parsed.version,
+              is_current: true,
+              created_by: actor.id,
+              // Provenance, not a dependency: retention will eventually drop
+              // the revision this one restored, and the column goes to `null`
+              // rather than holding the rollback hostage.
+              rolled_back_from_id: restoredFrom?.id ?? null,
             });
-            await tx.apiSpecChanges.prune(api.id, SPEC_CHANGE_HISTORY_LIMIT);
-          }
-          // The row that records where the gateway points moves with the
-          // gateway, in the same transaction as the revision: if this rolls
-          // back, the compensation below puts the proxy back and the row never
-          // claimed the new upstream in the first place.
-          const changes: Partial<ApiRecord> = {};
-          if (!isDeepStrictEqual(nextAgents, api.agents ?? null)) changes.agents = nextAgents;
-          if (nextVersion !== api.version) changes.version = nextVersion;
-          if (movedTo !== null) changes.upstream_url = movedTo;
-          const row =
-            Object.keys(changes).length === 0
-              ? api
-              : await tx.apis.update(api.id, changes);
-          if (!row) throw notFound('API', api.id);
-          if (repairRecovery) {
-            // Authorize the corrected catalog shape without changing the original
-            // replay document, tool ids, plugins or proxy. Both revisions commit
-            // together under the retained proxy lease.
-            await writeRecoveryJournal(tx, deps.crypto, recoveryKey(api.id), {
-              ...repairRecovery,
-              catalogShape: deploymentShape(row),
-              catalogSpecId: revision.id,
-            });
-          }
-          // The completion row commits with the revision: a failed insert rolls
-          // the revision back, and the catch below compensates the gateway
-          // exactly as for any other failed row write.
-          await audit.forStore(tx).record(
-            { id: actor.id, role: actor.role },
-            // One publishing path, two names for it. A rollback is a revision
-            // like any other on the gateway, and an operator reading the log
-            // still has to be able to tell "the provider uploaded a document"
-            // from "the provider put an earlier one back".
-            restoredFrom ? AuditAction.API_SPEC_ROLLBACK : AuditAction.API_SPEC_UPDATE,
-            { type: 'api', id: api.id },
-            {
-              spec_id: revision.id,
-              version: nextVersion,
-              spec_paths: parsed.pathCount,
-              spec_operations: parsed.operationCount,
-              spec_enforcement: api.spec_enforcement,
-              backend_updated: backendUpdated,
-              pruned_revisions: pruned,
-              spec_changes: specChanges
-                ? {
-                    breaking: specChanges.counts.breaking,
-                    non_breaking: specChanges.counts.non_breaking,
-                    complete: specChanges.complete,
-                  }
-                : null,
-              ...(restoredFrom
-                ? {
-                    restored_from_spec_id: restoredFrom.id,
-                    restored_from_version: restoredFrom.version,
-                    restored_from_created_at: restoredFrom.created_at,
-                  }
-                : {}),
-            },
-            ip,
-          );
-          return { spec: revision, api: row, change };
-        });
+            await tx.apiSpecs.setCurrent(api.id, revision.id);
+            // Bounded retention, in the *same* transaction that made the new
+            // revision current: a rollback takes the prune with it, and by this
+            // point the revision a rollback would restore is the newest
+            // non-current one, which the limit's minimum of 1 always keeps.
+            pruned = await tx.apiSpecs.pruneHistory(api.id, config.specHistoryLimit);
+            // The consumer-facing summary commits with the revision it
+            // describes, and is bounded by its own retention: it outlives the
+            // document the prune above may just have dropped.
+            let change: ApiSpecChangeRecord | null = null;
+            if (replaced && specChanges) {
+              change = await tx.apiSpecChanges.create({
+                api_id: api.id,
+                revision_id: revision.id,
+                previous_revision_id: replaced.id,
+                kind: restoredFrom ? 'rollback' : 'update',
+                version: nextVersion,
+                previous_version: replaced.version,
+                revision_seq: revision.revision_seq,
+                report: specChanges,
+              });
+              await tx.apiSpecChanges.prune(api.id, SPEC_CHANGE_HISTORY_LIMIT);
+            }
+            // The row that records where the gateway points moves with the
+            // gateway, in the same transaction as the revision: if this rolls
+            // back, the compensation below puts the proxy back and the row never
+            // claimed the new upstream in the first place.
+            const changes: Partial<ApiRecord> = {};
+            if (!isDeepStrictEqual(nextAgents, api.agents ?? null)) changes.agents = nextAgents;
+            if (nextVersion !== api.version) changes.version = nextVersion;
+            if (movedTo !== null) changes.upstream_url = movedTo;
+            const row =
+              Object.keys(changes).length === 0 ? api : await tx.apis.update(api.id, changes);
+            if (!row) throw notFound('API', api.id);
+            if (repairRecovery) {
+              // Authorize the corrected catalog shape without changing the original
+              // replay document, tool ids, plugins or proxy. Both revisions commit
+              // together under the retained proxy lease.
+              await writeRecoveryJournal(tx, deps.crypto, recoveryKey(api.id), {
+                ...repairRecovery,
+                catalogShape: deploymentShape(row),
+                catalogSpecId: revision.id,
+              });
+            }
+            // The completion row commits with the revision: a failed insert rolls
+            // the revision back, and the catch below compensates the gateway
+            // exactly as for any other failed row write.
+            await audit.forStore(tx).record(
+              { id: actor.id, role: actor.role },
+              // One publishing path, two names for it. A rollback is a revision
+              // like any other on the gateway, and an operator reading the log
+              // still has to be able to tell "the provider uploaded a document"
+              // from "the provider put an earlier one back".
+              restoredFrom ? AuditAction.API_SPEC_ROLLBACK : AuditAction.API_SPEC_UPDATE,
+              { type: 'api', id: api.id },
+              {
+                spec_id: revision.id,
+                version: nextVersion,
+                spec_paths: parsed.pathCount,
+                spec_operations: parsed.operationCount,
+                spec_enforcement: api.spec_enforcement,
+                backend_updated: backendUpdated,
+                pruned_revisions: pruned,
+                spec_changes: specChanges
+                  ? {
+                      breaking: specChanges.counts.breaking,
+                      non_breaking: specChanges.counts.non_breaking,
+                      complete: specChanges.complete,
+                    }
+                  : null,
+                ...(restoredFrom
+                  ? {
+                      restored_from_spec_id: restoredFrom.id,
+                      restored_from_version: restoredFrom.version,
+                      restored_from_created_at: restoredFrom.created_at,
+                    }
+                  : {}),
+              },
+              ip,
+            );
+            return { spec: revision, api: row, change };
+          },
+          { requireAtomic: repairRecovery !== null },
+        );
       } catch (error) {
         // Best-effort by the same contract `update()` documents: the request
         // is already failing and an undo step must not replace the failure
@@ -3305,6 +3312,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // the `GET` that produced the "before" snapshot and the `PUT` — the
         // shape `edge-plugins.ts` already uses — so the snapshot and its undo
         // cannot come apart.
+        // Conversion may later replace or retire encrypted custody, including
+        // during rollback. Admit atomic storage before agent intent or enrollment.
+        if (
+          proxyId &&
+          patch.spec_enforcement !== undefined &&
+          patch.spec_enforcement !== api.spec_enforcement
+        ) {
+          await store.transaction(async () => undefined, { requireAtomic: true });
+        }
         if (agentsMoved && proxyId) {
           await store.transaction(async (tx) => {
             await audit
@@ -3861,49 +3877,54 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // undo below puts the gateway back. A drift repair with no row to
           // write commits its record alone, and a failed insert undoes the
           // repair the same way.
-          updated = await store.transaction(async (tx) => {
-            if (enforcementMoved) {
-              const latest = await tx.apis.findById(api.id);
-              const recovery = await readRecoveryJournal<ConversionRecovery>(
-                tx,
-                deps.crypto,
-                recoveryKey(api.id),
-              );
-              if (
-                !latest ||
-                latest.ferrum_proxy_id !== proxyId ||
-                !isDeepStrictEqual(deploymentShape(latest), deploymentShape(api)) ||
-                !recovery
-              ) {
-                throw conflict('The API changed before its conversion could commit');
+          updated = await store.transaction(
+            async (tx) => {
+              if (enforcementMoved) {
+                const latest = await tx.apis.findById(api.id);
+                const recovery = await readRecoveryJournal<ConversionRecovery>(
+                  tx,
+                  deps.crypto,
+                  recoveryKey(api.id),
+                );
+                if (
+                  !latest ||
+                  latest.ferrum_proxy_id !== proxyId ||
+                  !isDeepStrictEqual(deploymentShape(latest), deploymentShape(api)) ||
+                  !recovery
+                ) {
+                  throw conflict('The API changed before its conversion could commit');
+                }
+                assertRecoveryAcknowledged(recovery);
+                if (
+                  (await tx.apiSpecs.findCurrentByApi(api.id))?.id !==
+                  (recovery.catalogSpecId ?? recovery.originalSpecId)
+                ) {
+                  throw conflict('The catalog revision changed before its conversion could commit');
+                }
               }
-              assertRecoveryAcknowledged(recovery);
-              if (
-                (await tx.apiSpecs.findCurrentByApi(api.id))?.id !==
-                (recovery.catalogSpecId ?? recovery.originalSpecId)
-              ) {
-                throw conflict('The catalog revision changed before its conversion could commit');
+              let row = api;
+              if (changed.length > 0) {
+                const persisted = await tx.apis.update(api.id, update);
+                if (!persisted) throw notFound('API', apiId);
+                row = persisted;
               }
-            }
-            let row = api;
-            if (changed.length > 0) {
-              const persisted = await tx.apis.update(api.id, update);
-              if (!persisted) throw notFound('API', apiId);
-              row = persisted;
-            }
-            if (recordOwnership) await tx.apiGatewayPlugins.replace(api.id, nextOwned);
-            if (enforcementMoved) await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
-            await audit
-              .forStore(tx)
-              .record(
-                { id: actor.id, role: actor.role },
-                update.status === 'retired' ? AuditAction.API_RETIRE : AuditAction.API_UPDATE,
-                { type: 'api', id: api.id },
-                { changed_fields: changed, ...details },
-                ip,
-              );
-            return row;
-          });
+              if (recordOwnership) await tx.apiGatewayPlugins.replace(api.id, nextOwned);
+              if (enforcementMoved) {
+                await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
+              }
+              await audit
+                .forStore(tx)
+                .record(
+                  { id: actor.id, role: actor.role },
+                  update.status === 'retired' ? AuditAction.API_RETIRE : AuditAction.API_UPDATE,
+                  { type: 'api', id: api.id },
+                  { changed_fields: changed, ...details },
+                  ip,
+                );
+              return row;
+            },
+            { requireAtomic: enforcementMoved },
+          );
         } catch (error) {
           // Compensation is best-effort by contract: the PATCH is already
           // failing, and an undo step that throws must not replace the failure
@@ -4207,15 +4228,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               throw conflict('The API changed while gateway recovery was waiting');
             }
             await edge.assertBackendEgress();
-            await store.transaction(async (tx) => {
-              await audit.forStore(tx).record(
-                { id: actor.id, role: actor.role },
-                AuditAction.API_GATEWAY_RESTORE_START,
-                { type: 'api', id: api.id },
-                { proxy_id: snapshot.proxy.id, spec_id: current.id, recovery: 'conversion' },
-                ip,
-              );
-            });
+            await store.transaction(
+              async (tx) => {
+                await audit.forStore(tx).record(
+                  { id: actor.id, role: actor.role },
+                  AuditAction.API_GATEWAY_RESTORE_START,
+                  { type: 'api', id: api.id },
+                  { proxy_id: snapshot.proxy.id, spec_id: current.id, recovery: 'conversion' },
+                  ip,
+                );
+              },
+              { requireAtomic: true },
+            );
             let rebuilt = false;
             try {
               assertRecoveryAcknowledged(snapshot);
@@ -4294,42 +4318,45 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               // corrected catalog or staged attempt cannot claim original rollback.
               const reconciledOriginal =
                 !rebuilt && (await originalConversionMatches(latest, current, snapshot));
-              const row = await store.transaction(async (tx) => {
-                const final = await tx.apis.findById(api.id);
-                const finalSpec = await tx.apiSpecs.findCurrentByApi(api.id);
-                if (
-                  !final ||
-                  final.ferrum_proxy_id !== latest.ferrum_proxy_id ||
-                  finalSpec?.id !== current.id ||
-                  !isDeepStrictEqual(deploymentShape(final), deploymentShape(latest))
-                ) {
-                  throw conflict('The API changed while its gateway recovery was running');
-                }
-                const updated = await tx.apis.update(api.id, {
-                  ferrum_proxy_id: snapshot.proxy.id,
-                  gateway_state: 'deployed',
-                });
-                if (!updated) throw notFound('API', api.id);
-                await tx.apiGatewayPlugins.replace(api.id, completedOwnership.ids);
-                await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
-                if (reconciledOriginal) {
+              const row = await store.transaction(
+                async (tx) => {
+                  const final = await tx.apis.findById(api.id);
+                  const finalSpec = await tx.apiSpecs.findCurrentByApi(api.id);
+                  if (
+                    !final ||
+                    final.ferrum_proxy_id !== latest.ferrum_proxy_id ||
+                    finalSpec?.id !== current.id ||
+                    !isDeepStrictEqual(deploymentShape(final), deploymentShape(latest))
+                  ) {
+                    throw conflict('The API changed while its gateway recovery was running');
+                  }
+                  const updated = await tx.apis.update(api.id, {
+                    ferrum_proxy_id: snapshot.proxy.id,
+                    gateway_state: 'deployed',
+                  });
+                  if (!updated) throw notFound('API', api.id);
+                  await tx.apiGatewayPlugins.replace(api.id, completedOwnership.ids);
+                  await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
+                  if (reconciledOriginal) {
+                    await audit.forStore(tx).record(
+                      { id: actor.id, role: actor.role },
+                      AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
+                      { type: 'api', id: api.id },
+                      { proxy_id: snapshot.proxy.id, spec_id: current.id, recovery: 'original' },
+                      ip,
+                    );
+                  }
                   await audit.forStore(tx).record(
                     { id: actor.id, role: actor.role },
-                    AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
+                    AuditAction.API_GATEWAY_RESTORE,
                     { type: 'api', id: api.id },
-                    { proxy_id: snapshot.proxy.id, spec_id: current.id, recovery: 'original' },
+                    restoreDetails(updated, current, snapshot.proxy.id, rebuilt),
                     ip,
                   );
-                }
-                await audit.forStore(tx).record(
-                  { id: actor.id, role: actor.role },
-                  AuditAction.API_GATEWAY_RESTORE,
-                  { type: 'api', id: api.id },
-                  restoreDetails(updated, current, snapshot.proxy.id, rebuilt),
-                  ip,
-                );
-                return updated;
-              });
+                  return updated;
+                },
+                { requireAtomic: true },
+              );
               return { api: row, spec: current, proxyId: snapshot.proxy.id, rebuilt };
             } catch (error) {
               // Leave the encrypted record and owned identity for the next attempt.
@@ -4416,32 +4443,36 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // transaction for the flag and its audit row, so the restore key's
           // fence covers both: a restore that stalled past the TTL while another
           // took the key over is refused rather than clearing a reference the
-          // other restore has since committed (#384).
-          await store.transaction(async (tx) => {
-            const latest = await tx.apis.findById(api.id);
-            if (!latest) throw notFound('API', api.id);
-            if (latest.ferrum_proxy_id !== recorded) {
-              throw conflict('The gateway reference changed');
-            }
-            await tx.apis.update(api.id, {
-              ferrum_proxy_id: null,
-              gateway_state: 'repair_required',
-            });
-            await audit.forStore(tx).record(
-              { id: actor.id, role: actor.role },
-              AuditAction.API_GATEWAY_REPAIR_REQUIRED,
-              { type: 'api', id: api.id },
-              {
-                phase: 'orphaned_proxy',
-                namespace,
-                proxy_id: recorded,
-                slug: api.slug,
-                spec_enforcement: api.spec_enforcement,
-                reason: 'confirmed_missing_during_restore',
-              },
-              ip,
-            );
-          });
+          // other restore has since committed (#384). Rebuilding may require a
+          // cleanup journal, so atomic admission precedes even this catalog flag.
+          await store.transaction(
+            async (tx) => {
+              const latest = await tx.apis.findById(api.id);
+              if (!latest) throw notFound('API', api.id);
+              if (latest.ferrum_proxy_id !== recorded) {
+                throw conflict('The gateway reference changed');
+              }
+              await tx.apis.update(api.id, {
+                ferrum_proxy_id: null,
+                gateway_state: 'repair_required',
+              });
+              await audit.forStore(tx).record(
+                { id: actor.id, role: actor.role },
+                AuditAction.API_GATEWAY_REPAIR_REQUIRED,
+                { type: 'api', id: api.id },
+                {
+                  phase: 'orphaned_proxy',
+                  namespace,
+                  proxy_id: recorded,
+                  slug: api.slug,
+                  spec_enforcement: api.spec_enforcement,
+                  reason: 'confirmed_missing_during_restore',
+                },
+                ip,
+              );
+            },
+            { requireAtomic: true },
+          );
         }
 
         const parsed = parseOpenApiSpec(current.raw_spec);
@@ -4499,23 +4530,27 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // the fence covers it). The completion row commits with the adoption
         // below, but a proxy that went live and could then be neither recorded
         // nor withdrawn must still leave a row naming who built it; a failure to
-        // record this stops the restore before the gateway is touched.
-        await store.transaction(async (tx) => {
-          await audit.forStore(tx).record(
-            { id: actor.id, role: actor.role },
-            AuditAction.API_GATEWAY_RESTORE_START,
-            { type: 'api', id: api.id },
-            {
-              slug: api.slug,
-              listen_path: listenPath,
-              proxy_id: proxyId,
-              spec_id: current.id,
-              spec_enforcement: api.spec_enforcement,
-              auth_plugin: api.auth_plugin,
-            },
-            ip,
-          );
-        });
+        // record this stops the restore before the gateway is touched. Even a
+        // docs-only rebuild may need durable conditional cleanup on failure.
+        await store.transaction(
+          async (tx) => {
+            await audit.forStore(tx).record(
+              { id: actor.id, role: actor.role },
+              AuditAction.API_GATEWAY_RESTORE_START,
+              { type: 'api', id: api.id },
+              {
+                slug: api.slug,
+                listen_path: listenPath,
+                proxy_id: proxyId,
+                spec_id: current.id,
+                spec_enforcement: api.spec_enforcement,
+                auth_plugin: api.auth_plugin,
+              },
+              ip,
+            );
+          },
+          { requireAtomic: true },
+        );
 
         const created: { proxyId?: string; specId?: string; pluginIds: string[] } = {
           pluginIds: [],
@@ -4650,19 +4685,22 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 acknowledged: false,
               };
               const persist = async (start = false): Promise<void> => {
-                await store.transaction(async (tx) => {
-                  const latest = await tx.apis.findById(api.id);
-                  if (
-                    !latest ||
-                    latest.ferrum_proxy_id !== null ||
-                    !isDeepStrictEqual(deploymentShape(latest), journal.catalogShape) ||
-                    (await tx.apiSpecs.findCurrentByApi(api.id))?.id !== current.id ||
-                    (start && (await tx.settings.get(cleanupKey)))
-                  ) {
-                    throw conflict('The restore changed before conditional cutover admission');
-                  }
-                  await writeRecoveryJournal(tx, deps.crypto, cleanupKey, journal);
-                });
+                await store.transaction(
+                  async (tx) => {
+                    const latest = await tx.apis.findById(api.id);
+                    if (
+                      !latest ||
+                      latest.ferrum_proxy_id !== null ||
+                      !isDeepStrictEqual(deploymentShape(latest), journal.catalogShape) ||
+                      (await tx.apiSpecs.findCurrentByApi(api.id))?.id !== current.id ||
+                      (start && (await tx.settings.get(cleanupKey)))
+                    ) {
+                      throw conflict('The restore changed before conditional cutover admission');
+                    }
+                    await writeRecoveryJournal(tx, deps.crypto, cleanupKey, journal);
+                  },
+                  { requireAtomic: true },
+                );
               };
               await persist(true);
               await edge.deployments.replace(id, document, original, actor.id);
@@ -4689,72 +4727,75 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // Written inside the compensated block, like every other
           // gateway-then-store sequence here: a store failure must not leave a
           // live proxy the portal cannot address.
-          const row = await store.transaction(async (tx) => {
-            // Re-read before committing. The restore holds a lease against
-            // other restores, but there is no proxy for anything else to lease
-            // on — that is the whole condition — so a specification uploaded
-            // while this one was building would otherwise be committed under a
-            // proxy still serving the previous document. A changed row means
-            // the proxy was built from something that is no longer true:
-            // refuse, let the compensation withdraw it, and let a retry build
-            // from what the row says now.
-            const latest = await tx.apis.findById(api.id);
-            if (!latest) throw notFound('API', api.id);
-            const latestSpec = await tx.apiSpecs.findCurrentByApi(api.id);
-            if (
-              latest.ferrum_proxy_id !== null ||
-              latestSpec?.id !== current.id ||
-              !isDeepStrictEqual(deploymentShape(latest), deploymentShape(api))
-            ) {
-              throw conflict(
-                'This API changed while its gateway deployment was being rebuilt; restore it again',
-                { api_id: api.id },
-              );
-            }
-            const journal = await readRecoveryJournal<{ acknowledged: boolean }>(
-              tx,
-              deps.crypto,
-              cleanupKey,
-            );
-            if (journal) {
-              if (journal.acknowledged !== true) {
-                throw conflict('The conditional restore application remains unconfirmed');
+          const row = await store.transaction(
+            async (tx) => {
+              // Re-read before committing. The restore holds a lease against
+              // other restores, but there is no proxy for anything else to lease
+              // on — that is the whole condition — so a specification uploaded
+              // while this one was building would otherwise be committed under a
+              // proxy still serving the previous document. A changed row means
+              // the proxy was built from something that is no longer true:
+              // refuse, let the compensation withdraw it, and let a retry build
+              // from what the row says now.
+              const latest = await tx.apis.findById(api.id);
+              if (!latest) throw notFound('API', api.id);
+              const latestSpec = await tx.apiSpecs.findCurrentByApi(api.id);
+              if (
+                latest.ferrum_proxy_id !== null ||
+                latestSpec?.id !== current.id ||
+                !isDeepStrictEqual(deploymentShape(latest), deploymentShape(api))
+              ) {
+                throw conflict(
+                  'This API changed while its gateway deployment was being rebuilt; restore it again',
+                  { api_id: api.id },
+                );
               }
-              await deleteRecoveryJournal(tx, deps.crypto, cleanupKey);
-            }
-            const updated = await tx.apis.update(api.id, {
-              ferrum_proxy_id: gatewayProxyId,
-              gateway_state: 'deployed',
-            });
-            if (!updated) throw notFound('API', api.id);
-            await tx.apiGatewayPlugins.replace(api.id, owned);
-            for (const entry of palette) {
-              const configId = paletteConfigIds.get(entry.plugin_name);
-              if (configId === undefined) continue;
-              await tx.apiPlugins.upsert({
-                api_id: api.id,
-                plugin_name: entry.plugin_name,
-                enabled: entry.enabled,
-                config: entry.config,
-                trigger: entry.trigger,
-                ferrum_plugin_config_id: configId,
-              });
-            }
-            // The completion row commits with the adoption: a failed insert
-            // rolls it back, and the catch below withdraws the proxy exactly as
-            // for any other failed row write. The API was already undeployed,
-            // so that costs no traffic — it stays `repair_required` for a retry.
-            await audit
-              .forStore(tx)
-              .record(
-                { id: actor.id, role: actor.role },
-                AuditAction.API_GATEWAY_RESTORE,
-                { type: 'api', id: updated.id },
-                restoreDetails(updated, current, gatewayProxyId, true),
-                ip,
+              const journal = await readRecoveryJournal<{ acknowledged: boolean }>(
+                tx,
+                deps.crypto,
+                cleanupKey,
               );
-            return updated;
-          });
+              if (journal) {
+                if (journal.acknowledged !== true) {
+                  throw conflict('The conditional restore application remains unconfirmed');
+                }
+                await deleteRecoveryJournal(tx, deps.crypto, cleanupKey);
+              }
+              const updated = await tx.apis.update(api.id, {
+                ferrum_proxy_id: gatewayProxyId,
+                gateway_state: 'deployed',
+              });
+              if (!updated) throw notFound('API', api.id);
+              await tx.apiGatewayPlugins.replace(api.id, owned);
+              for (const entry of palette) {
+                const configId = paletteConfigIds.get(entry.plugin_name);
+                if (configId === undefined) continue;
+                await tx.apiPlugins.upsert({
+                  api_id: api.id,
+                  plugin_name: entry.plugin_name,
+                  enabled: entry.enabled,
+                  config: entry.config,
+                  trigger: entry.trigger,
+                  ferrum_plugin_config_id: configId,
+                });
+              }
+              // The completion row commits with the adoption: a failed insert
+              // rolls it back, and the catch below withdraws the proxy exactly as
+              // for any other failed row write. The API was already undeployed,
+              // so that costs no traffic — it stays `repair_required` for a retry.
+              await audit
+                .forStore(tx)
+                .record(
+                  { id: actor.id, role: actor.role },
+                  AuditAction.API_GATEWAY_RESTORE,
+                  { type: 'api', id: updated.id },
+                  restoreDetails(updated, current, gatewayProxyId, true),
+                  ip,
+                );
+              return updated;
+            },
+            { requireAtomic: true },
+          );
           return { api: row, spec: current, proxyId: gatewayProxyId, rebuilt: true };
         } catch (error) {
           let strandedProxyId = created.proxyId ?? null;
@@ -4846,22 +4887,25 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               }
               // Complete original evidence is durable before the selected HTTP
               // operation. No fresh authority or fallback follows a refusal.
-              await store.transaction(async (tx) => {
-                const previous = await readRecoveryJournal<{ acknowledged: boolean }>(
-                  tx,
-                  deps.crypto,
-                  cleanupKey,
-                );
-                if (previous && previous.acknowledged !== true) {
-                  throw conflict('The failed restore already has pending cleanup');
-                }
-                await writeRecoveryJournal(tx, deps.crypto, cleanupKey, {
-                  original,
-                  cutover: previous,
-                  proxyId: present.id,
-                  acknowledged: false,
-                });
-              });
+              await store.transaction(
+                async (tx) => {
+                  const previous = await readRecoveryJournal<{ acknowledged: boolean }>(
+                    tx,
+                    deps.crypto,
+                    cleanupKey,
+                  );
+                  if (previous && previous.acknowledged !== true) {
+                    throw conflict('The failed restore already has pending cleanup');
+                  }
+                  await writeRecoveryJournal(tx, deps.crypto, cleanupKey, {
+                    original,
+                    cutover: previous,
+                    proxyId: present.id,
+                    acknowledged: false,
+                  });
+                },
+                { requireAtomic: true },
+              );
               await edge.deployments.remove(present.id, original, actor.id);
               strandedProxyId = null;
             } else if (!present) {
@@ -4873,42 +4917,45 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             cleanupError = failure;
           }
           await store
-            .transaction(async (tx) => {
-              const latest = await tx.apis.findById(api.id);
-              if (
-                latest &&
-                (latest.ferrum_proxy_id === null || latest.ferrum_proxy_id === strandedProxyId)
-              ) {
-                await tx.apis.update(api.id, {
-                  ferrum_proxy_id: strandedProxyId,
-                  gateway_state: 'repair_required',
-                });
-              }
-              await audit.forStore(tx).record(
-                { id: actor.id, role: actor.role },
-                AuditAction.API_GATEWAY_RESTORE_FAILED,
-                { type: 'api', id: api.id },
-                {
-                  slug: api.slug,
-                  spec_enforcement: api.spec_enforcement,
-                  auth_plugin: api.auth_plugin,
-                  proxy_id: created.proxyId ?? null,
-                  withdrawn: strandedProxyId === null,
-                  ...(strandedProxyId === null
-                    ? {}
-                    : {
-                        stranded_proxy_id: strandedProxyId,
-                        cleanup_refused: 'deployment_cleanup_unconfirmed',
-                      }),
-                  error: errorMessage(error),
-                  ...(cleanupError ? { cleanup_error: errorMessage(cleanupError) } : {}),
-                },
-                ip,
-              );
-              if (strandedProxyId === null) {
-                await deleteRecoveryJournal(tx, deps.crypto, cleanupKey);
-              }
-            })
+            .transaction(
+              async (tx) => {
+                const latest = await tx.apis.findById(api.id);
+                if (
+                  latest &&
+                  (latest.ferrum_proxy_id === null || latest.ferrum_proxy_id === strandedProxyId)
+                ) {
+                  await tx.apis.update(api.id, {
+                    ferrum_proxy_id: strandedProxyId,
+                    gateway_state: 'repair_required',
+                  });
+                }
+                await audit.forStore(tx).record(
+                  { id: actor.id, role: actor.role },
+                  AuditAction.API_GATEWAY_RESTORE_FAILED,
+                  { type: 'api', id: api.id },
+                  {
+                    slug: api.slug,
+                    spec_enforcement: api.spec_enforcement,
+                    auth_plugin: api.auth_plugin,
+                    proxy_id: created.proxyId ?? null,
+                    withdrawn: strandedProxyId === null,
+                    ...(strandedProxyId === null
+                      ? {}
+                      : {
+                          stranded_proxy_id: strandedProxyId,
+                          cleanup_refused: 'deployment_cleanup_unconfirmed',
+                        }),
+                    error: errorMessage(error),
+                    ...(cleanupError ? { cleanup_error: errorMessage(cleanupError) } : {}),
+                  },
+                  ip,
+                );
+                if (strandedProxyId === null) {
+                  await deleteRecoveryJournal(tx, deps.crypto, cleanupKey);
+                }
+              },
+              { requireAtomic: true },
+            )
             .catch(() => undefined);
           if (strandedProxyId !== null) {
             deps.log?.(
@@ -4966,6 +5013,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           );
         }
 
+        // A retained legacy or chunked journal makes deletion an atomic custody
+        // operation. Admit it before the intent audit, proxy or consumer teardown;
+        // standalone MongoDB cannot undo any of those effects after a late refusal.
+        const hasRecoveryJournal = (await store.settings.get(recoveryKey(api.id))) !== null;
+        if (hasRecoveryJournal) {
+          await readRecoveryJournal(store, deps.crypto, recoveryKey(api.id));
+        }
+
         // 0. Record the attempt before the gateway is touched. The teardown
         //    below cannot be rolled back, so a failure to record the delete
         //    that follows it must still leave a row naming who started it —
@@ -4989,22 +5044,28 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           );
           heldCredentials = held.length;
         }
-        const startedId = await store.transaction(async (tx) => {
-          const started = await audit.forStore(tx).record(
-            { id: actor.id, role: actor.role },
-            AuditAction.API_DELETE_START,
-            { type: 'api', id: api.id },
-            {
-              slug: api.slug,
-              proxy_id: api.ferrum_proxy_id,
-              ...(heldConsumerId === null
-                ? {}
-                : { test_consumer_id: heldConsumerId, test_consumer_credentials: heldCredentials }),
-            },
-            ip,
-          );
-          return started.id;
-        });
+        const startedId = await store.transaction(
+          async (tx) => {
+            const started = await audit.forStore(tx).record(
+              { id: actor.id, role: actor.role },
+              AuditAction.API_DELETE_START,
+              { type: 'api', id: api.id },
+              {
+                slug: api.slug,
+                proxy_id: api.ferrum_proxy_id,
+                ...(heldConsumerId === null
+                  ? {}
+                  : {
+                      test_consumer_id: heldConsumerId,
+                      test_consumer_credentials: heldCredentials,
+                    }),
+              },
+              ip,
+            );
+            return started.id;
+          },
+          { requireAtomic: hasRecoveryJournal },
+        );
 
         // 1. Take the API off the gateway first: once the proxy is gone nobody
         //    can call it, so a later failure cannot leave it
@@ -5079,69 +5140,76 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         let grants: GrantRecord[] = [];
         await credentials.teardownGatewayIdentity(testConsumerUsername(api.id), actor.id, {
           whileHeld: async (testConsumer) => {
-            grants = await store.transaction(async (tx) => {
-              const active = await tx.grants.listActiveByApi(api.id);
-              await tx.grants.deleteByApi(api.id);
-              await tx.accessRequests.deleteByApi(api.id);
-              await tx.apiPlugins.deleteByApi(api.id);
-              await tx.apiGatewayPlugins.deleteByApi(api.id);
-              await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
-              await tx.apiViewers.deleteByApi(api.id);
-              await tx.apiSpecChanges.deleteByApi(api.id);
-              await tx.apiSpecs.deleteByApi(api.id);
-              // Nothing matched: a concurrent deletion got here first — the
-              // lease above does not serialise an API with no proxy, and an
-              // expired one serialises nothing. Only one of them may answer
-              // `200` and write `api.delete`.
-              if (!(await tx.apis.delete(api.id))) throw notFound('API', apiId);
-              // A teardown that found the consumer already gone follows an
-              // earlier attempt that took it down and then failed to record
-              // the delete — its credential rows were revoked back then, so
-              // this attempt counts none of them. The earliest attempt's start
-              // row says what the identity held before any of it.
-              let resumed: Record<string, unknown> = {};
-              if (!testConsumer.consumer_deleted) {
-                const attempts = await tx.auditLogs.list(
-                  { action: AuditAction.API_DELETE_START, target_type: 'api', target_id: api.id },
-                  { limit: MAX_PAGE_SIZE },
-                );
-                const earlier = earliestPriorAttempt(attempts.items, startedId, 'test_consumer_id');
-                if (earlier) {
-                  const held = earlier.test_consumer_credentials;
-                  resumed = {
-                    test_consumer_id: testConsumer.consumer_id ?? earlier.test_consumer_id,
-                    test_consumer_revoked_credentials: Math.max(
-                      testConsumer.revoked_credentials,
-                      typeof held === 'number' ? held : 0,
-                    ),
-                    resumed: true,
-                  };
+            grants = await store.transaction(
+              async (tx) => {
+                const active = await tx.grants.listActiveByApi(api.id);
+                await tx.grants.deleteByApi(api.id);
+                await tx.accessRequests.deleteByApi(api.id);
+                await tx.apiPlugins.deleteByApi(api.id);
+                await tx.apiGatewayPlugins.deleteByApi(api.id);
+                await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
+                await tx.apiViewers.deleteByApi(api.id);
+                await tx.apiSpecChanges.deleteByApi(api.id);
+                await tx.apiSpecs.deleteByApi(api.id);
+                // Nothing matched: a concurrent deletion got here first — the
+                // lease above does not serialise an API with no proxy, and an
+                // expired one serialises nothing. Only one of them may answer
+                // `200` and write `api.delete`.
+                if (!(await tx.apis.delete(api.id))) throw notFound('API', apiId);
+                // A teardown that found the consumer already gone follows an
+                // earlier attempt that took it down and then failed to record
+                // the delete — its credential rows were revoked back then, so
+                // this attempt counts none of them. The earliest attempt's start
+                // row says what the identity held before any of it.
+                let resumed: Record<string, unknown> = {};
+                if (!testConsumer.consumer_deleted) {
+                  const attempts = await tx.auditLogs.list(
+                    { action: AuditAction.API_DELETE_START, target_type: 'api', target_id: api.id },
+                    { limit: MAX_PAGE_SIZE },
+                  );
+                  const earlier = earliestPriorAttempt(
+                    attempts.items,
+                    startedId,
+                    'test_consumer_id',
+                  );
+                  if (earlier) {
+                    const held = earlier.test_consumer_credentials;
+                    resumed = {
+                      test_consumer_id: testConsumer.consumer_id ?? earlier.test_consumer_id,
+                      test_consumer_revoked_credentials: Math.max(
+                        testConsumer.revoked_credentials,
+                        typeof held === 'number' ? held : 0,
+                      ),
+                      resumed: true,
+                    };
+                  }
                 }
-              }
-              await audit.forStore(tx).record(
-                { id: actor.id, role: actor.role },
-                AuditAction.API_DELETE,
-                { type: 'api', id: api.id },
-                {
-                  slug: api.slug,
-                  proxy_id: api.ferrum_proxy_id,
-                  revoked_grants: active.length,
-                  // Only when there was one: an API that never had a test
-                  // consumer must not leave a row that reads as though its
-                  // teardown was skipped rather than unnecessary.
-                  ...(testConsumer.consumer_id !== null || testConsumer.registration_removed
-                    ? {
-                        test_consumer_id: testConsumer.consumer_id,
-                        test_consumer_revoked_credentials: testConsumer.revoked_credentials,
-                      }
-                    : {}),
-                  ...resumed,
-                },
-                ip,
-              );
-              await recordWithDelete?.(tx);
-              return active;
-            });
+                await audit.forStore(tx).record(
+                  { id: actor.id, role: actor.role },
+                  AuditAction.API_DELETE,
+                  { type: 'api', id: api.id },
+                  {
+                    slug: api.slug,
+                    proxy_id: api.ferrum_proxy_id,
+                    revoked_grants: active.length,
+                    // Only when there was one: an API that never had a test
+                    // consumer must not leave a row that reads as though its
+                    // teardown was skipped rather than unnecessary.
+                    ...(testConsumer.consumer_id !== null || testConsumer.registration_removed
+                      ? {
+                          test_consumer_id: testConsumer.consumer_id,
+                          test_consumer_revoked_credentials: testConsumer.revoked_credentials,
+                        }
+                      : {}),
+                    ...resumed,
+                  },
+                  ip,
+                );
+                await recordWithDelete?.(tx);
+                return active;
+              },
+              { requireAtomic: hasRecoveryJournal },
+            );
           },
         });
 
@@ -5802,29 +5870,32 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         if (!(await store.apis.findById(api.id))) {
           // Full owner acknowledgement, followed by a fenced absence check,
           // permits orphan journal completion without recreating a deleted API.
-          await store.transaction(async (tx) => {
-            if (await tx.apis.findById(api.id)) {
-              throw conflict('The catalog identity returned before orphan recovery completion');
-            }
-            const pending = await readRecoveryJournal<ConversionRecovery>(
-              tx,
-              deps.crypto,
-              recoveryKey(api.id),
-            );
-            if (!pending) throw conflict('The orphan recovery journal is unavailable');
-            assertRecoveryAcknowledged(pending);
-            if (!pending.mutations?.some((mutation) => mutation.kind === 'remove')) {
-              throw conflict('The orphan removal has no acknowledged deployment operation');
-            }
-            await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
-            await audit.forStore(tx).record(
-              { id: actor.id, role: actor.role },
-              AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
-              { type: 'api', id: api.id },
-              { proxy_id: proxyId, recovery: 'orphan_removed' },
-              ip,
-            );
-          });
+          await store.transaction(
+            async (tx) => {
+              if (await tx.apis.findById(api.id)) {
+                throw conflict('The catalog identity returned before orphan recovery completion');
+              }
+              const pending = await readRecoveryJournal<ConversionRecovery>(
+                tx,
+                deps.crypto,
+                recoveryKey(api.id),
+              );
+              if (!pending) throw conflict('The orphan recovery journal is unavailable');
+              assertRecoveryAcknowledged(pending);
+              if (!pending.mutations?.some((mutation) => mutation.kind === 'remove')) {
+                throw conflict('The orphan removal has no acknowledged deployment operation');
+              }
+              await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
+              await audit.forStore(tx).record(
+                { id: actor.id, role: actor.role },
+                AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
+                { type: 'api', id: api.id },
+                { proxy_id: proxyId, recovery: 'orphan_removed' },
+                ip,
+              );
+            },
+            { requireAtomic: true },
+          );
           return;
         }
         await rebuild(api.spec_enforcement, api.agents ?? null);
@@ -5839,28 +5910,31 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         throw conflict('The original deployment could not be verified after conversion rollback');
       }
       const ownership = await firstClassOwnership(api, await binder.listByProxy(proxyId));
-      await store.transaction(async (tx) => {
-        const latest = await tx.apis.findById(api.id);
-        if (
-          !latest ||
-          latest.ferrum_proxy_id !== proxyId ||
-          !isDeepStrictEqual(deploymentShape(latest), recovery.shape) ||
-          (await tx.apiSpecs.findCurrentByApi(api.id))?.id !== originalSpec.id ||
-          !(await tx.settings.get(recoveryKey(api.id)))
-        ) {
-          throw conflict('The API changed before its conversion rollback could commit');
-        }
-        await tx.apis.update(api.id, { gateway_state: 'deployed' });
-        await tx.apiGatewayPlugins.replace(api.id, ownership.ids);
-        await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
-        await audit.forStore(tx).record(
-          { id: actor.id, role: actor.role },
-          AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
-          { type: 'api', id: api.id },
-          { proxy_id: proxyId },
-          ip,
-        );
-      });
+      await store.transaction(
+        async (tx) => {
+          const latest = await tx.apis.findById(api.id);
+          if (
+            !latest ||
+            latest.ferrum_proxy_id !== proxyId ||
+            !isDeepStrictEqual(deploymentShape(latest), recovery.shape) ||
+            (await tx.apiSpecs.findCurrentByApi(api.id))?.id !== originalSpec.id ||
+            !(await tx.settings.get(recoveryKey(api.id)))
+          ) {
+            throw conflict('The API changed before its conversion rollback could commit');
+          }
+          await tx.apis.update(api.id, { gateway_state: 'deployed' });
+          await tx.apiGatewayPlugins.replace(api.id, ownership.ids);
+          await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
+            { type: 'api', id: api.id },
+            { proxy_id: proxyId },
+            ip,
+          );
+        },
+        { requireAtomic: true },
+      );
     };
     const report = (phase: 'conversion' | 'rollback', error: unknown, restoreError: unknown) =>
       reportUnrepairableProxy({
