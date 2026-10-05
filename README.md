@@ -34,11 +34,16 @@ supported pair, how to upgrade from `v0.2.0`, and the known limitations.
 This source branch is a **draft** jsdom 30 / Undici 8 migration. It proposes
 `^22.22.2 || ^24.15.0 || >=26.0.0`; owner approval to change the released Node
 support profile is still pending. The released profile remains Node 22.14+.
-Both candidate locks are imported from verified hosted artifact `11308824128`.
-The pre-integration candidate passed all 15 hosted checks; qualified main PR #519 is now
-integrated, including MCP subsets and the proposed service-manifest preview. The combined
-head still requires fresh hosted qualification, full root review and independent review.
-See the [candidate and rollback notes](docs/dependency-majors-449-higher-floor-draft.md).
+Both candidate locks were originally imported byte-for-byte from verified hosted artifact
+`11308824128`, produced by run `37217928511`, attempt 1, from source
+`15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`; the root lock is unchanged. The current e2e
+lock incorporates qualified main PR #523's `@types/node` 22.20.4 to 22.20.5 patch while
+preserving the candidate engine. Parent `74bc56c` passed all 15 hosted checks after
+integrating qualified main PRs #519 and #523, including MCP subsets and the proposed
+service-manifest preview. This documentation head still requires fresh hosted qualification,
+full root review and independent review. See the
+[candidate and rollback notes](docs/dependency-majors-449-higher-floor-draft.md) for
+historical producer provenance and current hashes in the main integration section.
 
 - **Production upgrades.** Schema changes ship as forward migrations that
   upgrade a released database in place; upgrades never require a reset. See

@@ -44,11 +44,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   controls name their visible title and action and describe their body/time,
   retaining accessible-role assertions under jsdom 30. The existing Node image
   digest already contains 22.23.3. The higher released Node floor is **not approved**:
-  both locks are imported byte-for-byte from verified hosted artifact
-  `11308824128`. The pre-integration candidate passed all 15 hosted checks;
-  after integrating qualified main PR #519, the combined head requires fresh
+  both locks were originally imported byte-for-byte from verified hosted artifact
+  `11308824128`, produced by run `37217928511`, attempt 1, from source
+  `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`; the root lock is unchanged. The current e2e
+  lock incorporates qualified main PR #523's `@types/node` 22.20.4 to 22.20.5 patch while
+  preserving the candidate engine. Parent `74bc56c` passed all 15 hosted checks after
+  integrating qualified main PRs #519 and #523. This documentation head requires fresh
   hosted qualification, full root and independent review. Owner approval remains pending. See
-  [candidate and rollback notes](docs/dependency-majors-449-higher-floor-draft.md).
+  [candidate and rollback notes](docs/dependency-majors-449-higher-floor-draft.md) for
+  historical producer provenance and current hashes in the main integration section.
 
 - **Node 22.14-compatible dependency majors are migrated** (Refs #449).
   All four TypeScript manifests use 7.0.2; the transactional audit scan uses
