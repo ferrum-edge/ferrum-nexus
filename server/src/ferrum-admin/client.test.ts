@@ -1386,7 +1386,12 @@ describe('ferrum admin client', () => {
         const validator = edge.pluginForProxy(id, 'openapi_validator');
         assert.ok(validator);
         assert.equal(validator.id, `${id}-routes`);
-        assert.deepEqual(validator.labels, { operator: 'preserve' });
+        assert.equal(validator.scope, 'proxy');
+        assert.deepEqual(await client.pluginConfigs.get(validator.id), validator);
+        assert.deepEqual(validator.labels, {
+          operator: 'preserve',
+          'provisioned-by': 'ferrum-nexus',
+        });
         assert.equal(validator.priority_override, 2_900);
         assert.deepEqual(
           (validator.config as Record<string, unknown>).request_content_types,
@@ -1410,6 +1415,102 @@ describe('ferrum admin client', () => {
         (error: unknown) => isNexusError(error) && error.code === 'EDGE_REJECTED_SPEC',
       );
       assert.equal(edge.proxies.has('nexus/invalid-embedded'), false);
+    });
+
+    it('returns native defaults and preserves explicit imported plugin metadata', async () => {
+      const document = specDocument('import-defaults', '/nexus/import-defaults', ['/invoices']);
+      const trigger = { when: { match: { method: ['GET'] } } };
+      const operator = {
+        id: 'import-operator',
+        plugin_name: 'ip_restriction',
+        scope: 'proxy',
+        enabled: false,
+        config: { allow: ['203.0.113.0/24'], mode: 'allow_first' },
+        labels: { operator: 'preserve', 'provisioned-by': 'operator-origin' },
+        priority_override: 2_900,
+        trigger,
+        created_at: '2020-01-01T00:00:00Z',
+        updated_at: '2020-01-01T00:00:00Z',
+      };
+      document['x-ferrum-plugins'] = [{ id: 'import-default', plugin_name: 'basic_auth' }, operator];
+      const ref = await client.apiSpecs.create(document);
+      const configs = await client.pluginConfigs.listByProxy(ref.proxy_id);
+      const defaults = configs.find((plugin) => plugin.id === 'import-default');
+      const explicit = configs.find((plugin) => plugin.id === operator.id);
+      assert.ok(defaults && explicit);
+      assert.equal(defaults.scope, 'proxy');
+      assert.equal(defaults.enabled, true);
+      assert.equal(defaults.config, null);
+      assert.deepEqual(defaults.labels, { 'provisioned-by': 'ferrum-nexus' });
+      assert.equal(defaults.priority_override, undefined);
+      assert.equal(defaults.trigger, undefined);
+      for (const plugin of [defaults, explicit]) {
+        assert.equal(plugin.namespace, 'nexus');
+        assert.equal(plugin.proxy_id, ref.proxy_id);
+        assert.equal(plugin.api_spec_id, ref.id);
+        assert.ok(plugin.created_at && plugin.updated_at);
+        assert.equal(new Date(plugin.created_at).toISOString(), plugin.created_at);
+        assert.equal(new Date(plugin.updated_at).toISOString(), plugin.updated_at);
+        assert.deepEqual(await client.pluginConfigs.get(plugin.id), plugin);
+      }
+      assert.equal(explicit.scope, operator.scope);
+      assert.equal(explicit.enabled, false);
+      assert.deepEqual(explicit.config, operator.config);
+      assert.deepEqual(explicit.trigger, trigger);
+      assert.equal(explicit.priority_override, operator.priority_override);
+      assert.notEqual(explicit.created_at, operator.created_at);
+      assert.deepEqual(explicit.labels, operator.labels);
+      const effective = edge.effectivePluginsForProxy(ref.proxy_id);
+      assert.ok(effective.some((plugin) => plugin.id === defaults.id));
+      assert.equal(effective.some((plugin) => plugin.id === operator.id), false);
+
+      const { labels: _labels, ...replacement } = operator;
+      document['x-ferrum-plugins'] = [
+        { id: defaults.id, plugin_name: 'basic_auth', config: null },
+        replacement,
+      ];
+      await client.apiSpecs.replace(ref.id, document);
+      const restored = await client.pluginConfigs.get(operator.id);
+      assert.ok(restored);
+      assert.deepEqual(restored.labels, explicit.labels);
+      assert.equal(restored.created_at, explicit.created_at);
+      assert.equal(restored.enabled, false);
+      assert.equal(restored.scope, 'proxy');
+      assert.deepEqual(restored.trigger, explicit.trigger);
+      assert.equal(restored.priority_override, explicit.priority_override);
+      assert.equal(restored.api_spec_id, ref.id);
+      assert.deepEqual(restored.config, explicit.config);
+    });
+
+    it('rejects explicit invalid imported resource fields instead of defaulting them', async () => {
+      const invalid: Record<string, unknown>[] = [
+        { enabled: null },
+        { enabled: 'false' },
+        { enabled: 0 },
+        { scope: null },
+        { scope: 'global' },
+        { scope: 'proxy_group' },
+        { scope: 1 },
+        { labels: { operator: 1 } },
+        { priority_override: '2900' },
+        { priority_override: 65_536 },
+        { api_spec_id: 'operator-owned-spec' },
+        { unknown_resource_field: true },
+        { config: true },
+        { config: { unknown_config_field: true } },
+      ];
+      for (const [index, fields] of invalid.entries()) {
+        const proxyId = `invalid-import-${index}`;
+        const document = specDocument(proxyId, `/nexus/${proxyId}`, ['/invoices']);
+        document['x-ferrum-plugins'] = [{ plugin_name: 'basic_auth', ...fields }];
+        await assert.rejects(
+          client.apiSpecs.create(document),
+          (error: unknown) => isNexusError(error) && error.code === 'EDGE_REJECTED_SPEC',
+        );
+        assert.equal(edge.proxies.has(`nexus/${proxyId}`), false);
+        assert.equal(edge.apiSpecForProxy(proxyId), undefined);
+        assert.deepEqual(edge.pluginsForProxy(proxyId), []);
+      }
     });
 
     it('models literal root paths and listen/server joins in the importer', async () => {

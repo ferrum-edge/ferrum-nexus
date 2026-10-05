@@ -282,7 +282,13 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     await operator.arrayBuffer();
     const beforeResponse = await gatewayAdmin('GET', '/deployment-snapshot');
     assert.equal(beforeResponse.status, 200);
-    const before = (await beforeResponse.json()) as { evidence: { resources: unknown[] } };
+    const before = (await beforeResponse.json()) as {
+      evidence: { resources: unknown[] };
+      plugin_configs: { id: string; labels: Record<string, string> }[];
+    };
+    const beforeValidator = before.plugin_configs.find((plugin) => plugin.id === validator.id);
+    assert.ok(beforeValidator);
+    assert.equal(beforeValidator.labels.operator, 'preserve');
     await inPostgres(
       'psql',
       '-U',
@@ -340,7 +346,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       evidence: { resources: unknown[] };
       plugin_configs: {
         id: string;
-        labels: unknown;
+        labels: Record<string, string>;
         priority_override: number;
         config: { request_content_types: unknown };
       }[];
@@ -353,7 +359,8 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     }
     const replayed = after.plugin_configs.find((plugin) => plugin.id === validator.id);
     assert.ok(replayed);
-    assert.deepEqual(replayed.labels, { operator: 'preserve' });
+    assert.deepEqual(replayed.labels, beforeValidator.labels);
+    assert.equal(replayed.labels.operator, 'preserve');
     assert.equal(replayed.priority_override, 2_900);
     assert.deepEqual(replayed.config.request_content_types, ['application/problem+json']);
     const catalog = await portal<{

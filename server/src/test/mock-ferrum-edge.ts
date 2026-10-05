@@ -2664,6 +2664,38 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       if (!isRecord(plugin) || typeof plugin.plugin_name !== 'string') {
         return parseError('MalformedExtension', 'Invalid spec plugin');
       }
+      // The native extractor defaults an omitted scope before decoding the
+      // closed PluginConfig resource. Explicit invalid fields still fail.
+      for (const field of Object.keys(plugin)) {
+        if (!PLUGIN_CONFIG_KEYS.has(field)) {
+          return parseError('MalformedExtension', `unknown spec plugin field: ${field}`);
+        }
+      }
+      if (plugin.scope !== undefined && plugin.scope !== 'proxy') {
+        return parseError('MalformedExtension', 'Spec plugins must have proxy scope');
+      }
+      if (plugin.enabled !== undefined && typeof plugin.enabled !== 'boolean') {
+        return parseError('MalformedExtension', 'Spec plugin enabled must be a boolean');
+      }
+      if (plugin.api_spec_id != null) {
+        return parseError('MalformedExtension', 'Spec plugin api_spec_id is server-managed');
+      }
+      if (
+        plugin.labels !== undefined &&
+        (!isRecord(plugin.labels) ||
+          Object.values(plugin.labels).some((value) => typeof value !== 'string'))
+      ) {
+        return parseError('MalformedExtension', 'Spec plugin labels must be a string map');
+      }
+      if (
+        plugin.priority_override != null &&
+        (typeof plugin.priority_override !== 'number' ||
+          !Number.isInteger(plugin.priority_override) ||
+          plugin.priority_override < 0 ||
+          plugin.priority_override > 65_535)
+      ) {
+        return parseError('MalformedExtension', 'Spec plugin priority_override must be a u16');
+      }
       const generated = plugin === validator && (validate === true || isRecord(validate));
       if (generated && !isRecord(plugin.config)) {
         return parseError('MalformedExtension', 'openapi_validator config must be an object');
@@ -2703,7 +2735,27 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     document: Record<string, unknown>,
     proxyBody: Record<string, unknown>,
     createdAt: string,
+    provisionedBy?: string,
   ): void {
+    const previousProxy = proxies.get(key(namespace, proxyId));
+    const previousPlugins = new Map<string, Record<string, unknown>>(
+      specOwnedConfigs(namespace, specId).map((config) => [String(config.id), config]),
+    );
+    // Native import preserves missing labels from the same resource identity;
+    // newly imported resources acquire attribution without replacing operator labels.
+    function importedLabels(
+      resource: Record<string, unknown>,
+      previous?: Record<string, unknown>,
+    ): Record<string, unknown> {
+      const labels = {
+        ...(isRecord(previous?.labels) ? previous.labels : {}),
+        ...(isRecord(resource.labels) ? resource.labels : {}),
+      };
+      if (!previous && provisionedBy !== undefined && labels['provisioned-by'] === undefined) {
+        labels['provisioned-by'] = provisionedBy.trim();
+      }
+      return Object.keys(labels).length === 0 ? {} : { labels };
+    }
     const survivors = [...pluginConfigs.values()]
       .filter(
         (config) =>
@@ -2720,6 +2772,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     const proxy: Record<string, unknown> = {
       ...proxyBody,
+      ...importedLabels(proxyBody, previousProxy),
       id: proxyId,
       namespace,
       strip_listen_path: proxyBody.strip_listen_path ?? true,
@@ -2743,6 +2796,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         id: randomUUID(),
         plugin_name: 'openapi_validator',
         namespace,
+        ...importedLabels({}),
         config: generateValidatorConfig(document, isRecord(validate) ? validate : {}),
         scope: 'proxy',
         proxy_id: proxyId,
@@ -2756,7 +2810,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     }
     for (const entry of embedded) {
       if (!isRecord(entry)) continue;
-      const id = typeof entry.id === 'string' ? entry.id : randomUUID();
+      const id = typeof entry.id === 'string' && entry.id !== '' ? entry.id : randomUUID();
+      const previous = previousPlugins.get(id);
       const settings =
         entry === embeddedValidator && (validate === true || isRecord(validate))
           ? importedValidatorConfig(
@@ -2765,14 +2820,23 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
               entry.config as Record<string, unknown>,
             )
           : entry.config;
-      const config = {
+      const config: Record<string, unknown> = {
+        scope: 'proxy',
+        enabled: true,
         ...entry,
-        config: settings,
+        ...importedLabels(entry, previous),
+        config: settings === undefined ? null : settings,
         id,
         namespace,
         proxy_id: proxyId,
         api_spec_id: specId,
+        created_at: previous?.created_at ?? nowIso(),
+        updated_at: nowIso(),
       };
+      // Native serialization omits empty labels and absent optional metadata.
+      if (isRecord(config.labels) && Object.keys(config.labels).length === 0) delete config.labels;
+      if (config.priority_override == null) delete config.priority_override;
+      if (config.trigger == null) delete config.trigger;
       pluginConfigs.set(key(namespace, id), config);
       generated.push(id);
     }
@@ -2786,6 +2850,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     namespace: string,
     body: unknown,
     query: URLSearchParams,
+    provisionedBy?: string,
   ): void {
     const [, first, second] = segments;
 
@@ -2863,7 +2928,15 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         updated_at: nowIso(),
       };
       apiSpecs.set(key(namespace, spec.id), spec);
-      applySpecDocument(namespace, spec.id, proxyId, document, proxyBody, spec.created_at);
+      applySpecDocument(
+        namespace,
+        spec.id,
+        proxyId,
+        document,
+        proxyBody,
+        spec.created_at,
+        provisionedBy,
+      );
       return send(res, 201, {
         id: spec.id,
         proxy_id: proxyId,
@@ -2921,6 +2994,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         document,
         proxyBody,
         typeof proxy?.created_at === 'string' ? proxy.created_at : nowIso(),
+        provisionedBy,
       );
       return send(res, 200, {
         id: existing.id,
@@ -3494,7 +3568,15 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       case 'proxies':
         return handleProxies(res, method, segments, namespace, body, url.searchParams);
       case 'api-specs':
-        return handleApiSpecs(res, method, segments, namespace, body, url.searchParams);
+        return handleApiSpecs(
+          res,
+          method,
+          segments,
+          namespace,
+          body,
+          url.searchParams,
+          typeof provisionedBy === 'string' ? provisionedBy : undefined,
+        );
       case 'plugins':
         if (segments[1] === 'config') {
           return handlePluginConfigs(res, method, segments, namespace, body, url.searchParams);
