@@ -8,12 +8,12 @@
     "version": 1,
     "status": "implemented",
     "owner": "ferrum-edge/ferrum-edge",
-    "edge_availability": "Released in Ferrum Edge v0.9.11 at c764084b3b51c3f7ffde268c039688d35e49c553; upstream distribution is verified. Canonical contracts-edge-0.9.11 tag/publication remains pending.",
+    "edge_availability": "Released since Ferrum Edge v0.9.11; re-read at verified v0.9.12 source 0d917701b63ef38210c49df830f48cf0457cbc7d. Canonical contracts-edge-0.9.11 is published; contracts-edge-0.9.12 publication is pending.",
     "provenance": [
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.11",
-        "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
         "path": "openapi.yaml",
         "symbols": [
           "components.schemas.BackendEgressPolicyResponse"
@@ -21,8 +21,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.11",
-        "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
         "path": "src/admin/backend_egress_policy.rs",
         "symbols": [
           "BackendEgressPolicyResponse",
@@ -32,8 +32,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.11",
-        "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
         "path": "src/config/env_config.rs",
         "symbols": [
           "BackendEgressPolicy::metadata",
@@ -43,8 +43,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.11",
-        "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
         "path": "docs/admin_api.md"
       }
     ]

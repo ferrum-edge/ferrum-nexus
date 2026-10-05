@@ -110,6 +110,8 @@ export interface ConsumerProvisioner {
 
 /** Extra conditions {@link ConsumerProvisioner.mutateAclGroups} checks. */
 export interface MutateAclGroupsOptions {
+  /** Enrollment preflight may preserve an already matching row without a metadata PUT. */
+  skipUnchanged?: boolean;
   /**
    * Refuse the write unless this account is still `active`, checked **inside**
    * the critical section.
@@ -278,6 +280,16 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
         }
         const { consumer: current, etag } = snapshot;
         const groups = change([...(current.acl_groups ?? [])]);
+        if (
+          options?.skipUnchanged &&
+          !options.afterWrite &&
+          groups.length === current.acl_groups.length &&
+          groups.every((group, index) => group === current.acl_groups[index])
+        ) {
+          // Return only the ordinary redacted view, never the secret-complete
+          // verification row. Existing mutation callers retain their row PUT.
+          return edge.consumers.get(ferrumConsumerId);
+        }
         const written = await edge.consumers.replace(
           ferrumConsumerId,
           {

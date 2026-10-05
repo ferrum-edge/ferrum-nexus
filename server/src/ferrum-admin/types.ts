@@ -47,6 +47,29 @@ export interface EdgeErrorBody {
   detail?: string;
 }
 
+/** Secret-complete original authority. Persist only inside an encrypted recovery journal. */
+export interface EdgeDeploymentSnapshot {
+  profile: 'deployment-v1';
+  namespace: string;
+  namespace_etag: string;
+  evidence: Record<string, unknown>;
+  proxies: EdgeProxy[];
+  plugin_configs: EdgePluginConfig[];
+  upstreams: Record<string, unknown>[];
+  api_specs: Record<string, unknown>[];
+  [field: string]: unknown;
+}
+
+/** The released partial-write acknowledgement, distinct from ordinary resource responses. */
+export interface EdgeDeploymentAcknowledgement {
+  profile?: 'deployment-v1';
+  id?: string;
+  durable: 'not_started' | 'not_committed' | 'committed' | 'unknown';
+  live: 'unconfirmed' | 'not_applicable' | 'applied';
+  recovery_cleanup_authorized: boolean;
+  [field: string]: unknown;
+}
+
 /** Query parameters accepted by Edge list endpoints. */
 export interface EdgeListQuery {
   limit?: number;

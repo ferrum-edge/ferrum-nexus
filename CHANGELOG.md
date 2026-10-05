@@ -21,10 +21,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   are refused. The mock hashes Basic through normal write lifecycles and enforces
   closed credential fields; the delayed issue/disable regression keeps its `ok`
   teardown requirement. Four-store service/protocol regressions and a separate
-  controlled packaged DNS-rebinding fixture are included. This cannot land pending explicit CP/public-profile owner approval,
+  controlled packaged DNS-rebinding fixture are included. This cannot land pending
+  explicit CP/public-profile owner approval,
   exact-head hosted CI/review, actual published-image qualification and released
-  canonical adoption qualification. The candidate now pins published Edge v0.9.11
-  and contracts-edge-0.9.11; Nexus version markers remain unchanged and the advisory
+  canonical adoption qualification. The candidate now pins published Edge v0.9.12
+  and contracts-edge-0.9.12; Nexus version markers remain unchanged and the advisory
   is not declared fixed. See [proposal limitations](docs/security.md#1-threat-model).
 
 - **Draft conversion recovery hardening** (PR #522): encrypted baseline, repair
@@ -32,25 +33,26 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   completion audit and journal removal commit together. Combined PATCHes capture
   the baseline before gateway writes. Corrected agent uploads preserve original
   replay resources while authorizing the new catalog tool ids. Initial conversion
-  teardown, live spec recovery and failed missing-deployment cleanup refuse before
-  unfenced mutations; identities and all operator fields survive. Credential teardown
+  teardown, selected cleanup and corrected replacement now use released deployment-v1
+  original authority. Each pending operation is encrypted before HTTP; only explicit
+  committed/applied cleanup acknowledgement permits dependent recovery. Uncertain
+  writes retain journals and block replay without refreshing tokens. Credential teardown
   removes Nexus-supported keyauth/Basic/JWT state and retains custom/mTLS state.
-  Live partial cleanup now refuses without mutation: released Edge namespace
-  replacement changes unrelated fields. Automatic rollback and vanished-catalog
-  cleanup remain required failing gates pending the
-  [owner API](docs/edge-conversion-recovery-blocker.md).
-  New four-store interruption and concurrent Admin regressions require hosted CI.
+  Native concurrent Admin, uncertain-acknowledgement, original replay and transactional
+  fault controls remain strict and require exact-head hosted qualification. See the
+  [released protocol and replay limits](docs/edge-conversion-recovery-blocker.md).
 
-- **Published Edge v0.9.11 candidate baseline** (PR #522): pin immutable owner
-  source `c764084b3b51c3f7ffde268c039688d35e49c553`, the default image index
-  `sha256:2476b502855940e28157858fc24008545cb3baeb3084c9610e1d4505cbe0d36e`,
-  and canonical `contracts-edge-0.9.11` at
-  `390edbd5b2485af0988e02f7827fde778d76ae0a`. Refresh exact-byte vocabulary,
-  schema and fixture digests; assert every egress response field and invalid case.
-  [Edge #6010](https://github.com/ferrum-edge/ferrum-edge/issues/6010) is actionable
-  internal work requiring a future immutable release and canonical adoption.
-  No Nexus release is finalized; hosted acceptance and public-only owner approval
-  remain pending. See [actual publication facts](docs/edge-0.9.11-adoption.md).
+- **Published Edge v0.9.12 candidate adoption** (PR #522): pin immutable source
+  `0d917701b63ef38210c49df830f48cf0457cbc7d`, default image index
+  `sha256:80526b59cbbdc2bfcc8bae9241da4e5395414cf07bf0be4effd4c73c51684ee4`,
+  and published `contracts-edge-0.9.12` at
+  `31f0a21d707795be293d15837c2f77c3d84219d8`. Adopt exact-byte deployment
+  snapshot/acknowledgement schemas and meaningful valid/invalid fixtures alongside
+  refreshed vocabularies and egress assets. The separate manifest pin and unreleased
+  Alloy flags are preserved. The owner API release dependency is complete; consumer
+  Node/four-store/packaged qualification, public-only profile approval and advisory
+  Part B remain pending. No Nexus release or migration release marker is changed.
+  See [actual publication facts](docs/edge-0.9.11-adoption.md).
 
 - **Optional MCP tool subsets** (Refs #446). Consumers request published exposure IDs;
   providers can narrow approval. Separate MCP-all/per-tool groups preserve REST access
@@ -64,7 +66,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   Authenticated namespace-authorized bounded intake validates the exact immutable
   shared v1 schema and fixtures. Preview has no apply/publish, URL/file/TLS
   access or diagnostic import. Anvil's separate diagnostic consumer is merged, while
-  the shared v1 contract is EXISTING/implemented in published contracts-edge-0.9.11.
+  the shared v1 contract is EXISTING/implemented in published contracts-edge-0.9.12.
   Alloy remains unreleased; Nexus final qualification is still required. See
   [preview status](docs/service-manifest-preview.md).
 
@@ -119,7 +121,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   multi-architecture image digest. This release adds fail-closed handling for
   uninspectable MCP JSON-RPC batches and refuses non-UTF-8 charsets for
   `mcp_gateway` and `ai_prompt_shield`. The opt-in agent marketplace uses that
-  released contract; this candidate advances the actual pin to v0.9.11. Nexus
+  released contract; this candidate advances the actual pin to v0.9.12. Nexus
   itself does not parse data-plane MCP traffic.
 - **The Ferrum Edge `gateway-headers` vocabulary is now vendored and pinned**
   alongside the plugin catalog and provisioned-by vocabularies, and the shared
@@ -151,7 +153,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   audit failure preserves repair state and the journal transactionally. Corrected
   revisions, rebuilds, staging and refusals emit no false rollback. These observations
   do not fence external Admin writes. Strict successful-conversion and partial-recovery
-  gates still require the next released owner contract; no advisory is declared fixed.
+  gates now use the released owner contract and still require exact-head hosted
+  qualification; no advisory is declared fixed.
 
 - **Verification and password-recovery mail take priority over queued campaigns**
   (#500, GHSA-rqrj-7g3f-c6ww phase 2). Every store claims due security mail at

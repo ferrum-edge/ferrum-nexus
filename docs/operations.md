@@ -251,22 +251,22 @@ operator fields, plugin ids and partial rebuild paths/spec ownership. It uses th
 existing settings repository on all four stores; no schema migration is needed.
 `POST /api/apis/:id/restore-gateway` repeats admission, takes the API and proxy
 leases, and verifies resources against that record before rebuilding an absent
-identity. All live partial resources remain untouched: the released owner cannot
-fence their cascade without changing unrelated namespace fields. Unknown or
-changed resources also require operator reconciliation. See the
-[required owner API and release ordering](edge-conversion-recovery-blocker.md).
-Initial conversion and failed missing-deployment cleanup refuse before destructive
-delete. Live in-place spec recovery also refuses before PUT. Absent `routes`
-conversion recovery refuses corrected spec replacement and spec-owned cutover,
-retaining its acknowledged staging resources and encrypted journal. Concurrent
-Admin hosts edits survive refusal; no completion audit or journal deletion occurs.
-Ordinary publication and missing-deployment restore retain their existing cutover.
-The original identity, all unrelated fields and upstreams survive. Failed restore records its attempted
-identity and `withdrawn: false`; no replacement fallback is available in v0.9.11.
-Corrected agent uploads retain the immutable replay baseline and commit their
-authorized catalog shape alongside the revision. Recovery replays the original
-agent shape; applying a corrected routes document or cutting it over now awaits
-the released dependency fence. Absent `docs_only` recovery remains supported.
+identity. Live selected removal and API-spec replacement use the released v0.9.12
+conditional deployment API: a complete encrypted original snapshot and its strong
+`deployment-v1` token, never a backup/row token or namespace replacement. Each
+pending operation is durable before HTTP. Only HTTP 200 with the expected profile
+and target, committed/applied acknowledgement, explicit cleanup authorization and
+applicable covering cursor allows dependent recovery or journal removal. CP/unserved
+durable-only results, unknown fields, lost replies and cancellation retain the
+journal and attempted identity with `withdrawn: false`; no fresh-token retry or
+unconditional cleanup follows. The owner task may still settle after transport loss.
+Unknown or changed target state refuses mutation. Frozen external-reference replay,
+unrepresentable associations and unsupported write fields require operator
+resolution. Generated validator resource/config fields are preserved; operation
+schemas remain owner-generated. Corrected uploads preserve immutable original replay
+resources and atomically bind the new catalog shape and current revision. Original
+staging replay precedes corrected replacement and cutover under their own retained
+authority. See the [released protocol and qualification limits](edge-conversion-recovery-blocker.md).
 Only a deployment matching the catalog clears the condition; recovery checks it
 on staging before cutover, then again before the fenced completion transaction.
 Reconciliation takes the same proxy lease and retains conversion-owned references
@@ -293,8 +293,8 @@ contain fixed bounded reasons, never policy bodies, CIDRs or secrets.
 This proposal is reviewable code, not permission to change released support or a
 claim that GHSA-93rq-89vr-38pc is fixed. Root must obtain the explicit CP/public-profile
 owner decision after exact-head independent review and hosted CI. The candidate
-now pins the published Edge `v0.9.11` default image and canonical
-`contracts-edge-0.9.11` at `390edbd5b2485af0988e02f7827fde778d76ae0a`.
+now pins the published Edge `v0.9.12` default image and canonical
+`contracts-edge-0.9.12` at `31f0a21d707795be293d15837c2f77c3d84219d8`.
 See [the adoption facts](edge-0.9.11-adoption.md). Actual packaged acceptance and
 the public-only DNS-rebinding fixture still require exact-head hosted qualification.
 See the separate [unqualified packaged fixture](../e2e/public-only/README.md).
@@ -1041,7 +1041,7 @@ docker compose up -d
 The four secrets and `FERRUM_EDGE_IMAGE` are required (`${VAR:?…}`); keep the
 secrets stable across restarts. [`release/compatibility.env`](../release/compatibility.env)
 pins the Edge image by digest. The current acceptance suite
-([`e2e/`](../e2e/README.md)) selects published Ferrum Edge `v0.9.11` for candidate qualification; the released Nexus
+([`e2e/`](../e2e/README.md)) selects published Ferrum Edge `v0.9.12` for candidate qualification; the released Nexus
 `v0.3.0` pairing with Edge `v0.9.9` is recorded in the
 [`v0.3.0` release notes](release-notes.md#supported-combination).
 
@@ -1198,7 +1198,7 @@ access.
 
 ### Conditional Edge snapshots and namespace restore
 
-The Edge `v0.9.11` owner contract adds `GET /backup?conditional=true` for a
+The retained Edge `v0.9.11` operator contract introduced `GET /backup?conditional=true` for a
 coherent, complete, unfiltered namespace snapshot and matching strong **namespace**
 ETag. Preserve that response header and send it in `If-Match` to
 `POST /restore?confirm=true`. Body metadata, consumer row ETags and wildcard tags

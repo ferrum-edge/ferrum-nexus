@@ -44,8 +44,8 @@ describe('pinned Ferrum contracts', () => {
   it('keeps every vendored contract file byte-identical to its recorded digest', () => {
     const pin = readFileSync(join(contractsDirectory, 'PIN'), 'utf8');
     const lines = pin.trim().split('\n');
-    assert.equal(lines[0], 'tag: contracts-edge-0.9.11');
-    assert.equal(lines[1], 'commit: 390edbd5b2485af0988e02f7827fde778d76ae0a');
+    assert.equal(lines[0], 'tag: contracts-edge-0.9.12');
+    assert.equal(lines[1], 'commit: 31f0a21d707795be293d15837c2f77c3d84219d8');
 
     const digestLines = lines.slice(2);
     assert.ok(digestLines.length > 0, 'PIN must list the vendored contract file digests');
@@ -68,6 +68,30 @@ describe('pinned Ferrum contracts', () => {
     assert.deepEqual(
       digestLines.map((line) => line.replace(/^sha256: [a-f0-9]{64}  /, '')).sort(),
       [
+        'fixtures/admin-deployment-mutation-acknowledgement/invalid/cleanup-not-boolean.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/invalid/durable-only-cleanup.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/invalid/missing-cleanup-authorization.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/invalid/unconfirmed-cleanup.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/invalid/unknown-durable-cleanup.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/invalid/unknown-durable.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/invalid/unknown-live.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/invalid/unknown-profile.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/valid/applied.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/valid/committed-unconfirmed.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/valid/durable-only.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/valid/not-started.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/valid/stale.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/valid/unknown.json',
+        'fixtures/admin-deployment-snapshot/invalid/evidence-not-object.json',
+        'fixtures/admin-deployment-snapshot/invalid/missing-evidence.json',
+        'fixtures/admin-deployment-snapshot/invalid/row-token.json',
+        'fixtures/admin-deployment-snapshot/invalid/spec-not-object.json',
+        'fixtures/admin-deployment-snapshot/invalid/token-list.json',
+        'fixtures/admin-deployment-snapshot/invalid/token-with-line-break.json',
+        'fixtures/admin-deployment-snapshot/invalid/unknown-profile.json',
+        'fixtures/admin-deployment-snapshot/invalid/weak-token.json',
+        'fixtures/admin-deployment-snapshot/valid/empty-mongodb.json',
+        'fixtures/admin-deployment-snapshot/valid/empty-sql.json',
         'fixtures/backend-egress-policy/invalid/allow-overlay-guarantee.json',
         'fixtures/backend-egress-policy/invalid/false-public-guarantee.json',
         'fixtures/backend-egress-policy/invalid/leaked-cidr-field.json',
@@ -82,6 +106,8 @@ describe('pinned Ferrum contracts', () => {
         'fixtures/backend-egress-policy/valid/public-serving.json',
         'fixtures/backend-egress-policy/valid/public-with-allow-overrides.json',
         'fixtures/invalid-expectations.json',
+        'schemas/admin-deployment-mutation-acknowledgement/v1.schema.json',
+        'schemas/admin-deployment-snapshot/v1.schema.json',
         'schemas/backend-egress-policy/v1.schema.json',
         'vocabularies/backend-egress-policy.json',
         'vocabularies/gateway-errors.json',

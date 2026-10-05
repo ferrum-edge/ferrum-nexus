@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { describe, it, type TestContext } from 'node:test';
 
 import type { EdgeConfig } from '../config/index.js';
@@ -10,6 +11,7 @@ import {
   createFerrumAdminClient,
   type FerrumAdminClient,
 } from './client.js';
+import type { EdgeDeploymentSnapshot } from './types.js';
 
 const ROW_TAG = '"' + 'a'.repeat(32) + '"';
 
@@ -40,6 +42,7 @@ async function fixture(t: TestContext) {
     headers: Record<string, string | string[]>;
     /** Overrides `body` with one computed from the request URL, e.g. to echo a page offset. */
     respond: ((url: URL) => string) | null;
+    policyForDeployment: boolean;
   } = {
     status: 200,
     body: '',
@@ -47,6 +50,7 @@ async function fixture(t: TestContext) {
     disconnect: false,
     headers: {},
     respond: null,
+    policyForDeployment: false,
   };
   const requests: string[] = [];
   const ifMatches: (string | undefined)[] = [];
@@ -55,6 +59,11 @@ async function fixture(t: TestContext) {
     requests.push(`${req.method} ${req.url}`);
     ifMatches.push(req.headers['if-match']);
     req.resume();
+    if (reply.policyForDeployment && req.url === '/backend-egress-policy') {
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end(JSON.stringify(publicEgressPolicy()));
+      return;
+    }
     if (reply.disconnect) {
       req.on('end', () => req.socket.destroy());
       return;
@@ -623,5 +632,133 @@ describe('Edge response contracts over HTTP sockets', () => {
       },
     );
     assert.ok(!JSON.stringify(logs).includes('private-canary'));
+  });
+});
+
+describe('released deployment authority over HTTP sockets', () => {
+  function original(): EdgeDeploymentSnapshot {
+    const value = JSON.parse(
+      readFileSync(
+        new URL(
+          '../../../contracts/ferrum-contracts/fixtures/admin-deployment-snapshot/valid/empty-sql.json',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ) as EdgeDeploymentSnapshot;
+    value.namespace = 'nexus';
+    value.proxies = [{ ...proxy } as EdgeDeploymentSnapshot['proxies'][number]];
+    value.evidence.resources = [value.proxies, [], [], [], [], [], null, 0];
+    return value;
+  }
+
+  it('retains original evidence and sends one strong token with the exact DELETE query', async (t) => {
+    const { client, reply, requests, ifMatches } = await fixture(t);
+    const snapshot = original();
+    snapshot.evidence.private_canary = { historical_credentials: ['secret-complete-original'] };
+    reply.body = JSON.stringify(snapshot);
+    reply.headers = { 'cache-control': 'no-store', etag: snapshot.namespace_etag };
+    const captured = await client.deployments.snapshot();
+    assert.deepEqual(captured, snapshot);
+    reply.policyForDeployment = true;
+    reply.body = JSON.stringify({
+      profile: 'deployment-v1',
+      id: 'proxy-1',
+      durable: 'committed',
+      live: 'applied',
+      recovery_cleanup_authorized: true,
+      future_owner_metadata: true,
+    });
+    reply.headers = { 'x-ferrum-config-cursor': '7:12' };
+    await client.deployments.remove('proxy-1', captured);
+    assert.deepEqual(requests, [
+      'GET /deployment-snapshot',
+      'GET /backend-egress-policy',
+      'DELETE /proxies/proxy-1?conditional=true&cleanup_orphaned_upstream=false',
+    ]);
+    assert.deepEqual(ifMatches, [undefined, undefined, snapshot.namespace_etag]);
+    assert.deepEqual(captured, snapshot, 'the original authority was not rewritten');
+  });
+
+  it('refuses mismatched, cached or incomplete snapshot authority without a mutation', async (t) => {
+    const { client, reply, requests, logs } = await fixture(t);
+    const snapshot = original();
+    reply.body = JSON.stringify(snapshot);
+    for (const headers of [
+      { 'cache-control': 'no-store', etag: ROW_TAG },
+      { 'cache-control': 'no-store', etag: snapshot.namespace_etag, age: '1' },
+    ]) {
+      reply.headers = headers;
+      await assert.rejects(client.deployments.snapshot(), protocolFailure);
+    }
+    reply.headers = { 'cache-control': 'no-store', etag: snapshot.namespace_etag };
+    reply.body = JSON.stringify({ ...snapshot, evidence: { secret: 'private-canary' } });
+    await assert.rejects(client.deployments.snapshot(), /cannot establish original authority/);
+    assert.ok(requests.every((request) => request.startsWith('GET ')));
+    assert.ok(!JSON.stringify(logs).includes('private-canary'));
+  });
+
+  for (const status of [200, 202, 204, 400, 409, 412, 501, 503]) {
+    it(`${status}: never authorizes cleanup from an incomplete or refused acknowledgement`, async (t) => {
+      const { client, reply, requests, logs } = await fixture(t);
+      reply.policyForDeployment = true;
+      reply.status = status;
+      reply.body = JSON.stringify({
+        error: 'private-canary',
+        durable: status === 200 ? 'committed' : 'unknown',
+        live: status === 200 ? 'not_applicable' : 'unconfirmed',
+        recovery_cleanup_authorized: false,
+      });
+      await assert.rejects(client.deployments.remove('proxy-1', original()));
+      assert.equal(requests.filter((request) => request.startsWith('DELETE ')).length, 1);
+      assert.equal(requests.filter((request) => request === 'GET /deployment-snapshot').length, 0);
+      assert.ok(!JSON.stringify(logs).includes('private-canary'));
+    });
+  }
+
+  it('does not retry a deployment write whose connection loses the acknowledgement', async (t) => {
+    const { client, reply, requests } = await fixture(t);
+    reply.policyForDeployment = true;
+    reply.disconnect = true;
+    await assert.rejects(client.deployments.remove('proxy-1', original()));
+    assert.equal(requests.filter((request) => request.startsWith('DELETE ')).length, 1);
+    assert.ok(!requests.includes('GET /deployment-snapshot'));
+  });
+
+  it('uses the spec target and original deployment authority for ordinary-document PUT', async (t) => {
+    const { client, reply, requests, ifMatches } = await fixture(t);
+    const snapshot = original();
+    snapshot.proxies[0]!.api_spec_id = 'spec-1';
+    snapshot.api_specs = [{ id: 'spec-1', proxy_id: 'proxy-1' }];
+    snapshot.evidence.resources = [snapshot.proxies, [], [], [], [], snapshot.api_specs, null, 0];
+    reply.policyForDeployment = true;
+    reply.headers = { 'x-ferrum-config-cursor': '7:13' };
+    reply.body = JSON.stringify({
+      profile: 'deployment-v1',
+      id: 'spec-1',
+      durable: 'committed',
+      live: 'applied',
+      recovery_cleanup_authorized: true,
+    });
+    await client.deployments.replace('spec-1', { openapi: '3.1.0', paths: {} }, snapshot);
+    assert.deepEqual(requests, [
+      'GET /backend-egress-policy',
+      'PUT /api-specs/spec-1?conditional=true',
+    ]);
+    assert.deepEqual(ifMatches, [undefined, snapshot.namespace_etag]);
+    reply.body = JSON.stringify({
+      profile: 'deployment-v1',
+      id: 'proxy-1',
+      durable: 'committed',
+      live: 'applied',
+      recovery_cleanup_authorized: true,
+    });
+    await assert.rejects(
+      client.deployments.replace('spec-1', { openapi: '3.1.0', paths: {} }, snapshot),
+      /application is unconfirmed/,
+    );
+    const offset = requests.length;
+    await assert.rejects(client.deployments.replace('another-spec', {}, snapshot));
+    assert.equal(requests.length, offset, 'a mismatched original target sends no HTTP');
   });
 });

@@ -78,6 +78,8 @@ import type {
   EdgeConsumerReplacement,
   EdgeVerifiedConsumer,
   EdgeCredentialEntry,
+  EdgeDeploymentAcknowledgement,
+  EdgeDeploymentSnapshot,
   EdgeHealth,
   EdgeLatencyBucket,
   EdgeListQuery,
@@ -92,6 +94,14 @@ import type {
   EdgeUnhealthyTarget,
 } from './types.js';
 import { consumerMetadataCredentials } from './consumer-metadata.js';
+import {
+  assertDeploymentApplied,
+  assertDeploymentEvidence,
+  deploymentTarget,
+  isDeploymentAcknowledgement,
+  isDeploymentSnapshot,
+  isDeploymentTag,
+} from './deployment.js';
 
 /** Minimal logger surface, so this module does not depend on Fastify. */
 export interface EdgeLogger {
@@ -146,6 +156,8 @@ interface CallOptions {
   /** Refuse to buffer a response larger than this many bytes. */
   maxResponseBytes?: number;
   ifMatch?: string;
+  /** Released deployment-v1 partial write, with its own response and secret boundary. */
+  deployment?: boolean;
   /** Keep the matching response headers with this call, never in shared state. */
   responseHeaders?: (headers: Record<string, string | string[] | undefined>) => void;
 }
@@ -190,6 +202,17 @@ export interface FerrumAdminClient {
   backendEgressPolicy(signal?: AbortSignal): Promise<BackendEgressPolicy>;
   /** Admission before side effects; each backend write repeats it at the boundary. */
   assertBackendEgress(): Promise<void>;
+
+  readonly deployments: {
+    snapshot(subject?: string): Promise<EdgeDeploymentSnapshot>;
+    remove(id: string, original: EdgeDeploymentSnapshot, subject?: string): Promise<void>;
+    replace(
+      id: string,
+      document: EdgeApiSpecDocument,
+      original: EdgeDeploymentSnapshot,
+      subject?: string,
+    ): Promise<void>;
+  };
 
   /** `GET /namespaces` — a list of name strings. */
   listNamespaces(): Promise<string[]>;
@@ -638,6 +661,8 @@ function responseContract(method: string, path: string): ResponseContract {
         statuses: [200],
         body: (value) => isRecord(value) && isString(value.namespace),
       };
+    case 'deployment-snapshot':
+      return { statuses: [200], body: isDeploymentSnapshot };
     case 'live':
       return {
         statuses: [200],
@@ -998,7 +1023,9 @@ export function createFerrumAdminClient(
     path: string,
     options: CallOptions = {},
   ): Promise<T | null> {
-    const contract = responseContract(method, path);
+    const contract: ResponseContract = options.deployment
+      ? { statuses: [200], body: isDeploymentAcknowledgement }
+      : responseContract(method, path);
     const token = await minter.getToken(options.subject ?? DEFAULT_ADMIN_SUBJECT);
     const url = urlFor(path, options.query);
     const headers: Record<string, string> = {
@@ -1110,7 +1137,7 @@ export function createFerrumAdminClient(
       // Only error-status classification may inspect an absent JSON body.
     }
     if (statusCode >= 400 && !contract.statuses.includes(statusCode)) {
-      throw classify(statusCode, parsed, method, path);
+      throw classify(statusCode, parsed, method, path, options.deployment);
     }
     if (!contract.statuses.includes(statusCode)) {
       throw protocolError(statusCode, 'unexpected_status', method, path);
@@ -1124,7 +1151,11 @@ export function createFerrumAdminClient(
     if (!contract.body(parsed)) {
       throw protocolError(statusCode, 'invalid_body', method, path);
     }
-    if (path === '/backend-egress-policy' || /\/consumers\/[^/]+\/verification$/.test(path)) {
+    if (
+      path === '/backend-egress-policy' ||
+      path === '/deployment-snapshot' ||
+      /\/consumers\/[^/]+\/verification$/.test(path)
+    ) {
       // These endpoints promise authoritative no-store reads. Refuse intermediary
       // cache evidence rather than treating an old policy/snapshot as admission.
       if (
@@ -1138,7 +1169,7 @@ export function createFerrumAdminClient(
     }
     if (isRecord(parsed)) {
       const scoped = /^\/(consumers|proxies|plugins\/config)(?:\/|$)/.exec(path);
-      if (scoped) {
+      if (scoped && !options.deployment) {
         const rows = Array.isArray(parsed.data) ? parsed.data : [parsed];
         const id = path.slice(scoped[1]!.length + 2).split('/')[0];
         if (
@@ -1182,7 +1213,13 @@ export function createFerrumAdminClient(
     );
   }
 
-  function classify(status: number, parsed: unknown, method: string, path: string): Error {
+  function classify(
+    status: number,
+    parsed: unknown,
+    method: string,
+    path: string,
+    deployment = false,
+  ): Error {
     const body = (parsed ?? {}) as {
       error?: unknown;
       applied?: unknown;
@@ -1195,7 +1232,9 @@ export function createFerrumAdminClient(
     const sensitive =
       credentialWrite ||
       /^\/consumers\/[^/]+\/verification$/.test(path) ||
-      path === '/backend-egress-policy';
+      path === '/backend-egress-policy' ||
+      path === '/deployment-snapshot' ||
+      deployment;
     const isApiSpecWrite =
       (method === 'POST' || method === 'PUT') && /^\/api-specs(?:\/[^/]+)?$/.test(path);
     if (sensitive) {
@@ -1220,6 +1259,21 @@ export function createFerrumAdminClient(
       );
     }
 
+    if (deployment) {
+      if (status === 412 || status === 409) {
+        return conflict('The original gateway deployment authority was refused', {
+          status,
+          kind: 'deployment_precondition_failed',
+        });
+      }
+      return edgeError('Gateway deployment mutation was not confirmed; retain recovery state', {
+        status,
+        kind: 'deployment_acknowledgement_uncertain',
+      });
+    }
+    if (path === '/deployment-snapshot') {
+      return edgeError('The gateway deployment authority is unavailable', { status });
+    }
     if (credentialWrite && status === 412) {
       return conflict('The gateway consumer changed; read it again before retrying', {
         status,
@@ -1313,6 +1367,58 @@ export function createFerrumAdminClient(
     if (!deps.allowPrivateUpstreams && !provesLocalPublicEgress(policy)) {
       throw edgeError('The gateway cannot establish the required local public egress policy', {
         kind: 'backend_egress_unverified',
+      });
+    }
+  }
+
+  async function deploymentMutation(
+    method: 'PUT' | 'DELETE',
+    id: string,
+    original: EdgeDeploymentSnapshot,
+    subject?: string,
+    document?: EdgeApiSpecDocument,
+  ): Promise<void> {
+    assertDeploymentEvidence(original, namespace);
+    if (!isDeploymentTag(original.namespace_etag)) {
+      throw edgeError('Original deployment-v1 authority is required');
+    }
+    if (method === 'DELETE') {
+      deploymentTarget(original, id);
+    } else {
+      const specs = original.api_specs.filter((spec) => spec.id === id);
+      if (specs.length !== 1 || typeof specs[0]!.proxy_id !== 'string') {
+        throw conflict('The replacement target is not owned by the original deployment');
+      }
+      deploymentTarget(original, specs[0]!.proxy_id);
+    }
+    await assertBackendEgress();
+    let headers: Record<string, string | string[] | undefined> = {};
+    const acknowledgement = await callRequired<EdgeDeploymentAcknowledgement>(
+      method,
+      `/${method === 'DELETE' ? 'proxies' : 'api-specs'}/${encodeURIComponent(id)}`,
+      {
+        subject,
+        body: document,
+        query: {
+          conditional: true,
+          ...(method === 'DELETE' ? { cleanup_orphaned_upstream: false } : {}),
+        },
+        ifMatch: original.namespace_etag,
+        deployment: true,
+        responseHeaders: (value) => {
+          headers = value;
+        },
+      },
+    );
+    assertDeploymentApplied(acknowledgement, id);
+    const cursor = headers['x-ferrum-config-cursor'];
+    if (
+      typeof cursor !== 'string' ||
+      !/^[0-9]+:[0-9]+(?![\s\S])/.test(cursor) ||
+      headers[NAMESPACE_UNSERVED_HEADER] === NAMESPACE_UNSERVED_HEADER_VALUE
+    ) {
+      throw edgeError('Gateway deployment covering application proof is unavailable', {
+        kind: 'deployment_acknowledgement_uncertain',
       });
     }
   }
@@ -1510,6 +1616,28 @@ export function createFerrumAdminClient(
     namespaceMonitor,
     backendEgressPolicy,
     assertBackendEgress,
+    deployments: {
+      async snapshot(subject?: string): Promise<EdgeDeploymentSnapshot> {
+        let etag: string | string[] | undefined;
+        const snapshot = await callRequired<EdgeDeploymentSnapshot>('GET', '/deployment-snapshot', {
+          subject,
+          responseHeaders: (headers) => {
+            etag = headers.etag;
+          },
+        });
+        if (!isDeploymentTag(etag) || etag !== snapshot.namespace_etag) {
+          throw protocolError(200, 'invalid_deployment_authority', 'GET', '/deployment-snapshot');
+        }
+        assertDeploymentEvidence(snapshot, namespace);
+        return snapshot;
+      },
+      async remove(id, original, subject): Promise<void> {
+        await deploymentMutation('DELETE', id, original, subject);
+      },
+      async replace(id, document, original, subject): Promise<void> {
+        await deploymentMutation('PUT', id, original, subject, document);
+      },
+    },
 
     async health(): Promise<EdgeHealth> {
       // `503` is reachable-but-not-ready only with a valid health payload.

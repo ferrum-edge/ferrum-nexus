@@ -2,13 +2,13 @@
   "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v1.schema.json",
   "vocabulary": "backend-egress-policy",
   "version": 1,
-  "edge_release": "v0.9.11",
-  "description": "Labels for process-scoped, immutable loaded backend policy metadata. Edge v0.9.11 is published with verified upstream distribution; this canonical contracts tag/publication remains pending. Mode lists describe the final evaluation stage, not unconditional effective allows. Classifier meaning changes require versioned coordination.",
+  "edge_release": "v0.9.12",
+  "description": "Labels for process-scoped, immutable loaded backend policy metadata. Edge v0.9.12 is published with verified distribution. Canonical contracts-edge-0.9.11 is published; contracts-edge-0.9.12 publication is pending. Mode lists describe the final evaluation stage, not unconditional effective allows. Classifier meaning changes require versioned coordination.",
   "provenance": [
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.11",
-      "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+      "ref": "v0.9.12",
+      "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
       "path": "openapi.yaml",
       "symbols": [
         "components.schemas.BackendEgressPolicyResponse"
@@ -16,8 +16,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.11",
-      "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+      "ref": "v0.9.12",
+      "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
       "path": "src/admin/backend_egress_policy.rs",
       "symbols": [
         "BackendEgressPolicyResponse",
@@ -26,8 +26,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.11",
-      "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+      "ref": "v0.9.12",
+      "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
       "path": "src/config/env_config.rs",
       "symbols": [
         "BackendEgressPolicy",
@@ -38,8 +38,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.11",
-      "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+      "ref": "v0.9.12",
+      "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
       "path": "docs/admin_api.md",
       "note": "Transcribed GET /backend-egress-policy labels, scope limits, v1 classifier and conservative guarantee rule; no raw CIDRs or credentials."
     }

@@ -373,14 +373,14 @@ describe('deleting an API that races an enforcement conversion', () => {
     // the last instant it can: the very next thing the conversion does is ask
     // whether the portal still describes the API.
     const restore = vanishAfter(api.id, (vanish) => {
-      const real = harness.edgeClient.proxies.delete.bind(harness.edgeClient.proxies);
-      harness.edgeClient.proxies.delete = async (...args) => {
+      const real = harness.edgeClient.deployments.remove.bind(harness.edgeClient.deployments);
+      harness.edgeClient.deployments.remove = async (...args) => {
         const deleted = await real(...args);
         vanish();
         return deleted;
       };
       return () => {
-        harness.edgeClient.proxies.delete = real;
+        harness.edgeClient.deployments.remove = real;
       };
     });
     try {

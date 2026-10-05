@@ -1,65 +1,60 @@
-# Draft Edge v0.9.11 adoption baseline
+# Draft Edge v0.9.12 adoption
 
-Nexus PR #522 remains DRAFT. This candidate selects published artifacts, but
-does not finalize a Nexus release, declare GHSA-93rq-89vr-38pc fixed or grant
-public-only supported-profile approval.
+Nexus PR #522 remains DRAFT. The filename preserves existing links from the
+v0.9.11 candidate. The current candidate selects published v0.9.12 artifacts;
+it does not finalize a Nexus release, close GHSA-93rq-89vr-38pc Part B or approve
+a public-only supported profile.
 
 ## Published identities
 
-- [Edge v0.9.11](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.11)
-  is published at immutable source `c764084b3b51c3f7ffde268c039688d35e49c553`.
-  The default Docker Hub multi-architecture index selected in
-  [`release/compatibility.env`](../release/compatibility.env) is
-  `sha256:2476b502855940e28157858fc24008545cb3baeb3084c9610e1d4505cbe0d36e`.
-  Root verified the published asset hashes, amd64/arm64 manifests and exact
-  default-image gateway/CNI binary pairing. Authenticated hosted attestations
-  qualified the GHCR distribution; anonymous GHCR pulls were not established,
-  and published configs lack an image revision label.
-- [contracts-edge-0.9.11](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.11)
-  was published at `390edbd5b2485af0988e02f7827fde778d76ae0a` on 2026-10-04.
-  Nexus copies vocabularies, the egress schema and fixtures, and the manifest
-  schema and fixtures directly from that immutable tagged source. `PIN` and
-  `SERVICE-MANIFEST-PIN` record the full commit and every adopted file hash.
-  Historical prepared-publication and owner PROPOSED description text stays
-  byte-identical. Current shared manifest v1 status is EXISTING/implemented;
-  Alloy owner `81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e` remains unreleased.
+- [Edge v0.9.12](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.12)
+  is published at immutable unsigned lightweight tag source
+  `0d917701b63ef38210c49df830f48cf0457cbc7d`. The default Docker Hub
+  multi-architecture index in [`release/compatibility.env`](../release/compatibility.env)
+  is `sha256:80526b59cbbdc2bfcc8bae9241da4e5395414cf07bf0be4effd4c73c51684ee4`.
+  Root recorded successful hosted release jobs and verified distribution facts:
+  release assets and sidecars, image indexes/configurations, default gateway/CNI
+  pairing, authenticated hosted cosign/SLSA/SPDX evidence and ABI. This consumer
+  change does not claim independent cryptographic verification. Anonymous GHCR
+  pulls returned 401; the selected public image is Docker Hub.
+- [contracts-edge-0.9.12](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.12)
+  was published on 2026-10-05 at immutable unsigned lightweight tag commit
+  `31f0a21d707795be293d15837c2f77c3d84219d8`. Its protected merge tree
+  `1b480bf3e14e33d8a013247d2a30406159b6c04b` equals reviewed source
+  `d9c84810152732524c54a9ed292dc59103f0619d`. Selected vocabularies, egress
+  schema/fixtures and both new deployment schemas/fixtures are copied byte for
+  byte. `PIN` records all 46 adopted paths and hashes. `SERVICE-MANIFEST-PIN`
+  remains separate; shared manifest v1 and unreleased Alloy owner flags stay
+  unchanged. Historical publication-pending prose inside canonical assets stays
+  byte-identical even though the canonical release is now published.
+- The released owner OpenAPI SHA-256 is
+  `f7242228d73d34ad2d7da3c989ec6ba15bb6ae1f2f4c94a8e0a181b000caae77`.
+  Full gzip ApiSpec content, raw SQL/BSON evidence and original namespace tokens
+  come from `GET /deployment-snapshot`, not ordinary resource views or backup.
 
-The egress endpoint and credential-complete verification are released in this
-baseline. All response fields, mode/class arrays, evaluation order and conservative
-guarantee semantics remain strict. Metadata is process-scoped: public-only
-admission still requires the actual local serving data plane and operator-established
-Admin/traffic identity. No missing-policy fallback or longer acceptance timeout is
-introduced. Existing HTTP behavior, private opt-in and Node 22.14 support remain.
+## Consumer adoption and remaining gates
 
-## Outstanding qualification and owner work
+The candidate uses the actual [released partial deployment protocol](edge-conversion-recovery-blocker.md):
+original strong deployment authority, conditional selected proxy removal and
+API-spec replacement, encrypted evidence retained before HTTP, and explicit
+commit/application acknowledgement before dependent recovery or journal removal.
+It preserves the released credential-complete row verification and ordinary CRUD
+contracts. Refused or uncertain operations do not refresh authority or fall back
+to unconditional cleanup or namespace replacement.
 
-The previous exact-head packaged acceptance used v0.9.10, whose
-`GET /backend-egress-policy` returned 404 and prevented portal health readiness.
-The candidate now uses the real published v0.9.11 image. This fixes the artifact
-selection; exact-head hosted acceptance must establish the runtime result.
-The [controlled public-only fixture](../e2e/public-only/README.md) still requires
-hosted qualification with a packaged Nexus digest and explicit owner approval.
-It retains isolated controlled public DNS rebinding, real authenticated gateway
-traffic, an observed private answer after DNS expiry, and the zero-request private
-canary assertion. Private-opt-in acceptance cannot qualify public-only support.
+The older v0.9.11 missing-owner-capability blocker is satisfied by the published
+Edge and canonical releases. Nexus qualification is still pending: fresh exact-head
+Node checks, four-store service contracts, protocol/format gates and packaged
+acceptance against the selected image. Strict cancellation, audit, lease, cleanup,
+original replay and concurrent Admin controls remain required. Static inspection
+and integrity checks establish no hosted test or acceptance result.
 
-[Edge #6010](https://github.com/ferrum-edge/ferrum-edge/issues/6010) is actionable
-internal owner work for dependency-fenced cascade removal and API-spec replacement.
-Neither exists in v0.9.11. Nexus refuses initial conversion teardown, live in-place
-spec recovery and failed missing-deployment cleanup before destructive mutation.
-It preserves original or attempted identity, exact operator fields, security
-configs, upstreams and immutable encrypted conversion evidence. Read-only
-reconciliation and absent-identity rebuilding remain available. See the
-[adoption seam and required ordering](edge-conversion-recovery-blocker.md).
+The [controlled public-only fixture](../e2e/public-only/README.md) additionally
+requires a packaged Nexus digest, hosted DNS-rebinding/zero-private-canary
+qualification and an explicit supported-profile owner decision. Internal deployment
+API adoption does not supply that decision or close advisory Part B. Private-opt-in
+acceptance does not qualify public-only support.
 
-Automatic rollback and vanished-catalog cleanup expectations remain required
-failing gates awaiting owner implementation; their mocks and assertions are not
-weakened. #6010 needs owner review, exact-head hosted qualification, the next
-immutable Edge release and canonical publication, then Nexus adoption and full
-four-store/packaged qualification. This baseline claims no future capability or
-future release identity.
-
-Nexus version and migration release markers are unchanged. Released migrations
-001–006 and their hashes remain immutable; prepared 007–011 remain unreleased.
-New notes stay under Unreleased. Static inspection and integrity checks do not
-establish hosted build, format, test or acceptance success.
+Nexus version markers, Node 22.14 minimum and Node 24 qualification remain unchanged.
+Released migrations 001–006 and hashes are immutable; prepared 007–011 remain
+unreleased. No Nexus tag, release or advisory completion is created here.

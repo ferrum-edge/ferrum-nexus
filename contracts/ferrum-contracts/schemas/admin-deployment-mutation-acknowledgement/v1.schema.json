@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ferrum-edge/ferrum-contracts/schemas/admin-deployment-mutation-acknowledgement/v1.schema.json",
+  "title": "Edge deployment mutation acknowledgement v1",
+  "description": "Conditional proxy DELETE or API-spec PUT result. Consumers require HTTP 200, the expected deployment-v1 profile/target, durable=committed, live=applied and recovery_cleanup_authorized=true before automatic journal removal or dependent cleanup. Missing fields, refusal, cancellation and uncertain transport never authorize replay. Local application does not attest every remote DP.",
+  "x-contract": {
+    "name": "admin-deployment-mutation-acknowledgement",
+    "version": 1,
+    "status": "implemented",
+    "owner": "ferrum-edge/ferrum-edge",
+    "edge_availability": "Released in Ferrum Edge v0.9.12 at 0d917701b63ef38210c49df830f48cf0457cbc7d with verified distribution. Canonical contracts-edge-0.9.12 publication is pending; contracts-edge-0.9.11 remains published.",
+    "provenance": [
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "path": "openapi.yaml",
+        "symbols": [
+          "components.schemas.DeploymentMutationAcknowledgement",
+          "components.responses.DeploymentMutationUnavailable"
+        ],
+        "note": "Transcribed required members, optional profile/id/error and open object shape. The additional implication for cleanup authorization copies finish: true is emitted only after confirmed commit and applicable local application, final audit admission and lease release. HTTP status and profile/target matching remain consumer runtime checks."
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "path": "src/admin/deployment_mutations.rs",
+        "symbols": [
+          "refusal",
+          "unavailable",
+          "store_error",
+          "finish"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "path": "docs/deployment_mutations.md"
+      }
+    ]
+  },
+  "type": "object",
+  "required": [
+    "durable",
+    "live",
+    "recovery_cleanup_authorized"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "profile": {
+      "type": "string",
+      "enum": [
+        "deployment-v1"
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "error": {
+      "type": "string"
+    },
+    "durable": {
+      "type": "string",
+      "enum": [
+        "not_started",
+        "not_committed",
+        "committed",
+        "unknown"
+      ]
+    },
+    "live": {
+      "type": "string",
+      "enum": [
+        "unconfirmed",
+        "not_applicable",
+        "applied"
+      ]
+    },
+    "recovery_cleanup_authorized": {
+      "type": "boolean",
+      "description": "True only after confirmed commit, applicable local live proof, final audit admission and namespace lease release. CP/unserved durable-only results are false even with HTTP 200."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "recovery_cleanup_authorized"
+        ],
+        "properties": {
+          "recovery_cleanup_authorized": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "durable": {
+            "const": "committed"
+          },
+          "live": {
+            "const": "applied"
+          }
+        }
+      }
+    }
+  ]
+}

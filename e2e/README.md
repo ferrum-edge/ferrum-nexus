@@ -121,7 +121,7 @@ is part of what is being tested, and the assertion is worth less than it looks.
 
 ## MCP subsets and shared manifest preview
 
-The packaged-image data-plane suite extends the pinned v0.9.11 qualification with
+The packaged-image data-plane suite extends the pinned v0.9.12 qualification with
 API-key/basic-account and JWT-application subset list/call cases. Approval cannot
 broaden the request; unapproved tools are hidden and denied while REST remains usable.
 Explicit empty and omitted subsets, rename/re-add, changed spec, disable/re-enable,

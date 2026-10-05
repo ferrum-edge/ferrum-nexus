@@ -59,6 +59,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import type { AddressInfo } from 'node:net';
 
 import { jwtVerify } from 'jose';
@@ -1688,6 +1689,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const pluginConfigs = new Map<string, Record<string, unknown>>();
   const apiSpecs = new Map<string, StoredApiSpec>();
   const namespaces = new Map<string, { name: string; description: string | null }>();
+  const deploymentSequences = new Map<string, number>();
+  const writeScopes = new WeakMap<ServerResponse, string>();
+  const deploymentAcks = new WeakMap<ServerResponse, { id: string; namespace: string }>();
   const requests: RecordedRequest[] = [];
   const failures: QueuedFailure[] = [];
   const lostAcks: QueuedFailure[] = [];
@@ -1877,7 +1881,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     return {
       gateway: {
         mode: 'database',
-        ferrum_version: '0.9.11',
+        ferrum_version: '0.9.12',
         uptime_seconds: MOCK_GATEWAY_UPTIME_SECONDS,
         total_requests: totalRequests,
         proxy_count: proxies.size,
@@ -1897,6 +1901,30 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   }
 
   function send(res: ServerResponse, status: number, body?: unknown): void {
+    const writeNamespace = writeScopes.get(res);
+    writeScopes.delete(res);
+    if (writeNamespace && status >= 200 && status < 300) {
+      deploymentSequences.set(writeNamespace, (deploymentSequences.get(writeNamespace) ?? 0) + 1);
+    }
+    const deployment = deploymentAcks.get(res);
+    deploymentAcks.delete(res);
+    if (deployment && status >= 200 && status < 300) {
+      const applicable =
+        health.mode !== 'cp' &&
+        health.mode !== 'node_agent' &&
+        !dataPlaneUnserved(deployment.namespace);
+      status = 200;
+      body = {
+        profile: 'deployment-v1',
+        id: deployment.id,
+        durable: 'committed',
+        live: applicable ? 'applied' : 'not_applicable',
+        recovery_cleanup_authorized: applicable,
+      };
+      if (applicable) {
+        res.setHeader('x-ferrum-config-cursor', `1:${deploymentSequences.get(deployment.namespace)}`);
+      }
+    }
     const dropped = droppedAcks.get(res);
     if (dropped) {
       droppedAcks.delete(res);
@@ -3070,6 +3098,142 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
   /* ── Dispatcher ───────────────────────────────────────────────────────── */
 
+  /** Native in-memory owner evidence. Real SQL/BSON preservation is a packaged CI gate. */
+  function deploymentSnapshot(namespace: string): Record<string, unknown> {
+    const selected = <T extends { namespace?: unknown; id?: unknown }>(rows: Iterable<T>): T[] =>
+      [...rows]
+        .filter((row) => row.namespace === namespace)
+        .sort((left, right) => {
+          const leftId = String(left.id);
+          const rightId = String(right.id);
+          return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+        });
+    const snapshotProxies = selected(proxies.values()).map((proxy) => ({
+      ...proxy,
+      plugins: [...(proxy.plugins as { plugin_config_id: string }[])].sort((left, right) => {
+        const leftId = left.plugin_config_id;
+        const rightId = right.plugin_config_id;
+        return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+      }),
+    }));
+    const snapshotConsumers = selected(consumers.values());
+    const snapshotUpstreams = selected(upstreams.values());
+    const snapshotPlugins = selected(pluginConfigs.values());
+    const snapshotSpecs = selected(apiSpecs.values()).map((spec) => {
+      const bytes = Buffer.from(JSON.stringify(spec.document));
+      const { document: _document, ...metadata } = spec;
+      return {
+        ...metadata,
+        spec_format: 'json',
+        content_encoding: 'gzip',
+        spec_content: [...gzipSync(bytes)],
+        uncompressed_size: bytes.length,
+        content_hash: createHash('sha256').update(bytes).digest('hex'),
+      };
+    });
+    const namespaceRecord = namespaces.get(namespace) ?? null;
+    const storedRows = (rows: unknown[]): Record<string, unknown>[] =>
+      rows.map((row) => ({
+        mock_document: { column_type: 'json', value_type: 'text', value: JSON.stringify(row) },
+      }));
+    const evidence = {
+      profile: 'deployment-v1',
+      resources: [
+        snapshotProxies,
+        snapshotConsumers,
+        snapshotUpstreams,
+        snapshotPlugins,
+        [],
+        snapshotSpecs,
+        namespaceRecord,
+        deploymentSequences.get(namespace) ?? 0,
+      ],
+      stored: {
+        proxies: storedRows(snapshotProxies),
+        consumers: storedRows(snapshotConsumers),
+        upstreams: storedRows(snapshotUpstreams),
+        plugin_configs: storedRows(snapshotPlugins),
+        proxy_plugins: storedRows(snapshotProxies.flatMap((proxy) => proxy.plugins)),
+        api_specs: storedRows(snapshotSpecs),
+        gateway_trust_bundles: [],
+        consumer_identity_index: [],
+        consumer_credential_index: [],
+        namespaces: storedRows(namespaceRecord ? [namespaceRecord] : []),
+      },
+    };
+    const digest = createHmac('sha256', options.jwtSecret)
+      .update(JSON.stringify([namespace, evidence]))
+      .digest('hex')
+      .slice(0, 32);
+    return {
+      profile: 'deployment-v1',
+      namespace,
+      namespace_etag: `"deployment-v1-${digest}"`,
+      evidence,
+      proxies: snapshotProxies,
+      plugin_configs: snapshotPlugins,
+      upstreams: snapshotUpstreams,
+      api_specs: snapshotSpecs,
+    };
+  }
+
+  function admitDeployment(
+    req: IncomingMessage,
+    res: ServerResponse,
+    url: URL,
+    namespace: string,
+    removal: boolean,
+  ): boolean {
+    const refusal = (status: number, durable: string): false => {
+      send(res, status, {
+        error: 'Deployment authority refused',
+        durable,
+        live: 'unconfirmed',
+        recovery_cleanup_authorized: false,
+      });
+      return false;
+    };
+    const query = url.searchParams;
+    const matches = req.rawHeaders.filter(
+      (_, index) => index % 2 === 0 && req.rawHeaders[index]?.toLowerCase() === 'if-match',
+    );
+    const token = req.headers['if-match'];
+    if (
+      query.getAll('conditional').length !== 1 ||
+      query.get('conditional') !== 'true' ||
+      query.getAll('apply').length > 1 ||
+      (query.has('apply') && query.get('apply') !== 'sync') ||
+      (removal &&
+        (query.getAll('cleanup_orphaned_upstream').length !== 1 ||
+          query.get('cleanup_orphaned_upstream') !== 'false')) ||
+      [...query.keys()].some(
+        (key) =>
+          !['conditional', 'apply', ...(removal ? ['cleanup_orphaned_upstream'] : [])].includes(key),
+      ) ||
+      matches.length !== 1 ||
+      typeof token !== 'string' ||
+      !/^"deployment-v1-[0-9a-f]{32}"(?![\s\S])/.test(token)
+    ) {
+      return refusal(400, 'not_started');
+    }
+    if (token !== deploymentSnapshot(namespace).namespace_etag) {
+      return refusal(412, 'not_committed');
+    }
+    const id = decodeURIComponent(url.pathname.split('/')[2]!);
+    const proxy = removal
+      ? proxies.get(key(namespace, id))
+      : proxies.get(key(namespace, apiSpecs.get(key(namespace, id))?.proxy_id ?? ''));
+    if (!proxy || proxyAssociationError(String(proxy.id), namespace, proxy.plugins)) {
+      return refusal(409, 'not_committed');
+    }
+    const ownedSpec = specForProxy(namespace, String(proxy.id));
+    if ((ownedSpec?.id ?? null) !== (proxy.api_spec_id ?? null)) {
+      return refusal(409, 'not_committed');
+    }
+    deploymentAcks.set(res, { id, namespace });
+    return true;
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://mock.invalid');
     const segments = url.pathname.split('/').filter((segment) => segment !== '');
@@ -3103,7 +3267,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     if (verified instanceof Error) return fail(res, 401, verified.message);
     if (
       claims?.role !== 'admin' &&
-      (segments[0] === 'consumers' || segments[0] === 'backend-egress-policy')
+      (segments[0] === 'consumers' ||
+        segments[0] === 'backend-egress-policy' ||
+        segments[0] === 'deployment-snapshot' ||
+        (segments[0] === 'api-specs' && method === 'PUT'))
     ) {
       return fail(res, 403, `Admin role '${String(claims?.role)}' cannot access this endpoint`);
     }
@@ -3114,6 +3281,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       segments[0] === 'consumers' ||
       segments[0] === 'proxies' ||
       segments[0] === 'api-specs' ||
+      segments[0] === 'deployment-snapshot' ||
       segments[0] === 'backend-egress-policy'
         ? namespace
         : segments[0] === 'plugins' && segments[1] === 'config'
@@ -3188,7 +3356,27 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
     }
 
+    const deploymentRequested =
+      url.searchParams.has('conditional') ||
+      String(req.headers['if-match'] ?? '').includes('deployment-v1-');
+    if (deploymentRequested) {
+      const removal = segments[0] === 'proxies' && segments.length === 2 && method === 'DELETE';
+      const replacement = segments[0] === 'api-specs' && segments.length === 2 && method === 'PUT';
+      if (!removal && !replacement) return fail(res, 400, 'Unsupported deployment mutation');
+      if (!admitDeployment(req, res, url, namespace, removal)) return;
+    } else if (segments[0] === 'api-specs' && method !== 'GET' && req.headers['if-match']) {
+      return fail(res, 400, 'API-spec If-Match requires deployment authority');
+    }
+    if (method !== 'GET' && scopedNamespace !== null) writeScopes.set(res, namespace);
+
     switch (segments[0]) {
+      case 'deployment-snapshot': {
+        if (method !== 'GET' || url.search !== '') return fail(res, 400, 'Unfiltered GET required');
+        const snapshot = deploymentSnapshot(namespace);
+        res.setHeader('cache-control', 'no-store');
+        res.setHeader('etag', String(snapshot.namespace_etag));
+        return send(res, 200, snapshot);
+      }
       case 'backend-egress-policy': {
         if (method !== 'GET') return fail(res, 405, 'Method not allowed');
         if (egressPolicy === null) return fail(res, 404, 'Not found');
@@ -3320,6 +3508,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       pluginConfigs.clear();
       apiSpecs.clear();
       namespaces.clear();
+      deploymentSequences.clear();
       requests.length = 0;
       failures.length = 0;
       lostAcks.length = 0;

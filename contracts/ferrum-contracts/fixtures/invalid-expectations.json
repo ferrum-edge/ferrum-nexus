@@ -219,5 +219,69 @@
   "vocabulary-backend-egress-policy/invalid/unknown-mode.json": {
     "instance_path": "/modes/0",
     "keyword": "enum"
+  },
+  "admin-deployment-snapshot/invalid/weak-token.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "admin-deployment-snapshot/invalid/row-token.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "admin-deployment-snapshot/invalid/token-list.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "admin-deployment-snapshot/invalid/token-with-line-break.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "admin-deployment-snapshot/invalid/unknown-profile.json": {
+    "instance_path": "/profile",
+    "keyword": "enum"
+  },
+  "admin-deployment-snapshot/invalid/evidence-not-object.json": {
+    "instance_path": "/evidence",
+    "keyword": "type"
+  },
+  "admin-deployment-snapshot/invalid/spec-not-object.json": {
+    "instance_path": "/api_specs/0",
+    "keyword": "type"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/unknown-profile.json": {
+    "instance_path": "/profile",
+    "keyword": "enum"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/unknown-durable.json": {
+    "instance_path": "/durable",
+    "keyword": "enum"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/unknown-live.json": {
+    "instance_path": "/live",
+    "keyword": "enum"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/cleanup-not-boolean.json": {
+    "instance_path": "/recovery_cleanup_authorized",
+    "keyword": "type"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/durable-only-cleanup.json": {
+    "instance_path": "/live",
+    "keyword": "const"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/unknown-durable-cleanup.json": {
+    "instance_path": "/durable",
+    "keyword": "const"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/unconfirmed-cleanup.json": {
+    "instance_path": "/live",
+    "keyword": "const"
+  },
+  "admin-deployment-snapshot/invalid/missing-evidence.json": {
+    "instance_path": "",
+    "keyword": "required"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/missing-cleanup-authorization.json": {
+    "instance_path": "",
+    "keyword": "required"
   }
 }

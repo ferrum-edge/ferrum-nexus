@@ -4,8 +4,8 @@
  * Every other suite in this repository asks Nexus whether it believes a
  * decision was applied. These ask Ferrum Edge, by sending requests to the
  * listener a client uses and checking whether they reached the deterministic
- * upstream. The Admin API is never consulted for an assertion — only for the
- * one destructive step that simulates an operator deleting a proxy.
+ * upstream. Deployment protocol tests additionally compare complete owner
+ * snapshots; authenticated traffic remains the proof of application.
  *
  * The stack is the one an operator deploys: the production container image,
  * PostgreSQL, a pinned Edge release, real SMTP. Nothing is stubbed, and the
@@ -16,6 +16,7 @@
 
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { after, before, describe, it } from 'node:test';
 import { promisify } from 'node:util';
 
@@ -47,6 +48,11 @@ const run = promisify(execFile);
 
 /** Unique per run, so a re-run against a warm stack does not collide. */
 const RUN = Date.now().toString(36);
+
+/** Compare complete secret-bearing evidence without printing it on an assertion failure. */
+function evidenceDigest(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
 
 /** Compose service control, for the restart and restore cases. */
 const COMPOSE = (process.env.E2E_COMPOSE ?? 'docker compose').split(' ');
@@ -116,6 +122,235 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
 
   after(async () => {
     await clearMail();
+  });
+
+  for (const level of ['docs_only', 'routes'] as const) {
+    it(`${level}: converts through released deployment authority and preserves issued access`, async () => {
+      const api = await publishApi(provider, {
+        name: 'Conditional deployment acceptance',
+        slug: `deployment-${level}-${RUN}`,
+        authPlugin: 'key_auth',
+        enforcement: level,
+      });
+      const client = await newClient();
+      await grantAccess(client, provider, api.id);
+      const credential = await issueCredential(client, 'keyauth');
+      const headers = authHeadersFor(credential, 'keyauth');
+      const beforeResponse = await gatewayAdmin('GET', '/deployment-snapshot');
+      assert.equal(beforeResponse.status, 200);
+      assert.equal(beforeResponse.headers.get('cache-control'), 'no-store');
+      const before = (await beforeResponse.json()) as {
+        profile: string;
+        namespace_etag: string;
+        evidence: { resources: unknown[] };
+      };
+      assert.equal(before.profile, 'deployment-v1');
+      assert.equal(beforeResponse.headers.get('etag'), before.namespace_etag);
+      assert.equal(before.evidence.resources.length, 8);
+      const consumers = before.evidence.resources[1] as {
+        username: string;
+        credentials: { keyauth?: { key: string }[] };
+      }[];
+      const consumer = consumers.find((row) => row.username === credential.consumerUsername);
+      assert.ok(consumer?.credentials.keyauth?.some((row) => row.key === credential.secret.key));
+      const stored = await portal<{ api: { ferrum_proxy_id: string } }>(
+        'GET',
+        `/api/apis/${api.id}`,
+        { session: provider },
+      );
+      const converted = await portal<{
+        api: { ferrum_proxy_id: string; gateway_state: string; spec_enforcement: string };
+      }>('PATCH', `/api/apis/${api.id}`, {
+        session: provider,
+        body: { spec_enforcement: level === 'routes' ? 'docs_only' : 'routes' },
+      });
+      assert.equal(converted.api.ferrum_proxy_id, stored.api.ferrum_proxy_id);
+      assert.equal(converted.api.gateway_state, 'deployed');
+      const afterResponse = await gatewayAdmin('GET', '/deployment-snapshot');
+      assert.equal(afterResponse.status, 200);
+      const after = (await afterResponse.json()) as typeof before;
+      for (const index of [1, 2, 4, 6]) {
+        assert.equal(
+          evidenceDigest(after.evidence.resources[index]),
+          evidenceDigest(before.evidence.resources[index]),
+        );
+      }
+      const served = await callGateway(`${api.listen_path}/invoices`, { headers });
+      assert.equal(served.status, 200);
+      assert.ok(reachedUpstream(served));
+      const unauthenticated = await callGateway(`${api.listen_path}/invoices`);
+      assert.equal(unauthenticated.status, 401);
+      assert.equal(reachedUpstream(unauthenticated), false);
+      if (converted.api.spec_enforcement === 'routes') {
+        const unknown = await callGateway(`${api.listen_path}/not-in-the-spec`, { headers });
+        assert.equal(unknown.status, 400);
+        assert.equal(reachedUpstream(unknown), false);
+      }
+    });
+  }
+
+  it('refuses a stale original token and invalid conditional modes on the actual owner', async () => {
+    const api = await publishApi(provider, {
+      name: 'Original authority acceptance',
+      slug: `deployment-stale-${RUN}`,
+      authPlugin: 'key_auth',
+    });
+    const client = await newClient();
+    await grantAccess(client, provider, api.id);
+    const credential = await issueCredential(client, 'keyauth');
+    const stored = await portal<{ api: { ferrum_proxy_id: string } }>(
+      'GET',
+      `/api/apis/${api.id}`,
+      { session: provider },
+    );
+    const original = await gatewayAdmin('GET', '/deployment-snapshot');
+    assert.equal(original.status, 200);
+    const token = original.headers.get('etag');
+    assert.ok(token);
+    await original.arrayBuffer();
+    const unrelated = await newClient();
+    await issueCredential(unrelated, 'keyauth');
+    const path = `/proxies/${stored.api.ferrum_proxy_id}`;
+    const stale = await gatewayAdmin(
+      'DELETE',
+      `${path}?conditional=true&cleanup_orphaned_upstream=false`,
+      undefined,
+      { 'if-match': token },
+    );
+    assert.equal(stale.status, 412);
+    const refused = (await stale.json()) as {
+      durable: string;
+      live: string;
+      recovery_cleanup_authorized: boolean;
+    };
+    assert.equal(refused.durable, 'not_committed');
+    assert.equal(refused.live, 'unconfirmed');
+    assert.equal(refused.recovery_cleanup_authorized, false);
+    for (const query of [
+      'conditional=true&conditional=true&cleanup_orphaned_upstream=false',
+      'conditional=true&cleanup_orphaned_upstream=false&apply=async',
+      'conditional=true&cleanup_orphaned_upstream=true',
+    ]) {
+      const invalid = await gatewayAdmin('DELETE', `${path}?${query}`, undefined, {
+        'if-match': token,
+      });
+      assert.equal(invalid.status, 400);
+      await invalid.arrayBuffer();
+    }
+    const served = await callGateway(`${api.listen_path}/invoices`, {
+      headers: authHeadersFor(credential, 'keyauth'),
+    });
+    assert.equal(served.status, 200);
+    assert.ok(reachedUpstream(served));
+  });
+
+  it('replays operator validator fields after a real catalog commit refusal', async () => {
+    const api = await publishApi(provider, {
+      name: 'Conditional rollback acceptance',
+      slug: `deployment-rollback-${RUN}`,
+      authPlugin: 'key_auth',
+      enforcement: 'routes',
+    });
+    const client = await newClient();
+    await grantAccess(client, provider, api.id);
+    const credential = await issueCredential(client, 'keyauth');
+    const stored = await portal<{ api: { ferrum_proxy_id: string; gateway_state: string } }>(
+      'GET',
+      `/api/apis/${api.id}`,
+      { session: provider },
+    );
+    const response = await gatewayAdmin('GET', '/deployment-snapshot');
+    assert.equal(response.status, 200);
+    const original = (await response.json()) as {
+      plugin_configs: { id: string; proxy_id: string; plugin_name: string; config: object }[];
+    };
+    const validator = original.plugin_configs.find(
+      (plugin) =>
+        plugin.proxy_id === stored.api.ferrum_proxy_id && plugin.plugin_name === 'openapi_validator',
+    );
+    assert.ok(validator);
+    const operator = await gatewayAdmin('PUT', `/plugins/config/${validator.id}`, {
+      plugin_name: 'openapi_validator',
+      scope: 'proxy',
+      proxy_id: stored.api.ferrum_proxy_id,
+      enabled: true,
+      labels: { operator: 'preserve' },
+      priority_override: 2_900,
+      config: { ...validator.config, request_content_types: ['application/problem+json'] },
+    });
+    assert.equal(operator.status, 200);
+    await operator.arrayBuffer();
+    const beforeResponse = await gatewayAdmin('GET', '/deployment-snapshot');
+    assert.equal(beforeResponse.status, 200);
+    const before = (await beforeResponse.json()) as { evidence: { resources: unknown[] } };
+    await inPostgres(
+      'psql',
+      '-U',
+      'nexus',
+      '-d',
+      'nexus',
+      '-v',
+      'ON_ERROR_STOP=1',
+      '-c',
+      `CREATE FUNCTION deployment_commit_refusal() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.id = '${api.id}' AND NEW.spec_enforcement <> OLD.spec_enforcement
+      THEN RAISE EXCEPTION 'acceptance conversion commit failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER deployment_commit_refusal BEFORE UPDATE ON apis
+      FOR EACH ROW EXECUTE FUNCTION deployment_commit_refusal();`,
+    );
+    try {
+      const failed = await portalRaw('PATCH', `/api/apis/${api.id}`, {
+        session: provider,
+        body: { spec_enforcement: 'docs_only' },
+      });
+      assert.equal(failed.status, 500);
+      await failed.arrayBuffer();
+    } finally {
+      await inPostgres(
+        'psql',
+        '-U',
+        'nexus',
+        '-d',
+        'nexus',
+        '-v',
+        'ON_ERROR_STOP=1',
+        '-c',
+        'DROP TRIGGER deployment_commit_refusal ON apis; DROP FUNCTION deployment_commit_refusal();',
+      );
+    }
+    const afterResponse = await gatewayAdmin('GET', '/deployment-snapshot');
+    assert.equal(afterResponse.status, 200);
+    const after = (await afterResponse.json()) as {
+      evidence: { resources: unknown[] };
+      plugin_configs: {
+        id: string;
+        labels: unknown;
+        priority_override: number;
+        config: { request_content_types: unknown };
+      }[];
+    };
+    for (const index of [1, 2, 4, 6]) {
+      assert.equal(
+        evidenceDigest(after.evidence.resources[index]),
+        evidenceDigest(before.evidence.resources[index]),
+      );
+    }
+    const replayed = after.plugin_configs.find((plugin) => plugin.id === validator.id);
+    assert.ok(replayed);
+    assert.deepEqual(replayed.labels, { operator: 'preserve' });
+    assert.equal(replayed.priority_override, 2_900);
+    assert.deepEqual(replayed.config.request_content_types, ['application/problem+json']);
+    const catalog = await portal<{
+      api: { gateway_state: string; ferrum_proxy_id: string; spec_enforcement: string };
+    }>('GET', `/api/apis/${api.id}`, { session: provider });
+    assert.equal(catalog.api.gateway_state, 'deployed');
+    assert.equal(catalog.api.ferrum_proxy_id, stored.api.ferrum_proxy_id);
+    assert.equal(catalog.api.spec_enforcement, 'routes');
+    const served = await callGateway(`${api.listen_path}/invoices`, {
+      headers: authHeadersFor(credential, 'keyauth'),
+    });
+    assert.equal(served.status, 200);
+    assert.ok(reachedUpstream(served));
   });
 
   /* ── The authentication matrix ────────────────────────────────────────── */
@@ -307,7 +542,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     };
   }
 
-  // The default at the immutable v0.9.11 pin; this client supports that version.
+  // The default at the immutable v0.9.12 pin; this client supports that version.
   const MCP_PROTOCOL_VERSION = '2025-11-25';
 
   async function rpc(
@@ -1769,13 +2004,18 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
  * one from the portal, because the portal is the thing under test and must not
  * be asked to help break itself.
  */
-async function deleteProxyOnGateway(proxyId: string): Promise<void> {
+async function gatewayAdmin(
+  method: 'GET' | 'PUT' | 'DELETE',
+  path: string,
+  document?: unknown,
+  headers: Record<string, string> = {},
+): Promise<Response> {
   const { createHmac, randomUUID } = await import('node:crypto');
   const secret = process.env.FERRUM_ADMIN_JWT_SECRET;
   const issuer = process.env.FERRUM_ADMIN_JWT_ISSUER ?? 'ferrum-edge';
   const namespace = process.env.FERRUM_NAMESPACE ?? 'nexus';
   const adminUrl = process.env.E2E_ADMIN_URL ?? 'http://127.0.0.1:9000';
-  if (!secret) throw new Error('FERRUM_ADMIN_JWT_SECRET is required to simulate the deletion');
+  if (!secret) throw new Error('FERRUM_ADMIN_JWT_SECRET is required for owner protocol acceptance');
 
   const encode = (value: object): string =>
     Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -1795,10 +2035,20 @@ async function deleteProxyOnGateway(proxyId: string): Promise<void> {
   })}`;
   const token = `${body}.${createHmac('sha256', secret).update(body).digest('base64url')}`;
 
-  const response = await fetch(`${adminUrl}/proxies/${encodeURIComponent(proxyId)}`, {
-    method: 'DELETE',
-    headers: { authorization: `Bearer ${token}`, 'X-Ferrum-Namespace': namespace },
+  return fetch(`${adminUrl}${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${token}`,
+      'X-Ferrum-Namespace': namespace,
+      ...(document === undefined ? {} : { 'content-type': 'application/json' }),
+      ...headers,
+    },
+    ...(document === undefined ? {} : { body: JSON.stringify(document) }),
   });
+}
+
+async function deleteProxyOnGateway(proxyId: string): Promise<void> {
+  const response = await gatewayAdmin('DELETE', `/proxies/${encodeURIComponent(proxyId)}`);
   if (response.status >= 400 && response.status !== 404) {
     throw new Error(`Deleting proxy ${proxyId} answered ${response.status}`);
   }

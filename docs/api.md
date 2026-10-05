@@ -328,7 +328,7 @@ unknown, CP-only, default-both and allow-overlay cases refuse with bounded opaqu
 `EDGE_ERROR` / `EDGE_PROTOCOL_ERROR` / `EDGE_UNAVAILABLE` diagnostics. Health's
 cache/coalescing still bounds public probe load. The supported CP/public-profile
 owner decision and exact-head packaged qualification remain pending. Published
-v0.9.11 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
+v0.9.12 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
 
 Whole-consumer metadata replacements pair complete server-only verification with
 the original strong row `If-Match`, using Edge's masked projection and hidden-type
@@ -2524,11 +2524,12 @@ existence, or an incomplete original-id staging proxy, never counts as restored.
 Audit rows: `api.gateway_restore_start` (before the first gateway call; if it
 fails, nothing is built), `api.gateway_restore` with the new proxy id, and on
 failure `api.gateway_restore_failed` (with `stranded_proxy_id` when the cleanup
-is unavailable). Failed missing-deployment cleanup refuses destructive deletion,
-retains its attempted identity and security configs, and records `withdrawn: false`
-with `repair_required`. Conversion recovery retains live partial resources and its
-encrypted journal until operator reconciliation or a supported atomic removal
-capability becomes available.
+is unconfirmed). Selected cleanup/replacement requires the released Edge v0.9.12
+original deployment authority and explicit committed/applied cleanup acknowledgement.
+Uncertain/refused results retain the attempted identity, security configs and
+encrypted journal with `withdrawn: false` and `repair_required`; no refreshed-token
+retry or unconditional fallback is performed. See the
+[released protocol and bounded replay limits](edge-conversion-recovery-blocker.md).
 
 ### `POST /api/apis/:id/test-consumer`
 

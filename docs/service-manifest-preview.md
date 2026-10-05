@@ -3,9 +3,9 @@
 Nexus [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519) implements its
 consumer portion of [Alloy #27](https://github.com/ferrum-edge/ferrum-alloy/issues/27).
 The Nexus preview remains Unreleased. Its shared v1 contract is now
-EXISTING/implemented in published `contracts-edge-0.9.11`, commit
-`390edbd5b2485af0988e02f7827fde778d76ae0a` in
-[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts/tree/390edbd5b2485af0988e02f7827fde778d76ae0a).
+EXISTING/implemented in published `contracts-edge-0.9.12`, commit
+`31f0a21d707795be293d15837c2f77c3d84219d8` in
+[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts/tree/31f0a21d707795be293d15837c2f77c3d84219d8).
 [`SERVICE-MANIFEST-PIN`](../contracts/ferrum-contracts/SERVICE-MANIFEST-PIN) records
 SHA-256 for the schema, every shared manifest fixture and shared expectations.
 The separate Edge vocabulary [`PIN`](../contracts/ferrum-contracts/PIN) adopts
@@ -66,4 +66,4 @@ Those passed jobs do not claim all CI checks at that commit are green. The final
 documentation and main-integration head still requires all fresh hosted gates,
 including `Supported Node minimum`, and root's final qualification. The declared
 Node 22.14 minimum remains unchanged. This candidate adopts the published Edge
-v0.9.11 default image; earlier acceptance does not qualify the new head.
+v0.9.12 default image; earlier acceptance does not qualify the new head.

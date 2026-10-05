@@ -121,8 +121,8 @@ require operator enforcement and requalification; a startup/sample success does 
 secure future fleet traffic. Current released documentation accepts CP pairings, so
 this proposed narrowing **cannot land until an explicit supported-profile owner
 decision** after exact-head review and hosted CI. Edge source authority is
-`c764084b3b51c3f7ffde268c039688d35e49c553` (`v0.9.11`); published-image qualification
-and released canonical pins remain a separate root finishing dependency. The draft
+`0d917701b63ef38210c49df830f48cf0457cbc7d` (`v0.9.12`); actual Edge and canonical releases are published and pinned.
+Exact-head consumer and packaged qualification remain root finishing gates. The draft
 GHSA-93rq-89vr-38pc is not declared fixed.
 
 ### Out of scope

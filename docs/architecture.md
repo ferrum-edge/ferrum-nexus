@@ -403,19 +403,22 @@ and replacement, including plugin binding and undo; service preflight precedes s
 destructive conversion and spec ACL enrollment. Conversion commits
 `repair_required`, the original owned proxy id, an intent audit and an encrypted
 recovery journal in `app_settings` before resource teardown. Deliberate restore
-takes both API and proxy leases, refuses initial conversion teardown, live spec
-replacement and destructive cleanup without the Edge #6010 owner fence, and validates
-the rebuilt path, configuration, plugins and spec before cutover and completion.
+takes both API and proxy leases and binds complete original deployment-v1 authority
+to conditional selected removal/replacement in released Edge v0.9.12. Explicit
+commit, applicable local application and recovery-cleanup authorization are required
+before dependent recovery. Uncertain writes retain the journal and block replay;
+no fresh-token retry or unconditional fallback is used. The rebuilt path,
+configuration, plugins and spec are validated before cutover and completion.
 The journal is removed only with catalog, ownership and completion audit in one
 fenced transaction. Successful rollback reconciles the catalog and journal together.
-See the [owner capability blocker](edge-conversion-recovery-blocker.md).
+See the [released protocol and remaining qualification](edge-conversion-recovery-blocker.md).
 Health caches observations only.
 The public profile requires namespace-matched local serving/public-only metadata and
 operator-established Admin/traffic singleton identity. Process evidence cannot attest
 CPs, remote DPs, load-balanced Admin endpoints or fleets. See the pending
 [supported-profile decision](operations.md#draft-backend-egress-adoption-pending-supported-profile-approval)
 and [unqualified packaged fixture](../e2e/public-only/README.md). Source authority is Edge
-`c764084b3b51c3f7ffde268c039688d35e49c553`. The candidate now adopts its
+`0d917701b63ef38210c49df830f48cf0457cbc7d`. The candidate now adopts its
 [published image and canonical contracts](edge-0.9.11-adoption.md); hosted
 acceptance and public-only owner approval remain outstanding.
 
@@ -489,7 +492,7 @@ Plugin configs are closed key sets; a typo is a `400`. What Nexus sends:
 - **`cors`** — `{ allowed_origins, allow_credentials }` only. Edge's other CORS
   keys keep their native defaults; sending a key the provider cannot change
   would only freeze that default.
-- **`openapi_validator`** — **Nexus never writes one.** Edge refuses a
+- **`openapi_validator`** — **Nexus never creates one by hand.** Edge refuses a
   hand-built validator on a proxy with no attached API spec, so `routes`
   enforcement submits the _document_ and lets Edge generate the plugin (see
   [Spec-owned proxies](#spec-owned-proxies)).
@@ -1289,5 +1292,5 @@ unsupported schema keywords at startup. Validation precedes defaults; explicit n
 are never interpreted as omission. Local presentation/reference budgets further narrow
 accepted input. The configured Edge namespace is the authorization boundary for this
 single-namespace portal. The service returns an allow-listed redacted DTO from `shared/`
-and has no store, gateway, network or source-file reader dependency. The shared v1 format is EXISTING/implemented in published contracts-edge-0.9.11;
+and has no store, gateway, network or source-file reader dependency. The shared v1 format is EXISTING/implemented in published contracts-edge-0.9.12;
 Alloy remains unreleased. Preview cannot invoke publishing or install agent policy.
