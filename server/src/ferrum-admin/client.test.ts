@@ -373,7 +373,13 @@ describe('ferrum admin client', () => {
     for (const [index, labels] of labelMaps.entries()) {
       const proxyId = `replay-labels-${index}`;
       const proxy = await client.proxies.create(
-        { id: proxyId, listen_path: `/nexus/${proxyId}`, backend_host: 'example.com', labels },
+        {
+          id: proxyId,
+          listen_path: `/nexus/${proxyId}`,
+          backend_host: 'example.com',
+          backend_port: 80,
+          labels,
+        },
         'replay-actor',
         { preserveLabels: true },
       );
