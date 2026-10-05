@@ -10,6 +10,8 @@ on:
       - server/package.json
       - web/package.json
       - e2e/package.json
+      - .nvmrc
+      - .github/workflows/ci.yml
       - .github/workflows/dependency-locks.yml
   workflow_dispatch:
 
@@ -27,7 +29,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22.14.0'
+          node-version: '22.22.2'
           package-manager-cache: false
       - name: Record immutable inputs and generate locks without lifecycle scripts
         env:
@@ -37,8 +39,10 @@ jobs:
           git rev-parse HEAD > lock-artifacts/provenance/source-sha.txt
           sha256sum package.json shared/package.json server/package.json web/package.json \
             e2e/package.json package-lock.json e2e/package-lock.json \
-            .github/workflows/dependency-locks.yml > lock-artifacts/provenance/input.sha256
+            .nvmrc .github/workflows/ci.yml .github/workflows/dependency-locks.yml \
+            > lock-artifacts/provenance/input.sha256
           node --version > lock-artifacts/provenance/node-version.txt
+          test "$(cat lock-artifacts/provenance/node-version.txt)" = 'v22.22.2'
           npm --version > lock-artifacts/provenance/npm-version.txt
           printf '%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > lock-artifacts/provenance/run.txt
           # Keep the committed graphs as npm's resolution inputs. The fresh
@@ -115,6 +119,7 @@ jobs:
           }
           assert.equal(root.packages['node_modules/@vitest/coverage-v8']?.version, vitest);
           assert.equal(e2e.packages['node_modules/typescript']?.version, typescript);
+          const found = new Set();
           for (const lock of [root, e2e]) {
             for (const [path, pkg] of Object.entries(lock.packages)) {
               for (const [name, version] of Object.entries(versions)) {
@@ -124,10 +129,23 @@ jobs:
               if (vitestPackage && !vitestPackage.startsWith('istanbul-lib-')) {
                 assert.equal(pkg.version, vitest, path);
               }
-              if (path.endsWith('node_modules/jsdom')) assert.match(pkg.version, /^26\./);
-              if (path.endsWith('node_modules/undici')) assert.match(pkg.version, /^7\./);
+              if (path.endsWith('node_modules/jsdom')) {
+                found.add('jsdom');
+                assert.equal(pkg.version, '30.1.2', path);
+                assert.equal(pkg.engines.node, '^22.22.2 || ^24.15.0 || >=26.0.0', path);
+                assert.equal(pkg.integrity,
+                  'sha512-0FFE/jE1rppmVfUrJUgxqXjcwolZYIGtAgj1pTussMhNZxIxi7W/PvfWaMNroGi2B36X1IKHbexpZ9DhkoOPiQ==');
+              }
+              if (path.endsWith('node_modules/undici')) {
+                found.add('undici');
+                assert.equal(pkg.version, '8.11.2', path);
+                assert.equal(pkg.engines.node, '>=22.19.0', path);
+                assert.equal(pkg.integrity,
+                  'sha512-u4UB2/IrKdU6lFxumHmmo1a3fCQO5tzQllRorfoRS63txhrB7xTpSn1PftwC4qEHkOaqP95fCWW4lJzwErwzhQ==');
+              }
             }
           }
+          assert.deepEqual([...found].sort(), ['jsdom', 'undici']);
           JS
           git diff --check
           git diff --no-ext-diff -- package-lock.json e2e/package-lock.json > lock-artifacts/locks.diff

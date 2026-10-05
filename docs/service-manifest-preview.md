@@ -43,10 +43,10 @@ Its real Alloy producer golden came from source
 artifact `11305688717`. Root verified archive identity, hashes and actual producer
 sources. These are diagnostic-consumer qualification facts, not a manifest v1 freeze.
 
-Alloy #27 remains open. The cross-repository manifest contract remains PROPOSED
-pending this Nexus consumer's final qualification, the canonical tracking/freeze
-decision and root's tracking-issue update. Anvil's merge alone does not complete
-that work. No new release, image, tag or Edge API is introduced here.
+Nexus #519 is also qualified and merged, as recorded below. Alloy #27 remains open.
+The cross-repository manifest contract remains PROPOSED pending the canonical
+tracking/freeze decision and root's tracking-issue update. Neither consumer's merge
+freezes the contract. No new release, image, tag or Edge API is introduced here.
 
 ## Nexus qualification
 
@@ -58,7 +58,17 @@ absence of gateway writes. At `0c05113fdaa34bcce2c7ee5780191447359f105e`,
 passed with this endpoint and the vendored contract asset in the production image.
 The executed subset/store qualification and its limits are recorded in the
 [unreleased rollout](mcp-subsets-migration-draft.md#hosted-qualification-and-final-gate).
-Those passed jobs do not claim all CI checks at that commit are green. The final
-documentation and main-integration head still requires all fresh hosted gates,
-including `Supported Node minimum`, and root's final qualification. The declared
-Node 22.14 minimum and existing Edge v0.9.10 image digest remain unchanged.
+Those passed jobs do not claim all CI checks at that commit are green. Final PR #519
+head `77fdb767ec8ef04e88f13df9fb291bc77fbd0344` subsequently passed all 11 hosted
+checks across [CI 37221116488](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221116488)
+and [Verbatim quickstart 37221116610](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221116610),
+including all eight protected Actions contexts. Root completed whole and fresh independent
+reviews with zero unresolved threads before merging it as
+`559c350a5370335791cdc3082225dce6056cf547` on 2026-10-04 at 17:42:42 UTC.
+Main's Node 22.14 minimum and the existing Edge v0.9.10 image digest were retained.
+
+This higher-floor candidate integrates that qualified consumer without source or fixture
+edits. Its combined head still requires all fresh hosted gates and root and independent
+review under the separate [Node proposal](dependency-majors-449-higher-floor-draft.md#main-integration-and-current-gates).
+Owner approval remains pending; prior main qualification does not approve this profile
+or qualify the combined candidate.

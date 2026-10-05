@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Notification } from '@ferrum-nexus/shared';
 import { CREATED_AT } from '../../test/fixtures';
@@ -64,10 +64,16 @@ afterEach(() => {
 describe('notifications inbox', () => {
   it('paginates past the latest ten and opens an older unread notification', async () => {
     renderPage(<NotificationsPage />);
-    await screen.findByRole('button', { name: /Notification 1\b/ });
-    expect(screen.queryByRole('button', { name: /Notification 11\b/ })).not.toBeInTheDocument();
+    const first = await screen.findByRole('button', { name: 'Notification 1 Open' });
+    expect(first).toBeVisible();
+    expect(first).toHaveAccessibleDescription(/^Message 1 /);
+    expect(within(first).getByText('Notification 1')).toBeVisible();
+    expect(within(first).getByText('Message 1')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Notification 11 Open' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
-    const older = await screen.findByRole('button', { name: /Notification 11\b/ });
+    const older = await screen.findByRole('button', { name: 'Notification 11 Open' });
+    expect(older).toBeVisible();
+    expect(older).toHaveAccessibleDescription(/^Message 11 /);
     expect(notificationsApi.list).toHaveBeenLastCalledWith({ limit: 10, offset: 10 });
     expect(screen.getByText('11–12')).toBeInTheDocument();
     fireEvent.click(older);
@@ -79,9 +85,9 @@ describe('notifications inbox', () => {
 
   it('filters to unread notifications and resets to the first page', async () => {
     renderPage(<NotificationsPage />);
-    await screen.findByRole('button', { name: /Notification 1\b/ });
+    await screen.findByRole('button', { name: 'Notification 1 Open' });
     fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
-    await screen.findByRole('button', { name: /Notification 11\b/ });
+    await screen.findByRole('button', { name: 'Notification 11 Open' });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Unread only' }));
     await waitFor(() =>
       expect(notificationsApi.list).toHaveBeenLastCalledWith({
@@ -91,9 +97,9 @@ describe('notifications inbox', () => {
       }),
     );
     await waitFor(() =>
-      expect(screen.queryByRole('button', { name: /Notification 1\b/ })).not.toBeInTheDocument(),
+      expect(screen.queryByRole('button', { name: 'Notification 1 Open' })).not.toBeInTheDocument(),
     );
-    expect(screen.getByRole('button', { name: /Notification 11\b/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Notification 11 Open' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Next page' })).not.toBeInTheDocument();
   });
 
@@ -107,12 +113,35 @@ describe('notifications inbox', () => {
     );
     await screen.findByRole('button', { name: 'Notifications, 1 unread' });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Unread only' }));
-    const unread = await screen.findByRole('button', { name: /Notification 11\b/ });
+    const unread = await screen.findByRole('button', { name: 'Notification 11 Open' });
     fireEvent.click(unread);
     await waitFor(() => expect(screen.getByText('No unread notifications')).toBeInTheDocument());
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Notifications' })).toBeInTheDocument(),
     );
     expect(notificationsApi.markRead).toHaveBeenCalledWith({ ids: ['notification-11'] });
+  });
+
+  it('names an unlinked notification by its visible title and current action', async () => {
+    notifications = [
+      {
+        ...notifications[10]!,
+        title: 'Approval received',
+        body: 'Your request was approved.',
+        link: null,
+      },
+      { ...notifications[0]!, title: 'Earlier approval', link: null },
+    ];
+    renderPage(<NotificationsPage />);
+    const unread = await screen.findByRole('button', { name: 'Approval received Mark read' });
+    expect(unread).toBeVisible();
+    expect(unread).toHaveAccessibleDescription(/^Your request was approved\. /);
+    expect(within(unread).getByText('Approval received')).toBeVisible();
+    expect(within(unread).getByText('Mark read')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Earlier approval Read' })).toBeVisible();
+    fireEvent.click(unread);
+    expect(await screen.findByRole('button', { name: 'Approval received Read' })).toBeVisible();
+    expect(notificationsApi.markRead).toHaveBeenCalledWith({ ids: ['notification-11'] });
+    expect(navigate).not.toHaveBeenCalled();
   });
 });

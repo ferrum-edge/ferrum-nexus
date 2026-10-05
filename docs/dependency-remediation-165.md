@@ -39,11 +39,16 @@ Its [10.0.0 migration](https://github.com/nodemailer/nodemailer/releases/tag/v10
 TypeScript, dual ESM/CommonJS builds and bundled declarations. This bounded remediation stays
 on the patched 9.x API with external types; it does not require that migration.
 
-The project now requires Node `>=22.14`, with `.nvmrc` and the hosted minimum job at 22.14.
+That remediation established Node `>=22.14`, with `.nvmrc` and the hosted minimum job at 22.14.
 This is an explicit increase from 22.12 for SQLite's Node-API 10 binding, not a requirement
 of the static or SMTP updates. The current Node 22 and 24 jobs remain. Existing locked glob
 dependencies (minimatch 10.2.6, minipass 7.1.3, path-scurry 2.0.2) satisfy glob 13.0.6.
 Hosted checks include `npm ci`, typecheck, tests, formatting and build.
+
+These are historical remediation facts, including the SQLite minimum in the companion JSON.
+The current unreleased jsdom 30 / Undici 8 candidate proposes higher per-major minima, without
+approval to change the released profile; see the
+[draft notes](dependency-majors-449-higher-floor-draft.md).
 
 ## SQLite native compatibility discovered by Node 24 CI
 
@@ -106,9 +111,11 @@ rollback, retained statements, explicit close and natural exit with an open data
 They require successful process exit as well as completed assertions, so a destructor abort
 after the assertions still fails CI. The unchanged Node 24 suite remains the original
 reproducer, and the hosted four-adapter contracts and Docker checks run on every pull request.
-They are **required**: the `main` ruleset ("Main required checks") pins `checks (22.14.0)`,
-`checks (22)`, `checks (24)`, `store-contracts` and `docker`, with no bypass actors, so a failing
-or missing job blocks every merge (see issue #181).
+The original remediation required `checks (22.14.0)`, `checks (22)`, `checks (24)`,
+`store-contracts` and `docker` (see issue #181). PR #520 subsequently replaced the required
+version-specific minimum context with `Supported Node minimum`; the actual minimum still
+runs in the matrix. The draft updates that matrix and its declaration assertions together,
+and does not change repository rulesets or other required gates.
 
 ## Published advisory coverage and Nexus reachability
 

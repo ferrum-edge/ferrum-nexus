@@ -735,6 +735,8 @@ function buildDispatcher(config: EdgeConfig): Dispatcher {
     }
   }
   return new Agent({
+    // Undici 8 enables HTTP/2 by default; retain the released H1 pooling/retry contract.
+    allowH2: false,
     connect: {
       timeout: config.timeoutMs,
       ...(isHttps && ca ? { ca } : {}),
