@@ -326,7 +326,11 @@ async function systemLoopbackLookup(host: string): Promise<ResolvedAddress[]> {
  * `NEXUS_OIDC_ALLOW_PRIVATE_ADDRESSES`.
  */
 function createOidcTransport(lookup: LookupFunction | null): OidcFetch {
-  const dispatcher = new Agent({ connect: lookup === null ? {} : { lookup } });
+  const dispatcher = new Agent({
+    // Keep the released transport protocol and connection-time DNS vetting together.
+    allowH2: false,
+    connect: lookup === null ? {} : { lookup },
+  });
   return async (input, init) => {
     // Every caller passes a method, a header record and a string body.
     const request: UndiciRequestInit = {

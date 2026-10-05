@@ -32,10 +32,12 @@ jobs:
 
   checks:
     runs-on: ubuntu-latest
+    env:
+      npm_config_engine_strict: 'true'
     strategy:
       fail-fast: false
       matrix:
-        node: ['22.14.0', '22', '24']
+        node: ['22.22.2', '22', '24.15.0', '24', '26.0.0', '26']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Require digests for container images
@@ -44,6 +46,17 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - name: Verify the actual Node qualification version
+        env:
+          EXPECTED_NODE: ${{ matrix.node }}
+        run: |
+          actual_node=$(node -p 'process.versions.node')
+          case "$EXPECTED_NODE" in
+            22|24|26) [[ "$actual_node" == "$EXPECTED_NODE".* ]] ;;
+            *) [ "$actual_node" = "$EXPECTED_NODE" ] ;;
+          esac
+          printf 'Qualification runtime: Node `%s` (matrix `%s`).\n' \
+            "$actual_node" "$EXPECTED_NODE" >> "$GITHUB_STEP_SUMMARY"
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
@@ -56,8 +69,8 @@ jobs:
           fi
       - run: npm run build
 
-  # Stage 1 of #449: preserve the supported floor and existing check contexts.
-  # An owner-approved floor change must update the declarations, matrix and assertions together.
+  # Draft stage 2 of #449: qualify every proposed minimum and current major.
+  # This candidate does not approve a released support-profile change.
   supported-node-minimum:
     name: Supported Node minimum
     needs: checks
@@ -89,21 +102,29 @@ jobs:
           checks_matrix=$(sed -n '/^  checks:$/,/^    steps:$/p' .github/workflows/ci.yml \
             | sed -n '/^      matrix:$/,$p')
           expected_matrix=$(printf '%s\n' '      matrix:' \
-            "        node: ['22.14.0', '22', '24']" '    steps:')
-          if [ "$declared_range" != '>=22.14' ] || [ "$declared_nvm" != '22.14' ] \
+            "        node: ['22.22.2', '22', '24.15.0', '24', '26.0.0', '26']" '    steps:')
+          if [ "$declared_range" != '^22.22.2 || ^24.15.0 || >=26.0.0' ] \
+            || [ "$declared_nvm" != '22.22.2' ] \
             || [ "$checks_matrix" != "$expected_matrix" ]; then
             echo 'Minimum qualification: unverified declaration/matrix alignment.' \
               >> "$GITHUB_STEP_SUMMARY"
             echo '::error::Update the minimum declarations, checks matrix and gate together.'
             exit 1
           fi
+          for manifest in shared/package.json server/package.json web/package.json e2e/package.json; do
+            workspace_range=$(jq -er '.engines.node | select(type == "string")' "$manifest")
+            if [ "$workspace_range" != "$declared_range" ]; then
+              echo "::error::$manifest must declare the same candidate Node range."
+              exit 1
+            fi
+          done
 
           if [ "$CHECKS_RESULT" != 'success' ]; then
-            echo 'Node 22.14.0 minimum qualification: not successful.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Node 22.22.2 minimum qualification: not successful.' >> "$GITHUB_STEP_SUMMARY"
             echo '::error::The complete checks matrix must succeed to qualify the Node minimum.'
             exit 1
           fi
-          echo 'Node 22.14.0 minimum qualified by the successful checks matrix (22.14.0, 22, 24).' \
+          echo 'Candidate minima qualified by the successful checks matrix (22.22.2, 22, 24.15.0, 24, 26.0.0, 26).' \
             >> "$GITHUB_STEP_SUMMARY"
 
   # Non-blocking: coverage is reported for visibility, not enforced as a gate.

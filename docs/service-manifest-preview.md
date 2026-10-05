@@ -62,8 +62,24 @@ absence of gateway writes. At `0c05113fdaa34bcce2c7ee5780191447359f105e`,
 passed with this endpoint and the vendored contract asset in the production image.
 The executed subset/store qualification and its limits are recorded in the
 [unreleased rollout](mcp-subsets-migration-draft.md#hosted-qualification-and-final-gate).
-Those passed jobs do not claim all CI checks at that commit are green. The final
-documentation and main-integration head still requires all fresh hosted gates,
-including `Supported Node minimum`, and root's final qualification. The declared
-Node 22.14 minimum remains unchanged. This candidate adopts the published Edge
-v0.9.12 default image; earlier acceptance does not qualify the new head.
+Those passed jobs do not claim all CI checks at that commit are green. Final PR #519
+head `77fdb767ec8ef04e88f13df9fb291bc77fbd0344` subsequently passed all 11 hosted
+checks across [CI 37221116488](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221116488)
+and [Verbatim quickstart 37221116610](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221116610),
+including all eight protected Actions contexts. Root completed whole and fresh independent
+reviews with zero unresolved threads before merging it as
+`559c350a5370335791cdc3082225dce6056cf547` on 2026-10-04 at 17:42:42 UTC.
+At that historical qualification, Node 22.14 and the Edge v0.9.10 image digest were retained.
+
+Main subsequently adopted the owner-approved jsdom 30 / Undici 8 upgrade in PR #521,
+with supported Node range `^22.22.2 || ^24.15.0 || >=26.0.0`. Its reviewed head
+`a559d30db4530987e91176a5cd191c646750594b` passed all 15 hosted checks and fresh
+independent review before the protected squash merge at
+`f357a37cd0bee81faa0f14ea26e6e38a17cf3152`. The Node owner decision is approved;
+published older releases retain their historical floors until a new release ships.
+
+This deployment-adoption candidate integrates that qualified main and selects published
+Edge v0.9.12 and the published shared canonical contract. Earlier consumer qualification
+does not qualify the changed source, pins or combined head. All fresh hosted gates,
+including `Supported Node minimum`, full root review and fresh independent review remain
+required. The separate CP/public-only deployment-profile decision is still pending.

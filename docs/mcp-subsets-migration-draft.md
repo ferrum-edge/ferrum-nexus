@@ -3,8 +3,10 @@
 Nexus [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519) implements the
 optional tool subsets tracked by [#446](https://github.com/ferrum-edge/ferrum-nexus/issues/446).
 Root accepted the provider opt-in, exposure-identity tradeoff and writer-drain plan
-below. The implementation remains Unreleased. It uses the existing digest-pinned
-Edge v0.9.10 policy contract and keeps the declared Node 22.14 minimum.
+below. The implementation is qualified and merged but remains Unreleased. It uses the
+existing digest-pinned Edge v0.9.10 policy contract. Main retains Node 22.14; this higher-floor
+candidate integrates that implementation under the separate, owner-pending
+[Node proposal](dependency-majors-449-higher-floor-draft.md).
 
 ## Enrollment and rollout
 
@@ -110,14 +112,21 @@ The following executed evidence applies to code commit
   exposure-ID rotation, explicit-empty versus omitted/null coverage and checks that
   changed or re-enabled exposure cannot revive old IDs.
 
-These passed jobs do not establish that every `0c05113` CI check passed. The active
-branch ruleset requires fresh results for these eight contexts on the final documentation
-and main-integration head: `Supported Node minimum`, `checks (22)`, `checks (24)`,
-`store-contracts`, `docker`, `acceptance`, `quickstart-config` and `action-pins`. The
-`checks (22.14.0)` matrix job remains an explicit Node 22.14.0 minimum-version check, but
-is not a separate required context in that ruleset. The `Supported Node minimum` gate was
-integrated from main commit `48ea760098d1aa858dc7cee06bf7f8fb7536cdaf`
-([#520](https://github.com/ferrum-edge/ferrum-nexus/pull/520)). Root's final qualification
-requires fresh results for all reported hosted checks, including `checks (22.14.0)`,
-coverage and quickstart. No repository code, formatter, build or test was executed locally
-for this documentation and integration update.
+These passed jobs do not establish that every `0c05113` CI check passed. Final PR #519
+head `77fdb767ec8ef04e88f13df9fb291bc77fbd0344` subsequently passed all 11 hosted
+checks across [CI 37221116488](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221116488)
+and [Verbatim quickstart 37221116610](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221116610).
+That includes all eight protected Actions contexts: `Supported Node minimum`, `checks (22)`,
+`checks (24)`, `store-contracts`, `docker`, `acceptance`, `quickstart-config` and `action-pins`,
+plus the exact `checks (22.14.0)` minimum, coverage and quickstart. Root completed whole and
+fresh independent reviews with zero unresolved threads. The PR merged at
+`559c350a5370335791cdc3082225dce6056cf547` on 2026-10-04 at 17:42:42 UTC; #446
+closed at 17:42:43 UTC. This completes main's implementation and qualification, not a release.
+
+The higher-floor candidate integrates that immutable main commit with a normal merge,
+preserving its MCP source and fixtures. The combined head requires fresh hosted results and root and
+independent review; neither parent's results qualify it. Its six proposed minimum/current
+Node lanes and unchanged eight protected contexts are documented in the
+[integration record](dependency-majors-449-higher-floor-draft.md#main-integration-and-current-gates).
+Owner approval to change the released Node profile remains pending. No repository code,
+installer, formatter, build or test was executed locally for this integration.

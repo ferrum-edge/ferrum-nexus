@@ -99,6 +99,8 @@ export function NotificationsPage(): ReactElement {
                 <li key={notification.id} className="border-b border-border last:border-b-0">
                   <button
                     type="button"
+                    aria-labelledby={`notification-title-${notification.id} notification-action-${notification.id}`}
+                    aria-describedby={`notification-body-${notification.id} notification-time-${notification.id}`}
                     disabled={markRead.isPending}
                     onClick={() => openNotification(notification)}
                     className={cn(
@@ -120,6 +122,7 @@ export function NotificationsPage(): ReactElement {
                     />
                     <span className="min-w-0 flex-1">
                       <span
+                        id={`notification-title-${notification.id}`}
                         className={cn(
                           'block text-sm',
                           isUnread ? 'font-semibold text-fg' : 'font-medium text-fg-muted',
@@ -127,14 +130,23 @@ export function NotificationsPage(): ReactElement {
                       >
                         {notification.title}
                       </span>
-                      <span className="mt-1 block text-sm leading-relaxed text-fg-muted">
+                      <span
+                        id={`notification-body-${notification.id}`}
+                        className="mt-1 block text-sm leading-relaxed text-fg-muted"
+                      >
                         {notification.body}
                       </span>
-                      <span className="mt-2 block text-xs text-fg-subtle">
+                      <span
+                        id={`notification-time-${notification.id}`}
+                        className="mt-2 block text-xs text-fg-subtle"
+                      >
                         {formatRelative(notification.created_at)}
                       </span>
                     </span>
-                    <span className="shrink-0 text-xs font-medium text-accent-text">
+                    <span
+                      id={`notification-action-${notification.id}`}
+                      className="shrink-0 text-xs font-medium text-accent-text"
+                    >
                       {notification.link ? 'Open' : isUnread ? 'Mark read' : 'Read'}
                     </span>
                   </button>
