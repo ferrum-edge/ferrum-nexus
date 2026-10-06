@@ -226,8 +226,8 @@ function MoreAgentTools({
     return (
       <div className="flex flex-col gap-3 border-t border-border pt-4">
         <FormNotice tone="info">
-          Your request for more agent tools is awaiting review (submitted {submitted}). Your
-          current access is unchanged meanwhile.
+          Your request for more agent tools is awaiting review (submitted {submitted}). Your current
+          access is unchanged meanwhile.
         </FormNotice>
         <AgentGrantSummary
           agents={agents}

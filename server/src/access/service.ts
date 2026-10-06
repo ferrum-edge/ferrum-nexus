@@ -636,13 +636,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       decision_note: 'The grant this request would extend is no longer active',
     });
     if (!closed) return;
-    await audit.forStore(tx).record(
-      { id: actor.id, role: actor.role },
-      AuditAction.ACCESS_CANCEL,
-      { type: 'access_request', id: pending.id },
-      { api_id: grant.api_id, grant_id: grant.id, reason: 'grant_inactive' },
-      ip,
-    );
+    await audit
+      .forStore(tx)
+      .record(
+        { id: actor.id, role: actor.role },
+        AuditAction.ACCESS_CANCEL,
+        { type: 'access_request', id: pending.id },
+        { api_id: grant.api_id, grant_id: grant.id, reason: 'grant_inactive' },
+        ip,
+      );
   }
 
   /**
@@ -2172,21 +2174,19 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           decision_note: note ?? null,
         });
         if (!moved) return null;
-        await audit
-          .forStore(tx)
-          .record(
-            { id: actor.id, role: actor.role },
-            AuditAction.ACCESS_DENY,
-            { type: 'access_request', id: request.id },
-            {
-              api_id: api.id,
-              api_slug: api.slug,
-              user_id: requester.id,
-              has_note: note !== null,
-              ...(request.grant_id ? { grant_id: request.grant_id } : {}),
-            },
-            ip,
-          );
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.ACCESS_DENY,
+          { type: 'access_request', id: request.id },
+          {
+            api_id: api.id,
+            api_slug: api.slug,
+            user_id: requester.id,
+            has_note: note !== null,
+            ...(request.grant_id ? { grant_id: request.grant_id } : {}),
+          },
+          ip,
+        );
         return moved;
       });
       if (!updated) throw await decisionConflict(request.id);

@@ -2833,10 +2833,10 @@ Asks for more MCP tools on an active explicit-subset grant (one whose
 the usual recovery after a tool's definition changed or it was renamed, which
 drops it from explicit subsets. Body (no other keys):
 
-| Field             | Type                                                                       |
-| ----------------- | -------------------------------------------------------------------------- |
-| `requested_tools` | 1–256 unique, currently published `AgentTool.id` UUIDs the grant lacks     |
-| `justification`   | 1–2000 chars                                                               |
+| Field             | Type                                                                   |
+| ----------------- | ---------------------------------------------------------------------- |
+| `requested_tools` | 1–256 unique, currently published `AgentTool.id` UUIDs the grant lacks |
+| `justification`   | 1–2000 chars                                                           |
 
 The result is an ordinary pending access request for the grant's identity, with
 `grant_id` set to the grant and `requested_tools` listing only the tools to add.
