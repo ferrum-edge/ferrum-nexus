@@ -7,6 +7,7 @@ import {
   MAX_AGENT_DESCRIPTION_LENGTH,
   MAX_AGENT_TOOLS,
   MAX_OPENAPI_REF_HOPS,
+  MAX_SPEC_BYTES,
   OPENAPI_OPERATION_METHODS,
   mcpAllGroupForApi,
   mcpToolGroupForApi,
@@ -147,103 +148,310 @@ function toolDefinition(
 const REBASING_KEYWORDS = ['$id', '$dynamicRef', '$recursiveRef'];
 
 /**
- * Canonical JSON with sorted keys, in which every local `$ref` is replaced by
- * the digest of what it names. Each target is digested once per call, so a
- * document that references one schema many times costs its size, not the
- * size of the expansion. A reference back into a target still being digested
- * stands for itself; its content is already part of that enclosing target.
- * Anything Nexus cannot resolve from the document root (an external or
- * anchor reference, a dangling pointer, a rebased or dynamic reference) is
- * reported through `unresolved`.
+ * Hash input, in characters, that resolving references may cost one build of
+ * tool hashes (every tool of one document) before it falls back to the whole
+ * document. A legitimate document resolves each target once, so it stays far
+ * below this; past it, references are amplifying the work.
  */
-function canonicalizer(document: Record<string, unknown>): {
-  canonical: (value: unknown) => string;
-  unresolved: () => boolean;
-} {
-  const digests = new Map<string, string>();
-  const active = new Set<string>();
-  let unresolved = false;
-  const target = (ref: string): string => {
-    if (ref !== '#' && !ref.startsWith('#/')) {
-      unresolved = true;
-      return JSON.stringify(ref);
-    }
-    const known = digests.get(ref);
-    if (known !== undefined) return known;
-    if (active.has(ref)) return JSON.stringify(`cycle:${ref}`);
-    const resolved = resolveOpenApiPointer(document, ref);
-    if (resolved === undefined) {
-      unresolved = true;
-      return JSON.stringify(`missing:${ref}`);
-    }
-    active.add(ref);
-    const digest = JSON.stringify(`sha256:${sha256(canonical(resolved))}`);
-    active.delete(ref);
-    digests.set(ref, digest);
-    return digest;
-  };
-  const canonical = (value: unknown): string => {
-    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-    if (!record(value)) return JSON.stringify(value ?? null);
-    if (REBASING_KEYWORDS.some((keyword) => Object.hasOwn(value, keyword))) unresolved = true;
-    const members = Object.keys(value)
+export const MAX_DEFINITION_HASH_WORK = 8 * MAX_SPEC_BYTES;
+
+/** Nesting, through values and references together, one tool hash may descend. */
+export const MAX_DEFINITION_HASH_DEPTH = 1_024;
+
+/** Work counters a test may pass, to assert what hashing cost without timing it. */
+export interface DefinitionHashStats {
+  /** Characters fed to SHA-256, the whole-document fallback included. */
+  hashed: number;
+  /** Local references looked up in the document. */
+  lookups: number;
+  /** Whether the build ran out of budget and hashed every tool by the whole document. */
+  overBudget: boolean;
+}
+
+/** Thrown when one build of tool hashes exceeds its work or depth budget. */
+class HashBudgetExceeded extends Error {}
+
+/** A reference target's digest, and whether anything beneath it was unresolvable. */
+interface TargetDigest {
+  text: string;
+  unresolved: boolean;
+}
+
+/** One digest computation: what it inherits from what it reached. */
+interface HashFrame {
+  unresolved: boolean;
+  /**
+   * Whether it reached a cycle. Such a digest depends on where the cycle was
+   * entered, so it is reused only within the tool that computed it.
+   */
+  cyclic: boolean;
+}
+
+/**
+ * A pointer's segments as {@link resolveOpenApiPointer} decodes them, so every
+ * spelling of one location is one key. Called only on a pointer that resolved.
+ */
+function pointerKey(ref: string): string {
+  if (ref === '#') return '[]';
+  const segments = ref
+    .slice(2)
+    .split('/')
+    .map((segment) => decodeURIComponent(segment).replace(/~1/g, '/').replace(/~0/g, '~'));
+  return JSON.stringify(segments);
+}
+
+/** Canonical JSON with sorted keys, streamed into `write`, with every `$ref` left as text. */
+function writeLiteral(value: unknown, write: (text: string) => void): void {
+  if (Array.isArray(value)) {
+    write('[');
+    value.forEach((item, index) => {
+      if (index > 0) write(',');
+      writeLiteral(item, write);
+    });
+    write(']');
+  } else if (record(value)) {
+    write('{');
+    Object.keys(value)
       .sort()
-      .map((key) => {
-        const child = value[key];
-        const text = key === '$ref' && typeof child === 'string' ? target(child) : canonical(child);
-        return `${JSON.stringify(key)}:${text}`;
+      .forEach((key, index) => {
+        write(`${index > 0 ? ',' : ''}${JSON.stringify(key)}:`);
+        writeLiteral(value[key], write);
       });
-    return `{${members.join(',')}}`;
-  };
-  return { canonical, unresolved: () => unresolved };
+    write('}');
+  } else {
+    write(JSON.stringify(value ?? null));
+  }
+}
+
+/** The SHA-256 of {@link writeLiteral}'s form of `value`. Linear in its size. */
+function literalDigest(value: unknown, stats: DefinitionHashStats): string {
+  const hash = createHash('sha256');
+  writeLiteral(value, (text) => {
+    stats.hashed += text.length;
+    hash.update(text);
+  });
+  return hash.digest('hex');
 }
 
 /**
- * Hashes the tools of one document. Path Items are resolved once, and the
- * whole-document digest below at most once, however many tools are hashed.
+ * Digests tool definitions of one document, every local `$ref` in them
+ * replaced by the reference string together with the digest of what it names.
+ *
+ * - **Memo by node.** A target is keyed by the object it resolves to (or, for
+ *   a scalar, its decoded location), so the many spellings of one pointer are
+ *   one entry. A digest that reached no cycle depends only on its content, and
+ *   is shared by every tool of the build. A reference back into a target
+ *   still being digested stands for itself, as its distance up the stack of
+ *   targets: its content is already part of that enclosing target. A digest
+ *   that reached one depends on where the cycle was entered, so it is reused
+ *   within its tool only. Either way a tool's hash never depends on which
+ *   other tools were hashed.
+ * - **Budget.** Every character hashed, across the build, is charged to
+ *   {@link MAX_DEFINITION_HASH_WORK}, and nesting to
+ *   {@link MAX_DEFINITION_HASH_DEPTH}. Past either, {@link HashBudgetExceeded}
+ *   abandons the build.
+ * - Anything Nexus cannot resolve from the document root (an external or
+ *   anchor reference, a dangling pointer, a rebased or dynamic reference) is
+ *   reported as `unresolved`.
  */
-function definitionHasher(document: Record<string, unknown>): (tool: AgentToolSelection) => string {
-  let paths: Record<string, unknown> | null = null;
+function resolvingDigester(
+  document: Record<string, unknown>,
+  stats: DefinitionHashStats,
+): (definition: Record<string, unknown>) => TargetDigest {
+  const shared = new Map<unknown, TargetDigest>();
+  let work = 0;
+  const spend = (count: number): void => {
+    stats.hashed += count;
+    work += count;
+    if (work > MAX_DEFINITION_HASH_WORK) throw new HashBudgetExceeded();
+  };
+  return (definition) => {
+    const local = new Map<unknown, TargetDigest>();
+    const active = new Map<object, number>();
+    let frame: HashFrame = { unresolved: false, cyclic: false };
+    let depth = 0;
+
+    const digest = (value: unknown): string => {
+      const hash = createHash('sha256');
+      emit(value, (text) => {
+        spend(text.length);
+        hash.update(text);
+      });
+      return hash.digest('hex');
+    };
+
+    const target = (ref: string): string => {
+      const quoted = JSON.stringify(ref);
+      if (ref !== '#' && !ref.startsWith('#/')) {
+        frame.unresolved = true;
+        return `[${quoted},"external"]`;
+      }
+      stats.lookups += 1;
+      const resolved = resolveOpenApiPointer(document, ref);
+      if (resolved === undefined) {
+        frame.unresolved = true;
+        return `[${quoted},"missing"]`;
+      }
+      const node = typeof resolved === 'object' && resolved !== null ? resolved : null;
+      const key = node ?? pointerKey(ref);
+      const index = node ? active.get(node) : undefined;
+      if (index !== undefined) {
+        frame.cyclic = true;
+        return `[${quoted},"cycle:${active.size - index}"]`;
+      }
+      const known = shared.get(key) ?? local.get(key);
+      if (known) {
+        frame.unresolved ||= known.unresolved;
+        // Only a digest that reached a cycle is kept for this tool alone.
+        frame.cyclic ||= !shared.has(key);
+        return `[${quoted},${known.text}]`;
+      }
+      const outer = frame;
+      frame = { unresolved: false, cyclic: false };
+      if (node) active.set(node, active.size);
+      const computed: TargetDigest = {
+        text: JSON.stringify(`sha256:${digest(resolved)}`),
+        unresolved: frame.unresolved,
+      };
+      if (node) active.delete(node);
+      (frame.cyclic ? local : shared).set(key, computed);
+      outer.unresolved ||= frame.unresolved;
+      outer.cyclic ||= frame.cyclic;
+      frame = outer;
+      return `[${quoted},${computed.text}]`;
+    };
+
+    const emit = (value: unknown, write: (text: string) => void): void => {
+      depth += 1;
+      if (depth > MAX_DEFINITION_HASH_DEPTH) throw new HashBudgetExceeded();
+      if (Array.isArray(value)) {
+        write('[');
+        value.forEach((item, index) => {
+          if (index > 0) write(',');
+          emit(item, write);
+        });
+        write(']');
+      } else if (record(value)) {
+        if (REBASING_KEYWORDS.some((keyword) => Object.hasOwn(value, keyword))) {
+          frame.unresolved = true;
+        }
+        write('{');
+        Object.keys(value)
+          .sort()
+          .forEach((key, index) => {
+            write(`${index > 0 ? ',' : ''}${JSON.stringify(key)}:`);
+            const child = value[key];
+            if (key === '$ref' && typeof child === 'string') write(target(child));
+            else emit(child, write);
+          });
+        write('}');
+      } else {
+        write(JSON.stringify(value ?? null));
+      }
+      depth -= 1;
+    };
+
+    const text = digest(definition);
+    return { text, unresolved: frame.unresolved };
+  };
+}
+
+/** The fields of a selection that name a tool, as hash input. */
+function selectionText(tool: AgentToolSelection): string {
+  return JSON.stringify([tool.method, tool.path, tool.name, tool.description]);
+}
+
+/**
+ * Unbound definition digests of `tools`, all in one `document`; see
+ * {@link agentToolDefinitionDigests}.
+ */
+function definitionDigests(
+  document: Record<string, unknown>,
+  tools: readonly AgentToolSelection[],
+  stats: DefinitionHashStats,
+): string[] {
+  // The whole document but `info`, hashed as text: its references are not
+  // followed, because every local target is already in it.
   let whole: string | null = null;
-  return (tool) => {
-    try {
-      paths ??= agentPathItems(document);
-      const { canonical, unresolved } = canonicalizer(document);
-      const definition = canonical(toolDefinition(document, paths, tool));
-      if (!unresolved()) return sha256(definition);
-      const { info: _info, ...rest } = document;
-      whole ??= sha256(canonicalizer(document).canonical(rest));
-      return sha256(`${definition}\n${whole}`);
-    } catch {
-      return sha256(`unreadable\n${JSON.stringify({ document, tool })}`);
-    }
+  const wholeDigest = (): string => {
+    const { info: _info, ...rest } = document;
+    return (whole ??= literalDigest(rest, stats));
   };
+  try {
+    const paths = agentPathItems(document);
+    const digester = resolvingDigester(document, stats);
+    return tools.map((tool) => {
+      const definition = digester(toolDefinition(document, paths, tool));
+      return definition.unresolved
+        ? sha256(`resolved\n${definition.text}\n${wholeDigest()}`)
+        : definition.text;
+    });
+  } catch (error) {
+    // Over budget, or not walkable at all (a Path Item that does not
+    // resolve): every tool of the build is its selection and the whole
+    // document, so the outcome never depends on which tool ran out.
+    if (error instanceof HashBudgetExceeded) stats.overBudget = true;
+    return tools.map((tool) => sha256(`document\n${selectionText(tool)}\n${wholeDigest()}`));
+  }
 }
 
 /**
- * The fingerprint of what Edge publishes for one selected tool, with every
- * local reference resolved: its name, method, path and description, the
- * operation's summary and description, its parameters, request body and 2xx
- * JSON schemas, and the document's OpenAPI version. When a reference cannot
- * be resolved from the document root, the whole document but `info` is
- * folded in instead of guessing what it names. A document that cannot be
- * walked at all yields a hash of all of it.
+ * The fingerprints of what Edge publishes for each of `tools` in `document`,
+ * with every local reference resolved: the name, method, path and
+ * description, the operation's summary and description, its parameters,
+ * request body and 2xx JSON schemas, and the document's OpenAPI version. Each
+ * `$ref` contributes its own text and the digest of its target, so changing
+ * either changes the hash.
+ *
+ * A tool falls back to the whole document but `info`, without following its
+ * references, instead of guessing what they name, when:
+ *
+ * - a reference it reaches is external (`other.yaml#/…`), an anchor
+ *   (`#name`), or a local pointer that names nothing; or a node it reaches has
+ *   a `$id`, `$dynamicRef` or `$recursiveRef` member, a property of that name
+ *   included. Its resolved definition is hashed with the whole document.
+ * - a Path Item does not resolve, or hashing every tool of the document would
+ *   pass {@link MAX_DEFINITION_HASH_WORK} or {@link MAX_DEFINITION_HASH_DEPTH}.
+ *   Then every tool of the call is its selection and the whole document.
+ *
+ * A `$ref: "#"` names the whole document, `info` included. A fallback only
+ * ever folds in more than Edge publishes, so it costs a re-approval and
+ * nothing else.
  */
+export function agentToolDefinitionDigests(
+  document: Record<string, unknown>,
+  tools: readonly AgentToolSelection[],
+  stats: DefinitionHashStats = { hashed: 0, lookups: 0, overBudget: false },
+): string[] {
+  return definitionDigests(document, tools, stats);
+}
+
+/** {@link agentToolDefinitionDigests} for one tool. */
 export function agentToolDefinitionHash(
   document: Record<string, unknown>,
   tool: AgentToolSelection,
 ): string {
-  return definitionHasher(document)(tool);
+  return agentToolDefinitionDigests(document, [tool])[0] as string;
+}
+
+/**
+ * The stored `definition_hash`: a definition digest bound to the id that
+ * consent was given under. A hash copied onto another id, as a release
+ * without hashes does when it mints a new one, never matches again.
+ */
+function boundDefinitionHash(id: string, digest: string): string {
+  return sha256(`${id}\n${digest}`);
 }
 
 /**
  * Ignore client-supplied IDs and hashes. A tool keeps its id only while it is
  * the same published tool: the same operation (method and path) under the
- * same name, with an unchanged {@link agentToolDefinitionHash}. Anything else,
- * a description edit included, is a new tool with a new id, so an explicit
- * subset never silently covers a changed definition. A stored tool saved
- * before hashes were recorded is hashed against `previousDocument`, the
- * revision it was published with.
+ * same name, with an unchanged definition digest
+ * ({@link agentToolDefinitionDigests}). Anything else, a description edit
+ * included, is a new tool with a new id, so an explicit subset never silently
+ * covers a changed definition. A stored tool saved before hashes were
+ * recorded is hashed against `previousDocument`, the revision it was
+ * published with.
  */
 export function identifyAgentTools(
   next: ApiAgents | null,
@@ -252,17 +460,30 @@ export function identifyAgentTools(
   previousDocument: Record<string, unknown> = document,
 ): ApiAgents | null {
   if (!next) return null;
-  const hash = definitionHasher(document);
-  const priorHash = definitionHasher(previousDocument);
+  const tools = next.operations.map(({ id: _id, definition_hash: _hash, ...tool }) => tool);
+  const digests = agentToolDefinitionDigests(document, tools);
+  const priors = tools.map((tool) =>
+    previous?.operations.find(
+      (item) => item.method === tool.method && item.path === tool.path && item.name === tool.name,
+    ),
+  );
+  const legacy = priors.filter(
+    (prior): prior is AgentTool => prior !== undefined && prior.definition_hash === undefined,
+  );
+  const legacyDigests = agentToolDefinitionDigests(previousDocument, legacy);
   return {
-    operations: next.operations.map(({ id: _id, definition_hash: _hash, ...tool }) => {
-      const definitionHash = hash(tool);
-      const prior = previous?.operations.find(
-        (item) => item.method === tool.method && item.path === tool.path && item.name === tool.name,
-      );
-      const recorded = prior && (prior.definition_hash ?? priorHash(prior));
-      const id = prior?.id && recorded === definitionHash ? prior.id : newId();
-      return { ...tool, id, definition_hash: definitionHash };
+    operations: tools.map((tool, index) => {
+      const digest = digests[index] as string;
+      const prior = priors[index];
+      const priorId = prior?.id;
+      const same =
+        prior !== undefined &&
+        priorId !== undefined &&
+        (prior.definition_hash === undefined
+          ? legacyDigests[legacy.indexOf(prior)] === digest
+          : prior.definition_hash === boundDefinitionHash(priorId, digest));
+      const id = same && priorId !== undefined ? priorId : newId();
+      return { ...tool, id, definition_hash: boundDefinitionHash(id, digest) };
     }),
   };
 }

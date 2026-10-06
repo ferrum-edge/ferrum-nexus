@@ -304,7 +304,7 @@ import {
   type UpstreamPolicy,
   type UpstreamResolver,
 } from './oas.js';
-import type { SpecChangeNotifier } from './spec-change-notices.js';
+import { agentToolsChangedText, oneLine, type SpecChangeNotifier } from './spec-change-notices.js';
 import { compareSpecRevisionsSafely } from './spec-changes.js';
 import { diffSpecDocuments } from './spec-diff.js';
 import {
@@ -2552,6 +2552,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           undo.push(step);
         };
         let updated: ApiRecord;
+        // Accounts whose explicit subsets lost a redefined tool, by the
+        // transaction attempt that committed.
+        let redefinedFor = new Map<Uuid, Set<string>>();
 
         try {
           if (patch.upstream_url !== undefined && patch.upstream_url.trim() !== '' && proxyId) {
@@ -3084,9 +3087,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               row = persisted;
             }
             if (recordOwnership) await tx.apiGatewayPlugins.replace(api.id, nextOwned);
-            if (agentsMoved) {
-              await pruneToolSubsets(tx, actor, api.id, api.agents ?? null, nextAgents, ip);
-            }
+            redefinedFor = agentsMoved
+              ? await pruneToolSubsets(tx, actor, api.id, api.agents ?? null, nextAgents, ip)
+              : new Map();
             await audit
               .forStore(tx)
               .record(
@@ -3266,6 +3269,23 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             `This API's portal-managed authentication now uses a ${CREDENTIAL_TYPE_FOR_PLUGIN[updated.auth_plugin]} credential (${updated.auth_plugin}). A gateway configuration outside the portal still accepts ${CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin]} credentials here for now, but issue one of the new kind from your credentials page to keep calling this API once it is removed.`,
             '/credentials',
           );
+        }
+
+        // A spec revision tells grantees through its change summary; an edit
+        // in the agent settings has none, so the accounts it took a tool from
+        // are told here. Best-effort: the edit has committed.
+        for (const [userId, tools] of redefinedFor) {
+          if (userId === actor.id) continue;
+          await notifications
+            .notify(
+              userId,
+              'system',
+              `${oneLine(updated.name)} changed its agent tools`,
+              `The provider edited the agent tool settings of ${oneLine(updated.name)}. ` +
+                agentToolsChangedText([...tools].sort()),
+              `/catalog/${encodeURIComponent(updated.slug)}`,
+            )
+            .catch(() => undefined);
         }
 
         return {
@@ -4339,6 +4359,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * Each grant gets one `access.tools_prune` row per reason: `definition_changed`
    * for a tool still published under the same binding with a new id,
    * `tool_removed` for one that was removed, renamed or disabled.
+   *
+   * Returns, per account, the names of the redefined tools that left its
+   * subsets, for the caller to tell it once the transaction commits.
    */
   async function pruneToolSubsets(
     tx: NexusStore,
@@ -4347,9 +4370,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     previous: ApiAgents | null,
     next: ApiAgents | null,
     ip: string | null,
-  ): Promise<void> {
+  ): Promise<Map<Uuid, Set<string>>> {
     const kept = new Set(next?.operations.map((tool) => tool.id) ?? []);
-    const changed = new Set(rotatedAgentTools(previous, next).map((tool) => tool.id));
+    const rotated = rotatedAgentTools(previous, next);
+    const changed = new Set(rotated.map((tool) => tool.id));
+    const redefined = new Map<Uuid, Set<string>>();
     for (const grant of await tx.grants.listActiveByApi(apiId)) {
       const removed = grant.approved_tools?.filter((id) => !kept.has(id)) ?? [];
       if (removed.length === 0) continue;
@@ -4372,8 +4397,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           },
           ip,
         );
+        if (reason !== 'definition_changed') continue;
+        const names = redefined.get(grant.user_id) ?? new Set<string>();
+        for (const tool of rotated) {
+          if (tool.id !== undefined && tools.includes(tool.id)) names.add(tool.name);
+        }
+        redefined.set(grant.user_id, names);
       }
     }
+    return redefined;
   }
 
   /** Build fixed agent policy from fresh resources under the caller's proxy lease. */

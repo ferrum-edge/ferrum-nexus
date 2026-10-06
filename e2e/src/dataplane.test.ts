@@ -890,8 +890,9 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     }
     const currentId = api.agents?.operations[0]?.id;
     assert.ok(currentId);
-    // Exposure ids follow the operation, not the document bytes, so a subset
-    // approved on the current exposure carries across a spec revision.
+    // Exposure ids follow the tool's definition hash, not the document bytes,
+    // so a subset approved on the current exposure carries across a revision
+    // that changes only info.version.
     const carried = await newClient();
     const carriedRequest = await portal<{ access_request: { id: string } }>(
       'POST',

@@ -125,6 +125,25 @@ function changeLine(change: SpecChange): string {
 }
 
 /**
+ * What a grantee is told about agent tools whose definition changed: an
+ * explicit tool approval is per definition, and an active grant cannot be
+ * widened, so getting a changed tool back takes a new access request, which
+ * the provider can approve only once the current grant is revoked.
+ */
+export function agentToolsChangedText(tools: readonly string[]): string {
+  // A tool name is provider-written, but limited to `A-Za-z0-9_.-`.
+  const shown = tools.slice(0, SPEC_CHANGE_NOTICE_NAMED).map(oneLine);
+  const rest = tools.length - shown.length;
+  const list = rest > 0 ? `${shown.join(', ')} and ${rest} more` : shown.join(', ');
+  const them = tools.length === 1 ? 'it' : 'them';
+  return (
+    `The definition of ${plural(tools.length, 'agent tool')} changed (${list}). An explicit ` +
+    `tool approval no longer covers ${them}. To use ${them} again, request access again: ` +
+    'ask the provider to revoke your current grant, then submit a new request.'
+  );
+}
+
+/**
  * What to tell grantees about one recorded change. Pure, and bounded by the
  * summary it reads: at most {@link SPEC_CHANGE_NOTICE_NAMED} changes are named,
  * each already cut to `MAX_SPEC_CHANGE_TEXT` per name.
@@ -165,17 +184,7 @@ export function summarizeSpecChange(apiName: string, entry: ApiSpecChangeEntry):
     if (parts.length > 0) sentences.push(`${parts.join(', ')}.`);
     sentences.push(`${plural(total, 'change')} in all, ${counts.breaking} breaking.`);
   }
-  if (tools.length > 0) {
-    // A tool name is provider-written, but limited to `A-Za-z0-9_.-`.
-    const shown = tools.slice(0, SPEC_CHANGE_NOTICE_NAMED).map(oneLine);
-    const rest = tools.length - shown.length;
-    const list = rest > 0 ? `${shown.join(', ')} and ${rest} more` : shown.join(', ');
-    const them = tools.length === 1 ? 'it' : 'them';
-    sentences.push(
-      `The definition of ${plural(tools.length, 'agent tool')} changed (${list}). An explicit ` +
-        `tool approval no longer covers ${them} until the provider approves ${them} again.`,
-    );
-  }
+  if (tools.length > 0) sentences.push(agentToolsChangedText(tools));
   if (!report.complete) {
     sentences.push('The comparison was incomplete, so this may not be everything.');
   }

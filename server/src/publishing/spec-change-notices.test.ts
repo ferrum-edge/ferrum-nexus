@@ -158,8 +158,9 @@ describe('spec change notices', () => {
     assert.equal(
       one.summary,
       'The definition of 1 agent tool changed (list_orders). An explicit tool approval no ' +
-        'longer covers it until the provider approves it again. This compares the structure ' +
-        'of the two documents, so a change it does not list can still affect you.',
+        'longer covers it. To use it again, request access again: ask the provider to revoke ' +
+        'your current grant, then submit a new request. This compares the structure of the ' +
+        'two documents, so a change it does not list can still affect you.',
     );
     const names = Array.from({ length: SPEC_CHANGE_NOTICE_NAMED + 2 }, (_, i) => `tool_${i}`);
     const many = summarizeSpecChange(
@@ -171,7 +172,7 @@ describe('spec change notices', () => {
       many.summary,
       new RegExp(`${names.length} agent tools changed \\(.*tool_0.* and 2 more\\)`),
     );
-    assert.match(many.summary, /covers them until the provider approves them again/);
+    assert.match(many.summary, /covers them\. To use them again, request access again: /);
   });
 
   it('says when the comparison was incomplete', () => {

@@ -260,12 +260,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **An explicit MCP tool approval never follows a changed tool definition** (Refs #519).
   Each selected tool stores a `definition_hash`, a SHA-256 over the reference-resolved
   definition Edge publishes for it: description, operation summary and description,
-  parameters, request body, 2xx JSON schemas and OpenAPI version. A spec revision,
+  parameters, request body, 2xx JSON schemas and OpenAPI version, with each `$ref`
+  hashed as its text and its target's digest, bound to the tool's id. Hashing is
+  bounded: targets are memoized by the node they resolve to and shared across a
+  document's tools, and a document past the hashing budget, like one with a reference
+  Nexus cannot resolve, folds in the whole document but `info` without following
+  references. A spec revision,
   rollback or agents edit that changes the hash, a description-only edit included, mints
   a new exposure id and drops the old one from every explicit subset in the same
   transaction, recording `access.tools_prune` with `reason: 'definition_changed'`.
   Holders keep REST access and their other tools; the revision's change summary and
-  grantee notice name the redefined tools (`agent_tools_changed`). This closes the tool
+  grantee notice name the redefined tools (`agent_tools_changed`), and an agents edit
+  notifies the affected subset holders in-app. This closes the tool
   poisoning path in which a revision rewrote an approved tool's schema or prompt text
   under an existing approval. Cosmetic description edits in agent settings no longer
   keep a tool's id. APIs saved before this change are compared against a hash computed

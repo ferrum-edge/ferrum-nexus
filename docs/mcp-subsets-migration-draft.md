@@ -56,8 +56,14 @@ with every local `$ref` resolved. That covers the tool name, method, path and Ne
 description, the operation's `summary` (Edge's tool title) and `description`, the
 path and operation parameters, the request body's `required`, `description` and JSON
 media schemas, the 2xx JSON response schemas (Edge's output schema), and the document's
-OpenAPI version, which decides how Edge normalizes those schemas. A non-local `$ref`
-anywhere in the definition folds in the whole document except `info`.
+OpenAPI version, which decides how Edge normalizes those schemas. Each `$ref`
+contributes its own text and its target's digest. A reference Nexus cannot resolve from
+the document root (external, anchor, dangling, or reaching a `$id`, `$dynamicRef` or
+`$recursiveRef` member) folds in the whole document except `info`, hashed as text; an
+unresolvable Path Item or a document whose references pass the hashing budget hashes
+every tool from its selection and that digest. See
+[agent-marketplace.md](agent-marketplace.md#optional-subsets-and-cross-repository-follow-up)
+for the exact cases.
 
 A tool keeps its ID across a spec revision, a rollback or an agents edit only while
 its method, path, name and hash are all unchanged. Whitespace, `info` edits, and
@@ -74,7 +80,10 @@ tool's definition also names it in the revision's change summary and in the gran
 notice. Null all-tools holders intentionally continue to receive published tools,
 changed ones included. APIs saved before definition hashes were stored compare
 against a hash computed from the current revision, so upgrading rotates nothing by
-itself.
+itself. The stored hash is bound to the tool's ID: a release without hashes copies the
+stored hash onto every ID it mints, and binding makes that copy never match, so a
+downgrade and re-upgrade cannot carry an approval onto a definition it was not given
+for.
 
 ## Consumer repair and revocation recovery
 

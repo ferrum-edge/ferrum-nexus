@@ -171,8 +171,22 @@ SHA-256 over the canonical, reference-resolved definition Edge publishes for it:
 method, path and Nexus description; the operation's `summary` (the tool title) and
 `description`; path and operation parameters; the request body's `required`,
 `description` and JSON schemas; the 2xx JSON response schemas (the output schema); and
-the document's OpenAPI version. A non-local `$ref` folds in the whole document except
-`info`. A spec revision, rollback or agents edit keeps a tool's ID only while its method,
+the document's OpenAPI version. Each `$ref` is hashed as its own text together with the
+digest of its target, so changing either changes the hash. The stored hash is bound to
+the tool's ID, so a hash copied onto another ID never matches.
+
+Some references are not followed. The whole document except `info`, hashed as text
+without following its references, is folded into a tool's hash when the definition
+reaches an external or anchor `$ref`, a local pointer that names nothing, or a `$id`,
+`$dynamicRef` or `$recursiveRef` member (a schema property of that name included). Every
+tool of the document is hashed from its selection and that whole-document digest
+instead when a Path Item does not resolve, or when resolving every selected tool's
+references would pass a fixed hashing budget (16 Mi characters of hash input across the
+document's tools, or 1,024 levels of nesting through values and references). A
+`$ref: "#"` names the whole document, `info` included. Each fallback only folds in more
+than Edge publishes, so it can cost a re-approval but never carries a changed tool.
+
+A spec revision, rollback or agents edit keeps a tool's ID only while its method,
 path, name and hash are unchanged, so explicit subsets carry across whitespace, `info`
 edits and changes to other operations or unreferenced components. Any change to the
 definition mints a new ID, including a description-only edit in the spec or in agent
@@ -184,7 +198,10 @@ The write that retires an ID drops it from every explicit subset in the same tra
 and records `access.tools_prune` per grant, with `reason` `definition_changed` or
 `tool_removed`. Those holders keep REST access and their remaining tools, and do not
 regain a tool if its old name or definition returns. A revision that changes a tool's
-definition names it in the change summary (`agent_tools_changed`) and the grantee notice.
+definition names it in the change summary (`agent_tools_changed`) and the grantee notice;
+an agents edit that redefines a tool sends the affected subset holders an in-app notice.
+Getting a changed tool back takes a new access request, which the provider can approve
+once the holder's current grant is revoked.
 Null grants retain their all-published-tools meaning, changed tools included. Revocation,
 deletion and bulk teardown remove both REST and MCP groups; re-enable rebuilds only
 active grants, preserving operator groups.

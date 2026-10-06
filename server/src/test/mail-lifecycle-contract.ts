@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createServer, type Socket } from 'node:net';
 import { after, before, describe, it } from 'node:test';
 
-import type { NexusStore, TransactionOptions } from '../db/store.js';
+import type { LeaseRepo, NexusStore, TransactionOptions } from '../db/store.js';
 import { createOutboxWorker, OUTBOX_SEND_BUDGET_MS } from '../email/outbox-worker.js';
 import { createSmtpTransport } from '../email/service.js';
 import { isoInSeconds, newId } from '../lib/ids.js';
@@ -396,8 +396,32 @@ export function runMailLifecycleContract(
       await other.tick();
       const queued = await mail(subject);
       let deadline: number | undefined;
+      // Signals the worker's first refused attempt at the account's lifecycle
+      // lease, which proves it is parked behind the holder below.
+      const lifecycleKey = userLifecycleLockKey(subject.user.id);
+      const refused = barrier();
+      const leases = new Proxy(peer.leases, {
+        get(target, property) {
+          if (property === 'acquire') {
+            return async (...args: Parameters<LeaseRepo['acquire']>): Promise<boolean> => {
+              const taken = await target.acquire(...args);
+              if (!taken && args[0] === lifecycleKey) refused.resolve();
+              return taken;
+            };
+          }
+          const value: unknown = Reflect.get(target, property);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const watched = new Proxy(peer, {
+        get(target, property) {
+          if (property === 'leases') return leases;
+          const value: unknown = Reflect.get(target, property);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
       const worker = createOutboxWorker({
-        store: peer,
+        store: watched,
         crypto: h.app.nexus.crypto,
         batchSize: 1,
         transportFactory: async () => ({
@@ -422,7 +446,15 @@ export function runMailLifecycleContract(
         await held.promise;
         const ticking = worker.tick();
         tick = ticking;
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        await Promise.race([
+          refused.promise,
+          ticking.then(() => {
+            throw new Error('the worker never waited on the lifecycle lease');
+          }),
+        ]);
+        // Margin only, so the release lands a clock tick after the refusal:
+        // the worker is already parked behind the lease.
+        await new Promise((resolve) => setTimeout(resolve, 5));
         unblock.resolve();
         await holding;
         assert.equal((await ticking).sent, 1);

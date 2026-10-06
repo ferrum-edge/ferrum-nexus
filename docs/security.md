@@ -890,13 +890,19 @@ definition: each tool stores a SHA-256 `definition_hash` over the canonical,
 reference-resolved definition Edge publishes (name, method, path and Nexus description;
 the operation's summary, which is the tool title, and description; parameters; the
 request body's `required`, `description` and JSON schemas; the 2xx JSON response
-schemas; the OpenAPI version). A non-local `$ref` folds in the whole document except
-`info`. A spec revision, rollback or agents edit keeps the ID only while the tool's
+schemas; the OpenAPI version), each `$ref` hashed as its own text and its target's
+digest, and the result bound to the tool's ID. A reference Nexus cannot resolve from the
+document root, an unresolvable Path Item, or a document whose references pass a fixed
+hashing budget folds in the whole document except `info`, hashed as text without
+following references, so hashing costs at most a bounded multiple of the document's size
+(cases in [agent-marketplace.md](agent-marketplace.md#optional-subsets-and-cross-repository-follow-up)).
+A spec revision, rollback or agents edit keeps the ID only while the tool's
 method, path, name and hash are unchanged. Any other change mints a new ID, including a
 description-only edit, since descriptions are prompt text an agent acts on (the tool
 poisoning, or rug-pull, pattern). The same transaction drops retired IDs from every
 explicit subset (`access.tools_prune`, `reason` `definition_changed` or `tool_removed`),
-and a revision names redefined tools in its change summary and grantee notice, so a
+and a revision names redefined tools in its change summary and grantee notice (an agents
+edit notifies the affected subset holders directly), so a
 consumer never runs a changed tool on an approval given for the old one. Providers must
 still explicitly select mutations. A spec build enrolls all-tools grantees that hold the
 REST group but not the MCP-all group, committing an `access.mcp_enroll` intent row before

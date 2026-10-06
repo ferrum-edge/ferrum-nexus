@@ -3021,8 +3021,8 @@ is granted in every case. Request rows return both subset fields; grants return
 
 Each tool carries a server-owned `definition_hash`, a SHA-256 of the
 reference-resolved definition Edge publishes for it (description, operation summary
-and description, parameters, request body, 2xx JSON schemas, OpenAPI version). A
-tool ID persists across spec revisions, rollbacks and agents edits only while its
+and description, parameters, request body, 2xx JSON schemas, OpenAPI version), bound
+to the tool's ID. A tool ID persists across spec revisions, rollbacks and agents edits only while its
 method, path, name and `definition_hash` are unchanged. Any definition change,
 description-only edits included, mints a new ID, as do rename, path/method changes,
 removing/re-adding exposure and disable/re-enable. The write that does so removes the

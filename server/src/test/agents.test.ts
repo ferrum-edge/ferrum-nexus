@@ -982,6 +982,61 @@ describe('agent publishing and Nexus authorization', () => {
     assert.equal(pruned.length, 1);
     assert.deepEqual(pruned[0]?.details.removed_tools, [f.listId]);
     assert.equal(pruned[0]?.details.reason, 'definition_changed');
+    // An agents edit has no change summary, so the holder is told directly.
+    const notices = await harness.store.notifications.list({
+      user_id: f.grantee.user.id,
+      type: 'system',
+    });
+    const told = notices.items.filter((notice) => /changed its agent tools/.test(notice.title));
+    assert.equal(told.length, 1);
+    assert.match(told[0]?.body ?? '', /1 agent tool changed \(list_items\)\./);
+    assert.match(told[0]?.body ?? '', /ask the provider to revoke your current grant/);
+  });
+
+  it('compares a tool stored without a hash against the revision it was published with', async () => {
+    const f = await subsetFixture();
+    /** Drop the stored hashes, as a release without them saved the selection. */
+    const forgetHashes = async (): Promise<void> => {
+      const operations = (await harness.store.apis.findById(f.api.id))?.agents?.operations ?? [];
+      await harness.store.apis.update(f.api.id, {
+        agents: { operations: operations.map(({ definition_hash: _hash, ...tool }) => tool) },
+      });
+    };
+    await forgetHashes();
+    const carried = await reviseDocument(f.api.id, {
+      ...DOCUMENT,
+      info: { ...DOCUMENT.info, version: '5' },
+    });
+    assert.equal(carried.statusCode, 200, carried.body);
+    const kept = (await harness.store.apis.findById(f.api.id))?.agents?.operations ?? [];
+    assert.deepEqual(
+      kept.map((tool) => tool.id),
+      [f.listId, f.removeId],
+    );
+    assert.ok(
+      kept.every((tool) => tool.definition_hash),
+      'the revision records the hashes',
+    );
+    assert.equal((await pruneRows(f.grant.id)).length, 0);
+
+    await forgetHashes();
+    const revised = await reviseDocument(
+      f.api.id,
+      withListOperation(
+        {
+          ...DOCUMENT.paths['/items'].get,
+          parameters: [{ name: 'scope', in: 'query', schema: { type: 'string' } }],
+        },
+        '6',
+      ),
+    );
+    assert.equal(revised.statusCode, 200, revised.body);
+    const current = (await harness.store.apis.findById(f.api.id))?.agents?.operations ?? [];
+    assert.notEqual(current.find((tool) => tool.name === 'list_items')?.id, f.listId);
+    assert.equal(current.find((tool) => tool.name === 'remove')?.id, f.removeId);
+    assert.deepEqual((await harness.store.grants.findById(f.grant.id))?.approved_tools, [
+      f.removeId,
+    ]);
   });
 
   /**
