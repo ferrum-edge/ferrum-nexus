@@ -1165,6 +1165,12 @@ export interface SpecChangeReport {
   truncated: boolean;
   /** The `info` fields that differ. Their values are not carried. */
   info_changes: SpecInfoChange['field'][];
+  /**
+   * Unqualified names of agent tools whose published definition changed, a
+   * description-only edit included. Each got a new exposure id, which left
+   * every explicit tool approval. Absent when no tool changed.
+   */
+  agent_tools_changed?: string[];
 }
 
 /** Whether a revision was an upload or the restoration of an earlier document. */

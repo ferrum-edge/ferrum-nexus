@@ -1105,12 +1105,18 @@ service ──enqueue──> email_outbox(pending) ──claim──> sending �
 - SMTP settings are read on **every** tick, so edits apply without a restart.
 - Account-bound enqueue and claim transactions write the recipient's internal
   `email_lifecycle_fence` while it still owns the address. Immediately before
-  SMTP, the worker takes the account lifecycle lease and commits that same
-  recipient write with a refresh of the sending generation. Address release
+  SMTP, the worker takes the account's mail-handoff lease, then the account
+  lifecycle lease just long enough to commit that same recipient write with a
+  refresh of the sending generation. The lifecycle lease is released before
+  SMTP, so a disable, sign-in or credential change never waits on a slow relay.
+  The SMTP send budget starts once the lifecycle lease is held, so waiting for
+  it never shortens the relay's time.
+  Address release takes the mail-handoff lease before the lifecycle lease and
   writes the account before scanning the outbox, so new inserts and handoffs
   cannot escape cancellation by reading an old committed address. The sender
-  holds the lease until SMTP settles or its connection is actually cancelled;
-  a timeout destroys the owned socket and MIME source before settling the row.
+  holds the mail-handoff lease until SMTP settles or its connection is actually
+  cancelled; a timeout destroys the owned socket and MIME source before
+  settling the row.
 - Messages rendered from the `verification` and `password_reset` templates
   carry a single-use link, so they are stored **sealed** (`email/sealed-outbox.ts`):
   one AES-256-GCM envelope bound to the row id and recipient, opened only by the

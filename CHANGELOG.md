@@ -118,6 +118,31 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **A disabled grantee no longer blocks a provider's agent-enabled API** (Refs #519).
+  Every spec build enrolled each all-tools grantee in the MCP-all group and refused
+  with `USER_DISABLED` when any grantee was disabled, so spec revisions, agent edits,
+  enforcement changes and restores all failed with an error that read as the
+  provider's own account. Builds now skip disabled grantees and consumers missing from
+  the gateway; grant rows stay for audit, and re-enable rebuilds the grantee's groups.
+  Consumers that already carry the group are not rewritten, and each enrollment commits
+  a new `access.mcp_enroll` intent audit row before its gateway write.
+
+- **Explicit MCP subsets survive spec revisions that leave their tools alone** (Refs #519).
+  Any spec change, even whitespace or a rollback, rotated every exposure id and silently
+  emptied each explicit subset. A tool now keeps its id while its method, path, name and
+  published definition are unchanged; see Security for the definition rule. An agents
+  edit that removes or renames a tool drops its id from every subset in the edit's
+  transaction and records `access.tools_prune` per grant.
+
+- **Disabling an account never waits for SMTP** (Refs #508). The outbox worker held the
+  recipient's lifecycle lease for the whole send (up to 60 s) while lease waiters give
+  up at 30 s, so an emergency disable during a slow relay could fail with `409`. The
+  lifecycle lease now covers only the transaction that authorizes the handoff; a new
+  per-account mail-handoff lease, taken only by the worker and by address release,
+  keeps release ordered behind an in-flight delivery. The 60 s send budget starts once
+  the lifecycle lease is held, so waiting for it never shortens the relay's time. Claim
+  fencing, at-most-once parking and the security-mail priority lane are unchanged.
+
 - **Verification and password-recovery mail take priority over queued campaigns**
   (#500, GHSA-rqrj-7g3f-c6ww phase 2). Every store claims due security mail at
   high priority, routine notifications at normal priority and new campaigns at
@@ -231,6 +256,32 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   falling back to the built-in default.
 
 ### Security
+
+- **An explicit MCP tool approval never follows a changed tool definition** (Refs #519).
+  Each selected tool stores a `definition_hash`, a SHA-256 over the reference-resolved
+  definition Edge publishes for it: description, operation summary and description,
+  parameters, request body, 2xx JSON schemas and OpenAPI version, with each `$ref`
+  hashed as its text and its target's digest, bound to the tool's id. Hashing is
+  bounded: selections are validated before anything is hashed, reading each Path Item
+  in place; one work meter per build, shared by its tools, is charged for every key,
+  array element and reference hop of the document read, before it is read, and for
+  every character hashed; nothing is copied out of the document; and each selected
+  Path Item, Request Body or Response reference, Content map and acyclic schema
+  reference target is read once per build. A document past the budget, like one with a
+  reference Nexus cannot resolve (a Request Body or Response chain that does not end at
+  an object included), folds in the whole document but `info` without following
+  references, and the fallback is recorded as `tool_hash_fallback` in the audit row
+  that commits the change. A spec revision,
+  rollback or agents edit that changes the hash, a description-only edit included, mints
+  a new exposure id and drops the old one from every explicit subset in the same
+  transaction, recording `access.tools_prune` with `reason: 'definition_changed'`.
+  Holders keep REST access and their other tools; the revision's change summary and
+  grantee notice name the redefined tools (`agent_tools_changed`), and an agents edit
+  notifies the affected subset holders in-app. This closes the tool
+  poisoning path in which a revision rewrote an approved tool's schema or prompt text
+  under an existing approval. Cosmetic description edits in agent settings no longer
+  keep a tool's id. APIs saved before this change are compared against a hash computed
+  from their current revision, so upgrading rotates nothing.
 
 - **The quickstart Edge service enforces public-only upstream egress by default**
   (GHSA-93rq-89vr-38pc, Part A). The gateway's connection-time address check

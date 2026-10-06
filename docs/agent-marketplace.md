@@ -166,13 +166,59 @@ ones; explicit `[]` means REST access only. Approval defaults to the requested s
 and may narrow it, never broaden it. Only currently published IDs can be requested or
 approved. Request and approval admission share the publishing proxy lease.
 
-IDs survive cosmetic descriptions and unchanged republishing. Rename, method/path changes,
-removing and re-adding exposure, or disabling and re-enabling agents mint new IDs. Any
-changed uploaded spec conservatively rotates all IDs, including a spec rollback, because
-references or schemas can change callable semantics. Existing explicit subsets then fail
-closed and do not regain tools if old names return. REST access remains. Null grants
-retain their all-published-tools meaning. Revocation, deletion and bulk teardown remove
-both REST and MCP groups; re-enable rebuilds only active grants, preserving operator groups.
+An ID names one published tool definition. Each tool stores a `definition_hash`, a
+SHA-256 over the canonical, reference-resolved definition Edge publishes for it: name,
+method, path and Nexus description; the operation's `summary` (the tool title) and
+`description`; path and operation parameters; the request body's `required`,
+`description` and JSON schemas; the 2xx JSON response schemas (the output schema); and
+the document's OpenAPI version. Each `$ref` is hashed as its own text together with the
+digest of its target, so changing either changes the hash. The stored hash is bound to
+the tool's ID, so a hash copied onto another ID never matches.
+
+Some references are not followed. The whole document except `info`, hashed as text
+without following its references, is folded into a tool's hash when the definition
+reaches an external or anchor `$ref`, a local pointer that names nothing, or a `$id`,
+`$dynamicRef` or `$recursiveRef` member (a schema property of that name included), or
+when its Request Body or a 2xx Response is a reference chain that does not end at an
+object within 32 acyclic local hops. Every tool of the document is hashed from its
+selection and that whole-document digest instead when a selected Path Item does not
+resolve, or when reading and hashing every selected tool would pass a fixed work
+budget: 16 Mi units across the document's tools, or 1,024 levels of nesting through
+values and references. One meter per build is charged a unit for every member of a
+document collection read (each Path Item, Request Body and Response reference hop,
+each key of a Responses or Content map, and each key and array element of the
+parameters, schemas and examples hashed) before it is read, plus every key and pointer
+before it is parsed and every character as it is hashed. Nothing is copied out of the
+document, and each selected Path Item, Request Body or Response reference, Content map
+and acyclic schema reference target is read once per build however many tools and
+statuses reach it, so a legitimate document stays far below the budget. A budget
+fallback is recorded as `tool_hash_fallback: true` in the `api.publish`, `api.update`,
+`api.spec_update` or `api.spec_rollback` audit row that commits the change, which
+explains a later mass rotation: once every tool hashes the whole document, any change
+outside `info` re-ids all of them. A
+`$ref: "#"` names the whole document, `info` included. Each fallback only folds in more
+than Edge publishes, so it can cost a re-approval but never carries a changed tool.
+Selections are validated (existing, unique operations and names) before any hashing.
+
+A spec revision, rollback or agents edit keeps a tool's ID only while its method,
+path, name and hash are unchanged, so explicit subsets carry across whitespace, `info`
+edits and changes to other operations or unreferenced components. Any change to the
+definition mints a new ID, including a description-only edit in the spec or in agent
+settings, because descriptions are prompt text an agent acts on. Rename, method/path
+changes, removing and re-adding exposure, or disabling and re-enabling agents also mint
+new IDs. A revision cannot drop a selected operation.
+
+The write that retires an ID drops it from every explicit subset in the same transaction
+and records `access.tools_prune` per grant, with `reason` `definition_changed` or
+`tool_removed`. Those holders keep REST access and their remaining tools, and do not
+regain a tool if its old name or definition returns. A revision that changes a tool's
+definition names it in the change summary (`agent_tools_changed`) and the grantee notice;
+an agents edit that redefines a tool sends the affected subset holders an in-app notice.
+Getting a changed tool back takes a new access request, which the provider can approve
+once the holder's current grant is revoked.
+Null grants retain their all-published-tools meaning, changed tools included. Revocation,
+deletion and bulk teardown remove both REST and MCP groups; re-enable rebuilds only
+active grants, preserving operator groups.
 
 Existing phase-1 APIs require an authenticated provider republish before accepting a
 subset, including empty subsets. See the [draft upgrade tradeoff](mcp-subsets-migration-draft.md).

@@ -69,6 +69,11 @@ function RevisionReport({ report }: { report: SpecChangeReport }): ReactElement 
               <span>Also changed: {report.info_changes.join(', ')}</span>
             ) : null}
           </p>
+          {report.agent_tools_changed?.length ? (
+            <p className="text-sm text-fg-muted">
+              Agent tools redefined: {report.agent_tools_changed.join(', ')}
+            </p>
+          ) : null}
           {report.changes.length > 0 ? (
             <ul className="flex flex-col gap-2">
               {report.changes.map((change, index) => (

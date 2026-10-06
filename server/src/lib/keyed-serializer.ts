@@ -115,6 +115,20 @@ export function userLifecycleLockKey(userId: string): string {
 }
 
 /**
+ * The per-account **mail handoff** key: the outbox worker holds it from the
+ * recipient check through SMTP until the attempt settles, and address release
+ * takes it, so a release cannot overtake a live handoff to the old address.
+ *
+ * Nothing else takes it. The worker holds {@link userLifecycleLockKey} only for
+ * the short transaction that authorizes the handoff, so a disable — the
+ * response to a compromised account — a sign-in or a credential change never
+ * waits on a slow relay. Always taken **outside** the lifecycle key.
+ */
+export function userMailHandoffLockKey(userId: string): string {
+  return `users:mail-handoff:${userId}`;
+}
+
+/**
  * The per-provider **single sign-on** key: every OIDC callback that writes one
  * of the provider's links (a first-time link, a provisioned account), every
  * deprovisioning, and every save of the single sign-on settings are taken

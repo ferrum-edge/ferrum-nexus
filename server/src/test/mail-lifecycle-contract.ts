@@ -4,10 +4,11 @@ import assert from 'node:assert/strict';
 import { createServer, type Socket } from 'node:net';
 import { after, before, describe, it } from 'node:test';
 
-import type { NexusStore, TransactionOptions } from '../db/store.js';
-import { createOutboxWorker } from '../email/outbox-worker.js';
+import type { LeaseRepo, NexusStore, TransactionOptions } from '../db/store.js';
+import { createOutboxWorker, OUTBOX_SEND_BUDGET_MS } from '../email/outbox-worker.js';
 import { createSmtpTransport } from '../email/service.js';
 import { isoInSeconds, newId } from '../lib/ids.js';
+import { createKeyedSerializer, userLifecycleLockKey } from '../lib/keyed-serializer.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 interface MailTarget {
@@ -341,6 +342,132 @@ export function runMailLifecycleContract(
         settle.resolve();
         await tick;
         await releasing;
+        await worker.stop();
+      }
+    });
+
+    it('never makes a disable wait for a stalled SMTP handoff', async () => {
+      const subject = await h.registerUser({ email: `${newId()}@example.test` });
+      await other.tick();
+      const queued = await mail(subject);
+      const handingOff = barrier();
+      const settle = barrier();
+      const worker = createOutboxWorker({
+        store: peer,
+        crypto: h.app.nexus.crypto,
+        batchSize: 1,
+        transportFactory: async () => ({
+          async send(): Promise<void> {
+            handingOff.resolve();
+            await settle.promise;
+          },
+        }),
+      });
+      const tick = worker.tick();
+      try {
+        await Promise.race([
+          handingOff.promise,
+          tick.then(() => {
+            throw new Error('handoff barrier missed');
+          }),
+        ]);
+        // The relay is stalled mid-send. The emergency disable must not queue
+        // behind it on the account's lifecycle lease.
+        const disabled = await h.authed(founder, {
+          method: 'PATCH',
+          url: `/api/users/${subject.user.id}`,
+          payload: { status: 'disabled' },
+        });
+        assert.equal(disabled.statusCode, 200, disabled.body);
+        assert.equal((await peer.users.findById(subject.user.id))?.status, 'disabled');
+        assert.equal((await peer.emailOutbox.findById(queued.entry.id))?.status, 'sending');
+        settle.resolve();
+        assert.equal((await tick).sent, 1);
+        assert.equal((await peer.emailOutbox.findById(queued.entry.id))?.status, 'sent');
+      } finally {
+        settle.resolve();
+        await tick;
+        await worker.stop();
+      }
+    });
+
+    it('starts the SMTP budget only once the account lifecycle lease is held', async () => {
+      const subject = await h.registerUser({ email: `${newId()}@example.test` });
+      await other.tick();
+      const queued = await mail(subject);
+      let deadline: number | undefined;
+      // Signals the worker's first refused attempt at the account's lifecycle
+      // lease, which proves it is parked behind the holder below.
+      const lifecycleKey = userLifecycleLockKey(subject.user.id);
+      const refused = barrier();
+      const leases = new Proxy(peer.leases, {
+        get(target, property) {
+          if (property === 'acquire') {
+            return async (...args: Parameters<LeaseRepo['acquire']>): Promise<boolean> => {
+              const taken = await target.acquire(...args);
+              if (!taken && args[0] === lifecycleKey) refused.resolve();
+              return taken;
+            };
+          }
+          const value: unknown = Reflect.get(target, property);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const watched = new Proxy(peer, {
+        get(target, property) {
+          if (property === 'leases') return leases;
+          const value: unknown = Reflect.get(target, property);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const worker = createOutboxWorker({
+        store: watched,
+        crypto: h.app.nexus.crypto,
+        batchSize: 1,
+        transportFactory: async () => ({
+          async send(_mail: unknown, options?: { deadline?: number }): Promise<void> {
+            deadline = options?.deadline;
+          },
+        }),
+      });
+      // Another process holds the account's lifecycle lease, as a disable's
+      // teardown or a sign-in would, while the worker reaches the handoff.
+      const holder = createKeyedSerializer({ leases: peer.leases });
+      const held = barrier();
+      const unblock = barrier();
+      let releasedAt = 0;
+      const holding = holder(userLifecycleLockKey(subject.user.id), async () => {
+        held.resolve();
+        await unblock.promise;
+        releasedAt = Date.now();
+      });
+      let tick: Promise<unknown> = Promise.resolve();
+      try {
+        await held.promise;
+        const ticking = worker.tick();
+        tick = ticking;
+        await Promise.race([
+          refused.promise,
+          ticking.then(() => {
+            throw new Error('the worker never waited on the lifecycle lease');
+          }),
+        ]);
+        // Margin only, so the release lands a clock tick after the refusal:
+        // the worker is already parked behind the lease.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        unblock.resolve();
+        await holding;
+        assert.equal((await ticking).sent, 1);
+        assert.equal((await peer.emailOutbox.findById(queued.entry.id))?.status, 'sent');
+        assert.ok(deadline !== undefined, 'the transport must receive a deadline');
+        assert.ok(
+          deadline >= releasedAt + OUTBOX_SEND_BUDGET_MS,
+          'the lease wait must not shorten the relay budget',
+        );
+      } finally {
+        unblock.resolve();
+        await holding;
+        await tick;
         await worker.stop();
       }
     });

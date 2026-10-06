@@ -31,6 +31,28 @@ describe('agent operation metadata', () => {
     assert.equal(head?.supported, false);
   });
 
+  it('reads a shared Path Item in place, and bounds a chain joined to one already read', () => {
+    const chain: Record<string, unknown> = {};
+    for (let index = 0; index < 31; index += 1) {
+      const next = index < 30 ? `H${index + 1}` : 'Item';
+      chain[`H${index}`] = { $ref: `#/components/pathItems/${next}` };
+    }
+    const item = { summary: 'Shared', get: { operationId: 'read' } };
+    const paths: Record<string, unknown> = {};
+    for (let index = 0; index < 100; index += 1) {
+      paths[`/p${index}`] = { $ref: '#/components/pathItems/H0' };
+    }
+    const document = { paths, components: { pathItems: { ...chain, Item: item } } };
+    // Each path is 32 hops from the item.
+    assert.equal(agentOperations(document).length, 100);
+    assert.equal((agentPathItems(document)['/p99'] as Record<string, unknown>).summary, 'Shared');
+    // One more hop, through a path already resolved, passes the bound.
+    assert.throws(
+      () => agentOperations({ ...document, paths: { ...paths, '/q': { $ref: '#/paths/~1p0' } } }),
+      /local Path Item reference/,
+    );
+  });
+
   it('refuses cyclic, external and out-of-bound Path Item references', () => {
     for (const reference of [
       'https://outside.test/path.json',

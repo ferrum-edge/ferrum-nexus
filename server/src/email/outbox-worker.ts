@@ -73,7 +73,11 @@ import {
 
 import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
-import { createKeyedSerializer, userLifecycleLockKey } from '../lib/keyed-serializer.js';
+import {
+  createKeyedSerializer,
+  userLifecycleLockKey,
+  userMailHandoffLockKey,
+} from '../lib/keyed-serializer.js';
 import { openOutboxRecord, sealLegacyBearerRows, type MailContent } from './sealed-outbox.js';
 import {
   isDeliveredUnacknowledged,
@@ -163,6 +167,15 @@ export interface OutboxTickResult {
   skipped: boolean;
 }
 
+/** Whether a claimed row may be handed to SMTP; `lost` means the claim moved on. */
+type Authorization = 'allowed' | 'ineligible' | 'lost';
+
+/** An authorization, and when it was made: the start of the send budget. */
+interface Authorized {
+  at: string;
+  authorized: Authorization;
+}
+
 const EMPTY_TICK: Omit<OutboxTickResult, 'released' | 'sealedLegacy'> = {
   claimed: 0,
   sent: 0,
@@ -226,7 +239,7 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
   const batchSize = deps.batchSize ?? OUTBOX_BATCH_SIZE;
   const now = deps.now ?? ((): Date => new Date());
   const random = deps.random ?? Math.random;
-  const lifecycle = createKeyedSerializer({ leases: store.leases });
+  const locks = createKeyedSerializer({ leases: store.leases });
 
   let timer: NodeJS.Timeout | null = null;
   let inFlight: Promise<OutboxTickResult> | null = null;
@@ -242,42 +255,37 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
     result: OutboxTickResult,
     entry: EmailOutboxRecord,
   ): Promise<void> {
-    // This lookup selects the lifecycle key only. Eligibility is a persisted
-    // write inside deliverUnderLifecycle, never this possibly stale snapshot.
+    // This lookup selects the keys only. Eligibility is a persisted write
+    // inside deliverClaimed, never this possibly stale snapshot.
     const recipient = entry.recipient_user_id
       ? await store.users.findById(entry.recipient_user_id)
       : await store.users.findByEmail(entry.to_email);
     const userId = entry.recipient_user_id ?? recipient?.id;
-    const handoff = (): Promise<void> => deliverUnderLifecycle(transport, result, entry);
-    if (userId) await lifecycle(userLifecycleLockKey(userId), handoff);
-    else await handoff();
+    if (!userId) {
+      await deliverClaimed(transport, result, entry, (run) => run());
+      return;
+    }
+    // The handoff key orders the whole attempt with address release. The
+    // account's lifecycle key is held only for the authorizing transaction and
+    // released before SMTP, so a disable never waits on the relay.
+    await locks(userMailHandoffLockKey(userId), () =>
+      deliverClaimed(transport, result, entry, (run) => locks(userLifecycleLockKey(userId), run)),
+    );
   }
 
-  async function deliverUnderLifecycle(
+  async function deliverClaimed(
     transport: MailTransport,
     result: OutboxTickResult,
     entry: EmailOutboxRecord,
+    underAccount: (run: () => Promise<Authorized>) => Promise<Authorized>,
   ): Promise<void> {
-    const at = new Date().toISOString();
-    const deadline = Date.parse(at) + OUTBOX_SEND_BUDGET_MS;
-    const authorized = await store.transaction(async (tx) => {
-      const current = await tx.emailOutbox.findById(entry.id);
-      if (current?.status !== 'sending' || current.generation !== entry.generation) return 'lost';
-      const legacyRecipient =
-        entry.recipient_user_id === null ? await tx.users.findByEmail(entry.to_email) : null;
-      const userId = entry.recipient_user_id ?? legacyRecipient?.id;
-      if (
-        isReleasedEmail(entry.to_email) ||
-        (userId && !(await tx.users.lockEmailRecipient(userId, entry.to_email)))
-      ) {
-        return (await tx.emailOutbox.markFailed(entry, 'recipient-address-changed'))
-          ? 'ineligible'
-          : 'lost';
-      }
-      // A real write on both the account and claimed row orders handoff with
-      // release, including an enqueue that missed the release's outbox scan.
-      return (await tx.emailOutbox.beginDelivery(entry, at)) ? 'allowed' : 'lost';
+    // The send budget starts once the account's lifecycle key is held, so a
+    // wait behind a disable or a sign-in never eats into the relay's time.
+    const { at, authorized } = await underAccount(async () => {
+      const started = new Date().toISOString();
+      return { at: started, authorized: await authorize(entry, started) };
     });
+    const deadline = Date.parse(at) + OUTBOX_SEND_BUDGET_MS;
     if (authorized === 'lost') {
       lostClaim(result, entry, 'markSent');
       return;
@@ -355,6 +363,31 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
     } catch (error) {
       await parkUnacknowledged(result, entry, error);
     }
+  }
+
+  /**
+   * Check the claimed row's recipient and refresh its sending generation, in
+   * one transaction that commits before SMTP is contacted.
+   */
+  function authorize(entry: EmailOutboxRecord, at: string): Promise<Authorization> {
+    return store.transaction(async (tx): Promise<Authorization> => {
+      const current = await tx.emailOutbox.findById(entry.id);
+      if (current?.status !== 'sending' || current.generation !== entry.generation) return 'lost';
+      const legacyRecipient =
+        entry.recipient_user_id === null ? await tx.users.findByEmail(entry.to_email) : null;
+      const userId = entry.recipient_user_id ?? legacyRecipient?.id;
+      if (
+        isReleasedEmail(entry.to_email) ||
+        (userId && !(await tx.users.lockEmailRecipient(userId, entry.to_email)))
+      ) {
+        return (await tx.emailOutbox.markFailed(entry, 'recipient-address-changed'))
+          ? 'ineligible'
+          : 'lost';
+      }
+      // A real write on both the account and claimed row orders handoff with
+      // release, including an enqueue that missed the release's outbox scan.
+      return (await tx.emailOutbox.beginDelivery(entry, at)) ? 'allowed' : 'lost';
+    });
   }
 
   /**
