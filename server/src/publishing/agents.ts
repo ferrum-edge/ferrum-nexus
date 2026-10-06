@@ -932,10 +932,9 @@ export function resolvedAgentOperations(
   try {
     return agentOperations(document, maxOperations === null ? {} : { maxOperations });
   } catch (error) {
-    throw specInvalid(
-      error instanceof Error ? error.message : 'Cannot resolve agent operations',
-      { field: 'agents' },
-    );
+    throw specInvalid(error instanceof Error ? error.message : 'Cannot resolve agent operations', {
+      field: 'agents',
+    });
   }
 }
 
