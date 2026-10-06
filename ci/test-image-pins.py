@@ -191,7 +191,6 @@ FROM build AS runtime
         for command in (
             'docker run "nginx:latest',
             'docker run --frobnicate=1 nginx:latest',
-            'docker compose run app',
         ):
             with self.subTest(command=command):
                 refs = list(image_fields(
@@ -205,6 +204,8 @@ FROM build AS runtime
             'steps:\n'
             '  - run: docker build -t ferrum-nexus:ci -f docker/Dockerfile .\n'
             '  - run: docker version && docker ps  # never run a container here\n'
+            '  - run: docker exec app npm run test\n'
+            '  - run: docker network create ci\n'
         )
         self.assertEqual(list(image_fields(Path('.github/workflows/ci.yml'), workflow)), [])
 

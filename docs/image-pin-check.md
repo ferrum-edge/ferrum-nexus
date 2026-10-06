@@ -32,8 +32,9 @@ Docker commands are checked per line (backslash continuations joined), including
 quoted `run:` scalars, `$(...)`/backtick substitutions, quoted `bash -c` strings,
 commands joined by `;`, `&&`, `|` or parentheses, and `sudo`/absolute-path
 `docker`. Any line holding a `docker ... run|create|pull` segment that the
-tokenizer cannot resolve to an image, including unknown Docker options and
-`docker compose run`, fails rather than being skipped. Commands assembled from
+tokenizer cannot resolve to an image, including unknown Docker options, fails
+rather than being skipped. `docker compose` commands are not image references;
+Compose files are scanned directly. Commands assembled from
 variables or invoked through aliases are outside the check. Arbitrary YAML flow collections
 that do not expose an `image` or `container` key in a recognizable key position
 are outside the scan.

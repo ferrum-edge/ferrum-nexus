@@ -173,11 +173,12 @@ def _workflow_run_text(line):
     return text
 
 
-# A `docker ... run|create|pull` command inside one shell segment. Counting
-# these gives a floor for the images the tokenizer must find on a line, so any
-# form it cannot follow fails instead of being skipped.
+# `docker [global options] [container|image] run|create|pull`. Counting these
+# gives a floor for the images the tokenizer must find on a line, so any form it
+# cannot follow fails instead of being skipped.
 DOCKER_COMMAND = re.compile(
-    r'(?<![\w.-])(?:[\w.-]*/)?docker(?![\w.-])[^;&|()`\n]*?(?<![\w-])(?:run|create|pull)(?![\w-])'
+    r'(?<![\w.-])(?:[\w.-]*/)?docker(?:\s+-\S+(?:\s+[^-\s]\S*)?)*'
+    r'\s+(?:(?:container|image)\s+)?(?:run|create|pull)(?![\w-])'
 )
 
 
@@ -228,6 +229,7 @@ def workflow_docker_images(line):
     if len(images) < expected:
         images.append('<unparsed docker command>')
     return images
+
 
 def files(root):
     names = subprocess.check_output(['git', '-C', str(root), 'ls-files', '-z']).decode().split('\0')
