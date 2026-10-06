@@ -242,8 +242,13 @@ for the supported combination and the upgrade steps.
   gateway holds. Upgrade note: an agent API already published with a larger
   document keeps serving, and any other `PATCH` (visibility, status, metadata)
   still succeeds; turn its agents off (`agents: null`) to revise it again.
-  Resolved Path Item references now count their operations against the 3,000
-  operation cap.
+  Admitting an agent selection now also requires that the document has at most 3,000
+  operations once Path Item references resolve. That covers publish, revision, rollback
+  and restore of an agent API, a `PATCH` of `agents` or `spec_enforcement`, and the
+  provider's operation picker. The upload limit uses the same number but counts only the
+  method keys each path declares, so a document can pass the upload and still be refused
+  for agents with `400 SPEC_INVALID`. Matching a live deployment's routes is not
+  capped, so routes APIs without agents are unaffected.
 - **The dependency-lock producer no longer hard-codes jsdom and Undici** (Refs #525).
   It checked their exact versions and integrity hashes, so the next reviewed bump
   would have failed it. It now requires both packages, a registry `resolved` URL and

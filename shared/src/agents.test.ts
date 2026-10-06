@@ -54,16 +54,17 @@ describe('agent operation metadata', () => {
     };
     const operations = agentOperations(document);
 
+    // In OPENAPI_OPERATION_METHODS order, which is the OpenAPI Path Item's.
     assert.deepEqual(
       operations.map(({ method, path, supported }) => [method, path, supported]),
       [
         ['GET', '/shared', true],
-        ['POST', '/shared', true],
         ['PUT', '/shared', true],
-        ['PATCH', '/shared', true],
+        ['POST', '/shared', true],
         ['DELETE', '/shared', true],
-        ['HEAD', '/shared', false],
         ['OPTIONS', '/shared', false],
+        ['HEAD', '/shared', false],
+        ['PATCH', '/shared', true],
         ['TRACE', '/shared', false],
       ],
     );
@@ -104,26 +105,27 @@ describe('agent operation metadata', () => {
     }
   });
 
-  it('counts operations reached through Path Item references against the spec cap', () => {
+  it('counts operations reached through Path Item references against a requested cap', () => {
+    const OK = { responses: { '200': { description: 'OK' } } };
+    // 1,500 paths share one Path Item of two operations: 3,000 resolved
+    // operations, though no path declares a method of its own.
     const paths: Record<string, unknown> = {};
-    for (let index = 0; index < 2_000; index += 1) {
+    for (let index = 0; index < MAX_SPEC_OPERATIONS / 2; index += 1) {
       paths[`/items/${index}`] = { $ref: '#/components/pathItems/Shared' };
     }
     const document = {
       paths,
-      components: {
-        pathItems: {
-          Shared: {
-            get: { responses: { '200': { description: 'OK' } } },
-            post: { responses: { '200': { description: 'OK' } } },
-          },
-        },
-      },
+      components: { pathItems: { Shared: { get: OK, post: OK } } },
     };
+    const capped = { maxOperations: MAX_SPEC_OPERATIONS };
 
+    assert.equal(agentOperations(document, capped).length, MAX_SPEC_OPERATIONS);
+    const over = { ...document, paths: { ...paths, '/one-more': { get: OK } } };
     assert.throws(
-      () => agentOperations(document),
+      () => agentOperations(over, capped),
       new RegExp(`more than ${MAX_SPEC_OPERATIONS} operations`),
     );
+    // Without a cap, a document already on the gateway is read in full.
+    assert.equal(agentOperations(over).length, MAX_SPEC_OPERATIONS + 1);
   });
 });

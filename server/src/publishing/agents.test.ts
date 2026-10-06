@@ -11,6 +11,7 @@ import {
   agentToolDefinitionHash,
   definitionHashStats,
   identifyAgentTools,
+  resolvedAgentOperations,
   stampAgentDocument,
   stampedAgentDocumentBytes,
   validateAgents,
@@ -858,30 +859,32 @@ describe('the stamped agent document', () => {
     assert.ok(stampedAgentDocumentBytes(document, LISTEN_PATHS, agents) > charged);
   });
 
-  it('rejects more than the shared operation cap after resolving Path Item references', () => {
+  it('admits exactly the operation cap after resolving Path Item references', () => {
+    // 1,499 paths share one Path Item of two operations, and the selected
+    // path declares two more: exactly the cap once resolved.
     const paths: Record<string, unknown> = {};
-    for (let index = 0; index < 2_000; index += 1) {
+    for (let index = 0; index < MAX_SPEC_OPERATIONS / 2 - 1; index += 1) {
       paths[`/p${index}`] = { $ref: '#/components/pathItems/Shared' };
     }
+    paths['/orders'] = { get: { responses: OK }, post: { responses: OK } };
     const document = {
       paths,
-      components: {
-        pathItems: {
-          Shared: {
-            get: { responses: OK },
-            post: { responses: OK },
-          },
-        },
-      },
+      components: { pathItems: { Shared: { get: { responses: OK }, post: { responses: OK } } } },
     };
+    const over = { ...document, paths: { ...paths, '/one-more': { get: { responses: OK } } } };
+    const agents = { operations: [TOOL] };
 
+    assert.doesNotThrow(() => validateAgents(agents, document, 'routes', true, null, null));
     assert.throws(
-      () => validateAgents({ operations: [TOOL] }, document, 'routes', true, null, null),
+      () => validateAgents(agents, over, 'routes', true, null, null),
       (error: unknown) =>
         error instanceof NexusError &&
         error.code === 'SPEC_INVALID' &&
         error.message.includes(`${MAX_SPEC_OPERATIONS} operations`),
     );
+    // A selection already admitted, re-checked by a PATCH, is not capped.
+    assert.doesNotThrow(() => validateAgents(agents, over, 'routes', true, null, null, null));
+    assert.equal(resolvedAgentOperations(over, null).length, MAX_SPEC_OPERATIONS + 1);
   });
 });
 

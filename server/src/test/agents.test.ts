@@ -5,6 +5,7 @@ import {
   mcpAllGroupForApi,
   mcpToolGroupForApi,
   consumerUsernameForUser,
+  MAX_SPEC_OPERATIONS,
   type ApiAgents,
   type ApproveAccessRequestResponse,
   type CreateAccessRequestResponse,
@@ -63,6 +64,27 @@ function cyclicPathItemDocument(): Record<string, unknown> {
     servers: [{ url: 'https://api.example.com' }],
     paths: { '/items': { $ref: '#/components/pathItems/Loop', get: operation } },
     components: { pathItems: { Loop: { $ref: '#/components/pathItems/Loop', get: operation } } },
+  };
+}
+
+/**
+ * Paths sharing one Path Item: one operation past the cap once resolved,
+ * though the upload cap, which counts each path's own method keys, sees one.
+ */
+function overCapDocument(): Record<string, unknown> {
+  const operation = { responses: { '200': { description: 'OK' } } };
+  const paths: Record<string, unknown> = {
+    '/items': { get: { operationId: 'items', ...operation } },
+  };
+  for (let index = 0; index < MAX_SPEC_OPERATIONS / 2; index += 1) {
+    paths[`/shared/${index}`] = { $ref: '#/components/pathItems/Shared' };
+  }
+  return {
+    openapi: '3.1.0',
+    info: { title: 'Agent API', version: '1' },
+    servers: [{ url: 'https://api.example.com' }],
+    paths,
+    components: { pathItems: { Shared: { get: operation, post: operation } } },
   };
 }
 
@@ -266,6 +288,81 @@ describe('agent publishing and Nexus authorization', () => {
       payload: { agents: AGENTS },
     });
     assert.equal(invalidStoredRevision.statusCode, 400, invalidStoredRevision.body);
+  });
+
+  it('caps resolved operations only where an agent selection is admitted', async () => {
+    const spec = JSON.stringify(overCapDocument());
+    const refused = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: {
+        name: 'Over-cap agent API',
+        slug: `agent-over-cap-${++sequence}`,
+        spec,
+        auth_plugin: 'key_auth',
+        requestable: true,
+        visibility: 'public',
+        spec_enforcement: 'routes',
+        agents: AGENTS,
+      },
+    });
+    assert.equal(refused.statusCode, 400, refused.body);
+    assert.equal(refused.json<{ error: { code: string } }>().error.code, 'SPEC_INVALID');
+    assert.match(refused.body, new RegExp(`more than ${MAX_SPEC_OPERATIONS} operations`));
+
+    // Without agents the document is admitted, and every check of the live
+    // deployment reads all of its routes: none of them is capped.
+    const { api: routes } = await publish({ spec, agents: null });
+    const restored = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/apis/${routes.id}/restore-gateway`,
+      payload: {},
+    });
+    assert.equal(restored.statusCode, 409, restored.body);
+    assert.match(restored.body, /already has a gateway proxy/);
+    const converted = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${routes.id}`,
+      payload: { spec_enforcement: 'docs_only' },
+    });
+    assert.equal(converted.statusCode, 200, converted.body);
+    const convertedRow = await harness.store.apis.findById(routes.id);
+    assert.equal(convertedRow?.spec_enforcement, 'docs_only');
+    assert.notEqual(convertedRow?.gateway_state, 'repair_required');
+
+    // An agent API whose stored document resolves past the cap, as one
+    // published before the cap existed may.
+    const { api } = await publish();
+    await harness.store.apiSpecs.create({
+      api_id: api.id,
+      version: 'over-cap',
+      raw_spec: spec,
+      parsed_title: 'Agent API',
+      parsed_version: 'over-cap',
+      is_current: true,
+      created_by: provider.user.id,
+      rolled_back_from_id: null,
+    });
+    const metadata = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { name: 'Renamed agent API', visibility: 'internal' },
+    });
+    assert.equal(metadata.statusCode, 200, metadata.body);
+    const renamed = await harness.store.apis.findById(api.id);
+    assert.equal(renamed?.name, 'Renamed agent API');
+    assert.equal(renamed?.visibility, 'internal');
+    const reselected = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: {
+        agents: {
+          operations: [{ ...AGENTS.operations[0], description: 'Updated description' }],
+        },
+      },
+    });
+    assert.equal(reselected.statusCode, 400, reselected.body);
+    assert.equal(reselected.json<{ error: { code: string } }>().error.code, 'SPEC_INVALID');
   });
 
   it('keeps namespace metacharacters literal in the MCP validator bypass', () => {

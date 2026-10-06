@@ -200,6 +200,7 @@ import {
   DEFAULT_BACKEND_WRITE_TIMEOUT_MS,
   DEFAULT_SPEC_ENFORCEMENT,
   MAX_PAGE_SIZE,
+  MAX_SPEC_OPERATIONS,
   RATE_LIMIT_PLUGIN,
   SPEC_CHANGE_HISTORY_LIMIT,
   aclGroupForApi,
@@ -308,6 +309,7 @@ import {
   definitionHashStats,
   identifyAgentTools,
   rotatedAgentTools,
+  resolvedAgentOperations,
   stampedAgentDocumentBytes,
   validateAgents,
   type DefinitionHashStats,
@@ -3484,14 +3486,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           (patch.agents ?? api.agents) ? await store.apiSpecs.findCurrentByApi(api.id) : null;
         const agentDocument = currentSpec ? safeSpecDocument(currentSpec.raw_spec) : {};
         // Validated before hashing, which reads every selection: a duplicate
-        // or missing one is refused before it costs anything. The stamped
-        // document's size is bounded below, only if this PATCH rebuilds it.
+        // or missing one is refused before it costs anything. The operation
+        // cap and the stamped document's size are applied below, only if
+        // this PATCH admits a new selection or rebuilds the document.
         validateAgents(
           patch.agents === undefined ? (api.agents ?? null) : patch.agents,
           agentDocument,
           patch.spec_enforcement ?? api.spec_enforcement,
           patch.requestable ?? api.requestable,
           patch.allowed_methods === undefined ? api.allowed_methods : patch.allowed_methods,
+          null,
           null,
         );
         const hashing = definitionHashStats();
@@ -3506,23 +3510,23 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 hashing,
               );
         const agentsMoved = !isDeepStrictEqual(nextAgents, api.agents ?? null);
-        // Only an agents edit or an enforcement conversion stamps the document
-        // the gateway receives, so only those are bounded, before any gateway
-        // write. A visibility, status or metadata edit leaves the gateway
-        // document alone, so an agent API published before the bound existed
-        // can still be edited, retired, or have its agents turned off.
-        if (
-          nextAgents &&
-          api.ferrum_proxy_id &&
-          (agentsMoved ||
-            (patch.spec_enforcement !== undefined &&
-              patch.spec_enforcement !== api.spec_enforcement))
-        ) {
-          stampedAgentDocumentBytes(
-            agentDocument,
-            agentListenPaths(api.namespace, api.slug),
-            nextAgents,
-          );
+        const enforcementMoved =
+          patch.spec_enforcement !== undefined && patch.spec_enforcement !== api.spec_enforcement;
+        // Only an agents edit or an enforcement conversion admits a selection
+        // or stamps the document the gateway receives, so only those are
+        // bounded, before any gateway write. A visibility, status or metadata
+        // edit leaves the gateway document alone, so an agent API published
+        // before the bounds existed can still be edited, retired, or have its
+        // agents turned off.
+        if (nextAgents && (agentsMoved || enforcementMoved)) {
+          resolvedAgentOperations(agentDocument, MAX_SPEC_OPERATIONS);
+          if (api.ferrum_proxy_id) {
+            stampedAgentDocumentBytes(
+              agentDocument,
+              agentListenPaths(api.namespace, api.slug),
+              nextAgents,
+            );
+          }
         }
         Object.assign(details, toolHashFallback(hashing));
         if (agentsMoved) {

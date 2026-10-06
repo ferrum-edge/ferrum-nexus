@@ -1,4 +1,4 @@
-import { MAX_SPEC_OPERATIONS, OPENAPI_OPERATION_METHODS, type HttpMethod } from './constants.js';
+import { OPENAPI_OPERATION_METHODS, type HttpMethod } from './constants.js';
 import { resolveOpenApiPointer } from './openapi.js';
 
 /** A provider explicitly selected this operation; no spec extension grants access. */
@@ -170,17 +170,34 @@ export function agentPathItems(document: Record<string, unknown>): Record<string
   return paths;
 }
 
-/** Browser defaults are hints only. The server requires an explicit selection payload. */
-export function agentOperations(document: Record<string, unknown>): AgentOperation[] {
+/** Options for {@link agentOperations}. */
+export interface AgentOperationOptions {
+  /**
+   * Refuse a document that resolves to more operations than this. Only an
+   * agent selection being admitted passes it: a document already on the
+   * gateway is read in full, whatever it resolves to.
+   */
+  maxOperations?: number;
+}
+
+/**
+ * Browser defaults are hints only. The server requires an explicit selection payload.
+ *
+ * Operations are counted after Path Item references resolve, so a document
+ * whose paths share one Path Item counts its operations once per path.
+ */
+export function agentOperations(
+  document: Record<string, unknown>,
+  options: AgentOperationOptions = {},
+): AgentOperation[] {
+  const { maxOperations } = options;
   const operations: AgentOperation[] = [];
   for (const [path, item] of agentPathItemEntries(document)) {
     for (const method of OPENAPI_OPERATION_METHODS) {
       const operation = agentPathItemMember(item, method);
       if (!record(operation)) continue;
-      if (operations.length >= MAX_SPEC_OPERATIONS) {
-        throw new Error(
-          `OpenAPI document resolves to more than ${MAX_SPEC_OPERATIONS} operations`,
-        );
+      if (maxOperations !== undefined && operations.length >= maxOperations) {
+        throw new Error(`OpenAPI document resolves to more than ${maxOperations} operations`);
       }
       const upper = method.toUpperCase() as HttpMethod;
       const operationId = typeof operation.operationId === 'string' ? operation.operationId : '';

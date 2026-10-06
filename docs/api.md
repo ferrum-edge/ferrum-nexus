@@ -2064,7 +2064,11 @@ the Edge proxy and plugins, then stores the API.
 
 **Document limits** (also applied to spec revisions), each `400 SPEC_INVALID`:
 
-- 2 MiB; at most 2 000 paths and 3 000 operations.
+- 2 MiB; at most 2 000 paths and 3 000 operations. The upload counts each path's own
+  method keys, so a path that is a `$ref` to a Path Item counts none. An `agents`
+  selection is admitted only if the document has at most 3 000 operations after Path
+  Item references resolve, each path counting the operations its Path Item resolves to
+  ([security.md](security.md#the-provider--operator-split-on-gateway-plugins)).
 - At most 200 levels of object/array nesting
   (`details.reason: "nesting_too_deep"`).
 - YAML mapping keys must be scalar (`details.reason: "non_scalar_key"`); an alias
