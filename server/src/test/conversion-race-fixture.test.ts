@@ -192,50 +192,47 @@ test('conversion fixture clears completed wait timers and abort listeners', asyn
 });
 
 for (const rejects of [false, true]) {
-  test(
-    `conversion fixture joins a late close before shared teardown, rejects: ${rejects}`,
-    async (t) => {
-      const fixture = createConversionRaceFixture(t.signal, 25);
-      const events: string[] = [];
-      const closing = gate();
-      const finishClose = gate();
-      const failure = new Error('late two close failed');
-      let alarm: ReturnType<typeof setTimeout> | undefined;
-      const completed = assert.rejects(
-        fixture.cleanup(
-          {
-            async close(): Promise<void> {
-              events.push('two close started');
-              closing.release();
-              await finishClose.promise;
-              events.push('two close settled');
-              if (rejects) throw failure;
-            },
+  test(`conversion fixture joins a late close before shared teardown, rejects: ${rejects}`, async (t) => {
+    const fixture = createConversionRaceFixture(t.signal, 25);
+    const events: string[] = [];
+    const closing = gate();
+    const finishClose = gate();
+    const failure = new Error('late two close failed');
+    let alarm: ReturnType<typeof setTimeout> | undefined;
+    const completed = assert.rejects(
+      fixture.cleanup(
+        {
+          async close(): Promise<void> {
+            events.push('two close started');
+            closing.release();
+            await finishClose.promise;
+            events.push('two close settled');
+            if (rejects) throw failure;
           },
-          recordClose(events, 'one shared teardown'),
+        },
+        recordClose(events, 'one shared teardown'),
+      ),
+      (error: unknown) =>
+        error instanceof AggregateError &&
+        error.errors.length === (rejects ? 2 : 1) &&
+        error.errors.includes(failure) === rejects &&
+        error.errors.some(
+          (cause: unknown) => cause instanceof Error && /app cleanup/.test(cause.message),
         ),
-        (error: unknown) =>
-          error instanceof AggregateError &&
-          error.errors.length === (rejects ? 2 : 1) &&
-          error.errors.includes(failure) === rejects &&
-          error.errors.some(
-            (cause: unknown) => cause instanceof Error && /app cleanup/.test(cause.message),
-          ),
-      );
-      try {
-        await fixture.within(closing.promise, 'two close started');
-        await new Promise<void>((resolve) => {
-          alarm = setTimeout(resolve, 75);
-        });
-        assert.deepEqual(events, ['two close started']);
-      } finally {
-        clearTimeout(alarm);
-        finishClose.release();
-        await completed;
-      }
-      assert.deepEqual(events, ['two close started', 'two close settled', 'one shared teardown']);
-    },
-  );
+    );
+    try {
+      await fixture.within(closing.promise, 'two close started');
+      await new Promise<void>((resolve) => {
+        alarm = setTimeout(resolve, 75);
+      });
+      assert.deepEqual(events, ['two close started']);
+    } finally {
+      clearTimeout(alarm);
+      finishClose.release();
+      await completed;
+    }
+    assert.deepEqual(events, ['two close started', 'two close settled', 'one shared teardown']);
+  });
 }
 
 test(
@@ -399,26 +396,23 @@ test('conversion fixture releases on assertion failure and attempts both closes'
       throw new Error('request rejected after the assertion');
     }),
   );
-  await assert.rejects(
-    async () => {
-      try {
-        assert.fail('injected assertion failure');
-      } finally {
-        await assert.rejects(
-          fixture.cleanup(
-            {
-              async close(): Promise<void> {
-                events.push('two closed');
-                throw failure;
-              },
+  await assert.rejects(async () => {
+    try {
+      assert.fail('injected assertion failure');
+    } finally {
+      await assert.rejects(
+        fixture.cleanup(
+          {
+            async close(): Promise<void> {
+              events.push('two closed');
+              throw failure;
             },
-            recordClose(events, 'one closed'),
-          ),
-          (error: unknown) => error instanceof AggregateError && error.errors.includes(failure),
-        );
-      }
-    },
-    /injected assertion failure/,
-  );
+          },
+          recordClose(events, 'one closed'),
+        ),
+        (error: unknown) => error instanceof AggregateError && error.errors.includes(failure),
+      );
+    }
+  }, /injected assertion failure/);
   assert.deepEqual(events, ['request settled', 'two closed', 'one closed']);
 });

@@ -608,7 +608,11 @@ export function runEdgeSecurityAdoptionContract(
         harness.edgeClient.deployments.replace = replace;
         harness.edgeClient.deployments.remove = remove;
       });
-      faults.failNext('apiGatewayPlugins', 'replace', new Error('restore ownership commit refused'));
+      faults.failNext(
+        'apiGatewayPlugins',
+        'replace',
+        new Error('restore ownership commit refused'),
+      );
       await assert.rejects(
         harness.services.publishing.restoreGateway(actor, published.api.id),
         /restore ownership commit refused/,
@@ -889,7 +893,10 @@ export function runEdgeSecurityAdoptionContract(
           assert.equal(call.namespace, 'nexus');
           assert.equal(call.claims?.sub, actor.id);
         }
-        assert.equal((await harness.store.apis.findById(published.api.id))?.gateway_state, 'deployed');
+        assert.equal(
+          (await harness.store.apis.findById(published.api.id))?.gateway_state,
+          'deployed',
+        );
         assert.equal(
           await harness.store.settings.get(`gateway_recovery:nexus:${published.api.id}`),
           null,
@@ -1057,7 +1064,12 @@ export function runEdgeSecurityAdoptionContract(
       const published = await publish('routes');
       const proxyId = published.api.ferrum_proxy_id!;
       const key = `gateway_recovery:nexus:${published.api.id}`;
-      harness.edge.queueLostAck(503, { error: 'creation acknowledgement lost' }, '/proxies', 'POST');
+      harness.edge.queueLostAck(
+        503,
+        { error: 'creation acknowledgement lost' },
+        '/proxies',
+        'POST',
+      );
       const offset = harness.edge.requests.length;
       await assert.rejects(
         harness.services.publishing.update(actor, published.api.id, {
@@ -1152,7 +1164,9 @@ export function runEdgeSecurityAdoptionContract(
       });
       harness.edge.queueFailure(503, { error: 'creation refused' }, '/proxies', 'POST');
       await assert.rejects(
-        harness.services.publishing.update(actor, published.api.id, { spec_enforcement: 'docs_only' }),
+        harness.services.publishing.update(actor, published.api.id, {
+          spec_enforcement: 'docs_only',
+        }),
       );
       const replayed = await harness.edgeClient.pluginConfigs.get(validator.id);
       assert.ok(replayed);
@@ -1162,7 +1176,10 @@ export function runEdgeSecurityAdoptionContract(
       };
       assert.deepEqual(shape(replayed), shape(original));
       assert.notEqual(replayed.api_spec_id, original.api_spec_id);
-      assert.equal((await harness.store.apis.findById(published.api.id))?.gateway_state, 'deployed');
+      assert.equal(
+        (await harness.store.apis.findById(published.api.id))?.gateway_state,
+        'deployed',
+      );
       assert.equal(
         await harness.store.settings.get(`gateway_recovery:nexus:${published.api.id}`),
         null,
@@ -1747,7 +1764,10 @@ export function runEdgeSecurityAdoptionContract(
         assert.equal(journal.shape.upstream_url, published.api.upstream_url);
         assert.equal(journal.shape.auth_plugin, 'key_auth');
         assert.equal(journal.shape.cors, null);
-        assert.equal(JSON.stringify(harness.edge.upstreams.get(`nexus/${upstreamId}`)), upstreamBytes);
+        assert.equal(
+          JSON.stringify(harness.edge.upstreams.get(`nexus/${upstreamId}`)),
+          upstreamBytes,
+        );
         reset();
         harness.edge.setBackendEgressPolicy(publicEgressPolicy());
         await harness.edgeClient.proxies.delete(proxyId, actor.id, {
@@ -1756,7 +1776,10 @@ export function runEdgeSecurityAdoptionContract(
         const restored = await harness.services.publishing.restoreGateway(actor, published.api.id);
         assert.equal(restored.api.gateway_state, 'deployed');
         assert.equal(harness.edge.proxies.get(`nexus/${proxyId}`)?.upstream_id, upstreamId);
-        assert.equal(JSON.stringify(harness.edge.upstreams.get(`nexus/${upstreamId}`)), upstreamBytes);
+        assert.equal(
+          JSON.stringify(harness.edge.upstreams.get(`nexus/${upstreamId}`)),
+          upstreamBytes,
+        );
       });
 
       it(`${level}: records repair when policy changes after conversion deletion`, async () => {
@@ -2229,7 +2252,9 @@ export function runEdgeSecurityAdoptionContract(
       assert.equal(writes.length, 1);
       assert.equal(writes[0]!.method, 'PUT');
       assert.equal(writes[0]!.query.conditional, 'true');
-      assert.ok(!harness.edge.requests.slice(replayOffset).some((call) => call.method === 'DELETE'));
+      assert.ok(
+        !harness.edge.requests.slice(replayOffset).some((call) => call.method === 'DELETE'),
+      );
       assert.ok(replacement.journal?.encrypted && typeof replacement.journal.value === 'string');
       assert.deepEqual(await harness.store.settings.get(key), replacement.journal);
       const replayed = await readJournal<Record<string, unknown>>(key);
@@ -2403,7 +2428,10 @@ export function runEdgeSecurityAdoptionContract(
             const catalog = await harness.store.apis.findById(apiId);
             assert.ok(catalog);
             assert.deepEqual(catalog, { ...originalCatalog, updated_at: catalog.updated_at });
-            assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(apiId), originalRevision);
+            assert.deepEqual(
+              await harness.store.apiSpecs.findCurrentByApi(apiId),
+              originalRevision,
+            );
             const live = harness.edge.proxies.get(`nexus/${proxyId}`)!;
             assert.deepEqual(live, {
               ...originalProxy,
@@ -3229,7 +3257,9 @@ export function runEdgeSecurityAdoptionContract(
         'teardown removes only the three Nexus-supported credential types',
       );
       for (const type of ['keyauth', 'basicauth', 'jwt']) {
-        assert.ok(harness.edge.callsTo('DELETE', `/consumers/${id}/credentials/${type}`).length > 0);
+        assert.ok(
+          harness.edge.callsTo('DELETE', `/consumers/${id}/credentials/${type}`).length > 0,
+        );
       }
       assert.deepEqual(stored.acl_groups, []);
       assert.deepEqual(stored.labels, { operator: 'retained' });

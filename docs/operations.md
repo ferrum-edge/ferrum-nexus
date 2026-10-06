@@ -1801,11 +1801,11 @@ An undo step that fails does not raise (it would hide the original error). It
 writes an audit row and logs at `error`. Nothing repairs these automatically,
 so alert on each:
 
-| Row                           | Meaning                                                                                                                                                                                                                                            |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api.gateway_repair_required` | A change could not be undone. `conversion` or `rollback` leaves a missing or partial deployment tracked as `repair_required`; `compensation` means fields listed in `details.steps` may not match the catalog.                                     |
-| `api.publish_rollback`        | A publish reached the gateway, then failed. `withdrawn: true` needs nothing. `withdrawn: false` means `details.stranded_proxy_id` may still be live on a staging path with no `apis` row.                                                          |
-| `api.plugin_rollback`         | A palette plugin change failed. `restored: true` needs nothing. `restored: false` means the config in `details.plugin_config_id` may still hold the attempted change; `details.step_errors` says which step failed.                                |
+| Row                           | Meaning                                                                                                                                                                                                             |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `api.gateway_repair_required` | A change could not be undone. `conversion` or `rollback` leaves a missing or partial deployment tracked as `repair_required`; `compensation` means fields listed in `details.steps` may not match the catalog.      |
+| `api.publish_rollback`        | A publish reached the gateway, then failed. `withdrawn: true` needs nothing. `withdrawn: false` means `details.stranded_proxy_id` may still be live on a staging path with no `apis` row.                           |
+| `api.plugin_rollback`         | A palette plugin change failed. `restored: true` needs nothing. `restored: false` means the config in `details.plugin_config_id` may still hold the attempted change; `details.step_errors` says which step failed. |
 
 ```sql
 SELECT created_at, action, target_id AS api_id, details

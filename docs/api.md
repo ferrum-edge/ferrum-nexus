@@ -1985,7 +1985,7 @@ and threads.
 | `timeouts`         | `{ connect_ms, read_ms, write_ms }` \| null | backend timeouts; `null` keeps the gateway defaults (5000 / 30000 / 30000 ms)                                                                                                                                                                            |
 | `circuit_breaker`  | boolean                                     | `true` attaches Edge's default breaker (5 failures to open, 3 successes to close, 30 s open, trips on 500/502/503/504 and connection errors)                                                                                                             |
 | `spec_enforcement` | `docs_only` \| `routes`                     | `docs_only` (default): the document is catalog metadata only. `routes`: the proxy is **spec-owned** — Edge imports the document and generates an `openapi_validator` that answers `400` for an undeclared path or method. **Bodies are never validated** |
-| `gateway_state`    | `deployed` \| `repair_required`             | `repair_required` means the portal established a missing or incomplete gateway deployment (a reconciliation repair, or a failed restore). It stays until `POST /api/apis/:id/restore-gateway` succeeds                                                     |
+| `gateway_state`    | `deployed` \| `repair_required`             | `repair_required` means the portal established a missing or incomplete gateway deployment (a reconciliation repair, or a failed restore). It stays until `POST /api/apis/:id/restore-gateway` succeeds                                                   |
 
 `HttpMethod` is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`,
 `TRACE` or `CONNECT`.

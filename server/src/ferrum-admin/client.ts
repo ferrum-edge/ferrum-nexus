@@ -1827,7 +1827,12 @@ export function createFerrumAdminClient(
         );
         if (!consumer) return null;
         if (!isStrongRowTag(etag)) {
-          throw protocolError(200, 'invalid_consumer_verification', 'GET', '/consumers/verification');
+          throw protocolError(
+            200,
+            'invalid_consumer_verification',
+            'GET',
+            '/consumers/verification',
+          );
         }
         return { consumer, etag };
       },
@@ -1901,7 +1906,9 @@ export function createFerrumAdminClient(
 
       async replace(id, body, subject, ifMatch): Promise<EdgeConsumer> {
         if (!isStrongRowTag(ifMatch)) {
-          throw edgeError('A credential-complete consumer snapshot and strong row tag are required');
+          throw edgeError(
+            'A credential-complete consumer snapshot and strong row tag are required',
+          );
         }
         return callRequired<EdgeConsumer>('PUT', `/consumers/${encodeURIComponent(id)}`, {
           body: {
@@ -2049,7 +2056,11 @@ export function createFerrumAdminClient(
         subject?: string,
         options?: { preserveLabels: true },
       ): Promise<EdgePluginConfig> {
-        return callRequired<EdgePluginConfig>('POST', '/plugins/config', { body, subject, ...options });
+        return callRequired<EdgePluginConfig>('POST', '/plugins/config', {
+          body,
+          subject,
+          ...options,
+        });
       },
       async replace(
         id: string,

@@ -82,7 +82,7 @@ const { api } = await call(
       openapi: '3.1.0',
       info: { title: 'Controlled', version: '1' },
       servers: [{ url: 'http://rebind.fixture.test:9100' }],
-      paths: { '/marker': { get: { responses: { '200': { description: 'OK' } } } } },
+      paths: { '/marker': { get: { responses: { 200: { description: 'OK' } } } } },
     }),
   },
   201,

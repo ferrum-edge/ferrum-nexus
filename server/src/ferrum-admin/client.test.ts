@@ -205,7 +205,10 @@ describe('ferrum admin client', () => {
   it('rejects owner-closed credential fields without effects', async () => {
     const basic = { password: 'secret-password', username: 'unsupported' };
     const jwt = { secret: 's'.repeat(32), issuer: 'unsupported' };
-    for (const [type, entry] of [['basicauth', basic], ['jwt', jwt]] as const) {
+    for (const [type, entry] of [
+      ['basicauth', basic],
+      ['jwt', jwt],
+    ] as const) {
       await assert.rejects(
         client.consumers.create({
           username: `closed-${type}`,
@@ -1476,10 +1479,9 @@ describe('ferrum admin client', () => {
           'provisioned-by': 'ferrum-nexus',
         });
         assert.equal(validator.priority_override, 2_900);
-        assert.deepEqual(
-          (validator.config as Record<string, unknown>).request_content_types,
-          ['application/problem+json'],
-        );
+        assert.deepEqual((validator.config as Record<string, unknown>).request_content_types, [
+          'application/problem+json',
+        ]);
         assert.deepEqual((validator.config as Record<string, unknown>).operations, [
           {
             method: 'GET',
@@ -1515,7 +1517,10 @@ describe('ferrum admin client', () => {
         created_at: '2020-01-01T00:00:00Z',
         updated_at: '2020-01-01T00:00:00Z',
       };
-      document['x-ferrum-plugins'] = [{ id: 'import-default', plugin_name: 'basic_auth' }, operator];
+      document['x-ferrum-plugins'] = [
+        { id: 'import-default', plugin_name: 'basic_auth' },
+        operator,
+      ];
       const ref = await client.apiSpecs.create(document);
       const configs = await client.pluginConfigs.listByProxy(ref.proxy_id);
       const defaults = configs.find((plugin) => plugin.id === 'import-default');
@@ -1545,7 +1550,10 @@ describe('ferrum admin client', () => {
       assert.deepEqual(explicit.labels, operator.labels);
       const effective = edge.effectivePluginsForProxy(ref.proxy_id);
       assert.ok(effective.some((plugin) => plugin.id === defaults.id));
-      assert.equal(effective.some((plugin) => plugin.id === operator.id), false);
+      assert.equal(
+        effective.some((plugin) => plugin.id === operator.id),
+        false,
+      );
 
       const { labels: _labels, ...replacement } = operator;
       document['x-ferrum-plugins'] = [
@@ -1702,20 +1710,16 @@ describe('ferrum admin client', () => {
     });
 
     it('rejects imported timestamp UTC overflow before POST or PUT effects', async () => {
-      const baseline = specDocument(
-        'timestamp-admission',
-        '/nexus/timestamp-admission',
-        ['/invoices'],
-      );
+      const baseline = specDocument('timestamp-admission', '/nexus/timestamp-admission', [
+        '/invoices',
+      ]);
       baseline['x-ferrum-plugins'] = [
         { id: 'timestamp-admission-auth', plugin_name: 'basic_auth' },
       ];
       const ref = await client.apiSpecs.create(baseline);
-      const companion = specDocument(
-        'timestamp-companion',
-        '/nexus/timestamp-companion',
-        ['/companion'],
-      );
+      const companion = specDocument('timestamp-companion', '/nexus/timestamp-companion', [
+        '/companion',
+      ]);
       companion['x-ferrum-plugins'] = [
         { id: 'timestamp-companion-auth', plugin_name: 'basic_auth' },
       ];
@@ -1831,11 +1835,9 @@ describe('ferrum admin client', () => {
         '\u2003-262143-1-1t0: 0:0 −00 : 00\u2003',
       ];
       for (const [index, timestamp] of timestamps.entries()) {
-        const document = specDocument(
-          `valid-metadata-${index}`,
-          `/nexus/valid-metadata-${index}`,
-          ['/invoices'],
-        );
+        const document = specDocument(`valid-metadata-${index}`, `/nexus/valid-metadata-${index}`, [
+          '/invoices',
+        ]);
         const proxy = document['x-ferrum-proxy'] as Record<string, unknown>;
         proxy.created_at = timestamp;
         proxy.updated_at = timestamp;
@@ -1899,11 +1901,9 @@ describe('ferrum admin client', () => {
         assert.deepEqual(await client.apiSpecs.documentByProxy(ref.proxy_id), document);
       }
       for (const id of [undefined, '']) {
-        const document = specDocument(
-          'omitted-import-id',
-          '/nexus/omitted-import-id',
-          ['/invoices'],
-        );
+        const document = specDocument('omitted-import-id', '/nexus/omitted-import-id', [
+          '/invoices',
+        ]);
         const proxy = document['x-ferrum-proxy'] as Record<string, unknown>;
         if (id === undefined) delete proxy.id;
         else proxy.id = id;

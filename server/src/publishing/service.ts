@@ -1396,13 +1396,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         if (start) {
           const marked = await tx.apis.update(api.id, { gateway_state: 'repair_required' });
           if (!marked) throw notFound('API', api.id);
-          await audit.forStore(tx).record(
-            { id: start.actor.id, role: start.actor.role },
-            AuditAction.API_GATEWAY_CONVERSION_START,
-            { type: 'api', id: api.id },
-            { proxy_id: recovery.proxy.id, attempted_spec_enforcement: start.target },
-            start.ip,
-          );
+          await audit
+            .forStore(tx)
+            .record(
+              { id: start.actor.id, role: start.actor.role },
+              AuditAction.API_GATEWAY_CONVERSION_START,
+              { type: 'api', id: api.id },
+              { proxy_id: recovery.proxy.id, attempted_spec_enforcement: start.target },
+              start.ip,
+            );
         }
       },
       { requireAtomic: true },
@@ -1608,9 +1610,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     const sorted = (plugins: EdgePluginConfig[]): EdgePluginConfig[] =>
       [...plugins].sort((left, right) => left.id.localeCompare(right.id));
     if (
-      !isDeepStrictEqual(deploymentProxyShape(target.proxy), deploymentProxyShape(expected.proxy)) ||
+      !isDeepStrictEqual(
+        deploymentProxyShape(target.proxy),
+        deploymentProxyShape(expected.proxy),
+      ) ||
       !isDeepStrictEqual(sorted(target.plugins), sorted(expected.plugins)) ||
-      !isDeepStrictEqual(target.spec ? deploymentSpecDocument(target.spec) : null, expected.document)
+      !isDeepStrictEqual(
+        target.spec ? deploymentSpecDocument(target.spec) : null,
+        expected.document,
+      )
     ) {
       throw conflict(message);
     }
@@ -1628,7 +1636,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       document: await edge.apiSpecs.documentByProxy(proxy.id),
     };
     if (
-      ![recovery.attempt.proxy.listen_path, recovery.proxy.listen_path].includes(proxy.listen_path) ||
+      ![recovery.attempt.proxy.listen_path, recovery.proxy.listen_path].includes(
+        proxy.listen_path,
+      ) ||
       !isDeepStrictEqual(submittableProxyBody(proxy), {
         ...recovery.attempt.proxy,
         listen_path: proxy.listen_path,
@@ -1637,7 +1647,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         !recovery.attempt.documentDigests.includes(documentFingerprint(observed.document))) ||
       handOwnedPlugins(observed.plugins).some((plugin) => {
         const prior = recovery.plugins.find((row) => row.id === plugin.id);
-        return !prior || !isDeepStrictEqual(recoveryPluginShape(plugin), recoveryPluginShape(prior));
+        return (
+          !prior || !isDeepStrictEqual(recoveryPluginShape(plugin), recoveryPluginShape(prior))
+        );
       })
     ) {
       throw conflict('The staged conversion changed before its deployment authority was captured');
@@ -1948,14 +1960,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       }
       for (const [field, value] of Object.entries(expectedPlugin.config ?? {})) {
         if (field === 'operations') continue; // Compared as route matchers below.
-        if (!isDeepStrictEqual((livePlugin.config as Record<string, unknown> | null)?.[field], value)) {
+        if (
+          !isDeepStrictEqual((livePlugin.config as Record<string, unknown> | null)?.[field], value)
+        ) {
           return false;
         }
       }
     }
     const sortMatchers = (rows: Record<string, unknown>[]): Record<string, unknown>[] =>
       rows.sort((left, right) =>
-        `${left.method} ${left.path_template}`.localeCompare(`${right.method} ${right.path_template}`),
+        `${left.method} ${left.path_template}`.localeCompare(
+          `${right.method} ${right.path_template}`,
+        ),
       );
     const expectedMatchers = sortMatchers(routeMatchers(expectedDocument, live.listen_path));
     return plugins.some((plugin) => {
@@ -2218,7 +2234,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         false,
       );
       recovery.attempt!.documentDigests.push(documentFingerprint(submitted));
-      await mutateRecoveryDeployment(api, recovery, 'replace', specId, original, subject, submitted);
+      await mutateRecoveryDeployment(
+        api,
+        recovery,
+        'replace',
+        specId,
+        original,
+        subject,
+        submitted,
+      );
       await observeConversionAttempt(api, recovery);
     }
     const completedApi = corrected?.api ?? api;
@@ -4558,13 +4582,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             await edge.assertBackendEgress();
             await store.transaction(
               async (tx) => {
-                await audit.forStore(tx).record(
-                  { id: actor.id, role: actor.role },
-                  AuditAction.API_GATEWAY_RESTORE_START,
-                  { type: 'api', id: api.id },
-                  { proxy_id: snapshot.proxy.id, spec_id: current.id, recovery: 'conversion' },
-                  ip,
-                );
+                await audit
+                  .forStore(tx)
+                  .record(
+                    { id: actor.id, role: actor.role },
+                    AuditAction.API_GATEWAY_RESTORE_START,
+                    { type: 'api', id: api.id },
+                    { proxy_id: snapshot.proxy.id, spec_id: current.id, recovery: 'conversion' },
+                    ip,
+                  );
               },
               { requireAtomic: true },
             );
@@ -4668,21 +4694,25 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   await tx.apiGatewayPlugins.replace(api.id, completedOwnership.ids);
                   await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
                   if (reconciledOriginal) {
-                    await audit.forStore(tx).record(
+                    await audit
+                      .forStore(tx)
+                      .record(
+                        { id: actor.id, role: actor.role },
+                        AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
+                        { type: 'api', id: api.id },
+                        { proxy_id: snapshot.proxy.id, spec_id: current.id, recovery: 'original' },
+                        ip,
+                      );
+                  }
+                  await audit
+                    .forStore(tx)
+                    .record(
                       { id: actor.id, role: actor.role },
-                      AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
+                      AuditAction.API_GATEWAY_RESTORE,
                       { type: 'api', id: api.id },
-                      { proxy_id: snapshot.proxy.id, spec_id: current.id, recovery: 'original' },
+                      restoreDetails(updated, current, snapshot.proxy.id, rebuilt),
                       ip,
                     );
-                  }
-                  await audit.forStore(tx).record(
-                    { id: actor.id, role: actor.role },
-                    AuditAction.API_GATEWAY_RESTORE,
-                    { type: 'api', id: api.id },
-                    restoreDetails(updated, current, snapshot.proxy.id, rebuilt),
-                    ip,
-                  );
                   return updated;
                 },
                 { requireAtomic: true },
@@ -4695,13 +4725,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 const final = await tx.apis.findById(api.id);
                 if (!final || final.ferrum_proxy_id !== latest.ferrum_proxy_id) return;
                 await tx.apis.update(api.id, { gateway_state: 'repair_required' });
-                await audit.forStore(tx).record(
-                  { id: actor.id, role: actor.role },
-                  AuditAction.API_GATEWAY_RESTORE_FAILED,
-                  { type: 'api', id: api.id },
-                  { proxy_id: snapshot.proxy.id, withdrawn: false, error: errorMessage(error) },
-                  ip,
-                );
+                await audit
+                  .forStore(tx)
+                  .record(
+                    { id: actor.id, role: actor.role },
+                    AuditAction.API_GATEWAY_RESTORE_FAILED,
+                    { type: 'api', id: api.id },
+                    { proxy_id: snapshot.proxy.id, withdrawn: false, error: errorMessage(error) },
+                    ip,
+                  );
               });
               throw error;
             }
@@ -4754,13 +4786,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               }
               const row = await tx.apis.update(api.id, { gateway_state: 'deployed' });
               if (!row) throw notFound('API', api.id);
-              await audit.forStore(tx).record(
-                { id: actor.id, role: actor.role },
-                AuditAction.API_GATEWAY_RESTORE,
-                { type: 'api', id: row.id },
-                restoreDetails(row, current, recorded, false),
-                ip,
-              );
+              await audit
+                .forStore(tx)
+                .record(
+                  { id: actor.id, role: actor.role },
+                  AuditAction.API_GATEWAY_RESTORE,
+                  { type: 'api', id: row.id },
+                  restoreDetails(row, current, recorded, false),
+                  ip,
+                );
               return row;
             });
             return { api: cleared, spec: current, proxyId: recorded, rebuilt: false };
@@ -4992,8 +5026,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // which the public path serves an ungated proxy.
           await associate(gatewayProxyId, created.pluginIds, actor.id);
           let conditionalCutover:
-            | ((id: string, document: Record<string, unknown>) => Promise<void>)
-            | undefined;
+            ((id: string, document: Record<string, unknown>) => Promise<void>) | undefined;
           if (api.spec_enforcement === 'routes') {
             const original = await edge.deployments.snapshot(actor.id);
             const staged = await edge.proxies.get(gatewayProxyId);
@@ -5152,7 +5185,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               for (const plugin of target.plugins) {
                 const expected = attemptedPlugins.find((row) => row.id === plugin.id);
                 if (expected) {
-                  if (!isDeepStrictEqual(recoveryPluginShape(plugin), recoveryPluginShape(expected))) {
+                  if (
+                    !isDeepStrictEqual(recoveryPluginShape(plugin), recoveryPluginShape(expected))
+                  ) {
                     throw conflict('The failed restore plugin changed');
                   }
                   continue;
@@ -5203,13 +5238,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 if (
                   !attemptedSpecDocument ||
                   !isDeepStrictEqual(document, attemptedSpecDocument) ||
-                  !isDeepStrictEqual(
-                    document['x-ferrum-proxy'],
-                    {
-                      ...submittableProxyBody(attemptedProxy),
-                      listen_path: target.proxy.listen_path,
-                    },
-                  )
+                  !isDeepStrictEqual(document['x-ferrum-proxy'], {
+                    ...submittableProxyBody(attemptedProxy),
+                    listen_path: target.proxy.listen_path,
+                  })
                 ) {
                   throw conflict('The failed restore specification changed');
                 }
@@ -6354,13 +6386,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 throw conflict('The orphan removal has no acknowledged deployment operation');
               }
               await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
-              await audit.forStore(tx).record(
-                { id: actor.id, role: actor.role },
-                AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
-                { type: 'api', id: api.id },
-                { proxy_id: proxyId, recovery: 'orphan_removed' },
-                ip,
-              );
+              await audit
+                .forStore(tx)
+                .record(
+                  { id: actor.id, role: actor.role },
+                  AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
+                  { type: 'api', id: api.id },
+                  { proxy_id: proxyId, recovery: 'orphan_removed' },
+                  ip,
+                );
             },
             { requireAtomic: true },
           );
@@ -6393,13 +6427,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           await tx.apis.update(api.id, { gateway_state: 'deployed' });
           await tx.apiGatewayPlugins.replace(api.id, ownership.ids);
           await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
-          await audit.forStore(tx).record(
-            { id: actor.id, role: actor.role },
-            AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
-            { type: 'api', id: api.id },
-            { proxy_id: proxyId },
-            ip,
-          );
+          await audit
+            .forStore(tx)
+            .record(
+              { id: actor.id, role: actor.role },
+              AuditAction.API_GATEWAY_CONVERSION_ROLLBACK,
+              { type: 'api', id: api.id },
+              { proxy_id: proxyId },
+              ip,
+            );
         },
         { requireAtomic: true },
       );
@@ -6410,7 +6446,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         phase,
         target,
         proxyId,
-        pluginNames: handOwnedPlugins(beforePlugins).map((plugin) => plugin.plugin_name).sort(),
+        pluginNames: handOwnedPlugins(beforePlugins)
+          .map((plugin) => plugin.plugin_name)
+          .sort(),
         actor,
         error,
         restoreError,
@@ -6526,13 +6564,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const latest = await tx.apis.findById(input.api.id);
       if (!latest || latest.ferrum_proxy_id !== input.proxyId) return;
       await tx.apis.update(input.api.id, { gateway_state: 'repair_required' });
-      await audit.forStore(tx).record(
-        { id: input.actor.id, role: input.actor.role },
-        AuditAction.API_GATEWAY_REPAIR_REQUIRED,
-        { type: 'api', id: input.api.id },
-        details,
-        input.ip,
-      );
+      await audit
+        .forStore(tx)
+        .record(
+          { id: input.actor.id, role: input.actor.role },
+          AuditAction.API_GATEWAY_REPAIR_REQUIRED,
+          { type: 'api', id: input.api.id },
+          details,
+          input.ip,
+        );
     });
   }
 

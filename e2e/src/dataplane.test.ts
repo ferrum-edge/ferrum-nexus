@@ -266,7 +266,8 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     };
     const validator = original.plugin_configs.find(
       (plugin) =>
-        plugin.proxy_id === stored.api.ferrum_proxy_id && plugin.plugin_name === 'openapi_validator',
+        plugin.proxy_id === stored.api.ferrum_proxy_id &&
+        plugin.plugin_name === 'openapi_validator',
     );
     assert.ok(validator);
     const operator = await gatewayAdmin('PUT', `/plugins/config/${validator.id}`, {

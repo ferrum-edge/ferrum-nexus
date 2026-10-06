@@ -19,14 +19,17 @@ export function createOwnedOperation<T>(
   onOwn: () => void = () => {},
 ): OwnedOperation<T> {
   const controller = new AbortController();
-  const operation = Object.assign(Promise.resolve().then(() => run(controller.signal)), {
-    signal: controller.signal,
-    own: onOwn,
-    cancel(reason: Error): void {
-      onOwn();
-      controller.abort(reason);
+  const operation = Object.assign(
+    Promise.resolve().then(() => run(controller.signal)),
+    {
+      signal: controller.signal,
+      own: onOwn,
+      cancel(reason: Error): void {
+        onOwn();
+        controller.abort(reason);
+      },
     },
-  });
+  );
   // Observe even a synchronous factory failure before a caller starts awaiting it.
   void operation.catch(() => undefined);
   return operation;

@@ -1968,7 +1968,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         recovery_cleanup_authorized: applicable,
       };
       if (applicable) {
-        res.setHeader('x-ferrum-config-cursor', `1:${deploymentSequences.get(deployment.namespace)}`);
+        res.setHeader(
+          'x-ferrum-config-cursor',
+          `1:${deploymentSequences.get(deployment.namespace)}`,
+        );
       }
     }
     const dropped = droppedAcks.get(res);
@@ -3481,7 +3484,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           query.get('cleanup_orphaned_upstream') !== 'false')) ||
       [...query.keys()].some(
         (key) =>
-          !['conditional', 'apply', ...(removal ? ['cleanup_orphaned_upstream'] : [])].includes(key),
+          !['conditional', 'apply', ...(removal ? ['cleanup_orphaned_upstream'] : [])].includes(
+            key,
+          ),
       ) ||
       matches.length !== 1 ||
       typeof token !== 'string' ||
