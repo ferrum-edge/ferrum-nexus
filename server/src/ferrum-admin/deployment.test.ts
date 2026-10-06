@@ -36,8 +36,9 @@ function oneSpecSnapshot(document: Record<string, unknown>): EdgeDeploymentSnaps
   );
   const bytes = Buffer.from(JSON.stringify(document));
   const stored = gzipSync(bytes);
+  const original = snapshot.api_specs[0] as unknown as Record<string, unknown>;
   const spec = {
-    ...snapshot.api_specs[0]!,
+    ...original,
     spec_content: {
       sha256: createHash('sha256').update(stored).digest('hex'),
       len: stored.length,
@@ -50,7 +51,7 @@ function oneSpecSnapshot(document: Record<string, unknown>): EdgeDeploymentSnaps
   (snapshot.evidence.resources as unknown[])[5] = [structuredClone(spec)];
   snapshot.api_spec_contents = [
     {
-      id: String(spec.id),
+      id: String(original['id']),
       spec_content_base64: stored.toString('base64'),
       external_ref_snapshot_base64: null,
     },
