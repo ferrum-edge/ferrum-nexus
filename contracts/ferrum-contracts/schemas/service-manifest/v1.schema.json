@@ -2,18 +2,18 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ferrum-edge/ferrum-contracts/schemas/service-manifest/v1.schema.json",
   "title": "ferrum.service_manifest v1",
-  "description": "PROPOSED. A versioned, reviewable description of how a service is published behind Ferrum Edge, written as TOML (ferrum-service.toml) and described here as its JSON data model. Alloy is the only producer and reader today; field names may change before a consumer implements them.",
+  "description": "A versioned, reviewable description of how a service is published behind Ferrum Edge, written as TOML (ferrum-service.toml) and described here as its JSON data model. Alloy implements the producer/parser; Nexus and Foundry implement qualified read-only JSON previews. Shared v1 freeze is accepted in the canonical release candidate; publication remains pending.",
   "x-contract": {
     "name": "service-manifest",
     "version": 1,
-    "status": "proposed",
+    "status": "implemented",
     "owner": "ferrum-edge/ferrum-alloy",
     "wire_version": "ferrum.service_manifest 1.x",
     "provenance": [
       {
         "repo": "ferrum-edge/ferrum-alloy",
         "ref": "main",
-        "commit": "4cba0f4a66f85bcee3140e3b92e299275a2507fb",
+        "commit": "81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e",
         "availability": "unreleased",
         "path": "crates/ferrum-alloy-edge/src/manifest.rs",
         "symbols": [
@@ -28,7 +28,7 @@
           "ManifestAgents",
           "ServiceManifest::validate"
         ],
-        "note": "Alloy publishes no JSON Schema for the manifest. This schema transcribes the serde structs (deny_unknown_fields, defaults) and the checks in validate(). Cross-field rules validate() applies after defaults (for example the proxy_id default and agents.endpoint_path being below api.public_path) are not all expressible here."
+        "note": "Alloy publishes no JSON Schema for the manifest. This schema transcribes the serde structs (deny_unknown_fields, defaults) and the checks in validate(). Cross-field rules validate() applies after defaults (for example the proxy_id default and agents.endpoint_path being below api.public_path) are not all expressible here. Re-read at the qualified 81cbb410 owner: field/bound transcription is retained; validate() also checks derived resource ID lengths after defaults, outside this schema's existing assertions."
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
@@ -40,7 +40,16 @@
         ],
         "note": "Edge v0.9.9 documents the MCP namespace character and length rule and requires the MCP endpoint to sit under the proxy listen path."
       }
-    ]
+    ],
+    "shared_status": "EXISTING shared v1 in the contracts-edge-0.9.11 release candidate. Root accepted the unchanged wire freeze after qualified owner/consumer review (ferrum-alloy#27); canonical tag/publication remains pending.",
+    "coordinated_release": {
+      "contracts_tag": "contracts-edge-0.9.11",
+      "state": "shared v1 freeze accepted by root; canonical tag/publication pending",
+      "qualified_owner_commit": "81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e",
+      "owner_main_push_run": "https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37238543236",
+      "decision": "Root accepted the unchanged shared v1 wire contracts on 2026-10-04 after reviewed owner/consumer qualification. This records the authorized canonical metadata decision, not a prior separate human approval or Alloy crate publishing approval. Alloy remains unpublished.",
+      "adoption": "Existing consumer pins and historical r2 bytes are unchanged. After canonical tag publication, update owner/consumer pins, checksums and local annotations together with full hosted parity."
+    }
   },
   "type": "object",
   "additionalProperties": false,

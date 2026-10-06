@@ -32,8 +32,8 @@
  *
  * ## Serialisation
  *
- * `PUT /consumers/{id}` is a whole-resource replace with no concurrency token
- * (Edge `docs/admin_api.md`, "Replace semantics for `PUT`"), so **every**
+ * `PUT /consumers/{id}` is a whole-resource replace. Verification snapshots and
+ * strong row tags detect external concurrent changes; **every**
  * consumer mutation goes through `edge.serializePerKey(consumerId, …)`. Two
  * approvals for the same user landing at once would otherwise lose one ACL
  * group. {@link mutateAclGroups} is the read-modify-write helper both services
@@ -111,6 +111,8 @@ export interface ConsumerProvisioner {
 
 /** Extra conditions {@link ConsumerProvisioner.mutateAclGroups} checks. */
 export interface MutateAclGroupsOptions {
+  /** Enrollment preflight may preserve an already matching row without a metadata PUT. */
+  skipUnchanged?: boolean;
   /**
    * Refuse the write unless this account is still `active`, checked **inside**
    * the critical section.
@@ -280,24 +282,37 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
             );
           }
         }
-        const current = await edge.consumers.get(ferrumConsumerId);
-        if (!current) {
+        const snapshot = await edge.consumers.verification(ferrumConsumerId, subject);
+        if (!snapshot) {
           if (options?.absentIsDone) return null;
           throw edgeError('The gateway consumer for this account no longer exists', {
             consumer_id: ferrumConsumerId,
           });
         }
+        const { consumer: current, etag } = snapshot;
         const groups = change([...(current.acl_groups ?? [])]);
+        if (
+          options?.skipUnchanged &&
+          !options.afterWrite &&
+          groups.length === current.acl_groups.length &&
+          groups.every((group, index) => group === current.acl_groups[index])
+        ) {
+          // Return only the ordinary redacted view, never the secret-complete
+          // verification row. Existing mutation callers retain their row PUT.
+          return edge.consumers.get(ferrumConsumerId);
+        }
         const written = await edge.consumers.replace(
           ferrumConsumerId,
           {
             id: current.id,
+            labels: current.labels,
             username: current.username,
             custom_id: current.custom_id ?? null,
             credentials: current.credentials,
             acl_groups: groups,
           },
           subject,
+          etag,
         );
         if (options?.afterWrite) await options.afterWrite(written);
         return written;

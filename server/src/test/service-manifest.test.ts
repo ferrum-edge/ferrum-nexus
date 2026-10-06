@@ -11,10 +11,22 @@ function fixture(path: string): unknown {
   return JSON.parse(readFileSync(new URL(path, root), 'utf8'));
 }
 
-describe('proposed immutable service-manifest consumer', () => {
+describe('published immutable service-manifest consumer', () => {
   it('verifies the exact commit, schema, shared fixtures and invalid-expectation integrity pins', () => {
     const pin = readFileSync(new URL('SERVICE-MANIFEST-PIN', root), 'utf8');
-    assert.match(pin, /commit: 591c73a3f965fdab440c3a76b2707accdf491ba5/);
+    assert.deepEqual(pin.split('\n').slice(0, 2), [
+      'tag: contracts-edge-0.9.12',
+      'commit: 31f0a21d707795be293d15837c2f77c3d84219d8',
+    ]);
+    const schema = fixture('schemas/service-manifest/v1.schema.json') as {
+      'x-contract': { status: string; provenance: { commit: string; availability?: string }[] };
+    };
+    assert.equal(schema['x-contract'].status, 'implemented');
+    assert.equal(
+      schema['x-contract'].provenance[0]?.commit,
+      '81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e',
+    );
+    assert.equal(schema['x-contract'].provenance[0]?.availability, 'unreleased');
     for (const line of pin.split('\n').filter((entry) => entry.startsWith('sha256: '))) {
       const [, digest, path] = /^sha256: ([a-f0-9]{64})  (.+)$/.exec(line) ?? [];
       assert.ok(path);
@@ -121,7 +133,8 @@ describe('proposed immutable service-manifest consumer', () => {
       const response = await harness.authed(provider, { method: 'POST', url, payload });
       assert.equal(response.statusCode, 200, response.body);
       assert.equal(response.json().preview_only, true);
-      assert.equal(response.json().contract_status, 'proposed');
+      assert.equal(response.json().contract_status, 'implemented');
+      assert.equal(response.json().contract_commit, '31f0a21d707795be293d15837c2f77c3d84219d8');
       assert.equal(response.json().references.values, '[REDACTED]');
       for (const secret of [
         'edge-client',

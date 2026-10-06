@@ -14,7 +14,7 @@
 
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -274,6 +274,45 @@ function writesThrough(fn: ts.Node, store: string): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found) return;
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'deleteRecoveryJournal' &&
+      resolve(node.expression) === null &&
+      node.arguments[0] !== undefined &&
+      ts.isIdentifier(node.arguments[0]) &&
+      node.arguments[0].text === store &&
+      awaitedDirectly(node) &&
+      ts.isSignatureDeclaration(fn) &&
+      !swallowedBy(node, fn)
+    ) {
+      // The journal helper deletes authenticated chunks and their manifest in
+      // an atomic nested transaction that joins this transaction-scoped store.
+      // Recognize only its exact, unshadowed import; an arbitrary helper with
+      // the same name or one handed the root store is not evidence of a write.
+      const source = node.getSourceFile();
+      found = source.statements.some((statement) => {
+        if (
+          !ts.isImportDeclaration(statement) ||
+          !ts.isStringLiteral(statement.moduleSpecifier) ||
+          join(dirname(source.fileName), statement.moduleSpecifier.text) !==
+            join(SOURCE_ROOT, '__audit_scan__', 'publishing', 'recovery-storage.js')
+        ) {
+          return false;
+        }
+        const bindings = statement.importClause?.namedBindings;
+        return (
+          bindings !== undefined &&
+          ts.isNamedImports(bindings) &&
+          bindings.elements.some(
+            (binding) =>
+              binding.name.text === 'deleteRecoveryJournal' &&
+              (binding.propertyName?.text ?? binding.name.text) === 'deleteRecoveryJournal',
+          )
+        );
+      });
+      if (found) return;
+    }
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       const repo = node.expression.expression;
       if (
@@ -785,6 +824,53 @@ describe('transactional audit actions', () => {
 
 describe('the transactional audit scan itself', () => {
   const PRELUDE = "import { AuditAction } from '../audit/service.js';\n";
+
+  it('recognizes only transaction-scoped authenticated journal deletion', () => {
+    const imported = "import { deleteRecoveryJournal } from './recovery-storage.js';\n";
+    const body = `store.transaction(async (tx) => {
+      await deleteRecoveryJournal(tx, crypto, key);
+      await audit.forStore(tx).record(actor, AuditAction.API_GATEWAY_CONVERSION_ROLLBACK, target);
+    });`;
+    const findings = (text: string): string[] =>
+      scanSource('publishing/fixture.ts', PRELUDE + text).findings;
+    assert.deepEqual(findings(imported + body), []);
+    for (const text of [
+      body,
+      imported.replace('./recovery-storage.js', './other.js') + body,
+      imported + body.replace('deleteRecoveryJournal(tx', 'deleteRecoveryJournal(store'),
+      imported + body.replace('await deleteRecoveryJournal', 'deleteRecoveryJournal'),
+      imported +
+        body.replace(
+          'await deleteRecoveryJournal(tx, crypto, key);',
+          'try { await deleteRecoveryJournal(tx, crypto, key); } catch {}',
+        ),
+      imported +
+        body.replace(
+          'await deleteRecoveryJournal',
+          'const deleteRecoveryJournal = other; await deleteRecoveryJournal',
+        ),
+    ]) {
+      assert.ok(findings(text).some((finding) => finding.includes('writes nothing else')));
+    }
+    withParsedSources(
+      [
+        {
+          label: 'publishing/recovery-storage.ts',
+          text: readFileSync(join(SOURCE_ROOT, 'publishing', 'recovery-storage.ts'), 'utf8'),
+        },
+      ],
+      (_label, source) => {
+        const helper = source.statements.find(
+          (statement) =>
+            ts.isFunctionDeclaration(statement) && statement.name?.text === 'deleteRecoveryJournal',
+        );
+        assert.ok(
+          helper && writesThrough(helper, 'tx'),
+          'journal deletion must retain its store writes',
+        );
+      },
+    );
+  });
 
   function findingsOf(text: string): string[] {
     return scanSource('fixture.ts', text).findings;

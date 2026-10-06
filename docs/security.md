@@ -82,25 +82,65 @@ moves a proxy that follows its document, and on a gateway restore. A refusal is
 `resolved` addresses when DNS decided) or `unresolvable_upstream`.
 
 `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` skips all three checks, including the
-lookup. Use it only for a portal that fronts internal services, and configure
+lookup. `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` skips none of them. Use the private
+opt-in only for a portal that fronts internal services, and configure
 Edge with `FERRUM_BACKEND_ALLOW_CIDRS` for the intended private destinations
 while keeping `FERRUM_BACKEND_ALLOW_IPS=public`. The latter selects a filtering
 mode; it does not name allowed destinations. Public mode also screens plugin
 endpoints, so a private plugin dependency such as Redis must be included in the
 CIDR allowlist.
 
-**Residual risk: time-of-check, not time-of-use.** Nexus resolves the name once,
-when the backend is written; Edge resolves it on every request. DNS rebinding or
-a re-pointed record is invisible to the portal, and Nexus does not pin the
-address because the proxy stores a hostname. Run Ferrum Edge with
-`FERRUM_BACKEND_ALLOW_IPS=public` so the gateway screens the address it actually
-connects to. The quickstart configures this setting. Nexus's check gives the
-provider an immediate `400`; Edge's egress mode holds when the record changes
-later. Deployments that allow private Nexus upstreams must coordinate the Edge
-CIDR allowlist with those destinations. Nexus cannot detect an Edge deployment
-without public-only egress, so such a gateway remains exposed to the rebinding
-path; Part B of GHSA-93rq-89vr-38pc is tracked in
-[ferrum-edge#5994](https://github.com/ferrum-edge/ferrum-edge/issues/5994).
+**Gateway egress admission (draft; not a release claim).** The
+public-upstream profile now requires a fresh authenticated, namespace-matched
+`GET /backend-egress-policy` before each proxy/spec create or replacement,
+including staging, rebuilds, plugin association writes and compensation. Service
+preflight runs before destructive conversion and spec ACL enrollment. Schema v1
+must be complete and closed, with exact class arrays and evaluation order; only
+`enforcement_scope=local-data-plane` and `public_only_guaranteed=true` authorize
+public-profile writes. Missing capability, timeouts, authentication failures,
+unknown/inconsistent responses, cache evidence, CP admission-only, unserved/no
+local plane, default `both` and any allow-CIDR override refuse the mutation.
+The dangerous-range baseline alone is insufficient. A refused compensation uses
+existing repair-required reporting; it does not bypass the policy.
+
+Two opt-outs relax different checks. The existing private opt-in still skips Nexus
+DNS admission and permits internal or unresolvable upstreams; Edge decides
+reachability, so it also accepts all recognized, consistent process-policy
+modes/scopes/overlays. `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` waives only the
+gateway attestation and keeps all three Nexus checks above. Under either, missing,
+malformed or unsupported-schema metadata still refuses backend writes, the pairing
+is never represented as public-only, startup logs a warning naming the variable,
+and each publish, update and restore audit row records its `egress_profile` and
+`enforcement_scope`. Public mode also screens private plugin dependencies, and any
+allow override needed for Redis removes public-only certification. Edge's
+`rediss://` hostname limitation remains: TLS Redis hostnames are screened then
+re-resolved by the Redis client; use a literal-IP TLS endpoint or the owner-documented
+plaintext hostname path where appropriate. Metadata does not expand this coverage.
+
+This is process evidence only. Operators must establish that a direct singleton's
+Admin endpoint and traffic listener belong to the same serving process. CP-only,
+remote/fleet/load-balanced Admin pairings cannot acquire that proof from this API.
+Health is sampled, cached and observational, never mutation authorization. Replacing
+or reconfiguring Edge, retargeting Admin or traffic endpoints, and existing traffic
+require operator enforcement and requalification; a startup/sample success does not
+secure future fleet traffic.
+
+**Topology decision.** Nexus grants the verified public-only guarantee only to
+`enforcement_scope=local-data-plane` with `public_only_guaranteed=true`, and health
+reports it to admins as `edge.public_egress_guaranteed`. Edge source authority is
+`0d917701b63ef38210c49df830f48cf0457cbc7d` (`v0.9.12`); the Edge and canonical
+releases are published and pinned. Nexus reads egress policy schema 1 only, so the
+supported pairing ends at Edge `v0.9.12` until schema 2 is adopted (see
+[the compatibility ceiling](operations.md#backend-egress-admission-and-the-public-only-guarantee)).
+
+**Operator guidance for control-plane/data-plane pairings.** Nexus cannot verify
+data-plane egress for a CP/DP pairing: the control plane's policy describes
+admission, not the remote data planes that connect to backends, so such a pairing
+always reads "not guaranteed". Enforce `FERRUM_BACKEND_ALLOW_IPS=public` without
+allow CIDRs on every data plane, and opt in with
+`NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`, which keeps Nexus's own upstream
+screening. Requalify that enforcement whenever a data plane is added, replaced or
+reconfigured.
 
 ### Out of scope
 
@@ -1859,8 +1899,8 @@ a start without completion requires comparing the live spec policy with Nexus.
 
 | Action                        | Target type   | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ----------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api.publish`                 | `api`         | An API was published. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, CORS policy, method allow-list, backend timeouts, circuit breaker, enforcement level, upstream, spec path count. `tool_hash_fallback: true` when agent tool hashing passed its work budget.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `api.update`                  | `api`         | Runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin`, `existing_credentials_invalidated`, `outgoing_auth_configs_remaining` (see [§4](#the-provider--operator-split-on-gateway-plugins)), `proxy_rebuilt: true` when a `spec_enforcement` change recreated the proxy (a brief outage), and `gateway_reconciled: true` for a drift-only repair. `tool_hash_fallback: true` when an agents edit's tool hashing passed its work budget.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `api.publish`                 | `api`         | An API was published. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, CORS policy, method allow-list, backend timeouts, circuit breaker, enforcement level, upstream, spec path count. `egress_profile` (`public-guaranteed`, `private-upstreams-opt-in` or `unattested-edge-opt-in`) and the policy's `enforcement_scope` name what admitted the write. `tool_hash_fallback: true` when agent tool hashing passed its work budget.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `api.update`                  | `api`         | Runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin`, `existing_credentials_invalidated`, `outgoing_auth_configs_remaining` (see [§4](#the-provider--operator-split-on-gateway-plugins)), `proxy_rebuilt: true` when a `spec_enforcement` change recreated the proxy (a brief outage), and `gateway_reconciled: true` for a drift-only repair. A gateway-backed change also carries `egress_profile` (`public-guaranteed`, `private-upstreams-opt-in` or `unattested-edge-opt-in`) and the policy's `enforcement_scope`, naming what admitted the write. `tool_hash_fallback: true` when an agents edit's tool hashing passed its work budget.                                                                                                                                                                                                                                                                                                                                                                                |
 | `api.spec_update`             | `api`         | A new spec revision became current. `details`: spec id, version, path count, enforcement level, `backend_updated`. `changed_tool_ids` when a tool's definition changed and it got a new exposure ID. `tool_hash_fallback: true` when tool hashing passed its work budget.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `api.spec_rollback`           | `api`         | A retained revision was redeployed as a **new** revision. `details`: as `api.spec_update`, plus `restored_from_spec_id`, `restored_from_version`, `restored_from_created_at`; `spec_id` is the new revision.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `api.spec_revision_start`     | `api`         | Intent: a revision is about to rewrite a live proxy (a `routes` API, or a `docs_only` one whose document moves the backend). `details`: `operation` (`update` \| `rollback`), `version`, `restored_from_spec_id`, `proxy_id`, `spec_enforcement`, `backend`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -1875,7 +1915,7 @@ a start without completion requires comparing the live spec policy with Nexus.
 | `api.plugin_rollback`         | `api`         | A palette `set` or `remove` reached the gateway and then failed. `details`: `operation`, `plugin_name`, `plugin_config_id`, `proxy_id`, `restored`, `error`, `step_errors` when `restored: false`. **Alert on `restored: false`**: the config may still carry the attempted change.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `api.gateway_repair_required` | `api`         | The API's gateway state needs an operator. Also logged at `error`. **Alert on it.** Phases below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `api.publish_rollback`        | `api`         | A publish reached the gateway and then failed. `details`: `slug`, `proxy_id`, `spec_enforcement`, `auth_plugin`, `withdrawn`, `error`, `stranded_proxy_id` when `withdrawn: false`. **Alert on `withdrawn: false`**: a proxy may be live on its staging path with no `apis` row.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `api.gateway_restore`         | `api`         | An API's gateway deployment was rebuilt in place (same id, slug, history and grants; new proxy). `details`: `slug`, `listen_path`, `proxy_id`, `spec_id`, `spec_enforcement`, `auth_plugin`, `requestable`, `rebuilt` (`false`: the stored proxy was live after all, so only the flag was cleared).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `api.gateway_restore`         | `api`         | An API's gateway deployment was rebuilt in place (same id, slug, history and grants; new proxy). `details`: `slug`, `listen_path`, `proxy_id`, `spec_id`, `spec_enforcement`, `auth_plugin`, `requestable`, `rebuilt` (`false`: the stored proxy was live after all, so only the flag was cleared). `egress_profile` (`public-guaranteed`, `private-upstreams-opt-in` or `unattested-edge-opt-in`) and the policy's `enforcement_scope` name what admitted the write.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `api.gateway_restore_start`   | `api`         | Intent, before a restore builds a new proxy. `details`: `slug`, `listen_path`, `proxy_id` (minted by Nexus), `spec_id`, `spec_enforcement`, `auth_plugin`. Not written when a restore only clears a stale flag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `api.gateway_restore_failed`  | `api`         | A restore reached the gateway and then failed; the API stays `repair_required`. `details`: as `api.publish_rollback`. **Alert on `withdrawn: false`.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `api.auth_plugin_changed`     | `api`         | Companion to `api.update` for an `auth_plugin` change on a live API. `details`: `previous_auth_plugin`, `auth_plugin`, `previous_credential_type`, `affected_grantees` / `affected_grantee_ids` (they must issue a new credential; theirs are **not** revoked), `api_owned_credentials` / `revoked_api_credentials` (the API's test-consumer keys), `failed` / `failure_errors`, `outgoing_auth_configs_remaining`. **Alert on a non-empty `failed`.** No row when nothing was disrupted.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -1887,16 +1927,56 @@ a start without completion requires comparing the live spec policy with Nexus.
 | `application.delete`          | `application` | The application and its consumer were deleted; its credentials stop working. `details`: `name`, `consumer_id` (or `null`), `revoked_grants`, `revoked_credentials`, `unmapped_consumer: true` when the consumer was found by its derived id.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `test_consumer.create`        | `api`         | A provider created or replaced the `nexus-test-<api_id>` consumer. `details`: `consumer_username`, `consumer_id`, `credential_type`, `replaced`, `revoked_credentials`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
+`api.gateway_conversion_start` is an intent action committed with the encrypted
+original baseline, retained proxy identity and `repair_required` state before any
+conversion teardown. `api.gateway_conversion_rollback` is transactional: current
+observations must exactly match the complete original proxy, plugin bodies and
+specification, original revision id and catalog deployment shape, without a rebuild
+or staging attempt. Its bounded details are `proxy_id`, `spec_id` and
+`recovery: "original"`; resource bodies and credentials never enter the event.
+Catalog repair state, ownership, journal deletion, this event and the normal
+`api.gateway_restore` event commit together. Failure of either completion audit
+preserves journal/catalog/ownership, apart from failed-restore repair bookkeeping.
+Corrected revisions, changed operator fields, staging, rebuilds, refusals and older
+journals without revision identity cannot claim original rollback. These are
+separate current gateway observations, not atomic Edge CAS or external-writer
+fencing. Successful conversion clears its journal with `api.update`, the
+catalog mode and ownership. No credential-bearing resource body enters either
+audit. Corrected agent revisions commit an authorized comparison shape without
+changing the original replay resources. Conversion teardown, selected partial
+cleanup, corrected spec replacement and spec-owned cutover now use the published
+Edge v0.9.12 conditional deployment protocol. Complete original secret-bearing
+namespace evidence and its quoted token are durable before each HTTP mutation.
+Dependent recovery requires the expected committed/applied acknowledgement,
+explicit cleanup authorization and applicable covering cursor. Stale authority,
+unknown or changed resources, lost replies and uncertain acknowledgements retain
+staging, the journal and operator edits with `withdrawn: false` and no completion
+audit; no fresh-token retry or unconditional fallback is allowed. Large journals
+are stored as individually encrypted chunks whose identity, order and complete
+content are authenticated by an encrypted manifest. Publication and retirement
+commit atomically through `NexusStore`; a failed update retains all prior committed
+custody, and a missing or substituted chunk blocks replay and completion. No raw
+owner evidence or credential is trimmed to fit a database row. Existing single-row
+journals remain readable, and every chunk participates in encrypted-setting key
+rotation. See the [released protocol and replay limits](edge-conversion-recovery-blocker.md).
+Exact-head hosted/native-store/packaged qualification remains pending. To resolve
+an unconfirmed mutation, follow the
+[operator runbook](operations.md#resolving-an-unconfirmed-gateway-deployment-mutation).
+
 `api.gateway_repair_required` phases (`details.phase`):
 
 | Phase            | Meaning                                                                                                                                                                                        | Other `details`                                                                                                                        |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `conversion`     | A `spec_enforcement` conversion failed and the original proxy could not be restored. The API has **no gateway proxy**; grants and credentials stay valid.                                      | `proxy_id`, `plugin_names`, `spec_enforcement` (the level the row still holds), `attempted_spec_enforcement`, `error`, `restore_error` |
+| `conversion`     | A `spec_enforcement` conversion failed and the original proxy could not be restored. The API is `repair_required`; its owned proxy id may be missing or partial.                               | `proxy_id`, `plugin_names`, `spec_enforcement` (the level the row still holds), `attempted_spec_enforcement`, `error`, `restore_error` |
 | `rollback`       | The conversion succeeded, a later step of the same `PATCH` failed, and the unwind could not rebuild the proxy. Same outcome as `conversion`.                                                   | as `conversion`, plus `restore_target`, without `error`                                                                                |
 | `compensation`   | A `PATCH` or spec revision could not undo every gateway change. The proxy exists but may not match the catalog.                                                                                | `proxy_id`, `attempted_changes`, `steps`, `step_errors`, `error`                                                                       |
 | `orphaned_proxy` | The stored proxy id no longer exists on the gateway (found by gateway reconciliation or a restore). The reference is cleared and the API marked `repair_required` until `api.gateway_restore`. | `namespace`, `proxy_id`, `slug`, `spec_enforcement`, optional `reason`                                                                 |
 
-Raw proxy and plugin configurations are never recorded.
+Raw proxy and plugin configurations never enter audit rows or logs. Enforcement
+conversion snapshots are sealed in encrypted settings before teardown and removed
+only in the matching lease-fenced catalog completion or verified rollback
+transaction; they are not consumer credential snapshots and never cross into
+portal responses.
 
 ### Access workflow
 
@@ -2049,7 +2129,11 @@ Before going live:
 - [ ] `NEXUS_ALLOW_PRIVATE_UPSTREAMS` is `false` unless the portal fronts
       internal services, in which case Edge keeps
       `FERRUM_BACKEND_ALLOW_IPS=public` and lists intended private destinations
-      in `FERRUM_BACKEND_ALLOW_CIDRS` (including private plugin endpoints).
+      in `FERRUM_BACKEND_ALLOW_CIDRS` (including private plugin endpoints) only
+      under the private opt-in profile; every allow overlay prevents public-only certification.
+- [ ] `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS` is `false` unless Edge runs as a control
+      plane with remote data planes, every one of which enforces
+      `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs.
 - [ ] The Nexus process can resolve public DNS; with private upstreams refused,
       an unresolvable name cannot be published.
 - [ ] Ferrum Edge runs with `FERRUM_BACKEND_ALLOW_IPS=public` (or an equivalent
@@ -2090,7 +2174,7 @@ Before going live:
 
 `POST /api/service-manifests/preview` requires a provider-or-higher session, CSRF,
 and the configured namespace in both the request and manifest (the contract's default
-namespace is `ferrum`). The immutable PROPOSED v1 schema and complete shared fixture
+namespace is `ferrum`). The immutable EXISTING shared v1 schema and complete shared fixture
 set are pinned separately in `contracts/ferrum-contracts/SERVICE-MANIFEST-PIN`.
 Strict validation rejects nulls where types prohibit them, unknown keys, unsupported
 schema versions/protocols, noncanonical paths and invalid references. Intake is bounded

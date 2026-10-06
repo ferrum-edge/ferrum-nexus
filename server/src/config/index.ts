@@ -9,7 +9,7 @@
  * with the same default. A handful of extra variables exist for testing and
  * container deployment (`NEXUS_ENV`, `NEXUS_RATE_LIMIT_ENABLED`,
  * `NEXUS_HEALTH_CACHE_MS`, `NEXUS_BRANDING_CACHE_MS`, `NEXUS_HEALTH_PROBE_TIMEOUT_MS`,
- * `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`,
+ * `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`, `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS`,
  * `FERRUM_ADMIN_TIMEOUT_MS`, `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
  * they are all optional and default to production-safe values.
  */
@@ -467,6 +467,17 @@ export interface NexusConfig {
    */
   allowPrivateUpstreams: boolean;
   /**
+   * Whether backend writes may proceed when the gateway cannot attest public-only
+   * egress on its own data plane (`NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS`), as in a
+   * control-plane/data-plane pairing.
+   *
+   * Narrower than {@link allowPrivateUpstreams}: it relaxes only the Edge
+   * attestation, so Nexus keeps its own suffix, IP-literal and resolved-address
+   * screening of every upstream. The operator takes responsibility for enforcing
+   * public-only egress on every data plane. Defaults to `false`.
+   */
+  allowUnattestedEdgeEgress: boolean;
+  /**
    * Permit the process environment to override `.env` for `FERRUM_NAMESPACE`
    * and `FERRUM_ADMIN_URL` outside production (`NEXUS_ALLOW_ENV_OVERRIDE`).
    *
@@ -621,6 +632,7 @@ const envSchema = z.object({
   NEXUS_MAX_MASS_EMAIL_BYTES: intish(DEFAULT_MAX_MASS_EMAIL_BYTES, 0, 17_179_869_184),
   NEXUS_MAX_MASS_EMAILS_PER_DAY: intish(DEFAULT_MAX_MASS_EMAILS_PER_DAY, 0, 100_000),
   NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
+  NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: boolish(false),
   NEXUS_ALLOW_ENV_OVERRIDE: boolish(false),
   NEXUS_WEB_DIST: optionalString(),
 
@@ -883,6 +895,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     maxMassEmailBytes: raw.NEXUS_MAX_MASS_EMAIL_BYTES,
     maxMassEmailsPerDay: raw.NEXUS_MAX_MASS_EMAILS_PER_DAY,
     allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,
+    allowUnattestedEdgeEgress: raw.NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS,
     allowEnvOverride: raw.NEXUS_ALLOW_ENV_OVERRIDE,
     webDistPath: raw.NEXUS_WEB_DIST,
     db: {

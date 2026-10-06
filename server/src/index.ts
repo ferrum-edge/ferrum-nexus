@@ -385,6 +385,10 @@ export async function buildServer(
   // stored settings still say CAPTCHA is on, and nothing else in the log would
   // say that register and login are letting every request through unverified.
   if (config.captchaEnforcement === 'disabled') logCaptchaEnforcementDisabled(app);
+  // Equally loud for a weakened backend egress profile: health reports
+  // `public_egress_guaranteed: false` to admins, but nothing else in the log
+  // would say that backend writes are admitted without the gateway's proof.
+  logBackendEgressOptOuts(app, config);
   const email = createEmailService({
     config,
     store: deps.store,
@@ -519,6 +523,7 @@ export async function buildServer(
   });
   const publishing = createPublishingService({
     config,
+    crypto,
     store: deps.store,
     edge: deps.edge,
     audit,
@@ -1014,6 +1019,30 @@ function logGeneratedBootstrapToken(app: FastifyInstance, token: string): void {
       'across restarts and across a multi-instance deployment.\n' +
       '='.repeat(76),
   );
+}
+
+/**
+ * Announce each backend egress opt-out that is on.
+ *
+ * Both admit backend writes the gateway has not proved public-only, and each
+ * write admitted that way records its `egress_profile` in its audit row. No
+ * policy detail appears here, only which switch is set.
+ */
+function logBackendEgressOptOuts(app: FastifyInstance, config: NexusConfig): void {
+  if (config.allowPrivateUpstreams) {
+    app.log.warn(
+      { egress_profile: 'private-upstreams-opt-in' },
+      'BACKEND EGRESS NOT GUARANTEED: NEXUS_ALLOW_PRIVATE_UPSTREAMS=true admits private ' +
+        'upstreams and skips Nexus upstream screening; the gateway alone limits backend egress',
+    );
+  }
+  if (config.allowUnattestedEdgeEgress) {
+    app.log.warn(
+      { egress_profile: 'unattested-edge-opt-in' },
+      'BACKEND EGRESS NOT GUARANTEED: NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true admits backend ' +
+        'writes the gateway cannot attest as public-only; every data plane must enforce it',
+    );
+  }
 }
 
 /**

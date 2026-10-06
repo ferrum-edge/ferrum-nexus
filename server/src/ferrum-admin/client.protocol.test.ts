@@ -1,14 +1,19 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { describe, it, type TestContext } from 'node:test';
 
 import type { EdgeConfig } from '../config/index.js';
 import { isNexusError } from '../lib/errors.js';
+import { publicEgressPolicy } from '../test/mock-ferrum-edge.js';
 import {
   ADMIN_RESPONSE_MAX_BYTES,
   createFerrumAdminClient,
   type FerrumAdminClient,
 } from './client.js';
+import type { EdgeDeploymentSnapshot } from './types.js';
+
+const ROW_TAG = '"' + 'a'.repeat(32) + '"';
 
 const consumer = {
   id: 'consumer-1',
@@ -34,20 +39,31 @@ async function fixture(t: TestContext) {
     body: string | Buffer;
     location: string;
     disconnect: boolean;
+    headers: Record<string, string | string[]>;
     /** Overrides `body` with one computed from the request URL, e.g. to echo a page offset. */
     respond: ((url: URL) => string) | null;
+    policyForDeployment: boolean;
   } = {
     status: 200,
     body: '',
     location: '/redirect-target',
     disconnect: false,
+    headers: {},
     respond: null,
+    policyForDeployment: false,
   };
   const requests: string[] = [];
+  const ifMatches: (string | undefined)[] = [];
   const logs: unknown[] = [];
   const server = createServer((req, res) => {
     requests.push(`${req.method} ${req.url}`);
+    ifMatches.push(req.headers['if-match']);
     req.resume();
+    if (reply.policyForDeployment && req.url === '/backend-egress-policy') {
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end(JSON.stringify(publicEgressPolicy()));
+      return;
+    }
     if (reply.disconnect) {
       req.on('end', () => req.socket.destroy());
       return;
@@ -55,6 +71,7 @@ async function fixture(t: TestContext) {
     res.writeHead(reply.status, {
       'content-type': 'application/json',
       location: reply.location,
+      ...reply.headers,
     });
     res.end(
       reply.respond ? reply.respond(new URL(req.url ?? '/', 'http://edge.test')) : reply.body,
@@ -88,7 +105,7 @@ async function fixture(t: TestContext) {
       server.close((error) => (error ? reject(error) : resolve()));
     });
   });
-  return { client, reply, requests, logs };
+  return { client, reply, requests, logs, ifMatches };
 }
 
 function protocolFailure(error: unknown): boolean {
@@ -100,6 +117,123 @@ function protocolFailure(error: unknown): boolean {
 }
 
 describe('Edge response contracts over HTTP sockets', () => {
+  it('requires strong tags and authoritative complete no-store reads', async (t) => {
+    const { client, reply, logs } = await fixture(t);
+    reply.body = JSON.stringify(publicEgressPolicy());
+    const rejectedHeaders: Record<string, string>[] = [
+      {},
+      { 'cache-control': 'public, max-age=60' },
+      { 'cache-control': 'no-store', age: '1' },
+      { 'cache-control': 'no-store', 'x-data-source': 'cache' },
+    ];
+    for (const headers of rejectedHeaders) {
+      reply.headers = headers;
+      await assert.rejects(client.assertBackendEgress(), protocolFailure);
+    }
+    reply.headers = { 'cache-control': 'no-store' };
+    await client.assertBackendEgress();
+    const complete = {
+      ...consumer,
+      credentials: {
+        keyauth: [{ key: 'verification-secret-canary', future: { retained: true } }],
+        basicauth: [{ username: 'legacy', password_hash: 'hmac_sha256:' + 'b'.repeat(64) }],
+        custom: [{ nested: ['hidden-secret-canary'] }],
+      },
+    };
+    reply.body = JSON.stringify(complete);
+    for (const etag of ['', '*', 'W/"weak"', '"a", "b"', 'unquoted']) {
+      reply.headers = { 'cache-control': 'no-store', etag };
+      await assert.rejects(client.consumers.verification('consumer-1'), protocolFailure);
+    }
+    reply.headers = { 'cache-control': 'no-store', etag: ROW_TAG };
+    assert.deepEqual((await client.consumers.verification('consumer-1'))?.consumer, complete);
+    reply.body = JSON.stringify(consumer);
+    await assert.rejects(client.consumers.verification('consumer-1'), protocolFailure);
+    for (const status of [400, 409, 422, 503]) {
+      Object.assign(reply, {
+        status,
+        body: JSON.stringify({ error: 'verification-secret-canary' }),
+      });
+      await assert.rejects(client.consumers.verification('consumer-1'), (error: Error) => {
+        assert.ok(!error.message.includes('verification-secret-canary'));
+        assert.ok(!JSON.stringify(error).includes('verification-secret-canary'));
+        return true;
+      });
+    }
+    assert.ok(!JSON.stringify(logs).includes('verification-secret-canary'));
+    assert.ok(!JSON.stringify(logs).includes('hidden-secret-canary'));
+  });
+
+  it('keeps opaque row tags verbatim and refuses ambiguous preconditions', async (t) => {
+    const { client, reply, requests, ifMatches } = await fixture(t);
+    const complete = { ...consumer, credentials: { keyauth: [{ key: 'complete-key' }] } };
+    for (const tag of ['"opaque-v1"', '"!#$%&()*+,-./:;<=>?@[\\]^_`{|}~"']) {
+      reply.body = JSON.stringify(complete);
+      reply.headers = { 'cache-control': 'no-store', etag: tag };
+      const snapshot = await client.consumers.verification('consumer-1');
+      assert.equal(snapshot?.etag, tag);
+      reply.body = JSON.stringify(consumer);
+      await client.consumers.replace(
+        'consumer-1',
+        { username: 'alice', credentials: snapshot!.consumer.credentials, acl_groups: [] },
+        undefined,
+        snapshot!.etag,
+      );
+      assert.equal(ifMatches.at(-1), tag, 'the original row token is sent unchanged');
+    }
+    for (const tag of [
+      '',
+      '*',
+      'W/"weak"',
+      '"a", "b"',
+      'unquoted',
+      '""',
+      '"a b"',
+      '"a\nb"',
+      '"a\rb"',
+      '"a\tb"',
+      '"é"',
+      '"a"\n',
+    ]) {
+      const offset = requests.length;
+      await assert.rejects(
+        client.consumers.replace('consumer-1', { username: 'alice' }, undefined, tag),
+      );
+      assert.equal(requests.length, offset);
+    }
+    reply.body = JSON.stringify(complete);
+    reply.headers = { 'cache-control': 'no-store', etag: ['"same"', '"same"'] };
+    await assert.rejects(client.consumers.verification('consumer-1'), protocolFailure);
+  });
+
+  it('verifies historical JSON shapes and reserves only exact known secret markers', async (t) => {
+    const { client, reply } = await fixture(t);
+    reply.headers = { 'cache-control': 'no-store', etag: '"opaque-history"' };
+    const credentials = {
+      keyauth: [{ key: 'prefix[REDACTED]suffix', metadata: '[REDACTED]' }],
+      jwt: { secret: 'j'.repeat(32), algorithm: 'legacy' },
+      hmac_auth: [],
+      basicauth: { password_hash: 'hmac_sha256:' + 'a'.repeat(64), future: true },
+      custom: { secret: '[REDACTED]', nested: ['[REDACTED]'] },
+      empty_custom: [],
+      old_custom: null,
+    };
+    reply.body = JSON.stringify({ ...consumer, credentials });
+    assert.deepEqual(
+      (await client.consumers.verification('consumer-1'))?.consumer.credentials,
+      credentials,
+    );
+    for (const [type, value] of [
+      ['keyauth', [{ key: '[REDACTED]' }]],
+      ['jwt', { secret: '[REDACTED]' }],
+      ['hmac_auth', [{ secret: '[REDACTED]' }]],
+      ['basicauth', [{ password: 'plaintext-must-not-pass' }]],
+    ] as const) {
+      reply.body = JSON.stringify({ ...consumer, credentials: { [type]: value } });
+      await assert.rejects(client.consumers.verification('consumer-1'), protocolFailure);
+    }
+  });
+
   const resourceReads: [string, (client: FerrumAdminClient) => Promise<unknown>, unknown][] = [
     ['consumer', (client) => client.consumers.get('consumer-1'), consumer],
     ['proxy', (client) => client.proxies.get('proxy-1'), proxy],
@@ -351,7 +485,10 @@ describe('Edge response contracts over HTTP sockets', () => {
     const { client, reply, requests } = await fixture(t);
     for (const [status, write] of [
       [201, () => client.consumers.create({ username: 'alice' })],
-      [200, () => client.consumers.replace('consumer-1', { username: 'alice' })],
+      [
+        200,
+        () => client.consumers.replace('consumer-1', { username: 'alice' }, undefined, ROW_TAG),
+      ],
       [200, () => client.consumers.addCredential('consumer-1', 'keyauth', { key: 'test-key' })],
     ] as const) {
       for (const body of ['', 'null', '{', '<html>private-canary</html>', '{}']) {
@@ -396,7 +533,7 @@ describe('Edge response contracts over HTTP sockets', () => {
     reply.disconnect = true;
     for (const write of [
       () => client.consumers.create({ username: 'alice' }),
-      () => client.consumers.replace('consumer-1', { username: 'alice' }),
+      () => client.consumers.replace('consumer-1', { username: 'alice' }, undefined, ROW_TAG),
       () => client.consumers.delete('consumer-1'),
     ]) {
       const before = requests.length;
@@ -495,5 +632,134 @@ describe('Edge response contracts over HTTP sockets', () => {
       },
     );
     assert.ok(!JSON.stringify(logs).includes('private-canary'));
+  });
+});
+
+describe('released deployment authority over HTTP sockets', () => {
+  function original(): EdgeDeploymentSnapshot {
+    const value = JSON.parse(
+      readFileSync(
+        new URL(
+          '../../../contracts/ferrum-contracts/fixtures/admin-deployment-snapshot/valid/empty-sql.json',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ) as EdgeDeploymentSnapshot;
+    value.namespace = 'nexus';
+    value.proxies = [{ ...proxy } as EdgeDeploymentSnapshot['proxies'][number]];
+    value.evidence.resources = [value.proxies, [], [], [], [], [], null, 0];
+    return value;
+  }
+
+  it('retains original evidence and sends one strong token with the exact DELETE query', async (t) => {
+    const { client, reply, requests, ifMatches } = await fixture(t);
+    const snapshot = original();
+    snapshot.evidence.private_canary = { historical_credentials: ['secret-complete-original'] };
+    reply.body = JSON.stringify(snapshot);
+    reply.headers = { 'cache-control': 'no-store', etag: snapshot.namespace_etag };
+    const captured = await client.deployments.snapshot();
+    assert.deepEqual(captured, snapshot);
+    reply.policyForDeployment = true;
+    reply.body = JSON.stringify({
+      profile: 'deployment-v1',
+      id: 'proxy-1',
+      durable: 'committed',
+      live: 'applied',
+      recovery_cleanup_authorized: true,
+      future_owner_metadata: true,
+    });
+    reply.headers = { 'x-ferrum-config-cursor': '7:12' };
+    await client.deployments.remove('proxy-1', captured);
+    assert.deepEqual(requests, [
+      'GET /deployment-snapshot',
+      'GET /backend-egress-policy',
+      'DELETE /proxies/proxy-1?conditional=true&cleanup_orphaned_upstream=false',
+    ]);
+    assert.deepEqual(ifMatches, [undefined, undefined, snapshot.namespace_etag]);
+    assert.deepEqual(captured, snapshot, 'the original authority was not rewritten');
+  });
+
+  it('refuses mismatched, cached or incomplete snapshot authority without a mutation', async (t) => {
+    const { client, reply, requests, logs } = await fixture(t);
+    const snapshot = original();
+    reply.body = JSON.stringify(snapshot);
+    const headersToRefuse: Record<string, string>[] = [
+      { 'cache-control': 'no-store', etag: ROW_TAG },
+      { 'cache-control': 'no-store', etag: snapshot.namespace_etag, age: '1' },
+    ];
+    for (const headers of headersToRefuse) {
+      reply.headers = headers;
+      await assert.rejects(client.deployments.snapshot(), protocolFailure);
+    }
+    reply.headers = { 'cache-control': 'no-store', etag: snapshot.namespace_etag };
+    reply.body = JSON.stringify({ ...snapshot, evidence: { secret: 'private-canary' } });
+    await assert.rejects(client.deployments.snapshot(), /cannot establish original authority/);
+    assert.ok(requests.every((request) => request.startsWith('GET ')));
+    assert.ok(!JSON.stringify(logs).includes('private-canary'));
+  });
+
+  for (const status of [200, 202, 204, 400, 409, 412, 501, 503]) {
+    it(`${status}: never authorizes cleanup from an incomplete or refused acknowledgement`, async (t) => {
+      const { client, reply, requests, logs } = await fixture(t);
+      reply.policyForDeployment = true;
+      reply.status = status;
+      reply.body = JSON.stringify({
+        error: 'private-canary',
+        durable: status === 200 ? 'committed' : 'unknown',
+        live: status === 200 ? 'not_applicable' : 'unconfirmed',
+        recovery_cleanup_authorized: false,
+      });
+      await assert.rejects(client.deployments.remove('proxy-1', original()));
+      assert.equal(requests.filter((request) => request.startsWith('DELETE ')).length, 1);
+      assert.equal(requests.filter((request) => request === 'GET /deployment-snapshot').length, 0);
+      assert.ok(!JSON.stringify(logs).includes('private-canary'));
+    });
+  }
+
+  it('does not retry a deployment write whose connection loses the acknowledgement', async (t) => {
+    const { client, reply, requests } = await fixture(t);
+    reply.policyForDeployment = true;
+    reply.disconnect = true;
+    await assert.rejects(client.deployments.remove('proxy-1', original()));
+    assert.equal(requests.filter((request) => request.startsWith('DELETE ')).length, 1);
+    assert.ok(!requests.includes('GET /deployment-snapshot'));
+  });
+
+  it('uses the spec target and original deployment authority for ordinary-document PUT', async (t) => {
+    const { client, reply, requests, ifMatches } = await fixture(t);
+    const snapshot = original();
+    snapshot.proxies[0]!.api_spec_id = 'spec-1';
+    snapshot.api_specs = [{ id: 'spec-1', proxy_id: 'proxy-1' }];
+    snapshot.evidence.resources = [snapshot.proxies, [], [], [], [], snapshot.api_specs, null, 0];
+    reply.policyForDeployment = true;
+    reply.headers = { 'x-ferrum-config-cursor': '7:13' };
+    reply.body = JSON.stringify({
+      profile: 'deployment-v1',
+      id: 'spec-1',
+      durable: 'committed',
+      live: 'applied',
+      recovery_cleanup_authorized: true,
+    });
+    await client.deployments.replace('spec-1', { openapi: '3.1.0', paths: {} }, snapshot);
+    assert.deepEqual(requests, [
+      'GET /backend-egress-policy',
+      'PUT /api-specs/spec-1?conditional=true',
+    ]);
+    assert.deepEqual(ifMatches, [undefined, snapshot.namespace_etag]);
+    reply.body = JSON.stringify({
+      profile: 'deployment-v1',
+      id: 'proxy-1',
+      durable: 'committed',
+      live: 'applied',
+      recovery_cleanup_authorized: true,
+    });
+    await assert.rejects(
+      client.deployments.replace('spec-1', { openapi: '3.1.0', paths: {} }, snapshot),
+      /application is unconfirmed/,
+    );
+    const offset = requests.length;
+    await assert.rejects(client.deployments.replace('another-spec', {}, snapshot));
+    assert.equal(requests.length, offset, 'a mismatched original target sends no HTTP');
   });
 });

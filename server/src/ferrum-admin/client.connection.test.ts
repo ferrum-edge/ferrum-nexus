@@ -15,6 +15,8 @@ import {
   shouldRetryOnFreshConnection,
 } from './client.js';
 
+const ROW_TAG = '"' + 'a'.repeat(32) + '"';
+
 const HEALTH_BODY = JSON.stringify({ status: 'ok', ready: true, mode: 'database' });
 
 /**
@@ -173,7 +175,7 @@ describe('ferrum admin client connection handling', () => {
     const edge = await gateway(t);
     for (const mutate of [
       () => edge.client.consumers.create({ username: 'alice' }),
-      () => edge.client.consumers.replace('consumer-1', { username: 'alice' }),
+      () => edge.client.consumers.replace('consumer-1', { username: 'alice' }, undefined, ROW_TAG),
       () => edge.client.consumers.delete('consumer-1'),
     ]) {
       // Warm a pooled connection, then close it under the write.

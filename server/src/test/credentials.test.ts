@@ -124,7 +124,9 @@ describe('gateway credentials', () => {
 
     const entries = consumerOf(bob.user.id)?.credentials.basicauth;
     assert.equal(entries?.length, 1);
-    assert.deepEqual(Object.keys(entries?.[0] ?? {}), ['password']);
+    assert.deepEqual(Object.keys(entries?.[0] ?? {}), ['password_hash']);
+    assert.match(String(entries?.[0]?.password_hash), /^hmac_sha256:[0-9a-f]{64}$/);
+    assert.ok(!JSON.stringify(entries).includes(body.secret.password));
   });
 
   it('hides echoed credential secrets from the response, audit and server log', async () => {

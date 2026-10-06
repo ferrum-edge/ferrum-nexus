@@ -74,39 +74,40 @@ See the README for a two-stack example.
 
 ### Server
 
-| Variable                                     | Default                               | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| -------------------------------------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXUS_ENV`                                  | from `NODE_ENV`, else `development`   | `development` \| `test` \| `production`. `test` turns rate limiting off and quietens the logger.                                                                                                                                                                                                                                                                                                                                                                     |
-| `NODE_ENV`                                   | —                                     | Read only when `NEXUS_ENV` is unset; only `production` and `test` are honoured.                                                                                                                                                                                                                                                                                                                                                                                      |
-| `NEXUS_HOST`                                 | `127.0.0.1`                           | Bind address. Use `0.0.0.0` in a container.                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `NEXUS_PORT`                                 | `8787`                                | 0–65535.                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `NEXUS_PUBLIC_URL`                           | `http://127.0.0.1:5173`               | Public origin of the portal, used for links in email. Absolute `http(s)` URL with no credentials, query or fragment; a trailing slash is stripped.                                                                                                                                                                                                                                                                                                                   |
-| `NEXUS_TRUSTED_PROXIES`                      | _(unset)_                             | Which proxies may set `X-Forwarded-For`. Unset trusts none, so `request.ip` is the socket address. Either a hop count `1`–`32` counted from the right of the header, or a comma-separated list of IPs/CIDRs (IPv4 prefix 1–32, IPv6 prefix 1–128) and the keywords `loopback`, `linklocal`, `uniquelocal`. Invalid entries fail startup. See [§4](#4-running-behind-tls-and-a-reverse-proxy).                                                                        |
-| `NEXUS_TRUST_PROXY`                          | `false`                               | Deprecated. `true` means `NEXUS_TRUSTED_PROXIES=1`. Does not affect cookies or HSTS.                                                                                                                                                                                                                                                                                                                                                                                 |
-| `NEXUS_COOKIE_SECURE`                        | `true` unless `NEXUS_ENV=development` | Marks `nexus_session` and `nexus_csrf` `Secure` and enables HSTS. Set `false` only when serving plain `http://`.                                                                                                                                                                                                                                                                                                                                                     |
-| `NEXUS_LOG_LEVEL`                            | `info`                                | `fatal`, `error`, `warn`, `info`, `debug`, `trace` or `silent`.                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `NEXUS_SESSION_TTL`                          | `43200` (12 h)                        | Sliding session idle lifetime in seconds, 60 – 2 592 000.                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `NEXUS_CAPTCHA_ENFORCEMENT`                  | `enforced`                            | `enforced` \| `disabled`. The CAPTCHA break-glass switch; not settable through the API, and `0`/`false` are rejected. See [Recovering a portal locked out by CAPTCHA](#recovering-a-portal-locked-out-by-captcha).                                                                                                                                                                                                                                                   |
-| `NEXUS_RATE_LIMIT_ENABLED`                   | `true`                                | Installs the per-route rate limiters listed under [Abuse controls](#abuse-controls). Forced off when `NEXUS_ENV=test`.                                                                                                                                                                                                                                                                                                                                               |
-| `NEXUS_HEALTH_CACHE_MS`                      | `5000`                                | How long `/api/health` and `/api/health/edge` reuse a dependency probe, 0–60000. `0` disables the cache. See [§9](#9-health-checks).                                                                                                                                                                                                                                                                                                                                 |
-| `NEXUS_HEALTH_PROBE_TIMEOUT_MS`              | `1500`                                | Deadline for the health route's Edge calls, 100–5000, independent of `FERRUM_ADMIN_TIMEOUT_MS`. Capped so it fits inside the image's 10-second healthcheck; if you override the orchestrator's probe timeout, keep it well above this plus database time.                                                                                                                                                                                                            |
-| `NEXUS_BRANDING_CACHE_MS`                    | `5000`                                | How long `GET /api/branding` reuses its payload, 0–60000. `0` disables the cache. See [Branding](#branding).                                                                                                                                                                                                                                                                                                                                                         |
-| `NEXUS_MAX_APIS_PER_OWNER`                   | `50`                                  | APIs one account may own, 0–100 000; `0` disables. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                            |
-| `NEXUS_MAX_APPLICATIONS_PER_OWNER`           | `20`                                  | Application identities (each one a gateway consumer) one account may own, 0–100 000; `0` disables. Exceeding it is `429 QUOTA_EXCEEDED`.                                                                                                                                                                                                                                                                                                                             |
-| `NEXUS_SPEC_HISTORY_LIMIT`                   | `10`                                  | Historical spec revisions kept per API on top of the current one, 1–10 000.                                                                                                                                                                                                                                                                                                                                                                                          |
-| `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`        | `200`                                 | Messages per account per rolling 24 h, 0–1 000 000; `0` disables. See [Messaging](#messaging).                                                                                                                                                                                                                                                                                                                                                                       |
-| `NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY` | `20`                                  | Access requests per account per rolling 24 h, 0–1 000 000; `0` disables. See [Access requests](#access-requests).                                                                                                                                                                                                                                                                                                                                                    |
-| `NEXUS_MAX_BROADCAST_RECIPIENTS`             | `5000`                                | Recipients per god-mode broadcast, 0–1 000 000; `0` disables.                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `NEXUS_MAX_BROADCASTS_PER_DAY`               | `20`                                  | Broadcasts per administrator per rolling 24 h, 0–100 000; `0` disables.                                                                                                                                                                                                                                                                                                                                                                                              |
-| `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`            | `5000`                                | Recipients per mass-email campaign, 0–1 000 000; `0` disables. See [A mass-email campaign is recorded, then queued in chunks](#a-mass-email-campaign-is-recorded-then-queued-in-chunks).                                                                                                                                                                                                                                                                             |
-| `NEXUS_MAX_MASS_EMAIL_BYTES`                 | `67108864`                            | Rendered bytes per mass-email campaign (an upper bound on one message, HTML escaping included, × recipients), 0–17 179 869 184; `0` disables. Default 64 MiB.                                                                                                                                                                                                                                                                                                        |
-| `NEXUS_MAX_MASS_EMAILS_PER_DAY`              | `5`                                   | Mass-email campaigns per administrator per rolling 24 h, 0–100 000; `0` disables. A retry with the same `idempotency_key`, content and audience is not counted again; the same key with anything else is `409 CONFLICT`. Security mail has claim priority; this cap still bounds campaign storage.                                                                                                                                                                   |
-| `NEXUS_ALLOW_PRIVATE_UPSTREAMS`              | `false`                               | Whether an API upstream may be loopback, private (RFC 1918, CGNAT, link-local) or a `.local`/`.internal`/`.localhost`/`.home.arpa` name. At `false` Nexus also resolves every other upstream hostname and refuses it if any answer is private or the name does not resolve, so **the Nexus process needs public DNS**. Refusals are `400 SPEC_INVALID`. Set `true` for internal-only portals and local development. See [`security.md`](security.md#1-threat-model). |
-| `NEXUS_ALLOW_ENV_OVERRIDE`                   | `false`                               | Allow the process environment to override `.env` for `FERRUM_NAMESPACE`/`FERRUM_ADMIN_URL` outside production (see above). No effect in production.                                                                                                                                                                                                                                                                                                                  |
-| `NEXUS_WEB_DIST`                             | _(unset)_                             | Directory of the built SPA. Nexus uses the first of this, `../../web/dist` relative to the server, and `./web/dist` under the working directory that contains an `index.html`; with none, only the API is served.                                                                                                                                                                                                                                                    |
-| `NEXUS_BOOTSTRAP_TOKEN`                      | _(unset)_                             | Token the founding registration must present. At least 16 characters. When unset, each process generates one. Set it for any multi-instance deployment. See [First run](#first-run-and-the-bootstrap-token).                                                                                                                                                                                                                                                         |
-| `NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`        | `900000` (15 min)                     | How often Nexus checks that the gateway still holds the consumer and proxy ids it stored, 0 – 86 400 000. A pass also runs at startup. `0` disables the timer. See [§13](#13-retargeting-or-rebuilding-ferrum-edge).                                                                                                                                                                                                                                                 |
-| `NEXUS_GATEWAY_RECONCILE_SAMPLE`             | `200`                                 | Most stored references of each kind one pass checks, 1–100 000. A pass that hits the bound reports `complete: false`.                                                                                                                                                                                                                                                                                                                                                |
+| Variable                                     | Default                               | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------------------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXUS_ENV`                                  | from `NODE_ENV`, else `development`   | `development` \| `test` \| `production`. `test` turns rate limiting off and quietens the logger.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `NODE_ENV`                                   | —                                     | Read only when `NEXUS_ENV` is unset; only `production` and `test` are honoured.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `NEXUS_HOST`                                 | `127.0.0.1`                           | Bind address. Use `0.0.0.0` in a container.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `NEXUS_PORT`                                 | `8787`                                | 0–65535.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `NEXUS_PUBLIC_URL`                           | `http://127.0.0.1:5173`               | Public origin of the portal, used for links in email. Absolute `http(s)` URL with no credentials, query or fragment; a trailing slash is stripped.                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `NEXUS_TRUSTED_PROXIES`                      | _(unset)_                             | Which proxies may set `X-Forwarded-For`. Unset trusts none, so `request.ip` is the socket address. Either a hop count `1`–`32` counted from the right of the header, or a comma-separated list of IPs/CIDRs (IPv4 prefix 1–32, IPv6 prefix 1–128) and the keywords `loopback`, `linklocal`, `uniquelocal`. Invalid entries fail startup. See [§4](#4-running-behind-tls-and-a-reverse-proxy).                                                                                                                                                                         |
+| `NEXUS_TRUST_PROXY`                          | `false`                               | Deprecated. `true` means `NEXUS_TRUSTED_PROXIES=1`. Does not affect cookies or HSTS.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `NEXUS_COOKIE_SECURE`                        | `true` unless `NEXUS_ENV=development` | Marks `nexus_session` and `nexus_csrf` `Secure` and enables HSTS. Set `false` only when serving plain `http://`.                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `NEXUS_LOG_LEVEL`                            | `info`                                | `fatal`, `error`, `warn`, `info`, `debug`, `trace` or `silent`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `NEXUS_SESSION_TTL`                          | `43200` (12 h)                        | Sliding session idle lifetime in seconds, 60 – 2 592 000.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `NEXUS_CAPTCHA_ENFORCEMENT`                  | `enforced`                            | `enforced` \| `disabled`. The CAPTCHA break-glass switch; not settable through the API, and `0`/`false` are rejected. See [Recovering a portal locked out by CAPTCHA](#recovering-a-portal-locked-out-by-captcha).                                                                                                                                                                                                                                                                                                                                                    |
+| `NEXUS_RATE_LIMIT_ENABLED`                   | `true`                                | Installs the per-route rate limiters listed under [Abuse controls](#abuse-controls). Forced off when `NEXUS_ENV=test`.                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `NEXUS_HEALTH_CACHE_MS`                      | `5000`                                | How long `/api/health` and `/api/health/edge` reuse a dependency probe, 0–60000. `0` disables the cache. See [§9](#9-health-checks).                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `NEXUS_HEALTH_PROBE_TIMEOUT_MS`              | `1500`                                | Deadline for the health route's Edge calls, 100–5000, independent of `FERRUM_ADMIN_TIMEOUT_MS`. Capped so it fits inside the image's 10-second healthcheck; if you override the orchestrator's probe timeout, keep it well above this plus database time.                                                                                                                                                                                                                                                                                                             |
+| `NEXUS_BRANDING_CACHE_MS`                    | `5000`                                | How long `GET /api/branding` reuses its payload, 0–60000. `0` disables the cache. See [Branding](#branding).                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `NEXUS_MAX_APIS_PER_OWNER`                   | `50`                                  | APIs one account may own, 0–100 000; `0` disables. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `NEXUS_MAX_APPLICATIONS_PER_OWNER`           | `20`                                  | Application identities (each one a gateway consumer) one account may own, 0–100 000; `0` disables. Exceeding it is `429 QUOTA_EXCEEDED`.                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `NEXUS_SPEC_HISTORY_LIMIT`                   | `10`                                  | Historical spec revisions kept per API on top of the current one, 1–10 000.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`        | `200`                                 | Messages per account per rolling 24 h, 0–1 000 000; `0` disables. See [Messaging](#messaging).                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY` | `20`                                  | Access requests per account per rolling 24 h, 0–1 000 000; `0` disables. See [Access requests](#access-requests).                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `NEXUS_MAX_BROADCAST_RECIPIENTS`             | `5000`                                | Recipients per god-mode broadcast, 0–1 000 000; `0` disables.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `NEXUS_MAX_BROADCASTS_PER_DAY`               | `20`                                  | Broadcasts per administrator per rolling 24 h, 0–100 000; `0` disables.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`            | `5000`                                | Recipients per mass-email campaign, 0–1 000 000; `0` disables. See [A mass-email campaign is recorded, then queued in chunks](#a-mass-email-campaign-is-recorded-then-queued-in-chunks).                                                                                                                                                                                                                                                                                                                                                                              |
+| `NEXUS_MAX_MASS_EMAIL_BYTES`                 | `67108864`                            | Rendered bytes per mass-email campaign (an upper bound on one message, HTML escaping included, × recipients), 0–17 179 869 184; `0` disables. Default 64 MiB.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `NEXUS_MAX_MASS_EMAILS_PER_DAY`              | `5`                                   | Mass-email campaigns per administrator per rolling 24 h, 0–100 000; `0` disables. A retry with the same `idempotency_key`, content and audience is not counted again; the same key with anything else is `409 CONFLICT`. Security mail has claim priority; this cap still bounds campaign storage.                                                                                                                                                                                                                                                                    |
+| `NEXUS_ALLOW_PRIVATE_UPSTREAMS`              | `false`                               | Whether an API upstream may be loopback, private (RFC 1918, CGNAT, link-local) or a `.local`/`.internal`/`.localhost`/`.home.arpa` name. At `false` Nexus also resolves every other upstream hostname and refuses it if any answer is private or the name does not resolve, so **the Nexus process needs public DNS**. Refusals are `400 SPEC_INVALID`. Set `true` for internal-only portals and local development. See [`security.md`](security.md#1-threat-model).                                                                                                  |
+| `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS`         | `false`                               | Whether backend writes may proceed when the gateway cannot attest public-only egress on its own data plane, as in a control-plane/data-plane pairing. Relaxes only that attestation: Nexus keeps the upstream screening above, health keeps `public_egress_guaranteed: false`, startup logs a warning, and each admitted write records `egress_profile` in its audit row. Set `true` only when every data plane enforces `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs. See [the topology decision](#backend-egress-admission-and-the-public-only-guarantee). |
+| `NEXUS_ALLOW_ENV_OVERRIDE`                   | `false`                               | Allow the process environment to override `.env` for `FERRUM_NAMESPACE`/`FERRUM_ADMIN_URL` outside production (see above). No effect in production.                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `NEXUS_WEB_DIST`                             | _(unset)_                             | Directory of the built SPA. Nexus uses the first of this, `../../web/dist` relative to the server, and `./web/dist` under the working directory that contains an `index.html`; with none, only the API is served.                                                                                                                                                                                                                                                                                                                                                     |
+| `NEXUS_BOOTSTRAP_TOKEN`                      | _(unset)_                             | Token the founding registration must present. At least 16 characters. When unset, each process generates one. Set it for any multi-instance deployment. See [First run](#first-run-and-the-bootstrap-token).                                                                                                                                                                                                                                                                                                                                                          |
+| `NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`        | `900000` (15 min)                     | How often Nexus checks that the gateway still holds the consumer and proxy ids it stored, 0 – 86 400 000. A pass also runs at startup. `0` disables the timer. See [§13](#13-retargeting-or-rebuilding-ferrum-edge).                                                                                                                                                                                                                                                                                                                                                  |
+| `NEXUS_GATEWAY_RECONCILE_SAMPLE`             | `200`                                 | Most stored references of each kind one pass checks, 1–100 000. A pass that hits the bound reports `complete: false`.                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 ### Database
 
@@ -225,14 +226,198 @@ curl -s "$FERRUM_ADMIN_URL/health" -H "Authorization: Bearer $ADMIN_JWT" | jq .n
 }
 ```
 
-A control plane reports `data_plane_single_namespace: false` and
-`active: null`, and never degrades the portal. A gateway without a `namespace`
-block is treated as unknown, not as a mismatch.
+The released namespace-routing policy accepts a control plane with
+`data_plane_single_namespace: false` and `active: null`; a missing namespace
+block is unknown, not a mismatch. **Backend egress admission below narrows that
+accepted CP pairing; see its topology decision.**
+
+### Backend egress admission and the public-only guarantee
+
+Unless an opt-out below is set, every backend-writing Admin boundary
+requires fresh authenticated, namespace-matched, no-store process metadata from
+`GET /backend-egress-policy`, schema v1. Only `local-data-plane` with
+`public_only_guaranteed=true` passes. Nexus validates the complete closed vocabulary,
+exact allowed/blocked class arrays, evaluation order and cross-field consistency.
+Unknown/missing/malformed metadata, auth/network/timeout failures, cached answers,
+CP-only/admission-only, unserved/no data plane, mode `both` and any allow-CIDR overlay
+refuse writes. Preflight precedes destructive conversions, staging and ACL building;
+compensation repeats admission and records repair-required failures. Before
+teardown, conversion atomically seals its original baseline, retains its proxy
+reference, sets `gateway_state=repair_required` and records an intent audit. The
+condition survives staging, cutover and catalog commit refusal. Completion clears
+the journal with the catalog, ownership and audit in one lease-fenced transaction.
+Successful rollback also clears repair state and the journal atomically.
+The encrypted `gateway_recovery:<namespace>:<api_id>` setting records original
+operator fields, plugin ids and partial rebuild paths/spec ownership. It uses the
+existing settings repository on all four stores; no schema migration is needed.
+Large journals use an encrypted manifest at that key and individually encrypted
+`gateway_recovery_chunk:<generation>:<index>` rows. Each chunk stays below 1 MiB,
+including encryption and encoding overhead, so growing namespace evidence cannot
+cross [MongoDB's 16 MiB document limit](https://www.mongodb.com/docs/manual/reference/limits/#bson-document-size).
+The complete generation, manifest and old
+chunk retirement commit in one atomic transaction (MongoDB requires a replica set).
+Existing inline legacy journals require the same atomic admission. Updating or deleting
+an API with a journal, enforcement conversion and restore rebuilds refuse opted-in
+standalone MongoDB before catalog, audit or gateway effects. Ordinary catalog revisions,
+live reconciliation and deletion without a journal retain their standalone behavior.
+Reads authenticate identity, order and complete content in a coherent transaction;
+missing/substituted chunks refuse replay and completion. Failed publication retains
+the previous generation, including every original credential, raw row, spec and
+token. Treat these rows as one journal in paired backups and writer-drain procedures;
+never manually trim or remove chunks. Existing single-row journals remain readable,
+and normal encrypted-setting key rotation includes each manifest and chunk.
+The `gateway_restore_cleanup:<namespace>:<api_id>` cutover/cleanup journal uses the
+same format and custody rules.
+`POST /api/apis/:id/restore-gateway` repeats admission, takes the API and proxy
+leases, and verifies resources against that record before rebuilding an absent
+identity. Live selected removal and API-spec replacement use the released v0.9.12
+conditional deployment API: a complete encrypted original snapshot and its strong
+`deployment-v1` token, never a backup/row token or namespace replacement. Each
+pending operation is durable before HTTP. Only HTTP 200 with the expected profile
+and target, committed/applied acknowledgement, explicit cleanup authorization and
+applicable covering cursor allows dependent recovery or journal removal. CP/unserved
+durable-only results, unknown fields, lost replies and cancellation retain the
+journal and attempted identity with `withdrawn: false`; no fresh-token retry or
+unconditional cleanup follows. The owner task may still settle after transport loss.
+Unknown or changed target state refuses mutation. Frozen external-reference replay,
+unrepresentable associations and unsupported write fields require operator
+resolution. Generated validator resource/config fields are preserved; operation
+schemas remain owner-generated. Corrected uploads preserve immutable original replay
+resources and atomically bind the new catalog shape and current revision. Original
+staging replay precedes corrected replacement and cutover under their own retained
+authority. See the [released protocol and qualification limits](edge-conversion-recovery-blocker.md).
+Only a deployment matching the catalog clears the condition; recovery checks it
+on staging before cutover, then again before the fenced completion transaction.
+Reconciliation takes the same proxy lease and retains conversion-owned references
+through missing-resource gaps, so repair cannot release those identities.
+
+Two opt-outs relax different checks, and each one relaxes only its own:
+
+- `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` keeps its existing meaning: Nexus skips its
+  own upstream screening, so internal and unresolvable names are permitted, and Edge
+  alone decides reachability. A portal that publishes private upstreams on purpose
+  cannot also run a public-only gateway, so recognized consistent weaker metadata
+  is accepted too, including CP, `both`, `private` and overlays.
+- `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` waives only the gateway's public-only
+  attestation, for a pairing such as CP/DP that cannot provide it. Nexus keeps its
+  suffix, IP-literal and resolved-address screening of every upstream.
+
+Under either opt-out, missing, malformed or unsupported-schema metadata is still
+refused, the pairing is never reported as public-only, startup logs a
+`BACKEND EGRESS NOT GUARANTEED` warning naming the variable, and every publish,
+update and restore records the admitting `egress_profile` (`public-guaranteed`,
+`private-upstreams-opt-in` or `unattested-edge-opt-in`) and the policy's
+`enforcement_scope` in its audit row. Private plugin dependencies may require allow
+CIDRs; any such override removes public-only certification even when an operator
+considers the override harmless. Edge's `rediss://` hostname rebinding limitation
+remains unchanged (see the security guide).
+
+A direct singleton requires operator-established identity of its Admin and traffic
+process. Metadata has no process identity or fleet inventory; it cannot attest a
+remote DP, other process, load-balanced Admin endpoint or future replacement. Check
+both endpoints and configuration on replacement/reconfiguration, and enforce policy
+for existing traffic outside Nexus. Startup and cached health successes authorize no
+mutation. Health keeps HTTP 200 for degraded liveness and retains probe
+caching/coalescing. A caller below `admin` reads only `edge.reason: "unspecified"`
+and `public_egress_guaranteed: null`; an admin reads `backend_egress_unverified`,
+the boolean verdict and a fixed bounded diagnostic, never policy bodies, CIDRs or
+secrets.
+
+**Topology decision.** Nexus grants the verified public-only egress guarantee only
+when Edge reports `public_only_guaranteed=true` with
+`enforcement_scope=local-data-plane`, that is, a single gateway process that both
+answers the Admin API and serves the traffic. `GET /api/health/edge` reports that
+verdict as `public_egress_guaranteed`. Every other pairing reads
+`public_egress_guaranteed: false`, including a control plane that reports
+`public_only_guaranteed=true` for its own process: its policy describes admission,
+not the remote data planes that connect to backends.
+
+| Pairing                                                      | Public profile (default)                          | `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`         | `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`              |
+| ------------------------------------------------------------ | ------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- |
+| Local data plane, public mode, no allow overrides            | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
+| Control plane with remote data planes (CP/DP)                | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      | Writes admitted; health `ok`; not guaranteed      |
+| Any other recognized policy                                  | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      | Writes admitted; health `ok`; not guaranteed      |
+| Missing, malformed, unsupported-schema or unreachable policy | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed |
+
+Nexus upstream screening runs in the first two columns and is skipped only in the
+last. A CP/DP deployment therefore publishes with
+`NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` and keeps that screening; it does not
+need `NEXUS_ALLOW_PRIVATE_UPSTREAMS`. Nexus never describes it as public-only, and
+the operator enforces public-only egress on every data plane (see the
+[security guide](security.md#1-threat-model)).
+
+**Compatibility ceiling.** Nexus reads egress policy schema 1 only, which Edge
+publishes up to `v0.9.12`. Edge `v0.9.13` and later publish schema 2; Nexus refuses
+it under the protocol reason `unsupported_egress_policy_schema`, health reads
+`degraded`, and an admin's `edge.error` names the unsupported schema. Every backend
+write is refused in every profile, so pair this release with Edge `v0.9.12` or
+earlier until schema 2 is adopted. Adopting it must keep requiring
+`enforcement_scope=local-data-plane` explicitly, not schema 2's narrowed
+`public_only_guaranteed` alone.
+
+The candidate pins the published Edge `v0.9.12` default image and canonical
+`contracts-edge-0.9.12` at `31f0a21d707795be293d15837c2f77c3d84219d8`.
+See [the adoption facts](edge-0.9.11-adoption.md) and the separate
+[packaged public-only fixture](../e2e/public-only/README.md).
 
 **Fixing a mismatch.** Set the portal's `FERRUM_NAMESPACE` to the gateway's
 `active` value, or restart the gateway with the portal's value, then restart
 the portal. Changing the portal's namespace changes every listen path, so APIs
 published under the old one must be republished.
+
+### Resolving an unconfirmed gateway deployment mutation
+
+A conditional deployment removal or replacement that Edge did not confirm (a lost
+reply, a timeout, `503`, a CP/unserved durable-only result) may still settle after
+Nexus gave up on it. Nexus never guesses the outcome, so the API stays
+`gateway_state: repair_required` with its encrypted journal, and every portal path
+that would act on it refuses with `409 CONFLICT`:
+
+- `POST /api/apis/:id/restore-gateway` and `DELETE /api/apis/:id` answer
+  "A gateway deployment mutation is unconfirmed", "The conditional restore
+  application remains unconfirmed" or "A failed restore has unconfirmed deployment
+  cleanup".
+- The audit trail has an `api.gateway_repair_required` row with
+  `recovery_retained: true`, or an `api.gateway_restore_failed` row with
+  `cleanup_refused: "deployment_cleanup_unconfirmed"`. Both name the `proxy_id`.
+
+A request refused before anything was sent (for example by egress admission) is
+never journaled as unconfirmed, so this state always means a request reached the
+gateway. There is no portal endpoint that marks it confirmed. Resolve it by
+observation:
+
+1. **Do not retry around it.** Do not repeat the PATCH, recreate the proxy, or edit
+   the API through the portal. A second operation could overlap the one that may
+   still settle.
+2. **Wait for the gateway to settle.** Confirm Edge is `ready`, then read
+   `GET /deployment-snapshot` for the namespace twice, at least one config poll
+   interval apart. The same `ETag` both times means no deployment is still in
+   flight.
+3. **Observe the outcome** for the audited `proxy_id` through the Edge Admin API,
+   and record the proxy's plugin configs before changing anything (the audit row's
+   `plugin_names` lists the hand-owned ones):
+   - after a teardown or cleanup removal, the proxy is either still present,
+     unchanged on its original listen path (not applied), or absent (applied);
+   - after a `routes` cutover, the proxy is either still on its
+     `/<namespace>/.staging/<id>` path (not applied) or on the API's real listen
+     path with the submitted specification (applied).
+4. **Release the journal**, break-glass, with every Nexus instance stopped as in
+   the [paired-backup writer drain](#ordering-and-consistency) and a fresh paired
+   backup taken. In `app_settings` (a table, or a collection on MongoDB), delete
+   the journal's manifest row, whose key is
+   `gateway_recovery:<namespace>:<api_id>` or
+   `gateway_restore_cleanup:<namespace>:<api_id>`. Delete only that row: the
+   `gateway_recovery_chunk:*` rows it referenced become unreferenced and inert,
+   and a later journal uses a new generation.
+5. **Bring the gateway back to the catalog.** Start Nexus and run
+   `POST /api/apis/:id/restore-gateway`. A present proxy that still matches the
+   catalog clears `repair_required` without a rebuild; an absent one is rebuilt
+   from the catalog under a new id. A present proxy that matches neither is refused
+   as needing operator reconciliation: remove it through the Edge Admin API, run
+   the restore again, then re-add any hand-owned plugin configs recorded in step 3.
+
+Never release a journal while the outcome is still unsettled, and never edit or
+remove individual chunk rows of a journal that is kept.
 
 ### Email
 
@@ -976,7 +1161,7 @@ docker compose up -d
 The four secrets and `FERRUM_EDGE_IMAGE` are required (`${VAR:?…}`); keep the
 secrets stable across restarts. [`release/compatibility.env`](../release/compatibility.env)
 pins the Edge image by digest. The current acceptance suite
-([`e2e/`](../e2e/README.md)) uses Ferrum Edge `v0.9.10`; the released Nexus
+([`e2e/`](../e2e/README.md)) selects published Ferrum Edge `v0.9.12` for candidate qualification; the released Nexus
 `v0.3.0` pairing with Edge `v0.9.9` is recorded in the
 [`v0.3.0` release notes](release-notes.md#supported-combination).
 
@@ -986,9 +1171,9 @@ rechecks public-address policy when it opens each upstream connection. A
 deployment that sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` must configure
 `FERRUM_BACKEND_ALLOW_CIDRS=<intended private ranges>` while keeping
 `FERRUM_BACKEND_ALLOW_IPS=public`. Public mode also screens plugin endpoints,
-including private Redis URLs. Part B of GHSA-93rq-89vr-38pc remains: Nexus
-cannot detect an Edge deployment without public-only egress; this is tracked in
-[ferrum-edge#5994](https://github.com/ferrum-edge/ferrum-edge/issues/5994).
+including private Redis URLs. Under the draft public profile, any allow-CIDR override
+prevents certification and refuses mutations. See the pending supported-profile
+proposal above; its source contract does not qualify the current pinned image.
 
 Dependabot proposes digest updates for Compose and Dockerfile images, which are
 reviewed with the source change. GitHub Actions workflow service images and
@@ -1130,6 +1315,43 @@ keys and `jwt` secrets unredacted. The Nexus database holds only credential
 fingerprints and last-four characters, but it does hold password hashes,
 session-token hashes and encrypted settings. Encrypt both backups and restrict
 access.
+
+### Conditional Edge snapshots and namespace restore
+
+The retained Edge `v0.9.11` operator contract introduced `GET /backup?conditional=true` for a
+coherent, complete, unfiltered namespace snapshot and matching strong **namespace**
+ETag. Preserve that response header and send it in `If-Match` to
+`POST /restore?confirm=true`. Body metadata, consumer row ETags and wildcard tags
+are not an authorization substitute for that coherent namespace snapshot. Snapshot
+credentials remain live secrets, never Nexus DTOs, logs or audit details.
+
+A malformed/unsupported conditional request is `400`; a stale namespace
+precondition is `412` and must not overwrite concurrent updates. `501` means the
+backend/topology cannot supply the required atomic/coherent capability (for example
+standalone MongoDB); `503` means authoritative snapshot/audit/admission is unavailable.
+Fail closed, resolve the condition and obtain a new coherent snapshot; never retry
+an old restore body under a newly fetched tag. Verify durable/live state after an
+uncertain acknowledgement before retrying. These are distinct from strong **row**
+`If-Match` used by Nexus's three whole-consumer callers with
+`GET /consumers/{id}/verification`. Tokens are opaque quoted visible ASCII,
+validated as one strong entity tag and preserved verbatim; syntax checking does not
+validate their MAC. Weak, wildcard, list, empty, control/non-ASCII and ambiguous
+duplicate tags refuse the write. Consumer metadata uses Edge's masked projection:
+hidden Basic/custom state is restored by the owner under that original row fence,
+while historical JWT/HMAC entries are canonicalized to their supported secret field.
+The complete verification shape can contain historical empty arrays, objects or
+other JSON values. Only exact `[REDACTED]` at keyauth/JWT/HMAC secret sites is a
+reserved marker; substrings and custom metadata remain valid. Basic plaintext is
+never accepted by verification; an invalid hidden Basic shape reports
+`consumer_metadata_unrepresentable` before a PUT, without credential details.
+
+Nexus has no namespace Admin restore caller. Its API gateway restore rebuilds
+individual resources and repeats egress admission. Conditional Edge backup does not
+make Nexus and Edge backups jointly atomic; keep the writer-drain and paired-backup
+procedure below. The current unreleased candidate selects published Edge `v0.9.12`
+and `contracts-edge-0.9.12` pins; its exact-head recovery and packaged-image
+qualification remains pending. Historical Nexus `v0.3.0` remains paired with Edge
+`v0.9.9`. See [the adoption facts and remaining gates](edge-0.9.11-adoption.md).
 
 ### Ordering and consistency
 
@@ -1495,6 +1717,10 @@ These subkeys are HKDF-derived from `NEXUS_SECRET_KEY`:
 | Session token HMAC (HMAC-SHA-256)    | `nexus-session-hmac-v1`    | `sessions.token_hash`, `email_verification_tokens.token_hash`                                             |
 | Single sign-on attempt (AES-256-GCM) | `nexus-sso-transaction-v1` | The `nexus_sso` cookie of a sign-in in progress (10 minutes at most)                                      |
 
+Encrypted gateway recovery journals use the same settings subkey. Include every
+`gateway_recovery:<namespace>:<api_id>` row in settings re-encryption during rotation;
+losing that key makes recovery refuse instead of guessing at resource ownership.
+
 Passwords are hashed with scrypt and a random salt, independent of the key, so
 password sign-in survives a rotation.
 
@@ -1654,11 +1880,11 @@ An undo step that fails does not raise (it would hide the original error). It
 writes an audit row and logs at `error`. Nothing repairs these automatically,
 so alert on each:
 
-| Row                           | Meaning                                                                                                                                                                                                                                            |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api.gateway_repair_required` | A change could not be undone. `details.phase`: `conversion` or `rollback` means a `spec_enforcement` rebuild left the API with **no proxy**; `compensation` means the proxy exists but fields listed in `details.steps` may not match the catalog. |
-| `api.publish_rollback`        | A publish reached the gateway, then failed. `withdrawn: true` needs nothing. `withdrawn: false` means `details.stranded_proxy_id` may still be live on a staging path with no `apis` row.                                                          |
-| `api.plugin_rollback`         | A palette plugin change failed. `restored: true` needs nothing. `restored: false` means the config in `details.plugin_config_id` may still hold the attempted change; `details.step_errors` says which step failed.                                |
+| Row                           | Meaning                                                                                                                                                                                                             |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `api.gateway_repair_required` | A change could not be undone. `conversion` or `rollback` leaves a missing or partial deployment tracked as `repair_required`; `compensation` means fields listed in `details.steps` may not match the catalog.      |
+| `api.publish_rollback`        | A publish reached the gateway, then failed. `withdrawn: true` needs nothing. `withdrawn: false` means `details.stranded_proxy_id` may still be live on a staging path with no `apis` row.                           |
+| `api.plugin_rollback`         | A palette plugin change failed. `restored: true` needs nothing. `restored: false` means the config in `details.plugin_config_id` may still hold the attempted change; `details.step_errors` says which step failed. |
 
 ```sql
 SELECT created_at, action, target_id AS api_id, details
@@ -1675,6 +1901,11 @@ Repairs:
 - **`api.publish_rollback`, `withdrawn: false`:** check `GET /proxies/{id}`. If
   it exists, nothing in the portal owns it; delete it. Nexus never reuses a
   stranded id, so this cannot affect the provider's retry.
+- **`api.gateway_repair_required`, `phase: "conversion"` or `"rollback"`:** restore
+  the API through `POST /api/apis/:id/restore-gateway` after fresh policy permits.
+  Keep its encrypted recovery setting and original proxy reference until completion.
+  If resource validation refuses, reconcile the named partial resources on Edge;
+  do not clear the flag merely because that proxy id exists.
 - **`api.gateway_repair_required`, `phase: "compensation"`:** compare the fields
   in `details.steps` with the catalog and fix the gateway, or ask the provider
   to re-submit the `PATCH`.
@@ -2830,9 +3061,13 @@ in development needs the same arrangement, or an HTTPS issuer both can reach.
 
 ## Gateway resource attribution
 
-Every Admin API call sends `X-Ferrum-Provisioned-By: ferrum-nexus`. A gateway
+Initial provisioning sends `X-Ferrum-Provisioned-By: ferrum-nexus`. A gateway
 with resource-label support records `labels: {provisioned-by: ferrum-nexus}` on
 consumers, proxies and plugin configs Nexus creates, including resources
 generated from API specs. Labels survive later updates. Gateways without label
 support ignore the header. Labels are informational: Nexus's stored ids remain
-authoritative, and JWT subjects still identify the acting user.
+authoritative, and JWT subjects still identify the acting user. Recovery recreation
+omits the informational header and carries the retained resource labels exactly,
+including an absent origin that an operator removed. Native import replacement
+preserves the labels of those same resource ids. Original deployment evidence,
+conditional authority, actor subjects and namespace admission remain required.

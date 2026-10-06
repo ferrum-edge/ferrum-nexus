@@ -7,12 +7,20 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import type { ApiErrorBody, AppHealth, EdgeHealth } from '@ferrum-nexus/shared';
 
+import { publicEgressPolicy } from './mock-ferrum-edge.js';
+import type { NexusError } from '../lib/errors.js';
 import { OPAQUE_ERROR } from '../routes/health.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 describe('health probe deadline', () => {
   it('bounds a hung version lookup and preserves normal admin deadlines', async (t) => {
     const gateway = createHttpServer((request, response) => {
+      if (request.url === '/backend-egress-policy') {
+        response.setHeader('cache-control', 'no-store');
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify(publicEgressPolicy()));
+        return;
+      }
       if (request.url !== '/health') return;
       void delay(700).then(() => {
         response.setHeader('content-type', 'application/json');
@@ -117,6 +125,7 @@ describe('health endpoints', () => {
     assert.equal(body.edge.mode, null, 'gateway mode is admin-only detail');
     assert.equal(body.edge.admin_writes_enabled, null, 'admin-only detail');
     assert.equal(body.edge.edge_version, null, 'Ferrum Edge exposes no version endpoint');
+    assert.equal(body.edge.public_egress_guaranteed, null, 'egress posture is admin-only detail');
     assert.equal(body.credentials.legacy_basicauth_scan, null, 'scan state is admin-only detail');
     assert.ok(body.uptime_seconds >= 0);
     assert.ok(Date.parse(body.checked_at) > 0);
@@ -169,6 +178,131 @@ describe('health endpoints', () => {
   it('needs no authentication', async () => {
     const response = await harness.app.inject({ method: 'GET', url: '/api/health' });
     assert.equal(response.statusCode, 200);
+  });
+
+  it('reports only a coarse policy reason publicly and a bounded admin diagnostic', async (t) => {
+    const portal = await buildTestApp();
+    t.after(() => portal.close());
+    const operator = await portal.registerUser();
+    portal.edge.setBackendEgressPolicy({
+      ...publicEgressPolicy(),
+      secret_unknown_field: 'policy-secret-canary',
+    });
+    const anonymous = await portal.app.inject({ method: 'GET', url: '/api/health/edge' });
+    assert.equal(anonymous.statusCode, 200);
+    assert.equal(anonymous.json<EdgeHealth>().status, 'degraded');
+    // Anonymous callers learn only that the gateway is degraded, not why.
+    assert.equal(anonymous.json<EdgeHealth>().reason, 'unspecified');
+    assert.equal(anonymous.json<EdgeHealth>().public_egress_guaranteed, null);
+    assert.equal(anonymous.json<EdgeHealth>().error, null);
+    const detailed = await portal.authed(operator, { method: 'GET', url: '/api/health/edge' });
+    assert.equal(detailed.statusCode, 200);
+    assert.equal(detailed.json<EdgeHealth>().reason, 'backend_egress_unverified');
+    assert.equal(detailed.json<EdgeHealth>().public_egress_guaranteed, false);
+    assert.equal(
+      detailed.json<EdgeHealth>().error,
+      'Required backend egress policy could not be verified; check the configured pairing',
+    );
+    assert.ok(!detailed.body.includes('policy-secret-canary'));
+    assert.ok(!anonymous.body.includes('policy-secret-canary'));
+  });
+
+  it('grants the public egress guarantee only to a local public-only data plane', async (t) => {
+    // A public-mode control plane: its own process reports public-only, but it
+    // only admits configuration; remote data planes serve the traffic.
+    const controlPlane: Record<string, unknown> = {
+      ...publicEgressPolicy(),
+      enforcement_scope: 'admission-only',
+    };
+    assert.equal(controlPlane['public_only_guaranteed'], true);
+    const strict = await buildTestApp();
+    t.after(() => strict.close());
+    const strictAdmin = await strict.registerUser();
+    const edgeHealth = (portal: TestApp, session: TestSession) =>
+      portal.authed(session, { method: 'GET', url: '/api/health/edge' });
+    const local = await edgeHealth(strict, strictAdmin);
+    assert.equal(local.json<EdgeHealth>().status, 'ok');
+    assert.equal(local.json<EdgeHealth>().public_egress_guaranteed, true);
+    assert.deepEqual(await strict.edgeClient.assertBackendEgress(), {
+      egress_profile: 'public-guaranteed',
+      enforcement_scope: 'local-data-plane',
+    });
+    // Until Nexus adopts data-plane attestation, the public profile reads that
+    // pairing as not guaranteed: degraded, and every backend write is refused.
+    strict.edge.setBackendEgressPolicy(controlPlane);
+    const refused = await edgeHealth(strict, strictAdmin);
+    assert.equal(refused.json<EdgeHealth>().status, 'degraded');
+    assert.equal(refused.json<EdgeHealth>().reason, 'backend_egress_unverified');
+    assert.equal(refused.json<EdgeHealth>().public_egress_guaranteed, false);
+    await assert.rejects(strict.edgeClient.assertBackendEgress());
+
+    // Each explicit opt-out admits the same pairing for writes under its own
+    // audited profile, and neither ever reports it as public-only.
+    for (const [env, profile] of [
+      ['NEXUS_ALLOW_PRIVATE_UPSTREAMS', 'private-upstreams-opt-in'],
+      ['NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS', 'unattested-edge-opt-in'],
+    ] as const) {
+      const optedOut = await buildTestApp({ env: { [env]: 'true' } });
+      t.after(() => optedOut.close());
+      const optedOutAdmin = await optedOut.registerUser();
+      optedOut.edge.setBackendEgressPolicy(controlPlane);
+      if (env === 'NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS') {
+        for (const refusedPolicy of [
+          {
+            ...publicEgressPolicy(),
+            mode: 'both',
+            mode_allowed_ip_classes: ['public', 'private-reserved'],
+            mode_blocked_ip_classes: [],
+            public_only_guaranteed: false,
+          },
+          {
+            ...controlPlane,
+            allow_cidr_overrides_present: true,
+            public_only_guaranteed: false,
+          },
+        ]) {
+          optedOut.edge.setBackendEgressPolicy(refusedPolicy);
+          const refusedPolicyHealth = await edgeHealth(optedOut, optedOutAdmin);
+          assert.equal(refusedPolicyHealth.json<EdgeHealth>().status, 'degraded');
+          assert.equal(refusedPolicyHealth.json<EdgeHealth>().reason, 'backend_egress_unverified');
+          assert.equal(refusedPolicyHealth.json<EdgeHealth>().public_egress_guaranteed, false);
+          await assert.rejects(optedOut.edgeClient.assertBackendEgress());
+        }
+        optedOut.edge.setBackendEgressPolicy(controlPlane);
+      }
+      const admitted = await edgeHealth(optedOut, optedOutAdmin);
+      assert.equal(admitted.json<EdgeHealth>().status, 'ok', env);
+      assert.equal(admitted.json<EdgeHealth>().public_egress_guaranteed, false, env);
+      assert.deepEqual(await optedOut.edgeClient.assertBackendEgress(), {
+        egress_profile: profile,
+        enforcement_scope: 'admission-only',
+      });
+    }
+  });
+
+  it('names an unsupported policy schema to admins and keeps refusing writes', async (t) => {
+    const portal = await buildTestApp({
+      env: { NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'true', NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: 'true' },
+    });
+    t.after(() => portal.close());
+    const operator = await portal.registerUser();
+    portal.edge.setBackendEgressPolicy({ ...publicEgressPolicy(), schema_version: 2 });
+    // Neither opt-out reaches past an unreadable policy.
+    await assert.rejects(portal.edgeClient.assertBackendEgress(), (error: NexusError) => {
+      assert.equal(error.code, 'EDGE_PROTOCOL_ERROR');
+      assert.equal(
+        (error.details as { reason?: string }).reason,
+        'unsupported_egress_policy_schema',
+      );
+      return true;
+    });
+    const detailed = await portal.authed(operator, { method: 'GET', url: '/api/health/edge' });
+    assert.equal(detailed.json<EdgeHealth>().status, 'degraded');
+    assert.equal(detailed.json<EdgeHealth>().reason, 'backend_egress_unverified');
+    assert.match(detailed.json<EdgeHealth>().error ?? '', /v0\.9\.12 or earlier/);
+    const anonymous = await portal.app.inject({ method: 'GET', url: '/api/health/edge' });
+    assert.equal(anonymous.json<EdgeHealth>().reason, 'unspecified');
+    assert.equal(anonymous.json<EdgeHealth>().error, null);
   });
 
   it('reports the gateway on its own endpoint', async () => {
@@ -355,9 +489,29 @@ describe('health probe caching', () => {
         assert.equal(response.json<EdgeHealth>().status, 'ok');
       }
       assert.equal(edgeProbes(harness), 1, 'concurrent callers must share one probe');
+      assert.equal(harness.edge.callsTo('GET', '/backend-egress-policy').length, 1);
     } finally {
       await harness.close();
     }
+  });
+
+  it('never uses a cached healthy policy to authorize a backend mutation', async (t) => {
+    const harness = await buildTestApp({ env: { NEXUS_HEALTH_CACHE_MS: '5000' } });
+    t.after(() => harness.close());
+    const first = await harness.app.inject({ method: 'GET', url: '/api/health/edge' });
+    assert.equal(first.json<EdgeHealth>().status, 'ok');
+    harness.edge.setBackendEgressPolicy(null);
+    const cached = await harness.app.inject({ method: 'GET', url: '/api/health/edge' });
+    assert.equal(cached.json<EdgeHealth>().status, 'ok', 'observation remains cached');
+    await assert.rejects(
+      harness.edgeClient.proxies.create({
+        listen_path: '/nexus/stale-health',
+        backend_host: 'example.test',
+        backend_port: 80,
+      }),
+    );
+    assert.equal(harness.edge.proxies.size, 0);
+    assert.equal(harness.edge.callsTo('GET', '/backend-egress-policy').length, 2);
   });
 
   it('collapses a burst of /api/health the same way', async () => {

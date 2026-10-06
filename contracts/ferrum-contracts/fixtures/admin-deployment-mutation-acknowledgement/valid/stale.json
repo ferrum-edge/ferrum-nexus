@@ -1,0 +1,6 @@
+{
+  "error": "Deployment snapshot is stale",
+  "durable": "not_committed",
+  "live": "unconfirmed",
+  "recovery_cleanup_authorized": false
+}

@@ -104,8 +104,9 @@ npm test --workspace server
 
 **Always do this when touching `server/src/db/`.** A new store method implemented in three adapters
 out of four typechecks fine and fails only at runtime, on whichever backend the reviewer does not
-run. CI's `store-contracts` job runs this suite on all four backends, together with the MySQL
-migration tests and the baseline-upgrade fixture.
+run. CI's `store-contracts` check runs this suite on all four backends, together with the MySQL
+migration tests and the baseline-upgrade fixture, in one lane per server backend (each lane also
+runs SQLite).
 
 The Mongo URL must point at a replica set (single-node is fine). A standalone `mongod` is rejected
 at `init()` unless `NEXUS_DB_ALLOW_STANDALONE=true`, and the smoke suite's transaction cases need

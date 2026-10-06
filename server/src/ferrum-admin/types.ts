@@ -47,6 +47,29 @@ export interface EdgeErrorBody {
   detail?: string;
 }
 
+/** Secret-complete original authority. Persist only inside an encrypted recovery journal. */
+export interface EdgeDeploymentSnapshot {
+  profile: 'deployment-v1';
+  namespace: string;
+  namespace_etag: string;
+  evidence: Record<string, unknown>;
+  proxies: EdgeProxy[];
+  plugin_configs: EdgePluginConfig[];
+  upstreams: Record<string, unknown>[];
+  api_specs: Record<string, unknown>[];
+  [field: string]: unknown;
+}
+
+/** The released partial-write acknowledgement, distinct from ordinary resource responses. */
+export interface EdgeDeploymentAcknowledgement {
+  profile?: 'deployment-v1';
+  id?: string;
+  durable: 'not_started' | 'not_committed' | 'committed' | 'unknown';
+  live: 'unconfirmed' | 'not_applicable' | 'applied';
+  recovery_cleanup_authorized: boolean;
+  [field: string]: unknown;
+}
+
 /** Query parameters accepted by Edge list endpoints. */
 export interface EdgeListQuery {
   limit?: number;
@@ -115,8 +138,9 @@ export interface EdgeConsumer {
  *
  * `namespace` is intentionally absent: the `X-Ferrum-Namespace` header
  * overwrites it on the wire, and sending unknown/read-only fields risks a 400.
- * `PUT` is a whole-resource replace — always build it from a `GET` response so
- * omitted credential types are not deleted.
+ * Metadata `PUT` uses EdgeConsumerReplacement: a complete verification snapshot
+ * supplies the original row tag; the owner projection preserves hidden groups
+ * and canonicalizes supported legacy single-field credentials.
  */
 export interface EdgeConsumerWrite {
   labels?: Record<string, string>;
@@ -126,6 +150,16 @@ export interface EdgeConsumerWrite {
   credentials?: EdgeCredentialMap;
   acl_groups?: string[];
 }
+
+/** Complete authoritative server-only row, including historical JSON credential values. */
+export type EdgeVerifiedConsumer = Omit<EdgeConsumer, 'credentials'> & {
+  credentials: Record<string, unknown>;
+};
+
+/** Metadata writes use the owner projection under the original complete row tag. */
+export type EdgeConsumerReplacement = Omit<EdgeConsumerWrite, 'credentials'> & {
+  credentials?: Record<string, unknown>;
+};
 
 /* ── Proxies ────────────────────────────────────────────────────────────── */
 
@@ -612,6 +646,20 @@ export interface EdgeHealth {
 
 /** Result of the Nexus-side Edge probe used by `GET /api/health`. */
 export interface EdgeProbe {
+  /** Sampled observation only; never authorizes a backend mutation. */
+  backendEgressVerified?: boolean;
+  /**
+   * Whether the sampled policy proves public-only egress on the local data
+   * plane (`enforcement_scope=local-data-plane`, `public_only_guaranteed`).
+   * Independent of the private opt-in, and always false for a control-plane
+   * or remote data-plane pairing. Observational only.
+   */
+  publicEgressGuaranteed?: boolean;
+  /**
+   * Whether the sampled policy named a schema version this portal does not
+   * read (Edge v0.9.13 and later publish schema 2). Admin diagnostic only.
+   */
+  backendEgressSchemaUnsupported?: boolean;
   /**
    * Whether the gateway answered at all. A gateway that answered `503` because
    * it is `starting`/`draining`/`unavailable` is **reachable** — read `ready`.

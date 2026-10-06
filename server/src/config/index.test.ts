@@ -121,6 +121,7 @@ describe('loadConfig', () => {
     assert.deepEqual(config.emailTemplateAllowedLinkHosts, []);
     assert.equal(config.trustedProxies, false);
     assert.equal(config.allowPrivateUpstreams, false);
+    assert.equal(config.allowUnattestedEdgeEgress, false);
     assert.equal(config.logLevel, 'info');
     assert.equal(config.sessionTtlSeconds, 43_200);
     assert.equal(config.captchaEnforcement, 'enforced');
@@ -556,6 +557,19 @@ describe('loadConfig', () => {
     expectConfigError(
       baseEnv({ NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'sometimes' }),
       'NEXUS_ALLOW_PRIVATE_UPSTREAMS must be true or false',
+    );
+  });
+
+  it('reads NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS independently of private upstreams', () => {
+    const unattested = loadConfig(baseEnv({ NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: 'true' }));
+    assert.equal(unattested.allowUnattestedEdgeEgress, true);
+    assert.equal(unattested.allowPrivateUpstreams, false);
+    const privateOnly = loadConfig(baseEnv({ NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'true' }));
+    assert.equal(privateOnly.allowPrivateUpstreams, true);
+    assert.equal(privateOnly.allowUnattestedEdgeEgress, false);
+    expectConfigError(
+      baseEnv({ NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: 'sometimes' }),
+      'NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS must be true or false',
     );
   });
 });

@@ -18,6 +18,7 @@ import {
 export {
   createFerrumAdminClient,
   createKeyedSerializer,
+  deploymentNotDispatched,
   silentEdgeLogger,
   LEASE_POLL_MS,
   LEASE_TTL_MS,
@@ -28,6 +29,7 @@ export {
   type KeyedSerializer,
   type KeyedSerializerOptions,
 } from './client.js';
+export type { BackendEgressAdmission, EgressProfile } from './egress-policy.js';
 
 export {
   createAdminTokenMinter,
@@ -71,5 +73,9 @@ export function createFerrumAdmin(
   logger: EdgeLogger = silentEdgeLogger,
   leases?: LeaseRepo,
 ): FerrumAdminClient {
-  return createFerrumAdminClient(config.edge, logger, leases === undefined ? {} : { leases });
+  return createFerrumAdminClient(config.edge, logger, {
+    leases,
+    allowPrivateUpstreams: config.allowPrivateUpstreams,
+    allowUnattestedEdgeEgress: config.allowUnattestedEdgeEgress,
+  });
 }

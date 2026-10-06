@@ -1,0 +1,103 @@
+# Published Edge v0.9.12 baseline; load its digest from release/compatibility.env.
+# Root supplies the packaged Nexus digest; hosted qualification and approval remain pending.
+# Separate from ../docker-compose.yml, which deliberately permits private upstreams.
+name: ferrum-nexus-public-only
+
+services:
+  controlled:
+    build: .
+    command: ['node', 'controlled.mjs']
+    networks:
+      private:
+        ipv4_address: 10.203.0.10
+      public-class:
+        ipv4_address: 11.203.0.10
+
+  ferrum-edge-init:
+    image: alpine:3@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+    command: ['chown', '65532:65532', '/data']
+    volumes:
+      - ferrumdata:/data
+    networks: [private]
+
+  ferrum-edge:
+    image: ${FERRUM_EDGE_IMAGE:?supply a qualified Edge v0.9.12 image index digest}
+    command: ['run', '-m', 'database']
+    environment:
+      FERRUM_MODE: database
+      FERRUM_DB_TYPE: sqlite
+      FERRUM_DB_URL: 'sqlite:///data/ferrum.db?mode=rwc'
+      FERRUM_NAMESPACE: nexus
+      FERRUM_ADMIN_JWT_SECRET: ${FERRUM_ADMIN_JWT_SECRET:?set a throwaway secret}
+      FERRUM_ADMIN_BIND_ADDRESS: 0.0.0.0
+      FERRUM_ALLOW_INSECURE_ADMIN_HTTP: 'true'
+      # `both` only for the negative control run; see README.md.
+      FERRUM_BACKEND_ALLOW_IPS: ${FIXTURE_EDGE_ALLOW_IPS:-public}
+      FERRUM_BACKEND_BLOCK_DANGEROUS_RANGES: 'true'
+      FERRUM_DNS_RESOLVER_ADDRESS: '10.203.0.10:53'
+      FERRUM_DNS_MIN_TTL_SECONDS: '1'
+      FERRUM_DNS_TTL_OVERRIDE_SECONDS: '1'
+      FERRUM_DNS_STALE_TTL: '1'
+      FERRUM_POOL_IDLE_TIMEOUT_SECONDS: '0'
+    networks:
+      private:
+        ipv4_address: 10.203.0.20
+      public-class:
+        ipv4_address: 11.203.0.20
+    volumes:
+      - ferrumdata:/data
+    depends_on:
+      controlled:
+        condition: service_started
+      ferrum-edge-init:
+        condition: service_completed_successfully
+
+  nexus:
+    image: ${NEXUS_IMAGE:?supply the packaged candidate image digest}
+    dns: [10.203.0.10]
+    environment:
+      NEXUS_SECRET_KEY: ${NEXUS_SECRET_KEY:?set a throwaway secret}
+      NEXUS_BOOTSTRAP_TOKEN: ${NEXUS_BOOTSTRAP_TOKEN:?set a throwaway secret}
+      NEXUS_PUBLIC_URL: http://nexus:8787
+      NEXUS_COOKIE_SECURE: 'false'
+      NEXUS_DB_DRIVER: sqlite
+      NEXUS_SQLITE_PATH: /app/data/nexus.sqlite
+      NEXUS_RATE_LIMIT_ENABLED: 'false'
+      NEXUS_ALLOW_PRIVATE_UPSTREAMS: ${FIXTURE_NEXUS_ALLOW_PRIVATE_UPSTREAMS:-false}
+      FERRUM_ADMIN_URL: http://ferrum-edge:9000
+      FERRUM_ADMIN_JWT_SECRET: ${FERRUM_ADMIN_JWT_SECRET:?set a throwaway secret}
+      FERRUM_ADMIN_ALLOW_INSECURE_HTTP: 'true'
+      FERRUM_NAMESPACE: nexus
+      FERRUM_GATEWAY_PUBLIC_URL: http://ferrum-edge:8000
+    networks: [private]
+    depends_on:
+      ferrum-edge:
+        condition: service_started
+
+  probe:
+    build: .
+    command: ['node', 'probe.mjs']
+    environment:
+      NEXUS_BOOTSTRAP_TOKEN: ${NEXUS_BOOTSTRAP_TOKEN:?set a throwaway secret}
+      FIXTURE_CONTROL_RUN: ${FIXTURE_CONTROL_RUN:-false}
+    networks: [private]
+    depends_on:
+      nexus:
+        condition: service_started
+
+networks:
+  # Both are isolated Docker networks. 11.203.0.10 is in Edge v1's public
+  # complement, but every packet goes only to our container, never the Internet.
+  public-class:
+    internal: true
+    ipam:
+      config:
+        - subnet: 11.203.0.0/24
+  private:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.203.0.0/24
+
+volumes:
+  ferrumdata:

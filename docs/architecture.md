@@ -364,9 +364,9 @@ while `starting`, `draining` or `unavailable`. `probe()` reports that as
 
 ### 5.2 `serializePerKey`, and the concurrency hazard it fixes
 
-`PUT /consumers/{id}` is a **whole-resource replace with no concurrency
-token** (no ETag, no `If-Match`, no version). Two concurrent read-modify-writes
-on one consumer both read the old state, and one overwrites the other:
+`PUT /consumers/{id}` is a **whole-resource replace**. Without a matching strong
+row `If-Match`, two concurrent read-modify-writes on one consumer can overwrite
+one another:
 
 ```
 t0  approve API-A: GET consumer -> acl_groups = []
@@ -385,9 +385,43 @@ through it: ACL-group changes (`ConsumerProvisioner.mutateAclGroups`),
 credential appends and deletes. A rotation re-reads the consumer _inside_ the
 lock, so the array length it checks and the index it deletes cannot drift.
 
-A `PUT` body must also be built from a fresh `GET` because omitting `keyauth`
-or `jwt` from it **deletes those credentials**. The provisioner echoes
-`current.credentials` back, redacted placeholders and all.
+The draft Edge adoption uses credential-complete `GET /consumers/{id}/verification`
+and its matching strong row ETag at exactly three whole-consumer callers: ACL mutation,
+re-enable and disable. Verification keeps the complete historical JSON row in
+transient server memory. Metadata PUT sends the owner's ordinary masked projection
+under that original row tag: labels, identity, hidden Basic/custom groups and
+keyauth fields survive; Edge intentionally canonicalizes legacy JWT/HMAC entries
+to their single secret field. Unrepresentable hidden state refuses the update,
+never gets dropped to make it succeed. Missing/unavailable tags refuse replacement;
+stale `412` becomes `CONFLICT`. A retry must re-read and recompute,
+never put a stale body under a fresh tag. Verification error bodies are suppressed
+like credential writes. Dedicated append/delete and show-once paths are unchanged.
+Leases still order Nexus's multi-step operations and fence its store transactions.
+
+Fresh closed `GET /backend-egress-policy` admission lives at every proxy/spec create
+and replacement, including plugin binding and undo; service preflight precedes staging,
+destructive conversion and spec ACL enrollment. Conversion commits
+`repair_required`, the original owned proxy id, an intent audit and an encrypted
+recovery journal in `app_settings` before resource teardown. Deliberate restore
+takes both API and proxy leases and binds complete original deployment-v1 authority
+to conditional selected removal/replacement in released Edge v0.9.12. Explicit
+commit, applicable local application and recovery-cleanup authorization are required
+before dependent recovery. Uncertain writes retain the journal and block replay;
+no fresh-token retry or unconditional fallback is used. The rebuilt path,
+configuration, plugins and spec are validated before cutover and completion.
+The journal is removed only with catalog, ownership and completion audit in one
+fenced transaction. Successful rollback reconciles the catalog and journal together.
+See the [released protocol and remaining qualification](edge-conversion-recovery-blocker.md).
+Health caches observations only.
+The public profile requires namespace-matched local serving/public-only metadata and
+operator-established Admin/traffic singleton identity. Process evidence cannot attest
+CPs, remote DPs, load-balanced Admin endpoints or fleets, so Nexus reports those
+pairings as not guaranteed and admits their writes only under the explicit private
+opt-in, until it adopts Edge data-plane attestation. See the
+[topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)
+and [packaged fixture](../e2e/public-only/README.md). Source authority is Edge
+`0d917701b63ef38210c49df830f48cf0457cbc7d`. The candidate adopts its
+[published image and canonical contracts](edge-0.9.11-adoption.md).
 
 **Leases.** One row per key with an owner token and expiry: 60 s TTL renewed at
 half that, a 30 s wait for a contended key, then `409 CONFLICT` asking the user
@@ -459,7 +493,7 @@ Plugin configs are closed key sets; a typo is a `400`. What Nexus sends:
 - **`cors`** — `{ allowed_origins, allow_credentials }` only. Edge's other CORS
   keys keep their native defaults; sending a key the provider cannot change
   would only freeze that default.
-- **`openapi_validator`** — **Nexus never writes one.** Edge refuses a
+- **`openapi_validator`** — **Nexus never creates one by hand.** Edge refuses a
   hand-built validator on a proxy with no attached API spec, so `routes`
   enforcement submits the _document_ and lets Edge generate the plugin (see
   [Spec-owned proxies](#spec-owned-proxies)).
@@ -668,7 +702,11 @@ undo both take the same staging detour.
 
 **Locking.** API `PATCH` and spec revision share the `proxy:<id>` lease. `PATCH`
 holds it from its catalog re-read through gateway writes, rollback and catalog
-persistence, so a conversion snapshots state only after earlier edits finish.
+persistence. An enforcement conversion runs before the other PATCH gateway writes,
+so its immutable recovery resources and original catalog shape share one baseline.
+Narrow compensation for the other fields runs before the conversion undo. A
+corrected agent specification commits a separate authorized catalog comparison
+shape with its new tool ids; it never overwrites the original replay resources.
 Spec revision re-reads its mode and current revision after taking the lease.
 
 **Spec revision undo.** The undo (previous document and backend, read under
@@ -1253,7 +1291,7 @@ Full reference: [`api.md`](api.md).
 | Catalog visibility                          | `catalog/service.ts` (`canList` / `canView`), `catalog/read-access.ts`               |
 | Last-super-admin guard                      | `users/service.ts` and `admin/god-service.ts` (both, on purpose)                     |
 
-### Proposed service-manifest intake
+### Shared v1 service-manifest intake
 
 The preview service is composed in `server/src/index.ts` and injected into its route.
 It compiles the exact vendored schema with the existing Zod dependency, refusing
@@ -1261,5 +1299,5 @@ unsupported schema keywords at startup. Validation precedes defaults; explicit n
 are never interpreted as omission. Local presentation/reference budgets further narrow
 accepted input. The configured Edge namespace is the authorization boundary for this
 single-namespace portal. The service returns an allow-listed redacted DTO from `shared/`
-and has no store, gateway, network or source-file reader dependency. The manifest format
-remains PROPOSED; preview cannot invoke the publishing service or install agent policy.
+and has no store, gateway, network or source-file reader dependency. The shared v1 format is EXISTING/implemented in published contracts-edge-0.9.12;
+Alloy remains unreleased. Preview cannot invoke publishing or install agent policy.

@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ferrum-edge/ferrum-contracts/schemas/admin-deployment-snapshot/v1.schema.json",
+  "title": "Edge deployment snapshot v1",
+  "description": "Body of admin-only GET /deployment-snapshot. Retain the complete secret-bearing original response and its matching HTTP ETag in encrypted recovery storage. JSON conformance checks the owner OpenAPI envelope, not evidence completeness, token authenticity, freshness, authorization or snapshot coherence.",
+  "x-contract": {
+    "name": "admin-deployment-snapshot",
+    "version": 1,
+    "status": "implemented",
+    "owner": "ferrum-edge/ferrum-edge",
+    "edge_availability": "Released in Ferrum Edge v0.9.12 at 0d917701b63ef38210c49df830f48cf0457cbc7d with verified distribution. Canonical contracts-edge-0.9.12 publication is pending; contracts-edge-0.9.11 remains published.",
+    "provenance": [
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "path": "openapi.yaml",
+        "symbols": [
+          "components.schemas.DeploymentSnapshot",
+          "components.parameters.DeploymentIfMatch"
+        ],
+        "note": "Transcribed OpenAPI envelope, required members and open object shapes. The token pattern uses an absolute end assertion to match the exact parse_request implementation, which rejects trailing control bytes. Nested resource and raw evidence shapes are intentionally not narrowed beyond the owner OpenAPI."
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "path": "src/admin/deployment_mutations.rs",
+        "symbols": [
+          "snapshot",
+          "parse_request",
+          "tag"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "path": "src/config/deployment_mutation.rs",
+        "symbols": [
+          "DeploymentSnapshot::representation"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "path": "src/config/db_backend.rs",
+        "symbols": [
+          "ConditionalNamespaceSnapshot::representation"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "path": "src/config/types.rs",
+        "symbols": [
+          "ApiSpec"
+        ],
+        "note": "Source of full gzip spec_content and optional external_ref_snapshot/external_ref_digest inspection data; the owner OpenAPI envelope intentionally leaves item properties open."
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "path": "src/config/db_loader.rs",
+        "symbols": [
+          "deployment_snapshot_tx",
+          "deployment_raw_sql_row"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "path": "src/config/mongo_store.rs",
+        "symbols": [
+          "deployment_snapshot_in_session"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "path": "docs/deployment_mutations.md",
+        "note": "HTTP/runtime protocol and complete evidence retention are documented in docs/deployment-contracts.md; the pinned owner's candidate wording precedes its subsequently verified publication."
+      }
+    ]
+  },
+  "type": "object",
+  "required": [
+    "profile",
+    "namespace",
+    "namespace_etag",
+    "evidence",
+    "proxies",
+    "upstreams",
+    "plugin_configs",
+    "api_specs"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "profile": {
+      "type": "string",
+      "enum": [
+        "deployment-v1"
+      ]
+    },
+    "namespace": {
+      "type": "string"
+    },
+    "namespace_etag": {
+      "type": "string",
+      "pattern": "^\"deployment-v1-[0-9a-f]{32}\"(?![\\s\\S])",
+      "description": "Exactly one original strong quoted deployment token, equal to the response ETag. Distinct from backup namespace and row tokens. Preserve verbatim; never refresh authority to retry a refused or uncertain mutation."
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Complete typed and raw comparison representation: resources, associations, full specs, historical credentials, trust, namespace metadata and change watermark. SQL retains column_type, value_type and lossless value, including typed nulls, float bits and blob bytes. MongoDB retains documents and BSON bytes. Preserve every member; this open shape cannot certify completeness."
+    },
+    "proxies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "upstreams": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "plugin_configs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "api_specs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Full stored spec metadata, numeric gzip byte array spec_content and any external_ref_snapshot/external_ref_digest. Preserve complete bytes and ownership; this envelope does not impose a second ApiSpec schema."
+      }
+    }
+  }
+}
