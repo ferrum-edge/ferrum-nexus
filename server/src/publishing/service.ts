@@ -775,6 +775,15 @@ export function stagingListenPath(namespace: string): string {
 }
 
 /**
+ * Every listen path an agent API's proxy holds while it is published: its own,
+ * and a staging path, which a create, restore or conversion stamps the
+ * document at first. Only their lengths matter, to bound the stamped document.
+ */
+function agentListenPaths(namespace: string, slug: string): string[] {
+  return [listenPathFor(namespace, slug), stagingListenPath(namespace)];
+}
+
+/**
  * The four proxy fields a backend move writes.
  *
  * `backend_path` is explicitly `null` when the new upstream has no base path:
@@ -1580,6 +1589,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         api.spec_enforcement,
         api.requestable,
         api.allowed_methods,
+        agentListenPaths(api.namespace, api.slug),
       );
       // A tool keeps its exposure id while its published definition is
       // unchanged, so explicit subsets carry across a revision that does not
@@ -1968,6 +1978,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         specEnforcement,
         input.requestable,
         methods,
+        agentListenPaths(namespace, slug),
       );
       const hashing = definitionHashStats();
       const agents = identifyAgentTools(
@@ -2333,6 +2344,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           patch.spec_enforcement ?? api.spec_enforcement,
           patch.requestable ?? api.requestable,
           patch.allowed_methods === undefined ? api.allowed_methods : patch.allowed_methods,
+          agentListenPaths(api.namespace, api.slug),
         );
         const hashing = definitionHashStats();
         const nextAgents =
@@ -3516,6 +3528,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           api.spec_enforcement,
           api.requestable,
           api.allowed_methods,
+          agentListenPaths(namespace, api.slug),
         );
         // The upstream the row already records wins over whatever the document
         // says: it is what the proxy was serving, and a restore must not

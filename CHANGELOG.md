@@ -118,6 +118,22 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **An agent API's submitted document is bounded before it is built** (Refs #525).
+  The document Nexus sends Edge for an agent API gives every path its own copy of
+  the Path Item it references, so 2,000 paths referencing one large Path Item
+  stamped to gigabytes on every publish or revision. Every request that publishes a
+  selection now charges an upper bound on that document's size to a work meter
+  before it builds anything, measuring each object of the document once, and
+  refuses one past 8 MiB with `400 SPEC_INVALID`
+  (`reason: "agent_document_too_large"`). Compensation still restores what the
+  gateway holds.
+- **The dependency-lock producer no longer hard-codes jsdom and Undici** (Refs #525).
+  It checked their exact versions and integrity hashes, so the next reviewed bump
+  would have failed it. It now requires both packages, a registry `resolved` URL and
+  sha512 integrity for every copy, and `engines` (checked with npm's own semver) that
+  admit every Node version the manifests support. The existing graph check still
+  ties each copy to the committed lock while the manifests are unchanged.
+
 - **A disabled grantee no longer blocks a provider's agent-enabled API** (Refs #519).
   Every spec build enrolled each all-tools grantee in the MCP-all group and refused
   with `USER_DISABLED` when any grantee was disabled, so spec revisions, agent edits,

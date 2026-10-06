@@ -1920,7 +1920,11 @@ permitted by `allowed_methods`; an explicit allow-list must also permit POST for
 transport. Unknown nested settings, supplied grant groups or endpoint overrides
 are refused. Invalid document/selection combinations return `400 SPEC_INVALID`
 before writes. A revision deleting a selected operation must first change or
-disable the selection.
+disable the selection. The document Nexus submits for an agent API holds a copy
+of each path's Path Item, references resolved, so one whose submitted size would
+pass 8 MiB (for example, thousands of paths referencing one large Path Item) is
+refused before anything is built, with `400 SPEC_INVALID` and
+`details: { field: "agents", reason: "agent_document_too_large", limit: 8388608 }`.
 
 Catalog `ApiSummary` includes the selection for tool metadata. MCP is served by
 Edge at `<invoke_url>/mcp` with tools named `<slug>.<name>`. A normal Nexus account

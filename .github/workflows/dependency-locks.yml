@@ -51,9 +51,14 @@ jobs:
           cp e2e/package-lock.json lock-artifacts/provenance/e2e-input-lock.json
           npm install --package-lock-only --ignore-scripts --no-audit --no-fund
           npm --prefix e2e install --package-lock-only --ignore-scripts --no-audit --no-fund
+          # npm's own semver, the library that evaluates `engines` for it.
+          NPM_SEMVER="$(npm root -g)/npm/node_modules/semver"
+          test -f "$NPM_SEMVER/package.json"
+          export NPM_SEMVER
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
           import { readFileSync } from 'node:fs';
+          import { createRequire } from 'node:module';
           import { isDeepStrictEqual } from 'node:util';
           const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
           const root = readJson('package-lock.json');
@@ -78,10 +83,11 @@ jobs:
             'engines',
             'workspaces',
           ];
-          for (const [lock, input, sources] of [
+          const locks = [
             [root, rootInput, manifests],
             [e2e, e2eInput, { '': e2eManifest }],
-          ]) {
+          ];
+          for (const [lock, input, sources] of locks) {
             let unchanged = true;
             for (const [path, manifest] of Object.entries(sources)) {
               assert.ok(lock.packages[path], `Missing manifest entry: ${path}`);
@@ -119,8 +125,22 @@ jobs:
           }
           assert.equal(root.packages['node_modules/@vitest/coverage-v8']?.version, vitest);
           assert.equal(e2e.packages['node_modules/typescript']?.version, typescript);
+          // jsdom and Undici set the supported Node floor (#449). No version or
+          // integrity is written here, so a reviewed bump (Dependabot's
+          // included) passes. This proves that both are in the regenerated
+          // locks, and that every copy was resolved from the npm registry with
+          // a sha512 integrity and declares `engines` that admit every Node
+          // version a manifest of its lock supports: no bump can raise the
+          // floor unless the manifests' `engines` move with it. That each copy
+          // is the reviewed tarball is the graph check above: a lock whose
+          // manifests are unchanged must equal the committed one, integrity
+          // included, and any other change is a diff the reviewer applies.
+          const semver = createRequire(`${process.cwd()}/`)(process.env.NPM_SEMVER);
+          const registry = (name) => `https://registry.npmjs.org/${name}/-/${name}-`;
           const found = new Set();
-          for (const lock of [root, e2e]) {
+          for (const [lock, , sources] of locks) {
+            const supported = Object.values(sources).map((manifest) => manifest.engines?.node);
+            for (const range of supported) assert.equal(typeof range, 'string', 'engines.node');
             for (const [path, pkg] of Object.entries(lock.packages)) {
               for (const [name, version] of Object.entries(versions)) {
                 if (path.endsWith(`node_modules/${name}`)) assert.equal(pkg.version, version, path);
@@ -129,19 +149,15 @@ jobs:
               if (vitestPackage && !vitestPackage.startsWith('istanbul-lib-')) {
                 assert.equal(pkg.version, vitest, path);
               }
-              if (path.endsWith('node_modules/jsdom')) {
-                found.add('jsdom');
-                assert.equal(pkg.version, '30.1.2', path);
-                assert.equal(pkg.engines.node, '^22.22.2 || ^24.15.0 || >=26.0.0', path);
-                assert.equal(pkg.integrity,
-                  'sha512-0FFE/jE1rppmVfUrJUgxqXjcwolZYIGtAgj1pTussMhNZxIxi7W/PvfWaMNroGi2B36X1IKHbexpZ9DhkoOPiQ==');
-              }
-              if (path.endsWith('node_modules/undici')) {
-                found.add('undici');
-                assert.equal(pkg.version, '8.11.2', path);
-                assert.equal(pkg.engines.node, '>=22.19.0', path);
-                assert.equal(pkg.integrity,
-                  'sha512-u4UB2/IrKdU6lFxumHmmo1a3fCQO5tzQllRorfoRS63txhrB7xTpSn1PftwC4qEHkOaqP95fCWW4lJzwErwzhQ==');
+              const pinned = path.match(/(?:^|\/)node_modules\/(jsdom|undici)$/)?.[1];
+              if (!pinned) continue;
+              found.add(pinned);
+              assert.ok(pkg.resolved?.startsWith(registry(pinned)), `${path}: resolved`);
+              assert.match(pkg.integrity ?? '', /^sha512-[A-Za-z0-9+/]{86}==$/, `${path}: integrity`);
+              const engines = pkg.engines?.node;
+              assert.equal(typeof engines, 'string', `${path}: engines`);
+              for (const range of supported) {
+                assert.ok(semver.subset(range, engines), `${path}: ${engines} excludes ${range}`);
               }
             }
           }

@@ -8,6 +8,7 @@ import {
   MAX_AGENT_TOOLS,
   MAX_OPENAPI_REF_HOPS,
   MAX_SPEC_BYTES,
+  MAX_SPEC_EXPANDED_BYTES,
   OPENAPI_OPERATION_METHODS,
   mcpAllGroupForApi,
   mcpToolGroupForApi,
@@ -90,28 +91,48 @@ export function definitionHashStats(): DefinitionHashStats {
 /** Thrown when one build of tool hashes exceeds its work or depth budget. */
 class HashBudgetExceeded extends Error {}
 
+/** The counters every {@link WorkMeter} keeps. */
+interface WorkStats {
+  /** Units charged to the meter. */
+  charged: number;
+  /** Members of document collections iterated. */
+  scanned: number;
+}
+
 /**
- * The one meter a build of tool hashes charges its work to, shared by every
- * tool of the build. Each iteration over something the document controls
- * (Path Item and reference chains, Responses and Content maps, and every
- * object and array the digest walks: parameters, schemas and their
- * subschemas, examples) is charged before it runs, and every character as it
- * is hashed. Past {@link MAX_DEFINITION_HASH_WORK} the build is abandoned.
+ * A budget that work over a provider's document is charged to before it is
+ * done, so a document cannot make the work outgrow what it pays for.
+ *
+ * - A build of tool hashes shares one across every tool of the build. Each
+ *   iteration over something the document controls (Path Item and reference
+ *   chains, Responses and Content maps, and every object and array the digest
+ *   walks: parameters, schemas and their subschemas, examples) is charged
+ *   before it runs, and every character as it is hashed. Past
+ *   {@link MAX_DEFINITION_HASH_WORK} the build is abandoned.
+ * - The stamped agent document is charged its bytes before it is built; see
+ *   {@link stampedAgentDocumentBytes}.
  */
-interface WorkMeter {
+interface WorkMeter<Stats extends WorkStats = DefinitionHashStats> {
   /** Charge `cost` units for work about to be done. */
   charge: (cost: number) => void;
   /** Charge `count` members of a collection about to be iterated, `cost` units in all. */
   members: (count: number, cost?: number) => void;
-  stats: DefinitionHashStats;
+  /** Units charged to this meter so far. */
+  used: () => number;
+  stats: Stats;
 }
 
-function workMeter(stats: DefinitionHashStats): WorkMeter {
+/** A meter that throws `exceeded()` once more than `limit` units are charged to it. */
+function workMeter<Stats extends WorkStats>(
+  stats: Stats,
+  limit: number,
+  exceeded: () => Error,
+): WorkMeter<Stats> {
   let work = 0;
   const charge = (cost: number): void => {
     work += cost;
     stats.charged += cost;
-    if (work > MAX_DEFINITION_HASH_WORK) throw new HashBudgetExceeded();
+    if (work > limit) throw exceeded();
   };
   return {
     charge,
@@ -119,6 +140,7 @@ function workMeter(stats: DefinitionHashStats): WorkMeter {
       stats.scanned += count;
       charge(cost);
     },
+    used: () => work,
     stats,
   };
 }
@@ -559,7 +581,7 @@ function definitionDigests(
     return (whole ??= literalDigest(rest, stats));
   };
   try {
-    const meter = workMeter(stats);
+    const meter = workMeter(stats, MAX_DEFINITION_HASH_WORK, () => new HashBudgetExceeded());
     const reader: DefinitionReader = {
       document,
       meter,
@@ -726,13 +748,187 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** No automatic selections, name collisions, path escapes, or method-policy bypasses. */
+/**
+ * Most bytes of compact JSON the document Nexus stamps for an agent API may
+ * hold: twice {@link MAX_SPEC_EXPANDED_BYTES}.
+ *
+ * Edge reads `x-ferrum-mcp` off each operation of each path, and two paths
+ * that reference one Path Item expose different tools, so the stamped document
+ * cannot keep that reference: every path holds its own copy of the Path Item
+ * it resolves to. Without a bound, 2,000 paths referencing one Path Item of
+ * 1 MiB would be a 2 GiB document, built and sent on every publish. A
+ * document that writes its Path Items inline stamps to about its own size,
+ * which uploads already hold to {@link MAX_SPEC_EXPANDED_BYTES}; the second
+ * share is room for every Path Item the document references once more.
+ */
+export const MAX_AGENT_DOCUMENT_BYTES = 2 * MAX_SPEC_EXPANDED_BYTES;
+
+/**
+ * Bytes charged for each operation the stamp marks, beyond its route's path
+ * template and regex: its `x-ferrum-mcp` mark and the route entry's fields.
+ */
+const OPERATION_STAMP_BYTES = 128;
+
+/**
+ * Bytes charged for each selected tool, beyond its name, description and
+ * slug: its exposed mark and its two policy entries, groups included.
+ */
+const TOOL_STAMP_BYTES = 512;
+
+/** Work counters a test may pass to {@link stampedAgentDocumentBytes}. */
+export interface AgentDocumentStats {
+  /** Bytes charged to {@link MAX_AGENT_DOCUMENT_BYTES}, by every estimate these were passed to. */
+  charged: number;
+  /** Paths, operation slots and Path Item reference hops visited. */
+  scanned: number;
+  /** Objects and arrays whose compact JSON size was computed: each at most once. */
+  measured: number;
+}
+
+/** Fresh counters for {@link stampedAgentDocumentBytes}. */
+export function agentDocumentStats(): AgentDocumentStats {
+  return { charged: 0, scanned: 0, measured: 0 };
+}
+
+/** `SPEC_INVALID` for an agent document past {@link MAX_AGENT_DOCUMENT_BYTES}. */
+function agentDocumentTooLarge(): Error {
+  return specInvalid(
+    'With AI agents enabled, the document sent to the gateway would be larger than the ' +
+      `${Math.floor(MAX_AGENT_DOCUMENT_BYTES / 1024)} KiB limit: every path holds its own copy ` +
+      'of the Path Item it references. Write fewer paths that reference large Path Items, or ' +
+      'turn AI agents off',
+    { field: 'agents', reason: 'agent_document_too_large', limit: MAX_AGENT_DOCUMENT_BYTES },
+  );
+}
+
+/**
+ * The compact JSON size, in UTF-8 bytes, of any value in one document. Each
+ * object and array is measured once and remembered by identity, so a value
+ * shared by many places costs its size once to measure, however often it is
+ * charged.
+ */
+function jsonSizer(stats: AgentDocumentStats): (value: unknown) => number {
+  const sizes = new WeakMap<object, number>();
+  const active = new WeakSet<object>();
+  const size = (value: unknown): number => {
+    if (typeof value === 'string') return Buffer.byteLength(JSON.stringify(value));
+    if (typeof value !== 'object' || value === null) {
+      // `undefined`, which JSON drops from an object, is counted as `null`.
+      return (JSON.stringify(value) ?? 'null').length;
+    }
+    const known = sizes.get(value);
+    if (known !== undefined) return known;
+    // Parsing refuses a cyclic document; one here would be infinitely large.
+    if (active.has(value)) throw agentDocumentTooLarge();
+    active.add(value);
+    stats.measured += 1;
+    let total = 2;
+    if (Array.isArray(value)) {
+      value.forEach((item: unknown, index) => {
+        total += (index > 0 ? 1 : 0) + size(item);
+      });
+    } else {
+      const object = value as Record<string, unknown>;
+      Object.keys(object).forEach((key, index) => {
+        total += (index > 0 ? 1 : 0) + size(key) + 1 + size(object[key]);
+      });
+    }
+    active.delete(value);
+    sizes.set(value, total);
+    return total;
+  };
+  return size;
+}
+
+/**
+ * An upper bound on the size of the document {@link stampAgentDocument}
+ * builds from `document` for `agents` at the longest of `listenPaths`,
+ * refused once it passes {@link MAX_AGENT_DOCUMENT_BYTES}. Each part is
+ * charged to a {@link WorkMeter} as soon as it is measured:
+ *
+ * - every root member but `paths`, `servers` and `x-ferrum-*`, as written,
+ *   and the root `servers` and `paths` keys the stamp writes;
+ * - for every path, its key, then each node of its Path Item reference chain
+ *   and the Path Item it resolves to, in full: at least the members its copy
+ *   holds. A Path Item referenced by every path is charged once per path;
+ * - for every operation, its route's path template and regex under the
+ *   longest listen path, and `OPERATION_STAMP_BYTES` for its mark and the
+ *   route's fields;
+ * - for every selected tool, its name three times, its description, the
+ *   longest listen path twice for its slug, and `TOOL_STAMP_BYTES` for its
+ *   mark and policy entries.
+ *
+ * Nested `servers` and operation `x-ferrum-*` members, which the stamp drops,
+ * are charged anyway. Nexus's own fixed scaffolding (`x-ferrum-proxy`, the
+ * root `x-ferrum-mcp` and the plugins' fixed settings, a few KiB) is not.
+ *
+ * Cost: each distinct object and array of the document is measured once, so
+ * the estimate reads the document about once, plus each path's reference
+ * chain and operation slots, however much the stamp would copy.
+ *
+ * @throws NexusError `SPEC_INVALID` with `reason: 'agent_document_too_large'`
+ * past the limit
+ */
+export function stampedAgentDocumentBytes(
+  document: Record<string, unknown>,
+  listenPaths: readonly string[],
+  agents: ApiAgents,
+  stats: AgentDocumentStats = agentDocumentStats(),
+): number {
+  const meter = workMeter(stats, MAX_AGENT_DOCUMENT_BYTES, agentDocumentTooLarge);
+  const size = jsonSizer(stats);
+  meter.charge(size({ servers: [{ url: '/' }], paths: {} }));
+  for (const key of Object.keys(document)) {
+    if (key === 'paths' || key === 'servers' || key.startsWith('x-ferrum-')) continue;
+    meter.charge(size(key) + 2 + size(document[key]));
+  }
+  const paths = document.paths;
+  if (record(paths)) {
+    const memo = new WeakMap<object, AgentPathItem>();
+    const keys = Object.keys(paths);
+    meter.members(keys.length, 0);
+    for (const path of keys) {
+      const value = paths[path];
+      if (!path.startsWith('/') || !record(value)) continue;
+      // Throws for a chain Edge would not follow, as the stamp itself does.
+      const item = resolveAgentPathItem(document, path, value, {
+        memo,
+        charge: () => meter.members(1, 0),
+      });
+      meter.charge(size(path) + 2);
+      for (const node of item.chain) meter.charge(size(node));
+      meter.charge(size(item.target));
+      let route = OPERATION_STAMP_BYTES;
+      for (const listenPath of listenPaths) {
+        const mounted = path === '/' ? listenPath : `${listenPath}${path}`;
+        route = Math.max(route, OPERATION_STAMP_BYTES + size(mounted) + size(pathRegex(mounted)));
+      }
+      for (const method of OPENAPI_OPERATION_METHODS) {
+        meter.members(1, 0);
+        if (record(agentPathItemMember(item, method))) meter.charge(route);
+      }
+    }
+  }
+  const slug = Math.max(0, ...listenPaths.map(size));
+  for (const tool of agents.operations) {
+    meter.charge(3 * size(tool.name) + size(tool.description) + 2 * slug + TOOL_STAMP_BYTES);
+  }
+  return meter.used();
+}
+
+/**
+ * No automatic selections, name collisions, path escapes, or method-policy
+ * bypasses, and no document that would stamp past
+ * {@link MAX_AGENT_DOCUMENT_BYTES} at any of `listenPaths`: every listen path
+ * the API's proxy may hold while it is published.
+ */
 export function validateAgents(
   agents: ApiAgents | null | undefined,
   document: Record<string, unknown>,
   enforcement: SpecEnforcementLevel,
   requestable: boolean,
   methods: HttpMethod[] | null,
+  listenPaths: readonly string[],
 ): void {
   if (!agents) return;
   const invalid = (message: string): never => {
@@ -796,6 +992,10 @@ export function validateAgents(
       invalid(`The MCP endpoint collides with a REST operation: ${path}`);
     }
   }
+  // Last, once every selection is known to be valid, and before anything is
+  // built. The submitted copy only drops members from this document, so it
+  // never stamps larger than this.
+  stampedAgentDocumentBytes(document, listenPaths, agents);
 }
 
 /**
@@ -803,6 +1003,12 @@ export function validateAgents(
  * Embed a routes-only validator using the same literal-prefix matchers instead.
  * Only the exact endpoint bypasses it; mcp_gateway claims/rejects that endpoint
  * and its descendants. REST bodies, backend and auth remain unchanged.
+ *
+ * Every path gets its own copy of the Path Item it references. Its size is
+ * bounded before any of this runs: {@link validateAgents}, at every request
+ * that publishes a selection, refuses a document past
+ * {@link MAX_AGENT_DOCUMENT_BYTES}. A compensation rebuilds the document the
+ * gateway already holds, so it is not refused here.
  */
 export function stampAgentDocument(
   document: Record<string, unknown>,
