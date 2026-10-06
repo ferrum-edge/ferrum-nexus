@@ -336,7 +336,7 @@ for the supported combination and the upgrade steps.
   that turning off `sync_roles` does not automatically demote existing admins
   or unlink their identities.
 - **The publishing upstream check now normalises the host before its
-  name-suffix rules** (#503, GHSA-cq2h-g4g3-rw3p). A host written fully
+  name-suffix rules** (#503). A host written fully
   qualified (`api.internal.`) or in another letter case (`API.INTERNAL`) skipped
   the `.internal`/`.local`/`.localhost`/`.home.arpa` refusal, so the suffix list
   could be bypassed before the DNS check. The host is now lower-cased with one
@@ -422,9 +422,8 @@ for the supported combination and the upgrade steps.
   `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` must configure Edge with
   `FERRUM_BACKEND_ALLOW_CIDRS` for intended private destinations while keeping
   `FERRUM_BACKEND_ALLOW_IPS=public`. Edge's public mode also screens plugin
-  endpoints such as private Redis. Nexus also reads the gateway's egress policy
-  before every backend write (see Added), so it refuses writes to a gateway
-  without public-only egress unless an opt-out is set.
+  endpoints such as private Redis. This addresses Part A only; the advisory
+  remains open.
 
 - **Edge credential-write errors no longer expose submitted secrets**
   (GHSA-qc7r-4j9m-pm44). Non-GET `/consumers` failures omit Edge response text

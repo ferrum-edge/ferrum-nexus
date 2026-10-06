@@ -253,9 +253,10 @@ All are listed in the [changelog](../CHANGELOG.md#040---2026-10-06).
 - **Gateway writes need public-only egress** unless an opt-out is set (see
   above). A refused write answers before any gateway change, and health reads
   `degraded`.
-- **Rollback is restricted once subsets exist.** Do not roll back while an
-  explicit tool-subset grant exists; remove subset grants and restore all-tools
-  grants through the normal audited workflow first.
+- **Rollback discards subsets.** Rollback restores the pre-upgrade backup (see
+  below), so explicit tool-subset grants made after the upgrade are lost with
+  every other post-upgrade change. To keep an audit trail, remove subset grants
+  and restore all-tools grants through the normal audited workflow first.
 - **A changed tool definition drops its approval.** A spec revision, rollback
   or agents edit that changes a selected tool's definition, a description-only
   edit included, gives it a new exposure ID and removes the old one from every

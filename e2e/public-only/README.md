@@ -15,8 +15,9 @@ authorization is required before dependent recovery. Uncertain results retain th
 encrypted journal and attempted identity without fresh-token retry or unconditional
 cleanup. Large journals preserve complete evidence in authenticated encrypted chunks
 committed atomically with their manifest. This DNS fixture does not cover conversion
-custody, native-store boundaries or every recovery interleaving; the store contracts
-and the acceptance suite cover those.
+custody, native-store boundaries or recovery interleavings; the store contracts and
+the acceptance suite cover Nexus-side recovery, and owner-side store behaviour is
+covered by Edge's own tests.
 
 This stack is separate from the private-opt-in acceptance stack. It admits
 `rebind.fixture.test` while DNS returns `11.203.0.10`, proves real authenticated

@@ -177,8 +177,9 @@ const approvedGroup = (apiId: string): string => `nexus:api:${apiId}:approved`;
  * The released-baseline database the upgrade starts from, for a source that
  * shipped the migrations `ids`. Rows keep the baseline's physical shape, except
  * that a source which shipped `009_outbox_priority` stores every outbox row
- * with the priority its writer gives it (the migration's own rule), so the
- * lanes read back the same from every source.
+ * with the priority `009_outbox_priority`'s backfill rule assigns (`verify:` and
+ * `reset:` rows high, the rest normal), so the lanes read back the same from
+ * every source.
  */
 async function buildFixture(ids: readonly string[]): Promise<FixtureRow[]> {
   const passwordHash = await hashPassword(FIXTURE_PASSWORD);

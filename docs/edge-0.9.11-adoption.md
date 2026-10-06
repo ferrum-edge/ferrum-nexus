@@ -90,7 +90,8 @@ is sent. Settle conversions and restores before upgrading Edge; see the
 [`release/compatibility.env`](../release/compatibility.env) pins the image above for
 Nexus `v0.4.0`, and the packaged acceptance suite runs against it. The
 [controlled public-only fixture](../e2e/public-only/README.md) runs a packaged Nexus
-image against the same Edge release and covers the local data-plane profile only.
+image against the same Edge release on demand, outside CI, and covers the local
+data-plane profile only.
 
 Nexus `v0.4.0` supports Node `^22.22.2 || ^24.15.0 || >=26.0.0` (adopted through
 #521). It freezes migrations `007_outbox_recipient` to `011_mcp_tool_subsets`; this
