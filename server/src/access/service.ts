@@ -1183,11 +1183,18 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     if (limit <= 0) return;
     const since = new Date(Date.now() - ACCESS_REQUEST_BUDGET_WINDOW_MS).toISOString();
     // A request for more tools on a grant is charged like a request for access.
-    const used = await audit.forStore(tx).count({
-      actor_user_id: requesterUserId,
-      actions: [AuditAction.ACCESS_REQUEST, AuditAction.ACCESS_TOOLS_REQUEST],
-      from: since,
-    });
+    const scoped = audit.forStore(tx);
+    const used =
+      (await scoped.count({
+        actor_user_id: requesterUserId,
+        action: AuditAction.ACCESS_REQUEST,
+        from: since,
+      })) +
+      (await scoped.count({
+        actor_user_id: requesterUserId,
+        action: AuditAction.ACCESS_TOOLS_REQUEST,
+        from: since,
+      }));
     if (used < limit) return;
     throw new NexusError(
       'QUOTA_EXCEEDED',
