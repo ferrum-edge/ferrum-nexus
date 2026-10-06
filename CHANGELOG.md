@@ -84,27 +84,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 - **jsdom 30.1.2 / Undici 8.11.2 use the approved Node profile** (Refs #449).
   The current unreleased supported range is `^22.22.2 || ^24.15.0 || >=26.0.0`,
-  with owner approval, exact minima and current majors in hosted CI and aligned
-  workspace declarations. Owned Admin, OIDC and CAPTCHA
-  agents explicitly retain HTTP/1.1. New real-network regressions cover TLS
-  negotiation/reset recovery, no mutation replay, JWT/namespace delivery,
+  with exact minima and aligned workspace declarations. Owned Admin, OIDC and
+  CAPTCHA agents explicitly retain HTTP/1.1. New real-network regressions cover
+  TLS negotiation/reset recovery, no mutation replay, JWT/namespace delivery,
   confidential OIDC exchange and CAPTCHA form/redirect behavior. Notification
   controls name their visible title and action and describe their body/time,
   retaining accessible-role assertions under jsdom 30. The existing Node image
   digest already contains 22.23.3. Node 22 remains supported; older Node 22/24
   patches and Node 23/25 are excluded. Published releases retain their historical
-  Node 22.14+ profile until a new release ships. Both locks were originally
-  imported byte-for-byte from verified hosted artifact
-  `11308824128`, produced by run `37217928511`, attempt 1, from source
-  `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`; the root lock is unchanged. The current e2e
-  lock incorporates qualified main PR #523's `@types/node` 22.20.4 to 22.20.5 patch while
-  preserving the approved engine range. Prior head `059b428` passed all 15 hosted checks after
-  integrating qualified main PRs #519 and #523 and completed full root and fresh independent
-  review. Its hosted producer artifact `11336281445` verified the current locks with an
-  empty diff. This documentation adoption head requires fresh hosted qualification,
-  full root and independent review. See
-  [candidate and rollback notes](docs/dependency-majors-449-higher-floor-draft.md) for
-  historical producer provenance and current hashes in the main integration section.
+  Node 22.14+ profile until a new release ships.
 
 - **Node 22.14-compatible dependency majors are migrated** (Refs #449).
   All four TypeScript manifests use 7.0.2; the transactional audit scan uses
@@ -179,6 +167,51 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   do not fence external Admin writes. Strict successful-conversion and partial-recovery
   gates now use the released owner contract and still require exact-head hosted
   qualification; no advisory is declared fixed.
+
+- **An agent API's submitted document is bounded before it is built** (Refs #525).
+  The document Nexus sends Edge for an agent API gives every path its own copy of
+  the Path Item it references, so 2,000 paths referencing one large Path Item
+  stamped to gigabytes on every publish or revision. Every request that rebuilds that
+  document (publish, revision, rollback, restore, or a `PATCH` of `agents` or
+  `spec_enforcement`) now charges an upper bound on its size to a work meter
+  before it builds anything, measuring each object of the document once, and
+  refuses one past 8 MiB with `400 SPEC_INVALID`
+  (`reason: "agent_document_too_large"`). Compensation still restores what the
+  gateway holds. Upgrade note: an agent API already published with a larger
+  document keeps serving, and any other `PATCH` (visibility, status, metadata)
+  still succeeds; turn its agents off (`agents: null`) to revise it again.
+- **The dependency-lock producer no longer hard-codes jsdom and Undici** (Refs #525).
+  It checked their exact versions and integrity hashes, so the next reviewed bump
+  would have failed it. It now requires both packages, a registry `resolved` URL and
+  sha512 integrity for every copy, and `engines` (checked with npm's own semver) that
+  admit every Node version the manifests support. While no manifest moves a jsdom
+  or Undici spec, every copy's version, `resolved` URL and integrity must still equal
+  the committed lock's, so a re-resolution forced by another bump cannot move them.
+
+- **A disabled grantee no longer blocks a provider's agent-enabled API** (Refs #519).
+  Every spec build enrolled each all-tools grantee in the MCP-all group and refused
+  with `USER_DISABLED` when any grantee was disabled, so spec revisions, agent edits,
+  enforcement changes and restores all failed with an error that read as the
+  provider's own account. Builds now skip disabled grantees and consumers missing from
+  the gateway; grant rows stay for audit, and re-enable rebuilds the grantee's groups.
+  Consumers that already carry the group are not rewritten, and each enrollment commits
+  a new `access.mcp_enroll` intent audit row before its gateway write.
+
+- **Explicit MCP subsets survive spec revisions that leave their tools alone** (Refs #519).
+  Any spec change, even whitespace or a rollback, rotated every exposure id and silently
+  emptied each explicit subset. A tool now keeps its id while its method, path, name and
+  published definition are unchanged; see Security for the definition rule. An agents
+  edit that removes or renames a tool drops its id from every subset in the edit's
+  transaction and records `access.tools_prune` per grant.
+
+- **Disabling an account never waits for SMTP** (Refs #508). The outbox worker held the
+  recipient's lifecycle lease for the whole send (up to 60 s) while lease waiters give
+  up at 30 s, so an emergency disable during a slow relay could fail with `409`. The
+  lifecycle lease now covers only the transaction that authorizes the handoff; a new
+  per-account mail-handoff lease, taken only by the worker and by address release,
+  keeps release ordered behind an in-flight delivery. The 60 s send budget starts once
+  the lifecycle lease is held, so waiting for it never shortens the relay's time. Claim
+  fencing, at-most-once parking and the security-mail priority lane are unchanged.
 
 - **Verification and password-recovery mail take priority over queued campaigns**
   (#500, GHSA-rqrj-7g3f-c6ww phase 2). Every store claims due security mail at
@@ -293,6 +326,32 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   falling back to the built-in default.
 
 ### Security
+
+- **An explicit MCP tool approval never follows a changed tool definition** (Refs #519).
+  Each selected tool stores a `definition_hash`, a SHA-256 over the reference-resolved
+  definition Edge publishes for it: description, operation summary and description,
+  parameters, request body, 2xx JSON schemas and OpenAPI version, with each `$ref`
+  hashed as its text and its target's digest, bound to the tool's id. Hashing is
+  bounded: selections are validated before anything is hashed, reading each Path Item
+  in place; one work meter per build, shared by its tools, is charged for every key,
+  array element and reference hop of the document read, before it is read, and for
+  every character hashed; nothing is copied out of the document; and each selected
+  Path Item, Request Body or Response reference, Content map and acyclic schema
+  reference target is read once per build. A document past the budget, like one with a
+  reference Nexus cannot resolve (a Request Body or Response chain that does not end at
+  an object included), folds in the whole document but `info` without following
+  references, and the fallback is recorded as `tool_hash_fallback` in the audit row
+  that commits the change. A spec revision,
+  rollback or agents edit that changes the hash, a description-only edit included, mints
+  a new exposure id and drops the old one from every explicit subset in the same
+  transaction, recording `access.tools_prune` with `reason: 'definition_changed'`.
+  Holders keep REST access and their other tools; the revision's change summary and
+  grantee notice name the redefined tools (`agent_tools_changed`), and an agents edit
+  notifies the affected subset holders in-app. This closes the tool
+  poisoning path in which a revision rewrote an approved tool's schema or prompt text
+  under an existing approval. Cosmetic description edits in agent settings no longer
+  keep a tool's id. APIs saved before this change are compared against a hash computed
+  from their current revision, so upgrading rotates nothing.
 
 - **The quickstart Edge service enforces public-only upstream egress by default**
   (GHSA-93rq-89vr-38pc, Part A). The gateway's connection-time address check

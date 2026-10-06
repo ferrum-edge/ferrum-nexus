@@ -98,7 +98,8 @@ export interface ConsumerProvisioner {
    *
    * Resolves to the consumer as written, or `null` when the consumer was
    * already gone and {@link MutateAclGroupsOptions.absentIsDone} said that is
-   * fine.
+   * fine, or its owner was inactive and
+   * {@link MutateAclGroupsOptions.skipInactiveUser} said to skip it.
    */
   mutateAclGroups(
     ferrumConsumerId: string,
@@ -124,10 +125,19 @@ export interface MutateAclGroupsOptions {
    */
   requireActiveUser?: Uuid;
   /**
+   * With {@link requireActiveUser}: resolve to `null` without reading or
+   * writing the consumer, instead of throwing `USER_DISABLED`, when that
+   * account is not active. For a write made on someone else's behalf — a
+   * provider's spec build enrolling its grantees — where an inactive grantee
+   * is skipped rather than reported as the caller's own disabled account.
+   */
+  skipInactiveUser?: boolean;
+  /**
    * Treat a consumer that no longer exists on the gateway as a finished
-   * write, rather than an `EDGE_ERROR`. Only for a *removal*: the groups of a
+   * write, rather than an `EDGE_ERROR`. For a *removal*: the groups of a
    * consumer that is gone are gone with it, so there is nothing left to take
-   * off. An addition always needs the consumer, and never passes this.
+   * off. An addition needs the consumer, and passes this only when it is a
+   * best-effort enrollment that consumer repair would redo.
    */
   absentIsDone?: boolean;
   /**
@@ -266,6 +276,7 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
         if (requiredActive !== undefined) {
           const owner = await store.users.findById(requiredActive);
           if (!owner || owner.status !== 'active') {
+            if (options?.skipInactiveUser) return null;
             throw userDisabled(
               'This account has been disabled; its gateway access cannot be extended',
             );

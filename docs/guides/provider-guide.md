@@ -198,11 +198,16 @@ selection in Settings before uploading a spec that deletes it.
 Consumers can request all published tools or select individual tools. In the review
 dialog you can narrow their selection or approve REST-only access with no tools.
 All-tools grants intentionally include future published tools; explicit subsets do not.
-Renaming/removing a tool, disabling agents, or changing an uploaded spec invalidates
-old exposure IDs, so affected subset holders keep REST access but need a new grant for
-new tool exposure. Revoke the old grant before accepting that identity's new request.
-Unchanged bindings and cosmetic descriptions retain IDs. Historical request/grant
-coverage marks expired IDs explicitly.
+Changing what a tool does or says invalidates its exposure ID: renaming or removing
+it, disabling agents, editing its description in Settings, or uploading a spec that
+changes its summary, description, parameters, request body or success response
+schemas. The change removes the old ID from every subset, so affected holders keep REST
+access and their other tools but need a new grant for the changed tool. Revoke the old
+grant before accepting that identity's new request. A spec update that leaves a tool's
+definition alone (an `info.version` bump, another operation, an unreferenced schema)
+keeps its ID, so subsets carry; a bump of the document's `openapi` version rotates every
+tool. Grantees are told which tools changed, after a spec update or an edit in Settings.
+Historical request/grant coverage marks expired IDs explicitly.
 
 Existing phase-1 APIs must be republished once before accepting subsets. Review the
 [draft upgrade tradeoff](../mcp-subsets-migration-draft.md) before rollout.

@@ -255,12 +255,13 @@ const agentsSchema = z
       .array(
         z
           .object({
-            // Round-trip presentation IDs are accepted but never trusted.
+            // Round-trip presentation IDs and hashes are accepted but never trusted.
             id: z.string().uuid().optional(),
             path: z.string().min(1).max(2_048),
             method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']),
             name: z.string().regex(AGENT_TOOL_NAME_PATTERN),
             description: z.string().trim().min(1).max(MAX_AGENT_DESCRIPTION_LENGTH),
+            definition_hash: z.string().max(128).optional(),
           })
           .strict(),
       )

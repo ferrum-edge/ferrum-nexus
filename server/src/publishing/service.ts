@@ -297,7 +297,14 @@ import {
   operatorOwnedFields,
   writeBody,
 } from './edge-plugins.js';
-import { identifyAgentTools, validateAgents } from './agents.js';
+import {
+  definitionHashStats,
+  identifyAgentTools,
+  rotatedAgentTools,
+  stampedAgentDocumentBytes,
+  validateAgents,
+  type DefinitionHashStats,
+} from './agents.js';
 import { presentApi, type GatewayUrlSource } from './present.js';
 import {
   assertUpstreamAllowed,
@@ -314,7 +321,7 @@ import {
   type UpstreamPolicy,
   type UpstreamResolver,
 } from './oas.js';
-import type { SpecChangeNotifier } from './spec-change-notices.js';
+import { agentToolsChangedText, oneLine, type SpecChangeNotifier } from './spec-change-notices.js';
 import { compareSpecRevisionsSafely } from './spec-changes.js';
 import { diffSpecDocuments } from './spec-diff.js';
 import {
@@ -838,6 +845,15 @@ export const STAGING_PATH_SEGMENT = '.staging';
  */
 export function stagingListenPath(namespace: string): string {
   return `/${namespace}/${STAGING_PATH_SEGMENT}/${randomBytes(16).toString('hex')}`;
+}
+
+/**
+ * Every listen path an agent API's proxy holds while it is published: its own,
+ * and a staging path, which a create, restore or conversion stamps the
+ * document at first. Only their lengths matter, to bound the stamped document.
+ */
+function agentListenPaths(namespace: string, slug: string): string[] {
+  return [listenPathFor(namespace, slug), stagingListenPath(namespace)];
 }
 
 /**
@@ -2198,6 +2214,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         corrected.document,
         submittableProxyBody(live),
         corrected.api,
+        subject,
         false,
       );
       recovery.attempt!.documentDigests.push(documentFingerprint(submitted));
@@ -2549,16 +2566,37 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         api.spec_enforcement,
         api.requestable,
         api.allowed_methods,
+        agentListenPaths(api.namespace, api.slug),
       );
-      // A changed document may alter referenced schemas or operation semantics.
-      // Conservatively invalidate every explicit subset; null grants remain all.
+      // A tool keeps its exposure id while its published definition is
+      // unchanged, so explicit subsets carry across a revision that does not
+      // touch the tools they approved. A tool whose definition changed gets a
+      // new id, which the commit below drops from every explicit subset.
+      // validateAgents above refuses a revision that drops a selected
+      // operation, so a revision never removes a tool outright.
+      const hashing = definitionHashStats();
       const nextAgents = identifyAgentTools(
         api.agents ?? null,
+        parsed.document,
         api.agents ?? null,
-        previous?.raw_spec !== parsed.raw,
+        previous ? safeSpecDocument(previous.raw_spec) : parsed.document,
+        hashing,
       );
       const repairRecovery =
         api.gateway_state === 'repair_required' ? await readConversionRecovery(api) : null;
+      const hashFallback = toolHashFallback(hashing);
+      // Named in the change summary, so grantees are told which tools left
+      // their explicit approvals, even for a description-only edit the
+      // structural comparison does not report.
+      const changedTools = rotatedAgentTools(api.agents ?? null, nextAgents);
+      const report: SpecChangeReport | null =
+        specChanges && changedTools.length > 0
+          ? {
+              ...specChanges,
+              changed: true,
+              agent_tools_changed: changedTools.map((tool) => tool.name),
+            }
+          : specChanges;
       const writesGateway =
         proxyId !== null && (api.spec_enforcement === 'routes' || backend !== null);
       if (writesGateway) {
@@ -2600,7 +2638,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             const build = (
               document: Record<string, unknown>,
               proxyBody: Record<string, unknown>,
-            ): Promise<Record<string, unknown>> => buildSpecDocument(document, proxyBody, api);
+            ): Promise<Record<string, unknown>> =>
+              buildSpecDocument(document, proxyBody, api, actor.id);
 
             const specId = await specIdForProxy(proxyId);
             // Captured before the write: the compensation has to put back the
@@ -2638,6 +2677,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   ...(backend ? backendFields(backend) : {}),
                 },
                 { ...api, agents: nextAgents },
+                actor.id,
               ),
               actor.id,
             );
@@ -2680,7 +2720,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // describes, and is bounded by its own retention: it outlives the
             // document the prune above may just have dropped.
             let change: ApiSpecChangeRecord | null = null;
-            if (replaced && specChanges) {
+            if (replaced && report) {
               change = await tx.apiSpecChanges.create({
                 api_id: api.id,
                 revision_id: revision.id,
@@ -2689,7 +2729,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 version: nextVersion,
                 previous_version: replaced.version,
                 revision_seq: revision.revision_seq,
-                report: specChanges,
+                report,
               });
               await tx.apiSpecChanges.prune(api.id, SPEC_CHANGE_HISTORY_LIMIT);
             }
@@ -2704,6 +2744,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             const row =
               Object.keys(changes).length === 0 ? api : await tx.apis.update(api.id, changes);
             if (!row) throw notFound('API', api.id);
+            if (changedTools.length > 0) {
+              await pruneToolSubsets(tx, actor, api.id, api.agents ?? null, nextAgents, ip);
+            }
             if (repairRecovery) {
               // Authorize the corrected catalog shape without changing the original
               // replay document, tool ids, plugins or proxy. Both revisions commit
@@ -2740,6 +2783,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                       complete: specChanges.complete,
                     }
                   : null,
+                ...(changedTools.length > 0
+                  ? { changed_tool_ids: changedTools.map((tool) => tool.id) }
+                  : {}),
+                ...hashFallback,
                 ...(restoredFrom
                   ? {
                       restored_from_spec_id: restoredFrom.id,
@@ -2919,8 +2966,25 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // creating a proxy that would then have to be rolled back.
       assertRoutesEnforceable(specEnforcement, parsed.paths);
       assertRoutesSubmittable(specEnforcement, parsed.document);
-      const agents = identifyAgentTools(input.agents ?? null);
-      validateAgents(agents, parsed.document, specEnforcement, input.requestable, methods);
+      // Validated before hashing, which reads every selection: a duplicate or
+      // missing one is refused before it costs anything.
+      validateAgents(
+        input.agents ?? null,
+        parsed.document,
+        specEnforcement,
+        input.requestable,
+        methods,
+        agentListenPaths(namespace, slug),
+      );
+      const hashing = definitionHashStats();
+      const agents = identifyAgentTools(
+        input.agents ?? null,
+        parsed.document,
+        null,
+        parsed.document,
+        hashing,
+      );
+      const hashFallback = toolHashFallback(hashing);
       const agentApi = { id: apiId, slug, agents };
 
       // Where the proxy is *born*. It stays here until every security plugin
@@ -3132,6 +3196,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 circuit_breaker: circuitBreaker,
                 spec_enforcement: specEnforcement,
                 agents,
+                ...hashFallback,
                 upstream: `${upstream.scheme}://${upstream.host}:${upstream.port}`,
                 spec_paths: parsed.pathCount,
                 spec_operations: parsed.operationCount,
@@ -3283,21 +3348,53 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           details.gateway_untouched = true;
         }
 
-        const nextAgents =
-          patch.agents === undefined
-            ? (api.agents ?? null)
-            : identifyAgentTools(patch.agents, api.agents ?? null);
-        const agentsMoved = !isDeepStrictEqual(nextAgents, api.agents ?? null);
+        // Read whenever a selection is or was in force: identities are hashed
+        // against it, and so is the selection being replaced.
         const currentSpec =
-          nextAgents || agentsMoved ? await store.apiSpecs.findCurrentByApi(api.id) : null;
+          (patch.agents ?? api.agents) ? await store.apiSpecs.findCurrentByApi(api.id) : null;
         const agentDocument = currentSpec ? safeSpecDocument(currentSpec.raw_spec) : {};
+        // Validated before hashing, which reads every selection: a duplicate
+        // or missing one is refused before it costs anything. The stamped
+        // document's size is bounded below, only if this PATCH rebuilds it.
         validateAgents(
-          nextAgents,
+          patch.agents === undefined ? (api.agents ?? null) : patch.agents,
           agentDocument,
           patch.spec_enforcement ?? api.spec_enforcement,
           patch.requestable ?? api.requestable,
           patch.allowed_methods === undefined ? api.allowed_methods : patch.allowed_methods,
+          null,
         );
+        const hashing = definitionHashStats();
+        const nextAgents =
+          patch.agents === undefined
+            ? (api.agents ?? null)
+            : identifyAgentTools(
+                patch.agents,
+                agentDocument,
+                api.agents ?? null,
+                agentDocument,
+                hashing,
+              );
+        const agentsMoved = !isDeepStrictEqual(nextAgents, api.agents ?? null);
+        // Only an agents edit or an enforcement conversion stamps the document
+        // the gateway receives, so only those are bounded, before any gateway
+        // write. A visibility, status or metadata edit leaves the gateway
+        // document alone, so an agent API published before the bound existed
+        // can still be edited, retired, or have its agents turned off.
+        if (
+          nextAgents &&
+          api.ferrum_proxy_id &&
+          (agentsMoved ||
+            (patch.spec_enforcement !== undefined &&
+              patch.spec_enforcement !== api.spec_enforcement))
+        ) {
+          stampedAgentDocumentBytes(
+            agentDocument,
+            agentListenPaths(api.namespace, api.slug),
+            nextAgents,
+          );
+        }
+        Object.assign(details, toolHashFallback(hashing));
         if (agentsMoved) {
           update.agents = nextAgents;
           changed.push('agents');
@@ -3565,6 +3662,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           undo.push(step);
         };
         let updated: ApiRecord;
+        // Accounts whose explicit subsets lost a redefined tool, by the
+        // transaction attempt that committed.
+        let redefinedFor = new Map<Uuid, Set<string>>();
 
         try {
           // ── OpenAPI enforcement ─────────────────────────────────────────
@@ -3986,6 +4086,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               agentDocument,
               submittableProxyBody(live),
               api,
+              actor.id,
             );
             if (!api.agents) {
               const validators = plugins.filter(
@@ -4034,10 +4135,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             });
             await edge.apiSpecs.replace(
               specId,
-              await buildSpecDocument(agentDocument, submittableProxyBody(live), {
-                ...api,
-                agents: nextAgents,
-              }),
+              await buildSpecDocument(
+                agentDocument,
+                submittableProxyBody(live),
+                { ...api, agents: nextAgents },
+                actor.id,
+              ),
               actor.id,
             );
             gatewayMutated = true;
@@ -4114,6 +4217,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 row = persisted;
               }
               if (recordOwnership) await tx.apiGatewayPlugins.replace(api.id, nextOwned);
+              redefinedFor = agentsMoved
+                ? await pruneToolSubsets(tx, actor, api.id, api.agents ?? null, nextAgents, ip)
+                : new Map();
               if (enforcementMoved) {
                 await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));
               }
@@ -4300,6 +4406,23 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           );
         }
 
+        // A spec revision tells grantees through its change summary; an edit
+        // in the agent settings has none, so the accounts it took a tool from
+        // are told here. Best-effort: the edit has committed.
+        for (const [userId, tools] of redefinedFor) {
+          if (userId === actor.id) continue;
+          await notifications
+            .notify(
+              userId,
+              'system',
+              `${oneLine(updated.name)} changed its agent tools`,
+              `The provider edited the agent tool settings of ${oneLine(updated.name)}. ` +
+                agentToolsChangedText([...tools].sort()),
+              `/catalog/${encodeURIComponent(updated.slug)}`,
+            )
+            .catch(() => undefined);
+        }
+
         return {
           api: presentApi(updated, await settings.getGatewayPublicUrl()),
           ...(outgoingAuthRemaining.length > 0
@@ -4457,6 +4580,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   latest.spec_enforcement,
                   latest.requestable,
                   latest.allowed_methods,
+                  agentListenPaths(namespace, latest.slug),
                 );
                 await assertUpstreamAllowed(
                   resolveUpstream(parsed, latest.upstream_url ?? ''),
@@ -4481,6 +4605,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                     parsed.document,
                     submittableProxyBody(live),
                     latest,
+                    actor.id,
                     false,
                   );
                   await mutateRecoveryDeployment(
@@ -4687,6 +4812,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           api.spec_enforcement,
           api.requestable,
           api.allowed_methods,
+          agentListenPaths(namespace, api.slug),
         );
         // The upstream the row already records wins over whatever the document
         // says: it is what the proxy was serving, and a restore must not
@@ -5841,11 +5967,84 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     };
   }
 
+  /**
+   * Audit details for a tool hash build that passed its work budget. Every
+   * tool was then hashed with the whole document, so the next change outside
+   * `info` re-ids all of them; this is what explains that mass rotation. It
+   * is recorded only in the audit row that commits the change, so a request
+   * that fails afterwards leaves no record of a fallback that never took
+   * effect.
+   */
+  function toolHashFallback(hashing: DefinitionHashStats): Record<string, unknown> {
+    return hashing.overBudget ? { tool_hash_fallback: true } : {};
+  }
+
+  /**
+   * Drop every exposure id that is no longer published from each explicit
+   * subset on the API, in the caller's transaction. Ids still published carry
+   * over; a grant left with `[]` keeps its REST access and covers no MCP tool.
+   * Each grant gets one `access.tools_prune` row per reason: `definition_changed`
+   * for a tool still published under the same binding with a new id,
+   * `tool_removed` for one that was removed, renamed or disabled.
+   *
+   * Returns, per account, the names of the redefined tools that left its
+   * subsets, for the caller to tell it once the transaction commits.
+   */
+  async function pruneToolSubsets(
+    tx: NexusStore,
+    actor: UserRecord,
+    apiId: Uuid,
+    previous: ApiAgents | null,
+    next: ApiAgents | null,
+    ip: string | null,
+  ): Promise<Map<Uuid, Set<string>>> {
+    const kept = new Set(next?.operations.map((tool) => tool.id) ?? []);
+    // Each redefined tool's retired id, to its name.
+    const changed = new Map<string, string>();
+    for (const tool of rotatedAgentTools(previous, next)) {
+      if (tool.id !== undefined) changed.set(tool.id, tool.name);
+    }
+    const redefined = new Map<Uuid, Set<string>>();
+    for (const grant of await tx.grants.listActiveByApi(apiId)) {
+      const removed = grant.approved_tools?.filter((id) => !kept.has(id)) ?? [];
+      if (removed.length === 0) continue;
+      await tx.grants.update(grant.id, {
+        approved_tools: grant.approved_tools?.filter((id) => kept.has(id)) ?? null,
+      });
+      for (const reason of ['definition_changed', 'tool_removed'] as const) {
+        const tools = removed.filter((id) => changed.has(id) === (reason === 'definition_changed'));
+        if (tools.length === 0) continue;
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.ACCESS_TOOLS_PRUNE,
+          { type: 'grant', id: grant.id },
+          {
+            api_id: apiId,
+            user_id: grant.user_id,
+            application_id: grant.application_id,
+            removed_tools: tools,
+            reason,
+          },
+          ip,
+        );
+        if (reason !== 'definition_changed') continue;
+        const names = redefined.get(grant.user_id) ?? new Set<string>();
+        for (const id of tools) {
+          const name = changed.get(id);
+          if (name !== undefined) names.add(name);
+        }
+        redefined.set(grant.user_id, names);
+      }
+    }
+    return redefined;
+  }
+
   /** Build fixed agent policy from fresh resources under the caller's proxy lease. */
   async function buildSpecDocument(
     document: Record<string, unknown>,
     proxy: Record<string, unknown>,
-    api?: Pick<ApiRecord, 'id' | 'slug' | 'agents'>,
+    api: Pick<ApiRecord, 'id' | 'slug' | 'agents'> | undefined,
+    subject: string,
     enroll = true,
   ): Promise<Record<string, unknown>> {
     await edge.assertBackendEgress();
@@ -5854,29 +6053,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const spec = await edge.apiSpecs.findByProxy(String(proxy.id));
       return preserveRouteValidator(routesSpecDocument(document, { proxy }), live, spec?.id);
     }
-    // Called under the proxy lease, including compensation. Retained phase-1
-    // approvals keep their all-tools meaning when this API first adopts subsets.
-    for (const grant of enroll ? await store.grants.listActiveByApi(api.id) : []) {
-      if (grant.approved_tools != null) continue;
-      const consumer = await store.consumers.findByUserAndNamespace(
-        grant.user_id,
-        namespace,
-        grant.application_id,
-      );
-      if (!consumer) continue;
-      await credentials.provisioner.mutateAclGroups(
-        consumer.ferrum_consumer_id,
-        (groups) => {
-          // The REST group proves membership; the active-user guard orders
-          // this enrollment against disable/teardown.
-          return groups.includes(grant.acl_group)
-            ? [...new Set([...groups, mcpAllGroupForApi(api.id)])]
-            : groups;
-        },
-        undefined,
-        { requireActiveUser: grant.user_id, skipUnchanged: true },
-      );
-    }
+    if (enroll) await enrollAllToolGrantees(api.id, subject);
     const proxyId = String(proxy.id);
     const live = await edge.pluginConfigs.listByProxy(proxyId);
     const spec = await edge.apiSpecs.findByProxy(proxyId);
@@ -5894,6 +6071,67 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   /**
+   * Put the MCP-all group on each active all-tools grantee whose REST group
+   * proves membership but which lacks it: a grant approved before this API
+   * exposed tools, or one retained from phase 1. Called under the proxy lease,
+   * including compensation.
+   *
+   * Never the provider's failure. A disabled grantee keeps its grant row for
+   * audit and is not enrolled; re-enabling it rebuilds its groups, MCP
+   * included, from that row. A grantee with no consumer, on the gateway or in
+   * the portal, is skipped for consumer repair. A consumer that already
+   * carries the group is not written at all, and every enrollment commits an
+   * `access.mcp_enroll` intent row before its write.
+   */
+  async function enrollAllToolGrantees(apiId: Uuid, subject: string): Promise<void> {
+    const group = mcpAllGroupForApi(apiId);
+    for (const grant of await store.grants.listActiveByApi(apiId)) {
+      if (grant.approved_tools != null) continue;
+      if ((await store.users.findById(grant.user_id))?.status !== 'active') continue;
+      const consumer = await store.consumers.findByUserAndNamespace(
+        grant.user_id,
+        namespace,
+        grant.application_id,
+      );
+      if (!consumer) continue;
+      const consumerId = consumer.ferrum_consumer_id;
+      const groups = (await edge.consumers.get(consumerId))?.acl_groups ?? [];
+      if (!groups.includes(grant.acl_group) || groups.includes(group)) continue;
+      const actor = await store.users.findById(subject);
+      await store.transaction(async (tx) => {
+        await audit.forStore(tx).record(
+          { id: subject, role: actor?.role ?? null },
+          AuditAction.ACCESS_MCP_ENROLL,
+          { type: 'grant', id: grant.id },
+          {
+            api_id: apiId,
+            user_id: grant.user_id,
+            application_id: grant.application_id,
+            consumer_id: consumerId,
+            acl_group: group,
+          },
+        );
+      });
+      await credentials.provisioner.mutateAclGroups(
+        consumerId,
+        (current) => {
+          // Re-checked under the consumer key: the REST group still proves
+          // membership, and the grantee is still active, so this cannot hand
+          // a group back to an account a disable has just stripped.
+          return current.includes(grant.acl_group) ? [...new Set([...current, group])] : current;
+        },
+        subject,
+        {
+          requireActiveUser: grant.user_id,
+          skipInactiveUser: true,
+          absentIsDone: true,
+          skipUnchanged: true,
+        },
+      );
+    }
+  }
+
+  /**
    * Create through the spec importer so the proxy carries its owning api_spec.
    * The pre-minted proxy id is the response fallback; the spec id is retained
    * for cutover without a lookup. Rebuild compensation may carry validated
@@ -5908,7 +6146,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     beforeWrite?: (document: Record<string, unknown>) => Promise<void>,
     options?: { preserveLabels: true },
   ): Promise<{ id: string; specId: string }> {
-    let submitted = await buildSpecDocument(document, proxyBody, api);
+    let submitted = await buildSpecDocument(document, proxyBody, api, subject);
     if (preserved && !api?.agents) {
       submitted = preserveRouteValidator(submitted, preserved);
     }
@@ -6011,6 +6249,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       document,
       { ...submittableProxyBody(proxy), listen_path: listenPath },
       api,
+      subject,
       !options?.recovery,
     );
     await options?.beforeWrite?.(submitted);
@@ -6180,7 +6419,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     try {
       // Enrollment is an acknowledged consumer mutation. It must precede the
       // namespace comparison token, never invalidate an admitted original.
-      if (api.agents) await buildSpecDocument(document, submittableProxyBody(before), api);
+      if (api.agents) {
+        await buildSpecDocument(document, submittableProxyBody(before), api, actor.id);
+      }
       const originalAuthority = await edge.deployments.snapshot(actor.id);
       assertSnapshotTarget(originalAuthority, {
         proxy: before,

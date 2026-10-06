@@ -16,14 +16,20 @@ credentials remain unchanged. Existing phase-1 APIs carry no exposure IDs and ca
 accept explicit subsets (including empty subsets) until their provider saves agents
 or republishes the spec through the authenticated API. That write assigns identities,
 enrolls existing null grants into a separate MCP-all group, and replaces tool policy
-under the existing proxy lease and compensated publishing path. Disabled consumers
-are not given new membership; enrollment may refuse while a disabled active-grant
-holder still needs teardown. Complete that teardown and retry.
+under the existing proxy lease and compensated publishing path. Disabled grantees
+are skipped, never enrolled and never a reason to refuse: their grant rows remain, and
+re-enabling the account rebuilds its groups, MCP included, from those rows. Consumers
+missing from the portal or the gateway are skipped for consumer repair.
 
 Enrollment repairs retained null-grant MCP-all membership while holding the proxy
-lease, then the consumer key, then the account lifecycle key. The REST group must
-still be present and the account active before membership is added. The publishing
-path preserves operator resource fields and unrelated consumer groups.
+lease, then the consumer key. It does not take the account lifecycle key: ordering
+against a disable comes from re-reading the account's status under the consumer key,
+because a disable commits the status change first and then strips groups under that
+same key. The REST group must still be present and the account active before
+membership is added, and a consumer that already carries the MCP-all group is not
+written. Each enrollment commits an `access.mcp_enroll` intent row before its consumer
+write. The publishing path preserves operator resource fields and unrelated consumer
+groups.
 
 Before rollout, stop and drain older Nexus request handlers and background writers
 across all instances. Mixed phase-1 and subset-aware writers are unsafe: an old
@@ -44,18 +50,41 @@ first; no history rewrite or manual gateway group copy is an approved migration 
 
 ## Exposure changes
 
-Exposure IDs persist only for a continuously published method/path/name binding.
-Disabling, removing and re-adding, or renaming rotates IDs. Any changed spec bytes
-conservatively rotate all IDs because indirect schema/reference changes can alter tool
-semantics. Explicit subset holders then have REST access and no matching MCP tools;
-providers must revoke and approve a new request to authorize changed exposure. Null
-all-tools holders intentionally continue to receive published tools. Cosmetic tool
-description edits in provider agent settings and byte-identical spec republish retain
-IDs; changing uploaded spec bytes still rotates IDs even for a description-only edit.
+An exposure ID names one published tool definition. Each selected tool stores a
+`definition_hash`: a SHA-256 over the canonical form of what Edge publishes for it,
+with every local `$ref` resolved. That covers the tool name, method, path and Nexus
+description, the operation's `summary` (Edge's tool title) and `description`, the
+path and operation parameters, the request body's `required`, `description` and JSON
+media schemas, the 2xx JSON response schemas (Edge's output schema), and the document's
+OpenAPI version, which decides how Edge normalizes those schemas. Each `$ref`
+contributes its own text and its target's digest. A reference Nexus cannot resolve from
+the document root (external, anchor, dangling, a Request Body or Response chain that
+does not end at an object, or reaching a `$id`, `$dynamicRef` or `$recursiveRef`
+member) folds in the whole document except `info`, hashed as text; an unresolvable
+selected Path Item or a document whose reading and hashing pass the work budget
+hashes every tool from its selection and that digest. See
+[agent-marketplace.md](agent-marketplace.md#optional-subsets-and-cross-repository-follow-up)
+for the exact cases.
 
-This accepted fail-closed behavior can interrupt explicit-subset integrations after
-spec changes. Providers must plan reapproval for changed exposure; an old explicit
-approval never silently covers a replacement tool.
+A tool keeps its ID across a spec revision, a rollback or an agents edit only while
+its method, path, name and hash are all unchanged. Whitespace, `info` edits, and
+changes to unselected operations or to components the tool does not reference carry.
+Any change to the definition mints a new ID, a description-only edit included, in the
+spec or in the provider's agent settings: descriptions are prompt text an agent acts
+on. Disabling, removing and re-adding, or renaming also rotate IDs.
+
+The write that rotates or removes an ID drops it from every explicit subset in the
+same transaction, recording `access.tools_prune` per grant with `reason`
+`definition_changed` or `tool_removed`. Holders keep REST access and their other
+tools, and need a new approval for the changed tool. A spec revision that changes a
+tool's definition also names it in the revision's change summary and in the grantee
+notice. Null all-tools holders intentionally continue to receive published tools,
+changed ones included. APIs saved before definition hashes were stored compare
+against a hash computed from the current revision, so upgrading rotates nothing by
+itself. The stored hash is bound to the tool's ID: a release without hashes copies the
+stored hash onto every ID it mints, and binding makes that copy never match, so a
+downgrade and re-upgrade cannot carry an approval onto a definition it was not given
+for.
 
 ## Consumer repair and revocation recovery
 

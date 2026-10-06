@@ -1940,14 +1940,24 @@ permitted by `allowed_methods`; an explicit allow-list must also permit POST for
 transport. Unknown nested settings, supplied grant groups or endpoint overrides
 are refused. Invalid document/selection combinations return `400 SPEC_INVALID`
 before writes. A revision deleting a selected operation must first change or
-disable the selection.
+disable the selection. The document Nexus submits for an agent API holds a copy
+of each path's Path Item, references resolved, so one whose submitted size would
+pass 8 MiB (for example, thousands of paths referencing one large Path Item) is
+refused before anything is built, with `400 SPEC_INVALID` and
+`details: { field: "agents", reason: "agent_document_too_large", limit: 8388608 }`.
+Only a request that rebuilds that document is refused: a publish, revision, rollback or
+restore, or a `PATCH` that changes `agents` or `spec_enforcement`. Any other `PATCH`
+(visibility, status, name, description or proxy settings) still succeeds for an agent
+API published before this limit, and `agents: null` turns its agents off so it can be
+revised again.
 
 Catalog `ApiSummary` includes the selection for tool metadata. MCP is served by
 Edge at `<invoke_url>/mcp` with tools named `<slug>.<name>`. A normal Nexus account
 or application credential goes in its existing auth header. The identity must
 hold this API's active REST grant for discovery and calls. Each tool additionally requires
-MCP-all or its own exposure group. `AgentTool.id` is a server-owned identity; providers
-cannot choose it. Revocation applies on the next gateway call. Optional tool subsets
+MCP-all or its own exposure group. `AgentTool.id` is a server-owned identity and
+`AgentTool.definition_hash` the server-owned hash of the tool's published definition;
+providers cannot choose either. Revocation applies on the next gateway call. Optional tool subsets
 are described below. See [agent-marketplace.md](agent-marketplace.md).
 
 ### The `Api` object's gateway fields
@@ -3086,11 +3096,18 @@ request; an explicit approval must be contained in the request. Ordinary REST ac
 is granted in every case. Request rows return both subset fields; grants return
 `approved_tools`. Historical IDs remain visible as expired coverage, never new tools.
 
-Tool IDs persist for an unchanged published binding. Rename, path/method changes,
-removing/re-adding exposure and disable/re-enable mint new IDs. A changed uploaded
-spec (including rollback) rotates every ID conservatively; explicit subsets then
-cover no matching tools until a new approval. Omitted/null grants continue to cover
-all published tools. See [draft migration notes](mcp-subsets-migration-draft.md).
+Each tool carries a server-owned `definition_hash`, a SHA-256 of the
+reference-resolved definition Edge publishes for it (description, operation summary
+and description, parameters, request body, 2xx JSON schemas, OpenAPI version), bound
+to the tool's ID. A tool ID persists across spec revisions, rollbacks and agents edits only while its
+method, path, name and `definition_hash` are unchanged. Any definition change,
+description-only edits included, mints a new ID, as do rename, path/method changes,
+removing/re-adding exposure and disable/re-enable. The write that does so removes the
+old IDs from every explicit subset (`access.tools_prune`, `reason` `definition_changed`
+or `tool_removed`), which keeps REST access and its other tools. A revision's change
+report lists redefined tools by name in `agent_tools_changed`. `id` and
+`definition_hash` are accepted on input and ignored. Omitted/null grants continue to
+cover all published tools. See [draft migration notes](mcp-subsets-migration-draft.md).
 
 ## Proposed service-manifest preview
 

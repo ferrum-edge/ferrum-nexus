@@ -43,7 +43,10 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  locks.diff
 These historical main outputs retain their original identity; they are not current candidate
 outputs. The normal merge incorporates main's e2e `@types/node` 22.20.4 to 22.20.5 patch
 without regenerating either graph. It combines the deterministic producer with the candidate's
-Node 22.22.2 witness and exact jsdom/Undici guards. Current candidate lock hashes are:
+Node 22.22.2 witness and exact jsdom/Undici guards (replaced on 2026-10-06 by PR #526 with
+checks derived from the manifests and the committed lock; see
+[the hosted locks section](dependency-majors-449.md#hosted-locks-and-qualification)). Current
+candidate lock hashes are:
 
 ```text
 0ed9c2de1dab8e5828e496a135fc1b67f91d2191f4c986e3ea79b19b5e8e6a12  package-lock.json

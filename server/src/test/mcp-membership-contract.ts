@@ -116,6 +116,22 @@ export function runMcpMembershipContract(
       return api;
     }
 
+    /** Expire every exposure id: a renamed tool is a new tool, a spec revision is not. */
+    function renameTools(api: Api) {
+      return {
+        method: 'PATCH' as const,
+        url: `/api/apis/${api.id}`,
+        payload: {
+          agents: {
+            operations: api.agents!.operations.map(({ id: _id, ...tool }) => ({
+              ...tool,
+              name: `new_${tool.name}`,
+            })),
+          },
+        },
+      };
+    }
+
     function toolIds(api: Api): string[] {
       const ids = api.agents?.operations.map((tool) => tool.id) ?? [];
       assert.equal(ids.length, 2);
@@ -357,11 +373,7 @@ export function runMcpMembershipContract(
         it(`${scope}: does not restore with no ${missing} remaining`, async () => {
           const f = await fixture(application);
           if (missing === 'exposure') {
-            const changed = await harness.authed(provider, {
-              method: 'PUT',
-              url: `/api/apis/${f.api.id}/spec`,
-              payload: { spec: SAMPLE_SPEC_YAML.replace('version: 2.4.0', 'version: 2.4.1') },
-            });
+            const changed = await harness.authed(provider, renameTools(f.api));
             assert.equal(changed.statusCode, 200, changed.body);
           }
           if (missing === 'consumer') await orphanConsumer(f.row);
@@ -512,11 +524,7 @@ export function runMcpMembershipContract(
               const writes = harness.edge.callsTo('PUT', `/consumers/${f.live.id}`).length;
               // A separate process does not inherit the revoker's stale fences.
               const changed = await outsideHeldLeases(() =>
-                peer.authed(provider, {
-                  method: 'PUT',
-                  url: `/api/apis/${f.api.id}/spec`,
-                  payload: { spec: SAMPLE_SPEC_YAML.replace('version: 2.4.0', 'version: 2.4.1') },
-                }),
+                peer.authed(provider, renameTools(f.api)),
               );
               assert.equal(changed.statusCode, 200, changed.body);
               const current = await target.store.apis.findById(f.api.id);
@@ -744,6 +752,10 @@ export function runMcpMembershipContract(
                 },
           );
           assert.equal(updated.statusCode, 200, updated.body);
+          // A spec revision keeps exposure ids, so the subset carries; a rename
+          // or disable removes them from the subset in the edit's transaction.
+          const carried = change === 'spec';
+          const approved = carried ? f.ids : [];
           await orphanConsumer(f.row);
           const [repaired] = await repair(f.client.user.id);
           assert.equal(repaired?.error, null);
@@ -752,7 +764,7 @@ export function runMcpMembershipContract(
           assert.equal(repaired?.restored_groups, groups.length);
           assert.deepEqual(groups, [
             aclGroupForApi(f.api.id),
-            ...(change === 'off' ? [] : f.ids.map((id) => mcpToolGroupForApi(f.api.id, id))),
+            ...approved.map((id) => mcpToolGroupForApi(f.api.id, id)),
           ]);
           assert.ok(groups.includes(aclGroupForApi(f.api.id)));
           assert.equal(groups.includes(mcpAllGroupForApi(f.api.id)), false);
@@ -771,8 +783,9 @@ export function runMcpMembershipContract(
               }
             ).policy;
             for (const tool of current.agents.operations) {
-              assert.ok(tool.id && !f.ids.includes(tool.id));
-              assert.equal(groups.includes(mcpToolGroupForApi(f.api.id, tool.id)), false);
+              assert.ok(tool.id);
+              assert.equal(f.ids.includes(tool.id), carried);
+              assert.equal(groups.includes(mcpToolGroupForApi(f.api.id, tool.id)), carried);
               const allowed: string[] | undefined =
                 policy.tools[`${current.slug}.${tool.name}`]?.allowed_groups;
               assert.ok(allowed);
@@ -782,11 +795,24 @@ export function runMcpMembershipContract(
               ]);
               assert.equal(
                 allowed.some((group) => groups.includes(group)),
-                false,
+                carried,
               );
             }
           }
-          assert.deepEqual((await target.store.grants.findById(f.grant.id))?.approved_tools, f.ids);
+          assert.deepEqual(
+            (await target.store.grants.findById(f.grant.id))?.approved_tools,
+            approved,
+          );
+          assert.equal(
+            await countAudit(AuditAction.ACCESS_TOOLS_PRUNE, f.grant.id),
+            carried ? 0 : 1,
+          );
+          if (!carried) {
+            assert.deepEqual(
+              (await details(AuditAction.ACCESS_TOOLS_PRUNE, f.grant.id))?.removed_tools,
+              f.ids,
+            );
+          }
         });
       }
 

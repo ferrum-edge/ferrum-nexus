@@ -319,6 +319,19 @@ export const AuditAction = {
   ACCESS_REVOKE: 'access.revoke',
   /** A revocation the gateway refused; records whether the grant went back. */
   ACCESS_REVOKE_ROLLBACK: 'access.revoke_rollback',
+  /**
+   * A provider's agent publish or spec build is about to add the API's MCP-all
+   * group to an all-tools grantee whose consumer holds the REST group but not
+   * that one. Committed before the consumer write.
+   */
+  ACCESS_MCP_ENROLL: 'access.mcp_enroll',
+  /**
+   * Exposure ids this grant's explicit subset held stopped being published: an
+   * agents edit removed or renamed their tools (`reason: 'tool_removed'`), or a
+   * spec revision or agents edit changed their definition, which mints a new id
+   * (`reason: 'definition_changed'`). Committed with that edit or revision.
+   */
+  ACCESS_TOOLS_PRUNE: 'access.tools_prune',
 
   /* credentials */
   CREDENTIAL_ISSUE: 'credential.issue',
@@ -596,6 +609,8 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.ACCESS_DENY]: TRANSACTIONAL,
   [AuditAction.ACCESS_REVOKE]: TRANSACTIONAL,
   [AuditAction.ACCESS_REVOKE_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
+  [AuditAction.ACCESS_MCP_ENROLL]: INTENT,
+  [AuditAction.ACCESS_TOOLS_PRUNE]: TRANSACTIONAL,
   [AuditAction.CREDENTIAL_ISSUE]: TRANSACTIONAL,
   [AuditAction.CREDENTIAL_ROTATE]: TRANSACTIONAL,
   [AuditAction.CREDENTIAL_REVOKE_START]: INTENT,

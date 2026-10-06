@@ -84,6 +84,7 @@ import { newId, nowIso } from '../lib/ids.js';
 import {
   SUPER_ADMIN_LOCK_KEY,
   userLifecycleLockKey,
+  userMailHandoffLockKey,
   type KeyedSerializer,
 } from '../lib/keyed-serializer.js';
 import { rewordLeaseLost } from '../lib/lease-fence.js';
@@ -527,7 +528,7 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       }
       // Mint outside the retryable body so one operation retains one tombstone.
       const tombstone = `released-${newId()}@${RELEASED_EMAIL_DOMAIN}`;
-      return locks(userLifecycleLockKey(targetId), () =>
+      const commit = (): Promise<User> =>
         store.transaction(
           async (tx) => {
             const target = await tx.users.findById(targetId);
@@ -587,7 +588,11 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
             return toPublicUser(row);
           },
           { requireAtomic: true },
-        ),
+        );
+      // The handoff key waits out a delivery the outbox has already handed to
+      // SMTP; the worker holds the lifecycle key only to authorize one.
+      return locks(userMailHandoffLockKey(targetId), () =>
+        locks(userLifecycleLockKey(targetId), commit),
       );
     },
 
