@@ -404,7 +404,7 @@ destructive conversion and spec ACL enrollment. Conversion commits
 `repair_required`, the original owned proxy id, an intent audit and an encrypted
 recovery journal in `app_settings` before resource teardown. Deliberate restore
 takes both API and proxy leases and binds complete original deployment-v1 authority
-to conditional selected removal/replacement in released Edge v0.9.12. Explicit
+to conditional selected removal/replacement in released Edge v0.9.13. Explicit
 commit, applicable local application and recovery-cleanup authorization are required
 before dependent recovery. Uncertain writes retain the journal and block replay;
 no fresh-token retry or unconditional fallback is used. The rebuilt path,
@@ -420,7 +420,7 @@ pairings as not guaranteed and admits their writes only under the explicit priva
 opt-in, until it adopts Edge data-plane attestation. See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)
 and [packaged fixture](../e2e/public-only/README.md). Source authority is Edge
-`0d917701b63ef38210c49df830f48cf0457cbc7d`. The candidate adopts its
+`9b83115de7ec23ab51ec4feae6bed65e596db425` (`v0.9.13`). The candidate adopts its
 [published image and canonical contracts](edge-0.9.11-adoption.md).
 
 **Leases.** One row per key with an owner token and expiry: 60 s TTL renewed at
@@ -1299,5 +1299,5 @@ unsupported schema keywords at startup. Validation precedes defaults; explicit n
 are never interpreted as omission. Local presentation/reference budgets further narrow
 accepted input. The configured Edge namespace is the authorization boundary for this
 single-namespace portal. The service returns an allow-listed redacted DTO from `shared/`
-and has no store, gateway, network or source-file reader dependency. The shared v1 format is EXISTING/implemented in published contracts-edge-0.9.12;
+and has no store, gateway, network or source-file reader dependency. The shared v1 format is EXISTING/implemented in published contracts-edge-0.9.13;
 Alloy remains unreleased. Preview cannot invoke publishing or install agent policy.

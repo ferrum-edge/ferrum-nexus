@@ -94,8 +94,8 @@ CIDR allowlist.
 public-upstream profile now requires a fresh authenticated, namespace-matched
 `GET /backend-egress-policy` before each proxy/spec create or replacement,
 including staging, rebuilds, plugin association writes and compensation. Service
-preflight runs before destructive conversion and spec ACL enrollment. Schema v1
-must be complete and closed, with exact class arrays and evaluation order; only
+preflight runs before destructive conversion and spec ACL enrollment. Schema 2
+(Edge v0.9.13) must be complete and closed, with exact class arrays and evaluation order; only
 `enforcement_scope=local-data-plane` and `public_only_guaranteed=true` authorize
 public-profile writes. Missing capability, timeouts, authentication failures,
 unknown/inconsistent responses, cache evidence, CP admission-only, unserved/no
@@ -107,7 +107,9 @@ Two opt-outs relax different checks. The existing private opt-in still skips Nex
 DNS admission and permits internal or unresolvable upstreams; Edge decides
 reachability, so it also accepts all recognized, consistent process-policy
 modes/scopes/overlays. `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` waives only the
-gateway attestation and keeps all three Nexus checks above. Under either, missing,
+gateway attestation and keeps all three Nexus checks above. It still requires
+`public_only_guaranteed=true`, which schema 2 reports only for `local-data-plane`, so
+against Edge v0.9.13 it admits no pairing the public profile refuses. Under either, missing,
 malformed or unsupported-schema metadata still refuses backend writes, the pairing
 is never represented as public-only, startup logs a warning naming the variable,
 and each publish, update and restore audit row records its `egress_profile` and
@@ -128,19 +130,23 @@ secure future fleet traffic.
 **Topology decision.** Nexus grants the verified public-only guarantee only to
 `enforcement_scope=local-data-plane` with `public_only_guaranteed=true`, and health
 reports it to admins as `edge.public_egress_guaranteed`. Edge source authority is
-`0d917701b63ef38210c49df830f48cf0457cbc7d` (`v0.9.12`); the Edge and canonical
-releases are published and pinned. Nexus reads egress policy schema 1 only, so the
-supported pairing ends at Edge `v0.9.12` until schema 2 is adopted (see
-[the compatibility ceiling](operations.md#backend-egress-admission-and-the-public-only-guarantee)).
+`9b83115de7ec23ab51ec4feae6bed65e596db425` (`v0.9.13`); the Edge and canonical
+releases are published and pinned. Nexus reads egress policy schema 2 only. Schema 1
+(Edge `v0.9.12` and earlier) reported the policy-only value of the same field and is
+refused rather than reinterpreted (see
+[the compatibility notes](operations.md#backend-egress-admission-and-the-public-only-guarantee)).
 
 **Operator guidance for control-plane/data-plane pairings.** Nexus cannot verify
 data-plane egress for a CP/DP pairing: the control plane's policy describes
 admission, not the remote data planes that connect to backends, so such a pairing
 always reads "not guaranteed". Enforce `FERRUM_BACKEND_ALLOW_IPS=public` without
-allow CIDRs on every data plane, and opt in with
-`NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`, which keeps Nexus's own upstream
-screening. Requalify that enforcement whenever a data plane is added, replaced or
-reconfigured.
+allow CIDRs on every data plane. Against Edge v0.9.12,
+`NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` admitted such a pairing while keeping
+Nexus's own upstream screening. Edge v0.9.13 reports `public_only_guaranteed=false`
+for a control plane, and Nexus does not reinterpret that, so the pairing now publishes
+only under `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which also skips Nexus's upstream
+screening, until Nexus adopts data-plane attestation. Requalify that enforcement
+whenever a data plane is added, replaced or reconfigured.
 
 ### Out of scope
 
@@ -1945,8 +1951,13 @@ catalog mode and ownership. No credential-bearing resource body enters either
 audit. Corrected agent revisions commit an authorized comparison shape without
 changing the original replay resources. Conversion teardown, selected partial
 cleanup, corrected spec replacement and spec-owned cutover now use the published
-Edge v0.9.12 conditional deployment protocol. Complete original secret-bearing
-namespace evidence and its quoted token are durable before each HTTP mutation.
+Edge v0.9.13 conditional deployment protocol. Complete original secret-bearing
+namespace evidence, the `api_spec_contents` stored-document copies (each verified
+against the digest the token fences) and its quoted token are durable before each
+HTTP mutation. A `412` (including every token Edge v0.9.12 issued) and a `507` past
+the owner's snapshot bound are definite refusals that keep the journal; journals
+holding Edge v0.9.12 authority stay readable but that authority is refused before
+any request.
 Dependent recovery requires the expected committed/applied acknowledgement,
 explicit cleanup authorization and applicable covering cursor. Stale authority,
 unknown or changed resources, lost replies and uncertain acknowledgements retain
@@ -2131,9 +2142,10 @@ Before going live:
       `FERRUM_BACKEND_ALLOW_IPS=public` and lists intended private destinations
       in `FERRUM_BACKEND_ALLOW_CIDRS` (including private plugin endpoints) only
       under the private opt-in profile; every allow overlay prevents public-only certification.
-- [ ] `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS` is `false` unless Edge runs as a control
-      plane with remote data planes, every one of which enforces
-      `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs.
+- [ ] `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS` is `false`. Against Edge v0.9.13 it admits
+      no pairing the public profile refuses; a control plane with remote data
+      planes publishes only under the private opt-in, with every data plane
+      enforcing `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs.
 - [ ] The Nexus process can resolve public DNS; with private upstreams refused,
       an unresolvable name cannot be published.
 - [ ] Ferrum Edge runs with `FERRUM_BACKEND_ALLOW_IPS=public` (or an equivalent

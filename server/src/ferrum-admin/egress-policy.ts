@@ -1,6 +1,10 @@
-/** Owner contract: Edge c764084b3b51c3f7ffde268c039688d35e49c553, schema v1. */
+/**
+ * Owner contract: Edge v0.9.13 (9b83115de7ec23ab51ec4feae6bed65e596db425), schema v2
+ * (`backend-egress-policy` v2 in contracts-edge-0.9.13). Schema 2 keeps v1's shape but
+ * narrows `public_only_guaranteed`: it is true only for `local-data-plane`.
+ */
 export interface BackendEgressPolicy {
-  schema_version: 1;
+  schema_version: 2;
   ip_classification: 'ferrum-private-reserved-v1';
   namespace: string;
   policy_scope: 'process';
@@ -41,10 +45,12 @@ function exactArray(value: unknown, expected: string[]): boolean {
 }
 
 /**
- * The only policy schema this portal reads. Edge v0.9.13 publishes schema 2,
- * so the supported pairing ends at Edge v0.9.12 until that schema is adopted.
+ * The only policy schema this portal reads. Edge v0.9.13 publishes schema 2 and
+ * never 1. Schema 1 (Edge v0.9.11 and v0.9.12) reported the policy-only value of
+ * `public_only_guaranteed`, so the same field meant something else: it is refused
+ * rather than reinterpreted, and this portal pairs with Edge v0.9.13 only.
  */
-export const SUPPORTED_EGRESS_POLICY_SCHEMA = 1;
+export const SUPPORTED_EGRESS_POLICY_SCHEMA = 2;
 
 /**
  * True when the gateway answered with a well-formed object naming a schema
@@ -103,14 +109,22 @@ export function parseBackendEgressPolicy(
     !exactArray(row.mode_allowed_ip_classes, allowed) ||
     !exactArray(row.mode_blocked_ip_classes, blocked) ||
     !exactArray(row.evaluation_order, EVALUATION_ORDER) ||
-    row.public_only_guaranteed !== (row.mode === 'public' && !row.allow_cidr_overrides_present)
+    // Schema 2's guarantee rule: local enforcement, public mode, no allow overlay.
+    row.public_only_guaranteed !==
+      (row.enforcement_scope === 'local-data-plane' &&
+        row.mode === 'public' &&
+        !row.allow_cidr_overrides_present)
   ) {
     return null;
   }
   return row as unknown as BackendEgressPolicy;
 }
 
-/** Process metadata cannot attest a remote data plane or an Admin fleet. */
+/**
+ * Process metadata cannot attest a remote data plane or an Admin fleet. Schema 2
+ * already folds the scope into `public_only_guaranteed`; the scope is still
+ * required explicitly, so a future owner change to the field cannot widen this.
+ */
 export function provesLocalPublicEgress(policy: BackendEgressPolicy): boolean {
   return policy.enforcement_scope === 'local-data-plane' && policy.public_only_guaranteed;
 }
@@ -125,7 +139,10 @@ export function provesLocalPublicEgress(policy: BackendEgressPolicy): boolean {
  *   publishes private upstreams on purpose, so the gateway cannot also be
  *   public-only and its attestation is not required.
  * - `unattested-edge-opt-in`: `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`. Only
- *   the gateway attestation is waived; Nexus still screens every upstream.
+ *   the gateway attestation is waived; Nexus still screens every upstream. It
+ *   still requires `public_only_guaranteed=true`, which schema 2 reports only
+ *   for `local-data-plane`, so against Edge v0.9.13 it admits no pairing the
+ *   public profile would refuse (a control plane reports `false`).
  */
 export type EgressProfile =
   'public-guaranteed' | 'private-upstreams-opt-in' | 'unattested-edge-opt-in';
@@ -157,6 +174,8 @@ export function admitBackendEgress(
   if (optOuts.allowPrivateUpstreams === true) {
     return { egress_profile: 'private-upstreams-opt-in', enforcement_scope };
   }
+  // Never relaxed to `mode === 'public'`: under schema 2 that would grant a
+  // control plane the policy-only reading the owner withdrew.
   if (optOuts.allowUnattestedEdgeEgress === true && policy.public_only_guaranteed === true) {
     return { egress_profile: 'unattested-edge-opt-in', enforcement_scope };
   }

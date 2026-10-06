@@ -8,35 +8,37 @@
     "version": 1,
     "status": "implemented",
     "owner": "ferrum-edge/ferrum-edge",
-    "edge_availability": "Released in Ferrum Edge v0.9.12 at 0d917701b63ef38210c49df830f48cf0457cbc7d with verified distribution. Canonical contracts-edge-0.9.12 publication is pending; contracts-edge-0.9.11 remains published.",
+    "edge_availability": "Released since Ferrum Edge v0.9.12; unchanged shape re-read at v0.9.13 source 9b83115de7ec23ab51ec4feae6bed65e596db425, where a 507 NamespaceSnapshotTooLarge body reports durable not_started (snapshot read or pre-transaction check) or not_committed (rolled-back mutation transaction).",
     "provenance": [
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.12",
-        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "ref": "v0.9.13",
+        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
         "path": "openapi.yaml",
         "symbols": [
           "components.schemas.DeploymentMutationAcknowledgement",
-          "components.responses.DeploymentMutationUnavailable"
+          "components.responses.DeploymentMutationUnavailable",
+          "components.responses.NamespaceSnapshotTooLarge"
         ],
         "note": "Transcribed required members, optional profile/id/error and open object shape. The additional implication for cleanup authorization copies finish: true is emitted only after confirmed commit and applicable local application, final audit admission and lease release. HTTP status and profile/target matching remain consumer runtime checks."
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.12",
-        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "ref": "v0.9.13",
+        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
         "path": "src/admin/deployment_mutations.rs",
         "symbols": [
           "refusal",
           "unavailable",
+          "snapshot_too_large",
           "store_error",
           "finish"
         ]
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.12",
-        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "ref": "v0.9.13",
+        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
         "path": "docs/deployment_mutations.md"
       }
     ]

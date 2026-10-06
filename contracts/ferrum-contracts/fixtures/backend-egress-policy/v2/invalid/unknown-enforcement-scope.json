@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "ip_classification": "ferrum-private-reserved-v1",
+  "namespace": "ferrum",
+  "policy_scope": "process",
+  "enforcement_scope": "unknown",
+  "mode": "both",
+  "mode_allowed_ip_classes": [
+    "public",
+    "private-reserved"
+  ],
+  "mode_blocked_ip_classes": [],
+  "dangerous_ranges_blocked": true,
+  "allow_cidr_overrides_present": false,
+  "deny_cidr_overrides_present": false,
+  "evaluation_order": [
+    "allow-cidrs",
+    "deny-cidrs",
+    "dangerous-ranges",
+    "ip-mode"
+  ],
+  "public_only_guaranteed": false
+}

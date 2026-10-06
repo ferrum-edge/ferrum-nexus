@@ -104,6 +104,7 @@ import {
   isDeploymentAcknowledgement,
   isDeploymentSnapshot,
   isDeploymentTag,
+  isSnapshotTooLargeRefusal,
 } from './deployment.js';
 
 /** Minimal logger surface, so this module does not depend on Fastify. */
@@ -983,13 +984,14 @@ const NOT_DISPATCHED = new WeakSet<object>();
 /**
  * True when a deployment `remove`/`replace` refused before sending any request,
  * so the gateway cannot have applied it. Transport, `409`/`412`, `503` and
- * acknowledgement failures are never marked: those may still settle.
+ * acknowledgement failures are never marked: those may still settle. Nor is a
+ * `507` refusal: it reached the gateway, so its journal entry is kept too.
  */
 export function deploymentNotDispatched(error: unknown): boolean {
   return typeof error === 'object' && error !== null && NOT_DISPATCHED.has(error);
 }
 
-/** Protocol-error reason for a policy schema newer than this portal reads. */
+/** Protocol-error reason for a policy schema this portal does not read (older or newer). */
 const UNSUPPORTED_SCHEMA_REASON = 'unsupported_egress_policy_schema';
 
 function isUnsupportedSchemaRefusal(error: unknown): boolean {
@@ -1328,13 +1330,39 @@ export function createFerrumAdminClient(
           kind: 'deployment_precondition_failed',
         });
       }
+      // A definite refusal: the namespace exceeds Edge's conditional snapshot
+      // bound and nothing was applied. Deterministic for unchanged state, so the
+      // caller keeps its journal and never retries it.
+      if (status === 507 && isSnapshotTooLargeRefusal(parsed)) {
+        return conflict(
+          'The gateway namespace is too large for conditional deployment authority; nothing ' +
+            'was applied',
+          { status, kind: 'namespace_snapshot_too_large' },
+        );
+      }
       return edgeError('Gateway deployment mutation was not confirmed; retain recovery state', {
         status,
         kind: 'deployment_acknowledgement_uncertain',
       });
     }
     if (path === '/deployment-snapshot') {
+      if (status === 507) {
+        return conflict(
+          'The gateway namespace is too large for conditional deployment authority; none was ' +
+            'issued',
+          { status, kind: 'namespace_snapshot_too_large' },
+        );
+      }
       return edgeError('The gateway deployment authority is unavailable', { status });
+    }
+    // Edge v0.9.13 answers a bare 507 when the namespace exceeds its conditional
+    // snapshot bound. The verification read issued nothing; name the cause and
+    // keep failing closed.
+    if (status === 507 && /^\/consumers\/[^/]+\/verification$/.test(path)) {
+      return edgeError('The gateway namespace is too large for consumer verification', {
+        status,
+        kind: 'namespace_snapshot_too_large',
+      });
     }
     if (credentialWrite && status === 412) {
       return conflict('The gateway consumer changed; read it again before retrying', {
@@ -1417,8 +1445,9 @@ export function createFerrumAdminClient(
       signal,
       maxResponseBytes: 4_096,
     });
-    // A newer schema is still refused, under its own reason: the operator
-    // needs to tell a version ceiling from a malformed answer.
+    // Another schema (schema 1 from Edge v0.9.12 or earlier, or a newer one) is
+    // still refused, under its own reason: the operator needs to tell a version
+    // mismatch from a malformed answer.
     if (isUnsupportedEgressPolicySchema(value)) {
       throw protocolError(200, UNSUPPORTED_SCHEMA_REASON, 'GET', '/backend-egress-policy');
     }

@@ -121,7 +121,7 @@ is part of what is being tested, and the assertion is worth less than it looks.
 
 ## MCP subsets and shared manifest preview
 
-The packaged-image data-plane suite extends the pinned v0.9.12 qualification with
+The packaged-image data-plane suite extends the pinned v0.9.13 qualification with
 API-key/basic-account and JWT-application subset list/call cases. Approval cannot
 broaden the request; unapproved tools are hidden and denied while REST remains usable.
 Explicit empty and omitted subsets, rename/re-add, a spec revision that leaves the
@@ -143,8 +143,8 @@ its private-service acceptance suite. It cannot prove DNS-rebinding enforcement.
 The separate [public-only fixture](public-only/README.md) uses controlled isolated
 DNS and canaries, with no unrelated public-service traffic. It remains unqualified
 pending a packaged Nexus digest, hosted qualification and an explicit supported-profile
-owner decision. The current candidate selects published Edge `v0.9.12` and canonical
-`contracts-edge-0.9.12` pins with the required policy/verification capabilities; selecting
+owner decision. The current candidate selects published Edge `v0.9.13` and canonical
+`contracts-edge-0.9.13` pins with the required policy/verification capabilities; selecting
 those artifacts does not establish a passing fixture. Historical Nexus `v0.3.0` remains
 paired with Edge `v0.9.9`. Any unavailable dependency must fail visibly, never be skipped,
 mocked or satisfied by fake pins. See [the adoption facts](../docs/edge-0.9.11-adoption.md).
