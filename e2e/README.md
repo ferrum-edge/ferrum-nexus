@@ -136,15 +136,13 @@ checks namespace/null rejection and redaction, and proves no request reaches the
 upstream for declared references. Contract fixture/integrity checks run in the server
 suite. These are hosted CI gates; adding cases does not claim they have passed.
 
-## Draft public-only pairing qualification
+## Public-only pairing fixture
 
 The existing stack deliberately sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` and keeps
 its private-service acceptance suite. It cannot prove DNS-rebinding enforcement.
 The separate [public-only fixture](public-only/README.md) uses controlled isolated
-DNS and canaries, with no unrelated public-service traffic. It remains unqualified
-pending a packaged Nexus digest, hosted qualification and an explicit supported-profile
-owner decision. The current candidate selects published Edge `v0.9.13` and canonical
-`contracts-edge-0.9.13` pins with the required policy/verification capabilities; selecting
-those artifacts does not establish a passing fixture. Historical Nexus `v0.3.0` remains
-paired with Edge `v0.9.9`. Any unavailable dependency must fail visibly, never be skipped,
-mocked or satisfied by fake pins. See [the adoption facts](../docs/edge-0.9.11-adoption.md).
+DNS and canaries, with no unrelated public-service traffic, against the Edge `v0.9.13`
+image pinned for Nexus `v0.4.0`. It runs on demand with a packaged Nexus image and is
+not part of the required CI checks. Any unavailable dependency must fail visibly, never
+be skipped, mocked or satisfied by fake pins. See
+[the adoption facts](../docs/edge-0.9.11-adoption.md).

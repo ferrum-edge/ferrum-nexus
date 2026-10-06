@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/ferrum-edge/ferrum-nexus/actions/workflows/ci.yml"><img src="https://github.com/ferrum-edge/ferrum-nexus/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
   <a href="https://github.com/ferrum-edge/ferrum-nexus/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue" alt="License" /></a>
-  <img src="https://img.shields.io/badge/node-22.22.2%20%7C%2024.15.0%20%7C%2026.0.0-brightgreen" alt="Supported Node minima (unreleased): 22.22.2, 24.15.0, 26.0.0" />
+  <img src="https://img.shields.io/badge/node-22.22.2%20%7C%2024.15.0%20%7C%2026.0.0-brightgreen" alt="Supported Node minima: 22.22.2, 24.15.0, 26.0.0" />
   <img src="https://img.shields.io/badge/TypeScript-strict-blue" alt="TypeScript" />
 </p>
 
@@ -27,14 +27,13 @@ row before calling Edge.
 
 ## Development status
 
-`v0.3.0` is the current release, paired with Ferrum Edge `v0.9.9`; `v0.1.0` was
+`v0.4.0` is the current release, paired with Ferrum Edge `v0.9.13`; `v0.1.0` was
 the first supported release. The [release notes](docs/release-notes.md) list the
-supported pair, how to upgrade from `v0.2.0`, and the known limitations.
+supported pair, how to upgrade from `v0.3.0`, and the known limitations.
 
-The owner has approved jsdom 30.1.2 / Undici 8.11.2 and the current unreleased
-supported Node range `^22.22.2 || ^24.15.0 || >=26.0.0`. Node 22 remains supported;
-older Node 22/24 patches and Node 23/25 are excluded. Published releases retain
-their historical Node 22.14+ profile until a new release ships.
+Since `v0.4.0` the supported Node range is `^22.22.2 || ^24.15.0 || >=26.0.0`.
+Node 22 remains supported; older Node 22/24 patches and Node 23/25 are excluded.
+Releases before `v0.4.0` supported Node 22.14 or later.
 
 - **Production upgrades.** Schema changes ship as forward migrations that
   upgrade a released database in place; upgrades never require a reset. See
@@ -131,7 +130,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the full design.
 ## Quickstart
 
 ```bash
-# Unreleased source: Node ^22.22.2 || ^24.15.0 || >=26.0.0 (see .nvmrc)
+# Node ^22.22.2 || ^24.15.0 || >=26.0.0 (see .nvmrc)
 npm install
 
 cp .env.example .env
@@ -243,12 +242,10 @@ The bootstrap token is printed to the container log (`docker logs`). Pass
 ### Full stack with Compose
 
 The Compose example runs Nexus, PostgreSQL and Ferrum Edge. The
-[compatibility record](release/compatibility.env) now selects the published Edge `v0.9.13`
-default image by digest for this draft candidate. Exact-head hosted qualification
-remains required; see [adoption status](docs/edge-0.9.11-adoption.md). The Nexus
-image is built from your checkout. For the released combination, check out
-`v0.3.0` and use that tag's compatibility record. This branch's v0.9.13 pin
-belongs to the unreleased candidate, which pairs with Edge v0.9.13 only.
+[compatibility record](release/compatibility.env) selects the Edge `v0.9.13`
+image by digest, the same image CI tests. The Nexus image is built from your
+checkout, so check out the release tag first
+(`git checkout --detach v0.4.0`).
 
 The four secrets and the Edge image are required. Keep the secrets stable for
 the life of the stack: store them in a secret manager instead of generating new
@@ -288,13 +285,13 @@ Ferrum Edge vocabularies it speaks under
 (`contracts-edge-0.9.13`) and per-file SHA-256 in
 [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN). The `shared` contract test
 verifies every digest and checks Nexus's local names against the vendored vocabularies; the
-vendoring and bump procedure is in [`CONTRIBUTING.md`](CONTRIBUTING.md). The unreleased
-[service-manifest preview](docs/service-manifest-preview.md) separately pins its EXISTING shared v1
+vendoring and bump procedure is in [`CONTRIBUTING.md`](CONTRIBUTING.md). The read-only
+[service-manifest preview](docs/service-manifest-preview.md) separately pins its shared v1
 schema and fixtures to `contracts-edge-0.9.13`, commit
 `9626821eb089c71f5d4d71268c7b8276a8a5ab50`, in
 [`contracts/ferrum-contracts/SERVICE-MANIFEST-PIN`](contracts/ferrum-contracts/SERVICE-MANIFEST-PIN).
-Alloy owner code remains unreleased; the preview remains read-only. A shared contract changes
-in ferrum-contracts first and is then re-vendored here — never edited locally.
+A shared contract changes in ferrum-contracts first and is then re-vendored here — never edited
+locally.
 
 ## Documentation
 

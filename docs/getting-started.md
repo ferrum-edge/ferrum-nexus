@@ -3,7 +3,7 @@
 This walkthrough takes you from an empty machine to a client calling a
 published API through the gateway, with a credential the portal issued.
 
-It targets Ferrum Nexus `v0.3.0` with Ferrum Edge `v0.9.9`, the supported pair
+It targets Ferrum Nexus `v0.4.0` with Ferrum Edge `v0.9.13`, the supported pair
 in the [release notes](release-notes.md). To upgrade a deployment that keeps
 its data, see [schema versioning and upgrades](operations.md#schema-versioning-and-upgrades).
 A development database created before `v0.1.0` needs the
@@ -32,16 +32,15 @@ without the web UI. The matching UI steps are noted as you go.
 
 ## 1. Prerequisites
 
-- **Released support profile: Node.js 22.14+**. The SQLite driver needs
-  Node-API 10, which older Node 22 releases lack.
+- **Node.js `^22.22.2 || ^24.15.0 || >=26.0.0`**, the supported profile since
+  `v0.4.0`. Node 23 and 25 are not supported.
 - **Docker**, for the Ferrum Edge gateway.
 - `curl` and `jq` for the examples.
 
 No database server is needed: Nexus defaults to SQLite.
 
-The current supported Node range is `^22.22.2 || ^24.15.0 || >=26.0.0`, and
-[`.nvmrc`](../.nvmrc) pins Node 22 to 22.22.2. Published releases retain their
-historical Node 22.14+ profile until a new release ships.
+[`.nvmrc`](../.nvmrc) pins Node 22.22.2, the lowest supported version. Releases
+before `v0.4.0` supported Node 22.14 or later.
 
 ---
 
@@ -57,7 +56,7 @@ exact Edge image this release was tested with, the same one the
 ```bash
 git clone https://github.com/ferrum-edge/ferrum-nexus.git
 cd ferrum-nexus
-git checkout --detach v0.3.0
+git checkout --detach v0.4.0
 set -a
 . ./release/compatibility.env
 set +a

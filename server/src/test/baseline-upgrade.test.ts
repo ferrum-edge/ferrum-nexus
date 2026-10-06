@@ -21,12 +21,16 @@
  * forward migration a release has not shipped (from `v0.1.0`,
  * `002_api_gateway_plugins` and `003_messages_thread_latest`; from `v0.1.0`
  * and `v0.2.0`, `004_api_spec_changes`, `005_notification_preferences` and
- * `006_user_identities`) is applied here on top of a populated database with
- * no change to the harness. From the newest release (`v0.3.0`), `007_outbox_recipient`
+ * `006_user_identities`; from every release before `v0.4.0`,
+ * `007_outbox_recipient` to `011_mcp_tool_subsets`) is applied here on top of a
+ * populated database with no change to the harness. `007_outbox_recipient`
  * adds a nullable account binding without changing retained message contents;
  * `008_email_lifecycle_fence` adds a private account fence without changing user DTOs;
- * `009_outbox_priority` classifies retained mail without changing its delivery state.
- * `010_api_agents` leaves retained APIs unexposed to agents.
+ * `009_outbox_priority` classifies retained mail without changing its delivery state;
+ * `010_api_agents` leaves retained APIs unexposed to agents; and
+ * `011_mcp_tool_subsets` keeps retained approvals covering every published tool.
+ * From the newest release (`v0.4.0`) nothing is pending, so its run proves the
+ * current code opens that database unchanged.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
@@ -169,8 +173,15 @@ const fingerprint = (material: string): string =>
 /** Edge's ACL group for an approved API; derived from the API id, so the id must survive. */
 const approvedGroup = (apiId: string): string => `nexus:api:${apiId}:approved`;
 
-/** The released-baseline database the upgrade starts from. */
-async function buildFixture(): Promise<FixtureRow[]> {
+/**
+ * The released-baseline database the upgrade starts from, for a source that
+ * shipped the migrations `ids`. Rows keep the baseline's physical shape, except
+ * that a source which shipped `009_outbox_priority` stores every outbox row
+ * with the priority `009_outbox_priority`'s backfill rule assigns (`verify:` and
+ * `reset:` rows high, the rest normal), so the lanes read back the same from
+ * every source.
+ */
+async function buildFixture(ids: readonly string[]): Promise<FixtureRow[]> {
   const passwordHash = await hashPassword(FIXTURE_PASSWORD);
   const encryptedSmtpPassword = createCrypto(SECRET).encryptJson(SMTP_PASSWORD);
   const stamps = { created_at: T0, updated_at: T1 };
@@ -192,10 +203,14 @@ async function buildFixture(): Promise<FixtureRow[]> {
     },
   });
   const decided = { decided_by: ID.provider, decided_at: T1, decision_note: 'Approved' };
+  const shippedPriority = ids.includes('009_outbox_priority');
+  const outboxPriority = (key: string): number =>
+    /^(verify:|reset:)/.test(key) ? OUTBOX_PRIORITY.high : OUTBOX_PRIORITY.normal;
   const mail = (id: string, key: string, extra: Record<string, SqlValue> = {}): FixtureRow => ({
     table: 'email_outbox',
     row: {
       id,
+      ...(shippedPriority ? { priority: outboxPriority(key) } : {}),
       to_email: 'client@example.test',
       subject: 'Retained message',
       body_html: '<p>Retained</p>',
@@ -1116,7 +1131,7 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
       it(`upgrades a ${release} database without losing data, and re-runs as a no-op`, async () => {
         const target = await makeTarget();
         try {
-          const fixture = await buildFixture();
+          const fixture = await buildFixture(ids);
           await target.seedBaseline(fixture, ids);
           const baseline = await target.ledger();
           assert.deepEqual(

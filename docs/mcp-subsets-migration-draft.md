@@ -1,12 +1,10 @@
-# Unreleased MCP subset rollout and exposure identities
+# MCP subset rollout and exposure identities
 
-Nexus [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519) implements the
-optional tool subsets tracked by [#446](https://github.com/ferrum-edge/ferrum-nexus/issues/446).
-Root accepted the provider opt-in, exposure-identity tradeoff and writer-drain plan
-below. The implementation is qualified and merged but remains Unreleased. It uses the
-existing digest-pinned Edge v0.9.10 policy contract. Main retains Node 22.14; this higher-floor
-candidate integrates that implementation under the separate, owner-pending
-[Node proposal](dependency-majors-449-higher-floor-draft.md).
+Nexus `v0.4.0` ships the optional tool subsets tracked by
+[#446](https://github.com/ferrum-edge/ferrum-nexus/issues/446), implemented in
+[#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519). This page describes the
+provider opt-in, the exposure-identity rules and the writer-drain rollout that an
+upgrade to `v0.4.0` requires.
 
 ## Enrollment and rollout
 
@@ -122,40 +120,14 @@ and one `access.revoke_rollback` row reporting `grant_restored: false` and
 its groups. The strict fixtures corrected at `0c05113` verify this existing production
 behavior; the correction did not change runtime revocation semantics.
 
-## Hosted qualification and final gate
+## Test coverage
 
-The following executed evidence applies to code commit
-`0c05113fdaa34bcce2c7ee5780191447359f105e`, in
-[run 37215210346](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37215210346):
-
-- [store-contracts, job 111474199932](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37215210346/job/111474199932)
-  passed production publishing/access subset cases and revocation, exposure-change
-  and membership-repair tests on SQLite, PostgreSQL, MySQL and MongoDB. The job
-  reported **1,365 tests: 1,349 passed, 16 skipped, zero failed**.
-- [Packaged acceptance, job 111474199807](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37215210346/job/111474199807)
-  passed all six provider-narrowed subset cases: account and application identities
-  with keyauth, basicauth and JWT credentials. Each case checked the exact approved
-  `list_invoices` discovery result and actual dispatch, including after account
-  re-enable with replacement credentials. Forbidden calls returned HTTP `200` with
-  JSON-RPC error `-32001` and no upstream effects. The suite also passed revocation,
-  exposure-ID rotation, explicit-empty versus omitted/null coverage and checks that
-  changed or re-enabled exposure cannot revive old IDs.
-
-These passed jobs do not establish that every `0c05113` CI check passed. Final PR #519
-head `77fdb767ec8ef04e88f13df9fb291bc77fbd0344` subsequently passed all 11 hosted
-checks across [CI 37221116488](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221116488)
-and [Verbatim quickstart 37221116610](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37221116610).
-That includes all eight protected Actions contexts: `Supported Node minimum`, `checks (22)`,
-`checks (24)`, `store-contracts`, `docker`, `acceptance`, `quickstart-config` and `action-pins`,
-plus the exact `checks (22.14.0)` minimum, coverage and quickstart. Root completed whole and
-fresh independent reviews with zero unresolved threads. The PR merged at
-`559c350a5370335791cdc3082225dce6056cf547` on 2026-10-04 at 17:42:42 UTC; #446
-closed at 17:42:43 UTC. This completes main's implementation and qualification, not a release.
-
-The higher-floor candidate integrates that immutable main commit with a normal merge,
-preserving its MCP source and fixtures. The combined head requires fresh hosted results and root and
-independent review; neither parent's results qualify it. Its six proposed minimum/current
-Node lanes and unchanged eight protected contexts are documented in the
-[integration record](dependency-majors-449-higher-floor-draft.md#main-integration-and-current-gates).
-Owner approval to change the released Node profile remains pending. No repository code,
-installer, formatter, build or test was executed locally for this integration.
+The store contracts run the production publishing and access subset cases, revocation,
+exposure-change and membership-repair tests on SQLite, PostgreSQL, MySQL and MongoDB.
+The packaged acceptance suite runs provider-narrowed subsets for account and
+application identities with keyauth, basicauth and JWT credentials. Each case checks
+the exact approved discovery result and actual dispatch, including after an account is
+re-enabled with replacement credentials; forbidden calls return HTTP `200` with JSON-RPC
+error `-32001` and no upstream effect. The suite also covers revocation, exposure-ID
+rotation, explicit-empty versus omitted/null coverage, and checks that a changed or
+re-enabled exposure cannot revive old IDs.

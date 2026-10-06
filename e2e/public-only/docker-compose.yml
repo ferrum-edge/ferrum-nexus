@@ -1,5 +1,5 @@
 # Published Edge v0.9.13 baseline; load its digest from release/compatibility.env.
-# Root supplies the packaged Nexus digest; hosted qualification and approval remain pending.
+# Supply the packaged Nexus image as NEXUS_IMAGE; this fixture runs on demand, outside CI.
 # Separate from ../docker-compose.yml, which deliberately permits private upstreams.
 name: ferrum-nexus-public-only
 
@@ -53,7 +53,7 @@ services:
         condition: service_completed_successfully
 
   nexus:
-    image: ${NEXUS_IMAGE:?supply the packaged candidate image digest}
+    image: ${NEXUS_IMAGE:?supply the packaged Nexus image digest}
     dns: [10.203.0.10]
     environment:
       NEXUS_SECRET_KEY: ${NEXUS_SECRET_KEY:?set a throwaway secret}

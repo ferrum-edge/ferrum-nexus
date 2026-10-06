@@ -1,8 +1,8 @@
-# Draft Edge v0.9.13 adoption
+# Edge v0.9.13 adoption
 
-The filename preserves existing links from the v0.9.11 candidate. Nexus PR #522
-adopted published Edge v0.9.12; this change advances the candidate to published
-Edge v0.9.13 and `contracts-edge-0.9.13`. It does not finalize a Nexus release.
+Nexus `v0.4.0` pairs with published Edge v0.9.13 and `contracts-edge-0.9.13`. The
+filename preserves existing links from the Edge v0.9.11 adoption; Nexus PR #522
+adopted Edge v0.9.12, and PR #529 advanced the pin to Edge v0.9.13.
 The public-only guarantee is granted only to a local data plane (see the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)).
 
@@ -13,11 +13,15 @@ The public-only guarantee is granted only to a local data plane (see the
   `9b83115de7ec23ab51ec4feae6bed65e596db425`, the merge of Edge #6026. The
   default Docker Hub multi-architecture index in
   [`release/compatibility.env`](../release/compatibility.env) is
-  `sha256:6caa0987adb4c0a3a368fcd800bb0459cff3d3e219522e2e9c56280205862e50`.
-  Root recorded the successful hosted release run and verified distribution facts:
-  release assets and checksum sidecars, the default, `-ebpf` and `-ebpf-tools`
-  image indexes, and image signing and attestation. This consumer change does not
-  claim independent cryptographic verification.
+  `sha256:6caa0987adb4c0a3a368fcd800bb0459cff3d3e219522e2e9c56280205862e50`; it
+  resolves to
+  `sha256:03822d924b7919d07a840baf757d016f2f05c8df8a8d0455a2eebae917aae2cc` on
+  `linux/amd64` and
+  `sha256:a628f8fc12c916793b96ba111c2bf4360ea84981b8bf766254b47c6140c02a80` on
+  `linux/arm64`. Edge's release run published the release assets and checksum
+  sidecars, the default, `-ebpf` and `-ebpf-tools` image indexes, and image
+  signatures and attestations. Nexus does not independently verify those
+  signatures.
 - [contracts-edge-0.9.13](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.13)
   was published on 2026-10-06 at tag commit
   `9626821eb089c71f5d4d71268c7b8276a8a5ab50`, the merge of contracts #20, and
@@ -37,8 +41,8 @@ Edge v0.9.13 changes two response contracts incompatibly and every snapshot toke
 
 - **Backend egress policy schema 2.** `public_only_guaranteed` is now true only with
   `enforcement_scope=local-data-plane`. Nexus reads schema 2 only and refuses schema
-  1 (Edge v0.9.12 and earlier) under `unsupported_egress_policy_schema`, so this
-  candidate pairs with Edge v0.9.13 only. The guarantee rule is unchanged: Nexus
+  1 (Edge v0.9.12 and earlier) under `unsupported_egress_policy_schema`, so Nexus
+  `v0.4.0` pairs with Edge v0.9.13 only. The guarantee rule is unchanged: Nexus
   still requires `local-data-plane` explicitly together with
   `public_only_guaranteed=true`. `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` still
   requires `public_only_guaranteed=true` and is never relaxed to the policy-only
@@ -69,7 +73,7 @@ Edge v0.9.13 changes two response contracts incompatibly and every snapshot toke
 
 ## Recovery journals
 
-Journals written by this candidate carry `authorityFormat: 2`: every deployment
+Journals written by Nexus `v0.4.0` carry `authorityFormat: 2`: every deployment
 snapshot they hold is Edge v0.9.13 authority. Journals written before carry no
 marker and may hold Edge v0.9.12 authority (inline spec bytes, no
 `api_spec_contents`). They remain readable, so custody checks, inspection and key
@@ -81,18 +85,14 @@ mutation, a stored-document comparison or deletion custody) is refused with
 is sent. Settle conversions and restores before upgrading Edge; see the
 [upgrade procedure](operations.md#upgrading-to-edge-v0913).
 
-## Remaining gates
+## Release status
 
-Nexus qualification is still pending: fresh exact-head Node checks, four-store
-service contracts, protocol and format gates, and packaged acceptance against the
-selected image. Static inspection and integrity checks establish no hosted test or
-acceptance result. The [controlled public-only fixture](../e2e/public-only/README.md)
-additionally requires a packaged Nexus digest and hosted qualification, and covers
-the local data-plane profile only.
+[`release/compatibility.env`](../release/compatibility.env) pins the image above for
+Nexus `v0.4.0`, and the packaged acceptance suite runs against it. The
+[controlled public-only fixture](../e2e/public-only/README.md) runs a packaged Nexus
+image against the same Edge release on demand, outside CI, and covers the local
+data-plane profile only.
 
-Nexus version markers remain unchanged. The owner-approved unreleased Node range is
-`^22.22.2 || ^24.15.0 || >=26.0.0`, adopted through #521; the candidate still requires
-exact-head qualification of every declared minimum and current major. Released
-migrations 001–006 and hashes are immutable; prepared 007–011 remain unreleased.
-This adoption adds no migration. No Nexus tag, release or advisory completion is
-created here.
+Nexus `v0.4.0` supports Node `^22.22.2 || ^24.15.0 || >=26.0.0` (adopted through
+#521). It freezes migrations `007_outbox_recipient` to `011_mcp_tool_subsets`; this
+Edge adoption itself adds no migration.

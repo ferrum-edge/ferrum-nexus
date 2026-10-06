@@ -1,9 +1,8 @@
 # Hosted lock provenance for issue #449
 
-The owner has approved jsdom 30.1.2 / Undici 8.11.2 and the current unreleased supported
-Node range `^22.22.2 || ^24.15.0 || >=26.0.0`. Prior head `059b428` is qualified below;
-fresh hosted qualification and review remain pending for this documentation adoption head.
-Published releases retain their historical Node 22.14+ profile until a new release ships.
+Nexus `v0.4.0` released jsdom 30.1.2 / Undici 8.11.2 and the supported Node range
+`^22.22.2 || ^24.15.0 || >=26.0.0`; releases before it keep their Node 22.14+ profile. The
+records below are the historical lock provenance for that change.
 
 ## Historical first-stage artifact; higher-floor locks imported
 

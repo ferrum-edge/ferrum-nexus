@@ -16,10 +16,10 @@ server (`server/`), which enforces RBAC and writes the audit log before forwardi
 
 ## Release status
 
-`v0.3.0` is the current release, paired with Ferrum Edge `v0.9.9`
+`v0.4.0` is the current release, paired with Ferrum Edge `v0.9.13`
 (`release/compatibility.env`). `v0.1.0`, the first supported release, froze the `001_initial`
-schema baseline; `v0.2.0` froze the forward migrations `002` and `003`, and `v0.3.0` froze `004`
-to `006`:
+schema baseline; `v0.2.0` froze the forward migrations `002` and `003`, `v0.3.0` froze `004` to
+`006`, and `v0.4.0` froze `007` to `011`:
 
 - `server/src/db/released-migrations.ts` lists every shipped or pending migration with its
   per-backend checksums; `released-migrations.test.ts` fails on any edit to a released one (or to

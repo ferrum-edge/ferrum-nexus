@@ -6,7 +6,7 @@ see [docs/contributing.md](docs/contributing.md).
 
 ## Prerequisites
 
-- Node.js 22.14 or later (see `.nvmrc`).
+- Node.js `^22.22.2 || ^24.15.0 || >=26.0.0` (`.nvmrc` pins 22.22.2).
 - A Ferrum Edge gateway, only for end-to-end work. Unit and integration tests run against a
   built-in mock Admin API.
 
