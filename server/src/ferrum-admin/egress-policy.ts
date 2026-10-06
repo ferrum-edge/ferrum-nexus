@@ -128,9 +128,7 @@ export function provesLocalPublicEgress(policy: BackendEgressPolicy): boolean {
  *   the gateway attestation is waived; Nexus still screens every upstream.
  */
 export type EgressProfile =
-  | 'public-guaranteed'
-  | 'private-upstreams-opt-in'
-  | 'unattested-edge-opt-in';
+  'public-guaranteed' | 'private-upstreams-opt-in' | 'unattested-edge-opt-in';
 
 /** The admission verdict for one backend write. */
 export interface BackendEgressAdmission {
