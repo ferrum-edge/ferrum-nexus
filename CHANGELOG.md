@@ -390,6 +390,10 @@ for the supported combination and the upgrade steps.
 
 ### Security
 
+- Pin the development-only transitive `shell-quote` dependency (pulled in by
+  `concurrently`, which requires exactly 1.9.0) to 1.12.0 with an npm
+  `overrides` entry, fixing GHSA-pqg4-j6r4-53mv (critical). No runtime
+  dependency changes.
 - **An explicit MCP tool approval never follows a changed tool definition** (Refs #519).
   Each selected tool stores a `definition_hash`, a SHA-256 over the reference-resolved
   definition Edge publishes for it: description, operation summary and description,
