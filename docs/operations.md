@@ -227,10 +227,10 @@ curl -s "$FERRUM_ADMIN_URL/health" -H "Authorization: Bearer $ADMIN_JWT" | jq .n
 
 The released namespace-routing policy accepts a control plane with
 `data_plane_single_namespace: false` and `active: null`; a missing namespace
-block is unknown, not a mismatch. **The draft public-egress proposal below narrows
-that accepted CP pairing and requires an explicit owner decision before landing.**
+block is unknown, not a mismatch. **Backend egress admission below narrows that
+accepted CP pairing; see its topology decision.**
 
-### Draft backend egress adoption (pending supported-profile approval)
+### Backend egress admission and the public-only guarantee
 
 With `NEXUS_ALLOW_PRIVATE_UPSTREAMS=false`, every backend-writing Admin boundary
 requires fresh authenticated, namespace-matched, no-store process metadata from
@@ -308,14 +308,32 @@ mutation. Public health reports only `backend_egress_unverified`, keeps HTTP 200
 degraded liveness, and retains probe caching/coalescing. Administrator diagnostics
 contain fixed bounded reasons, never policy bodies, CIDRs or secrets.
 
-This proposal is reviewable code, not permission to change released support or a
-claim that GHSA-93rq-89vr-38pc is fixed. Root must obtain the explicit CP/public-profile
-owner decision after exact-head independent review and hosted CI. The candidate
-now pins the published Edge `v0.9.12` default image and canonical
+**Topology decision.** Nexus grants the verified public-only egress guarantee only
+when Edge reports `public_only_guaranteed=true` with
+`enforcement_scope=local-data-plane`, that is, a single gateway process that both
+answers the Admin API and serves the traffic. `GET /api/health/edge` reports that
+verdict as `public_egress_guaranteed`. Every other pairing reads
+`public_egress_guaranteed: false`, including a control plane that reports
+`public_only_guaranteed=true` for its own process: its policy describes admission,
+not the remote data planes that connect to backends.
+
+| Pairing                                           | Public profile (default)                          | `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`              |
+| ------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- |
+| Local data plane, public mode, no allow overrides | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
+| Control plane with remote data planes (CP/DP)     | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
+| Any other recognized policy                       | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
+| Missing, malformed or unreachable policy          | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed |
+
+A CP/DP deployment therefore keeps requiring the existing explicit operator opt-out,
+and Nexus never describes it as public-only. Operators who run CP/DP must enforce
+public-only egress on every data plane themselves. This holds until Nexus adopts
+Edge's data-plane egress attestation, planned for the next Edge release; until
+then the CP/DP part of GHSA-93rq-89vr-38pc Part B remains open.
+
+The candidate pins the published Edge `v0.9.12` default image and canonical
 `contracts-edge-0.9.12` at `31f0a21d707795be293d15837c2f77c3d84219d8`.
-See [the adoption facts](edge-0.9.11-adoption.md). Actual packaged acceptance and
-the public-only DNS-rebinding fixture still require exact-head hosted qualification.
-See the separate [unqualified packaged fixture](../e2e/public-only/README.md).
+See [the adoption facts](edge-0.9.11-adoption.md) and the separate
+[packaged public-only fixture](../e2e/public-only/README.md).
 
 **Fixing a mismatch.** Set the portal's `FERRUM_NAMESPACE` to the gateway's
 `active` value, or restart the gateway with the portal's value, then restart

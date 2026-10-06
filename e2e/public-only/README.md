@@ -1,14 +1,15 @@
 # Public-only DNS rebinding proposal fixture
 
-**Hosted qualification pending; owner approval pending.** Owner authority is
+**Hosted qualification pending.** Owner authority is
 published Edge `v0.9.12`, source `0d917701b63ef38210c49df830f48cf0457cbc7d`.
 The candidate compatibility pin selects its default multi-architecture image
 `ferrumedge/ferrum-edge:v0.9.12@sha256:80526b59cbbdc2bfcc8bae9241da4e5395414cf07bf0be4effd4c73c51684ee4`.
 Canonical `contracts-edge-0.9.12` at `31f0a21d707795be293d15837c2f77c3d84219d8`
 is published and adopted byte-for-byte. See [adoption facts](../../docs/edge-0.9.11-adoption.md).
 Root must supply the packaged Nexus candidate digest and run this in hosted CI.
-Publication establishes artifact identity; it does not attest this fixture or grant
-public-only supported-profile approval. The candidate adopts released selected
+Publication establishes artifact identity; it does not attest this fixture. The
+fixture exercises the local data-plane profile, the only pairing Nexus grants the
+public-only guarantee. The candidate adopts released selected
 conditional removal and API-spec replacement: full original deployment authority
 is durable before HTTP, and committed/applied acknowledgement with explicit cleanup
 authorization is required before dependent recovery. Uncertain results retain the
@@ -16,7 +17,8 @@ encrypted journal and attempted identity without fresh-token retry or unconditio
 cleanup. Large journals preserve complete evidence in authenticated encrypted chunks
 committed atomically with their manifest. This DNS fixture does not qualify conversion
 custody, native-store boundaries or every recovery interleaving; those require their
-own exact-head hosted gates. Advisory Part B remains open.
+own exact-head hosted gates. Advisory Part B remains open for CP/DP pairings until
+Nexus adopts Edge data-plane attestation.
 
 This stack is separate from the private-opt-in acceptance stack. It admits
 `rebind.fixture.test` while DNS returns `11.203.0.10`, proves real authenticated

@@ -201,6 +201,36 @@ describe('health endpoints', () => {
     assert.ok(!anonymous.body.includes('policy-secret-canary'));
   });
 
+  it('grants the public egress guarantee only to a local public-only data plane', async (t) => {
+    // A public-mode control plane: its own process reports public-only, but it
+    // only admits configuration; remote data planes serve the traffic.
+    const controlPlane = { ...publicEgressPolicy(), enforcement_scope: 'admission-only' };
+    assert.equal(controlPlane.public_only_guaranteed, true);
+    const strict = await buildTestApp();
+    t.after(() => strict.close());
+    const local = await strict.app.inject({ method: 'GET', url: '/api/health/edge' });
+    assert.equal(local.json<EdgeHealth>().status, 'ok');
+    assert.equal(local.json<EdgeHealth>().public_egress_guaranteed, true);
+    // Until Nexus adopts data-plane attestation, the public profile reads that
+    // pairing as not guaranteed: degraded, and every backend write is refused.
+    strict.edge.setBackendEgressPolicy(controlPlane);
+    const refused = await strict.app.inject({ method: 'GET', url: '/api/health/edge' });
+    assert.equal(refused.json<EdgeHealth>().status, 'degraded');
+    assert.equal(refused.json<EdgeHealth>().reason, 'backend_egress_unverified');
+    assert.equal(refused.json<EdgeHealth>().public_egress_guaranteed, false);
+    await assert.rejects(strict.edgeClient.assertBackendEgress());
+
+    // The explicit private opt-in admits the same pairing for writes, and still
+    // never reports it as public-only.
+    const optedOut = await buildTestApp({ env: { NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'true' } });
+    t.after(() => optedOut.close());
+    optedOut.edge.setBackendEgressPolicy(controlPlane);
+    const admitted = await optedOut.app.inject({ method: 'GET', url: '/api/health/edge' });
+    assert.equal(admitted.json<EdgeHealth>().status, 'ok');
+    assert.equal(admitted.json<EdgeHealth>().public_egress_guaranteed, false);
+    await optedOut.edgeClient.assertBackendEgress();
+  });
+
   it('reports the gateway on its own endpoint', async () => {
     const response = await harness.app.inject({ method: 'GET', url: '/api/health/edge' });
     assert.equal(response.statusCode, 200);

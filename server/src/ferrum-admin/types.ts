@@ -649,6 +649,13 @@ export interface EdgeProbe {
   /** Sampled observation only; never authorizes a backend mutation. */
   backendEgressVerified?: boolean;
   /**
+   * Whether the sampled policy proves public-only egress on the local data
+   * plane (`enforcement_scope=local-data-plane`, `public_only_guaranteed`).
+   * Independent of the private opt-in, and always false for a control-plane
+   * or remote data-plane pairing. Observational only.
+   */
+  publicEgressGuaranteed?: boolean;
+  /**
    * Whether the gateway answered at all. A gateway that answered `503` because
    * it is `starting`/`draining`/`unavailable` is **reachable** — read `ready`.
    */

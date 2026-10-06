@@ -256,6 +256,7 @@ Example for an admin session:
     "mode": "database",
     "admin_writes_enabled": true,
     "edge_version": null,
+    "public_egress_guaranteed": true,
     "namespace": "nexus",
     "namespace_routing": {
       "configured": "nexus",
@@ -286,15 +287,16 @@ Example for an admin session:
 `"unreachable"` (the driver's message goes to the server log); `edge.error` is
 the real probe failure for an admin and `"unreachable"` for everyone else.
 
-| Field               | Values and meaning                                                                                                                                                                                   |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status`            | `ok` \| `degraded` \| `down`                                                                                                                                                                         |
-| `version`           | the server package version                                                                                                                                                                           |
-| `edge.status`       | `ok` \| `degraded` \| `not_ready` \| `down`                                                                                                                                                          |
-| `edge.reason`       | why a `degraded` gateway is degraded; only value `"namespace_unserved"`; `null` otherwise                                                                                                            |
-| `edge.ready`        | Edge's own readiness from its health payload; `null` when nothing answered. Edge answers `503` with a full payload while `starting`, `draining` or `unavailable`, which Nexus reports as `not_ready` |
-| `edge.edge_version` | always `null` against a stock gateway — Edge has no version endpoint                                                                                                                                 |
-| `edge.namespace`    | `FERRUM_NAMESPACE` on the portal                                                                                                                                                                     |
+| Field                           | Values and meaning                                                                                                                                                                                                                                               |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`                        | `ok` \| `degraded` \| `down`                                                                                                                                                                                                                                     |
+| `version`                       | the server package version                                                                                                                                                                                                                                       |
+| `edge.status`                   | `ok` \| `degraded` \| `not_ready` \| `down`                                                                                                                                                                                                                      |
+| `edge.reason`                   | why a `degraded` gateway is degraded: `"namespace_unserved"` or `"backend_egress_unverified"`; `null` otherwise                                                                                                                                                  |
+| `edge.ready`                    | Edge's own readiness from its health payload; `null` when nothing answered. Edge answers `503` with a full payload while `starting`, `draining` or `unavailable`, which Nexus reports as `not_ready`                                                             |
+| `edge.edge_version`             | always `null` against a stock gateway — Edge has no version endpoint                                                                                                                                                                                             |
+| `edge.public_egress_guaranteed` | `true` only when the sampled gateway policy proves public-only backend egress on its local data plane; always `false` for a control plane with remote data planes, and unchanged by `NEXUS_ALLOW_PRIVATE_UPSTREAMS`. Observational, never mutation authorization |
+| `edge.namespace`                | `FERRUM_NAMESPACE` on the portal                                                                                                                                                                                                                                 |
 
 #### Is the published API actually reachable?
 
@@ -317,18 +319,24 @@ serves exactly one namespace. Publish into any other and the Admin API answers
 `unserved` and `edge.reason` stay public so an anonymous monitor can alert on
 them. A gateway that reports no namespace leaves `active` `null`, `unserved`
 `false` and `checked_at` `null`: namespace mismatch alone is not inferred. The
-draft public-egress policy can still degrade this unknown pairing.
+backend egress policy can still degrade this unknown pairing.
 
-The draft egress adoption adds coarse public
+Backend egress admission adds coarse public
 `edge.reason = "backend_egress_unverified"` when fresh sampled policy cannot establish the configured
 profile. This is HTTP-200 degraded liveness, not mutation authorization: every backend
 write obtains its own authenticated namespace policy, including compensation. The
 public profile accepts only local-serving/public-only metadata; missing, stale,
 unknown, CP-only, default-both and allow-overlay cases refuse with bounded opaque
 `EDGE_ERROR` / `EDGE_PROTOCOL_ERROR` / `EDGE_UNAVAILABLE` diagnostics. Health's
-cache/coalescing still bounds public probe load. The supported CP/public-profile
-owner decision and exact-head packaged qualification remain pending. Published
-v0.9.12 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
+cache/coalescing still bounds public probe load.
+
+`edge.public_egress_guaranteed` is `true` only when that sampled policy reports
+`enforcement_scope=local-data-plane` with `public_only_guaranteed=true`. A control
+plane with remote data planes always reads `false`, even when it reports
+public-only for its own process, and `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` admits its
+writes without changing that verdict. See the
+[topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee).
+Published v0.9.12 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
 
 Whole-consumer metadata replacements pair complete server-only verification with
 the original strong row `If-Match`, using Edge's masked projection and hidden-type

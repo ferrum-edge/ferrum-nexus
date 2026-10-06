@@ -925,6 +925,17 @@ export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
    * endpoint**. Take the real version from your deployment metadata.
    */
   edge_version: string | null;
+  /**
+   * Whether the last sampled `GET /backend-egress-policy` proved public-only
+   * backend egress: `enforcement_scope` `local-data-plane` with
+   * `public_only_guaranteed`. Nexus grants this guarantee to nothing else.
+   * `false` for every control-plane/data-plane pairing (Nexus cannot yet attest
+   * a remote data plane), any weaker or unreadable policy and an unreachable
+   * gateway. `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` does not change it: that
+   * opt-in accepts a weaker policy for writes without making it public-only.
+   * Observational only; it never authorizes a mutation.
+   */
+  public_egress_guaranteed: boolean;
   namespace: string;
   /** Namespace routability; `unserved` is what makes `status` `degraded`. */
   namespace_routing: EdgeNamespaceRouting;

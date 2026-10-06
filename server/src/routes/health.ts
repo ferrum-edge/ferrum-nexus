@@ -210,6 +210,7 @@ function presentEdge(
     mode: detailAllowed ? result.mode : null,
     admin_writes_enabled: detailAllowed ? result.adminWritesEnabled : null,
     edge_version: result.version,
+    public_egress_guaranteed: result.publicEgressGuaranteed === true,
     namespace: routing.configured,
     // `unserved` and the reason above are the monitor's signal and stay
     // public; the gateway's *own* namespace and serving scope are deployment

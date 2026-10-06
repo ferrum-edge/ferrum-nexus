@@ -21,12 +21,20 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   are refused. The mock hashes Basic through normal write lifecycles and enforces
   closed credential fields; the delayed issue/disable regression keeps its `ok`
   teardown requirement. Four-store service/protocol regressions and a separate
-  controlled packaged DNS-rebinding fixture are included. This cannot land pending
-  explicit CP/public-profile owner approval,
-  exact-head hosted CI/review, actual published-image qualification and released
-  canonical adoption qualification. The candidate now pins published Edge v0.9.12
-  and contracts-edge-0.9.12; Nexus version markers remain unchanged and the advisory
-  is not declared fixed. See [proposal limitations](docs/security.md#1-threat-model).
+  controlled packaged DNS-rebinding fixture are included. The candidate pins
+  published Edge v0.9.12 and contracts-edge-0.9.12; Nexus version markers remain
+  unchanged. See [limitations](docs/security.md#1-threat-model).
+
+- **Public-only egress topology decision** (GHSA-93rq-89vr-38pc Part B): Nexus
+  grants the verified public-only guarantee only when Edge reports
+  `public_only_guaranteed=true` with `enforcement_scope=local-data-plane`, and
+  `GET /api/health/edge` reports it as `edge.public_egress_guaranteed`. A control
+  plane with remote data planes reads not guaranteed (health `degraded` in the
+  public profile), and its backend writes keep requiring the explicit
+  `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` opt-out, which never reports public-only.
+  The CP/DP part of the advisory stays open until Nexus adopts Edge data-plane
+  egress attestation. See the
+  [topology decision](docs/operations.md#backend-egress-admission-and-the-public-only-guarantee).
 
 - **Draft conversion recovery hardening** (PR #522): encrypted baseline, repair
   state and intent audit commit before teardown; catalog mode, ownership,
@@ -49,9 +57,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `31f0a21d707795be293d15837c2f77c3d84219d8`. Adopt exact-byte deployment
   snapshot/acknowledgement schemas and meaningful valid/invalid fixtures alongside
   refreshed vocabularies and egress assets. The separate manifest pin and unreleased
-  Alloy flags are preserved. The owner API release dependency is complete; consumer
-  Node/four-store/packaged qualification, public-only profile approval and advisory
-  Part B remain pending. No Nexus release or migration release marker is changed.
+  Alloy flags are preserved. The owner API release dependency is complete; the
+  CP/DP part of advisory Part B remains open pending Edge data-plane attestation.
+  No Nexus release or migration release marker is changed.
   See [actual publication facts](docs/edge-0.9.11-adoption.md).
 
 - **Optional MCP tool subsets** (Refs #446). Consumers request published exposure IDs;
@@ -165,8 +173,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   audit failure preserves repair state and the journal transactionally. Corrected
   revisions, rebuilds, staging and refusals emit no false rollback. These observations
   do not fence external Admin writes. Strict successful-conversion and partial-recovery
-  gates now use the released owner contract and still require exact-head hosted
-  qualification; no advisory is declared fixed.
+  gates use the released owner contract.
 
 - **An agent API's submitted document is bounded before it is built** (Refs #525).
   The document Nexus sends Edge for an agent API gives every path its own copy of

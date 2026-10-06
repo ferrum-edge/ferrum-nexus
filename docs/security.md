@@ -118,12 +118,19 @@ remote/fleet/load-balanced Admin pairings cannot acquire that proof from this AP
 Health is sampled, cached and observational, never mutation authorization. Replacing
 or reconfiguring Edge, retargeting Admin or traffic endpoints, and existing traffic
 require operator enforcement and requalification; a startup/sample success does not
-secure future fleet traffic. Current released documentation accepts CP pairings, so
-this proposed narrowing **cannot land until an explicit supported-profile owner
-decision** after exact-head review and hosted CI. Edge source authority is
-`0d917701b63ef38210c49df830f48cf0457cbc7d` (`v0.9.12`); actual Edge and canonical releases are published and pinned.
-Exact-head consumer and packaged qualification remain root finishing gates. The draft
-GHSA-93rq-89vr-38pc is not declared fixed.
+secure future fleet traffic.
+
+**Topology decision.** Nexus grants the verified public-only guarantee only to
+`enforcement_scope=local-data-plane` with `public_only_guaranteed=true`, and health
+reports it as `edge.public_egress_guaranteed`. A control plane with remote data
+planes reads "not guaranteed" (health `degraded` in the public profile), and its
+backend writes keep requiring the explicit `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`
+opt-out, which never reports it as public-only. This holds until Nexus adopts Edge's
+data-plane egress attestation in a later Edge release. Until then the CP/DP part of
+GHSA-93rq-89vr-38pc Part B stays open: operators running CP/DP must enforce
+public-only egress on every data plane themselves. Edge source authority is
+`0d917701b63ef38210c49df830f48cf0457cbc7d` (`v0.9.12`); the Edge and canonical
+releases are published and pinned.
 
 ### Out of scope
 

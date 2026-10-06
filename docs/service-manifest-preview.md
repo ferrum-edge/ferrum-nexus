@@ -82,4 +82,5 @@ This deployment-adoption candidate integrates that qualified main and selects pu
 Edge v0.9.12 and the published shared canonical contract. Earlier consumer qualification
 does not qualify the changed source, pins or combined head. All fresh hosted gates,
 including `Supported Node minimum`, full root review and fresh independent review remain
-required. The separate CP/public-only deployment-profile decision is still pending.
+required. The CP/public-only topology decision is recorded in the
+[operations guide](operations.md#backend-egress-admission-and-the-public-only-guarantee).

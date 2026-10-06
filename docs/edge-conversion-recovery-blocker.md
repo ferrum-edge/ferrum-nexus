@@ -4,8 +4,8 @@ PR #522 remains draft. The internal owner API dependency is now published in
 [Edge v0.9.12](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.12),
 source `0d917701b63ef38210c49df830f48cf0457cbc7d`, and canonical
 [contracts-edge-0.9.12](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.12),
-commit `31f0a21d707795be293d15837c2f77c3d84219d8`. Consumer qualification,
-public-only support approval and advisory Part B remain pending. See the
+commit `31f0a21d707795be293d15837c2f77c3d84219d8`. Consumer qualification and
+the CP/DP part of advisory Part B remain open. See the
 [artifact identities and remaining gates](edge-0.9.11-adoption.md).
 
 ## Released authority

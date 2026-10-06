@@ -1682,10 +1682,13 @@ export function createFerrumAdminClient(
       try {
         const health = await callRequired<EdgeHealth>('GET', '/health', { signal });
         let backendEgressVerified = false;
+        let publicEgressGuaranteed = false;
         try {
           const policy = await backendEgressPolicy(signal);
-          backendEgressVerified =
-            deps.allowPrivateUpstreams === true || provesLocalPublicEgress(policy);
+          // The guarantee is the gateway's alone: the private opt-in accepts a
+          // weaker policy for writes, but never turns it into public-only egress.
+          publicEgressGuaranteed = provesLocalPublicEgress(policy);
+          backendEgressVerified = deps.allowPrivateUpstreams === true || publicEgressGuaranteed;
         } catch {
           // Observational only. No mutation ever consults this sampled result.
         }
@@ -1718,6 +1721,7 @@ export function createFerrumAdminClient(
           error: null,
           namespace: serving,
           backendEgressVerified,
+          publicEgressGuaranteed,
         };
       } catch (error) {
         return {
@@ -1731,6 +1735,7 @@ export function createFerrumAdminClient(
           error: error instanceof Error ? error.message : 'unknown error',
           namespace: null,
           backendEgressVerified: false,
+          publicEgressGuaranteed: false,
         };
       }
     },

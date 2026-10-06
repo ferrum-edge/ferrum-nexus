@@ -415,12 +415,13 @@ See the [released protocol and remaining qualification](edge-conversion-recovery
 Health caches observations only.
 The public profile requires namespace-matched local serving/public-only metadata and
 operator-established Admin/traffic singleton identity. Process evidence cannot attest
-CPs, remote DPs, load-balanced Admin endpoints or fleets. See the pending
-[supported-profile decision](operations.md#draft-backend-egress-adoption-pending-supported-profile-approval)
-and [unqualified packaged fixture](../e2e/public-only/README.md). Source authority is Edge
-`0d917701b63ef38210c49df830f48cf0457cbc7d`. The candidate now adopts its
-[published image and canonical contracts](edge-0.9.11-adoption.md); hosted
-acceptance and public-only owner approval remain outstanding.
+CPs, remote DPs, load-balanced Admin endpoints or fleets, so Nexus reports those
+pairings as not guaranteed and admits their writes only under the explicit private
+opt-in, until it adopts Edge data-plane attestation. See the
+[topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)
+and [packaged fixture](../e2e/public-only/README.md). Source authority is Edge
+`0d917701b63ef38210c49df830f48cf0457cbc7d`. The candidate adopts its
+[published image and canonical contracts](edge-0.9.11-adoption.md).
 
 **Leases.** One row per key with an owner token and expiry: 60 s TTL renewed at
 half that, a 30 s wait for a contended key, then `409 CONFLICT` asking the user
