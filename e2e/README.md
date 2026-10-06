@@ -124,8 +124,8 @@ is part of what is being tested, and the assertion is worth less than it looks.
 The packaged-image data-plane suite extends the pinned v0.9.10 qualification with
 API-key/basic-account and JWT-application subset list/call cases. Approval cannot
 broaden the request; unapproved tools are hidden and denied while REST remains usable.
-Explicit empty and omitted subsets, rename/re-add, a changed spec (which an explicit
-subset survives), disable/re-enable, revocation and deletion are exercised through
+Explicit empty and omitted subsets, rename/re-add, a spec revision that leaves the
+approved tool's definition alone (which an explicit subset survives), disable/re-enable, revocation and deletion are exercised through
 production portal routes. Actual
 PostgreSQL triggers force grant and policy persistence failures after Edge mutations;
 compensation is asserted through the live listener and full upstream snapshots.

@@ -3,13 +3,23 @@ import { resolveOpenApiPointer } from './openapi.js';
 
 /** A provider explicitly selected this operation; no spec extension grants access. */
 export interface AgentTool {
-  /** Server-owned exposure identity. Changes to bindings invalidate subset grants. */
+  /**
+   * Server-owned exposure identity. It lasts only while the binding (method,
+   * path and name) and {@link AgentTool.definition_hash} stay the same; a new
+   * id leaves every explicit subset grant that held the old one.
+   */
   id?: string;
   path: string;
   method: HttpMethod;
   /** Unqualified tool name. Edge prefixes it with the API slug and a dot. */
   name: string;
   description: string;
+  /**
+   * Server-owned SHA-256 of the tool definition Edge publishes: the
+   * description, the operation's summary, parameters, request body and 2xx
+   * schemas, with references resolved. Accepted on input and never trusted.
+   */
+  definition_hash?: string;
 }
 
 /** null/absent means off. Every entry is an explicit opt-in, including mutations. */

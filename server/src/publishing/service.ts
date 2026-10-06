@@ -287,7 +287,7 @@ import {
   operatorOwnedFields,
   writeBody,
 } from './edge-plugins.js';
-import { identifyAgentTools, validateAgents } from './agents.js';
+import { identifyAgentTools, rotatedAgentTools, validateAgents } from './agents.js';
 import { presentApi, type GatewayUrlSource } from './present.js';
 import {
   assertUpstreamAllowed,
@@ -1575,11 +1575,30 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         api.requestable,
         api.allowed_methods,
       );
-      // Exposure ids follow the selected operation (method, path and tool
-      // name), never the document bytes, so explicit subsets carry across a
-      // revision. validateAgents above refuses a revision that drops a
-      // selected operation; only an agents edit removes a tool.
-      const nextAgents = identifyAgentTools(api.agents ?? null, api.agents ?? null);
+      // A tool keeps its exposure id while its published definition is
+      // unchanged, so explicit subsets carry across a revision that does not
+      // touch the tools they approved. A tool whose definition changed gets a
+      // new id, which the commit below drops from every explicit subset.
+      // validateAgents above refuses a revision that drops a selected
+      // operation, so a revision never removes a tool outright.
+      const nextAgents = identifyAgentTools(
+        api.agents ?? null,
+        parsed.document,
+        api.agents ?? null,
+        previous ? safeSpecDocument(previous.raw_spec) : parsed.document,
+      );
+      // Named in the change summary, so grantees are told which tools left
+      // their explicit approvals, even for a description-only edit the
+      // structural comparison does not report.
+      const changedTools = rotatedAgentTools(api.agents ?? null, nextAgents);
+      const report: SpecChangeReport | null =
+        specChanges && changedTools.length > 0
+          ? {
+              ...specChanges,
+              changed: true,
+              agent_tools_changed: changedTools.map((tool) => tool.name),
+            }
+          : specChanges;
       const writesGateway =
         proxyId !== null && (api.spec_enforcement === 'routes' || backend !== null);
       if (writesGateway) {
@@ -1700,7 +1719,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // describes, and is bounded by its own retention: it outlives the
           // document the prune above may just have dropped.
           let change: ApiSpecChangeRecord | null = null;
-          if (replaced && specChanges) {
+          if (replaced && report) {
             change = await tx.apiSpecChanges.create({
               api_id: api.id,
               revision_id: revision.id,
@@ -1709,7 +1728,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               version: nextVersion,
               previous_version: replaced.version,
               revision_seq: revision.revision_seq,
-              report: specChanges,
+              report,
             });
             await tx.apiSpecChanges.prune(api.id, SPEC_CHANGE_HISTORY_LIMIT);
           }
@@ -1725,6 +1744,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             Object.keys(changes).length === 0
               ? api
               : ((await tx.apis.update(api.id, changes)) ?? api);
+          if (changedTools.length > 0) {
+            await pruneToolSubsets(tx, actor, api.id, api.agents ?? null, nextAgents, ip);
+          }
           // The completion row commits with the revision: a failed insert rolls
           // the revision back, and the catch below compensates the gateway
           // exactly as for any other failed row write.
@@ -1751,6 +1773,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                     complete: specChanges.complete,
                   }
                 : null,
+              ...(changedTools.length > 0
+                ? { changed_tool_ids: changedTools.map((tool) => tool.id) }
+                : {}),
               ...(restoredFrom
                 ? {
                     restored_from_spec_id: restoredFrom.id,
@@ -1925,7 +1950,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // creating a proxy that would then have to be rolled back.
       assertRoutesEnforceable(specEnforcement, parsed.paths);
       assertRoutesSubmittable(specEnforcement, parsed.document);
-      const agents = identifyAgentTools(input.agents ?? null);
+      const agents = identifyAgentTools(input.agents ?? null, parsed.document);
       validateAgents(agents, parsed.document, specEnforcement, input.requestable, methods);
       const agentApi = { id: apiId, slug, agents };
 
@@ -2268,14 +2293,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           details.gateway_untouched = true;
         }
 
+        // Read whenever a selection is or was in force: identities are hashed
+        // against it, and so is the selection being replaced.
+        const currentSpec =
+          (patch.agents ?? api.agents) ? await store.apiSpecs.findCurrentByApi(api.id) : null;
+        const agentDocument = currentSpec ? safeSpecDocument(currentSpec.raw_spec) : {};
         const nextAgents =
           patch.agents === undefined
             ? (api.agents ?? null)
-            : identifyAgentTools(patch.agents, api.agents ?? null);
+            : identifyAgentTools(patch.agents, agentDocument, api.agents ?? null);
         const agentsMoved = !isDeepStrictEqual(nextAgents, api.agents ?? null);
-        const currentSpec =
-          nextAgents || agentsMoved ? await store.apiSpecs.findCurrentByApi(api.id) : null;
-        const agentDocument = currentSpec ? safeSpecDocument(currentSpec.raw_spec) : {};
         validateAgents(
           nextAgents,
           agentDocument,
@@ -3058,29 +3085,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             }
             if (recordOwnership) await tx.apiGatewayPlugins.replace(api.id, nextOwned);
             if (agentsMoved) {
-              // Ids still published carry over unchanged. Only the tools this
-              // edit removed leave an explicit subset; a grant left with `[]`
-              // keeps its REST access and covers no MCP tool.
-              const kept = new Set(nextAgents?.operations.map((tool) => tool.id) ?? []);
-              for (const grant of await tx.grants.listActiveByApi(api.id)) {
-                const removed = grant.approved_tools?.filter((id) => !kept.has(id)) ?? [];
-                if (removed.length === 0) continue;
-                await tx.grants.update(grant.id, {
-                  approved_tools: grant.approved_tools?.filter((id) => kept.has(id)) ?? null,
-                });
-                await audit.forStore(tx).record(
-                  { id: actor.id, role: actor.role },
-                  AuditAction.ACCESS_TOOLS_PRUNE,
-                  { type: 'grant', id: grant.id },
-                  {
-                    api_id: api.id,
-                    user_id: grant.user_id,
-                    application_id: grant.application_id,
-                    removed_tools: removed,
-                  },
-                  ip,
-                );
-              }
+              await pruneToolSubsets(tx, actor, api.id, api.agents ?? null, nextAgents, ip);
             }
             await audit
               .forStore(tx)
@@ -4326,6 +4331,50 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * {@link restoreProxyBackendLocked}.
    */
   /* ── Spec-owned proxies (`routes` mode) ───────────────────────────────── */
+
+  /**
+   * Drop every exposure id that is no longer published from each explicit
+   * subset on the API, in the caller's transaction. Ids still published carry
+   * over; a grant left with `[]` keeps its REST access and covers no MCP tool.
+   * Each grant gets one `access.tools_prune` row per reason: `definition_changed`
+   * for a tool still published under the same binding with a new id,
+   * `tool_removed` for one that was removed, renamed or disabled.
+   */
+  async function pruneToolSubsets(
+    tx: NexusStore,
+    actor: UserRecord,
+    apiId: Uuid,
+    previous: ApiAgents | null,
+    next: ApiAgents | null,
+    ip: string | null,
+  ): Promise<void> {
+    const kept = new Set(next?.operations.map((tool) => tool.id) ?? []);
+    const changed = new Set(rotatedAgentTools(previous, next).map((tool) => tool.id));
+    for (const grant of await tx.grants.listActiveByApi(apiId)) {
+      const removed = grant.approved_tools?.filter((id) => !kept.has(id)) ?? [];
+      if (removed.length === 0) continue;
+      await tx.grants.update(grant.id, {
+        approved_tools: grant.approved_tools?.filter((id) => kept.has(id)) ?? null,
+      });
+      for (const reason of ['definition_changed', 'tool_removed'] as const) {
+        const tools = removed.filter((id) => changed.has(id) === (reason === 'definition_changed'));
+        if (tools.length === 0) continue;
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.ACCESS_TOOLS_PRUNE,
+          { type: 'grant', id: grant.id },
+          {
+            api_id: apiId,
+            user_id: grant.user_id,
+            application_id: grant.application_id,
+            removed_tools: tools,
+            reason,
+          },
+          ip,
+        );
+      }
+    }
+  }
 
   /** Build fixed agent policy from fresh resources under the caller's proxy lease. */
   async function buildSpecDocument(

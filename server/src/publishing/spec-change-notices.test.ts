@@ -153,6 +153,27 @@ describe('spec change notices', () => {
     assert.match(three.summary, /^Only its title, version and description changed\. /);
   });
 
+  it('names agent tools whose definition changed, even with no structural change', () => {
+    const one = summarizeSpecChange('Billing', entry({ agent_tools_changed: ['list_orders'] }));
+    assert.equal(
+      one.summary,
+      'The definition of 1 agent tool changed (list_orders). An explicit tool approval no ' +
+        'longer covers it until the provider approves it again. This compares the structure ' +
+        'of the two documents, so a change it does not list can still affect you.',
+    );
+    const names = Array.from({ length: SPEC_CHANGE_NOTICE_NAMED + 2 }, (_, i) => `tool_${i}`);
+    const many = summarizeSpecChange(
+      'Billing',
+      entry({ info_changes: ['version'], agent_tools_changed: names }),
+    );
+    assert.match(many.summary, /^Its version changed\. /);
+    assert.match(
+      many.summary,
+      new RegExp(`${names.length} agent tools changed \\(.*tool_0.* and 2 more\\)`),
+    );
+    assert.match(many.summary, /covers them until the provider approves them again/);
+  });
+
   it('says when the comparison was incomplete', () => {
     const notice = summarizeSpecChange(
       'Billing',

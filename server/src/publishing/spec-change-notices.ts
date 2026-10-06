@@ -137,18 +137,20 @@ export function summarizeSpecChange(apiName: string, entry: ApiSpecChangeEntry):
   // bounds, and it becomes a title and a subject: one line, cut.
   const headline = `${verb} ${oneLine(entry.version)}`;
   const total = counts.breaking + counts.non_breaking;
+  const tools = report.agent_tools_changed ?? [];
 
   const sentences: string[] = [];
   if (total === 0) {
-    // Nothing structural: `changed` is set by an `info` field alone.
+    // Nothing structural: `changed` is set by an `info` field or an agent
+    // tool's definition alone.
     const fields = report.info_changes;
     const named =
       fields.length > 1 ? `${fields.slice(0, -1).join(', ')} and ${fields.at(-1)}` : fields[0];
-    sentences.push(
-      named === undefined
-        ? 'The comparison found no difference in its operations or schemas.'
-        : `Only its ${named} changed.`,
-    );
+    if (named !== undefined) {
+      sentences.push(tools.length > 0 ? `Its ${named} changed.` : `Only its ${named} changed.`);
+    } else if (tools.length === 0) {
+      sentences.push('The comparison found no difference in its operations or schemas.');
+    }
   } else {
     const operations = [
       [counts.operations_added, 'added'],
@@ -162,6 +164,17 @@ export function summarizeSpecChange(apiName: string, entry: ApiSpecChangeEntry):
     }
     if (parts.length > 0) sentences.push(`${parts.join(', ')}.`);
     sentences.push(`${plural(total, 'change')} in all, ${counts.breaking} breaking.`);
+  }
+  if (tools.length > 0) {
+    // A tool name is provider-written, but limited to `A-Za-z0-9_.-`.
+    const shown = tools.slice(0, SPEC_CHANGE_NOTICE_NAMED).map(oneLine);
+    const rest = tools.length - shown.length;
+    const list = rest > 0 ? `${shown.join(', ')} and ${rest} more` : shown.join(', ');
+    const them = tools.length === 1 ? 'it' : 'them';
+    sentences.push(
+      `The definition of ${plural(tools.length, 'agent tool')} changed (${list}). An explicit ` +
+        `tool approval no longer covers ${them} until the provider approves ${them} again.`,
+    );
   }
   if (!report.complete) {
     sentences.push('The comparison was incomplete, so this may not be everything.');

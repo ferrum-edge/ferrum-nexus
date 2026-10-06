@@ -166,16 +166,28 @@ ones; explicit `[]` means REST access only. Approval defaults to the requested s
 and may narrow it, never broaden it. Only currently published IDs can be requested or
 approved. Request and approval admission share the publishing proxy lease.
 
-IDs follow the selected operation (method, path and tool name), not the spec bytes. They
-survive cosmetic descriptions, republishing and every spec revision or rollback, so
-explicit subsets carry across spec changes. A revision cannot drop a selected operation.
-Rename, method/path changes, removing and re-adding exposure, or disabling and re-enabling
-agents mint new IDs. The agents edit that removes a tool drops its ID from every explicit
-subset in the same transaction and records `access.tools_prune` per grant; those holders
-keep REST access and their remaining tools, and do not regain a tool if its old name
-returns. Null grants retain their all-published-tools meaning. Revocation, deletion and
-bulk teardown remove both REST and MCP groups; re-enable rebuilds only active grants,
-preserving operator groups.
+An ID names one published tool definition. Each tool stores a `definition_hash`, a
+SHA-256 over the canonical, reference-resolved definition Edge publishes for it: name,
+method, path and Nexus description; the operation's `summary` (the tool title) and
+`description`; path and operation parameters; the request body's `required`,
+`description` and JSON schemas; the 2xx JSON response schemas (the output schema); and
+the document's OpenAPI version. A non-local `$ref` folds in the whole document except
+`info`. A spec revision, rollback or agents edit keeps a tool's ID only while its method,
+path, name and hash are unchanged, so explicit subsets carry across whitespace, `info`
+edits and changes to other operations or unreferenced components. Any change to the
+definition mints a new ID, including a description-only edit in the spec or in agent
+settings, because descriptions are prompt text an agent acts on. Rename, method/path
+changes, removing and re-adding exposure, or disabling and re-enabling agents also mint
+new IDs. A revision cannot drop a selected operation.
+
+The write that retires an ID drops it from every explicit subset in the same transaction
+and records `access.tools_prune` per grant, with `reason` `definition_changed` or
+`tool_removed`. Those holders keep REST access and their remaining tools, and do not
+regain a tool if its old name or definition returns. A revision that changes a tool's
+definition names it in the change summary (`agent_tools_changed`) and the grantee notice.
+Null grants retain their all-published-tools meaning, changed tools included. Revocation,
+deletion and bulk teardown remove both REST and MCP groups; re-enable rebuilds only
+active grants, preserving operator groups.
 
 Existing phase-1 APIs require an authenticated provider republish before accepting a
 subset, including empty subsets. See the [draft upgrade tradeoff](mcp-subsets-migration-draft.md).

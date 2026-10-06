@@ -170,6 +170,12 @@ export interface OutboxTickResult {
 /** Whether a claimed row may be handed to SMTP; `lost` means the claim moved on. */
 type Authorization = 'allowed' | 'ineligible' | 'lost';
 
+/** An authorization, and when it was made: the start of the send budget. */
+interface Authorized {
+  at: string;
+  authorized: Authorization;
+}
+
 const EMPTY_TICK: Omit<OutboxTickResult, 'released' | 'sealedLegacy'> = {
   claimed: 0,
   sent: 0,
@@ -271,11 +277,15 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
     transport: MailTransport,
     result: OutboxTickResult,
     entry: EmailOutboxRecord,
-    underAccount: (run: () => Promise<Authorization>) => Promise<Authorization>,
+    underAccount: (run: () => Promise<Authorized>) => Promise<Authorized>,
   ): Promise<void> {
-    const at = new Date().toISOString();
+    // The send budget starts once the account's lifecycle key is held, so a
+    // wait behind a disable or a sign-in never eats into the relay's time.
+    const { at, authorized } = await underAccount(async () => {
+      const started = new Date().toISOString();
+      return { at: started, authorized: await authorize(entry, started) };
+    });
     const deadline = Date.parse(at) + OUTBOX_SEND_BUDGET_MS;
-    const authorized = await underAccount(() => authorize(entry, at));
     if (authorized === 'lost') {
       lostClaim(result, entry, 'markSent');
       return;

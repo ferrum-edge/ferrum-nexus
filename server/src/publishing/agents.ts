@@ -1,9 +1,12 @@
+import { createHash } from 'node:crypto';
+
 import {
   AGENT_TOOL_CALL_LIMIT,
   AGENT_TOOL_CALL_WINDOW_SECONDS,
   AGENT_TOOL_NAME_PATTERN,
   MAX_AGENT_DESCRIPTION_LENGTH,
   MAX_AGENT_TOOLS,
+  MAX_OPENAPI_REF_HOPS,
   OPENAPI_OPERATION_METHODS,
   mcpAllGroupForApi,
   mcpToolGroupForApi,
@@ -12,6 +15,8 @@ import {
   agentPathItems,
   agentToolName,
   isReadOnlyAgentMethod,
+  resolveOpenApiPointer,
+  type AgentTool,
   type ApiAgents,
   type HttpMethod,
   type SpecEnforcementLevel,
@@ -33,24 +38,248 @@ export interface AgentDeployment {
   specId?: string;
 }
 
+/** The selection fields a tool's identity and definition depend on. */
+type AgentToolSelection = Pick<AgentTool, 'method' | 'path' | 'name' | 'description'>;
+
+function sha256(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+function isJsonMediaType(mediaType: string): boolean {
+  const essence = (mediaType.split(';')[0] ?? mediaType).trim().toLowerCase();
+  return essence === 'application/json' || essence.endsWith('+json');
+}
+
+/** The schemas of every JSON media type in a Content map, keyed by media type. */
+function jsonMediaSchemas(content: unknown): Record<string, unknown> | null {
+  if (!record(content)) return null;
+  const schemas: Record<string, unknown> = {};
+  for (const [mediaType, media] of Object.entries(content)) {
+    if (isJsonMediaType(mediaType)) schemas[mediaType] = record(media) ? media.schema : media;
+  }
+  return schemas;
+}
+
 /**
- * Ignore client-supplied IDs. Preserve only a currently published binding: the
- * same operation (method and path) under the same tool name keeps its id, so
- * a spec revision or a description edit never strands an explicit subset.
+ * A Request Body or Response, through its chain of local Reference Objects,
+ * with each reference's sibling fields laid over its target. Anything that
+ * does not resolve is returned as it is, for the canonical form to fold in.
+ */
+function followReference(document: Record<string, unknown>, value: unknown): unknown {
+  let current = value;
+  const overlays: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  while (record(current) && typeof current.$ref === 'string') {
+    const ref = current.$ref;
+    if (!ref.startsWith('#/') || seen.has(ref) || seen.size >= MAX_OPENAPI_REF_HOPS) {
+      return value;
+    }
+    const target = resolveOpenApiPointer(document, ref);
+    if (target === undefined) return value;
+    seen.add(ref);
+    const { $ref: _ref, ...overlay } = current;
+    overlays.push(overlay);
+    current = target;
+  }
+  if (!record(current)) return current;
+  // The outermost reference's siblings win, as in agentPathItems.
+  let resolved = { ...current };
+  for (const overlay of overlays.reverse()) resolved = { ...resolved, ...overlay };
+  return resolved;
+}
+
+/**
+ * What Edge's MCP bridge publishes for one selected operation, before its
+ * schema references are resolved. It mirrors the pinned extractor's
+ * `generate_mcp_bridge_operation`, over-including where that is simpler: an
+ * extra field only costs a re-approval, a missing one would let an explicit
+ * subset follow a changed tool.
+ */
+function toolDefinition(
+  document: Record<string, unknown>,
+  paths: Record<string, unknown>,
+  tool: AgentToolSelection,
+): Record<string, unknown> {
+  const item = paths[tool.path];
+  const operation = record(item) ? item[tool.method.toLowerCase()] : undefined;
+  const definition: Record<string, unknown> = {
+    // Edge normalizes schemas by the document's OpenAPI version.
+    openapi: document.openapi ?? null,
+    method: tool.method,
+    path: tool.path,
+    name: tool.name,
+    description: tool.description,
+  };
+  // validateAgents refuses a selection with no operation; this stays total.
+  if (!record(item) || !record(operation)) return { ...definition, operation: null };
+  const body = followReference(document, operation.requestBody ?? null);
+  const responses = record(operation.responses) ? operation.responses : {};
+  const outputs: Record<string, unknown> = {};
+  for (const [status, value] of Object.entries(responses)) {
+    if (!/^2([0-9]{2}|XX)$/.test(status)) continue;
+    const response = followReference(document, value);
+    outputs[status] = record(response) ? jsonMediaSchemas(response.content) : response;
+  }
+  return {
+    ...definition,
+    // Edge's tool title.
+    summary: operation.summary ?? null,
+    operation_description: operation.description ?? null,
+    // Path Item parameters, then the operation's own, which override them.
+    parameters: [item.parameters ?? null, operation.parameters ?? null],
+    request_body: record(body)
+      ? {
+          required: body.required ?? null,
+          description: body.description ?? null,
+          content: jsonMediaSchemas(body.content),
+        }
+      : body,
+    // Edge publishes the first 2xx JSON object schema as the output schema.
+    responses: outputs,
+  };
+}
+
+/**
+ * JSON Schema keywords that make a reference mean something other than a
+ * pointer from the document root: a resource identifier rebases the
+ * references beneath it, and dynamic references resolve at evaluation time.
+ */
+const REBASING_KEYWORDS = ['$id', '$dynamicRef', '$recursiveRef'];
+
+/**
+ * Canonical JSON with sorted keys, in which every local `$ref` is replaced by
+ * the digest of what it names. Each target is digested once per call, so a
+ * document that references one schema many times costs its size, not the
+ * size of the expansion. A reference back into a target still being digested
+ * stands for itself; its content is already part of that enclosing target.
+ * Anything Nexus cannot resolve from the document root (an external or
+ * anchor reference, a dangling pointer, a rebased or dynamic reference) is
+ * reported through `unresolved`.
+ */
+function canonicalizer(document: Record<string, unknown>): {
+  canonical: (value: unknown) => string;
+  unresolved: () => boolean;
+} {
+  const digests = new Map<string, string>();
+  const active = new Set<string>();
+  let unresolved = false;
+  const target = (ref: string): string => {
+    if (ref !== '#' && !ref.startsWith('#/')) {
+      unresolved = true;
+      return JSON.stringify(ref);
+    }
+    const known = digests.get(ref);
+    if (known !== undefined) return known;
+    if (active.has(ref)) return JSON.stringify(`cycle:${ref}`);
+    const resolved = resolveOpenApiPointer(document, ref);
+    if (resolved === undefined) {
+      unresolved = true;
+      return JSON.stringify(`missing:${ref}`);
+    }
+    active.add(ref);
+    const digest = JSON.stringify(`sha256:${sha256(canonical(resolved))}`);
+    active.delete(ref);
+    digests.set(ref, digest);
+    return digest;
+  };
+  const canonical = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+    if (!record(value)) return JSON.stringify(value ?? null);
+    if (REBASING_KEYWORDS.some((keyword) => Object.hasOwn(value, keyword))) unresolved = true;
+    const members = Object.keys(value)
+      .sort()
+      .map((key) => {
+        const child = value[key];
+        const text = key === '$ref' && typeof child === 'string' ? target(child) : canonical(child);
+        return `${JSON.stringify(key)}:${text}`;
+      });
+    return `{${members.join(',')}}`;
+  };
+  return { canonical, unresolved: () => unresolved };
+}
+
+/**
+ * Hashes the tools of one document. Path Items are resolved once, and the
+ * whole-document digest below at most once, however many tools are hashed.
+ */
+function definitionHasher(document: Record<string, unknown>): (tool: AgentToolSelection) => string {
+  let paths: Record<string, unknown> | null = null;
+  let whole: string | null = null;
+  return (tool) => {
+    try {
+      paths ??= agentPathItems(document);
+      const { canonical, unresolved } = canonicalizer(document);
+      const definition = canonical(toolDefinition(document, paths, tool));
+      if (!unresolved()) return sha256(definition);
+      const { info: _info, ...rest } = document;
+      whole ??= sha256(canonicalizer(document).canonical(rest));
+      return sha256(`${definition}\n${whole}`);
+    } catch {
+      return sha256(`unreadable\n${JSON.stringify({ document, tool })}`);
+    }
+  };
+}
+
+/**
+ * The fingerprint of what Edge publishes for one selected tool, with every
+ * local reference resolved: its name, method, path and description, the
+ * operation's summary and description, its parameters, request body and 2xx
+ * JSON schemas, and the document's OpenAPI version. When a reference cannot
+ * be resolved from the document root, the whole document but `info` is
+ * folded in instead of guessing what it names. A document that cannot be
+ * walked at all yields a hash of all of it.
+ */
+export function agentToolDefinitionHash(
+  document: Record<string, unknown>,
+  tool: AgentToolSelection,
+): string {
+  return definitionHasher(document)(tool);
+}
+
+/**
+ * Ignore client-supplied IDs and hashes. A tool keeps its id only while it is
+ * the same published tool: the same operation (method and path) under the
+ * same name, with an unchanged {@link agentToolDefinitionHash}. Anything else,
+ * a description edit included, is a new tool with a new id, so an explicit
+ * subset never silently covers a changed definition. A stored tool saved
+ * before hashes were recorded is hashed against `previousDocument`, the
+ * revision it was published with.
  */
 export function identifyAgentTools(
   next: ApiAgents | null,
+  document: Record<string, unknown>,
   previous: ApiAgents | null = null,
+  previousDocument: Record<string, unknown> = document,
 ): ApiAgents | null {
   if (!next) return null;
+  const hash = definitionHasher(document);
+  const priorHash = definitionHasher(previousDocument);
   return {
-    operations: next.operations.map(({ id: _id, ...tool }) => {
+    operations: next.operations.map(({ id: _id, definition_hash: _hash, ...tool }) => {
+      const definitionHash = hash(tool);
       const prior = previous?.operations.find(
         (item) => item.method === tool.method && item.path === tool.path && item.name === tool.name,
       );
-      return { ...tool, id: prior?.id ?? newId() };
+      const recorded = prior && (prior.definition_hash ?? priorHash(prior));
+      const id = prior?.id && recorded === definitionHash ? prior.id : newId();
+      return { ...tool, id, definition_hash: definitionHash };
     }),
   };
+}
+
+/**
+ * The tools of `previous` still published under the same binding (method,
+ * path and name) but with a new id in `next`: their definition changed.
+ */
+export function rotatedAgentTools(previous: ApiAgents | null, next: ApiAgents | null): AgentTool[] {
+  return (
+    previous?.operations.filter((tool) => {
+      const current = next?.operations.find(
+        (item) => item.method === tool.method && item.path === tool.path && item.name === tool.name,
+      );
+      return tool.id !== undefined && current !== undefined && current.id !== tool.id;
+    }) ?? []
+  );
 }
 
 /** Literal escaping matches Edge's regex::escape; slash is not a metacharacter. */

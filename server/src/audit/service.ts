@@ -322,8 +322,10 @@ export const AuditAction = {
    */
   ACCESS_MCP_ENROLL: 'access.mcp_enroll',
   /**
-   * An agents edit removed published tools, and their exposure ids were dropped
-   * from this grant's explicit subset. Committed with the edit.
+   * Exposure ids this grant's explicit subset held stopped being published: an
+   * agents edit removed or renamed their tools (`reason: 'tool_removed'`), or a
+   * spec revision or agents edit changed their definition, which mints a new id
+   * (`reason: 'definition_changed'`). Committed with that edit or revision.
    */
   ACCESS_TOOLS_PRUNE: 'access.tools_prune',
 

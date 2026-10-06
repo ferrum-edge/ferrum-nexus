@@ -1109,6 +1109,8 @@ service ──enqueue──> email_outbox(pending) ──claim──> sending �
   lifecycle lease just long enough to commit that same recipient write with a
   refresh of the sending generation. The lifecycle lease is released before
   SMTP, so a disable, sign-in or credential change never waits on a slow relay.
+  The SMTP send budget starts once the lifecycle lease is held, so waiting for
+  it never shortens the relay's time.
   Address release takes the mail-handoff lease before the lifecycle lease and
   writes the account before scanning the outbox, so new inserts and handoffs
   cannot escape cancellation by reading an old committed address. The sender
