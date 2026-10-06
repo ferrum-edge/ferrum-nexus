@@ -345,6 +345,51 @@ export function runMailLifecycleContract(
       }
     });
 
+    it('never makes a disable wait for a stalled SMTP handoff', async () => {
+      const subject = await h.registerUser({ email: `${newId()}@example.test` });
+      await other.tick();
+      const queued = await mail(subject);
+      const handingOff = barrier();
+      const settle = barrier();
+      const worker = createOutboxWorker({
+        store: peer,
+        crypto: h.app.nexus.crypto,
+        batchSize: 1,
+        transportFactory: async () => ({
+          async send(): Promise<void> {
+            handingOff.resolve();
+            await settle.promise;
+          },
+        }),
+      });
+      const tick = worker.tick();
+      try {
+        await Promise.race([
+          handingOff.promise,
+          tick.then(() => {
+            throw new Error('handoff barrier missed');
+          }),
+        ]);
+        // The relay is stalled mid-send. The emergency disable must not queue
+        // behind it on the account's lifecycle lease.
+        const disabled = await h.authed(founder, {
+          method: 'PATCH',
+          url: `/api/users/${subject.user.id}`,
+          payload: { status: 'disabled' },
+        });
+        assert.equal(disabled.statusCode, 200, disabled.body);
+        assert.equal((await peer.users.findById(subject.user.id))?.status, 'disabled');
+        assert.equal((await peer.emailOutbox.findById(queued.entry.id))?.status, 'sending');
+        settle.resolve();
+        assert.equal((await tick).sent, 1);
+        assert.equal((await peer.emailOutbox.findById(queued.entry.id))?.status, 'sent');
+      } finally {
+        settle.resolve();
+        await tick;
+        await worker.stop();
+      }
+    });
+
     if (label !== 'sqlite') {
       it('fences an enqueue whose transaction snapshot predates release', async () => {
         const subject = await disabledAccount();

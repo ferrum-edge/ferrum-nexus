@@ -198,10 +198,11 @@ selection in Settings before uploading a spec that deletes it.
 Consumers can request all published tools or select individual tools. In the review
 dialog you can narrow their selection or approve REST-only access with no tools.
 All-tools grants intentionally include future published tools; explicit subsets do not.
-Renaming/removing a tool, disabling agents, or changing an uploaded spec invalidates
-old exposure IDs, so affected subset holders keep REST access but need a new grant for
-new tool exposure. Revoke the old grant before accepting that identity's new request.
-Unchanged bindings and cosmetic descriptions retain IDs. Historical request/grant
+Renaming/removing a tool or disabling agents invalidates old exposure IDs: the edit
+removes them from every subset, so affected holders keep REST access and their other
+tools but need a new grant for the new exposure. Revoke the old grant before accepting
+that identity's new request. Spec revisions, unchanged bindings and cosmetic
+descriptions retain IDs, so subsets carry across a spec update. Historical request/grant
 coverage marks expired IDs explicitly.
 
 Existing phase-1 APIs must be republished once before accepting subsets. Review the

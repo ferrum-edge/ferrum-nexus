@@ -33,22 +33,22 @@ export interface AgentDeployment {
   specId?: string;
 }
 
-/** Ignore client-supplied IDs. Preserve only a currently published binding. */
+/**
+ * Ignore client-supplied IDs. Preserve only a currently published binding: the
+ * same operation (method and path) under the same tool name keeps its id, so
+ * a spec revision or a description edit never strands an explicit subset.
+ */
 export function identifyAgentTools(
   next: ApiAgents | null,
   previous: ApiAgents | null = null,
-  rotate = false,
 ): ApiAgents | null {
   if (!next) return null;
   return {
     operations: next.operations.map(({ id: _id, ...tool }) => {
-      const prior =
-        !rotate &&
-        previous?.operations.find(
-          (item) =>
-            item.method === tool.method && item.path === tool.path && item.name === tool.name,
-        );
-      return { ...tool, id: prior ? (prior.id ?? newId()) : newId() };
+      const prior = previous?.operations.find(
+        (item) => item.method === tool.method && item.path === tool.path && item.name === tool.name,
+      );
+      return { ...tool, id: prior?.id ?? newId() };
     }),
   };
 }

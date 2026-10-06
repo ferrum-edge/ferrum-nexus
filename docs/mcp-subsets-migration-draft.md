@@ -44,18 +44,17 @@ first; no history rewrite or manual gateway group copy is an approved migration 
 
 ## Exposure changes
 
-Exposure IDs persist only for a continuously published method/path/name binding.
-Disabling, removing and re-adding, or renaming rotates IDs. Any changed spec bytes
-conservatively rotate all IDs because indirect schema/reference changes can alter tool
-semantics. Explicit subset holders then have REST access and no matching MCP tools;
-providers must revoke and approve a new request to authorize changed exposure. Null
-all-tools holders intentionally continue to receive published tools. Cosmetic tool
-description edits in provider agent settings and byte-identical spec republish retain
-IDs; changing uploaded spec bytes still rotates IDs even for a description-only edit.
+Exposure IDs persist for a continuously published method/path/name binding, across
+spec revisions and rollbacks: they never depend on the document bytes. Disabling,
+removing and re-adding, or renaming rotates IDs. The agents edit that removes or renames
+a tool drops its old ID from every explicit subset in the same transaction, recording
+`access.tools_prune` per grant; holders keep REST access and their other tools, and
+need a new approval for the replacement. Null all-tools holders intentionally continue
+to receive published tools. Cosmetic description edits retain IDs.
 
-This accepted fail-closed behavior can interrupt explicit-subset integrations after
-spec changes. Providers must plan reapproval for changed exposure; an old explicit
-approval never silently covers a replacement tool.
+A spec revision may change a retained operation's schema under an existing approval.
+Providers who need consumers to re-approve changed semantics rename the tool, which
+mints a new ID; an old explicit approval never silently covers a replacement tool.
 
 ## Consumer repair and revocation recovery
 

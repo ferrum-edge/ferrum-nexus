@@ -1575,13 +1575,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         api.requestable,
         api.allowed_methods,
       );
-      // A changed document may alter referenced schemas or operation semantics.
-      // Conservatively invalidate every explicit subset; null grants remain all.
-      const nextAgents = identifyAgentTools(
-        api.agents ?? null,
-        api.agents ?? null,
-        previous?.raw_spec !== parsed.raw,
-      );
+      // Exposure ids follow the selected operation (method, path and tool
+      // name), never the document bytes, so explicit subsets carry across a
+      // revision. validateAgents above refuses a revision that drops a
+      // selected operation; only an agents edit removes a tool.
+      const nextAgents = identifyAgentTools(api.agents ?? null, api.agents ?? null);
       const writesGateway =
         proxyId !== null && (api.spec_enforcement === 'routes' || backend !== null);
       if (writesGateway) {
@@ -1621,7 +1619,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             const build = (
               document: Record<string, unknown>,
               proxyBody: Record<string, unknown>,
-            ): Promise<Record<string, unknown>> => buildSpecDocument(document, proxyBody, api);
+            ): Promise<Record<string, unknown>> =>
+              buildSpecDocument(document, proxyBody, api, actor.id);
 
             const specId = await specIdForProxy(proxyId);
             // Captured before the write: the compensation has to put back the
@@ -1659,6 +1658,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   ...(backend ? backendFields(backend) : {}),
                 },
                 { ...api, agents: nextAgents },
+                actor.id,
               ),
               actor.id,
             );
@@ -2950,6 +2950,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               agentDocument,
               submittableProxyBody(live),
               api,
+              actor.id,
             );
             if (!api.agents) {
               const validators = plugins.filter(
@@ -2998,10 +2999,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             });
             await edge.apiSpecs.replace(
               specId,
-              await buildSpecDocument(agentDocument, submittableProxyBody(live), {
-                ...api,
-                agents: nextAgents,
-              }),
+              await buildSpecDocument(
+                agentDocument,
+                submittableProxyBody(live),
+                { ...api, agents: nextAgents },
+                actor.id,
+              ),
               actor.id,
             );
             gatewayMutated = true;
@@ -3054,6 +3057,31 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               row = persisted;
             }
             if (recordOwnership) await tx.apiGatewayPlugins.replace(api.id, nextOwned);
+            if (agentsMoved) {
+              // Ids still published carry over unchanged. Only the tools this
+              // edit removed leave an explicit subset; a grant left with `[]`
+              // keeps its REST access and covers no MCP tool.
+              const kept = new Set(nextAgents?.operations.map((tool) => tool.id) ?? []);
+              for (const grant of await tx.grants.listActiveByApi(api.id)) {
+                const removed = grant.approved_tools?.filter((id) => !kept.has(id)) ?? [];
+                if (removed.length === 0) continue;
+                await tx.grants.update(grant.id, {
+                  approved_tools: grant.approved_tools?.filter((id) => kept.has(id)) ?? null,
+                });
+                await audit.forStore(tx).record(
+                  { id: actor.id, role: actor.role },
+                  AuditAction.ACCESS_TOOLS_PRUNE,
+                  { type: 'grant', id: grant.id },
+                  {
+                    api_id: api.id,
+                    user_id: grant.user_id,
+                    application_id: grant.application_id,
+                    removed_tools: removed,
+                  },
+                  ip,
+                );
+              }
+            }
             await audit
               .forStore(tx)
               .record(
@@ -4303,32 +4331,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   async function buildSpecDocument(
     document: Record<string, unknown>,
     proxy: Record<string, unknown>,
-    api?: Pick<ApiRecord, 'id' | 'slug' | 'agents'>,
+    api: Pick<ApiRecord, 'id' | 'slug' | 'agents'> | undefined,
+    subject: string,
   ): Promise<Record<string, unknown>> {
     if (!api?.agents) return routesSpecDocument(document, { proxy });
-    // Called under the proxy lease, including compensation. Retained phase-1
-    // approvals keep their all-tools meaning when this API first adopts subsets.
-    for (const grant of await store.grants.listActiveByApi(api.id)) {
-      if (grant.approved_tools != null) continue;
-      const consumer = await store.consumers.findByUserAndNamespace(
-        grant.user_id,
-        namespace,
-        grant.application_id,
-      );
-      if (!consumer) continue;
-      await credentials.provisioner.mutateAclGroups(
-        consumer.ferrum_consumer_id,
-        (groups) => {
-          // The REST group proves membership; the active-user guard orders
-          // this enrollment against disable/teardown.
-          return groups.includes(grant.acl_group)
-            ? [...new Set([...groups, mcpAllGroupForApi(api.id)])]
-            : groups;
-        },
-        undefined,
-        { requireActiveUser: grant.user_id },
-      );
-    }
+    await enrollAllToolGrantees(api.id, subject);
     const proxyId = String(proxy.id);
     const live = await edge.pluginConfigs.listByProxy(proxyId);
     const spec = await edge.apiSpecs.findByProxy(proxyId);
@@ -4346,6 +4353,62 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   /**
+   * Put the MCP-all group on each active all-tools grantee whose REST group
+   * proves membership but which lacks it: a grant approved before this API
+   * exposed tools, or one retained from phase 1. Called under the proxy lease,
+   * including compensation.
+   *
+   * Never the provider's failure. A disabled grantee keeps its grant row for
+   * audit and is not enrolled; re-enabling it rebuilds its groups, MCP
+   * included, from that row. A grantee with no consumer, on the gateway or in
+   * the portal, is skipped for consumer repair. A consumer that already
+   * carries the group is not written at all, and every enrollment commits an
+   * `access.mcp_enroll` intent row before its write.
+   */
+  async function enrollAllToolGrantees(apiId: Uuid, subject: string): Promise<void> {
+    const group = mcpAllGroupForApi(apiId);
+    for (const grant of await store.grants.listActiveByApi(apiId)) {
+      if (grant.approved_tools != null) continue;
+      if ((await store.users.findById(grant.user_id))?.status !== 'active') continue;
+      const consumer = await store.consumers.findByUserAndNamespace(
+        grant.user_id,
+        namespace,
+        grant.application_id,
+      );
+      if (!consumer) continue;
+      const consumerId = consumer.ferrum_consumer_id;
+      const groups = (await edge.consumers.get(consumerId))?.acl_groups ?? [];
+      if (!groups.includes(grant.acl_group) || groups.includes(group)) continue;
+      const actor = await store.users.findById(subject);
+      await store.transaction(async (tx) => {
+        await audit.forStore(tx).record(
+          { id: subject, role: actor?.role ?? null },
+          AuditAction.ACCESS_MCP_ENROLL,
+          { type: 'grant', id: grant.id },
+          {
+            api_id: apiId,
+            user_id: grant.user_id,
+            application_id: grant.application_id,
+            consumer_id: consumerId,
+            acl_group: group,
+          },
+        );
+      });
+      await credentials.provisioner.mutateAclGroups(
+        consumerId,
+        (current) => {
+          // Re-checked under the consumer key: the REST group still proves
+          // membership, and the grantee is still active, so this cannot hand
+          // a group back to an account a disable has just stripped.
+          return current.includes(grant.acl_group) ? [...new Set([...current, group])] : current;
+        },
+        subject,
+        { requireActiveUser: grant.user_id, skipInactiveUser: true, absentIsDone: true },
+      );
+    }
+  }
+
+  /**
    * Create through the spec importer so the proxy carries its owning api_spec.
    * The pre-minted proxy id is the response fallback; the spec id is retained
    * for cutover without a lookup. Rebuild compensation may carry validated
@@ -4358,7 +4421,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     api?: Pick<ApiRecord, 'id' | 'slug' | 'agents'>,
     preserved?: EdgePluginConfig[],
   ): Promise<{ id: string; specId: string }> {
-    const submitted = await buildSpecDocument(document, proxyBody, api);
+    const submitted = await buildSpecDocument(document, proxyBody, api, subject);
     if (preserved && Array.isArray(submitted['x-ferrum-plugins'])) {
       submitted['x-ferrum-plugins'] = submitted['x-ferrum-plugins'].map((entry) => {
         const plugin = entry as EdgePluginConfigWrite;
@@ -4437,6 +4500,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         document,
         { ...submittableProxyBody(proxy), listen_path: listenPath },
         api,
+        subject,
       ),
       subject,
     );
@@ -4518,7 +4582,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     const listenPath = listenPathFor(api.namespace, api.slug);
     // Validate the recorded role ids while their owning spec still exists.
     // A failed conversion must retain operator resource fields on recreation.
-    if (api.agents) await buildSpecDocument(document, body, api);
+    if (api.agents) await buildSpecDocument(document, body, api, subject);
     const preservedAgentPlugins = beforePlugins.filter(
       (plugin) => plugin.api_spec_id === before.api_spec_id,
     );

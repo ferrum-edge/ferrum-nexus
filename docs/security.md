@@ -884,9 +884,14 @@ identities are refused by `access_control` even for initialize and `tools/list`;
 account and application approvals remain separate. Revocation removes both group families,
 so the next call with the same credential/session fails. MCP sessions do not cache Nexus
 approval. Explicit subsets cannot be broadened by approval or tool lifecycle changes.
-Omitted/null grants intentionally cover future published tools; `[]` grants none. Changed
-specs rotate exposure IDs conservatively, leaving explicit subsets with REST access only
-until a new approval. Providers must still explicitly select mutations.
+Omitted/null grants intentionally cover future published tools; `[]` grants none. Exposure
+IDs follow the selected method/path/name, not the spec bytes, so explicit subsets carry
+across spec revisions; removing or renaming a tool drops its ID from every subset in the
+edit's transaction (`access.tools_prune`). Providers must still explicitly select mutations.
+A spec build enrolls all-tools grantees that hold the REST group but not the MCP-all
+group, committing an `access.mcp_enroll` intent row before each consumer write. It skips
+disabled grantees (their grant rows remain, and re-enable rebuilds their groups) and
+consumers missing from the gateway, so no grantee's state can fail a provider's build.
 
 Provider `x-ferrum-*` extensions cannot override endpoint, selection, grants or
 governance. Endpoint paths are derived from the namespace/slug and reserve a
@@ -1872,6 +1877,8 @@ Raw proxy and plugin configurations are never recorded.
 | `access.deny`             | `access_request` | Declined; nothing changed on the gateway. `details`: api id/slug, user id, `has_note`.                                                                                                                                                                                                                                  |
 | `access.revoke`           | `grant`          | A grant was withdrawn. Committed with the claim, before the gateway call. `details`: api id/slug, user id, `acl_group`, `reason`, `bulk: true` for the god-mode sweep. Exactly one row per grant.                                                                                                                       |
 | `access.revoke_rollback`  | `grant`          | A targeted revocation's ACL removal failed. `details`: api id, user id, `acl_group`, `cause`, `grant_restored`, optional `restore_skipped_reason` (`grantee_disabled`, `grantee_missing`, `application_missing`, `group_absent`). **Investigate `grant_restored: false` without a skip reason**: the group may be live. |
+| `access.mcp_enroll`       | `grant`          | Intent row before a spec build adds the MCP-all group to an active all-tools grantee whose consumer holds the REST group. `details`: api id, user id, application id, `consumer_id`, `acl_group`. Disabled grantees are skipped, never enrolled.                                                                        |
+| `access.tools_prune`      | `grant`          | An agents edit removed published tools; their exposure IDs left this explicit subset. Committed with the edit. `details`: api id, user id, application id, `removed_tools`. The grant keeps REST access and its remaining tools.                                                                                        |
 
 ### Credentials
 

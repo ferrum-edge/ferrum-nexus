@@ -118,6 +118,29 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **A disabled grantee no longer blocks a provider's agent-enabled API** (Refs #519).
+  Every spec build enrolled each all-tools grantee in the MCP-all group and refused
+  with `USER_DISABLED` when any grantee was disabled, so spec revisions, agent edits,
+  enforcement changes and restores all failed with an error that read as the
+  provider's own account. Builds now skip disabled grantees and consumers missing from
+  the gateway; grant rows stay for audit, and re-enable rebuilds the grantee's groups.
+  Consumers that already carry the group are not rewritten, and each enrollment commits
+  a new `access.mcp_enroll` intent audit row before its gateway write.
+
+- **Explicit MCP subsets survive spec revisions** (Refs #519). Any spec change, even
+  whitespace or a rollback, rotated every exposure id and silently emptied each explicit
+  subset. Ids now follow the selected method, path and tool name instead of the document
+  bytes. An agents edit that removes or renames a tool drops its id from every subset in
+  the edit's transaction and records `access.tools_prune` per grant.
+
+- **Disabling an account never waits for SMTP** (Refs #508). The outbox worker held the
+  recipient's lifecycle lease for the whole send (up to 60 s) while lease waiters give
+  up at 30 s, so an emergency disable during a slow relay could fail with `409`. The
+  lifecycle lease now covers only the transaction that authorizes the handoff; a new
+  per-account mail-handoff lease, taken only by the worker and by address release,
+  keeps release ordered behind an in-flight delivery. Claim fencing, at-most-once
+  parking and the security-mail priority lane are unchanged.
+
 - **Verification and password-recovery mail take priority over queued campaigns**
   (#500, GHSA-rqrj-7g3f-c6ww phase 2). Every store claims due security mail at
   high priority, routine notifications at normal priority and new campaigns at

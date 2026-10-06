@@ -166,13 +166,16 @@ ones; explicit `[]` means REST access only. Approval defaults to the requested s
 and may narrow it, never broaden it. Only currently published IDs can be requested or
 approved. Request and approval admission share the publishing proxy lease.
 
-IDs survive cosmetic descriptions and unchanged republishing. Rename, method/path changes,
-removing and re-adding exposure, or disabling and re-enabling agents mint new IDs. Any
-changed uploaded spec conservatively rotates all IDs, including a spec rollback, because
-references or schemas can change callable semantics. Existing explicit subsets then fail
-closed and do not regain tools if old names return. REST access remains. Null grants
-retain their all-published-tools meaning. Revocation, deletion and bulk teardown remove
-both REST and MCP groups; re-enable rebuilds only active grants, preserving operator groups.
+IDs follow the selected operation (method, path and tool name), not the spec bytes. They
+survive cosmetic descriptions, republishing and every spec revision or rollback, so
+explicit subsets carry across spec changes. A revision cannot drop a selected operation.
+Rename, method/path changes, removing and re-adding exposure, or disabling and re-enabling
+agents mint new IDs. The agents edit that removes a tool drops its ID from every explicit
+subset in the same transaction and records `access.tools_prune` per grant; those holders
+keep REST access and their remaining tools, and do not regain a tool if its old name
+returns. Null grants retain their all-published-tools meaning. Revocation, deletion and
+bulk teardown remove both REST and MCP groups; re-enable rebuilds only active grants,
+preserving operator groups.
 
 Existing phase-1 APIs require an authenticated provider republish before accepting a
 subset, including empty subsets. See the [draft upgrade tradeoff](mcp-subsets-migration-draft.md).

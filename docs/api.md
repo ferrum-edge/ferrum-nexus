@@ -3018,11 +3018,12 @@ request; an explicit approval must be contained in the request. Ordinary REST ac
 is granted in every case. Request rows return both subset fields; grants return
 `approved_tools`. Historical IDs remain visible as expired coverage, never new tools.
 
-Tool IDs persist for an unchanged published binding. Rename, path/method changes,
-removing/re-adding exposure and disable/re-enable mint new IDs. A changed uploaded
-spec (including rollback) rotates every ID conservatively; explicit subsets then
-cover no matching tools until a new approval. Omitted/null grants continue to cover
-all published tools. See [draft migration notes](mcp-subsets-migration-draft.md).
+Tool IDs persist for a published method/path/name binding, across spec revisions
+and rollbacks. Rename, path/method changes, removing/re-adding exposure and
+disable/re-enable mint new IDs; the agents edit that does so removes the old IDs from
+every explicit subset (`access.tools_prune`), which keeps REST access and its other
+tools. Omitted/null grants continue to cover all published tools. See
+[draft migration notes](mcp-subsets-migration-draft.md).
 
 ## Proposed service-manifest preview
 

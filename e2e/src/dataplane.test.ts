@@ -889,6 +889,25 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       assert.deepEqual(await upstreamSnapshot(), beforeStale);
     }
     const currentId = api.agents?.operations[0]?.id;
+    assert.ok(currentId);
+    // Exposure ids follow the operation, not the document bytes, so a subset
+    // approved on the current exposure carries across a spec revision.
+    const carried = await newClient();
+    const carriedRequest = await portal<{ access_request: { id: string } }>(
+      'POST',
+      '/api/access-requests',
+      {
+        session: carried,
+        body: { api_id: api.id, justification: 'Carried subset', requested_tools: [currentId] },
+      },
+    );
+    await portal('POST', `/api/access-requests/${carriedRequest.access_request.id}/approve`, {
+      session: provider,
+      body: {},
+      expect: 200,
+    });
+    const carriedHeaders = authHeadersFor(await issueCredential(carried, 'keyauth'), 'keyauth');
+    assert.deepEqual(await names(carriedHeaders), [`${api.slug}.list_invoices`]);
     const spec = await portal<{ raw_spec: string }>('GET', `/api/apis/${api.id}/spec`, {
       session: provider,
     });
@@ -901,7 +920,9 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     const updated = await portal<{ api: PublishedApi }>('GET', `/api/apis/${api.id}`, {
       session: provider,
     });
-    assert.notEqual(updated.api.agents?.operations[0]?.id, currentId);
+    assert.equal(updated.api.agents?.operations[0]?.id, currentId);
+    assert.deepEqual(await names(carriedHeaders), [`${api.slug}.list_invoices`]);
+    // The rename above already pruned the old id from this subset.
     assert.deepEqual(await names(selectedSession), []);
     assert.deepEqual(
       (await names(allSession)).sort(),

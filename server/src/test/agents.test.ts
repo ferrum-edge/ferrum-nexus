@@ -41,6 +41,7 @@ const DOCUMENT = {
 
 describe('agent publishing and Nexus authorization', () => {
   let harness: TestApp;
+  let admin: TestSession;
   let provider: TestSession;
   let other: TestSession;
   let client: TestSession;
@@ -48,7 +49,7 @@ describe('agent publishing and Nexus authorization', () => {
 
   before(async () => {
     harness = await buildTestApp();
-    await harness.registerUser();
+    admin = await harness.registerUser();
     provider = await harness.registerUser({ role: 'provider' });
     other = await harness.registerUser({ role: 'provider' });
     client = await harness.registerUser({ role: 'client' });
@@ -599,5 +600,175 @@ describe('agent publishing and Nexus authorization', () => {
     });
     assert.equal(enabled.statusCode, 200, enabled.body);
     assert.notEqual(enabled.json<PublishApiResponse>().api.agents?.operations[0]?.id, id);
+  });
+
+  async function approveFor(
+    grantee: TestSession,
+    apiId: string,
+    requestedTools?: string[],
+  ): Promise<ApproveAccessRequestResponse['grant']> {
+    const request = await harness.authed(grantee, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: {
+        api_id: apiId,
+        justification: 'Use agent tools',
+        ...(requestedTools ? { requested_tools: requestedTools } : {}),
+      },
+    });
+    assert.equal(request.statusCode, 201, request.body);
+    const requestId = request.json<CreateAccessRequestResponse>().access_request.id;
+    const approved = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/approve`,
+      payload: {},
+    });
+    assert.equal(approved.statusCode, 200, approved.body);
+    return approved.json<ApproveAccessRequestResponse>().grant;
+  }
+
+  function revise(apiId: string, version: string) {
+    return harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${apiId}/spec`,
+      payload: { spec: JSON.stringify({ ...DOCUMENT, info: { ...DOCUMENT.info, version } }) },
+    });
+  }
+
+  async function setStatus(subject: TestSession, status: 'active' | 'disabled'): Promise<void> {
+    const response = await harness.authed(admin, {
+      method: 'PATCH',
+      url: `/api/users/${subject.user.id}`,
+      payload: { status },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+  }
+
+  function countAudit(action: string, targetId: string): Promise<number> {
+    return harness.store.auditLogs.count({ action, target_id: targetId });
+  }
+
+  function groupsOf(subject: TestSession): string[] {
+    return (
+      harness.edge.consumerByUsername(consumerUsernameForUser(subject.user.id))?.acl_groups ?? []
+    );
+  }
+
+  it('builds specs past a disabled grantee without enrolling it, and re-enable restores it', async () => {
+    const { api } = await publish();
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id);
+    assert.ok(groupsOf(grantee).includes(mcpAllGroupForApi(api.id)));
+    await setStatus(grantee, 'disabled');
+    // The disable strips the gateway groups and keeps the grant row.
+    assert.equal((await harness.store.grants.findById(grant.id))?.status, 'active');
+
+    const revised = await revise(api.id, '2');
+    assert.equal(revised.statusCode, 200, revised.body);
+    const agentsOff = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: null },
+    });
+    assert.equal(agentsOff.statusCode, 200, agentsOff.body);
+    const agentsOn = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: AGENTS },
+    });
+    assert.equal(agentsOn.statusCode, 200, agentsOn.body);
+    assert.equal(
+      groupsOf(grantee).some((group) => group.startsWith(`nexus:api:${api.id}:`)),
+      false,
+    );
+    assert.equal(await countAudit('access.mcp_enroll', grant.id), 0);
+
+    await setStatus(grantee, 'active');
+    const rebuilt = await revise(api.id, '3');
+    assert.equal(rebuilt.statusCode, 200, rebuilt.body);
+    assert.ok(groupsOf(grantee).includes(aclGroupForApi(api.id)));
+    assert.ok(groupsOf(grantee).includes(mcpAllGroupForApi(api.id)));
+  });
+
+  it('audits enrolling existing grantees when agents are enabled, and never rewrites them', async () => {
+    const { api } = await publish({ agents: null });
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id);
+    assert.deepEqual(groupsOf(grantee), [aclGroupForApi(api.id)]);
+    const enabled = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: AGENTS },
+    });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    assert.ok(groupsOf(grantee).includes(mcpAllGroupForApi(api.id)));
+    const enrolled = (await harness.auditRows('access.mcp_enroll')).filter(
+      (row) => row.target_id === grant.id,
+    );
+    assert.equal(enrolled.length, 1);
+    assert.equal(enrolled[0]?.actor_user_id, provider.user.id);
+    assert.equal(enrolled[0]?.details.acl_group, mcpAllGroupForApi(api.id));
+
+    const before = harness.edge.requests.length;
+    const revised = await revise(api.id, '2');
+    assert.equal(revised.statusCode, 200, revised.body);
+    assert.equal(
+      harness.edge.requests
+        .slice(before)
+        .some((request) => request.method === 'PUT' && request.path.startsWith('/consumers/')),
+      false,
+    );
+    assert.equal(await countAudit('access.mcp_enroll', grant.id), 1);
+  });
+
+  it('carries explicit subsets across spec revisions and prunes only removed tools', async () => {
+    const remove = {
+      path: '/items/{id}',
+      method: 'DELETE' as const,
+      name: 'remove',
+      description: 'Delete one item',
+    };
+    const { api } = await publish({ agents: { operations: [...AGENTS.operations, remove] } });
+    const [listId, removeId] = api.agents?.operations.map((tool) => tool.id) ?? [];
+    assert.ok(listId && removeId);
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id, [listId, removeId]);
+    assert.deepEqual(grant.approved_tools, [listId, removeId]);
+
+    const revised = await revise(api.id, '2');
+    assert.equal(revised.statusCode, 200, revised.body);
+    const current = await harness.store.apis.findById(api.id);
+    assert.deepEqual(
+      current?.agents?.operations.map((tool) => tool.id),
+      [listId, removeId],
+    );
+    assert.deepEqual((await harness.store.grants.findById(grant.id))?.approved_tools, [
+      listId,
+      removeId,
+    ]);
+    const gateway = harness.edge
+      .effectivePluginsForProxy(api.ferrum_proxy_id ?? '')
+      .find((item) => item.plugin_name === 'mcp_gateway');
+    const policy = (gateway?.config as { policy: { tools: Record<string, unknown> } }).policy;
+    assert.deepEqual(policy.tools[`${api.slug}.list_items`], {
+      action: 'allow',
+      allowed_groups: [mcpAllGroupForApi(api.id), mcpToolGroupForApi(api.id, listId)],
+    });
+    assert.ok(groupsOf(grantee).includes(mcpToolGroupForApi(api.id, listId)));
+    assert.equal(await countAudit('access.tools_prune', grant.id), 0);
+
+    const narrowed = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: AGENTS },
+    });
+    assert.equal(narrowed.statusCode, 200, narrowed.body);
+    assert.equal(narrowed.json<PublishApiResponse>().api.agents?.operations[0]?.id, listId);
+    assert.deepEqual((await harness.store.grants.findById(grant.id))?.approved_tools, [listId]);
+    const pruned = (await harness.auditRows('access.tools_prune')).filter(
+      (row) => row.target_id === grant.id,
+    );
+    assert.equal(pruned.length, 1);
+    assert.deepEqual(pruned[0]?.details.removed_tools, [removeId]);
   });
 });
