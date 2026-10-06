@@ -1,4 +1,4 @@
-# Approved jsdom 30 / Undici 8 migration (unreleased)
+# jsdom 30 / Undici 8 migration (released in v0.4.0)
 
 References [issue #449](https://github.com/ferrum-edge/ferrum-nexus/issues/449).
 Prepared from main `48ea760098d1aa858dc7cee06bf7f8fb7536cdaf` (PR #520).
@@ -11,21 +11,17 @@ at `74bc56cc2265e65fed6b4422cae27d2f7e097339`.
 **Owner approval is complete for the reviewed issue #449 upgrade.** The owner explicitly said,
 “I approve the nexus issue upgrade too for framework/dependency bumps onto newer version.”
 Root received and recorded that decision. It covers jsdom 30.1.2 / Undici 8.11.2 and the
-current unreleased supported Node range `^22.22.2 || ^24.15.0 || >=26.0.0`, including the
-exclusion of older Node 22/24 patches and Node 23/25. It does not approve arbitrary dependency
-versions or other pending product decisions. Published releases and their Node 22.14+ profile
-remain immutable historical facts until a new release ships. The historical filename is retained
-for existing links.
+supported Node range `^22.22.2 || ^24.15.0 || >=26.0.0`, including the exclusion of older
+Node 22/24 patches and Node 23/25. Nexus `v0.4.0` released that profile; releases before it
+keep their Node 22.14+ profile. The historical filename is retained for existing links.
 
 Prior head `059b4284bf0aeb003f61a57c11ca9be70140c167` completed root and fresh independent
-review and all hosted gates, as recorded below. This documentation adoption head requires
-fresh hosted qualification, full root review and fresh independent review. Earlier pending
-approval and qualification statements in the historical records describe their preparation
-stage; they are superseded by the approval above and the exact-head qualification below.
+review and all hosted gates, as recorded below. The pending approval and qualification
+statements in the historical records below describe their preparation stage.
 
 ## Approved compatibility profile and primary evidence
 
-The current unreleased supported range is `^22.22.2 || ^24.15.0 || >=26.0.0`, declared
+The supported range since `v0.4.0` is `^22.22.2 || ^24.15.0 || >=26.0.0`, declared
 identically in the root, shared, server, web and e2e manifests. `.nvmrc` selects exactly
 22.22.2. This retains the Node 22 major, but excludes 22.14–22.22.1, Node 23/25, and Node 24
 below 24.15.0.

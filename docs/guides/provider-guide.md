@@ -210,9 +210,9 @@ tool. Grantees are told which tools changed, after a spec update or an edit in S
 Historical request/grant coverage marks expired IDs explicitly.
 
 Existing phase-1 APIs must be republished once before accepting subsets. Review the
-[draft upgrade tradeoff](../mcp-subsets-migration-draft.md) before rollout.
+[upgrade tradeoff](../mcp-subsets-migration-draft.md) before rollout.
 
-See the [published contract and qualification gates](../agent-marketplace.md).
+See the [published contract and test coverage](../agent-marketplace.md).
 
 ### Require an approved access request
 

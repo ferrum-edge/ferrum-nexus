@@ -46,9 +46,9 @@ dependencies (minimatch 10.2.6, minipass 7.1.3, path-scurry 2.0.2) satisfy glob 
 Hosted checks include `npm ci`, typecheck, tests, formatting and build.
 
 These are historical remediation facts, including the SQLite minimum in the companion JSON.
-The current unreleased jsdom 30 / Undici 8 candidate proposes higher per-major minima, without
-approval to change the released profile; see the
-[draft notes](dependency-majors-449-higher-floor-draft.md).
+Nexus `v0.4.0` raised the minima with the jsdom 30 / Undici 8 migration to
+`^22.22.2 || ^24.15.0 || >=26.0.0`; see the
+[migration notes](dependency-majors-449-higher-floor-draft.md).
 
 ## SQLite native compatibility discovered by Node 24 CI
 

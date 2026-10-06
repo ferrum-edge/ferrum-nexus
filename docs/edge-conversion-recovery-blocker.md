@@ -1,13 +1,12 @@
-# Draft conversion recovery: released dependency and pending qualification
+# Conversion recovery: released protocol and replay limits
 
-The internal owner API dependency was first published in Edge v0.9.12. The
-candidate now pairs with
+The internal owner API dependency was first published in Edge v0.9.12. Nexus
+`v0.4.0` pairs with
 [Edge v0.9.13](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.13),
 source `9b83115de7ec23ab51ec4feae6bed65e596db425`, and canonical
 [contracts-edge-0.9.13](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.13),
-commit `9626821eb089c71f5d4d71268c7b8276a8a5ab50`. Consumer qualification
-remains pending. See the
-[artifact identities and remaining gates](edge-0.9.11-adoption.md). To resolve an
+commit `9626821eb089c71f5d4d71268c7b8276a8a5ab50`. See the
+[artifact identities](edge-0.9.11-adoption.md). To resolve an
 unconfirmed mutation, follow the
 [operator runbook](operations.md#resolving-an-unconfirmed-gateway-deployment-mutation).
 
@@ -96,17 +95,15 @@ authority. A present partial with no
 acknowledged staging authority, including a lost create response, cannot acquire
 cleanup permission from a fresh snapshot.
 
-An unconfirmed mutation requires separate operator/root resolution and, where
-applicable, downstream application qualification. Read-only investigation is safe;
+An unconfirmed mutation requires separate operator resolution and, where
+applicable, downstream application checks. Read-only investigation is safe;
 automatic fresh-token replay or destructive cleanup is not. Namespace backup
 restore remains an operator recovery contract and is never a conversion fallback.
 
-## Qualification
+## Test coverage
 
 The four Nexus adapter contracts exercise production service paths with the
 released HTTP mock; it does not reproduce owner raw SQL/BSON internals. Packaged
 acceptance tests real v0.9.13 conversion traffic, preservation of complete consumer/
 trust/upstream evidence, stale original-token refusal and invalid conditional modes.
-Exact-head hosted checks, native owner store coverage and actual packaged execution are
-required before landing. Existing strict fault witnesses are retained; no future
-capability mock, skip or advisory completion replaces those gates.
+Owner-side store behaviour is covered by Edge's own native store tests, not by Nexus.

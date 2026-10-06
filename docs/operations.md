@@ -1,6 +1,6 @@
 # Operations
 
-Deployment reference for Ferrum Nexus (current release: `v0.3.0`; first
+Deployment reference for Ferrum Nexus (current release: `v0.4.0`; first
 supported release: `v0.1.0`): configuration, databases and upgrades, containers,
 TLS, backup and restore, key rotation, the email outbox, scaling limits, health
 checks, metrics and gateway recovery.
@@ -370,15 +370,15 @@ under the protocol reason `unsupported_egress_policy_schema` rather than reinter
 it, health reads `degraded`, and an admin's `edge.error` names the unsupported schema.
 Every backend write is then refused in every profile. The same holds for any newer
 schema. Nexus also requires the v0.9.13 deployment snapshot (`api_spec_contents`), so
-this candidate pairs with Edge `v0.9.13` only: upgrade Edge and Nexus together, as
+Nexus `v0.4.0` pairs with Edge `v0.9.13` only: upgrade Edge and Nexus together, as
 described in [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913). The guarantee
 still requires `enforcement_scope=local-data-plane` explicitly, not schema 2's
 narrowed `public_only_guaranteed` alone.
 
-The candidate pins the published Edge `v0.9.13` default image and canonical
-`contracts-edge-0.9.13` at `9626821eb089c71f5d4d71268c7b8276a8a5ab50`.
-See [the adoption facts](edge-0.9.11-adoption.md) and the separate
-[packaged public-only fixture](../e2e/public-only/README.md).
+[`release/compatibility.env`](../release/compatibility.env) pins the published Edge
+`v0.9.13` default image, and Nexus vendors `contracts-edge-0.9.13` at
+`9626821eb089c71f5d4d71268c7b8276a8a5ab50`. See [the adoption facts](edge-0.9.11-adoption.md)
+and the separate [packaged public-only fixture](../e2e/public-only/README.md).
 
 **Fixing a mismatch.** Set the portal's `FERRUM_NAMESPACE` to the gateway's
 `active` value, or restart the gateway with the portal's value, then restart
@@ -460,7 +460,7 @@ remove individual chunk rows of a journal that is kept.
 
 ### Upgrading to Edge v0.9.13
 
-This candidate pairs with Edge v0.9.13 only, and Edge v0.9.13 refuses every
+Nexus `v0.4.0` pairs with Edge v0.9.13 only, and Edge v0.9.13 refuses every
 deployment token an earlier Edge issued (see the
 [Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.13/docs/upgrade_guide.md#upgrading-to-0913)).
 A conversion or restore that is still in flight across the upgrade cannot finish on
@@ -844,9 +844,11 @@ development-only reset that destroys data.
 `server/src/db/released-migrations.ts` records it with per-backend SHA-256
 checksums and `release: 'v0.1.0'`, the forward migrations
 `002_api_gateway_plugins` and `003_messages_thread_latest` with
-`release: 'v0.2.0'`, and `004_api_spec_changes`,
+`release: 'v0.2.0'`, `004_api_spec_changes`,
 `005_notification_preferences` and `006_user_identities` with
-`release: 'v0.3.0'`.
+`release: 'v0.3.0'`, and `007_outbox_recipient`, `008_email_lifecycle_fence`,
+`009_outbox_priority`, `010_api_agents` and `011_mcp_tool_subsets` with
+`release: 'v0.4.0'`.
 
 **A released migration never changes.** A database only applies migrations its
 ledger lacks, so editing an applied one would make fresh and upgraded installs
@@ -908,7 +910,7 @@ upgraded account has no linked identity, no recorded address proof and no
 password lock. See [§14](#14-single-sign-on-openid-connect) for what a missing
 proof means for linking.
 
-`007_outbox_recipient` (pending release) adds a nullable `recipient_user_id`
+`007_outbox_recipient` (shipped in `v0.4.0`) adds a nullable `recipient_user_id`
 column to the outbox on SQL backends and backfills that field to `null` on
 retained MongoDB documents. Existing messages and delivery state are kept.
 New account mail names its original recipient; the sender refuses delivery
@@ -916,7 +918,7 @@ when that account no longer holds the address. Address recovery cancels all
 pending messages to the old address, including unbound legacy rows, and refuses
 while any is sending. Upgrade every mail-producing instance before using it.
 
-`008_email_lifecycle_fence` (pending release) adds an internal string fence to
+`008_email_lifecycle_fence` (shipped in `v0.4.0`) adds an internal string fence to
 each account, initialized to the empty string on SQL and retained MongoDB
 documents. It preserves account IDs, addresses, history and delivery state.
 Every account-bound enqueue, claim and SMTP authorization writes a fresh fence
@@ -928,7 +930,7 @@ deliverable to a replacement account. The field is internal and absent from user
 responses. Upgrade all producers and senders before enabling address recovery;
 an older instance does not participate in this fence or SMTP cancellation.
 
-`009_outbox_priority` (pending release) adds an integer priority on all four
+`009_outbox_priority` (shipped in `v0.4.0`) adds an integer priority on all four
 backends: low `0`, normal `1`, high `2`. Retained rows default to normal,
 including campaigns. The migration promotes only exact, case-sensitive
 `verify:` and `reset:` idempotency-key prefixes to high: these durable
@@ -945,6 +947,21 @@ upgrade. Upgrade all producers and workers to get priority ordering throughout
 the deployment: older SQL writers use the normal default, older MongoDB writers
 omit the field, and older workers still claim by due time. The address recovery
 rollout and atomic-transaction requirements from 007/008 still apply.
+
+`010_api_agents` (shipped in `v0.4.0`) adds a nullable `agents_json` column to
+`apis` on SQL backends and backfills `agents: null` on retained MongoDB documents.
+`null` means agent exposure is off, so every retained API stays unexposed to agents
+until its provider turns exposure on. It changes no other API data.
+
+`011_mcp_tool_subsets` (shipped in `v0.4.0`) adds nullable `requested_tools_json`
+and `approved_tools_json` columns to `access_requests` and `approved_tools_json` to
+`grants` on SQL backends, and backfills the same fields to `null` on retained MongoDB
+documents. `null` keeps the meaning every retained request and grant had: all
+published tools. Before deploying it, stop and drain every older Nexus request
+handler and background writer: an older publisher can overwrite tool policy, and an
+older consumer-group rebuild does not understand subset membership. Do not roll back
+while explicit subset grants exist. See the
+[MCP subset rollout](mcp-subsets-migration-draft.md).
 
 `003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
 `ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,
@@ -964,8 +981,8 @@ before a released one, when backends disagree on ids, or when a released MongoDB
 step's indexes drift. Never update a released checksum to make it pass.
 
 **Upgrade coverage.** `server/src/test/baseline-upgrade.test.ts` builds a
-database as each release in the manifest left it (`v0.1.0`, `v0.2.0`, then
-`v0.3.0`; every release is a supported upgrade source), seeds it with
+database as each release in the manifest left it (`v0.1.0`, `v0.2.0`, `v0.3.0`,
+then `v0.4.0`; every release is a supported upgrade source), seeds it with
 baseline-shaped rows, migrates with the current code, reads every value back,
 and migrates again to prove the re-run is a no-op. SQLite runs in every CI job;
 PostgreSQL, MySQL and MongoDB run in the `store-contracts` job. Per backend:
@@ -1214,13 +1231,11 @@ docker run --rm -p 127.0.0.1:8787:8787 \
 the generated token from `docker logs` ([First run](#first-run-and-the-bootstrap-token)).
 
 The image ([`docker/Dockerfile`](../docker/Dockerfile)) is a two-stage build on
-a digest-pinned `node:22-bookworm-slim`. Published releases retain their historical
-Node 22.14+ profile until a new release ships. The owner-approved current unreleased
-supported range is `^22.22.2 || ^24.15.0 || >=26.0.0`. The existing digest contains
-Node 22.23.3 on amd64 and arm64; the
+a digest-pinned `node:22-bookworm-slim`. The supported Node range since `v0.4.0` is
+`^22.22.2 || ^24.15.0 || >=26.0.0`; releases before it supported Node 22.14 or later.
+The pinned digest contains Node 22.23.3 on amd64 and arm64; the
 [migration notes](dependency-majors-449-higher-floor-draft.md) record the published OCI
-evidence, qualified prior head `059b428`, pending hosted qualification and review for the
-documentation adoption head, and rollback boundary. The image sets:
+evidence and the rollback boundary. The image sets:
 
 - `NODE_ENV=production`, and runs as the unprivileged `node` user.
 - `NEXUS_HOST=0.0.0.0`, `NEXUS_PORT=8787`.
@@ -1251,10 +1266,9 @@ docker compose up -d
 
 The four secrets and `FERRUM_EDGE_IMAGE` are required (`${VAR:?…}`); keep the
 secrets stable across restarts. [`release/compatibility.env`](../release/compatibility.env)
-pins the Edge image by digest. The current acceptance suite
-([`e2e/`](../e2e/README.md)) selects published Ferrum Edge `v0.9.13` for candidate qualification; the released Nexus
-`v0.3.0` pairing with Edge `v0.9.9` is recorded in the
-[`v0.3.0` release notes](release-notes.md#supported-combination).
+pins the Edge image by digest: Ferrum Edge `v0.9.13` for Nexus `v0.4.0`. That is
+the release the acceptance suite ([`e2e/`](../e2e/README.md)) tests against;
+other Edge versions are unverified.
 
 The quickstart pins its PostgreSQL and Alpine images by multi-architecture
 digest and sets `FERRUM_BACKEND_ALLOW_IPS=public` on Edge, so the gateway
@@ -1262,9 +1276,9 @@ rechecks public-address policy when it opens each upstream connection. A
 deployment that sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` must configure
 `FERRUM_BACKEND_ALLOW_CIDRS=<intended private ranges>` while keeping
 `FERRUM_BACKEND_ALLOW_IPS=public`. Public mode also screens plugin endpoints,
-including private Redis URLs. Under the draft public profile, any allow-CIDR override
-prevents certification and refuses mutations. See the pending supported-profile
-proposal above; its source contract does not qualify the current pinned image.
+including private Redis URLs. Under the public profile, any allow-CIDR override
+removes the public-only guarantee and refuses backend writes (see
+[backend egress admission](#backend-egress-admission-and-the-public-only-guarantee)).
 
 Dependabot proposes digest updates for Compose and Dockerfile images, which are
 reviewed with the source change. GitHub Actions workflow service images and
@@ -1395,7 +1409,7 @@ nothing about accounts, approvals or audit history.
    credentials and ACL groups, plugin configs, upstreams and API specs. Back up
    Edge's database with its own tooling, or use Edge's Admin API `GET /backup`
    (restore with `POST /restore?confirm=true`; see Edge's
-   [backup and restore reference](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.9/docs/admin_backup_restore.md)).
+   [backup and restore reference](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.13/docs/admin_backup_restore.md)).
 4. **Edge secrets**, especially `FERRUM_BASIC_AUTH_HMAC_SECRET`. Basic-auth
    credentials are stored as HMACs under it, so a different value rejects every
    basic-auth client.
@@ -1439,10 +1453,8 @@ never accepted by verification; an invalid hidden Basic shape reports
 Nexus has no namespace Admin restore caller. Its API gateway restore rebuilds
 individual resources and repeats egress admission. Conditional Edge backup does not
 make Nexus and Edge backups jointly atomic; keep the writer-drain and paired-backup
-procedure below. The current unreleased candidate selects published Edge `v0.9.13`
-and `contracts-edge-0.9.13` pins; its exact-head recovery and packaged-image
-qualification remains pending. Historical Nexus `v0.3.0` remains paired with Edge
-`v0.9.9`. See [the adoption facts and remaining gates](edge-0.9.11-adoption.md).
+procedure below. Nexus `v0.4.0` pairs with Edge `v0.9.13` and vendors
+`contracts-edge-0.9.13`. See [the adoption facts](edge-0.9.11-adoption.md).
 
 ### Ordering and consistency
 

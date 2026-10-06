@@ -69,8 +69,7 @@ jobs:
           fi
       - run: npm run build
 
-  # Draft stage 2 of #449: qualify every proposed minimum and current major.
-  # This candidate does not approve a released support-profile change.
+  # #449: qualify every supported minimum and current major (released in v0.4.0).
   supported-node-minimum:
     name: Supported Node minimum
     needs: checks
@@ -114,7 +113,7 @@ jobs:
           for manifest in shared/package.json server/package.json web/package.json e2e/package.json; do
             workspace_range=$(jq -er '.engines.node | select(type == "string")' "$manifest")
             if [ "$workspace_range" != "$declared_range" ]; then
-              echo "::error::$manifest must declare the same candidate Node range."
+              echo "::error::$manifest must declare the same supported Node range."
               exit 1
             fi
           done
@@ -124,7 +123,7 @@ jobs:
             echo '::error::The complete checks matrix must succeed to qualify the Node minimum.'
             exit 1
           fi
-          echo 'Candidate minima qualified by the successful checks matrix (22.22.2, 22, 24.15.0, 24, 26.0.0, 26).' \
+          echo 'Supported minima qualified by the successful checks matrix (22.22.2, 22, 24.15.0, 24, 26.0.0, 26).' \
             >> "$GITHUB_STEP_SUMMARY"
 
   # Non-blocking: coverage is reported for visibility, not enforced as a gate.

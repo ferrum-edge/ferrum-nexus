@@ -243,7 +243,7 @@ Example for an admin session:
 ```json
 {
   "status": "ok",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "uptime_seconds": 1284,
   "checked_at": "2026-08-31T09:12:44.117Z",
   "database": { "status": "ok", "latency_ms": 1, "error": null, "driver": "postgres" },
@@ -2528,7 +2528,6 @@ without exceeding a setting's physical storage limit. Failed reads or writes ret
 the previous committed generation; incomplete custody cannot authorize completion.
 An uploaded corrected agent specification changes only the authorized catalog
 comparison shape; the original replay resources and tool ids remain intact.
-Exact-head hosted qualification remains pending.
 
 Read-only recovery records `api.gateway_conversion_rollback` alongside
 `api.gateway_restore` only when the original revision id, original catalog
@@ -3125,9 +3124,9 @@ old IDs from every explicit subset (`access.tools_prune`, `reason` `definition_c
 or `tool_removed`), which keeps REST access and its other tools. A revision's change
 report lists redefined tools by name in `agent_tools_changed`. `id` and
 `definition_hash` are accepted on input and ignored. Omitted/null grants continue to
-cover all published tools. See [draft migration notes](mcp-subsets-migration-draft.md).
+cover all published tools. See the [migration notes](mcp-subsets-migration-draft.md).
 
-## Proposed service-manifest preview
+## Service-manifest preview
 
 `POST /api/service-manifests/preview` accepts JSON:
 

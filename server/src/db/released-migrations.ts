@@ -123,7 +123,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
   },
   {
     id: '007_outbox_recipient',
-    release: null,
+    // Frozen: shipped in v0.4.0. Never edit these checksums; a schema change
+    // is a new forward migration.
+    release: 'v0.4.0',
     sha256: {
       sqlite: '3542a52ac9d4899998982c35cebf711874171dc2e64e6cce93c511320e2d1c9f',
       pg: '3542a52ac9d4899998982c35cebf711874171dc2e64e6cce93c511320e2d1c9f',
@@ -133,7 +135,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
   },
   {
     id: '008_email_lifecycle_fence',
-    release: null,
+    // Frozen: shipped in v0.4.0. Never edit these checksums; a schema change
+    // is a new forward migration.
+    release: 'v0.4.0',
     sha256: {
       sqlite: 'e045e7cd6c1fe5185b48407fba1a184f013a144f0e814795bc57dcce367fb228',
       pg: 'e045e7cd6c1fe5185b48407fba1a184f013a144f0e814795bc57dcce367fb228',
@@ -143,7 +147,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
   },
   {
     id: '009_outbox_priority',
-    release: null,
+    // Frozen: shipped in v0.4.0. Never edit these checksums; a schema change
+    // is a new forward migration.
+    release: 'v0.4.0',
     sha256: {
       sqlite: '0ffa16cce8d5a154877a1dadffc52b8ac3ad4cc8346d637b008ded2ec5fde31e',
       pg: '6bd48d66f70cd8b949dc168991e822db31ae49d3734b3cbcee81115b0d6c8b35',
@@ -153,7 +159,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
   },
   {
     id: '010_api_agents',
-    release: null,
+    // Frozen: shipped in v0.4.0. Never edit these checksums; a schema change
+    // is a new forward migration.
+    release: 'v0.4.0',
     sha256: {
       sqlite: '6c443c5d865775a981fe81c31ba8b5b014db89a9327e3bfcdf5ba54368a04cdb',
       pg: '6c443c5d865775a981fe81c31ba8b5b014db89a9327e3bfcdf5ba54368a04cdb',
@@ -163,7 +171,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
   },
   {
     id: '011_mcp_tool_subsets',
-    release: null,
+    // Frozen: shipped in v0.4.0. Never edit these checksums; a schema change
+    // is a new forward migration.
+    release: 'v0.4.0',
     sha256: {
       sqlite: 'e8e6d9bc74832ae7340568100c6ab5726bdd4e6baf0d88ffb8a36cc72b3ec22f',
       pg: 'e8e6d9bc74832ae7340568100c6ab5726bdd4e6baf0d88ffb8a36cc72b3ec22f',

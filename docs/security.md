@@ -90,8 +90,8 @@ mode; it does not name allowed destinations. Public mode also screens plugin
 endpoints, so a private plugin dependency such as Redis must be included in the
 CIDR allowlist.
 
-**Gateway egress admission (draft; not a release claim).** The
-public-upstream profile now requires a fresh authenticated, namespace-matched
+**Gateway egress admission.** Since `v0.4.0` the
+public-upstream profile requires a fresh authenticated, namespace-matched
 `GET /backend-egress-policy` before each proxy/spec create or replacement,
 including staging, rebuilds, plugin association writes and compensation. Service
 preflight runs before destructive conversion and spec ACL enrollment. Schema 2
@@ -1970,8 +1970,7 @@ custody, and a missing or substituted chunk blocks replay and completion. No raw
 owner evidence or credential is trimmed to fit a database row. Existing single-row
 journals remain readable, and every chunk participates in encrypted-setting key
 rotation. See the [released protocol and replay limits](edge-conversion-recovery-blocker.md).
-Exact-head hosted/native-store/packaged qualification remains pending. To resolve
-an unconfirmed mutation, follow the
+To resolve an unconfirmed mutation, follow the
 [operator runbook](operations.md#resolving-an-unconfirmed-gateway-deployment-mutation).
 
 `api.gateway_repair_required` phases (`details.phase`):
@@ -2182,11 +2181,11 @@ Before going live:
       gateway-mutating work until promoted
       ([`operations.md`](operations.md#8-scaling)). SQLite is single-instance.
 
-### Proposed service-manifest preview boundary
+### Service-manifest preview boundary
 
 `POST /api/service-manifests/preview` requires a provider-or-higher session, CSRF,
 and the configured namespace in both the request and manifest (the contract's default
-namespace is `ferrum`). The immutable EXISTING shared v1 schema and complete shared fixture
+namespace is `ferrum`). The immutable published shared v1 schema and complete shared fixture
 set are pinned separately in `contracts/ferrum-contracts/SERVICE-MANIFEST-PIN`.
 Strict validation rejects nulls where types prohibit them, unknown keys, unsupported
 schema versions/protocols, noncanonical paths and invalid references. Intake is bounded

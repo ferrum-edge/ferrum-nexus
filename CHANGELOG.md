@@ -6,9 +6,28 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-06
+
+Paired with Ferrum Edge `v0.9.13`. Adds optional MCP tool subsets, whose
+approvals never carry over to a changed tool definition; verified public-only
+egress admission before every backend write, with conditional recovery of
+gateway conversions on Edge's deployment-snapshot API; and adopts Edge
+`v0.9.13` and `contracts-edge-0.9.13`. Fixes twelve published security
+advisories: GHSA-99p3-8fmh-3pfc, GHSA-hf6x-q9cp-9g6f, GHSA-p9qg-f2w6-c4qj,
+GHSA-cq2h-g4g3-rw3p, GHSA-gwhq-6vwf-9mmq, GHSA-whpj-2fr3-jjrw,
+GHSA-xx68-cpwv-x264, GHSA-qc7r-4j9m-pm44, GHSA-8w4q-fv8h-jv73,
+GHSA-mr69-2744-f78w, GHSA-fgq6-8q7j-qmww and GHSA-rqrj-7g3f-c6ww. Upgrades a
+`v0.3.0` database in place with the forward migrations `007_outbox_recipient`
+to `011_mcp_tool_subsets`; the gateway database carries over unchanged. Node
+`^22.22.2 || ^24.15.0 || >=26.0.0` is now required. Stop and drain every older
+Nexus writer, settle recovery journals before moving Edge to `v0.9.13`, and
+upgrade both sides in one window. See [`docs/release-notes.md`](docs/release-notes.md)
+for the supported combination and the upgrade steps.
+
 ### Added
 
-- **Draft Edge security adoption proposal**: fresh,
+- **Backend writes require verified gateway egress, and consumer writes keep
+  hidden state** (PR #522): fresh,
   closed namespace-matched egress admission on all proxy/spec write boundaries,
   preflight before destructive/staging/ACL effects, fail-closed compensation with
   truthful `repair_required` state with encrypted owned-resource recovery records,
@@ -21,9 +40,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   are refused. The mock hashes Basic through normal write lifecycles and enforces
   closed credential fields; the delayed issue/disable regression keeps its `ok`
   teardown requirement. Four-store service/protocol regressions and a separate
-  controlled packaged DNS-rebinding fixture are included. The candidate pins
-  published Edge v0.9.13 and contracts-edge-0.9.13; Nexus version markers remain
-  unchanged. See [limitations](docs/security.md#1-threat-model).
+  controlled packaged DNS-rebinding fixture are included. See
+  [limitations](docs/security.md#1-threat-model).
 
 - **Public-only egress topology decision**: Nexus grants the verified public-only
   guarantee only when Edge reports `public_only_guaranteed=true` with
@@ -41,7 +59,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `unsupported_egress_policy_schema` reason. See the
   [topology decision](docs/operations.md#backend-egress-admission-and-the-public-only-guarantee).
 
-- **Draft conversion recovery hardening** (PR #522): encrypted baseline, repair
+- **Conversion recovery hardening** (PR #522): encrypted baseline, repair
   state and intent audit commit before teardown; catalog mode, ownership,
   completion audit and journal removal commit together. Combined PATCHes capture
   the baseline before gateway writes. Corrected agent uploads preserve original
@@ -52,7 +70,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   writes retain journals and block replay without refreshing tokens. Credential teardown
   removes Nexus-supported keyauth/Basic/JWT state and retains custom/mTLS state.
   Native concurrent Admin, uncertain-acknowledgement, original replay and transactional
-  fault controls remain strict and require exact-head hosted qualification. An
+  fault controls remain strict. An
   enforcement conversion takes the API restore lease before the proxy lease, and every
   restore commit re-checks for a retained conversion journal, so a concurrent restore
   cannot build around one. Pre-send refusals are checked before a pending operation is
@@ -61,17 +79,46 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   covers unconfirmed mutations. See the
   [released protocol and replay limits](docs/edge-conversion-recovery-blocker.md).
 
-- **Published Edge v0.9.13 candidate adoption**: pin source
+- **Optional MCP tool subsets** (Refs #446). Consumers request published exposure IDs;
+  providers can narrow approval. Separate MCP-all/per-tool groups preserve REST access
+  and prevent its approval group bypassing subsets. Null retains all published tools;
+  empty means REST-only. Migration 011 covers all four stores. Exposure changes fail
+  closed. Existing phase-1 APIs require provider opt-in before explicit subsets;
+  deployment must stop and drain older writers and cannot roll back while subset
+  grants exist. Read the [rollout notes](docs/mcp-subsets-migration-draft.md)
+  and spec-change tradeoff before deployment.
+- **Redacted service-manifest preview** (Refs ferrum-edge/ferrum-alloy#27, Nexus portion).
+  Authenticated namespace-authorized bounded intake validates the exact immutable
+  shared v1 schema and fixtures, published in `contracts-edge-0.9.13`. Preview has
+  no apply/publish, URL/file/TLS access or diagnostic import. See
+  [the preview](docs/service-manifest-preview.md).
+
+- **Agent-ready API listings** (#446, phase 1). Providers can explicitly expose
+  selected OpenAPI operations as MCP tools, off by default, on requestable
+  `routes` APIs. Existing account/application approvals gate every tool; normal
+  credentials authenticate discovery and calls, and revocation removes access.
+  The catalog includes tool descriptions, grant coverage and connection recipes.
+  Fixed API-scoped governance denies unselected tools, shields MCP arguments and
+  budgets 60 tool calls per consumer per minute. Forward migration `010` retains
+  existing APIs with agents disabled on all four stores. Packaged acceptance covers
+  the digest-pinned Edge release; the optional tool subsets above build on this phase.
+
+### Changed
+
+- **Ferrum Edge `v0.9.13` is the supported gateway** (PR #529).
+  `release/compatibility.env` pins source
   `9b83115de7ec23ab51ec4feae6bed65e596db425`, default image index
   `sha256:6caa0987adb4c0a3a368fcd800bb0459cff3d3e219522e2e9c56280205862e50`, and
   published `contracts-edge-0.9.13` at `9626821eb089c71f5d4d71268c7b8276a8a5ab50`
   (vocabularies, both majors of the egress and deployment schemas with their
   per-major fixtures, the two new `507` acknowledgement fixtures, byte for byte; the
-  service-manifest pin moves to the same tag with unchanged manifest bytes). This
-  candidate pairs with Edge v0.9.13 only. Read
-  [Upgrading to Edge v0.9.13](docs/operations.md#upgrading-to-edge-v0913) first:
-  settle every conversion and restore journal before upgrading Edge, and upgrade both
-  sides in one window. See [adoption facts](docs/edge-0.9.11-adoption.md).
+  service-manifest pin moves to the same tag with unchanged manifest bytes), and
+  names `NEXUS_RELEASE_TAG=v0.4.0`. PR #522 first adopted Edge `v0.9.12` and
+  `contracts-edge-0.9.12` (the deployment snapshot and acknowledgement schemas);
+  PR #529 advanced both to `v0.9.13`. Nexus `v0.4.0` pairs with Edge `v0.9.13`
+  only. Read [Upgrading to Edge v0.9.13](docs/operations.md#upgrading-to-edge-v0913)
+  first: settle every conversion and restore journal before upgrading Edge, and
+  upgrade both sides in one window. See [adoption facts](docs/edge-0.9.11-adoption.md).
   - **Egress policy schema 2.** Nexus reads `schema_version: 2`, whose
     `public_only_guaranteed` is true only for `local-data-plane`; schema 1 (Edge
     v0.9.12 and earlier) is refused as `unsupported_egress_policy_schema`. The
@@ -95,48 +142,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     Journals written before stay readable; Edge v0.9.12 authority in them is refused
     before any request (`kind: "legacy_deployment_authority"`), and an unknown marker
     is refused.
-
-- **Published Edge v0.9.12 candidate adoption** (PR #522): pin immutable source
-  `0d917701b63ef38210c49df830f48cf0457cbc7d`, default image index
-  `sha256:80526b59cbbdc2bfcc8bae9241da4e5395414cf07bf0be4effd4c73c51684ee4`,
-  and published `contracts-edge-0.9.12` at
-  `31f0a21d707795be293d15837c2f77c3d84219d8`. Adopt exact-byte deployment
-  snapshot/acknowledgement schemas and meaningful valid/invalid fixtures alongside
-  refreshed vocabularies and egress assets. The separate manifest pin and unreleased
-  Alloy flags are preserved. The owner API release dependency is complete.
-  No Nexus release or migration release marker is changed.
-  See [actual publication facts](docs/edge-0.9.11-adoption.md).
-
-- **Optional MCP tool subsets** (Refs #446). Consumers request published exposure IDs;
-  providers can narrow approval. Separate MCP-all/per-tool groups preserve REST access
-  and prevent its approval group bypassing subsets. Null retains all published tools;
-  empty means REST-only. Migration 011 covers all four stores. Exposure changes fail
-  closed. Existing phase-1 APIs require provider opt-in before explicit subsets;
-  deployment must stop and drain older writers and cannot roll back while subset
-  grants exist. See the accepted [unreleased rollout](docs/mcp-subsets-migration-draft.md)
-  and spec-change tradeoff before deployment.
-- **Redacted service-manifest preview** (Refs ferrum-edge/ferrum-alloy#27, Nexus portion).
-  Authenticated namespace-authorized bounded intake validates the exact immutable
-  shared v1 schema and fixtures. Preview has no apply/publish, URL/file/TLS
-  access or diagnostic import. Anvil's separate diagnostic consumer is merged, while
-  the shared v1 contract is EXISTING/implemented in published contracts-edge-0.9.12.
-  Alloy remains unreleased; Nexus final qualification is still required. See
-  [preview status](docs/service-manifest-preview.md).
-
-- **Agent-ready API listings** (#446, phase 1). Providers can explicitly expose
-  selected OpenAPI operations as MCP tools, off by default, on requestable
-  `routes` APIs. Existing account/application approvals gate every tool; normal
-  credentials authenticate discovery and calls, and revocation removes access.
-  The catalog includes tool descriptions, grant coverage and connection recipes.
-  Fixed API-scoped governance denies unselected tools, shields MCP arguments and
-  budgets 60 tool calls per consumer per minute. Forward migration `010` retains
-  existing APIs with agents disabled on all four stores. Hosted acceptance covers
-  the actual digest-pinned Edge release; subset grants are extended by the unreleased phase 2 change above.
-
-### Changed
-
+- **`007_outbox_recipient`, `008_email_lifecycle_fence`, `009_outbox_priority`,
+  `010_api_agents` and `011_mcp_tool_subsets` are frozen.** The released-migration
+  manifest records them with `release: 'v0.4.0'`, so CI now rejects any edit to them
+  on every backend, and the released-baseline upgrade test also starts from a
+  `v0.4.0` database. The workspace packages and the `version` fallback of
+  `GET /api/health` are `0.4.0`.
 - **jsdom 30.1.2 / Undici 8.11.2 use the approved Node profile** (Refs #449).
-  The current unreleased supported range is `^22.22.2 || ^24.15.0 || >=26.0.0`,
+  **Behaviour change:** the supported range is now `^22.22.2 || ^24.15.0 || >=26.0.0`,
   with exact minima and aligned workspace declarations. Owned Admin, OIDC and
   CAPTCHA agents explicitly retain HTTP/1.1. New real-network regressions cover
   TLS negotiation/reset recovery, no mutation replay, JWT/namespace delivery,
@@ -144,8 +157,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   controls name their visible title and action and describe their body/time,
   retaining accessible-role assertions under jsdom 30. The existing Node image
   digest already contains 22.23.3. Node 22 remains supported; older Node 22/24
-  patches and Node 23/25 are excluded. Published releases retain their historical
-  Node 22.14+ profile until a new release ships.
+  patches and Node 23/25 are excluded. `v0.3.0` and earlier supported Node 22.14+.
 
 - **Node 22.14-compatible dependency majors are migrated** (Refs #449).
   All four TypeScript manifests use 7.0.2; the transactional audit scan uses
@@ -173,9 +185,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   upstream base image, retain readable version tags with immutable multi-arch
   digests. Dependabot covers Compose and Dockerfile pins; workflow service and
   command images are refreshed manually. A required CI check rejects unpinned
-  container references. The Edge egress-policy visibility needed to detect
-  unsafe existing deployments (Part B of GHSA-93rq-89vr-38pc) is tracked in
-  ferrum-edge#5994.
+  container references.
 
 - **Credential-write errors no longer return Edge response text** (GHSA-qc7r-4j9m-pm44).
   Non-GET `/consumers` failures omit `details.gateway_message` and use fixed
@@ -186,7 +196,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   multi-architecture image digest. This release adds fail-closed handling for
   uninspectable MCP JSON-RPC batches and refuses non-UTF-8 charsets for
   `mcp_gateway` and `ai_prompt_shield`. The opt-in agent marketplace uses that
-  released contract; this candidate advances the actual pin to v0.9.12. Nexus
+  released contract; the pin then advanced to `v0.9.13` (see above). Nexus
   itself does not parse data-plane MCP traffic.
 - **The Ferrum Edge `gateway-headers` vocabulary is now vendored and pinned**
   alongside the plugin catalog and provisioned-by vocabularies, and the shared
@@ -207,7 +217,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
-- **Draft recovery runtime controls** (PR #522): make the two-instance super-admin
+- **Recovery runtime controls** (PR #522): make the two-instance super-admin
   facade compatible with cancellation wrappers; restore owned catalog/transaction
   faults after failed assertions; join lifecycle race requests before restoring
   methods, with bounded waits that surface early refusal. Reachable recovery controls
@@ -354,7 +364,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   after re-enable may issue a fresh link. Redemption also guards its password
   write with active status, refusing a disable that won the write race. The
   disable's audit row records how many links it revoked.
-- **The acceptance runner treats `e2e/.env` as data and protects its secrets** (#497). It rejects
+- **The acceptance runner treats `e2e/.env` as data and protects its secrets** (#497,
+  GHSA-hf6x-q9cp-9g6f, GHSA-gwhq-6vwf-9mmq). It rejects
   malformed, duplicate, unsupported, or shell-containing entries without evaluating them, refuses
   symlinks, and creates or secures the file with mode `0600`.
 - **Failed list and detail reads no longer look empty** (#486). A persistent
@@ -411,9 +422,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` must configure Edge with
   `FERRUM_BACKEND_ALLOW_CIDRS` for intended private destinations while keeping
   `FERRUM_BACKEND_ALLOW_IPS=public`. Edge's public mode also screens plugin
-  endpoints such as private Redis. Nexus cannot detect an Edge deployment
-  without public-only egress; that residual risk (Part B) is tracked in
-  ferrum-edge#5994.
+  endpoints such as private Redis. Nexus also reads the gateway's egress policy
+  before every backend write (see Added), so it refuses writes to a gateway
+  without public-only egress unless an opt-out is set.
 
 - **Edge credential-write errors no longer expose submitted secrets**
   (GHSA-qc7r-4j9m-pm44). Non-GET `/consumers` failures omit Edge response text
@@ -449,10 +460,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     are measured after HTML escaping, and a template that repeats them counts
     every repetition. A single message too large for a 4 MiB fan-out
     transaction is `400 VALIDATION_FAILED`.
-  - **Behaviour change:** `NEXUS_MAX_MASS_EMAILS_PER_DAY` defaults to **5**,
-    deliberately low while campaign mail shares one queue with password-reset
-    and verification mail; it is expected to rise once that mail gets its own
-    outbox lane (#500). Set it explicitly to keep a higher ceiling.
+  - **Behaviour change:** `NEXUS_MAX_MASS_EMAILS_PER_DAY` defaults to **5**.
+    Set it explicitly to keep a higher ceiling.
   - The campaign's `admin.mass_email` row commits before the first outbox row,
     one per campaign, with a `content_sha256` digest of the subject, both
     bodies and the audience selector. A retry with the same `idempotency_key`,
@@ -469,8 +478,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     `admin.mass_email_complete` row; `enqueued` moved there from
     `admin.mass_email`. After such a retry the composer reports the campaign's
     total, not only what the retry added.
-  - Campaign and security mail still share one first-in, first-out outbox; a
-    priority lane for password-reset and verification mail is tracked in #500.
+  - Password-reset and verification mail is claimed ahead of campaigns by the
+    outbox priority lanes (#500, under Fixed).
 - GHSA-8w4q-fv8h-jv73: automatic single sign-on linking refused an account
   that already was an `admin`, but not one the same sign-in's claims were about
   to promote. A provider mapping a user to `admin` could therefore link to an

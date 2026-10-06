@@ -31,7 +31,7 @@ case "$SUITE" in
     ;;
 esac
 
-# The release candidate and the shipped Compose quickstart use the same Edge
+# The acceptance suite and the shipped Compose quickstart use the same Edge
 # digest. An explicit environment override remains available for experiments.
 EDGE_OVERRIDE="${FERRUM_EDGE_IMAGE:-}"
 # shellcheck disable=SC1091

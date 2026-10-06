@@ -2,15 +2,11 @@
 
 This document preserves the first-stage and pre-approval integration history for
 [issue #449](https://github.com/ferrum-edge/ferrum-nexus/issues/449). PR #518 completed the
-Node 22.14-compatible first stage. The owner has now approved jsdom 30.1.2 / Undici 8.11.2
-and the current unreleased supported range `^22.22.2 || ^24.15.0 || >=26.0.0`.
-Published releases retain their historical Node 22.14+ profile until a new release ships.
-The draft and pending owner/combined-head statements below describe earlier preparation
-snapshots, superseded by explicit approval and the qualification of prior head `059b428`.
-Fresh hosted qualification, full root and fresh independent review remain pending for the
-documentation adoption head. Issue #449 remains open while root completes those gates and
-PR #521's delivery. See the [migration notes](dependency-majors-449-higher-floor-draft.md)
-for current approval, exact-head qualification, preserved lock provenance and rollback.
+Node 22.14-compatible first stage. PR #521 then adopted jsdom 30.1.2 / Undici 8.11.2 and the
+supported range `^22.22.2 || ^24.15.0 || >=26.0.0`, which Nexus `v0.4.0` released; releases
+before `v0.4.0` supported Node 22.14 or later. The draft and pending statements below are
+historical preparation records. See the [migration notes](dependency-majors-449-higher-floor-draft.md)
+for the approval, qualification, preserved lock provenance and rollback.
 
 ## Published versions and migration boundaries
 

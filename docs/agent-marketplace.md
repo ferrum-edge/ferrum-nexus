@@ -2,36 +2,19 @@
 
 Issue [#446](https://github.com/ferrum-edge/ferrum-nexus/issues/446) exposes explicitly
 selected API operations as MCP tools. Agents are off by default. This document
-records the published dependency and the gates that must run in hosted CI; it
-does not claim unexecuted tests passed.
+records the published Edge dependency and what the test suites cover.
 
 ## Published dependency
 
-The checked-in `release/compatibility.env` already pins Edge **v0.9.10**:
+The MCP contract Nexus uses (the OpenAPI bridge, ACL-group tool grants and MCP
+governance) was first published in
+[Edge v0.9.10](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.10), whose
+tag resolves to `ee040d5e3281fde424aa65f5b18004852c5b53b0`; the source links below
+point at that release. Nexus `v0.4.0` pins Edge v0.9.13 in
+[`release/compatibility.env`](../release/compatibility.env), and the packaged
+acceptance suite runs the agent journeys against that image.
 
-```text
-ferrumedge/ferrum-edge:v0.9.10@sha256:430d6a7d41361de5ad12562786481f97f1e97fef72a0b5f1a0699eced7cdd4cc
-```
-
-This change does not bump the image, release version or compatibility pin.
-The [published release](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.10)
-was published October 1, 2026, at 12:59:57 UTC. Its tag resolves to
-`ee040d5e3281fde424aa65f5b18004852c5b53b0`. Inspection used that published source
-and registry artifacts, not current main. Registry index inspection matched the
-checked-in digest. The pinned Linux amd64 manifest is
-`sha256:18a8a962ad13bacb2505a122330bb25ce921b21a2f3cb5362a6ea93f11fe44d5`;
-its binary layer is
-`sha256:f87cf3cd82199e74e92a572ee794c4bfa9ea0fc793dbfdb1fd48d03dad07f127`.
-The extracted, unexecuted `app/ferrum-edge` SHA-256 is
-`52745149de09932b54bef79cbe5524e2376cb84d0fa7a4d8436ae0bcd19d6559`, matching
-the release's Linux x86_64 binary checksum. This links the source contract to
-the digest-pinned executable used by acceptance.
-
-The tracking issue's old unchecked Edge #5906/#5907/#5908 boxes do not indicate
-missing implementation. The released contract includes the bridge, ACL-group
-tool grants and MCP governance. No unshipped v0.9.11 field is assumed.
-
-Primary source contracts at this release:
+Primary source contracts (Edge v0.9.10):
 
 - [API spec importer and MCP extensions](https://github.com/ferrum-edge/ferrum-edge/blob/ee040d5e3281fde424aa65f5b18004852c5b53b0/src/admin/api_specs/extractor.rs)
 - [MCP gateway policy and validation](https://github.com/ferrum-edge/ferrum-edge/blob/ee040d5e3281fde424aa65f5b18004852c5b53b0/src/plugins/mcp_gateway.rs)
@@ -131,13 +114,9 @@ snapshot increments also require one opted-in DELETE, 60 admitted account GETs,
 the REST probe after exhaustion and one same-account application GET. This proof
 covers the tested requests and this fixture; it does not establish behavior at
 other destinations or for untested inputs. A gateway-authored error without the
-upstream marker alone cannot prove that no backend request was made. These are
-hosted acceptance assertions, not a claim that unexecuted gates have passed.
+upstream marker alone cannot prove that no backend request was made.
 
-## Hosted qualification
-
-No local project code, build, formatter or tests were executed for this change.
-Required hosted gates include:
+## Test coverage
 
 - Shared/server/web typecheck, build, format and tests, including the accessible
   operation picker and credential-placeholder connection recipe tests.
@@ -147,16 +126,16 @@ Required hosted gates include:
   ownership and compensated store failures with operator resource fields retained.
 - `store-contracts` on all four adapters, including retained baseline upgrade,
   default-off migration `010`, subset migration `011`, selection/subset round-trip,
-  production publishing/access mutations and transaction rollback;
-  released migration checksums must remain unchanged.
-- Packaged-image acceptance against the exact pin above: normal keyauth,
+  production publishing/access mutations and transaction rollback.
+- Packaged-image acceptance against the pinned Edge image: normal keyauth,
   basicauth and JWT credentials; account/application isolation; public/private
   approval; tools/list and tools/call;
   unapproved and revoked refusals with the same session/credential; read-only
   defaults, destructive opt-in, argument shielding, endpoint/REST bypass negative
   controls, tool-call-only consumer budgets and settings audit.
-- Fresh independent security review before merge. Mock config tests do not prove
-  real gateway execution or authorization.
+
+Mock config tests do not prove real gateway execution or authorization; the
+packaged acceptance suite does that against the pinned gateway.
 
 ## Optional subsets and cross-repository follow-up
 
@@ -221,8 +200,8 @@ deletion and bulk teardown remove both REST and MCP groups; re-enable rebuilds o
 active grants, preserving operator groups.
 
 Existing phase-1 APIs require an authenticated provider republish before accepting a
-subset, including empty subsets. See the [draft upgrade tradeoff](mcp-subsets-migration-draft.md).
-Hosted acceptance adds subset discovery/calls for keyauth, basicauth and JWT applications,
+subset, including empty subsets. See the [upgrade tradeoff](mcp-subsets-migration-draft.md).
+Acceptance adds subset discovery/calls for keyauth, basicauth and JWT applications,
 empty/omitted subsets, lifecycle changes and actual PostgreSQL-induced approval/policy
 rollback. The independent-budget proof now uses explicit read-tool subsets.
 
