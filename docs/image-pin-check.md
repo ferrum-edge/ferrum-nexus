@@ -18,8 +18,9 @@ in `ci/check_image_pins.py`.
 
 The exceptions retain the repository's current Node/PostgreSQL/Alpine distro
 channels and Mailpit's two-part release tag; their digest still fixes the image
-content. Compose permits `${FERRUM_EDGE_IMAGE:?...}` and
-`${NEXUS_IMAGE:?...}` required deployment inputs. The acceptance fallback
+content. Compose files and workflows permit `${FERRUM_EDGE_IMAGE:?...}` and
+`${NEXUS_IMAGE:?...}` required deployment inputs; env files must name a pinned
+image and reject them. The acceptance fallback
 `${NEXUS_IMAGE:-ferrum-nexus:e2e}` is allowed as a local image. Workflow commands
 may use the locally built `ferrum-nexus:ci` image, and `e2e/.env.example` may name
 the local `ferrum-nexus:e2e` image.
@@ -27,8 +28,12 @@ the local `ferrum-nexus:e2e` image.
 This is a bounded static scan, not a full YAML or shell interpreter. It does not
 execute files, scan shell scripts, expand variables, or resolve computed command
 names, shell aliases, sourced files or values assembled indirectly. Workflow
-Docker commands are checked on individual lines, including quoted `run:` scalars
-and backslash continuations; dynamically constructed commands are outside the
-check. Arbitrary YAML flow collections
+Docker commands are checked per line (backslash continuations joined), including
+quoted `run:` scalars, `$(...)`/backtick substitutions, quoted `bash -c` strings,
+commands joined by `;`, `&&`, `|` or parentheses, and `sudo`/absolute-path
+`docker`. Any line holding a `docker ... run|create|pull` segment that the
+tokenizer cannot resolve to an image, including unknown Docker options and
+`docker compose run`, fails rather than being skipped. Commands assembled from
+variables or invoked through aliases are outside the check. Arbitrary YAML flow collections
 that do not expose an `image` or `container` key in a recognizable key position
 are outside the scan.

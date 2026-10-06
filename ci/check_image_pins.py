@@ -173,17 +173,31 @@ def _workflow_run_text(line):
     return text
 
 
-def workflow_docker_images(line):
-    line = _workflow_run_text(line)
-    try:
-        words = shlex.split(line, comments=True)
-    except ValueError:
-        return ['<unparsed docker command>'] if re.search(
-            r'(?<![\w.-])docker\b[^;\n]*\b(run|create|pull)\b', line
-        ) else []
+# A `docker ... run|create|pull` command inside one shell segment. Counting
+# these gives a floor for the images the tokenizer must find on a line, so any
+# form it cannot follow fails instead of being skipped.
+DOCKER_COMMAND = re.compile(
+    r'(?<![\w.-])(?:[\w.-]*/)?docker(?![\w.-])[^;&|()`\n]*?(?<![\w-])(?:run|create|pull)(?![\w-])'
+)
+
+
+def _shell_words(text):
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=';&|()`')
+    lexer.whitespace_split = True
+    return list(lexer)
+
+
+def _docker_images_in_words(words, depth=0):
     images = []
     for index, word in enumerate(words):
-        if word != 'docker':
+        if depth < 2 and 'docker' in word and len(word.split()) > 1:
+            # A quoted command string (`bash -c "docker run ..."`, `"$(docker ...)"`).
+            try:
+                images.extend(_docker_images_in_words(_shell_words(word), depth + 1))
+            except ValueError:
+                pass
+            continue
+        if word.rsplit('/', 1)[-1] != 'docker':
             continue
         command_words = words[index + 1:].copy()
         if not command_words:
@@ -203,6 +217,17 @@ def workflow_docker_images(line):
         images.append(command_words[0] if command_words else '<missing docker image>')
     return images
 
+
+def workflow_docker_images(line):
+    line = _workflow_run_text(line)
+    expected = len(DOCKER_COMMAND.findall(re.sub(r'(?:^|\s)#.*$', '', line)))
+    try:
+        images = _docker_images_in_words(_shell_words(line))
+    except ValueError:
+        images = []
+    if len(images) < expected:
+        images.append('<unparsed docker command>')
+    return images
 
 def files(root):
     names = subprocess.check_output(['git', '-C', str(root), 'ls-files', '-z']).decode().split('\0')

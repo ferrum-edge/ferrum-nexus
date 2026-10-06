@@ -168,6 +168,46 @@ FROM build AS runtime
         self.assertEqual([ref for _, ref in refs], ['nginx:latest'])
         self.assertIsNotNone(error_for(refs[0][1]))
 
+    def test_workflow_docker_in_substitutions_and_strings_is_scanned(self):
+        for command in (
+            'CID=$(docker run -d nginx:latest)',
+            'CID="$(docker run -d nginx:latest)"',
+            'CID=`docker run -d nginx:latest`',
+            'true&&docker run nginx:latest',
+            '(docker run nginx:latest)',
+            'bash -c "docker run nginx:latest"',
+            '"docker run nginx:latest"  # quoted scalar with a comment',
+            'sudo docker run nginx:latest',
+            '/usr/bin/docker run nginx:latest',
+        ):
+            with self.subTest(command=command):
+                refs = list(image_fields(
+                    Path('.github/workflows/ci.yml'), f'steps:\n  - run: {command}\n'
+                ))
+                self.assertEqual([ref for _, ref in refs], ['nginx:latest'])
+                self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_workflow_docker_commands_the_tokenizer_misses_fail_closed(self):
+        for command in (
+            'docker run "nginx:latest',
+            'docker run --frobnicate=1 nginx:latest',
+            'docker compose run app',
+        ):
+            with self.subTest(command=command):
+                refs = list(image_fields(
+                    Path('.github/workflows/ci.yml'), f'steps:\n  - run: {command}\n'
+                ))
+                self.assertEqual(len(refs), 1)
+                self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_workflow_non_container_docker_commands_are_ignored(self):
+        workflow = (
+            'steps:\n'
+            '  - run: docker build -t ferrum-nexus:ci -f docker/Dockerfile .\n'
+            '  - run: docker version && docker ps  # never run a container here\n'
+        )
+        self.assertEqual(list(image_fields(Path('.github/workflows/ci.yml'), workflow)), [])
+
     def test_env_file_exports_and_required_variables_are_checked(self):
         source = (
             'export FERRUM_EDGE_IMAGE=nginx:latest\n'

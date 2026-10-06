@@ -1276,8 +1276,10 @@ fields, workflow `docker://` actions and Docker `run`, `create` and `pull`
 commands, including shell continuations, plus `FERRUM_EDGE_IMAGE` and `NEXUS_IMAGE` assignments in
 `.env`, `.env.*` and `*.env` files. It handles `docker container` commands,
 `docker image pull`, Docker global options before the command, and known
-image-option values such as `--label`, `-e` and `--name`. Unsupported Docker
-options fail closed. Quoted and flow-style image keys that the simple field
+image-option values such as `--label`, `-e` and `--name`, inside `$(...)` or
+backtick substitutions, quoted `bash -c` strings and `;`/`&&`/`|` chains. Unsupported
+Docker options, and any `docker ... run|create|pull` segment the scanner cannot
+resolve to an image, fail closed. Quoted and flow-style image keys that the simple field
 scanner recognizes are checked; malformed or empty image fields fail closed.
 Dockerfile comment-only lines inside a continued instruction are ignored as
 Docker ignores them. Dockerfile syntax frontends and external images in
@@ -1286,7 +1288,8 @@ Docker ignores them. Dockerfile syntax frontends and external images in
 Literal image references require their own full `@sha256:` digest of 64
 lowercase hexadecimal characters. Version tags can remain before the digest.
 Runtime `${FERRUM_EDGE_IMAGE:?...}` and `${NEXUS_IMAGE:?...}` required-variable
-references are allowed. The acceptance fallback `${NEXUS_IMAGE:-ferrum-nexus:e2e}`
+references are allowed in Compose files and workflows; env files must assign a
+pinned image. The acceptance fallback `${NEXUS_IMAGE:-ferrum-nexus:e2e}`
 is allowed as a local image; `e2e/.env.example` uses the same local Nexus image
 exception. Exact-tag exceptions and their reasons are listed in
 `ci/check_image_pins.py`.
