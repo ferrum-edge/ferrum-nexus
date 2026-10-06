@@ -5,6 +5,7 @@ import {
   MAX_DEFINITION_HASH_WORK,
   agentToolDefinitionDigests,
   agentToolDefinitionHash,
+  definitionHashStats,
   identifyAgentTools,
   type DefinitionHashStats,
 } from './agents.js';
@@ -78,7 +79,7 @@ function hash(document: Record<string, unknown>, tool = TOOL): string {
 }
 
 function stats(): DefinitionHashStats {
-  return { hashed: 0, lookups: 0, overBudget: false };
+  return definitionHashStats();
 }
 
 /** The `index`th spelling of one pointer: a different set of its letters percent-encoded. */
@@ -246,9 +247,14 @@ describe('agentToolDefinitionHash', () => {
     const counters = stats();
     const [one, two] = agentToolDefinitionDigests(document, [TOOL, second], counters);
     assert.equal(counters.overBudget, false);
-    // Every reference is still looked up: Big's, then Order, its cycle and
-    // Receipt, per tool.
-    assert.equal(counters.lookups, 2 * (refs.length + 3));
+    // Every spelling is still looked up, per tool: the memo is by node, not
+    // by text. Order, its cycle and Receipt add a few more; the Request Body
+    // and Response references a definition is assembled through are not
+    // counted.
+    assert.ok(
+      counters.lookups >= 2 * refs.length && counters.lookups <= 2 * (refs.length + 3),
+      `lookups ${counters.lookups}`,
+    );
     // Once for the string, then each reference's text and digest, per tool.
     assert.ok(counters.hashed < big.length + 1_500_000, `hashed ${counters.hashed}`);
     assert.notEqual(one, two);
@@ -297,6 +303,54 @@ describe('agentToolDefinitionHash', () => {
       nested,
     );
     assert.equal(nested.overBudget, true);
+  });
+
+  it('scans a Content map once however many statuses and selections reach it', () => {
+    const mediaTypes = 20_000;
+    const content: Record<string, unknown> = {};
+    for (let index = 0; index < mediaTypes; index += 1) content[`x/${index}`] = 0;
+    const statuses = [...Array.from({ length: 100 }, (_, index) => `${200 + index}`), '2XX'];
+    const responses = Object.fromEntries(
+      statuses.map((status) => [status, { $ref: '#/components/responses/Many' }]),
+    );
+    const document = {
+      ...BASE,
+      paths: { '/orders': { post: { ...BASE.paths['/orders'].post, responses } } },
+      components: { ...BASE.components, responses: { Many: { description: 'Many', content } } },
+    };
+    const counters = stats();
+    const [one, two] = agentToolDefinitionDigests(document, [TOOL, TOOL], counters);
+    assert.equal(counters.overBudget, false);
+    assert.equal(one, two);
+    // Each selection's statuses, the shared map once, and the request body's
+    // two media types; re-scanning per status would be millions.
+    assert.ok(
+      counters.scanned <= 2 * statuses.length + mediaTypes + 2,
+      `scanned ${counters.scanned}`,
+    );
+  });
+
+  it('charges the keys it examines, so a shared operation cannot amplify them', () => {
+    const responses: Record<string, unknown> = { '200': { description: 'OK' } };
+    for (let index = 0; index < 80_000; index += 1) {
+      responses[`x-${index}`] = { description: 'Never published' };
+    }
+    const paths: Record<string, unknown> = {};
+    const tools = Array.from({ length: 256 }, (_, index) => {
+      paths[`/p${index}`] = { $ref: '#/components/pathItems/Shared' };
+      return { ...TOOL, path: `/p${index}`, name: `tool_${index}` };
+    });
+    const document = {
+      openapi: '3.1.0',
+      info: { title: 'Shared', version: '1' },
+      paths,
+      components: { pathItems: { Shared: { post: { responses } } } },
+    };
+    const counters = stats();
+    agentToolDefinitionDigests(document, tools, counters);
+    assert.equal(counters.overBudget, true);
+    // Every key costs at least two characters of the budget.
+    assert.ok(counters.scanned <= MAX_DEFINITION_HASH_WORK / 2 + 1, `scanned ${counters.scanned}`);
   });
 });
 

@@ -51,13 +51,36 @@ function isJsonMediaType(mediaType: string): boolean {
   return essence === 'application/json' || essence.endsWith('+json');
 }
 
+/**
+ * One build's reads of the document while it assembles tool definitions:
+ * every key it examines and every pointer it follows is charged to the
+ * build's budget, and each Content map is scanned once however many tools
+ * and statuses reach it.
+ */
+interface DefinitionReader {
+  document: Record<string, unknown>;
+  paths: Record<string, unknown>;
+  charge: (count: number) => void;
+  stats: DefinitionHashStats;
+  contents: WeakMap<object, Record<string, unknown>>;
+}
+
 /** The schemas of every JSON media type in a Content map, keyed by media type. */
-function jsonMediaSchemas(content: unknown): Record<string, unknown> | null {
+function jsonMediaSchemas(
+  reader: DefinitionReader,
+  content: unknown,
+): Record<string, unknown> | null {
   if (!record(content)) return null;
+  const known = reader.contents.get(content);
+  if (known) return known;
   const schemas: Record<string, unknown> = {};
-  for (const [mediaType, media] of Object.entries(content)) {
+  for (const mediaType of Object.keys(content)) {
+    reader.stats.scanned += 1;
+    reader.charge(mediaType.length + 1);
+    const media = content[mediaType];
     if (isJsonMediaType(mediaType)) schemas[mediaType] = record(media) ? media.schema : media;
   }
+  reader.contents.set(content, schemas);
   return schemas;
 }
 
@@ -66,7 +89,7 @@ function jsonMediaSchemas(content: unknown): Record<string, unknown> | null {
  * with each reference's sibling fields laid over its target. Anything that
  * does not resolve is returned as it is, for the canonical form to fold in.
  */
-function followReference(document: Record<string, unknown>, value: unknown): unknown {
+function followReference(reader: DefinitionReader, value: unknown): unknown {
   let current = value;
   const overlays: Record<string, unknown>[] = [];
   const seen = new Set<string>();
@@ -75,7 +98,8 @@ function followReference(document: Record<string, unknown>, value: unknown): unk
     if (!ref.startsWith('#/') || seen.has(ref) || seen.size >= MAX_OPENAPI_REF_HOPS) {
       return value;
     }
-    const target = resolveOpenApiPointer(document, ref);
+    reader.charge(ref.length);
+    const target = resolveOpenApiPointer(reader.document, ref);
     if (target === undefined) return value;
     seen.add(ref);
     const { $ref: _ref, ...overlay } = current;
@@ -97,11 +121,11 @@ function followReference(document: Record<string, unknown>, value: unknown): unk
  * subset follow a changed tool.
  */
 function toolDefinition(
-  document: Record<string, unknown>,
-  paths: Record<string, unknown>,
+  reader: DefinitionReader,
   tool: AgentToolSelection,
 ): Record<string, unknown> {
-  const item = paths[tool.path];
+  const { document } = reader;
+  const item = reader.paths[tool.path];
   const operation = record(item) ? item[tool.method.toLowerCase()] : undefined;
   const definition: Record<string, unknown> = {
     // Edge normalizes schemas by the document's OpenAPI version.
@@ -113,13 +137,15 @@ function toolDefinition(
   };
   // validateAgents refuses a selection with no operation; this stays total.
   if (!record(item) || !record(operation)) return { ...definition, operation: null };
-  const body = followReference(document, operation.requestBody ?? null);
+  const body = followReference(reader, operation.requestBody ?? null);
   const responses = record(operation.responses) ? operation.responses : {};
   const outputs: Record<string, unknown> = {};
-  for (const [status, value] of Object.entries(responses)) {
+  for (const status of Object.keys(responses)) {
+    reader.stats.scanned += 1;
+    reader.charge(status.length + 1);
     if (!/^2([0-9]{2}|XX)$/.test(status)) continue;
-    const response = followReference(document, value);
-    outputs[status] = record(response) ? jsonMediaSchemas(response.content) : response;
+    const response = followReference(reader, responses[status]);
+    outputs[status] = record(response) ? jsonMediaSchemas(reader, response.content) : response;
   }
   return {
     ...definition,
@@ -132,7 +158,7 @@ function toolDefinition(
       ? {
           required: body.required ?? null,
           description: body.description ?? null,
-          content: jsonMediaSchemas(body.content),
+          content: jsonMediaSchemas(reader, body.content),
         }
       : body,
     // Edge publishes the first 2xx JSON object schema as the output schema.
@@ -148,10 +174,12 @@ function toolDefinition(
 const REBASING_KEYWORDS = ['$id', '$dynamicRef', '$recursiveRef'];
 
 /**
- * Hash input, in characters, that resolving references may cost one build of
- * tool hashes (every tool of one document) before it falls back to the whole
- * document. A legitimate document resolves each target once, so it stays far
- * below this; past it, references are amplifying the work.
+ * Work, in characters, that one build of tool hashes (every tool of one
+ * document) may cost before it falls back to the whole document: every
+ * character hashed, every key of a Responses or Content map examined, and
+ * every pointer followed to a Request Body or Response. A legitimate document
+ * reads each part of itself about once, so it stays far below this; past it,
+ * references or shared objects are amplifying the work.
  */
 export const MAX_DEFINITION_HASH_WORK = 8 * MAX_SPEC_BYTES;
 
@@ -164,12 +192,28 @@ export interface DefinitionHashStats {
   hashed: number;
   /** Local references looked up in the document. */
   lookups: number;
+  /** Keys of Responses and Content maps examined while assembling definitions. */
+  scanned: number;
   /** Whether the build ran out of budget and hashed every tool by the whole document. */
   overBudget: boolean;
 }
 
+/** Fresh counters for {@link agentToolDefinitionDigests}. */
+export function definitionHashStats(): DefinitionHashStats {
+  return { hashed: 0, lookups: 0, scanned: 0, overBudget: false };
+}
+
 /** Thrown when one build of tool hashes exceeds its work or depth budget. */
 class HashBudgetExceeded extends Error {}
+
+/** One build's charge against {@link MAX_DEFINITION_HASH_WORK}. */
+function workBudget(): (count: number) => void {
+  let work = 0;
+  return (count) => {
+    work += count;
+    if (work > MAX_DEFINITION_HASH_WORK) throw new HashBudgetExceeded();
+  };
+}
 
 /** A reference target's digest, and whether anything beneath it was unresolvable. */
 interface TargetDigest {
@@ -246,8 +290,8 @@ function literalDigest(value: unknown, stats: DefinitionHashStats): string {
  *   that reached one depends on where the cycle was entered, so it is reused
  *   within its tool only. Either way a tool's hash never depends on which
  *   other tools were hashed.
- * - **Budget.** Every character hashed, across the build, is charged to
- *   {@link MAX_DEFINITION_HASH_WORK}, and nesting to
+ * - **Budget.** Every character hashed is charged, through `charge`, to the
+ *   build's {@link MAX_DEFINITION_HASH_WORK}, and nesting to
  *   {@link MAX_DEFINITION_HASH_DEPTH}. Past either, {@link HashBudgetExceeded}
  *   abandons the build.
  * - Anything Nexus cannot resolve from the document root (an external or
@@ -256,14 +300,13 @@ function literalDigest(value: unknown, stats: DefinitionHashStats): string {
  */
 function resolvingDigester(
   document: Record<string, unknown>,
+  charge: (count: number) => void,
   stats: DefinitionHashStats,
 ): (definition: Record<string, unknown>) => TargetDigest {
   const shared = new Map<unknown, TargetDigest>();
-  let work = 0;
   const spend = (count: number): void => {
     stats.hashed += count;
-    work += count;
-    if (work > MAX_DEFINITION_HASH_WORK) throw new HashBudgetExceeded();
+    charge(count);
   };
   return (definition) => {
     const local = new Map<unknown, TargetDigest>();
@@ -378,10 +421,17 @@ function definitionDigests(
     return (whole ??= literalDigest(rest, stats));
   };
   try {
-    const paths = agentPathItems(document);
-    const digester = resolvingDigester(document, stats);
+    const charge = workBudget();
+    const reader: DefinitionReader = {
+      document,
+      paths: agentPathItems(document),
+      charge,
+      stats,
+      contents: new WeakMap(),
+    };
+    const digester = resolvingDigester(document, charge, stats);
     return tools.map((tool) => {
-      const definition = digester(toolDefinition(document, paths, tool));
+      const definition = digester(toolDefinition(reader, tool));
       return definition.unresolved
         ? sha256(`resolved\n${definition.text}\n${wholeDigest()}`)
         : definition.text;
@@ -410,8 +460,9 @@ function definitionDigests(
  *   (`#name`), or a local pointer that names nothing; or a node it reaches has
  *   a `$id`, `$dynamicRef` or `$recursiveRef` member, a property of that name
  *   included. Its resolved definition is hashed with the whole document.
- * - a Path Item does not resolve, or hashing every tool of the document would
- *   pass {@link MAX_DEFINITION_HASH_WORK} or {@link MAX_DEFINITION_HASH_DEPTH}.
+ * - a Path Item does not resolve, or reading and hashing every tool of the
+ *   call would pass {@link MAX_DEFINITION_HASH_WORK} or
+ *   {@link MAX_DEFINITION_HASH_DEPTH}.
  *   Then every tool of the call is its selection and the whole document.
  *
  * A `$ref: "#"` names the whole document, `info` included. A fallback only
@@ -421,7 +472,7 @@ function definitionDigests(
 export function agentToolDefinitionDigests(
   document: Record<string, unknown>,
   tools: readonly AgentToolSelection[],
-  stats: DefinitionHashStats = { hashed: 0, lookups: 0, overBudget: false },
+  stats: DefinitionHashStats = definitionHashStats(),
 ): string[] {
   return definitionDigests(document, tools, stats);
 }
@@ -452,16 +503,22 @@ function boundDefinitionHash(id: string, digest: string): string {
  * covers a changed definition. A stored tool saved before hashes were
  * recorded is hashed against `previousDocument`, the revision it was
  * published with.
+ *
+ * Run {@link validateAgents} on `next` first: hashing reads every selection,
+ * and a duplicate or missing one should be refused before it costs anything.
+ * `stats` reports, among other things, whether either build fell back to the
+ * whole document.
  */
 export function identifyAgentTools(
   next: ApiAgents | null,
   document: Record<string, unknown>,
   previous: ApiAgents | null = null,
   previousDocument: Record<string, unknown> = document,
+  stats: DefinitionHashStats = definitionHashStats(),
 ): ApiAgents | null {
   if (!next) return null;
   const tools = next.operations.map(({ id: _id, definition_hash: _hash, ...tool }) => tool);
-  const digests = agentToolDefinitionDigests(document, tools);
+  const digests = agentToolDefinitionDigests(document, tools, stats);
   const priors = tools.map((tool) =>
     previous?.operations.find(
       (item) => item.method === tool.method && item.path === tool.path && item.name === tool.name,
@@ -470,7 +527,7 @@ export function identifyAgentTools(
   const legacy = priors.filter(
     (prior): prior is AgentTool => prior !== undefined && prior.definition_hash === undefined,
   );
-  const legacyDigests = agentToolDefinitionDigests(previousDocument, legacy);
+  const legacyDigests = agentToolDefinitionDigests(previousDocument, legacy, stats);
   return {
     operations: tools.map((tool, index) => {
       const digest = digests[index] as string;

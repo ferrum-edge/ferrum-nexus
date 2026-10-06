@@ -60,8 +60,8 @@ OpenAPI version, which decides how Edge normalizes those schemas. Each `$ref`
 contributes its own text and its target's digest. A reference Nexus cannot resolve from
 the document root (external, anchor, dangling, or reaching a `$id`, `$dynamicRef` or
 `$recursiveRef` member) folds in the whole document except `info`, hashed as text; an
-unresolvable Path Item or a document whose references pass the hashing budget hashes
-every tool from its selection and that digest. See
+unresolvable Path Item or a document whose reading and hashing pass the work budget
+hashes every tool from its selection and that digest. See
 [agent-marketplace.md](agent-marketplace.md#optional-subsets-and-cross-repository-follow-up)
 for the exact cases.
 

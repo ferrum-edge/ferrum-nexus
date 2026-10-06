@@ -287,7 +287,13 @@ import {
   operatorOwnedFields,
   writeBody,
 } from './edge-plugins.js';
-import { identifyAgentTools, rotatedAgentTools, validateAgents } from './agents.js';
+import {
+  definitionHashStats,
+  identifyAgentTools,
+  rotatedAgentTools,
+  validateAgents,
+  type DefinitionHashStats,
+} from './agents.js';
 import { presentApi, type GatewayUrlSource } from './present.js';
 import {
   assertUpstreamAllowed,
@@ -1581,12 +1587,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // new id, which the commit below drops from every explicit subset.
       // validateAgents above refuses a revision that drops a selected
       // operation, so a revision never removes a tool outright.
+      const hashing = definitionHashStats();
       const nextAgents = identifyAgentTools(
         api.agents ?? null,
         parsed.document,
         api.agents ?? null,
         previous ? safeSpecDocument(previous.raw_spec) : parsed.document,
+        hashing,
       );
+      const hashFallback = toolHashFallback(api.id, hashing);
       // Named in the change summary, so grantees are told which tools left
       // their explicit approvals, even for a description-only edit the
       // structural comparison does not report.
@@ -1776,6 +1785,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               ...(changedTools.length > 0
                 ? { changed_tool_ids: changedTools.map((tool) => tool.id) }
                 : {}),
+              ...hashFallback,
               ...(restoredFrom
                 ? {
                     restored_from_spec_id: restoredFrom.id,
@@ -1950,8 +1960,24 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // creating a proxy that would then have to be rolled back.
       assertRoutesEnforceable(specEnforcement, parsed.paths);
       assertRoutesSubmittable(specEnforcement, parsed.document);
-      const agents = identifyAgentTools(input.agents ?? null, parsed.document);
-      validateAgents(agents, parsed.document, specEnforcement, input.requestable, methods);
+      // Validated before hashing, which reads every selection: a duplicate or
+      // missing one is refused before it costs anything.
+      validateAgents(
+        input.agents ?? null,
+        parsed.document,
+        specEnforcement,
+        input.requestable,
+        methods,
+      );
+      const hashing = definitionHashStats();
+      const agents = identifyAgentTools(
+        input.agents ?? null,
+        parsed.document,
+        null,
+        parsed.document,
+        hashing,
+      );
+      const hashFallback = toolHashFallback(apiId, hashing);
       const agentApi = { id: apiId, slug, agents };
 
       // Where the proxy is *born*. It stays here until every security plugin
@@ -2162,6 +2188,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 circuit_breaker: circuitBreaker,
                 spec_enforcement: specEnforcement,
                 agents,
+                ...hashFallback,
                 upstream: `${upstream.scheme}://${upstream.host}:${upstream.port}`,
                 spec_paths: parsed.pathCount,
                 spec_operations: parsed.operationCount,
@@ -2298,18 +2325,28 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         const currentSpec =
           (patch.agents ?? api.agents) ? await store.apiSpecs.findCurrentByApi(api.id) : null;
         const agentDocument = currentSpec ? safeSpecDocument(currentSpec.raw_spec) : {};
-        const nextAgents =
-          patch.agents === undefined
-            ? (api.agents ?? null)
-            : identifyAgentTools(patch.agents, agentDocument, api.agents ?? null);
-        const agentsMoved = !isDeepStrictEqual(nextAgents, api.agents ?? null);
+        // Validated before hashing, which reads every selection: a duplicate
+        // or missing one is refused before it costs anything.
         validateAgents(
-          nextAgents,
+          patch.agents === undefined ? (api.agents ?? null) : patch.agents,
           agentDocument,
           patch.spec_enforcement ?? api.spec_enforcement,
           patch.requestable ?? api.requestable,
           patch.allowed_methods === undefined ? api.allowed_methods : patch.allowed_methods,
         );
+        const hashing = definitionHashStats();
+        const nextAgents =
+          patch.agents === undefined
+            ? (api.agents ?? null)
+            : identifyAgentTools(
+                patch.agents,
+                agentDocument,
+                api.agents ?? null,
+                agentDocument,
+                hashing,
+              );
+        const agentsMoved = !isDeepStrictEqual(nextAgents, api.agents ?? null);
+        Object.assign(details, toolHashFallback(api.id, hashing));
         if (agentsMoved) {
           update.agents = nextAgents;
           changed.push('agents');
@@ -4353,6 +4390,21 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   /* ── Spec-owned proxies (`routes` mode) ───────────────────────────────── */
 
   /**
+   * Audit details for a tool hash build that passed its work budget, logged
+   * as it happens. Every tool was then hashed with the whole document, so
+   * the next change outside `info` re-ids all of them; this is what explains
+   * that mass rotation.
+   */
+  function toolHashFallback(apiId: Uuid, hashing: DefinitionHashStats): Record<string, unknown> {
+    if (!hashing.overBudget) return {};
+    deps.log?.(
+      { api_id: apiId },
+      'agent tool hashing passed its work budget; every tool was hashed with the whole document',
+    );
+    return { tool_hash_fallback: true };
+  }
+
+  /**
    * Drop every exposure id that is no longer published from each explicit
    * subset on the API, in the caller's transaction. Ids still published carry
    * over; a grant left with `[]` keeps its REST access and covers no MCP tool.
@@ -4372,8 +4424,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     ip: string | null,
   ): Promise<Map<Uuid, Set<string>>> {
     const kept = new Set(next?.operations.map((tool) => tool.id) ?? []);
-    const rotated = rotatedAgentTools(previous, next);
-    const changed = new Set(rotated.map((tool) => tool.id));
+    // Each redefined tool's retired id, to its name.
+    const changed = new Map<string, string>();
+    for (const tool of rotatedAgentTools(previous, next)) {
+      if (tool.id !== undefined) changed.set(tool.id, tool.name);
+    }
     const redefined = new Map<Uuid, Set<string>>();
     for (const grant of await tx.grants.listActiveByApi(apiId)) {
       const removed = grant.approved_tools?.filter((id) => !kept.has(id)) ?? [];
@@ -4399,8 +4454,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         );
         if (reason !== 'definition_changed') continue;
         const names = redefined.get(grant.user_id) ?? new Set<string>();
-        for (const tool of rotated) {
-          if (tool.id !== undefined && tools.includes(tool.id)) names.add(tool.name);
+        for (const id of tools) {
+          const name = changed.get(id);
+          if (name !== undefined) names.add(name);
         }
         redefined.set(grant.user_id, names);
       }

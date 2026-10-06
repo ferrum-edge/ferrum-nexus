@@ -180,11 +180,19 @@ without following its references, is folded into a tool's hash when the definiti
 reaches an external or anchor `$ref`, a local pointer that names nothing, or a `$id`,
 `$dynamicRef` or `$recursiveRef` member (a schema property of that name included). Every
 tool of the document is hashed from its selection and that whole-document digest
-instead when a Path Item does not resolve, or when resolving every selected tool's
-references would pass a fixed hashing budget (16 Mi characters of hash input across the
-document's tools, or 1,024 levels of nesting through values and references). A
+instead when a Path Item does not resolve, or when reading and hashing every selected
+tool would pass a fixed work budget: 16 Mi characters across the document's tools
+(characters hashed, response-status and media-type keys read, and Request Body and
+Response references followed), or 1,024 levels of nesting through values and
+references. Reference targets and Content maps are processed once per document however
+many tools reach them, so a legitimate document stays far below the budget. A budget
+fallback is logged and recorded as `tool_hash_fallback: true` in the `api.publish`,
+`api.update`, `api.spec_update` or `api.spec_rollback` audit row, which explains a later
+mass rotation: once every tool hashes the whole document, any change outside `info`
+re-ids all of them. A
 `$ref: "#"` names the whole document, `info` included. Each fallback only folds in more
 than Edge publishes, so it can cost a re-approval but never carries a changed tool.
+Selections are validated (existing, unique operations and names) before any hashing.
 
 A spec revision, rollback or agents edit keeps a tool's ID only while its method,
 path, name and hash are unchanged, so explicit subsets carry across whitespace, `info`
