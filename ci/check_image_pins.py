@@ -34,13 +34,14 @@ FIELD = re.compile(
 )
 
 
-def error_for(image):
+def error_for(image, local_ok=True):
+    """Return why `image` is not acceptable, or None. Env files pass local_ok=False."""
     if REQUIRED_VARIABLE.fullmatch(image):
         return None
     fallback = NEXUS_FALLBACK.fullmatch(image)
     if fallback:
-        return error_for(fallback.group(1))
-    if image in LOCAL_IMAGES:
+        return error_for(fallback.group(1), local_ok)
+    if local_ok and image in LOCAL_IMAGES:
         return None
     if not PIN.fullmatch(image):
         return 'expected name[:tag]@sha256:<64 lowercase hex>'
@@ -187,11 +188,15 @@ def main(root):
     for path in files(root):
         source = path.read_text()
         relative_path = Path(path.relative_to(root).as_posix())
-        refs = list(image_fields(relative_path, source))
+        refs = [(line, image, True) for line, image in image_fields(relative_path, source)]
         if path.name == '.env' or path.name.startswith('.env.') or path.name.endswith('.env'):
-            refs.extend(env_image_fields(relative_path, source))
-        for line, image in refs:
-            reason = error_for(image)
+            # Env files may name a local image only through the explicit
+            # e2e/.env.example exception in env_image_fields.
+            refs.extend(
+                (line, image, False) for line, image in env_image_fields(relative_path, source)
+            )
+        for line, image, local_ok in refs:
+            reason = error_for(image, local_ok)
             if reason:
                 errors.append(f'{path.relative_to(root)}:{line}: {image}: {reason}')
     if errors:

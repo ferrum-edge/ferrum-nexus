@@ -123,7 +123,7 @@ FROM build AS runtime
         image = 'NEXUS_IMAGE=ferrum-nexus:e2e'
         self.assertEqual(list(env_image_fields(Path('e2e/.env.example'), image)), [])
         ref = next(env_image_fields(Path('.env.example'), image))[1]
-        self.assertIsNotNone(error_for(ref))
+        self.assertIsNotNone(error_for(ref, local_ok=False))
 
     def test_workflow_unknown_docker_option_fails_closed(self):
         workflow = 'steps:\n  - run: docker run --mystery value registry.example/app:1.2.3\n'
