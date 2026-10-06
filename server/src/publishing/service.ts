@@ -2180,6 +2180,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       recovery.proxy.id,
       handOwnedPlugins(recovery.plugins),
       subject,
+      () => observeConversionAttempt(api, recovery),
     );
     await observeConversionAttempt(api, recovery);
     // An unchanged original needs only staging validation and cutover. A corrected

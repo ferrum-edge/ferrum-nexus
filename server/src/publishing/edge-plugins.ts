@@ -267,9 +267,16 @@ export interface EdgePluginBinder {
    * another request read a moment ago, still address a live row. `enabled`,
    * `trigger` and `priority_override` are carried across too — a restore that
    * quietly re-enabled a switched-off plugin, dropped its trigger, or reset its
-   * priority would change what the gateway runs.
+   * priority would change what the gateway runs. `afterPluginAcknowledged`
+   * freezes a successful create before the next create or association; it is
+   * never called for a rejected request.
    */
-  restorePlugins(proxyId: string, configs: EdgePluginConfig[], subject: string): Promise<void>;
+  restorePlugins(
+    proxyId: string,
+    configs: EdgePluginConfig[],
+    subject: string,
+    afterPluginAcknowledged?: () => Promise<void>,
+  ): Promise<void>;
   /** Undo step for "a config was created here": detach it, then delete it. */
   undoAttach(proxyId: string, configId: string, subject: string): () => Promise<void>;
   /** Undo step for "an associated config was removed": put it back, re-associate. */
@@ -433,13 +440,13 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
       );
     },
 
-    async restorePlugins(proxyId, configs, subject) {
+    async restorePlugins(proxyId, configs, subject, afterPluginAcknowledged) {
       return binder.withProxy(proxyId, () =>
-        binder.restorePluginsLocked(proxyId, configs, subject),
+        binder.restorePluginsLocked(proxyId, configs, subject, afterPluginAcknowledged),
       );
     },
 
-    async restorePluginsLocked(proxyId, configs, subject) {
+    async restorePluginsLocked(proxyId, configs, subject, afterPluginAcknowledged) {
       await edge.assertBackendEgress();
       const ids: string[] = [];
       for (const config of configs) {
@@ -463,6 +470,9 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
           { preserveLabels: true },
         );
         ids.push(config.id);
+        // Freeze each acknowledged prefix before the next write. A later
+        // rejection must use this held evidence, never a new post-failure token.
+        await afterPluginAcknowledged?.();
       }
       // One association write for the whole set, for the same reason `publish`
       // makes one: until the proxy names them these configs are inert, and the

@@ -28,7 +28,7 @@ import { after, afterEach, before, describe, it } from 'node:test';
 import type { GetApiResponse, PublishApiResponse } from '@ferrum-nexus/shared';
 
 import type { ApiRecord } from '../db/store.js';
-import { createConversionRaceFixture } from './conversion-race-fixture.js';
+import { createConversionRaceFixture, createOwnedOperation } from './conversion-race-fixture.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -290,7 +290,8 @@ describe('deleting an API that races an enforcement conversion', () => {
     assert.equal(harness.edge.pluginsForProxy(proxyId).length, 0);
   });
 
-  it('refuses the delete when the proxy identity moved while it waited', async () => {
+  it('refuses the delete when the proxy identity moved while it waited', async (t) => {
+    const fixture = createConversionRaceFixture(t.signal);
     const published = await harness.authed(provider, {
       method: 'POST',
       url: '/api/apis',
@@ -298,39 +299,83 @@ describe('deleting an API that races an enforcement conversion', () => {
     });
     assert.equal(published.statusCode, 201, published.body);
     const api = published.json<PublishApiResponse>().api;
-
-    // The re-read under the lease is the second one the delete makes. Answering
-    // it with a different proxy id stands in for a rebuild that landed while
-    // this delete was queued: the teardown must refuse rather than act on a
-    // snapshot that no longer describes the gateway.
-    const real = harness.store.apis.findById.bind(harness.store.apis);
-    let reads = 0;
-    harness.store.apis.findById = async (id): Promise<ApiRecord | null> => {
-      const row = await real(id);
-      reads += 1;
-      if (!row || row.id !== api.id || reads !== 2) return row;
-      return { ...row, ferrum_proxy_id: `${String(row.ferrum_proxy_id)}-moved` };
-    };
+    const proxyId = String(api.ferrum_proxy_id);
+    const before = structuredClone({
+      proxies: [...harness.edge.proxies],
+      plugins: [...harness.edge.pluginConfigs],
+      specs: [...harness.edge.apiSpecs],
+      consumers: [...harness.edge.consumers],
+    });
+    const serialize = harness.edgeClient.serializePerKey.bind(harness.edgeClient);
+    let announceHeld = (): void => {};
+    const held = new Promise<void>((resolve) => {
+      announceHeld = resolve;
+    });
+    let announceQueued = (): void => {};
+    const queued = new Promise<void>((resolve) => {
+      announceQueued = resolve;
+    });
     try {
-      const removed = await harness.authed(provider, {
-        method: 'DELETE',
-        url: `/api/apis/${api.id}`,
+      fixture.own(
+        createOwnedOperation(() =>
+          serialize(`proxy:${proxyId}`, async () => {
+            announceHeld();
+            await fixture.held;
+          }),
+        ),
+      );
+      await fixture.within(held, 'held original proxy lease');
+      harness.edgeClient.serializePerKey = (key, fn) => {
+        if (key === `proxy:${proxyId}`) announceQueued();
+        return serialize(key, fn);
+      };
+      const offset = harness.edge.requests.length;
+      const removal = fixture.own(
+        harness.authed(provider, { method: 'DELETE', url: `/api/apis/${api.id}` }),
+      );
+      await fixture.waitFor(queued, removal, 'delete queued on the original proxy lease');
+      // Change the real row only after selection of the held proxy key. The
+      // delete's re-read under that key must refuse the moved identity.
+      await harness.store.transaction(async (tx) => {
+        const row = await tx.apis.findById(api.id);
+        assert.equal(row?.ferrum_proxy_id, proxyId);
+        await tx.apis.update(api.id, { ferrum_proxy_id: `${proxyId}-moved` });
       });
+      fixture.release();
+      const removed = await fixture.within(removal, 'identity-conflict delete');
       assert.equal(removed.statusCode, 409, removed.body);
+      assert.equal(
+        (await harness.store.apis.findById(api.id))?.ferrum_proxy_id,
+        `${proxyId}-moved`,
+      );
+      assert.deepEqual(
+        structuredClone({
+          proxies: [...harness.edge.proxies],
+          plugins: [...harness.edge.pluginConfigs],
+          specs: [...harness.edge.apiSpecs],
+          consumers: [...harness.edge.consumers],
+        }),
+        before,
+      );
+      assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
+      for (const action of ['api.delete_start', 'api.delete']) {
+        assert.equal(
+          (await harness.auditRows(action)).filter((row) => row.target_id === api.id).length,
+          0,
+          'a refused teardown records no deletion intent or completion',
+        );
+      }
     } finally {
-      harness.store.apis.findById = real;
+      harness.edgeClient.serializePerKey = serialize;
+      await fixture.cleanup();
+      await harness.store.apis.update(api.id, { ferrum_proxy_id: proxyId });
     }
-
-    assert.ok(
-      harness.edge.proxyServing('/nexus/lifecycle-moved'),
-      'the refused delete tore nothing down',
-    );
-    assert.equal(
-      (await harness.auditRows('api.delete')).filter((row) => row.target_id === api.id).length,
-      0,
-      'no api.delete row for a teardown that never ran',
-    );
-    await harness.authed(provider, { method: 'DELETE', url: `/api/apis/${api.id}` });
+    assert.ok(harness.edge.proxyServing('/nexus/lifecycle-moved'));
+    const cleanup = await harness.authed(provider, {
+      method: 'DELETE',
+      url: `/api/apis/${api.id}`,
+    });
+    assert.equal(cleanup.statusCode, 200, cleanup.body);
   });
 
   /**

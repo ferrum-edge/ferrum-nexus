@@ -4224,6 +4224,37 @@ describe('publishing', () => {
       return cutover;
     }
 
+    /** The cutover is the last mutation; exact custody/fitness reads follow it. */
+    function assertConversionVerification(
+      cutover: PathWrite,
+      proxyId: string,
+      rollback = false,
+    ): void {
+      const tail = harness.edge.requests.slice(cutover.at + 1);
+      const expected = [
+        `/proxies/${proxyId}`,
+        '/plugins/config',
+        `/api-specs/by-proxy/${proxyId}`,
+        '/deployment-snapshot',
+        ...(rollback
+          ? [`/proxies/${proxyId}`, '/plugins/config', '/api-specs', '/plugins/config']
+          : []),
+      ];
+      assert.deepEqual(
+        tail.map((call) => `${call.method} ${call.path}`),
+        expected.map((path) => `GET ${path}`),
+        'only the complete staged custody and original deployment verification follow cutover',
+      );
+      for (const call of tail) {
+        assert.equal(call.namespace, 'nexus');
+        if (call.path === '/plugins/config' || call.path === '/api-specs') {
+          assert.equal(call.query.proxy_id, proxyId);
+        }
+        if (call.path === '/deployment-snapshot') assert.deepEqual(call.query, {});
+      }
+      assert.equal(cutover.at + expected.length, harness.edge.requests.length - 1);
+    }
+
     /** Indexes of every `POST /plugins/config` in the transcript. */
     function pluginCreateIndexes(from = 0): number[] {
       return harness.edge.requests
@@ -4454,7 +4485,7 @@ describe('publishing', () => {
         // a fresh staging path, so the real one answers 404 for the whole
         // rebuild rather than answering *open*.
         const cutover = assertStagedCutover(finalPath, from);
-        assert.equal(cutover.at, harness.edge.requests.length - 1);
+        assertConversionVerification(cutover, proxyId);
         for (const at of pluginCreateIndexes(from)) assert.ok(at < cutover.at);
         assert.equal(String(harness.edge.proxyServing(finalPath)?.id), proxyId);
         assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
@@ -4485,11 +4516,12 @@ describe('publishing', () => {
       assert.equal(response.statusCode, 500, response.body);
 
       // Two rebuilds — into `routes`, then back — and *both* of them staged.
-      // The last write of the whole PATCH is the undo's cutover.
+      // The last mutation of the whole PATCH is the undo's cutover; custody
+      // and original deployment verification follow without any further write.
       const writes = listenPathWrites(from);
       const onFinal = writes.filter((write) => write.listenPath === finalPath);
       assert.equal(onFinal.length, 2, 'each rebuild ends with one move onto the real path');
-      assert.equal((onFinal[1] as PathWrite).at, harness.edge.requests.length - 1);
+      assertConversionVerification(onFinal[1] as PathWrite, proxyId, true);
       for (const write of writes) {
         if (onFinal.some((entry) => entry.at === write.at)) continue;
         assert.match(write.listenPath, STAGING_PATH, `${write.call} must be on a staging path`);
