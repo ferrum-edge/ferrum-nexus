@@ -19,8 +19,10 @@ are skipped, never enrolled and never a reason to refuse: their grant rows remai
 re-enabling the account rebuilds its groups, MCP included, from those rows. Consumers
 missing from the portal or the gateway are skipped for consumer repair.
 
-Enrollment repairs retained null-grant MCP-all membership while holding the proxy
-lease, then the consumer key. It does not take the account lifecycle key: ordering
+Enrollment runs only for a change that turns agents on or that assigns a retained
+phase-1 selection its IDs; later builds do not read grantee consumers. It repairs
+retained null-grant MCP-all membership while holding the proxy lease, then the
+consumer key. It does not take the account lifecycle key: ordering
 against a disable comes from re-reading the account's status under the consumer key,
 because a disable commits the status change first and then strips groups under that
 same key. The REST group must still be present and the account active before
@@ -73,8 +75,9 @@ on. Disabling, removing and re-adding, or renaming also rotate IDs.
 
 The write that rotates or removes an ID drops it from every explicit subset in the
 same transaction, recording `access.tools_prune` per grant with `reason`
-`definition_changed` or `tool_removed`. Holders keep REST access and their other
-tools, and need a new approval for the changed tool. A spec revision that changes a
+`definition_changed`, `tool_renamed` or `tool_removed`. Holders keep REST access and
+their other tools, and need a new approval for the changed tool, which they request on
+their existing grant (`POST /api/grants/:id/tool-requests`) without revoking it. A spec revision that changes a
 tool's definition also names it in the revision's change summary and in the grantee
 notice. Null all-tools holders intentionally continue to receive published tools,
 changed ones included. APIs saved before definition hashes were stored compare

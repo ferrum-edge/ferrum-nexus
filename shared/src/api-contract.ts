@@ -1093,7 +1093,11 @@ export interface DecideAccessRequestRequest {
 /** `POST /api/access-requests/:id/approve` */
 export interface ApproveAccessRequestResponse {
   access_request: AccessRequest;
-  /** The grant created by the approval; its ACL group is now on the consumer. */
+  /**
+   * The grant created by the approval; its ACL group is now on the consumer.
+   * For a tool request (`grant_id` set), the existing grant, now covering the
+   * added tools.
+   */
   grant: Grant;
 }
 
@@ -1117,6 +1121,24 @@ export interface ListGrantsQuery extends ListQuery {
 
 /** `GET /api/grants` */
 export type ListGrantsResponse = Paginated<Grant>;
+
+/**
+ * `POST /api/grants/:id/tool-requests` — the grantee asks for more MCP tools on
+ * an explicit-subset grant without giving up the access it already has.
+ */
+export interface RequestGrantToolsRequest {
+  /** Currently published exposure IDs the grant does not cover yet; at least one. */
+  requested_tools: string[];
+  justification: string;
+}
+
+/**
+ * `POST /api/grants/:id/tool-requests` — a pending request with `grant_id` set,
+ * decided through the ordinary approve, deny and cancel endpoints.
+ */
+export interface RequestGrantToolsResponse {
+  access_request: AccessRequest;
+}
 
 /** `POST /api/grants/:id/revoke` */
 export interface RevokeGrantRequest {

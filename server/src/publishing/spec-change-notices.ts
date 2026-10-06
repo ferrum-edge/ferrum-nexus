@@ -124,22 +124,54 @@ function changeLine(change: SpecChange): string {
   return change.operation ? `${change.operation.method} ${change.operation.path}: ${text}` : text;
 }
 
+/** `a, b and N more`, naming at most {@link SPEC_CHANGE_NOTICE_NAMED}. */
+function namedList(items: readonly string[]): string {
+  const shown = items.slice(0, SPEC_CHANGE_NOTICE_NAMED);
+  const rest = items.length - shown.length;
+  return rest > 0 ? `${shown.join(', ')} and ${rest} more` : shown.join(', ');
+}
+
+/**
+ * How a grantee gets back tools an explicit approval stopped covering: a
+ * request for them on the grant it already holds, which keeps its REST access
+ * and its other tools while the provider decides.
+ */
+function toolRecoveryText(count: number): string {
+  const them = count === 1 ? 'it' : 'them';
+  return (
+    `To use ${them} again, request ${them} on your existing grant from the API's catalog ` +
+    'page: your current access stays in place while the provider reviews the request.'
+  );
+}
+
 /**
  * What a grantee is told about agent tools whose definition changed: an
- * explicit tool approval is per definition, and an active grant cannot be
- * widened, so getting a changed tool back takes a new access request, which
- * the provider can approve only once the current grant is revoked.
+ * explicit tool approval is per definition, so a changed tool leaves it until
+ * the holder requests it on the grant and the provider approves.
  */
 export function agentToolsChangedText(tools: readonly string[]): string {
   // A tool name is provider-written, but limited to `A-Za-z0-9_.-`.
-  const shown = tools.slice(0, SPEC_CHANGE_NOTICE_NAMED).map(oneLine);
-  const rest = tools.length - shown.length;
-  const list = rest > 0 ? `${shown.join(', ')} and ${rest} more` : shown.join(', ');
+  const list = namedList(tools.map(oneLine));
   const them = tools.length === 1 ? 'it' : 'them';
   return (
     `The definition of ${plural(tools.length, 'agent tool')} changed (${list}). An explicit ` +
-    `tool approval no longer covers ${them}. To use ${them} again, request access again: ` +
-    'ask the provider to revoke your current grant, then submit a new request.'
+    `tool approval no longer covers ${them}. ${toolRecoveryText(tools.length)}`
+  );
+}
+
+/**
+ * What a grantee is told about agent tools the provider renamed, as
+ * `[old name, new name]` pairs. An explicit approval names one published tool,
+ * so a renamed tool leaves it, while an all-tools grant keeps it under its new
+ * name; without this notice the holder would only see it vanish.
+ */
+export function agentToolsRenamedText(renames: readonly (readonly [string, string])[]): string {
+  const list = namedList(renames.map(([from, to]) => `${oneLine(from)} to ${oneLine(to)}`));
+  const them = renames.length === 1 ? 'it' : 'them';
+  return (
+    `The provider renamed ${plural(renames.length, 'agent tool')} (${list}). An explicit ` +
+    `tool approval no longer covers ${them} under the new name. ` +
+    toolRecoveryText(renames.length)
   );
 }
 

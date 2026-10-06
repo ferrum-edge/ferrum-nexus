@@ -17,6 +17,7 @@ import {
 
 import {
   BREAKING_TITLE_MARK,
+  agentToolsRenamedText,
   inertText,
   rewrittenNotice,
   specChangeEmailLine,
@@ -158,9 +159,10 @@ describe('spec change notices', () => {
     assert.equal(
       one.summary,
       'The definition of 1 agent tool changed (list_orders). An explicit tool approval no ' +
-        'longer covers it. To use it again, request access again: ask the provider to revoke ' +
-        'your current grant, then submit a new request. This compares the structure of the ' +
-        'two documents, so a change it does not list can still affect you.',
+        "longer covers it. To use it again, request it on your existing grant from the API's " +
+        'catalog page: your current access stays in place while the provider reviews the ' +
+        'request. This compares the structure of the two documents, so a change it does not ' +
+        'list can still affect you.',
     );
     const names = Array.from({ length: SPEC_CHANGE_NOTICE_NAMED + 2 }, (_, i) => `tool_${i}`);
     const many = summarizeSpecChange(
@@ -172,7 +174,22 @@ describe('spec change notices', () => {
       many.summary,
       new RegExp(`${names.length} agent tools changed \\(.*tool_0.* and 2 more\\)`),
     );
-    assert.match(many.summary, /covers them\. To use them again, request access again: /);
+    assert.match(many.summary, /covers them\. To use them again, request them on your /);
+  });
+
+  it('names renamed agent tools with their new names, bounded like other lists', () => {
+    assert.equal(
+      agentToolsRenamedText([['list_orders', 'orders_list']]),
+      'The provider renamed 1 agent tool (list_orders to orders_list). An explicit tool ' +
+        'approval no longer covers it under the new name. To use it again, request it on your ' +
+        "existing grant from the API's catalog page: your current access stays in place while " +
+        'the provider reviews the request.',
+    );
+    const pairs: [string, string][] = [];
+    for (let i = 0; i <= SPEC_CHANGE_NOTICE_NAMED; i += 1) pairs.push([`old_${i}`, `new_${i}`]);
+    const text = agentToolsRenamedText(pairs);
+    assert.match(text, new RegExp(`renamed ${pairs.length} agent tools \\(old_0 to new_0, `));
+    assert.match(text, / and 1 more\)\. An explicit tool approval no longer covers them /);
   });
 
   it('says when the comparison was incomplete', () => {

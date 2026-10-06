@@ -339,6 +339,13 @@ export interface AccessRequest {
   /** Published exposure IDs; null/omitted means all, [] means REST only. */
   requested_tools?: string[] | null;
   approved_tools?: string[] | null;
+  /**
+   * The active grant this request asks to cover more MCP tools, or
+   * `null`/omitted for a request for access. On a tool request,
+   * `requested_tools` lists only the tools to add and `approved_tools` the
+   * ones the provider added; the grant keeps its REST access throughout.
+   */
+  grant_id?: Uuid | null;
   id: Uuid;
   api_id: Uuid;
   user_id: Uuid;

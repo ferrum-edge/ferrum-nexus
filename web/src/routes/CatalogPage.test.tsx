@@ -27,7 +27,7 @@ import {
   catalogEntry,
 } from '../../test/fixtures';
 import { changeField, clearClients, deferred, renderPage, selectTab } from '../../test/helpers';
-import { accessRequestsApi, applicationsApi, catalogApi, threadsApi } from '../lib/api';
+import { accessRequestsApi, applicationsApi, catalogApi, grantsApi, threadsApi } from '../lib/api';
 import { CatalogDetailPage } from './CatalogDetailPage';
 import { CatalogPage } from './CatalogPage';
 
@@ -918,5 +918,75 @@ describe('per-identity catalog access (issue #314)', () => {
       // Open access has no per-identity grant to look up.
       expect(catalogApi.identityAccess).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('more agent tools on an existing grant (issue #525)', () => {
+  const TOOLS = {
+    operations: [
+      {
+        id: 'tool-1',
+        path: '/invoices',
+        method: 'GET' as const,
+        name: 'list',
+        description: 'List',
+      },
+      {
+        id: 'tool-2',
+        path: '/invoices',
+        method: 'POST' as const,
+        name: 'create',
+        description: 'Create',
+      },
+    ],
+  };
+  const NARROW: Grant = { ...GRANT, approved_tools: ['tool-1'] };
+
+  it('asks for the uncovered tools while the grant stays in place', async () => {
+    detail = {
+      ...detail,
+      api: catalogEntry({ access_state: 'granted', agents: TOOLS }),
+      my_grant: NARROW,
+    };
+    identities.account = { ...NO_ACCESS, grant: NARROW };
+    const pending: AccessRequest = {
+      ...REQUEST,
+      grant_id: GRANT.id,
+      requested_tools: ['tool-2'],
+    };
+    const requestTools = vi.spyOn(grantsApi, 'requestTools').mockImplementation(async () => {
+      identities.account = { ...NO_ACCESS, grant: NARROW, request: pending };
+      return { access_request: pending };
+    });
+    await openDetail('Access');
+    await screen.findByText(/Access granted to your account/);
+    // Only the tool the grant lacks is offered.
+    expect(screen.queryByRole('checkbox', { name: /list \(GET/ })).not.toBeInTheDocument();
+    const submit = screen.getByRole('button', { name: 'Request tools' });
+    expect(submit).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: /create \(POST \/invoices\)/ }));
+    changeField(/Why do you need these tools/, '  Create invoices  ');
+    fireEvent.click(submit);
+    await waitFor(() =>
+      expect(requestTools).toHaveBeenCalledWith(GRANT.id, {
+        requested_tools: ['tool-2'],
+        justification: 'Create invoices',
+      }),
+    );
+    expect(await screen.findByRole('button', { name: 'Withdraw tool request' })).toBeVisible();
+    expect(screen.getByText(/Access granted to your account/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Request tools' })).not.toBeInTheDocument();
+  });
+
+  it('offers nothing to an all-tools grant', async () => {
+    detail = {
+      ...detail,
+      api: catalogEntry({ access_state: 'granted', agents: TOOLS }),
+      my_grant: GRANT,
+    };
+    identities.account = { ...NO_ACCESS, grant: GRANT };
+    await openDetail('Access');
+    await screen.findByText(/Access granted to your account/);
+    expect(screen.queryByRole('button', { name: 'Request tools' })).not.toBeInTheDocument();
   });
 });

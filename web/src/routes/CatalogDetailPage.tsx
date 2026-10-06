@@ -6,15 +6,22 @@ import {
   grantedAgentTools,
   consumerUsernameForApplication,
   consumerUsernameForUser,
+  type AccessRequest,
+  type ApiAgents,
   type CatalogAccessState,
   type CatalogApi,
   type CatalogDetailResponse,
   type CatalogIdentityAccessResponse,
+  type Grant,
 } from '@ferrum-nexus/shared';
 import { isCatalogDetailTab } from '../lib/catalog-tabs';
 import { formatDateTime } from '../lib/format';
 import { useCatalogApi, useCatalogIdentityAccess, useCatalogSpec } from '../hooks/useCatalog';
-import { useCancelAccessRequest, useCreateAccessRequest } from '../hooks/useAccessRequests';
+import {
+  useCancelAccessRequest,
+  useCreateAccessRequest,
+  useRequestGrantTools,
+} from '../hooks/useAccessRequests';
 import { useAuth } from '../stores/auth';
 import { useToast } from '../stores/toast';
 import { ACCOUNT_IDENTITY, IdentityPicker } from '../components/applications/IdentityPicker';
@@ -195,6 +202,108 @@ function Documentation({ slug, hasSpec }: { slug: string; hasSpec: boolean }): R
 }
 
 /**
+ * More agent tools for an explicit-subset grant: the tools it does not cover
+ * yet, and either the pending request for some of them or a form to ask. The
+ * grant keeps its REST access and current tools while the provider decides.
+ */
+function MoreAgentTools({
+  grant,
+  agents,
+  pending,
+}: {
+  grant: Grant;
+  agents: ApiAgents;
+  pending: AccessRequest | null;
+}): ReactElement | null {
+  const [tools, setTools] = useState<string[]>([]);
+  const [justification, setJustification] = useState('');
+  const requestTools = useRequestGrantTools();
+  const cancelRequest = useCancelAccessRequest();
+  const toast = useToast();
+
+  if (pending) {
+    const submitted = formatDateTime(pending.created_at);
+    return (
+      <div className="flex flex-col gap-3 border-t border-border pt-4">
+        <FormNotice tone="info">
+          Your request for more agent tools is awaiting review (submitted {submitted}). Your
+          current access is unchanged meanwhile.
+        </FormNotice>
+        <AgentGrantSummary
+          agents={agents}
+          subset={pending.requested_tools}
+          label="Requested tools"
+        />
+        <div>
+          <Button
+            variant="secondary"
+            loading={cancelRequest.isPending}
+            onClick={() =>
+              cancelRequest.mutate(pending.id, {
+                onSuccess: () => toast.success('Tool request withdrawn'),
+              })
+            }
+          >
+            Withdraw tool request
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  const covered = grant.approved_tools ?? [];
+  const missing = agents.operations.filter((tool) => tool.id && !covered.includes(tool.id));
+  if (missing.length === 0) return null;
+  return (
+    <form
+      className="flex flex-col gap-4 border-t border-border pt-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        requestTools.mutate(
+          { id: grant.id, body: { requested_tools: tools, justification: justification.trim() } },
+          {
+            onSuccess: () => {
+              setTools([]);
+              setJustification('');
+              toast.success('Tool request submitted');
+            },
+          },
+        );
+      }}
+    >
+      <p className="text-sm text-fg-muted">
+        Need more agent tools? Ask for them on this grant: your current access stays in place while
+        the provider reviews the request.
+      </p>
+      <AgentSubsetPicker
+        agents={{ operations: missing }}
+        value={tools}
+        onChange={(value) => setTools(value ?? [])}
+        allowAll={false}
+      />
+      <LabeledTextarea
+        label="Why do you need these tools?"
+        required
+        rows={3}
+        maxLength={MAX_JUSTIFICATION_LENGTH}
+        value={justification}
+        onChange={(event) => setJustification(event.target.value)}
+      />
+      <div>
+        <Button
+          type="submit"
+          variant="secondary"
+          loading={requestTools.isPending}
+          disabled={tools.length === 0 || justification.trim().length === 0}
+        >
+          Request tools
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+/**
  * The request/grant state of the identity chosen in the access form, and the
  * form itself when that identity may ask.
  *
@@ -270,6 +379,15 @@ function IdentityAccess({
             Manage your credentials
           </Link>
         </div>
+        {api.agents && grant.approved_tools != null && api.status !== 'retired' ? (
+          <MoreAgentTools
+            grant={grant}
+            agents={api.agents}
+            pending={
+              request?.status === 'pending' && request.grant_id === grant.id ? request : null
+            }
+          />
+        ) : null}
       </div>
     );
   } else if (request && request.status === 'pending') {

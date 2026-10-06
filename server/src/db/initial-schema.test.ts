@@ -22,6 +22,7 @@ describe('buildout schema baseline', () => {
           '009_outbox_priority',
           '010_api_agents',
           '011_mcp_tool_subsets',
+          '012_access_request_grant',
         ],
       );
       const statements = splitSqlStatements(files[0]!.sql);

@@ -880,9 +880,16 @@ export async function buildServer(
     { prefix: '/api/access-requests' },
   );
 
-  await app.register(async (scope) => scope.register(grantRoutes, { access, applications }), {
-    prefix: '/api/grants',
-  });
+  await app.register(
+    async (scope) => {
+      // `global: false`: only `POST /:id/tool-requests` opts in.
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(grantRoutes, { access, applications });
+    },
+    { prefix: '/api/grants' },
+  );
 
   await app.register(
     async (scope) => scope.register(credentialsRoutes, { credentials, applications }),

@@ -427,6 +427,7 @@ function mapAccessRequest(row: Row): AccessRequestRecord {
     justification: text(row.justification),
     requested_tools: json<string[] | null>(row.requested_tools_json, null),
     approved_tools: json<string[] | null>(row.approved_tools_json, null),
+    grant_id: textOrNull(row.grant_id),
     status: text(row.status) as AccessRequestStatus,
     decided_by: textOrNull(row.decided_by),
     decided_at: textOrNull(row.decided_at),
@@ -1942,8 +1943,9 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
           exec,
           `INSERT INTO access_requests
              (id, api_id, user_id, application_id, justification, status, decided_by, decided_at,
-              decision_note, requested_tools_json, approved_tools_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              decision_note, requested_tools_json, approved_tools_json, grant_id, created_at,
+              updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.api_id,
@@ -1956,6 +1958,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
             input.decision_note ?? null,
             encodeJson(input.requested_tools ?? null),
             encodeJson(input.approved_tools ?? null),
+            input.grant_id ?? null,
             meta.created_at,
             meta.updated_at,
           ],
@@ -2053,7 +2056,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       const rows = await queryAll(
         exec,
         `SELECT id, api_id, user_id, application_id, justification, status, decided_by,
-                decided_at, decision_note, created_at, updated_at
+                decided_at, decision_note, requested_tools_json, approved_tools_json, grant_id,
+                created_at, updated_at
          FROM (
            SELECT r.*,
                   ROW_NUMBER() OVER (

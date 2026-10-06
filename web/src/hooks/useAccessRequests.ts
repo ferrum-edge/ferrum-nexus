@@ -14,8 +14,10 @@ import type {
   DenyAccessRequestResponse,
   ListAccessRequestsQuery,
   ListAccessRequestsResponse,
+  RequestGrantToolsRequest,
+  RequestGrantToolsResponse,
 } from '@ferrum-nexus/shared';
-import { accessRequestsApi } from '../lib/api';
+import { accessRequestsApi, grantsApi } from '../lib/api';
 import { queryKeys } from './keys';
 
 /** List access requests (own requests, or an API's inbox for its provider). */
@@ -52,6 +54,23 @@ export function useCreateAccessRequest(): UseMutationResult<
   const invalidate = useInvalidateAccess();
   return useMutation({
     mutationFn: (body: CreateAccessRequestRequest) => accessRequestsApi.create(body),
+    onSuccess: invalidate,
+  });
+}
+
+/**
+ * Ask for more agent tools on one of the caller's explicit-subset grants. The
+ * result is a pending request, decided like any other.
+ */
+export function useRequestGrantTools(): UseMutationResult<
+  RequestGrantToolsResponse,
+  Error,
+  { id: string; body: RequestGrantToolsRequest }
+> {
+  const invalidate = useInvalidateAccess();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: RequestGrantToolsRequest }) =>
+      grantsApi.requestTools(id, body),
     onSuccess: invalidate,
   });
 }
