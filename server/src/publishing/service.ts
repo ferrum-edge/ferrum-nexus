@@ -291,6 +291,7 @@ import {
   definitionHashStats,
   identifyAgentTools,
   rotatedAgentTools,
+  stampedAgentDocumentBytes,
   validateAgents,
   type DefinitionHashStats,
 } from './agents.js';
@@ -772,6 +773,15 @@ export const STAGING_PATH_SEGMENT = '.staging';
  */
 export function stagingListenPath(namespace: string): string {
   return `/${namespace}/${STAGING_PATH_SEGMENT}/${randomBytes(16).toString('hex')}`;
+}
+
+/**
+ * Every listen path an agent API's proxy holds while it is published: its own,
+ * and a staging path, which a create, restore or conversion stamps the
+ * document at first. Only their lengths matter, to bound the stamped document.
+ */
+function agentListenPaths(namespace: string, slug: string): string[] {
+  return [listenPathFor(namespace, slug), stagingListenPath(namespace)];
 }
 
 /**
@@ -1580,6 +1590,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         api.spec_enforcement,
         api.requestable,
         api.allowed_methods,
+        agentListenPaths(api.namespace, api.slug),
       );
       // A tool keeps its exposure id while its published definition is
       // unchanged, so explicit subsets carry across a revision that does not
@@ -1968,6 +1979,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         specEnforcement,
         input.requestable,
         methods,
+        agentListenPaths(namespace, slug),
       );
       const hashing = definitionHashStats();
       const agents = identifyAgentTools(
@@ -2326,13 +2338,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           (patch.agents ?? api.agents) ? await store.apiSpecs.findCurrentByApi(api.id) : null;
         const agentDocument = currentSpec ? safeSpecDocument(currentSpec.raw_spec) : {};
         // Validated before hashing, which reads every selection: a duplicate
-        // or missing one is refused before it costs anything.
+        // or missing one is refused before it costs anything. The stamped
+        // document's size is bounded below, only if this PATCH rebuilds it.
         validateAgents(
           patch.agents === undefined ? (api.agents ?? null) : patch.agents,
           agentDocument,
           patch.spec_enforcement ?? api.spec_enforcement,
           patch.requestable ?? api.requestable,
           patch.allowed_methods === undefined ? api.allowed_methods : patch.allowed_methods,
+          null,
         );
         const hashing = definitionHashStats();
         const nextAgents =
@@ -2346,6 +2360,24 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 hashing,
               );
         const agentsMoved = !isDeepStrictEqual(nextAgents, api.agents ?? null);
+        // Only an agents edit or an enforcement conversion stamps the document
+        // the gateway receives, so only those are bounded, before any gateway
+        // write. A visibility, status or metadata edit leaves the gateway
+        // document alone, so an agent API published before the bound existed
+        // can still be edited, retired, or have its agents turned off.
+        if (
+          nextAgents &&
+          api.ferrum_proxy_id &&
+          (agentsMoved ||
+            (patch.spec_enforcement !== undefined &&
+              patch.spec_enforcement !== api.spec_enforcement))
+        ) {
+          stampedAgentDocumentBytes(
+            agentDocument,
+            agentListenPaths(api.namespace, api.slug),
+            nextAgents,
+          );
+        }
         Object.assign(details, toolHashFallback(hashing));
         if (agentsMoved) {
           update.agents = nextAgents;
@@ -3516,6 +3548,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           api.spec_enforcement,
           api.requestable,
           api.allowed_methods,
+          agentListenPaths(namespace, api.slug),
         );
         // The upstream the row already records wins over whatever the document
         // says: it is what the proxy was serving, and a restore must not

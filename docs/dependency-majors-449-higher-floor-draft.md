@@ -271,6 +271,11 @@ witness, `.nvmrc` and CI provenance inputs, and exact jsdom/Undici version, engi
 and presence guards. Actions stay SHA-pinned with read-only permissions, no credential
 persistence or cache, and no lifecycle scripts. The fresh-graph workaround remains historical.
 
+Note (2026-10-06): PR #526 replaced the exact jsdom/Undici version, engine and integrity
+guards described here with checks derived from the manifests and the committed lock, so a
+reviewed bump no longer fails the producer. The current checks are described in
+[the hosted locks section](dependency-majors-449.md#hosted-locks-and-qualification).
+
 Main's [producer run 37284706045, attempt 1](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/37284706045)
 created artifact `11333906619` at source `27e4312e97f585e1a2da83d231730033f285e9a8`
 using Node `v22.14.0` / npm `10.9.2`. Root verified its archive digest

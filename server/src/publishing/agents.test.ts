@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { NexusError } from '../lib/errors.js';
 import {
+  MAX_AGENT_DOCUMENT_BYTES,
   MAX_DEFINITION_HASH_WORK,
+  agentDocumentStats,
   agentToolDefinitionDigests,
   agentToolDefinitionHash,
   definitionHashStats,
   identifyAgentTools,
+  stampAgentDocument,
+  stampedAgentDocumentBytes,
+  validateAgents,
   type DefinitionHashStats,
 } from './agents.js';
 import { parseOpenApiSpec } from './oas.js';
@@ -727,6 +733,100 @@ describe('agent tool hashing work, per document dimension', () => {
     });
     const { counters } = hashPaidFor(document, tools);
     assert.equal(counters.overBudget, true);
+  });
+});
+
+describe('the stamped agent document', () => {
+  const OK = { '200': { description: 'OK' } };
+  const LISTEN_PATH = '/nexus/fan-in';
+  const LISTEN_PATHS = [LISTEN_PATH, `/nexus/.staging/${'0'.repeat(32)}`];
+
+  /** Whether `error` is the stamped document's size refusal. */
+  const tooLarge = (error: unknown): boolean =>
+    error instanceof NexusError &&
+    error.code === 'SPEC_INVALID' &&
+    (error.details as { reason?: unknown } | undefined)?.reason === 'agent_document_too_large';
+
+  it('refuses a fan-in past its budget before building, reading the document about once', () => {
+    // 2,000 paths reach one Path Item of 150,000 members through 32 hops.
+    // Stamped, every path would hold its own copy: about 3 GiB.
+    const item = { ...wide(150_000, 'x-'), post: { responses: OK } };
+    const itemBytes = Buffer.byteLength(JSON.stringify(item));
+    const { document, tools } = fanIn({
+      pathItems: { ...referenceChain('pathItems', 'H', 31, 'Item'), Item: item },
+      start: 'H0',
+      paths: 2_000,
+      tools: 1,
+    });
+    assert.ok(2_000 * itemBytes > 100 * MAX_AGENT_DOCUMENT_BYTES);
+    const agents = { operations: tools };
+    // Reading the document about once is paid for; reading the Path Item
+    // once per path, as copying it would, throws UnpaidReads at once.
+    const budget = 3 * documentSize(document);
+    const allowed = (): number => budget;
+
+    const counters = agentDocumentStats();
+    const estimate = metered(document, allowed);
+    assert.throws(
+      () => stampedAgentDocumentBytes(estimate.document, LISTEN_PATHS, agents, counters),
+      tooLarge,
+    );
+    // Abandoned at the first charge past the budget, which is at most one
+    // copy of the Path Item.
+    assert.ok(counters.charged > MAX_AGENT_DOCUMENT_BYTES, `charged ${counters.charged}`);
+    assert.ok(counters.charged <= MAX_AGENT_DOCUMENT_BYTES + itemBytes, `${counters.charged}`);
+    // Each object measured once, the Path Item included, however many paths reach it.
+    assert.ok(counters.measured < 200, `measured ${counters.measured}`);
+    assert.ok(estimate.reads() < 1_000_000, `reads ${estimate.reads()}`);
+
+    // validateAgents, which every publishing request runs before it builds
+    // anything, refuses it the same way within the same reads.
+    const validation = metered(document, allowed);
+    assert.throws(
+      () => validateAgents(agents, validation.document, 'routes', true, null, LISTEN_PATHS),
+      tooLarge,
+    );
+    assert.ok(validation.reads() < 2_000_000, `reads ${validation.reads()}`);
+    // Nothing was built: every path is still its reference.
+    const paths = document.paths as Record<string, Record<string, unknown>>;
+    assert.deepEqual(paths['/p1999'], { $ref: '#/components/pathItems/H0' });
+  });
+
+  it('charges at least what the stamped document holds, but its fixed scaffolding', () => {
+    const operation = { summary: 'Shared', 'x-ferrum-internal': true, responses: OK };
+    const { document, tools } = fanIn({
+      pathItems: {
+        Shared: {
+          summary: 'Shared',
+          servers: [{ url: '/elsewhere' }],
+          parameters: [{ name: 'q', in: 'query', schema: { type: 'string' } }],
+          get: operation,
+          post: operation,
+        },
+      },
+      paths: 64,
+      tools: 8,
+      methods: ['GET', 'POST'],
+    });
+    const agents = { operations: tools };
+    const charged = stampedAgentDocumentBytes(document, [LISTEN_PATH], agents);
+    assert.ok(charged < MAX_AGENT_DOCUMENT_BYTES);
+    const stamped = structuredClone(document);
+    stampAgentDocument(
+      stamped,
+      { id: 'fan-in-proxy', listen_path: LISTEN_PATH },
+      {
+        apiId: 'fan-in-api',
+        slug: 'fan-in',
+        agents,
+        sync: { syncMode: 'local', redisUrl: undefined, redisTls: false },
+      },
+    );
+    const bytes = Buffer.byteLength(JSON.stringify(stamped));
+    assert.ok(bytes > 64 * Buffer.byteLength(JSON.stringify(operation)), `bytes ${bytes}`);
+    assert.ok(bytes <= charged + 8_192, `${bytes} bytes, ${charged} charged`);
+    // Every route is charged at the longest path the proxy may hold.
+    assert.ok(stampedAgentDocumentBytes(document, LISTEN_PATHS, agents) > charged);
   });
 });
 

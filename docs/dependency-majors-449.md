@@ -100,8 +100,13 @@ changes when that lock's manifest declarations are unchanged, so an `e2e`-only u
 the root graph. TypeScript pins must agree across all four manifests; Vitest and coverage pins
 and installed coupled peers must match. Zod and React Table checks use the input locked versions
 when their declared ranges are unchanged, or the npm-resolved versions when those declarations
-change. This draft retains exact jsdom 30.1.2 and Undici 8.11.2 version, engine, integrity and
-presence guards; main retains its Node 22.14 producer and jsdom 26 / Undici 7 profile. The
+change. jsdom and Undici, which set the Node floor, must be present and every copy must be
+resolved from the npm registry with a sha512 integrity and declare `engines` (checked with npm's
+own semver) that admit every Node version the manifests support. No version or integrity is
+hard-coded, so a reviewed bump passes. While no manifest of a lock moves a jsdom or Undici spec,
+every copy's version, resolved URL and integrity must equal the committed lock's, so a change that
+re-resolves the graph for another reason cannot move or dedupe either; jsdom depends on Undici, so
+either spec moving releases both. The
 candidate also records `.nvmrc` and CI as inputs and checks its actual Node version. It outputs
 both locks and the complete diff, source SHA, tool versions, run identity, and SHA-256 input/output
 manifests. Review every resolved-version movement before applying an artifact.

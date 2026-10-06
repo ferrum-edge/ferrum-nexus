@@ -154,7 +154,8 @@ function agentPathItemEntries(document: Record<string, unknown>): [string, Agent
 /**
  * Resolve only Path Item objects, with Edge's sibling overlay and a bounded
  * chain, as copies a caller may rewrite. Each copy costs its Path Item's size,
- * so only the stamped document, which must hold every one, builds them.
+ * so only the stamped document, which must hold every one, builds them, and
+ * only once the server has bounded the size of all of them together.
  */
 export function agentPathItems(document: Record<string, unknown>): Record<string, unknown> {
   const paths: Record<string, unknown> = {};
