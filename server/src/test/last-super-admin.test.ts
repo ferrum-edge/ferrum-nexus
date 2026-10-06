@@ -268,10 +268,12 @@ describe('the last active super_admin across two instances', () => {
   function separateInstance(store: NexusStore, gate: Rendezvous): NexusStore {
     const facade = Object.create(store) as NexusStore;
     Object.defineProperty(facade, 'transaction', {
+      configurable: true,
       value: <T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> => fn(facade),
     });
     // Per-instance so each app's own counts are the ones being parked.
     Object.defineProperty(facade, 'users', {
+      configurable: true,
       value: {
         ...store.users,
         countActiveSuperAdmins: async (excludeUserId?: string): Promise<number> => {

@@ -256,6 +256,7 @@ Example for an admin session:
     "mode": "database",
     "admin_writes_enabled": true,
     "edge_version": null,
+    "public_egress_guaranteed": true,
     "namespace": "nexus",
     "namespace_routing": {
       "configured": "nexus",
@@ -279,22 +280,24 @@ Example for an admin session:
 ```
 
 **Admin-only fields.** For anyone who is not a signed-in admin these are `null`:
-`edge.mode`, `edge.admin_writes_enabled`, `edge.namespace_routing.active`,
+`edge.mode`, `edge.admin_writes_enabled`, `edge.public_egress_guaranteed`,
+`edge.namespace_routing.active`,
 `.serving_scope`, `.data_plane_single_namespace`, and the
 `edge.reconciliation` counts (`orphaned_consumers`, `orphaned_proxies`,
 `awaiting_restore`, `complete`). `database.error` is always the constant
 `"unreachable"` (the driver's message goes to the server log); `edge.error` is
 the real probe failure for an admin and `"unreachable"` for everyone else.
 
-| Field               | Values and meaning                                                                                                                                                                                   |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status`            | `ok` \| `degraded` \| `down`                                                                                                                                                                         |
-| `version`           | the server package version                                                                                                                                                                           |
-| `edge.status`       | `ok` \| `degraded` \| `not_ready` \| `down`                                                                                                                                                          |
-| `edge.reason`       | why a `degraded` gateway is degraded; only value `"namespace_unserved"`; `null` otherwise                                                                                                            |
-| `edge.ready`        | Edge's own readiness from its health payload; `null` when nothing answered. Edge answers `503` with a full payload while `starting`, `draining` or `unavailable`, which Nexus reports as `not_ready` |
-| `edge.edge_version` | always `null` against a stock gateway — Edge has no version endpoint                                                                                                                                 |
-| `edge.namespace`    | `FERRUM_NAMESPACE` on the portal                                                                                                                                                                     |
+| Field                           | Values and meaning                                                                                                                                                                                                                                                                    |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`                        | `ok` \| `degraded` \| `down`                                                                                                                                                                                                                                                          |
+| `version`                       | the server package version                                                                                                                                                                                                                                                            |
+| `edge.status`                   | `ok` \| `degraded` \| `not_ready` \| `down`                                                                                                                                                                                                                                           |
+| `edge.reason`                   | why a `degraded` gateway is degraded: `"namespace_unserved"`, or `"backend_egress_unverified"` for an admin and the generic `"unspecified"` for everyone else; `null` otherwise                                                                                                       |
+| `edge.ready`                    | Edge's own readiness from its health payload; `null` when nothing answered. Edge answers `503` with a full payload while `starting`, `draining` or `unavailable`, which Nexus reports as `not_ready`                                                                                  |
+| `edge.edge_version`             | always `null` against a stock gateway — Edge has no version endpoint                                                                                                                                                                                                                  |
+| `edge.public_egress_guaranteed` | admin only (`null` otherwise): `true` only when the sampled gateway policy proves public-only backend egress on its local data plane; always `false` for a control plane with remote data planes, and unchanged by either egress opt-out. Observational, never mutation authorization |
+| `edge.namespace`                | `FERRUM_NAMESPACE` on the portal                                                                                                                                                                                                                                                      |
 
 #### Is the published API actually reachable?
 
@@ -316,7 +319,36 @@ serves exactly one namespace. Publish into any other and the Admin API answers
 
 `unserved` and `edge.reason` stay public so an anonymous monitor can alert on
 them. A gateway that reports no namespace leaves `active` `null`, `unserved`
-`false` and `checked_at` `null`: an unknown topology never degrades anything.
+`false` and `checked_at` `null`: namespace mismatch alone is not inferred. The
+backend egress policy can still degrade this unknown pairing.
+
+Backend egress admission degrades the gateway when fresh sampled policy cannot establish
+the configured profile. An admin reads `edge.reason = "backend_egress_unverified"`, with a
+bounded `edge.error` that names an unsupported policy schema; everyone else reads the
+generic `"unspecified"`, because the egress posture is deployment topology. This is
+HTTP-200 degraded liveness, not mutation authorization: every backend
+write obtains its own authenticated namespace policy, including compensation. The
+public profile accepts only local-serving/public-only metadata; missing, stale,
+unknown, CP-only, default-both and allow-overlay cases refuse with bounded opaque
+`EDGE_ERROR` / `EDGE_PROTOCOL_ERROR` / `EDGE_UNAVAILABLE` diagnostics. Health's
+cache/coalescing still bounds public probe load.
+
+`edge.public_egress_guaranteed` is `true` only when that sampled policy reports
+`enforcement_scope=local-data-plane` with `public_only_guaranteed=true`. A control
+plane with remote data planes always reads `false`, even when it reports
+public-only for its own process, and `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` or
+`NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` admits its writes without changing that verdict.
+See the
+[topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee).
+Published v0.9.12 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
+
+Whole-consumer metadata replacements pair complete server-only verification with
+the original strong row `If-Match`, using Edge's masked projection and hidden-type
+preservation. Edge canonicalizes legacy JWT/HMAC fields; it can refuse genuinely
+unrepresentable history. A stale `412` is exposed as `409 CONFLICT`; credential
+material never enters portal responses, persistence or audits. Credential append/delete
+and show-once responses are unchanged. Namespace backup ETags belong to the
+separate operator recovery contract described in operations, never to Nexus gateway rebuild requests.
 
 `edge.reconciliation` reports whether Edge still holds the consumer and proxy
 ids Nexus stored — the failure after `FERRUM_ADMIN_URL` is retargeted at a fresh
@@ -1957,7 +1989,7 @@ and threads.
 | `timeouts`         | `{ connect_ms, read_ms, write_ms }` \| null | backend timeouts; `null` keeps the gateway defaults (5000 / 30000 / 30000 ms)                                                                                                                                                                            |
 | `circuit_breaker`  | boolean                                     | `true` attaches Edge's default breaker (5 failures to open, 3 successes to close, 30 s open, trips on 500/502/503/504 and connection errors)                                                                                                             |
 | `spec_enforcement` | `docs_only` \| `routes`                     | `docs_only` (default): the document is catalog metadata only. `routes`: the proxy is **spec-owned** — Edge imports the document and generates an `openapi_validator` that answers `400` for an undeclared path or method. **Bodies are never validated** |
-| `gateway_state`    | `deployed` \| `repair_required`             | `repair_required` means the portal established that the gateway does not serve this API (a reconciliation repair, or a failed restore). It stays until `POST /api/apis/:id/restore-gateway` succeeds                                                     |
+| `gateway_state`    | `deployed` \| `repair_required`             | `repair_required` means the portal established a missing or incomplete gateway deployment (a reconciliation repair, or a failed restore). It stays until `POST /api/apis/:id/restore-gateway` succeeds                                                   |
 
 `HttpMethod` is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`,
 `TRACE` or `CONNECT`.
@@ -2257,13 +2289,19 @@ _provider_, owner or admin → `{ "ok": true }`.
 
 In order:
 
-1. The Edge proxy is deleted first, cascading its plugin associations and
+1. Under the API lease and then the canonical proxy lease, retained conversion
+   and failed-restore journals are authenticated in an atomic transaction before
+   deletion intent. Unacknowledged mutations, unconfirmed staging creation and
+   unresolved restore cleanup refuse deletion without gateway or credential changes.
+   Their original encrypted custody remains intact; standalone MongoDB refuses
+   deletion with either journal before effects.
+2. The Edge proxy is deleted first, cascading its plugin associations and
    proxy-scoped configs; any config the cascade missed is removed after.
-2. The API's test identity (`nexus-test-<api_id>` consumer, its credentials and
+3. The API's test identity (`nexus-test-<api_id>` consumer, its credentials and
    ACL group) is torn down.
-3. Grants, requests, spec revisions, spec change summaries and the API row are
+4. Grants, requests, spec revisions, spec change summaries and the API row are
    deleted in one transaction, with the `api.delete` audit row.
-4. The ACL group is stripped from each grantee's consumer (outside the proxy
+5. The ACL group is stripped from each grantee's consumer (outside the proxy
    lease; a failure is logged, not retried — the group has nothing left to
    authorize), and grantees are notified.
 
@@ -2462,15 +2500,52 @@ gateway no longer serves. Empty body →
 **Non-destructive.** The API keeps its id, slug, owner, spec history, gateway
 URL and grants; only the Edge objects are recreated, from what the portal
 stores. Approved clients keep their credentials: the ACL group is derived from
-the API id, so their existing consumer groups match again. Anything configured
-directly on the gateway (an operator's plugin config, a hand edit such as
-`hide_credentials: false`) was deleted with the proxy and is not restored.
+the API id, so their existing consumer groups match again. After a missing-proxy
+repair, direct gateway changes were deleted with the proxy and are not restored.
+A failed enforcement conversion instead retains an encrypted recovery snapshot of
+the original proxy and plugins, including operator fields.
+Recovery retains the original id and uses released Edge v0.9.12 selected
+conditional removal and spec replacement. Each operation durably records its
+complete original namespace snapshot and quoted `deployment-v1` token before HTTP;
+only the expected committed/applied result, explicit recovery-cleanup authorization
+and applicable covering cursor permit dependent work. Stale authority, changed
+partial resources, lost replies and uncertain acknowledgements retain the journal
+and block cleanup or replay. Nexus never refreshes a token to retry the old body,
+uses unconditional deletion as a fallback, or restores an entire namespace.
+An unchanged original can still be reconciled read-only. An absent identity can
+be rebuilt from the retained original resources on staging; corrected `routes`
+replacement and spec-owned cutover each require their own recorded authority.
+Frozen external references and resources Nexus cannot replay require operator
+resolution. See the [released protocol and replay limits](edge-conversion-recovery-blocker.md).
+The encrypted journal and repair state commit before teardown and clear together
+with catalog, ownership and completion audit under the existing lease fences.
+Large journals use encrypted, authenticated chunks and a manifest committed in one
+atomic store transaction, preserving complete credentials and raw owner evidence
+without exceeding a setting's physical storage limit. Failed reads or writes retain
+the previous committed generation; incomplete custody cannot authorize completion.
+An uploaded corrected agent specification changes only the authorized catalog
+comparison shape; the original replay resources and tool ids remain intact.
+Exact-head hosted qualification remains pending.
+
+Read-only recovery records `api.gateway_conversion_rollback` alongside
+`api.gateway_restore` only when the original revision id, original catalog
+deployment shape and complete original proxy/plugin/specification observations
+match, with no staging attempt or rebuild. Both audits, catalog/ownership changes
+and journal deletion commit in one Nexus transaction. An audit failure retains
+the journal, ownership and `repair_required` state. Corrected revisions (even an
+identical re-upload), operator edits and older journals without original revision
+identity cannot claim original rollback. The gateway comparisons are observations;
+they do not provide an atomic Edge snapshot or fence external Admin writers.
 
 What is rebuilt, in publish order: the proxy (through the API-spec importer in
 `routes` mode), the auth plugin, `access_control` when `requestable`, the rate
 limit, CORS, and the [plugin palette](#plugin-palette); then the move onto
 `/<namespace>/<slug>` as the last write. The current revision is deployed; no
 new revision is written (you can `PUT /api/apis/:id/spec` first to correct it).
+An existing proxy clears a repair flag only after the expected listen path, backend,
+settings, owned plugins, associations, route matchers and specification ownership
+match. Recovery checks a rebuilt staging deployment before moving it onto the public path. Mere
+existence, or an incomplete original-id staging proxy, never counts as restored.
 
 | Status           | Meaning                                                                                                                                                                                        |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -2483,8 +2558,12 @@ new revision is written (you can `PUT /api/apis/:id/spec` first to correct it).
 Audit rows: `api.gateway_restore_start` (before the first gateway call; if it
 fails, nothing is built), `api.gateway_restore` with the new proxy id, and on
 failure `api.gateway_restore_failed` (with `stranded_proxy_id` when the cleanup
-delete could not be confirmed). A failed restore removes what it created and
-leaves the API `repair_required`, ready to retry.
+is unconfirmed). Selected cleanup/replacement requires the released Edge v0.9.12
+original deployment authority and explicit committed/applied cleanup acknowledgement.
+Uncertain/refused results retain the attempted identity, security configs and
+encrypted journal with `withdrawn: false` and `repair_required`; no refreshed-token
+retry or unconditional fallback is performed. See the
+[released protocol and bounded replay limits](edge-conversion-recovery-blocker.md).
 
 ### `POST /api/apis/:id/test-consumer`
 
@@ -3064,7 +3143,7 @@ configured portal namespace (`403 FORBIDDEN` otherwise). The contract defaults a
 omitted gateway namespace to `ferrum`; it does not inherit the caller's selection.
 Maximum body is 32 KiB (`413`), with bounded nesting/strings/references and strict
 schema validation (`400 VALIDATION_FAILED`). Unknown/null fields are not stripped
-or coerced. The result has `preview_only: true`, `contract_status: "proposed"`, the
+or coerced. The result has `preview_only: true`, `contract_status: "implemented"`, the
 immutable contract commit, service/public-path/protocol/auth/agent hints and redacted
 reference-presence flags. No upstream/file/TLS/telemetry values or free-form text
 are echoed. No apply, publishing, fetch or diagnostic-import endpoint exists.

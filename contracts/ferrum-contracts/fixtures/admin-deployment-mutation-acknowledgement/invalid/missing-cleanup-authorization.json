@@ -1,0 +1,6 @@
+{
+  "profile": "deployment-v1",
+  "id": "deployment",
+  "durable": "committed",
+  "live": "not_applicable"
+}

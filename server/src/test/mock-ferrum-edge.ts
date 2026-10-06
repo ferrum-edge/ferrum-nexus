@@ -58,14 +58,17 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import type { AddressInfo } from 'node:net';
+import { isDeepStrictEqual } from 'node:util';
 
 import { jwtVerify } from 'jose';
 import { FERRUM_PROVISIONED_BY_HEADER } from '@ferrum-nexus/shared';
 
 /** One recorded Admin API call. */
 export interface RecordedRequest {
+  ifMatch?: string;
   provisionedBy?: string;
   method: string;
   /** Path without the query string. */
@@ -244,6 +247,8 @@ interface QueuedFailure {
 
 /** The running mock. */
 export interface MockFerrumEdge {
+  /** Exact owner-contract response; null models the missing capability. */
+  setBackendEgressPolicy(payload: Record<string, unknown> | null): void;
   /** Base URL, e.g. `http://127.0.0.1:54321`. Valid after `start()`. */
   readonly url: string;
   /** Every request the mock has served since the last `reset()`. */
@@ -343,6 +348,7 @@ export interface MockFerrumEdge {
   readonly consumers: Map<string, StoredConsumer>;
   /** Direct access to stored proxies, keyed `<namespace>/<id>`. */
   readonly proxies: Map<string, Record<string, unknown>>;
+  readonly upstreams: Map<string, Record<string, unknown>>;
   /** Direct access to stored plugin configs, keyed `<namespace>/<id>`. */
   readonly pluginConfigs: Map<string, Record<string, unknown>>;
   /** Direct access to stored API specs, keyed `<namespace>/<id>`. */
@@ -441,6 +447,79 @@ const HISTOGRAM_BOUNDS = [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 
 const REDACTED = '[REDACTED]';
 const REDACTABLE_TYPES = new Set(['keyauth', 'jwt', 'hmac_auth']);
 const KNOWN_CREDENTIAL_TYPES = new Set(['basicauth', 'keyauth', 'jwt', 'hmac_auth', 'mtls_auth']);
+
+/** Deterministic fixture HMAC, separate from the Admin JWT key. Never stores plaintext. */
+export function mockBasicPasswordHash(password: string): string {
+  return (
+    'hmac_sha256:' +
+    createHmac('sha256', 'mock-basic-hmac-secret-0123456789abcdef').update(password).digest('hex')
+  );
+}
+
+/** Owner closed single-field/Basic input validation and Basic write preparation. */
+function prepareCredentials(
+  credentials: Record<string, Record<string, unknown>[]>,
+  maxCredentials: number,
+): Record<string, Record<string, unknown>[]> | null {
+  const prepared: Record<string, Record<string, unknown>[]> = {};
+  for (const [type, entries] of Object.entries(credentials)) {
+    if (
+      !/^[A-Za-z0-9_-]{1,64}$/.test(type) ||
+      !Array.isArray(entries) ||
+      entries.length === 0 ||
+      entries.length > maxCredentials
+    ) {
+      return null;
+    }
+    const result: Record<string, unknown>[] = [];
+    for (const entry of entries) {
+      if (!isRecord(entry)) return null;
+      for (const value of Object.values(entry)) {
+        if (
+          typeof value === 'string' &&
+          ([...value].length > 4096 || /[\u0000-\u001f\u007f-\u009f]/.test(value))
+        ) {
+          return null;
+        }
+      }
+      if (type === 'basicauth') {
+        if (Object.keys(entry).length !== 1) return null;
+        if (typeof entry.password === 'string' && entry.password !== '') {
+          if (
+            [...entry.password].length > 4096 ||
+            /[\u0000-\u001f\u007f-\u009f]/.test(entry.password)
+          ) {
+            return null;
+          }
+          result.push({ password_hash: mockBasicPasswordHash(entry.password) });
+          continue;
+        }
+        if (
+          typeof entry.password_hash !== 'string' ||
+          !/^hmac_sha256:[0-9a-f]{64}$/.test(entry.password_hash)
+        ) {
+          return null;
+        }
+      }
+      const field = type === 'mtls_auth' ? 'identity' : type === 'keyauth' ? 'key' : 'secret';
+      if (['jwt', 'hmac_auth', 'mtls_auth'].includes(type) && Object.keys(entry).length !== 1) {
+        return null;
+      }
+      if (KNOWN_CREDENTIAL_TYPES.has(type) && type !== 'basicauth') {
+        const value = entry[field];
+        if (typeof value !== 'string' || value.trim() === '') return null;
+        if (REDACTABLE_TYPES.has(type) && value === REDACTED) return null;
+        if (type === 'jwt' && [...value].length < 32) return null;
+        if (type === 'hmac_auth' && [...value].filter((char) => char.trim() !== '').length < 32) {
+          return null;
+        }
+      }
+      result.push({ ...entry });
+    }
+    prepared[type] = result;
+  }
+  return prepared;
+}
 
 /**
  * Every field Edge's `Proxy` deserializer accepts, from the openapi `Proxy`
@@ -943,6 +1022,42 @@ function generateValidatorConfig(
     ...(validate.bypass === undefined ? {} : { bypass: validate.bypass }),
     operations: generateOperations(document),
   };
+}
+
+/** Edge merges the first embedded validator before plugin admission, regenerating operations. */
+function importedValidatorConfig(
+  document: Record<string, unknown>,
+  validate: Record<string, unknown>,
+  operator: Record<string, unknown>,
+): Record<string, unknown> {
+  const generated = generateValidatorConfig(document, validate);
+  const merged: Record<string, unknown> = {
+    ...generated,
+    ...operator,
+    operations: generated.operations,
+  };
+  if (isRecord(operator.bypass)) {
+    const original: Record<string, unknown> = isRecord(generated.bypass) ? generated.bypass : {};
+    const bypass: Record<string, unknown> = { ...original, ...operator.bypass };
+    for (const field of ['paths', 'methods', 'consumers']) {
+      const added = operator.bypass[field];
+      if (Array.isArray(added)) {
+        const values: unknown[] = Array.isArray(original[field]) ? [...original[field]] : [];
+        for (const candidate of added) {
+          if (!values.some((value) => isDeepStrictEqual(value, candidate))) values.push(candidate);
+        }
+        bypass[field] = values;
+      }
+    }
+    if (isRecord(operator.bypass.header_present)) {
+      bypass.header_present = {
+        ...(isRecord(original.header_present) ? original.header_present : {}),
+        ...operator.bypass.header_present,
+      };
+    }
+    merged.bypass = bypass;
+  }
+  return merged;
 }
 
 /** `Proxy.allowed_methods` entries, from the openapi enum. */
@@ -1464,6 +1579,25 @@ function triggerNodeError(node: unknown, path: string): string | null {
   return null;
 }
 
+function openapiValidatorBypassError(bypass: unknown): string | null {
+  if (bypass === undefined) return null;
+  if (!isRecord(bypass)) return "openapi_validator: 'bypass' must be an object";
+  for (const field of Object.keys(bypass)) {
+    if (!OPENAPI_BYPASS_KEYS.has(field)) {
+      return `openapi_validator: bypass unknown field '${field}'`;
+    }
+  }
+  for (const field of ['paths', 'methods', 'consumers']) {
+    if (bypass[field] !== undefined && !Array.isArray(bypass[field])) {
+      return `openapi_validator: 'bypass.${field}' must be an array`;
+    }
+  }
+  if (bypass.header_present !== undefined && !isRecord(bypass.header_present)) {
+    return "openapi_validator: 'bypass.header_present' must be an object";
+  }
+  return null;
+}
+
 /**
  * Edge's admission checks for `openapi_validator`, reduced to what Nexus can
  * actually get wrong.
@@ -1510,18 +1644,8 @@ function openapiValidatorError(config: Record<string, unknown>): string | null {
     }
   }
 
-  const bypass = config.bypass;
-  if (bypass !== undefined) {
-    if (!isRecord(bypass)) return "openapi_validator: 'bypass' must be an object";
-    for (const field of Object.keys(bypass)) {
-      if (!OPENAPI_BYPASS_KEYS.has(field)) {
-        return `openapi_validator: bypass unknown field '${field}'`;
-      }
-    }
-    if (bypass.methods !== undefined && !Array.isArray(bypass.methods)) {
-      return "openapi_validator: 'bypass.methods' must be an array of strings";
-    }
-  }
+  const bypassProblem = openapiValidatorBypassError(config.bypass);
+  if (bypassProblem) return bypassProblem;
 
   // A config with no schemas and no unknown-operation check enforces nothing at
   // all, which Edge refuses rather than accepting as a no-op policy.
@@ -1536,21 +1660,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Apply Edge's closed read projection to a stored consumer. */
-function project(consumer: StoredConsumer): Record<string, unknown> {
+/** Owner projection: legacy single objects are wrapped; hidden/empty types are omitted. */
+function projectCredentials(
+  stored: Record<string, Record<string, unknown>[]>,
+): Record<string, Record<string, unknown>[]> {
   const credentials: Record<string, Record<string, unknown>[]> = {};
-  for (const [type, entries] of Object.entries(consumer.credentials)) {
-    if (type === 'basicauth') continue; // omitted entirely
-    if (!KNOWN_CREDENTIAL_TYPES.has(type)) continue; // unknown types are omitted
+  for (const [type, value] of Object.entries(stored)) {
+    const entries = (Array.isArray(value) ? value : [value]).filter(isRecord);
     if (type === 'mtls_auth') {
-      credentials[type] = entries.map((entry) => ({ identity: entry.identity }));
-      continue;
-    }
-    if (REDACTABLE_TYPES.has(type)) {
+      const visible = entries.filter(
+        (entry) =>
+          typeof entry.identity === 'string' &&
+          entry.identity.trim() !== '' &&
+          [...entry.identity].length <= 4096 &&
+          !/[\u0000-\u001f\u007f-\u009f]/.test(entry.identity),
+      );
+      if (visible.length > 0) {
+        credentials[type] = visible.map((entry) => ({ identity: entry.identity }));
+      }
+    } else if (REDACTABLE_TYPES.has(type) && entries.length > 0) {
       const field = type === 'keyauth' ? 'key' : 'secret';
       credentials[type] = entries.map(() => ({ [field]: REDACTED }));
     }
   }
+  return credentials;
+}
+
+/** Apply Edge's closed read projection to a stored consumer. */
+function project(consumer: StoredConsumer): Record<string, unknown> {
+  const credentials = projectCredentials(consumer.credentials);
   return {
     id: consumer.id,
     username: consumer.username,
@@ -1564,6 +1702,25 @@ function project(consumer: StoredConsumer): Record<string, unknown> {
   };
 }
 
+/** Public serving singleton fixture; not evidence about a deployed gateway. */
+export function publicEgressPolicy(namespace = 'nexus'): Record<string, unknown> {
+  return {
+    schema_version: 1,
+    ip_classification: 'ferrum-private-reserved-v1',
+    namespace,
+    policy_scope: 'process',
+    enforcement_scope: 'local-data-plane',
+    mode: 'public',
+    mode_allowed_ip_classes: ['public'],
+    mode_blocked_ip_classes: ['private-reserved'],
+    dangerous_ranges_blocked: true,
+    allow_cidr_overrides_present: false,
+    deny_cidr_overrides_present: false,
+    evaluation_order: ['allow-cidrs', 'deny-cidrs', 'dangerous-ranges', 'ip-mode'],
+    public_only_guaranteed: true,
+  };
+}
+
 /** Build (but do not start) the mock. */
 export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrumEdge {
   const secret = new TextEncoder().encode(options.jwtSecret);
@@ -1574,13 +1731,18 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
   const consumers = new Map<string, StoredConsumer>();
   const proxies = new Map<string, Record<string, unknown>>();
+  const upstreams = new Map<string, Record<string, unknown>>();
   const pluginConfigs = new Map<string, Record<string, unknown>>();
   const apiSpecs = new Map<string, StoredApiSpec>();
   const namespaces = new Map<string, { name: string; description: string | null }>();
+  const deploymentSequences = new Map<string, number>();
+  const writeScopes = new WeakMap<ServerResponse, string>();
+  const deploymentAcks = new WeakMap<ServerResponse, { id: string; namespace: string }>();
   const requests: RecordedRequest[] = [];
   const failures: QueuedFailure[] = [];
   const lostAcks: QueuedFailure[] = [];
   const delays: QueuedDelay[] = [];
+  let egressPolicy: Record<string, unknown> | null | undefined;
   /**
    * Responses whose acknowledgement is being dropped, keyed by the response
    * object the handler will eventually write to.
@@ -1634,6 +1796,11 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
   function consumersIn(namespace: string): StoredConsumer[] {
     return [...consumers.values()].filter((consumer) => consumer.namespace === namespace);
+  }
+
+  function consumerTag(consumer: StoredConsumer): string {
+    const mac = createHmac('sha256', secret).update(JSON.stringify(consumer)).digest('hex');
+    return '"' + mac.slice(0, 32) + '"';
   }
 
   function identityTaken(namespace: string, values: (string | null)[], selfId?: string): boolean {
@@ -1760,7 +1927,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     return {
       gateway: {
         mode: 'database',
-        ferrum_version: '0.9.0',
+        ferrum_version: '0.9.12',
         uptime_seconds: MOCK_GATEWAY_UPTIME_SECONDS,
         total_requests: totalRequests,
         proxy_count: proxies.size,
@@ -1780,6 +1947,33 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   }
 
   function send(res: ServerResponse, status: number, body?: unknown): void {
+    const writeNamespace = writeScopes.get(res);
+    writeScopes.delete(res);
+    if (writeNamespace && status >= 200 && status < 300) {
+      deploymentSequences.set(writeNamespace, (deploymentSequences.get(writeNamespace) ?? 0) + 1);
+    }
+    const deployment = deploymentAcks.get(res);
+    deploymentAcks.delete(res);
+    if (deployment && status >= 200 && status < 300) {
+      const applicable =
+        health.mode !== 'cp' &&
+        health.mode !== 'node_agent' &&
+        !dataPlaneUnserved(deployment.namespace);
+      status = 200;
+      body = {
+        profile: 'deployment-v1',
+        id: deployment.id,
+        durable: 'committed',
+        live: applicable ? 'applied' : 'not_applicable',
+        recovery_cleanup_authorized: applicable,
+      };
+      if (applicable) {
+        res.setHeader(
+          'x-ferrum-config-cursor',
+          `1:${deploymentSequences.get(deployment.namespace)}`,
+        );
+      }
+    }
     const dropped = droppedAcks.get(res);
     if (dropped) {
       droppedAcks.delete(res);
@@ -1910,6 +2104,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     namespace: string,
     body: unknown,
     query: URLSearchParams,
+    ifMatch: string | string[] | undefined,
   ): void {
     const [, id, credentialsSegment, credentialType, indexSegment] = segments;
 
@@ -1942,13 +2137,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             'Consumer identity or credential conflicts with another Consumer in the namespace',
           );
         }
+        const submitted = normaliseCredentials(body.credentials);
+        const credentials =
+          submitted === null ? null : prepareCredentials(submitted, maxCredentials);
+        if (credentials === null) return fail(res, 400, 'Invalid consumer credentials');
         const stored: StoredConsumer = {
           id: newId,
           ...(isRecord(body.labels) && { labels: body.labels as Record<string, string> }),
           username,
           namespace,
           custom_id: customId,
-          credentials: normaliseCredentials(body.credentials),
+          credentials,
           acl_groups: Array.isArray(body.acl_groups) ? body.acl_groups.map(String) : [],
           created_at: nowIso(),
           updated_at: nowIso(),
@@ -1962,13 +2161,25 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     const stored = consumers.get(key(namespace, id));
 
+    const tag = stored ? consumerTag(stored) : undefined;
+    if (credentialsSegment === 'verification' && method === 'GET') {
+      if (!stored) return fail(res, 404, 'Consumer not found');
+      res.setHeader('cache-control', 'no-store');
+      res.setHeader('etag', tag!);
+      return send(res, 200, stored);
+    }
+
     if (credentialsSegment === undefined) {
       if (method === 'GET') {
         if (!stored) return fail(res, 404, 'Consumer not found');
+        res.setHeader('etag', tag!);
         return send(res, 200, project(stored));
       }
       if (method === 'PUT') {
         if (!stored) return fail(res, 404, 'Consumer not found');
+        if (ifMatch !== undefined && ifMatch !== tag) {
+          return fail(res, 412, 'Precondition failed');
+        }
         if (!isRecord(body)) return fail(res, 400, 'Request body must be a JSON object');
         for (const field of Object.keys(body)) {
           if (!CONSUMER_KEYS.has(field)) return fail(res, 400, `unknown field: ${field}`);
@@ -1982,11 +2193,14 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             'Consumer identity or credential conflicts with another Consumer in the namespace',
           );
         }
+        const merged = mergeCredentialsOnReplace(stored.credentials, body.credentials);
+        const credentials = merged === null ? null : prepareCredentials(merged, maxCredentials);
+        if (credentials === null) return fail(res, 400, 'Invalid consumer credentials');
         if (isRecord(body.labels)) stored.labels = body.labels as Record<string, string>;
         stored.username = username;
         stored.custom_id = customId;
         stored.acl_groups = Array.isArray(body.acl_groups) ? body.acl_groups.map(String) : [];
-        stored.credentials = mergeCredentialsOnReplace(stored.credentials, body.credentials);
+        stored.credentials = credentials;
         stored.updated_at = nowIso();
         return send(res, 200, project(stored));
       }
@@ -2002,7 +2216,14 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       return fail(res, 404, 'Not found');
     }
     if (!stored) return fail(res, 404, 'Consumer not found');
-    if (!KNOWN_CREDENTIAL_TYPES.has(credentialType)) {
+    if (
+      !KNOWN_CREDENTIAL_TYPES.has(credentialType) &&
+      !(
+        method === 'DELETE' &&
+        indexSegment === undefined &&
+        Object.hasOwn(stored.credentials, credentialType)
+      )
+    ) {
       return fail(res, 400, `Unknown credential type '${credentialType}'`);
     }
 
@@ -2029,7 +2250,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       if (credentialType === 'keyauth' && body.key === REDACTED) {
         return fail(res, 400, '[REDACTED] is not accepted as credential material');
       }
-      entries.push({ ...body });
+      const prepared = prepareCredentials({ [credentialType]: [body] }, maxCredentials);
+      if (prepared === null) return fail(res, 400, 'Invalid credential entry');
+      entries.push(...prepared[credentialType]!);
       stored.credentials[credentialType] = entries;
       stored.updated_at = nowIso();
       return send(res, 200, project(stored));
@@ -2041,7 +2264,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       if (list.length > maxCredentials) {
         return fail(res, 400, 'FERRUM_MAX_CREDENTIALS_PER_TYPE exceeded');
       }
-      stored.credentials[credentialType] = list.map((entry) => ({ ...(entry as object) }));
+      if (!list.every(isRecord)) return fail(res, 400, 'Invalid credential entry');
+      const prepared = prepareCredentials({ [credentialType]: list }, maxCredentials);
+      if (prepared === null) return fail(res, 400, 'Invalid credential entry');
+      stored.credentials[credentialType] = prepared[credentialType]!;
       stored.updated_at = nowIso();
       return send(res, 200, project(stored));
     }
@@ -2053,14 +2279,16 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     return fail(res, 405, 'Method not allowed');
   }
 
-  function normaliseCredentials(value: unknown): Record<string, Record<string, unknown>[]> {
-    if (!isRecord(value)) return {};
+  function normaliseCredentials(value: unknown): Record<string, Record<string, unknown>[]> | null {
+    if (value === undefined) return {};
+    if (!isRecord(value)) return null;
     const result: Record<string, Record<string, unknown>[]> = {};
     for (const [type, entries] of Object.entries(value)) {
       if (Array.isArray(entries)) {
-        result[type] = entries.filter(isRecord).map((entry) => ({ ...entry }));
-      } else if (isRecord(entries)) {
-        result[type] = [{ ...entries }];
+        if (!entries.every(isRecord)) return null;
+        result[type] = entries.map((entry) => ({ ...entry }));
+      } else {
+        return null;
       }
     }
     return result;
@@ -2075,16 +2303,47 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   function mergeCredentialsOnReplace(
     stored: Record<string, Record<string, unknown>[]>,
     incoming: unknown,
-  ): Record<string, Record<string, unknown>[]> {
+  ): Record<string, Record<string, unknown>[]> | null {
     const submitted = normaliseCredentials(incoming);
+    if (submitted === null) return null;
+    const projected = projectCredentials(stored);
     const result: Record<string, Record<string, unknown>[]> = {};
 
     for (const [type, entries] of Object.entries(submitted)) {
-      const previous = stored[type] ?? [];
+      const storedValue = stored[type];
+      const previous = Array.isArray(storedValue)
+        ? storedValue
+        : isRecord(storedValue)
+          ? [storedValue]
+          : [];
+      if (
+        entries.some((entry, index) => {
+          const field = type === 'keyauth' ? 'key' : 'secret';
+          return (
+            REDACTABLE_TYPES.has(type) &&
+            Object.keys(entry).length === 1 &&
+            entry[field] === REDACTED &&
+            previous[index] === undefined
+          );
+        })
+      ) {
+        return null;
+      }
+      if (type === 'mtls_auth' && JSON.stringify(entries) === JSON.stringify(projected.mtls_auth)) {
+        result[type] = storedValue!;
+        continue;
+      }
       result[type] = entries.map((entry, index) => {
         const field = type === 'keyauth' ? 'key' : 'secret';
-        if (entry[field] === REDACTED) {
+        if (
+          REDACTABLE_TYPES.has(type) &&
+          Object.keys(entry).length === 1 &&
+          entry[field] === REDACTED
+        ) {
           const restored = previous[index];
+          if (restored && type !== 'keyauth' && typeof restored.secret === 'string') {
+            return { secret: restored.secret };
+          }
           return restored ? { ...restored } : { ...entry };
         }
         return { ...entry };
@@ -2093,7 +2352,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     // Types absent from the read projection are preserved when omitted.
     for (const [type, entries] of Object.entries(stored)) {
       if (result[type] !== undefined) continue;
-      if (type === 'basicauth' || !KNOWN_CREDENTIAL_TYPES.has(type)) result[type] = entries;
+      if (projected[type] === undefined) result[type] = entries;
     }
     return result;
   }
@@ -2188,6 +2447,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     namespace: string,
     body: unknown,
     query: URLSearchParams,
+    provisionedBy?: string,
   ): void {
     const id = segments[1];
     if (id === undefined) {
@@ -2216,6 +2476,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         if (associationProblem) return fail(res, 400, associationProblem);
         const proxy = {
           ...body,
+          ...createdLabels(body, provisionedBy),
           id: newId,
           namespace,
           strip_listen_path: body.strip_listen_path ?? true,
@@ -2252,6 +2513,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
       const updated = {
         ...body,
+        ...(body.labels === undefined && existing.labels ? { labels: existing.labels } : {}),
         id,
         namespace,
         plugins: body.plugins === undefined ? existing.plugins : body.plugins,
@@ -2271,6 +2533,16 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       // is what makes deleting the proxy a complete rollback for a `routes`
       // publish.
       deleteProxyCascade(namespace, id);
+      if (query.get('cleanup_orphaned_upstream') !== 'false' && existing.upstream_id) {
+        const upstreamId = existing.upstream_id;
+        if (
+          ![...proxies.values()].some(
+            (proxy) => proxy.namespace === namespace && proxy.upstream_id === upstreamId,
+          )
+        ) {
+          upstreams.delete(key(namespace, String(upstreamId)));
+        }
+      }
       return send(res, 204);
     }
     return fail(res, 405, 'Method not allowed');
@@ -2281,6 +2553,18 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
    * cascades are real: deleting the spec deletes the proxy, and deleting the
    * proxy deletes the spec.
    */
+
+  /** Native CRUD stamps only creates; explicit update labels can remove origin. */
+  function createdLabels(
+    resource: Record<string, unknown>,
+    provisionedBy?: string,
+  ): Record<string, unknown> {
+    const labels = { ...(isRecord(resource.labels) ? resource.labels : {}) };
+    if (provisionedBy !== undefined && labels['provisioned-by'] === undefined) {
+      labels['provisioned-by'] = provisionedBy.trim();
+    }
+    return Object.keys(labels).length === 0 ? {} : { labels };
+  }
 
   /** The spec that owns `proxyId`, or `undefined`. */
   function specForProxy(namespace: string, proxyId: string): StoredApiSpec | undefined {
@@ -2311,6 +2595,95 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     ];
   }
 
+  /** Chrono 0.4.44 DateTime serde uses its relaxed RFC3339 parser before import stamping. */
+  function importedTimestamp(value: unknown): boolean {
+    if (typeof value !== 'string') return false;
+    const parts = value.match(
+      /^\p{White_Space}*([+-]\d+|\d{1,4})\p{White_Space}*-\p{White_Space}*(\d{1,2})\p{White_Space}*-\p{White_Space}*(\d{1,2})[tT ]\p{White_Space}*(\d{1,2})\p{White_Space}*:\p{White_Space}*(\d{1,2})\p{White_Space}*:\p{White_Space}*(\d{1,2})(?:\.\d+)?\p{White_Space}*(?:[zZ]|[uU][tT][cC]|([+−-])(\d{2})[\p{White_Space}:]*(\d{2}))\p{White_Space}*$(?![\s\S])/u,
+    );
+    if (!parts) return false;
+    const [
+      ,
+      yearText,
+      monthText,
+      dayText,
+      hourText,
+      minuteText,
+      secondText,
+      offsetSign,
+      offsetHour,
+      offsetMinute,
+    ] = parts;
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const day = Number(dayText);
+    if (
+      year < -262_143 ||
+      year > 262_142 ||
+      month < 1 ||
+      month > 12 ||
+      day < 1 ||
+      day > 31 ||
+      Number(hourText) > 23 ||
+      Number(minuteText) > 59 ||
+      Number(secondText) > 60 ||
+      Number(offsetHour ?? 0) > 23 ||
+      Number(offsetMinute ?? 0) > 59
+    ) {
+      return false;
+    }
+    const calendar = new Date(0);
+    calendar.setUTCFullYear(year, month - 1, day);
+    if (
+      calendar.getUTCFullYear() !== year ||
+      calendar.getUTCMonth() !== month - 1 ||
+      calendar.getUTCDate() !== day
+    ) {
+      return false;
+    }
+    // Chrono encodes :60 as second 59 plus excess nanoseconds. checked_sub_offset
+    // shifts only whole seconds, preserving that fraction even at a date boundary.
+    const localSeconds =
+      Number(hourText) * 3_600 + Number(minuteText) * 60 + Math.min(Number(secondText), 59);
+    const offsetSeconds = Number(offsetHour ?? 0) * 3_600 + Number(offsetMinute ?? 0) * 60;
+    const utcSeconds = localSeconds - (offsetSign === '+' ? offsetSeconds : -offsetSeconds);
+    // Offsets are less than a day, so only the first/last local date can overflow.
+    // Integer seconds avoid rounding accepted subnanosecond input into another day.
+    return !(
+      (year === -262_143 && month === 1 && day === 1 && utcSeconds < 0) ||
+      (year === 262_142 && month === 12 && day === 31 && utcSeconds >= 86_400)
+    );
+  }
+
+  /** Native typed decoding/ID admission runs before generated IDs, namespace and times. */
+  function importedResourceProblem(resource: Record<string, unknown>): string | null {
+    if (
+      resource.id !== undefined &&
+      (typeof resource.id !== 'string' ||
+        (resource.id !== '' &&
+          (resource.id.length > 254 ||
+            !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$(?![\s\S])/.test(resource.id))))
+    ) {
+      return 'Invalid imported resource id';
+    }
+    if (resource.namespace !== undefined && typeof resource.namespace !== 'string') {
+      return 'Imported resource namespace must be a string';
+    }
+    if (
+      resource.labels !== undefined &&
+      (!isRecord(resource.labels) ||
+        Object.values(resource.labels).some((value) => typeof value !== 'string'))
+    ) {
+      return 'Imported resource labels must be a string map';
+    }
+    for (const field of ['created_at', 'updated_at']) {
+      if (resource[field] !== undefined && !importedTimestamp(resource[field])) {
+        return `Invalid imported resource ${field}`;
+      }
+    }
+    return null;
+  }
+
   /**
    * The structural checks `POST` and `PUT /api-specs` share, returning the
    * `x-ferrum-proxy` body once the document passes.
@@ -2319,7 +2692,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     body: unknown,
   ):
     | { error: string; code: string; details: string; status: number }
-    | { proxy: Record<string, unknown> } {
+    | { proxy: Record<string, unknown>; plugins: Record<string, unknown>[] } {
     const parseError = (code: string, details: string, status = 400) => ({
       error: 'Spec parse failed',
       code,
@@ -2355,6 +2728,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         );
       }
     }
+    const proxyMetadataProblem = importedResourceProblem(proxy);
+    if (proxyMetadataProblem) return parseError('MalformedExtension', proxyMetadataProblem);
     const validate = body['x-ferrum-validate'];
     if (isRecord(validate)) {
       for (const field of Object.keys(validate)) {
@@ -2362,6 +2737,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           return parseError('MalformedExtension', `unknown x-ferrum-validate field: ${field}`);
         }
       }
+      const bypassProblem = openapiValidatorBypassError(validate.bypass);
+      if (bypassProblem) return parseError('MalformedExtension', bypassProblem);
     }
     const mcp = body['x-ferrum-mcp'];
     if (mcp === true || isRecord(mcp)) {
@@ -2388,18 +2765,92 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         }
       }
     }
-    for (const plugin of Array.isArray(body['x-ferrum-plugins']) ? body['x-ferrum-plugins'] : []) {
+    const submittedPlugins = body['x-ferrum-plugins'];
+    if (submittedPlugins !== undefined && !Array.isArray(submittedPlugins)) {
+      return parseError('MalformedExtension', 'x-ferrum-plugins must be an array');
+    }
+    const embedded = submittedPlugins ?? [];
+    const validator = embedded.find(
+      (plugin) => isRecord(plugin) && plugin.plugin_name === 'openapi_validator',
+    );
+    for (const plugin of embedded) {
       if (!isRecord(plugin) || typeof plugin.plugin_name !== 'string') {
         return parseError('MalformedExtension', 'Invalid spec plugin');
       }
-      const problem = validatePluginConfig(plugin.plugin_name, plugin.config);
+      // The native extractor defaults an omitted scope before decoding the
+      // closed PluginConfig resource. Explicit invalid fields still fail.
+      for (const field of Object.keys(plugin)) {
+        if (!PLUGIN_CONFIG_KEYS.has(field)) {
+          return parseError('MalformedExtension', `unknown spec plugin field: ${field}`);
+        }
+      }
+      const metadataProblem = importedResourceProblem(plugin);
+      if (metadataProblem) return parseError('MalformedExtension', metadataProblem);
+      if (plugin.proxy_id != null && typeof plugin.proxy_id !== 'string') {
+        return parseError('MalformedExtension', 'Spec plugin proxy_id must be a string or null');
+      }
+      if (plugin.proxy_id != null && plugin.proxy_id !== (proxy.id ?? '')) {
+        return parseError(
+          'PluginProxyIdMismatch',
+          'Spec plugin proxy_id must match the proxy id',
+          422,
+        );
+      }
+      if (
+        typeof plugin.id === 'string' &&
+        plugin.id !== '' &&
+        embedded.some((other) => other !== plugin && isRecord(other) && other.id === plugin.id)
+      ) {
+        return parseError('MalformedExtension', 'Duplicate spec plugin id');
+      }
+      if (plugin.scope !== undefined && plugin.scope !== 'proxy') {
+        return parseError('MalformedExtension', 'Spec plugins must have proxy scope');
+      }
+      if (plugin.enabled !== undefined && typeof plugin.enabled !== 'boolean') {
+        return parseError('MalformedExtension', 'Spec plugin enabled must be a boolean');
+      }
+      if (plugin.api_spec_id != null) {
+        return parseError('MalformedExtension', 'Spec plugin api_spec_id is server-managed');
+      }
+      if (
+        plugin.labels !== undefined &&
+        (!isRecord(plugin.labels) ||
+          Object.values(plugin.labels).some((value) => typeof value !== 'string'))
+      ) {
+        return parseError('MalformedExtension', 'Spec plugin labels must be a string map');
+      }
+      if (
+        plugin.priority_override != null &&
+        (typeof plugin.priority_override !== 'number' ||
+          !Number.isInteger(plugin.priority_override) ||
+          plugin.priority_override < 0 ||
+          plugin.priority_override > 65_535)
+      ) {
+        return parseError('MalformedExtension', 'Spec plugin priority_override must be a u16');
+      }
+      const generated = plugin === validator && (validate === true || isRecord(validate));
+      if (generated && !isRecord(plugin.config)) {
+        return parseError('MalformedExtension', 'openapi_validator config must be an object');
+      }
+      if (generated && isRecord(plugin.config)) {
+        const bypassProblem = openapiValidatorBypassError(plugin.config.bypass);
+        if (bypassProblem) return parseError('MalformedExtension', bypassProblem);
+      }
+      const settings = generated
+        ? importedValidatorConfig(
+            body,
+            isRecord(validate) ? validate : {},
+            plugin.config as Record<string, unknown>,
+          )
+        : plugin.config;
+      const problem = validatePluginConfig(plugin.plugin_name, settings);
       if (problem) return parseError('MalformedExtension', problem);
       const triggerProblem = validatePluginTrigger(plugin.plugin_name, plugin.trigger);
       if (triggerProblem) return parseError('MalformedExtension', triggerProblem);
     }
     const settingsProblem = validateProxySettings(proxy);
     if (settingsProblem) return parseError('MalformedExtension', settingsProblem);
-    return { proxy };
+    return { proxy, plugins: embedded as Record<string, unknown>[] };
   }
 
   /**
@@ -2415,8 +2866,29 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     proxyId: string,
     document: Record<string, unknown>,
     proxyBody: Record<string, unknown>,
+    embedded: Record<string, unknown>[],
     createdAt: string,
+    provisionedBy?: string,
   ): void {
+    const previousProxy = proxies.get(key(namespace, proxyId));
+    const previousPlugins = new Map<string, Record<string, unknown>>(
+      specOwnedConfigs(namespace, specId).map((config) => [String(config.id), config]),
+    );
+    // Native import preserves missing labels from the same resource identity;
+    // newly imported resources acquire attribution without replacing operator labels.
+    function importedLabels(
+      resource: Record<string, unknown>,
+      previous?: Record<string, unknown>,
+    ): Record<string, unknown> {
+      const labels = {
+        ...(isRecord(previous?.labels) ? previous.labels : {}),
+        ...(isRecord(resource.labels) ? resource.labels : {}),
+      };
+      if (!previous && provisionedBy !== undefined && labels['provisioned-by'] === undefined) {
+        labels['provisioned-by'] = provisionedBy.trim();
+      }
+      return Object.keys(labels).length === 0 ? {} : { labels };
+    }
     const survivors = [...pluginConfigs.values()]
       .filter(
         (config) =>
@@ -2433,6 +2905,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     const proxy: Record<string, unknown> = {
       ...proxyBody,
+      ...importedLabels(proxyBody, previousProxy),
       id: proxyId,
       namespace,
       strip_listen_path: proxyBody.strip_listen_path ?? true,
@@ -2445,17 +2918,13 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     const generated: string[] = [];
     const validate = document['x-ferrum-validate'];
-    const embedded = Array.isArray(document['x-ferrum-plugins'])
-      ? document['x-ferrum-plugins']
-      : [];
-    const embeddedValidator = embedded.find(
-      (plugin) => isRecord(plugin) && plugin.plugin_name === 'openapi_validator',
-    );
+    const embeddedValidator = embedded.find((plugin) => plugin.plugin_name === 'openapi_validator');
     if ((validate === true || isRecord(validate)) && !embeddedValidator) {
       const config = {
         id: randomUUID(),
         plugin_name: 'openapi_validator',
         namespace,
+        ...importedLabels({}),
         config: generateValidatorConfig(document, isRecord(validate) ? validate : {}),
         scope: 'proxy',
         proxy_id: proxyId,
@@ -2468,25 +2937,33 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       generated.push(config.id);
     }
     for (const entry of embedded) {
-      if (!isRecord(entry)) continue;
-      const id = typeof entry.id === 'string' ? entry.id : randomUUID();
+      const id = typeof entry.id === 'string' && entry.id !== '' ? entry.id : randomUUID();
+      const previous = previousPlugins.get(id);
       const settings =
         entry === embeddedValidator && (validate === true || isRecord(validate))
-          ? {
-              ...generateValidatorConfig(document, isRecord(validate) ? validate : {}),
-              ...(isRecord(entry.config) ? entry.config : {}),
-              operations: generateValidatorConfig(document, isRecord(validate) ? validate : {})
-                .operations,
-            }
+          ? importedValidatorConfig(
+              document,
+              isRecord(validate) ? validate : {},
+              entry.config as Record<string, unknown>,
+            )
           : entry.config;
-      const config = {
+      const config: Record<string, unknown> = {
+        scope: 'proxy',
+        enabled: true,
         ...entry,
-        config: settings,
+        ...importedLabels(entry, previous),
+        config: settings === undefined ? null : settings,
         id,
         namespace,
         proxy_id: proxyId,
         api_spec_id: specId,
+        created_at: previous?.created_at ?? nowIso(),
+        updated_at: nowIso(),
       };
+      // Native serialization omits empty labels and absent optional metadata.
+      if (isRecord(config.labels) && Object.keys(config.labels).length === 0) delete config.labels;
+      if (config.priority_override == null) delete config.priority_override;
+      if (config.trigger == null) delete config.trigger;
       pluginConfigs.set(key(namespace, id), config);
       generated.push(id);
     }
@@ -2500,6 +2977,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     namespace: string,
     body: unknown,
     query: URLSearchParams,
+    provisionedBy?: string,
   ): void {
     const [, first, second] = segments;
 
@@ -2577,7 +3055,16 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         updated_at: nowIso(),
       };
       apiSpecs.set(key(namespace, spec.id), spec);
-      applySpecDocument(namespace, spec.id, proxyId, document, proxyBody, spec.created_at);
+      applySpecDocument(
+        namespace,
+        spec.id,
+        proxyId,
+        document,
+        proxyBody,
+        checked.plugins,
+        spec.created_at,
+        provisionedBy,
+      );
       return send(res, 201, {
         id: spec.id,
         proxy_id: proxyId,
@@ -2599,7 +3086,11 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
       const document = body as Record<string, unknown>;
       const proxyBody = checked.proxy;
-      if (typeof proxyBody.id === 'string' && proxyBody.id !== existing.proxy_id) {
+      if (
+        typeof proxyBody.id === 'string' &&
+        proxyBody.id !== '' &&
+        proxyBody.id !== existing.proxy_id
+      ) {
         return fail(res, 409, 'x-ferrum-proxy.id may not move an existing spec to another proxy');
       }
       if (typeof proxyBody.listen_path !== 'string' || !proxyBody.listen_path.startsWith('/')) {
@@ -2634,7 +3125,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         existing.proxy_id,
         document,
         proxyBody,
+        checked.plugins,
         typeof proxy?.created_at === 'string' ? proxy.created_at : nowIso(),
+        provisionedBy,
       );
       return send(res, 200, {
         id: existing.id,
@@ -2693,6 +3186,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     namespace: string,
     body: unknown,
     query: URLSearchParams,
+    provisionedBy?: string,
   ): void {
     const id = segments[2];
     if (id === undefined) {
@@ -2763,6 +3257,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         if (triggerProblem) return fail(res, 400, triggerProblem);
         const config = {
           ...body,
+          ...createdLabels(body, provisionedBy),
           id: typeof body.id === 'string' && body.id !== '' ? body.id : randomUUID(),
           namespace,
           enabled: body.enabled ?? true,
@@ -2803,6 +3298,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
       const updated = {
         ...body,
+        ...(body.labels === undefined && existing.labels ? { labels: existing.labels } : {}),
         id,
         namespace,
         // Server-owned: a replace cannot claim or disclaim spec ownership.
@@ -2878,6 +3374,144 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
   /* ── Dispatcher ───────────────────────────────────────────────────────── */
 
+  /** Native in-memory owner evidence. Real SQL/BSON preservation is a packaged CI gate. */
+  function deploymentSnapshot(namespace: string): Record<string, unknown> {
+    const selected = <T extends { namespace?: unknown; id?: unknown }>(rows: Iterable<T>): T[] =>
+      [...rows]
+        .filter((row) => row.namespace === namespace)
+        .sort((left, right) => {
+          const leftId = String(left.id);
+          const rightId = String(right.id);
+          return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+        });
+    const snapshotProxies = selected(proxies.values()).map((proxy) => ({
+      ...proxy,
+      plugins: [...(proxy.plugins as { plugin_config_id: string }[])].sort((left, right) => {
+        const leftId = left.plugin_config_id;
+        const rightId = right.plugin_config_id;
+        return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+      }),
+    }));
+    const snapshotConsumers = selected(consumers.values());
+    const snapshotUpstreams = selected(upstreams.values());
+    const snapshotPlugins = selected(pluginConfigs.values());
+    const snapshotSpecs = selected(apiSpecs.values()).map((spec) => {
+      const bytes = Buffer.from(JSON.stringify(spec.document));
+      const { document: _document, ...metadata } = spec;
+      return {
+        ...metadata,
+        spec_format: 'json',
+        content_encoding: 'gzip',
+        spec_content: [...gzipSync(bytes)],
+        uncompressed_size: bytes.length,
+        content_hash: createHash('sha256').update(bytes).digest('hex'),
+      };
+    });
+    const namespaceRecord = namespaces.get(namespace) ?? null;
+    const storedRows = (rows: unknown[]): Record<string, unknown>[] =>
+      rows.map((row) => ({
+        mock_document: { column_type: 'json', value_type: 'text', value: JSON.stringify(row) },
+      }));
+    const evidence = {
+      profile: 'deployment-v1',
+      resources: [
+        snapshotProxies,
+        snapshotConsumers,
+        snapshotUpstreams,
+        snapshotPlugins,
+        [],
+        snapshotSpecs,
+        namespaceRecord,
+        deploymentSequences.get(namespace) ?? 0,
+      ],
+      stored: {
+        proxies: storedRows(snapshotProxies),
+        consumers: storedRows(snapshotConsumers),
+        upstreams: storedRows(snapshotUpstreams),
+        plugin_configs: storedRows(snapshotPlugins),
+        proxy_plugins: storedRows(snapshotProxies.flatMap((proxy) => proxy.plugins)),
+        api_specs: storedRows(snapshotSpecs),
+        gateway_trust_bundles: [],
+        consumer_identity_index: [],
+        consumer_credential_index: [],
+        namespaces: storedRows(namespaceRecord ? [namespaceRecord] : []),
+      },
+    };
+    const digest = createHmac('sha256', options.jwtSecret)
+      .update(JSON.stringify([namespace, evidence]))
+      .digest('hex')
+      .slice(0, 32);
+    return {
+      profile: 'deployment-v1',
+      namespace,
+      namespace_etag: `"deployment-v1-${digest}"`,
+      evidence,
+      proxies: snapshotProxies,
+      plugin_configs: snapshotPlugins,
+      upstreams: snapshotUpstreams,
+      api_specs: snapshotSpecs,
+    };
+  }
+
+  function admitDeployment(
+    req: IncomingMessage,
+    res: ServerResponse,
+    url: URL,
+    namespace: string,
+    removal: boolean,
+  ): boolean {
+    const refusal = (status: number, durable: string): false => {
+      send(res, status, {
+        error: 'Deployment authority refused',
+        durable,
+        live: 'unconfirmed',
+        recovery_cleanup_authorized: false,
+      });
+      return false;
+    };
+    const query = url.searchParams;
+    const matches = req.rawHeaders.filter(
+      (_, index) => index % 2 === 0 && req.rawHeaders[index]?.toLowerCase() === 'if-match',
+    );
+    const token = req.headers['if-match'];
+    if (
+      query.getAll('conditional').length !== 1 ||
+      query.get('conditional') !== 'true' ||
+      query.getAll('apply').length > 1 ||
+      (query.has('apply') && query.get('apply') !== 'sync') ||
+      (removal &&
+        (query.getAll('cleanup_orphaned_upstream').length !== 1 ||
+          query.get('cleanup_orphaned_upstream') !== 'false')) ||
+      [...query.keys()].some(
+        (key) =>
+          !['conditional', 'apply', ...(removal ? ['cleanup_orphaned_upstream'] : [])].includes(
+            key,
+          ),
+      ) ||
+      matches.length !== 1 ||
+      typeof token !== 'string' ||
+      !/^"deployment-v1-[0-9a-f]{32}"(?![\s\S])/.test(token)
+    ) {
+      return refusal(400, 'not_started');
+    }
+    if (token !== deploymentSnapshot(namespace).namespace_etag) {
+      return refusal(412, 'not_committed');
+    }
+    const id = decodeURIComponent(url.pathname.split('/')[2]!);
+    const proxy = removal
+      ? proxies.get(key(namespace, id))
+      : proxies.get(key(namespace, apiSpecs.get(key(namespace, id))?.proxy_id ?? ''));
+    if (!proxy || proxyAssociationError(String(proxy.id), namespace, proxy.plugins)) {
+      return refusal(409, 'not_committed');
+    }
+    const ownedSpec = specForProxy(namespace, String(proxy.id));
+    if ((ownedSpec?.id ?? null) !== (proxy.api_spec_id ?? null)) {
+      return refusal(409, 'not_committed');
+    }
+    deploymentAcks.set(res, { id, namespace });
+    return true;
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://mock.invalid');
     const segments = url.pathname.split('/').filter((segment) => segment !== '');
@@ -2898,6 +3532,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     const claims = verified instanceof Error ? null : verified;
     const provisionedBy = req.headers[FERRUM_PROVISIONED_BY_HEADER.toLowerCase()];
     requests.push({
+      ifMatch: typeof req.headers['if-match'] === 'string' ? req.headers['if-match'] : undefined,
       provisionedBy: typeof provisionedBy === 'string' ? provisionedBy : undefined,
       method,
       path: url.pathname,
@@ -2908,14 +3543,24 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     });
 
     if (verified instanceof Error) return fail(res, 401, verified.message);
-    if (claims?.role !== 'admin' && segments[0] === 'consumers') {
+    if (
+      claims?.role !== 'admin' &&
+      (segments[0] === 'consumers' ||
+        segments[0] === 'backend-egress-policy' ||
+        segments[0] === 'deployment-snapshot' ||
+        (segments[0] === 'api-specs' && method === 'PUT'))
+    ) {
       return fail(res, 403, `Admin role '${String(claims?.role)}' cannot access this endpoint`);
     }
 
     // Namespace-scoped surfaces are selected by `X-Ferrum-Namespace`; the
     // `/namespaces/{name}` registry routes are selected by the name in the path.
     const scopedNamespace =
-      segments[0] === 'consumers' || segments[0] === 'proxies' || segments[0] === 'api-specs'
+      segments[0] === 'consumers' ||
+      segments[0] === 'proxies' ||
+      segments[0] === 'api-specs' ||
+      segments[0] === 'deployment-snapshot' ||
+      segments[0] === 'backend-egress-policy'
         ? namespace
         : segments[0] === 'plugins' && segments[1] === 'config'
           ? namespace
@@ -2989,7 +3634,44 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
     }
 
+    const deploymentRequested =
+      url.searchParams.has('conditional') ||
+      String(req.headers['if-match'] ?? '').includes('deployment-v1-');
+    if (deploymentRequested) {
+      const removal = segments[0] === 'proxies' && segments.length === 2 && method === 'DELETE';
+      const replacement = segments[0] === 'api-specs' && segments.length === 2 && method === 'PUT';
+      if (!removal && !replacement) return fail(res, 400, 'Unsupported deployment mutation');
+      if (!admitDeployment(req, res, url, namespace, removal)) return;
+    } else if (segments[0] === 'api-specs' && method !== 'GET' && req.headers['if-match']) {
+      return fail(res, 400, 'API-spec If-Match requires deployment authority');
+    }
+    if (method !== 'GET' && scopedNamespace !== null) writeScopes.set(res, namespace);
+
     switch (segments[0]) {
+      case 'deployment-snapshot': {
+        if (method !== 'GET' || url.search !== '') return fail(res, 400, 'Unfiltered GET required');
+        const snapshot = deploymentSnapshot(namespace);
+        res.setHeader('cache-control', 'no-store');
+        res.setHeader('etag', String(snapshot.namespace_etag));
+        return send(res, 200, snapshot);
+      }
+      case 'backend-egress-policy': {
+        if (method !== 'GET') return fail(res, 405, 'Method not allowed');
+        if (egressPolicy === null) return fail(res, 404, 'Not found');
+        const payload = egressPolicy ?? {
+          ...publicEgressPolicy(namespace),
+          enforcement_scope:
+            health.mode === 'cp'
+              ? 'admission-only'
+              : health.mode === 'node_agent'
+                ? 'no-data-plane'
+                : dataPlaneUnserved(namespace)
+                  ? 'unserved-namespace'
+                  : 'local-data-plane',
+        };
+        res.setHeader('cache-control', 'no-store');
+        return send(res, 200, payload);
+      }
       case 'health':
       case 'status':
         // Edge serves the *complete* payload with a 503 while it is
@@ -3012,14 +3694,46 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       case 'namespaces':
         return handleNamespaces(res, method, segments, body, url.searchParams);
       case 'consumers':
-        return handleConsumers(res, method, segments, namespace, body, url.searchParams);
+        return handleConsumers(
+          res,
+          method,
+          segments,
+          namespace,
+          body,
+          url.searchParams,
+          req.headers['if-match'],
+        );
       case 'proxies':
-        return handleProxies(res, method, segments, namespace, body, url.searchParams);
+        return handleProxies(
+          res,
+          method,
+          segments,
+          namespace,
+          body,
+          url.searchParams,
+          typeof provisionedBy === 'string' ? provisionedBy : undefined,
+        );
       case 'api-specs':
-        return handleApiSpecs(res, method, segments, namespace, body, url.searchParams);
+        return handleApiSpecs(
+          res,
+          method,
+          segments,
+          namespace,
+          body,
+          url.searchParams,
+          typeof provisionedBy === 'string' ? provisionedBy : undefined,
+        );
       case 'plugins':
         if (segments[1] === 'config') {
-          return handlePluginConfigs(res, method, segments, namespace, body, url.searchParams);
+          return handlePluginConfigs(
+            res,
+            method,
+            segments,
+            namespace,
+            body,
+            url.searchParams,
+            typeof provisionedBy === 'string' ? provisionedBy : undefined,
+          );
         }
         if (method === 'GET') {
           // The plugins Nexus writes: the six first-class ones plus every
@@ -3058,8 +3772,12 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     requests,
     consumers,
     proxies,
+    upstreams,
     pluginConfigs,
     apiSpecs,
+    setBackendEgressPolicy(payload): void {
+      egressPolicy = payload;
+    },
 
     async start(): Promise<string> {
       if (server) return baseUrl;
@@ -3085,11 +3803,14 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     },
 
     reset(): void {
+      egressPolicy = undefined;
       consumers.clear();
       proxies.clear();
+      upstreams.clear();
       pluginConfigs.clear();
       apiSpecs.clear();
       namespaces.clear();
+      deploymentSequences.clear();
       requests.length = 0;
       failures.length = 0;
       lostAcks.length = 0;

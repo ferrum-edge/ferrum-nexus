@@ -1,0 +1,7 @@
+{
+  "profile": "deployment-v1",
+  "id": "deployment",
+  "durable": "pending",
+  "live": "not_applicable",
+  "recovery_cleanup_authorized": false
+}

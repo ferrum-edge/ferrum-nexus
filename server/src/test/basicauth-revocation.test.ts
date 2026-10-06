@@ -37,6 +37,7 @@ import {
 
 import type { CredentialRecord } from '../db/store.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
+import { mockBasicPasswordHash } from './mock-ferrum-edge.js';
 
 function errorOf(body: string): ApiErrorBody['error'] {
   return (JSON.parse(body) as ApiErrorBody).error;
@@ -148,17 +149,19 @@ describe('basicauth revocation removes the selected password', () => {
   }
 
   /**
-   * The basicauth passwords live on the mock gateway, in array order — read
+   * The basicauth hashes live on the mock gateway, in array order — read
    * off the stored consumer, because Edge omits the type from every response.
    */
-  function livePasswords(actor: TestSession): string[] {
+  function livePasswordHashes(actor: TestSession): string[] {
     const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(actor.user.id));
-    return (consumer?.credentials.basicauth ?? []).map((entry) => String(entry.password));
+    return (consumer?.credentials.basicauth ?? []).map((entry) => String(entry.password_hash));
   }
 
   /** Whether the gateway would still accept this credential's password. */
   function authenticates(actor: TestSession, issued: { secret: ShowOnceSecret }): boolean {
-    return livePasswords(actor).includes(String(issued.secret.password));
+    return livePasswordHashes(actor).includes(
+      mockBasicPasswordHash(String(issued.secret.password)),
+    );
   }
 
   /** The account's basicauth rows that still occupy a gateway slot. */
@@ -189,7 +192,7 @@ describe('basicauth revocation removes the selected password', () => {
     const failed = await tryIssue(user);
     assert.ok(failed.statusCode >= 500, failed.body);
     assert.ok(!('secret' in JSON.parse(failed.body)), 'no secret was handed out');
-    assert.equal(livePasswords(user).length, 1, 'the append reached the gateway');
+    assert.equal(livePasswordHashes(user).length, 1, 'the append reached the gateway');
 
     // The entry has a row: it holds its slot, and says its outcome is unproved.
     const rows = await liveRowsOf(user);
@@ -212,12 +215,12 @@ describe('basicauth revocation removes the selected password', () => {
     // No active row is left, so the repair on offer is revoking the retiring one.
     assert.match(errorOf(later.body).message, /revoke the retiring credential/);
     assert.doesNotMatch(errorOf(later.body).message, /clear_type/);
-    assert.equal(livePasswords(user).length, 1, 'nothing was appended');
+    assert.equal(livePasswordHashes(user).length, 1, 'nothing was appended');
 
     // Revoking the only row clears the type, the unrecorded entry with it.
     const cleared = await revoke(user, pending.id);
     assert.equal(cleared.statusCode, 200, cleared.body);
-    assert.equal(livePasswords(user).length, 0, 'no basicauth password survives');
+    assert.equal(livePasswordHashes(user).length, 0, 'no basicauth password survives');
     assert.equal(await statusOf(pending.id), 'revoked');
 
     // …and the identity is back to ordinary self-service.
@@ -238,12 +241,17 @@ describe('basicauth revocation removes the selected password', () => {
     const username = consumerUsernameForUser(user.user.id);
     const entries = harness.edge.consumerByUsername(username)?.credentials.basicauth;
     assert.ok(entries);
-    entries.unshift({ password: 'an-entry-appended-without-a-portal-row' });
+    await harness.edgeClient.consumers.addCredential(
+      tracked.credential.ferrum_consumer_id,
+      'basicauth',
+      { password: 'an-entry-appended-without-a-portal-row' },
+    );
+    entries.unshift(entries.pop()!);
 
     const revoked = await revoke(user, tracked.credential.id);
     assert.equal(revoked.statusCode, 200, revoked.body);
     assert.equal(authenticates(user, tracked), false, 'the revoked password no longer works');
-    assert.equal(livePasswords(user).length, 0, 'the untracked entry went with the type');
+    assert.equal(livePasswordHashes(user).length, 0, 'the untracked entry went with the type');
     assert.equal(await statusOf(tracked.credential.id), 'revoked');
   });
 
@@ -257,7 +265,7 @@ describe('basicauth revocation removes the selected password', () => {
     harness.edge.queueLostAck(503, { error: 'timeout' }, '/credentials/basicauth', 'POST');
     const lost = await tryIssue(user);
     assert.equal(lost.statusCode, 502, lost.body);
-    assert.equal(livePasswords(user).length, 2, 'the append landed');
+    assert.equal(livePasswordHashes(user).length, 2, 'the append landed');
 
     const rows = await liveRowsOf(user);
     assert.equal(rows.length, 2, 'both gateway entries are named by portal rows');
@@ -272,12 +280,12 @@ describe('basicauth revocation removes the selected password', () => {
     // The unconfirmed row is not addressed by position…
     const refused = await revoke(user, pending.id);
     assert.equal(refused.statusCode, 409, refused.body);
-    assert.equal(livePasswords(user).length, 2, 'nothing was deleted');
+    assert.equal(livePasswordHashes(user).length, 2, 'nothing was deleted');
 
     // …but the last active credential takes the type, and the pending row, with it.
     const cleared = await revoke(user, kept.credential.id);
     assert.equal(cleared.statusCode, 200, cleared.body);
-    assert.equal(livePasswords(user).length, 0);
+    assert.equal(livePasswordHashes(user).length, 0);
     assert.equal(await statusOf(kept.credential.id), 'revoked');
     assert.equal(await statusOf(pending.id), 'revoked');
   });
@@ -296,7 +304,7 @@ describe('basicauth revocation removes the selected password', () => {
       appends,
       'nothing was appended',
     );
-    assert.equal(livePasswords(user).length, 0);
+    assert.equal(livePasswordHashes(user).length, 0);
     assert.equal((await liveRowsOf(user)).length, 0);
   });
 
@@ -305,7 +313,7 @@ describe('basicauth revocation removes the selected password', () => {
     harness.edge.queueLostAck(408, { error: 'request timeout' }, '/credentials/basicauth', 'POST');
     const timedOut = await tryIssue(user);
     assert.equal(timedOut.statusCode, 502, timedOut.body);
-    assert.equal(livePasswords(user).length, 1, 'the append landed');
+    assert.equal(livePasswordHashes(user).length, 1, 'the append landed');
 
     const rows = await liveRowsOf(user);
     assert.equal(rows.length, 1, 'the entry keeps a row');
@@ -316,7 +324,7 @@ describe('basicauth revocation removes the selected password', () => {
 
     const cleared = await revoke(user, rows[0]!.id);
     assert.equal(cleared.statusCode, 200, cleared.body);
-    assert.equal(livePasswords(user).length, 0);
+    assert.equal(livePasswordHashes(user).length, 0);
   });
 
   it('records the stranded append even when its row cannot be restored either', async () => {
@@ -339,7 +347,7 @@ describe('basicauth revocation removes the selected password', () => {
       }
     })();
     assert.ok(failed.statusCode >= 500, failed.body);
-    assert.equal(livePasswords(user).length, 1, 'the append reached the gateway');
+    assert.equal(livePasswordHashes(user).length, 1, 'the append reached the gateway');
 
     const rows = await liveRowsOf(user);
     assert.equal(rows.length, 1);
@@ -360,11 +368,11 @@ describe('basicauth revocation removes the selected password', () => {
     );
     const rejected = await tryIssue(user);
     assert.equal(rejected.statusCode, 502, rejected.body);
-    assert.equal(livePasswords(user).length, 0);
+    assert.equal(livePasswordHashes(user).length, 0);
     assert.equal((await liveRowsOf(user)).length, 0);
 
     const next = await issue(user);
-    assert.equal(livePasswords(user).length, 1);
+    assert.equal(livePasswordHashes(user).length, 1);
     assert.equal(await statusOf(next.credential.id), 'active');
   });
 
@@ -404,13 +412,13 @@ describe('basicauth revocation removes the selected password', () => {
     assert.equal(rotated.statusCode, 409, rotated.body);
     assert.ok(!('secret' in JSON.parse(rotated.body)), 'no secret was handed out');
     assert.equal((await tryIssue(user)).statusCode, 409);
-    assert.equal(livePasswords(user).length, 1, 'the gateway is untouched');
+    assert.equal(livePasswordHashes(user).length, 1, 'the gateway is untouched');
     assert.equal(await statusOf(second.credential.id), 'active');
 
     // Revoking the last active credential clears the type and settles the rest.
     const cleared = await revoke(user, second.credential.id);
     assert.equal(cleared.statusCode, 200, cleared.body);
-    assert.equal(livePasswords(user).length, 0);
+    assert.equal(livePasswordHashes(user).length, 0);
     assert.equal(await statusOf(first.credential.id), 'revoked');
     assert.equal(await statusOf(second.credential.id), 'revoked');
     const trail = (await rowsFor('credential.revoke', consumerId)).find(
@@ -437,7 +445,7 @@ describe('basicauth revocation removes the selected password', () => {
       url: `/api/credentials/${first.credential.id}?clear_type=true`,
     });
     assert.equal(lost.statusCode, 502, lost.body);
-    assert.equal(livePasswords(user).length, 0, 'the delete reached Edge');
+    assert.equal(livePasswordHashes(user).length, 0, 'the delete reached Edge');
     assert.equal(await statusOf(first.credential.id), 'retiring');
 
     const retried = await harness.authed(user, {
@@ -473,7 +481,7 @@ describe('basicauth revocation removes the selected password', () => {
       url: `/api/credentials/${survivor.id}?clear_type=true`,
     });
     assert.equal(cleared.statusCode, 200, cleared.body);
-    assert.equal(livePasswords(user).length, 0);
+    assert.equal(livePasswordHashes(user).length, 0);
   });
 
   it('keeps a lost append acknowledgement at the cap named during rotation', async () => {
@@ -488,14 +496,14 @@ describe('basicauth revocation removes the selected password', () => {
     assert.equal(await statusOf(second.credential.id), 'active');
     const rows = await liveRowsOf(user);
     assert.equal(rows.filter((row) => row.status === 'retiring').length, 1);
-    assert.equal(livePasswords(user).length, 2);
+    assert.equal(livePasswordHashes(user).length, 2);
 
     const cleared = await harness.authed(user, {
       method: 'DELETE',
       url: `/api/credentials/${second.credential.id}?clear_type=true`,
     });
     assert.equal(cleared.statusCode, 200, cleared.body);
-    assert.equal(livePasswords(user).length, 0);
+    assert.equal(livePasswordHashes(user).length, 0);
   });
 
   it('leaves a failed settlement for reconciliation instead of guessing', async () => {
@@ -523,7 +531,7 @@ describe('basicauth revocation removes the selected password', () => {
     });
     assert.equal(response.statusCode, 200, response.body);
     assert.equal(response.json<ReconcileCredentialsResponse>().revoked_credentials, 2);
-    assert.equal(livePasswords(user).length, 0);
+    assert.equal(livePasswordHashes(user).length, 0);
     assert.equal(await statusOf(first.credential.id), 'revoked');
     assert.equal(await statusOf(second.credential.id), 'revoked');
 
@@ -557,14 +565,14 @@ describe('basicauth revocation removes the selected password', () => {
     assert.equal(body.previous.status, 'revoked');
     assert.equal(authenticates(user, second), false);
     assert.equal(authenticates(user, body), true);
-    assert.equal(livePasswords(user).length, 1);
+    assert.equal(livePasswordHashes(user).length, 1);
 
     // A new credential beside it is issued as usual, and each is revocable.
     const third = await issue(user);
     assert.equal((await revoke(user, body.credential.id)).statusCode, 200);
     assert.equal(authenticates(user, third), true);
     assert.equal((await revoke(user, third.credential.id)).statusCode, 200);
-    assert.equal(livePasswords(user).length, 0);
+    assert.equal(livePasswordHashes(user).length, 0);
   });
 
   it('serializes a concurrent issue and revoke without losing the new password', async () => {
@@ -578,7 +586,7 @@ describe('basicauth revocation removes the selected password', () => {
     assert.equal(await statusOf(original.credential.id), 'revoked');
     assert.equal(await statusOf(replacement.credential.id), 'active');
     assert.equal(authenticates(user, replacement), true);
-    assert.equal(livePasswords(user).length, 1);
+    assert.equal(livePasswordHashes(user).length, 1);
   });
 
   /* ── clear_type is bounded ───────────────────────────────────────────── */
@@ -635,7 +643,7 @@ describe('basicauth revocation removes the selected password', () => {
       url: `/api/credentials/${own.credential.id}?clear_type=true`,
     });
     assert.equal(cleared.statusCode, 200, cleared.body);
-    assert.equal(livePasswords(user).length, 0);
+    assert.equal(livePasswordHashes(user).length, 0);
     assert.equal(await statusOf(own.credential.id), 'revoked');
     assert.equal(await statusOf(foreign.id), 'revoked');
   });
@@ -772,7 +780,11 @@ describe('legacy basicauth append scan', () => {
     const second = await issue(user);
     const consumerId = first.ferrum_consumer_id;
     // The orphan itself: an entry on the gateway that no row accounts for.
-    gatewayEntries(user).unshift({ password: 'an-entry-v0.2.0-appended-without-a-row' });
+    await harness.edgeClient.consumers.addCredential(consumerId, 'basicauth', {
+      password: 'an-entry-v0.2.0-appended-without-a-row',
+    });
+    const entries = gatewayEntries(user);
+    entries.unshift(entries.pop()!);
     const event = await seedLegacyOrphan(user, consumerId);
 
     await rescan();

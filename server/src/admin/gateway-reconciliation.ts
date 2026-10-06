@@ -901,7 +901,7 @@ export function createGatewayReconciliationService(
     };
     const moved = 'The API’s gateway proxy changed while the repair was running';
     try {
-      const outcome = await edge.serializePerKey(apiRestoreLockKey(orphan.api_id), async () => {
+      const flag = async () => {
         const current = await store.apis.findById(orphan.api_id);
         if (!current) return { kind: 'gone' } as const;
         if (current.ferrum_proxy_id !== orphan.ferrum_proxy_id) return { kind: 'moved' } as const;
@@ -911,6 +911,13 @@ export function createGatewayReconciliationService(
         // only — an unreachable gateway is never evidence that a proxy is gone.
         if ((await edge.proxies.get(orphan.ferrum_proxy_id)) !== null) {
           return { kind: 'present' } as const;
+        }
+
+        // A conversion journal owns this identity even during a confirmed gap.
+        // Only validated publishing recovery may release it; clearing it here
+        // would let deletion and restore bypass the canonical proxy lease.
+        if (await store.settings.get(`gateway_recovery:${namespace}:${current.id}`)) {
+          return { kind: 'recovery' } as const;
         }
 
         // Both facts in one write, and the audit row with them. Clearing the
@@ -944,7 +951,12 @@ export function createGatewayReconciliationService(
         });
         if (!flagged) return { kind: 'moved' } as const;
         return { kind: 'flagged', api: flagged } as const;
-      });
+      };
+      // Same API-then-proxy order as restore. Conversions and deletion already
+      // hold the proxy key, so a transient teardown cannot be mistaken for loss.
+      const outcome = await edge.serializePerKey(apiRestoreLockKey(orphan.api_id), () =>
+        edge.serializePerKey(`proxy:${orphan.ferrum_proxy_id}`, flag),
+      );
 
       if (outcome.kind === 'gone') {
         return { ...base, error: 'The portal no longer holds a row for this API' };
@@ -952,6 +964,13 @@ export function createGatewayReconciliationService(
       if (outcome.kind === 'moved') return { ...base, error: moved };
       if (outcome.kind === 'present') {
         return { ...base, error: 'The gateway serves this API’s proxy again; nothing to repair' };
+      }
+
+      if (outcome.kind === 'recovery') {
+        return {
+          ...base,
+          error: 'The owned conversion needs gateway recovery; its original reference is retained',
+        };
       }
 
       const api = outcome.api;

@@ -2,15 +2,19 @@
 
 Nexus [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519) implements its
 consumer portion of [Alloy #27](https://github.com/ferrum-edge/ferrum-alloy/issues/27).
-The preview is Unreleased and the cross-repository manifest contract remains
-PROPOSED; this is not a v1 freeze or a released-format claim. The immutable source is
-`contracts-edge-0.9.9-r2`, commit `591c73a3f965fdab440c3a76b2707accdf491ba5` in
-[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts/tree/591c73a3f965fdab440c3a76b2707accdf491ba5).
+The Nexus preview remains Unreleased. Its shared v1 contract is now
+EXISTING/implemented in published `contracts-edge-0.9.12`, commit
+`31f0a21d707795be293d15837c2f77c3d84219d8` in
+[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts/tree/31f0a21d707795be293d15837c2f77c3d84219d8).
 [`SERVICE-MANIFEST-PIN`](../contracts/ferrum-contracts/SERVICE-MANIFEST-PIN) records
-SHA-256 for the schema, every shared manifest valid/invalid fixture, and the shared
-invalid-expectations file. The separate Edge vocabulary
-[`PIN`](../contracts/ferrum-contracts/PIN) remains at `contracts-edge-0.9.9`, commit
-`25c4e9e00033d7941a1dd0ab733fa74e735546ae`.
+SHA-256 for the schema, every shared manifest fixture and shared expectations.
+The separate Edge vocabulary [`PIN`](../contracts/ferrum-contracts/PIN) adopts
+the same publication. Alloy owner `81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e`
+remains unreleased. Owner historical PROPOSED descriptions remain byte-paired;
+the copied `x-contract` metadata records the implemented shared status. Prepared
+publication wording in immutable canonical text is historical; the actual tag
+and release are published. The response reports `contract_status: "implemented"`
+and the exact adopted canonical commit without implying production apply.
 
 ## Preview boundary
 
@@ -43,10 +47,10 @@ Its real Alloy producer golden came from source
 artifact `11305688717`. Root verified archive identity, hashes and actual producer
 sources. These are diagnostic-consumer qualification facts, not a manifest v1 freeze.
 
-Nexus #519 is also qualified and merged, as recorded below. Alloy #27 remains open.
-The cross-repository manifest contract remains PROPOSED pending the canonical
-tracking/freeze decision and root's tracking-issue update. Neither consumer's merge
-freezes the contract. No new release, image, tag or Edge API is introduced here.
+Alloy #27 remains open for owner release/adoption coordination. Canonical
+publication establishes the unchanged shared v1 freeze; it does not publish
+Alloy crates or qualify this changed Nexus head. See
+[the published adoption baseline and remaining gates](edge-0.9.11-adoption.md).
 
 ## Nexus qualification
 
@@ -65,10 +69,18 @@ and [Verbatim quickstart 37221116610](https://github.com/ferrum-edge/ferrum-nexu
 including all eight protected Actions contexts. Root completed whole and fresh independent
 reviews with zero unresolved threads before merging it as
 `559c350a5370335791cdc3082225dce6056cf547` on 2026-10-04 at 17:42:42 UTC.
-Main's Node 22.14 minimum and the existing Edge v0.9.10 image digest were retained.
+At that historical qualification, Node 22.14 and the Edge v0.9.10 image digest were retained.
 
-This higher-floor candidate integrates that qualified consumer without source or fixture
-edits. Its combined head still requires all fresh hosted gates and root and independent
-review under the separate [Node proposal](dependency-majors-449-higher-floor-draft.md#main-integration-and-current-gates).
-Owner approval remains pending; prior main qualification does not approve this profile
-or qualify the combined candidate.
+Main subsequently adopted the owner-approved jsdom 30 / Undici 8 upgrade in PR #521,
+with supported Node range `^22.22.2 || ^24.15.0 || >=26.0.0`. Its reviewed head
+`a559d30db4530987e91176a5cd191c646750594b` passed all 15 hosted checks and fresh
+independent review before the protected squash merge at
+`f357a37cd0bee81faa0f14ea26e6e38a17cf3152`. The Node owner decision is approved;
+published older releases retain their historical floors until a new release ships.
+
+This deployment-adoption candidate integrates that qualified main and selects published
+Edge v0.9.12 and the published shared canonical contract. Earlier consumer qualification
+does not qualify the changed source, pins or combined head. All fresh hosted gates,
+including `Supported Node minimum`, full root review and fresh independent review remain
+required. The CP/public-only topology decision is recorded in the
+[operations guide](operations.md#backend-egress-admission-and-the-public-only-guarantee).

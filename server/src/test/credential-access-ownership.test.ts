@@ -522,7 +522,7 @@ describe('credential and access ownership (issue #341)', () => {
     const arrived = latch();
     const proceed = latch();
     let removalFences: readonly LeaseFence[] = [];
-    consumers.replace = async (id, body, subject) => {
+    consumers.replace = async (id, body, subject, ifMatch) => {
       if (
         id === consumer.ferrum_consumer_id &&
         subject === owner.user.id &&
@@ -536,7 +536,7 @@ describe('credential and access ownership (issue #341)', () => {
         arrived.open();
         await within(proceed.wait, 'revocation ACL write release');
       }
-      return realReplace(id, body, subject);
+      return realReplace(id, body, subject, ifMatch);
     };
 
     const realSerialize = edge.serializePerKey.bind(edge);

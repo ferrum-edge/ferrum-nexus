@@ -99,10 +99,10 @@ export type ApiVisibility = 'public' | 'internal' | 'private';
  *
  * `deployed` is the ordinary state and what every API reads back as until
  * something says otherwise. `repair_required` is written when the portal has
- * *established* that the gateway no longer serves the API — today only by a
- * reconciliation pass answering `404` for the stored `ferrum_proxy_id`, or by
- * a restore attempt that failed partway — and it stays until a restore
- * succeeds.
+ * *established* a missing or incomplete deployment: a confirmed missing
+ * reference, a failed restore, or conversion compensation that could not finish.
+ * An owned partial proxy keeps its reference for safe recovery. The flag stays
+ * until a validated restore succeeds.
  *
  * It is deliberately a separate field from {@link Api.ferrum_proxy_id} rather
  * than being derived from it. Clearing a dead proxy reference is what makes the
@@ -264,7 +264,7 @@ export interface Api {
    * Whether the gateway is believed to be serving this API.
    *
    * `repair_required` is an actionable condition, not a cosmetic badge: the
-   * public path answers `404`, approved clients' credentials reach nothing,
+   * deployment is missing or incomplete (including an owned staging proxy),
    * and only `POST /api/apis/:id/restore-gateway` clears it.
    */
   gateway_state: ApiGatewayState;
@@ -865,8 +865,13 @@ export type EdgeHealthStatus = 'ok' | 'degraded' | 'not_ready' | 'down';
  * namespace and it is not the one Nexus publishes into, so every proxy the
  * portal has created answers `404` on the listener. See
  * {@link EdgeNamespaceRouting}.
+ * `backend_egress_unverified` — sampled process metadata cannot establish the
+ * configured upstream profile. This observation never authorizes a mutation.
+ * Reported to admins only.
+ * `unspecified` — what a caller below `admin` reads in place of
+ * `backend_egress_unverified`: the gateway's egress posture is not public.
  */
-export type EdgeHealthReason = 'namespace_unserved';
+export type EdgeHealthReason = 'namespace_unserved' | 'backend_egress_unverified' | 'unspecified';
 
 /**
  * Which namespace the portal writes to and which one the gateway's data plane
@@ -923,6 +928,19 @@ export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
    * endpoint**. Take the real version from your deployment metadata.
    */
   edge_version: string | null;
+  /**
+   * Whether the last sampled `GET /backend-egress-policy` proved public-only
+   * backend egress: `enforcement_scope` `local-data-plane` with
+   * `public_only_guaranteed`. Nexus grants this guarantee to nothing else.
+   * `false` for every control-plane/data-plane pairing (Nexus cannot yet attest
+   * a remote data plane), any weaker or unreadable policy and an unreachable
+   * gateway. Neither `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` nor
+   * `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` changes it: each opt-out accepts a
+   * weaker policy for writes without making it public-only. `null` for a caller
+   * below `admin`, the same way {@link EdgeHealth.mode} is. Observational only;
+   * it never authorizes a mutation.
+   */
+  public_egress_guaranteed: boolean | null;
   namespace: string;
   /** Namespace routability; `unserved` is what makes `status` `degraded`. */
   namespace_routing: EdgeNamespaceRouting;

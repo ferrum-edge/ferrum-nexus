@@ -16,7 +16,8 @@
  * rollback and nested-transaction cases exercise real multi-document
  * transactions, which a standalone `mongod` cannot provide.
  * `NEXUS_TEST_MONGO_STANDALONE_URL` opts into the separate check that a
- * standalone deployment is *rejected* at `init()`.
+ * standalone deployment is *rejected* at `init()` and that opted-in recovery
+ * operations refuse before effects on the native non-atomic adapter.
  *
  * ```bash
  * NEXUS_TEST_POSTGRES_URL=postgres://postgres:pw@127.0.0.1:5432/postgres \
@@ -78,7 +79,9 @@ import { runAccountRecoveryContract } from './account-recovery-contract.js';
 import { runApplicationDeletionContract } from './application-deletion-contract.js';
 import { runApplicationViewerAuditContract } from './application-viewer-audit-contract.js';
 import { runDisableRevokesResetLinksContract } from './disable-revokes-reset-links-contract.js';
+import { runEdgeSecurityAdoptionContract } from './edge-security-adoption-contract.js';
 import { faultInjectingStore } from './fault-injection.js';
+import { runGatewayRecoveryAtomicityContract } from './gateway-recovery-atomicity-contract.js';
 import { testCaptchaTransport } from './helpers.js';
 import { runMcpMembershipContract } from './mcp-membership-contract.js';
 import { runMessageBudgetContract } from './message-budget-contract.js';
@@ -319,10 +322,12 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
   };
 }
 
-async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
+async function mongoTarget(baseUrl: string, allowStandalone = false): Promise<SmokeTarget> {
   const database = throwawayDbName();
   const url = withDatabase(baseUrl, database);
-  const store = createStore(testConfig('mongodb', url));
+  const baseConfig = testConfig('mongodb', url);
+  const config = { ...baseConfig, db: { ...baseConfig.db, allowStandalone } };
+  const store = createStore(config);
   try {
     await store.init();
     await store.migrate();
@@ -335,7 +340,7 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
 
   return {
     store,
-    peer: () => openPeer(testConfig('mongodb', url)),
+    peer: () => openPeer(config),
     teardown: async (): Promise<void> => {
       await store.close();
       const cleaner = new MongoClient(withDatabase(baseUrl, database));
@@ -360,6 +365,8 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
   runApplicationDeletionContract(label, makeStore);
   runApplicationViewerAuditContract(label, makeStore);
   runDisableRevokesResetLinksContract(label, makeStore);
+  runEdgeSecurityAdoptionContract(label, makeStore);
+  runGatewayRecoveryAtomicityContract(label, makeStore);
   runMcpMembershipContract(label, makeStore);
   runMessageBudgetContract(label, makeStore);
   runMailLifecycleContract(label, makeStore);
@@ -5171,6 +5178,12 @@ describe('mongodb standalone rule', () => {
     });
     return;
   }
+
+  runGatewayRecoveryAtomicityContract(
+    'mongodb standalone',
+    () => mongoTarget(standaloneUrl, true),
+    false,
+  );
 
   it('refuses to start against a standalone deployment', async () => {
     const store = createStore(

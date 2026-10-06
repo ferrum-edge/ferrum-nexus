@@ -8,6 +8,69 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
+- **Draft Edge security adoption proposal**: fresh,
+  closed namespace-matched egress admission on all proxy/spec write boundaries,
+  preflight before destructive/staging/ACL effects, fail-closed compensation with
+  truthful `repair_required` state with encrypted owned-resource recovery records,
+  validated staging recovery, and coarse observational degraded health. Three
+  whole-consumer callers pair complete historical verification with the owner's
+  masked metadata projection and original opaque strong row `If-Match`. Hidden
+  Basic/custom state, labels and identity survive; Edge canonicalizes legacy
+  JWT/HMAC fields and invalid hidden history refuses without silent loss. Exact
+  secret placeholders, plaintext Basic, malformed/ambiguous tags and stale writes
+  are refused. The mock hashes Basic through normal write lifecycles and enforces
+  closed credential fields; the delayed issue/disable regression keeps its `ok`
+  teardown requirement. Four-store service/protocol regressions and a separate
+  controlled packaged DNS-rebinding fixture are included. The candidate pins
+  published Edge v0.9.12 and contracts-edge-0.9.12; Nexus version markers remain
+  unchanged. See [limitations](docs/security.md#1-threat-model).
+
+- **Public-only egress topology decision**: Nexus grants the verified public-only
+  guarantee only when Edge reports `public_only_guaranteed=true` with
+  `enforcement_scope=local-data-plane`, and `GET /api/health/edge` reports it to
+  admins as `edge.public_egress_guaranteed` (`null` for everyone else, whose
+  degraded reason is the generic `unspecified`). A control plane with remote data
+  planes reads not guaranteed (health `degraded` in the public profile). Its backend
+  writes require the new `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`, which waives
+  only the gateway attestation and keeps Nexus's own upstream screening;
+  `NEXUS_ALLOW_PRIVATE_UPSTREAMS` keeps its existing meaning. Neither opt-out
+  reports public-only, startup warns while either is set, and publish, update and
+  restore audit rows record `egress_profile` and `enforcement_scope`. Egress policy
+  schema 2 (Edge `v0.9.13` and later) is refused under its own
+  `unsupported_egress_policy_schema` reason. See the
+  [topology decision](docs/operations.md#backend-egress-admission-and-the-public-only-guarantee).
+
+- **Draft conversion recovery hardening** (PR #522): encrypted baseline, repair
+  state and intent audit commit before teardown; catalog mode, ownership,
+  completion audit and journal removal commit together. Combined PATCHes capture
+  the baseline before gateway writes. Corrected agent uploads preserve original
+  replay resources while authorizing the new catalog tool ids. Initial conversion
+  teardown, selected cleanup and corrected replacement now use released deployment-v1
+  original authority. Each pending operation is encrypted before HTTP; only explicit
+  committed/applied cleanup acknowledgement permits dependent recovery. Uncertain
+  writes retain journals and block replay without refreshing tokens. Credential teardown
+  removes Nexus-supported keyauth/Basic/JWT state and retains custom/mTLS state.
+  Native concurrent Admin, uncertain-acknowledgement, original replay and transactional
+  fault controls remain strict and require exact-head hosted qualification. An
+  enforcement conversion takes the API restore lease before the proxy lease, and every
+  restore commit re-checks for a retained conversion journal, so a concurrent restore
+  cannot build around one. Pre-send refusals are checked before a pending operation is
+  journaled, restore and rollback completion re-read the stored journal, and an
+  [operator runbook](docs/operations.md#resolving-an-unconfirmed-gateway-deployment-mutation)
+  covers unconfirmed mutations. See the
+  [released protocol and replay limits](docs/edge-conversion-recovery-blocker.md).
+
+- **Published Edge v0.9.12 candidate adoption** (PR #522): pin immutable source
+  `0d917701b63ef38210c49df830f48cf0457cbc7d`, default image index
+  `sha256:80526b59cbbdc2bfcc8bae9241da4e5395414cf07bf0be4effd4c73c51684ee4`,
+  and published `contracts-edge-0.9.12` at
+  `31f0a21d707795be293d15837c2f77c3d84219d8`. Adopt exact-byte deployment
+  snapshot/acknowledgement schemas and meaningful valid/invalid fixtures alongside
+  refreshed vocabularies and egress assets. The separate manifest pin and unreleased
+  Alloy flags are preserved. The owner API release dependency is complete.
+  No Nexus release or migration release marker is changed.
+  See [actual publication facts](docs/edge-0.9.11-adoption.md).
+
 - **Optional MCP tool subsets** (Refs #446). Consumers request published exposure IDs;
   providers can narrow approval. Separate MCP-all/per-tool groups preserve REST access
   and prevent its approval group bypassing subsets. Null retains all published tools;
@@ -18,10 +81,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   and spec-change tradeoff before deployment.
 - **Redacted service-manifest preview** (Refs ferrum-edge/ferrum-alloy#27, Nexus portion).
   Authenticated namespace-authorized bounded intake validates the exact immutable
-  proposed schema and shared fixtures. Preview has no apply/publish, URL/file/TLS
-  access or diagnostic import. Anvil and Nexus consumers are qualified and merged;
-  the manifest contract remains PROPOSED pending the canonical tracking/freeze
-  decision. See [preview status](docs/service-manifest-preview.md).
+  shared v1 schema and fixtures. Preview has no apply/publish, URL/file/TLS
+  access or diagnostic import. Anvil's separate diagnostic consumer is merged, while
+  the shared v1 contract is EXISTING/implemented in published contracts-edge-0.9.12.
+  Alloy remains unreleased; Nexus final qualification is still required. See
+  [preview status](docs/service-manifest-preview.md).
 
 - **Agent-ready API listings** (#446, phase 1). Providers can explicitly expose
   selected OpenAPI operations as MCP tools, off by default, on requestable
@@ -82,11 +146,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   classifications so an Edge response that echoes a show-once secret cannot
   expose it through the API. Other Edge endpoints keep their existing
   validation and API-spec diagnostics.
-- **The acceptance suite now pins Ferrum Edge `v0.9.10`** by its published
+- **The acceptance suite first adopted Ferrum Edge `v0.9.10`** by its published
   multi-architecture image digest. This release adds fail-closed handling for
   uninspectable MCP JSON-RPC batches and refuses non-UTF-8 charsets for
   `mcp_gateway` and `ai_prompt_shield`. The opt-in agent marketplace uses that
-  released contract; Nexus itself does not parse data-plane MCP traffic.
+  released contract; this candidate advances the actual pin to v0.9.12. Nexus
+  itself does not parse data-plane MCP traffic.
 - **The Ferrum Edge `gateway-headers` vocabulary is now vendored and pinned**
   alongside the plugin catalog and provisioned-by vocabularies, and the shared
   contract test checks the `X-Ferrum-Namespace`, `X-Ferrum-Namespace-Unserved`
@@ -105,6 +170,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   sign-in policy and OpenID Connect providers with their claim mappings.
 
 ### Fixed
+
+- **Draft recovery runtime controls** (PR #522): make the two-instance super-admin
+  facade compatible with cancellation wrappers; restore owned catalog/transaction
+  faults after failed assertions; join lifecycle race requests before restoring
+  methods, with bounded waits that surface early refusal. Reachable recovery controls
+  witness real Admin proxy/plugin/spec writes and preserve whole operator state,
+  catalog, ownership and encrypted journals. Original read-only reconciliation now
+  commits `api.gateway_conversion_rollback` with `api.gateway_restore` only after
+  exact original revision, catalog shape and complete resource observations; either
+  audit failure preserves repair state and the journal transactionally. Corrected
+  revisions, rebuilds, staging and refusals emit no false rollback. These observations
+  do not fence external Admin writes. Strict successful-conversion and partial-recovery
+  gates use the released owner contract.
 
 - **An agent API's submitted document is bounded before it is built** (Refs #525).
   The document Nexus sends Edge for an agent API gives every path its own copy of

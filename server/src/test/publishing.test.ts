@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 
 import type { LightMyRequestResponse } from 'fastify';
 
@@ -31,7 +31,12 @@ import {
   type TestSession,
 } from './helpers.js';
 
-import { mockCorsPreflight, mockWebsocketAllowed } from './mock-ferrum-edge.js';
+import {
+  mockBasicPasswordHash,
+  mockCorsPreflight,
+  mockWebsocketAllowed,
+  publicEgressPolicy,
+} from './mock-ferrum-edge.js';
 
 const CORS_HEADERS = [
   'Accept',
@@ -62,8 +67,17 @@ function validationIssues(body: string): { path: string; message: string }[] {
  * through first — a spec revision that rewrites a live proxy commits its
  * `api.spec_revision_start` row in one of its own before the gateway moves.
  */
-function failNextTransaction(harness: TestApp, message: string, skip = 0): void {
+function failNextTransaction(
+  harness: TestApp,
+  message: string,
+  restorations: (() => void)[],
+  skip = 0,
+): void {
   const real = harness.store.transaction.bind(harness.store);
+  const restore = (): void => {
+    harness.store.transaction = real;
+  };
+  restorations.push(restore);
   let remaining = skip;
   harness.store.transaction = async <T>(
     fn: (tx: NexusStore) => Promise<T>,
@@ -73,17 +87,31 @@ function failNextTransaction(harness: TestApp, message: string, skip = 0): void 
       remaining -= 1;
       return real(fn, options);
     }
-    harness.store.transaction = real;
+    restore();
     throw new Error(message);
   };
 }
 
-/** Make the next `store.apis.update(...)` reject, then put the real one back. */
-function failNextApiUpdate(harness: TestApp, message: string): void {
+/** Own a one-shot catalog fault even when an earlier refusal makes it unreachable. */
+function failNextApiUpdate(
+  harness: TestApp,
+  message: string,
+  restorations: (() => void)[],
+): () => void {
   const real = harness.store.apis.update.bind(harness.store.apis);
-  harness.store.apis.update = async () => {
+  const restore = (): void => {
     harness.store.apis.update = real;
+  };
+  restorations.push(restore);
+  let triggered = false;
+  harness.store.apis.update = async (...args) => {
+    if (args[1].gateway_state === 'repair_required') return real(...args);
+    triggered = true;
+    restore();
     throw new Error(message);
+  };
+  return () => {
+    assert.ok(triggered, 'the injected failure reached the intended catalog update');
   };
 }
 
@@ -191,6 +219,7 @@ describe('publishing', () => {
   let provider: TestSession;
   let otherProvider: TestSession;
   let client: TestSession;
+  const restorations: (() => void)[] = [];
 
   before(async () => {
     harness = await buildTestApp();
@@ -205,6 +234,10 @@ describe('publishing', () => {
 
   after(async () => {
     await harness.close();
+  });
+
+  afterEach(() => {
+    for (const restore of restorations.splice(0).reverse()) restore();
   });
 
   describe('publish', () => {
@@ -745,7 +778,7 @@ describe('publishing', () => {
     it('leaves no association behind when the publish is rolled back', async () => {
       // The association write is the last gateway call of a publish, so a store
       // failure after it is the case that would strand one.
-      failNextTransaction(harness, 'database is gone');
+      failNextTransaction(harness, 'database is gone', restorations);
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -831,7 +864,7 @@ describe('publishing', () => {
     it('deletes the Edge objects when the Nexus rows cannot be written', async () => {
       // The rollback used to end before persistence began, so a store failure
       // here left a live proxy nothing in the portal knew about.
-      failNextTransaction(harness, 'database is gone');
+      failNextTransaction(harness, 'database is gone', restorations);
 
       const response = await harness.authed(provider, {
         method: 'POST',
@@ -1377,6 +1410,9 @@ describe('publishing', () => {
         assert.deepEqual(added[0]?.details, {
           changed_fields: [],
           gateway_reconciled: true,
+          // A drift repair writes the gateway, so it records what admitted it.
+          egress_profile: 'public-guaranteed',
+          enforcement_scope: 'local-data-plane',
         });
       });
     }
@@ -1924,6 +1960,9 @@ describe('publishing', () => {
       assert.deepEqual(added[0]?.details, {
         changed_fields: [],
         gateway_reconciled: true,
+        // A drift repair writes the gateway, so it records what admitted it.
+        egress_profile: 'public-guaranteed',
+        enforcement_scope: 'local-data-plane',
       });
     });
 
@@ -2120,7 +2159,7 @@ describe('publishing', () => {
 
       // The settings write is the last gateway call of a PATCH, so the row
       // update is the step whose failure has to unwind it.
-      failNextApiUpdate(harness, 'database is gone');
+      const assertUpdateFailed = failNextApiUpdate(harness, 'database is gone', restorations);
       const failed = await harness.authed(provider, {
         method: 'PATCH',
         url: `/api/apis/${apiId}`,
@@ -2130,6 +2169,7 @@ describe('publishing', () => {
           circuit_breaker: true,
         },
       });
+      assertUpdateFailed();
       assert.notEqual(failed.statusCode, 200);
 
       const proxy = storedProxy(harness, proxyId);
@@ -2230,13 +2270,14 @@ describe('publishing', () => {
     });
 
     it('restores the previous auth plugin when the Nexus row update fails', async () => {
-      failNextApiUpdate(harness, 'database is gone');
+      const assertUpdateFailed = failNextApiUpdate(harness, 'database is gone', restorations);
 
       const response = await harness.authed(provider, {
         method: 'PATCH',
         url: `/api/apis/${apiId}`,
         payload: { auth_plugin: 'jwt_auth' },
       });
+      assertUpdateFailed();
       assert.notEqual(response.statusCode, 200);
 
       assert.ok(
@@ -2313,6 +2354,9 @@ describe('publishing', () => {
       assert.deepEqual(added[0]?.details, {
         changed_fields: [],
         gateway_reconciled: true,
+        // A drift repair writes the gateway, so it records what admitted it.
+        egress_profile: 'public-guaranteed',
+        enforcement_scope: 'local-data-plane',
       });
     });
 
@@ -2381,7 +2425,7 @@ describe('publishing', () => {
 
     it('puts the backend back without dropping a later plugin change’s undo', async () => {
       enrichProxy(harness, proxyId);
-      failNextApiUpdate(harness, 'database is gone');
+      const assertUpdateFailed = failNextApiUpdate(harness, 'database is gone', restorations);
 
       const response = await harness.authed(provider, {
         method: 'PATCH',
@@ -2391,6 +2435,7 @@ describe('publishing', () => {
           rate_limit: { limit: 7, window_seconds: 60 },
         },
       });
+      assertUpdateFailed();
       assert.notEqual(response.statusCode, 200);
 
       const proxy = harness.edge.proxies.get(`nexus/${proxyId}`);
@@ -2688,7 +2733,7 @@ describe('publishing', () => {
       const api = published.json<PublishApiResponse>().api;
       const proxyId = String(api.ferrum_proxy_id);
 
-      failNextTransaction(harness, 'database is gone', 1);
+      failNextTransaction(harness, 'database is gone', restorations, 1);
       const response = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${api.id}/spec`,
@@ -2911,7 +2956,10 @@ describe('publishing', () => {
 
       const stored = harness.edge.consumerByUsername(`nexus-test-${apiId}`);
       assert.equal(stored?.credentials.basicauth?.length, 1, 'the old consumer was replaced');
-      assert.equal(stored?.credentials.basicauth?.[0]?.password, secondBody.secret.password);
+      assert.equal(
+        stored?.credentials.basicauth?.[0]?.password_hash,
+        mockBasicPasswordHash(secondBody.secret.password!),
+      );
 
       const row = (await harness.auditRows('test_consumer.create')).find(
         (entry) => entry.target_id === apiId && entry.details.replaced === true,
@@ -3194,6 +3242,7 @@ describe('publishing', () => {
       assert.deepEqual(document['x-ferrum-proxy'], {
         id: proxyId,
         name: 'nexus-enf-routes',
+        labels: { 'provisioned-by': 'ferrum-nexus' },
         listen_path: '/nexus/enf-routes',
         backend_scheme: 'https',
         backend_host: 'billing.example.com',
@@ -3666,12 +3715,13 @@ describe('publishing', () => {
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
       const before = associatedIds(harness, proxyId);
 
-      failNextApiUpdate(harness, 'store offline');
+      const assertUpdateFailed = failNextApiUpdate(harness, 'store offline', restorations);
       const response = await harness.authed(provider, {
         method: 'PATCH',
         url: `/api/apis/${apiId}`,
         payload: { spec_enforcement: 'routes' },
       });
+      assertUpdateFailed();
       assert.equal(response.statusCode, 500, response.body);
 
       // The rebuild has to be rolled back the same way the plugin attach used
@@ -3795,10 +3845,67 @@ describe('publishing', () => {
       );
     });
 
-    it('restores docs_only when the routes cutover fails', async () => {
-      await assertConversionRestores('enf-fail-cutover-routes', 'docs_only', () =>
-        harness.edge.queueFailure(500, { error: 'spec rejected' }, '/api-specs/', 'PUT'),
+    /**
+     * The `routes` cutover is a conditional deployment-v1 `PUT /api-specs/{id}`,
+     * and anything but a confirmed acknowledgement may still have landed. So
+     * unlike the other failures above, the original is not replayed over it and
+     * no fresh authority is fetched to retry it: the journal is kept, the API
+     * says `repair_required`, and the real path stays closed.
+     */
+    it('retains the journal when the routes cutover is not confirmed', async () => {
+      const slug = 'enf-fail-cutover-routes';
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+      const repairsBefore = await auditIds(harness, 'api.gateway_repair_required');
+      const offset = harness.edge.requests.length;
+
+      harness.edge.queueFailure(500, { error: 'spec rejected' }, '/api-specs/', 'PUT');
+      const failed = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(failed.statusCode, 502, failed.body);
+
+      // Nothing follows the unconfirmed cutover but reads: no replay of the
+      // original, no cleanup of the staged rebuild.
+      const calls = harness.edge.requests.slice(offset);
+      let cutover = -1;
+      calls.forEach((call, index) => {
+        if (call.method === 'PUT' && call.path.startsWith('/api-specs/')) cutover = index;
+      });
+      assert.ok(cutover >= 0, 'the conditional cutover was attempted');
+      assert.equal(calls[cutover]?.query.conditional, 'true');
+      assert.ok(calls.slice(cutover + 1).every((call) => call.method === 'GET'));
+
+      // One proxy, under the same id, still parked on its staging path: the
+      // real path answers 404 rather than open.
+      assert.equal(harness.edge.proxies.size, 1);
+      assert.match(
+        String(storedProxy(harness, proxyId).listen_path),
+        /^\/nexus\/\.staging\/[0-9a-f]{32}$/,
       );
+      assert.equal(harness.edge.proxyServing(`/nexus/${slug}`), undefined);
+      assert.ok(effectiveNames(harness, proxyId).includes('key_auth'));
+
+      const row = await harness.store.apis.findById(apiId);
+      assert.equal(row?.gateway_state, 'repair_required');
+      assert.equal(row?.spec_enforcement, 'docs_only');
+      assert.equal(row?.ferrum_proxy_id, proxyId);
+      const journal = await harness.store.settings.get(`gateway_recovery:nexus:${apiId}`);
+      assert.equal(journal?.encrypted, true, 'the encrypted recovery journal is retained');
+      const repairs = await auditRowsSince(harness, 'api.gateway_repair_required', repairsBefore);
+      assert.equal(repairs.length, 1);
+      assert.equal(repairs[0]?.target_id, apiId);
+      assert.equal(repairs[0]?.details.phase, 'conversion');
+      assert.equal(repairs[0]?.details.attempted_spec_enforcement, 'routes');
+      assert.equal(repairs[0]?.details.recovery_retained, true);
     });
 
     it('restores routes when the docs_only replacement cannot be created', async () => {
@@ -3866,6 +3973,146 @@ describe('publishing', () => {
       assert.equal('proxy' in (row?.details ?? {}), false);
       assert.equal('plugin_configs' in (row?.details ?? {}), false);
       assert.equal(JSON.stringify(row?.details).includes(secret), false);
+    });
+
+    /**
+     * A restore that starts while a conversion holds the proxy must not read
+     * "no journal", wait, and then build a fresh proxy around the journal the
+     * failed conversion retained (the conversion takes the API restore key
+     * first, and every restore commit re-checks for a journal).
+     */
+    it('keeps a concurrent restore from building around a conversion journal', async () => {
+      const slug = 'enf-restore-race';
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+
+      // Both rebuilds fail, so the conversion retains its journal behind a
+      // missing proxy.
+      harness.edge.queueFailure(503, { error: 'unavailable' }, '/api-specs', 'POST');
+      harness.edge.queueFailure(503, { error: 'unavailable' }, '/proxies', 'POST');
+
+      // Park the PATCH on its first proxy read: it holds its keys and has not
+      // yet written a journal.
+      const proxies = harness.edgeClient.proxies;
+      const get = proxies.get;
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let parked: () => void = () => undefined;
+      const reached = new Promise<void>((resolve) => {
+        parked = resolve;
+      });
+      let armed = true;
+      proxies.get = async (...args) => {
+        if (armed) {
+          armed = false;
+          parked();
+          await gate;
+        }
+        return get(...args);
+      };
+      try {
+        const patch = harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: { spec_enforcement: 'routes' },
+        });
+        await reached;
+        const restore = harness.authed(provider, {
+          method: 'POST',
+          url: `/api/apis/${apiId}/restore-gateway`,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        release();
+        assert.equal((await patch).statusCode, 502);
+        await restore;
+      } finally {
+        proxies.get = get;
+      }
+
+      // Whatever the restore did, it did through the journal: no proxy under a
+      // fresh id, the row still names the journaled proxy, and any completed
+      // restore names it too.
+      for (const proxy of harness.edge.proxies.values()) {
+        assert.equal(String(proxy.id), proxyId, 'no proxy was built around the journal');
+      }
+      const row = await harness.store.apis.findById(apiId);
+      assert.equal(row?.ferrum_proxy_id, proxyId);
+      const journal = await harness.store.settings.get(`gateway_recovery:nexus:${apiId}`);
+      const restores = (await harness.auditRows('api.gateway_restore')).filter(
+        (entry) => entry.target_id === apiId,
+      );
+      assert.ok(journal !== null || restores.length === 1, 'the journal stays actionable');
+      for (const entry of restores) assert.equal(entry.details.proxy_id, proxyId);
+    });
+
+    /**
+     * Egress admission flips between the conversion's preflight and its
+     * conditional teardown. The teardown is refused before anything is sent,
+     * so no pending deployment operation is journaled for it: the original
+     * proxy is untouched, and a restore clears the repair flag once the policy
+     * is back instead of refusing forever on an "unconfirmed" mutation.
+     */
+    it('never journals a teardown that was refused before it was sent', async () => {
+      const slug = 'enf-unsent-teardown';
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+
+      const deployments = harness.edgeClient.deployments;
+      const snapshot = deployments.snapshot;
+      let armed = true;
+      deployments.snapshot = async (...args) => {
+        const original = await snapshot(...args);
+        if (armed) {
+          armed = false;
+          harness.edge.setBackendEgressPolicy({
+            ...publicEgressPolicy(),
+            enforcement_scope: 'admission-only',
+          });
+        }
+        return original;
+      };
+      const offset = harness.edge.requests.length;
+      try {
+        const failed = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: { spec_enforcement: 'routes' },
+        });
+        assert.notEqual(failed.statusCode, 200, failed.body);
+      } finally {
+        deployments.snapshot = snapshot;
+        harness.edge.setBackendEgressPolicy(publicEgressPolicy());
+      }
+      assert.equal(armed, false, 'the policy flipped after the authority was captured');
+      assert.ok(
+        harness.edge.requests.slice(offset).every((call) => call.method !== 'DELETE'),
+        'the conditional teardown was never sent',
+      );
+      assert.equal(String(harness.edge.proxyServing(`/nexus/${slug}`)?.id), proxyId);
+
+      const restored = await harness.authed(provider, {
+        method: 'POST',
+        url: `/api/apis/${apiId}/restore-gateway`,
+      });
+      assert.equal(restored.statusCode, 200, restored.body);
+      const row = await harness.store.apis.findById(apiId);
+      assert.equal(row?.gateway_state, 'deployed');
+      assert.equal(row?.ferrum_proxy_id, proxyId);
+      assert.equal(await harness.store.settings.get(`gateway_recovery:nexus:${apiId}`), null);
     });
 
     it('regenerates the operation table when a new spec revision is published', async () => {
@@ -3998,7 +4245,7 @@ describe('publishing', () => {
       const apiId = published.json<PublishApiResponse>().api.id;
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
 
-      failNextTransaction(harness, 'store offline', 1);
+      failNextTransaction(harness, 'store offline', restorations, 1);
       const response = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${apiId}/spec`,
@@ -4050,7 +4297,7 @@ describe('publishing', () => {
     });
 
     it('rolls the spec back when a later publish step fails', async () => {
-      failNextTransaction(harness, 'store offline');
+      failNextTransaction(harness, 'store offline', restorations);
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -4182,6 +4429,37 @@ describe('publishing', () => {
         assert.match(write.listenPath, STAGING_PATH, `${write.call} must be on a staging path`);
       }
       return cutover;
+    }
+
+    /** The cutover is the last mutation; exact custody/fitness reads follow it. */
+    function assertConversionVerification(
+      cutover: PathWrite,
+      proxyId: string,
+      rollback = false,
+    ): void {
+      const tail = harness.edge.requests.slice(cutover.at + 1);
+      const expected = [
+        `/proxies/${proxyId}`,
+        '/plugins/config',
+        `/api-specs/by-proxy/${proxyId}`,
+        '/deployment-snapshot',
+        ...(rollback
+          ? [`/proxies/${proxyId}`, '/plugins/config', '/api-specs', '/plugins/config']
+          : []),
+      ];
+      assert.deepEqual(
+        tail.map((call) => `${call.method} ${call.path}`),
+        expected.map((path) => `GET ${path}`),
+        'only the complete staged custody and original deployment verification follow cutover',
+      );
+      for (const call of tail) {
+        assert.equal(call.namespace, 'nexus');
+        if (call.path === '/plugins/config' || call.path === '/api-specs') {
+          assert.equal(call.query.proxy_id, proxyId);
+        }
+        if (call.path === '/deployment-snapshot') assert.deepEqual(call.query, {});
+      }
+      assert.equal(cutover.at + expected.length, harness.edge.requests.length - 1);
     }
 
     /** Indexes of every `POST /plugins/config` in the transcript. */
@@ -4414,7 +4692,7 @@ describe('publishing', () => {
         // a fresh staging path, so the real one answers 404 for the whole
         // rebuild rather than answering *open*.
         const cutover = assertStagedCutover(finalPath, from);
-        assert.equal(cutover.at, harness.edge.requests.length - 1);
+        assertConversionVerification(cutover, proxyId);
         for (const at of pluginCreateIndexes(from)) assert.ok(at < cutover.at);
         assert.equal(String(harness.edge.proxyServing(finalPath)?.id), proxyId);
         assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
@@ -4435,20 +4713,22 @@ describe('publishing', () => {
       const before = associatedIds(harness, proxyId);
 
       const from = harness.edge.requests.length;
-      failNextApiUpdate(harness, 'store offline');
+      const assertUpdateFailed = failNextApiUpdate(harness, 'store offline', restorations);
       const response = await harness.authed(provider, {
         method: 'PATCH',
         url: `/api/apis/${apiId}`,
         payload: { spec_enforcement: 'routes' },
       });
+      assertUpdateFailed();
       assert.equal(response.statusCode, 500, response.body);
 
       // Two rebuilds — into `routes`, then back — and *both* of them staged.
-      // The last write of the whole PATCH is the undo's cutover.
+      // The last mutation of the whole PATCH is the undo's cutover; custody
+      // and original deployment verification follow without any further write.
       const writes = listenPathWrites(from);
       const onFinal = writes.filter((write) => write.listenPath === finalPath);
       assert.equal(onFinal.length, 2, 'each rebuild ends with one move onto the real path');
-      assert.equal((onFinal[1] as PathWrite).at, harness.edge.requests.length - 1);
+      assertConversionVerification(onFinal[1] as PathWrite, proxyId, true);
       for (const write of writes) {
         if (onFinal.some((entry) => entry.at === write.at)) continue;
         assert.match(write.listenPath, STAGING_PATH, `${write.call} must be on a staging path`);
@@ -5065,6 +5345,7 @@ describe('per-owner API quota', () => {
 describe('spec upstream following', () => {
   let harness: TestApp;
   let provider: TestSession;
+  const restorations: (() => void)[] = [];
 
   before(async () => {
     harness = await buildTestApp();
@@ -5077,6 +5358,10 @@ describe('spec upstream following', () => {
 
   after(async () => {
     await harness.close();
+  });
+
+  afterEach(() => {
+    for (const restore of restorations.splice(0).reverse()) restore();
   });
 
   /** The proxy's backend, in the same normalized form the `apis` row stores. */
@@ -5215,7 +5500,7 @@ describe('spec upstream following', () => {
         'https://billing.example.com:8443/v2',
       );
 
-      failNextTransaction(harness, 'database is gone', 1);
+      failNextTransaction(harness, 'database is gone', restorations, 1);
       const failed = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${apiId}/spec`,

@@ -1,6 +1,6 @@
 export const MANIFEST_BODY_LIMIT = 32 * 1024;
 
-/** PROPOSED contract intake; JSON data only, never a file or URL. */
+/** EXISTING shared v1 contract intake; JSON data only, never a file or URL. */
 export interface PreviewServiceManifestRequest {
   namespace: string;
   manifest: unknown;
@@ -9,7 +9,7 @@ export interface PreviewServiceManifestRequest {
 /** Bounded allow-listed summary. Source paths, locations and free text are redacted. */
 export interface PreviewServiceManifestResponse {
   preview_only: true;
-  contract_status: 'proposed';
+  contract_status: 'implemented';
   contract_commit: string;
   namespace: string;
   service: string;

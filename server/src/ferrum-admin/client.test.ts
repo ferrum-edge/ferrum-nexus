@@ -11,14 +11,18 @@ import type { EdgeConfig } from '../config/index.js';
 import { isNexusError } from '../lib/errors.js';
 import { createEdgePluginBinder } from '../publishing/edge-plugins.js';
 import { handOwnedPlugins } from '../publishing/spec-document.js';
-import { createMockFerrumEdge, type MockFerrumEdge } from '../test/mock-ferrum-edge.js';
+import {
+  createMockFerrumEdge,
+  mockBasicPasswordHash,
+  type MockFerrumEdge,
+} from '../test/mock-ferrum-edge.js';
 import {
   CONSUMER_SCAN_LIMIT,
   createFerrumAdminClient,
   createKeyedSerializer,
   type FerrumAdminClient,
 } from './client.js';
-import type { AdminTokenMinter } from './jwt.js';
+import { createAdminTokenMinter, type AdminTokenMinter } from './jwt.js';
 import type { EdgeApiSpecDocument, EdgeProxyWrite } from './types.js';
 
 const SECRET = 'ferrum-admin-client-test-secret-0123456789';
@@ -43,6 +47,21 @@ function configFor(url: string, overrides: Partial<EdgeConfig> = {}): EdgeConfig
     rateLimit: { syncMode: 'local', redisUrl: undefined, redisTls: false },
     ...overrides,
   };
+}
+
+/** Exercise the mock's actual whole-consumer input independently of the metadata builder. */
+async function rawConsumerPut(id: string, credentials: unknown, etag: string): Promise<Response> {
+  const token = await createAdminTokenMinter(configFor(edgeUrl)).getToken('mock-contract-test');
+  return fetch(`${edgeUrl}/consumers/${id}`, {
+    method: 'PUT',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'x-ferrum-namespace': 'nexus',
+      'content-type': 'application/json',
+      'if-match': etag,
+    },
+    body: JSON.stringify({ id, username: id, credentials, acl_groups: ['approved'] }),
+  });
 }
 
 describe('ferrum admin client', () => {
@@ -73,7 +92,7 @@ describe('ferrum admin client', () => {
     assert.equal(recorded?.claims?.ns, 'nexus', 'the tenancy claim rides on every call');
   });
 
-  it('creates, reads and replaces a consumer with redacted credentials', async () => {
+  it('creates, reads and conditionally replaces from complete consumer verification', async () => {
     const created = await client.consumers.create({
       id: 'user-1',
       username: 'nexus-user-1',
@@ -88,18 +107,214 @@ describe('ferrum admin client', () => {
     assert.equal(fetched?.username, 'nexus-user-1');
     assert.equal(await client.consumers.get('missing'), null, '404 becomes null, not an error');
 
-    const replaced = await client.consumers.replace('user-1', {
-      username: fetched?.username ?? '',
-      custom_id: fetched?.custom_id ?? null,
-      credentials: fetched?.credentials,
-      acl_groups: [aclGroupForApi('api-1')],
-    });
+    const snapshot = await client.consumers.verification('user-1');
+    assert.ok(snapshot);
+    const replaced = await client.consumers.replace(
+      'user-1',
+      {
+        username: fetched?.username ?? '',
+        custom_id: fetched?.custom_id ?? null,
+        credentials: snapshot.consumer.credentials,
+        acl_groups: [aclGroupForApi('api-1')],
+      },
+      undefined,
+      snapshot.etag,
+    );
     assert.deepEqual(replaced.acl_groups, ['nexus:api:api-1:approved']);
     assert.deepEqual(
       replaced.credentials.keyauth,
       [{ key: '[REDACTED]' }],
-      'a [REDACTED] placeholder restores the stored key rather than overwriting it',
+      'ordinary responses stay redacted after a complete replacement',
     );
+    assert.equal(
+      edge.consumers.get('nexus/user-1')?.credentials.keyauth?.[0]?.key,
+      'super-secret-key',
+    );
+  });
+
+  it('refuses missing tags and unmatched redacted credentials without effects', async () => {
+    await client.consumers.create({ id: 'placeholder', username: 'placeholder' });
+    const snapshot = await client.consumers.verification('placeholder');
+    assert.ok(snapshot);
+    const before = structuredClone(edge.consumers.get('nexus/placeholder'));
+    const offset = edge.requests.length;
+    await assert.rejects(client.consumers.replace('placeholder', { username: 'placeholder' }));
+    assert.equal(edge.requests.length, offset, 'missing precondition is refused before dispatch');
+    await assert.rejects(
+      client.consumers.replace(
+        'placeholder',
+        { username: 'placeholder', credentials: { keyauth: [{ key: '[REDACTED]' }] } },
+        undefined,
+        snapshot.etag,
+      ),
+    );
+    assert.deepEqual(edge.consumers.get('nexus/placeholder'), before);
+  });
+
+  it('hashes Basic create, append, type replacement and metadata PUT', async () => {
+    await client.consumers.create({
+      id: 'basic-hashing',
+      username: 'basic-hashing',
+      credentials: { basicauth: [{ password: 'initial-password' }] },
+    });
+    const stored = edge.consumers.get('nexus/basic-hashing')!;
+    assert.deepEqual(stored.credentials.basicauth, [
+      { password_hash: mockBasicPasswordHash('initial-password') },
+    ]);
+    await client.consumers.addCredential('basic-hashing', 'basicauth', {
+      password: 'appended-password',
+    });
+    assert.deepEqual(stored.credentials.basicauth?.[1], {
+      password_hash: mockBasicPasswordHash('appended-password'),
+    });
+    await client.consumers.replaceCredentials('basic-hashing', 'basicauth', [
+      { password: 'replacement-password' },
+    ]);
+    const snapshot = await client.consumers.verification('basic-hashing');
+    assert.deepEqual(snapshot?.consumer.credentials.basicauth, [
+      { password_hash: mockBasicPasswordHash('replacement-password') },
+    ]);
+    await client.consumers.replace(
+      'basic-hashing',
+      {
+        username: stored.username,
+        credentials: snapshot!.consumer.credentials,
+        acl_groups: ['approved'],
+      },
+      undefined,
+      snapshot!.etag,
+    );
+    assert.deepEqual(stored.credentials.basicauth, [
+      { password_hash: mockBasicPasswordHash('replacement-password') },
+    ]);
+    assert.deepEqual(stored.acl_groups, ['approved']);
+    assert.ok(!JSON.stringify(stored).includes('replacement-password'));
+    const refreshed = await client.consumers.verification(stored.id);
+    const response = await rawConsumerPut(
+      stored.id,
+      { basicauth: [{ password: 'whole-consumer-password' }] },
+      refreshed!.etag,
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(stored.credentials.basicauth, [
+      { password_hash: mockBasicPasswordHash('whole-consumer-password') },
+    ]);
+    assert.ok(!JSON.stringify(await response.json()).includes('whole-consumer-password'));
+  });
+
+  it('rejects owner-closed credential fields without effects', async () => {
+    const basic = { password: 'secret-password', username: 'unsupported' };
+    const jwt = { secret: 's'.repeat(32), issuer: 'unsupported' };
+    for (const [type, entry] of [
+      ['basicauth', basic],
+      ['jwt', jwt],
+    ] as const) {
+      await assert.rejects(
+        client.consumers.create({
+          username: `closed-${type}`,
+          credentials: { [type]: [entry] },
+        }),
+      );
+      await client.consumers.create({ id: `closed-${type}`, username: `closed-${type}` });
+      const stored = edge.consumers.get(`nexus/closed-${type}`)!;
+      const before = structuredClone(stored);
+      await assert.rejects(client.consumers.addCredential(stored.id, type, entry));
+      await assert.rejects(client.consumers.replaceCredentials(stored.id, type, [entry]));
+      const snapshot = await client.consumers.verification(stored.id);
+      const response = await rawConsumerPut(stored.id, { [type]: [entry] }, snapshot!.etag);
+      assert.equal(response.status, 400);
+      await response.arrayBuffer();
+      assert.deepEqual(stored, before);
+    }
+  });
+
+  it('projects legacy known objects and refuses invalid hidden custom history without loss', async () => {
+    await client.consumers.create({
+      id: 'legacy-objects',
+      username: 'legacy-objects',
+      credentials: {
+        jwt: [{ secret: 'j'.repeat(32) }],
+      },
+    });
+    const stored = edge.consumers.get('nexus/legacy-objects')!;
+    // Deliberate raw historical fixture boundary: unknown owner fields are not
+    // ordinary typed credential input. Restore history can hold single objects.
+    const history = stored.credentials as unknown as Record<string, unknown>;
+    history.keyauth = { key: 'prefix[REDACTED]suffix', operator: 'kept' };
+    history.custom = [{ marker: '[REDACTED]' }];
+    history.jwt = { secret: 'j'.repeat(32), algorithm: 'legacy' };
+    const snapshot = await client.consumers.verification(stored.id);
+    await client.consumers.replace(
+      stored.id,
+      {
+        username: stored.username,
+        credentials: snapshot!.consumer.credentials,
+        acl_groups: ['ok'],
+      },
+      undefined,
+      snapshot!.etag,
+    );
+    assert.deepEqual(stored.credentials, {
+      keyauth: [{ key: 'prefix[REDACTED]suffix', operator: 'kept' }],
+      jwt: [{ secret: 'j'.repeat(32) }],
+      custom: [{ marker: '[REDACTED]' }],
+    });
+    const invalid = stored.credentials as unknown as Record<string, unknown>;
+    invalid.custom = { hidden: 'custom-history-canary' };
+    const before = structuredClone(stored);
+    const next = await client.consumers.verification(stored.id);
+    await assert.rejects(
+      client.consumers.replace(
+        stored.id,
+        { username: stored.username, credentials: next!.consumer.credentials, acl_groups: [] },
+        undefined,
+        next!.etag,
+      ),
+      (error: unknown) => {
+        assert.ok(isNexusError(error));
+        assert.ok(!JSON.stringify(error).includes('custom-history-canary'));
+        return true;
+      },
+    );
+    assert.deepEqual(
+      stored,
+      before,
+      'hidden invalid state is retained instead of silently dropped',
+    );
+  });
+
+  it('refuses unrepresentable Basic history without a write or disclosure', async () => {
+    await client.consumers.create({
+      id: 'legacy-basic',
+      username: 'legacy-basic',
+      credentials: { basicauth: [{ password: 'legacy-password-canary' }] },
+    });
+    const stored = edge.consumers.get('nexus/legacy-basic')!;
+    stored.credentials.basicauth![0]!.future = true;
+    const snapshot = await client.consumers.verification(stored.id);
+    const offset = edge.requests.length;
+    await assert.rejects(
+      client.consumers.replace(
+        stored.id,
+        { username: stored.username, credentials: snapshot!.consumer.credentials, acl_groups: [] },
+        undefined,
+        snapshot!.etag,
+      ),
+      (error: unknown) => {
+        assert.ok(isNexusError(error));
+        assert.equal(
+          (error.details as { reason: string }).reason,
+          'consumer_metadata_unrepresentable',
+        );
+        assert.ok(!JSON.stringify(error).includes('hmac_sha256:'));
+        return true;
+      },
+    );
+    assert.equal(edge.requests.length, offset);
+    assert.deepEqual(stored.acl_groups, []);
+    const raw = await rawConsumerPut(stored.id, {}, snapshot!.etag);
+    assert.equal(raw.status, 400, 'the owner also refuses the restored invalid hidden entry');
+    await raw.arrayBuffer();
   });
 
   it('attributes every provisioning path while retaining caller labels and actor subjects', async () => {
@@ -141,9 +356,92 @@ describe('ferrum admin client', () => {
       team: 'platform',
     });
     assert.equal(consumer?.claims?.sub, 'admin-user');
+    assert.deepEqual((await client.proxies.get('attribution-proxy'))?.labels, {
+      'provisioned-by': 'ferrum-nexus',
+    });
+    assert.deepEqual((await client.pluginConfigs.get('attribution-cors'))?.labels, {
+      'provisioned-by': 'ferrum-nexus',
+    });
     assert.deepEqual((await client.consumers.get('attribution-user'))?.labels, {
       team: 'platform',
     });
+  });
+
+  it('recreates retained labels without adding origin while keeping namespace and actor', async () => {
+    const labelMaps: (Record<string, string> | undefined)[] = [
+      undefined,
+      { operator: 'preserve' },
+      { operator: 'preserve', 'provisioned-by': 'operator-origin' },
+    ];
+    for (const [index, labels] of labelMaps.entries()) {
+      const proxyId = `replay-labels-${index}`;
+      const proxy = await client.proxies.create(
+        {
+          id: proxyId,
+          listen_path: `/nexus/${proxyId}`,
+          backend_host: 'example.com',
+          backend_port: 80,
+          labels,
+        },
+        'replay-actor',
+        { preserveLabels: true },
+      );
+      assert.deepEqual(proxy.labels, labels);
+      const plugin = await client.pluginConfigs.create(
+        {
+          id: `${proxyId}-auth`,
+          plugin_name: 'basic_auth',
+          scope: 'proxy',
+          proxy_id: proxyId,
+          enabled: true,
+          config: null,
+          labels,
+        },
+        'replay-actor',
+        { preserveLabels: true },
+      );
+      assert.deepEqual(plugin.labels, labels);
+      const imported = await client.apiSpecs.create(
+        {
+          openapi: '3.0.3',
+          info: { title: 'Retained labels', version: '1' },
+          paths: {},
+          'x-ferrum-proxy': {
+            id: `${proxyId}-spec`,
+            listen_path: `/nexus/${proxyId}-spec`,
+            backend_host: 'example.com',
+            labels,
+          },
+          'x-ferrum-plugins': [{ id: `${proxyId}-embedded`, plugin_name: 'basic_auth', labels }],
+        },
+        'replay-actor',
+        { preserveLabels: true },
+      );
+      assert.deepEqual((await client.proxies.get(imported.proxy_id))?.labels, labels);
+      assert.deepEqual((await client.pluginConfigs.get(`${proxyId}-embedded`))?.labels, labels);
+      for (const path of ['/proxies', '/plugins/config', '/api-specs']) {
+        const request = edge.callsTo('POST', path).at(-1);
+        assert.ok(request);
+        assert.equal(request.provisionedBy, undefined);
+        assert.equal(request.namespace, 'nexus');
+        assert.equal(request.claims?.sub, 'replay-actor');
+      }
+      // CRUD PUT preserves an omitted label map.
+      await client.pluginConfigs.replace(plugin.id, {
+        plugin_name: plugin.plugin_name,
+        scope: plugin.scope,
+        proxy_id: proxy.id,
+        enabled: plugin.enabled,
+        config: plugin.config,
+      });
+      assert.deepEqual((await client.pluginConfigs.get(plugin.id))?.labels, labels);
+      await client.proxies.replace(proxy.id, {
+        id: proxy.id,
+        listen_path: proxy.listen_path,
+        backend_host: proxy.backend_host,
+      });
+      assert.deepEqual((await client.proxies.get(proxy.id))?.labels, labels);
+    }
   });
 
   it('finds a consumer by username by scanning the list endpoint', async () => {
@@ -532,11 +830,16 @@ describe('ferrum admin client', () => {
 
   describe('error mapping', () => {
     it('restores applied:false details for a non-credential write', async () => {
-      edge.queueFailure(503, {
-        error: 'internal detail nobody outside should see',
-        applied: false,
-        reason: 'private gateway reason',
-      });
+      edge.queueFailure(
+        503,
+        {
+          error: 'internal detail nobody outside should see',
+          applied: false,
+          reason: 'private gateway reason',
+        },
+        '/proxies',
+        'POST',
+      );
       await assert.rejects(
         () =>
           client.proxies.create({
@@ -836,6 +1139,7 @@ describe('ferrum admin client', () => {
         // The real minter stamps `ns`, so the ordinary client just works.
         const page = await stamped.consumers.list();
         assert.equal(page.pagination.total, 0);
+        await stamped.assertBackendEgress();
 
         for (const [label, denied] of [
           ['a token with no ns claim', unstamped],
@@ -850,6 +1154,14 @@ describe('ferrum admin client', () => {
               return true;
             },
             label,
+          );
+          await assert.rejects(
+            () => denied.assertBackendEgress(),
+            (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
+          );
+          await assert.rejects(
+            () => denied.consumers.verification('missing'),
+            (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
           );
         }
       } finally {
@@ -1065,7 +1377,8 @@ describe('ferrum admin client', () => {
           () => logged.apiSpecs.create(document),
           (error: unknown) => isNexusError(error) && error.code === 'INTERNAL',
         );
-        assert.equal(edge.requests.length, before);
+        assert.equal(edge.requests.length, before + 1, 'only the fresh policy read was dispatched');
+        assert.equal(edge.requests.at(-1)?.path, '/backend-egress-policy');
         assert.equal(logs.at(-1)?.path, '/api-specs');
         assert.equal(logs.at(-1)?.status, undefined);
         assert.equal(messages.at(-1), 'Ferrum Edge Admin API request serialization failed');
@@ -1136,6 +1449,477 @@ describe('ferrum admin client', () => {
           path_regex: '^/nexus/spec/invoices/[^/]+$',
         },
       ]);
+    });
+
+    it('admits embedded validator fields only after regenerating its operation table', async () => {
+      for (const operations of [undefined, [{ method: 'GET', path_regex: '[' }]]) {
+        const id = `embedded-validator-${operations === undefined ? 'missing' : 'stale'}`;
+        const document = specDocument(id, '/nexus/embedded', ['/invoices']);
+        document['x-ferrum-plugins'] = [
+          {
+            id: `${id}-routes`,
+            plugin_name: 'openapi_validator',
+            enabled: true,
+            labels: { operator: 'preserve' },
+            priority_override: 2_900,
+            config: {
+              request_content_types: ['application/problem+json'],
+              ...(operations === undefined ? {} : { operations }),
+            },
+          },
+        ];
+        const ref = await client.apiSpecs.create(document);
+        const validator = edge.pluginForProxy(id, 'openapi_validator');
+        assert.ok(validator);
+        assert.equal(validator.id, `${id}-routes`);
+        assert.equal(validator.scope, 'proxy');
+        assert.deepEqual(await client.pluginConfigs.get(validator.id), validator);
+        assert.deepEqual(validator.labels, {
+          operator: 'preserve',
+          'provisioned-by': 'ferrum-nexus',
+        });
+        assert.equal(validator.priority_override, 2_900);
+        assert.deepEqual((validator.config as Record<string, unknown>).request_content_types, [
+          'application/problem+json',
+        ]);
+        assert.deepEqual((validator.config as Record<string, unknown>).operations, [
+          {
+            method: 'GET',
+            path_template: '/nexus/embedded/invoices',
+            path_regex: '^/nexus/embedded/invoices$',
+          },
+        ]);
+        await client.apiSpecs.delete(ref.id);
+      }
+      const invalid = specDocument('invalid-embedded', '/nexus/invalid', ['/invoices']);
+      invalid['x-ferrum-plugins'] = [
+        { plugin_name: 'openapi_validator', config: { unknown_policy_field: true } },
+      ];
+      await assert.rejects(
+        client.apiSpecs.create(invalid),
+        (error: unknown) => isNexusError(error) && error.code === 'EDGE_REJECTED_SPEC',
+      );
+      assert.equal(edge.proxies.has('nexus/invalid-embedded'), false);
+    });
+
+    it('returns native defaults and preserves explicit imported plugin metadata', async () => {
+      const document = specDocument('import-defaults', '/nexus/import-defaults', ['/invoices']);
+      const trigger = { when: { match: { method: ['GET'] } } };
+      const operator = {
+        id: 'import-operator',
+        plugin_name: 'ip_restriction',
+        scope: 'proxy',
+        enabled: false,
+        config: { allow: ['203.0.113.0/24'], mode: 'allow_first' },
+        labels: { operator: 'preserve', 'provisioned-by': 'operator-origin' },
+        priority_override: 2_900,
+        trigger,
+        created_at: '2020-01-01T00:00:00Z',
+        updated_at: '2020-01-01T00:00:00Z',
+      };
+      document['x-ferrum-plugins'] = [
+        { id: 'import-default', plugin_name: 'basic_auth' },
+        operator,
+      ];
+      const ref = await client.apiSpecs.create(document);
+      const configs = await client.pluginConfigs.listByProxy(ref.proxy_id);
+      const defaults = configs.find((plugin) => plugin.id === 'import-default');
+      const explicit = configs.find((plugin) => plugin.id === operator.id);
+      assert.ok(defaults && explicit);
+      assert.equal(defaults.scope, 'proxy');
+      assert.equal(defaults.enabled, true);
+      assert.equal(defaults.config, null);
+      assert.deepEqual(defaults.labels, { 'provisioned-by': 'ferrum-nexus' });
+      assert.equal(defaults.priority_override, undefined);
+      assert.equal(defaults.trigger, undefined);
+      for (const plugin of [defaults, explicit]) {
+        assert.equal(plugin.namespace, 'nexus');
+        assert.equal(plugin.proxy_id, ref.proxy_id);
+        assert.equal(plugin.api_spec_id, ref.id);
+        assert.ok(plugin.created_at && plugin.updated_at);
+        assert.equal(new Date(plugin.created_at).toISOString(), plugin.created_at);
+        assert.equal(new Date(plugin.updated_at).toISOString(), plugin.updated_at);
+        assert.deepEqual(await client.pluginConfigs.get(plugin.id), plugin);
+      }
+      assert.equal(explicit.scope, operator.scope);
+      assert.equal(explicit.enabled, false);
+      assert.deepEqual(explicit.config, operator.config);
+      assert.deepEqual(explicit.trigger, trigger);
+      assert.equal(explicit.priority_override, operator.priority_override);
+      assert.notEqual(explicit.created_at, operator.created_at);
+      assert.deepEqual(explicit.labels, operator.labels);
+      const effective = edge.effectivePluginsForProxy(ref.proxy_id);
+      assert.ok(effective.some((plugin) => plugin.id === defaults.id));
+      assert.equal(
+        effective.some((plugin) => plugin.id === operator.id),
+        false,
+      );
+
+      const { labels: _labels, ...replacement } = operator;
+      document['x-ferrum-plugins'] = [
+        { id: defaults.id, plugin_name: 'basic_auth', config: null },
+        replacement,
+      ];
+      await client.apiSpecs.replace(ref.id, document);
+      const restored = await client.pluginConfigs.get(operator.id);
+      assert.ok(restored);
+      assert.deepEqual(restored.labels, explicit.labels);
+      assert.equal(restored.created_at, explicit.created_at);
+      assert.equal(restored.enabled, false);
+      assert.equal(restored.scope, 'proxy');
+      assert.deepEqual(restored.trigger, explicit.trigger);
+      assert.equal(restored.priority_override, explicit.priority_override);
+      assert.equal(restored.api_spec_id, ref.id);
+      assert.deepEqual(restored.config, explicit.config);
+    });
+
+    it('rejects explicit invalid imported resource fields instead of defaulting them', async () => {
+      const invalid: Record<string, unknown>[] = [
+        { enabled: null },
+        { enabled: 'false' },
+        { enabled: 0 },
+        { scope: null },
+        { scope: 'global' },
+        { scope: 'proxy_group' },
+        { scope: 1 },
+        { labels: { operator: 1 } },
+        { priority_override: '2900' },
+        { priority_override: 65_536 },
+        { api_spec_id: 'operator-owned-spec' },
+        { unknown_resource_field: true },
+        { config: true },
+        { config: { unknown_config_field: true } },
+      ];
+      for (const [index, fields] of invalid.entries()) {
+        const proxyId = `invalid-import-${index}`;
+        const document = specDocument(proxyId, `/nexus/${proxyId}`, ['/invoices']);
+        document['x-ferrum-plugins'] = [{ plugin_name: 'basic_auth', ...fields }];
+        await assert.rejects(
+          client.apiSpecs.create(document),
+          (error: unknown) => isNexusError(error) && error.code === 'EDGE_REJECTED_SPEC',
+        );
+        assert.equal(edge.proxies.has(`nexus/${proxyId}`), false);
+        assert.equal(edge.apiSpecForProxy(proxyId), undefined);
+        assert.deepEqual(edge.pluginsForProxy(proxyId), []);
+      }
+    });
+
+    it('rejects malformed submitted import metadata before POST or PUT effects', async () => {
+      const baseline = specDocument('import-admission', '/nexus/import-admission', ['/invoices']);
+      baseline['x-ferrum-plugins'] = [{ id: 'import-admission-auth', plugin_name: 'basic_auth' }];
+      const ref = await client.apiSpecs.create(baseline);
+      const token = await createAdminTokenMinter(configFor(edgeUrl)).getToken('import-admission');
+      const state = () =>
+        structuredClone({
+          proxies: [...edge.proxies],
+          plugins: [...edge.pluginConfigs],
+          specs: [...edge.apiSpecs],
+          upstreams: [...edge.upstreams],
+          consumers: [...edge.consumers],
+        });
+      const metadata: Record<string, unknown>[] = [
+        ...[null, 1, 'bad id', '/bad', '_bad', 'bad\n', 'é', 'a'.repeat(255)].map((id) => ({ id })),
+        ...['created_at', 'updated_at'].flatMap((field) =>
+          [
+            null,
+            1,
+            '',
+            'yesterday',
+            '2026-02-30T12:00:00Z',
+            '2026-01-01T24:00:00Z',
+            '2026-01-01T00:60:00Z',
+            '2026-01-01T00:00:61Z',
+            '2026-01-01T00:00:00+24:00',
+            '2026-01-01T00:00:00',
+            '2026-01-01',
+            '2026-01-01T00:00:00Zjunk',
+          ].map((value) => ({ [field]: value })),
+        ),
+        { namespace: null },
+        { namespace: 1 },
+        { labels: null },
+        { labels: [] },
+        { labels: { operator: 1 } },
+      ];
+      for (const method of ['POST', 'PUT'] as const) {
+        const endpoint = method === 'POST' ? '/api-specs' : `/api-specs/${ref.id}`;
+        const cases: {
+          resource: string;
+          fields: Record<string, unknown>;
+          status: number;
+          code: string;
+        }[] = [
+          ...metadata.flatMap((fields) =>
+            (['proxy', 'plugin'] as const).map((resource) => ({
+              resource,
+              fields,
+              status: 400,
+              code: 'MalformedExtension',
+            })),
+          ),
+          { resource: 'plugin', fields: { proxy_id: 1 }, status: 400, code: 'MalformedExtension' },
+          {
+            resource: 'plugin',
+            fields: { proxy_id: 'other-proxy' },
+            status: 422,
+            code: 'PluginProxyIdMismatch',
+          },
+          ...[null, {}, 'plugins', true].map((value) => ({
+            resource: 'extension',
+            fields: { value },
+            status: 400,
+            code: 'MalformedExtension',
+          })),
+          { resource: 'duplicates', fields: {}, status: 400, code: 'MalformedExtension' },
+        ];
+        for (const testCase of cases) {
+          const document = structuredClone(baseline);
+          if (testCase.resource === 'proxy') {
+            document['x-ferrum-proxy'] = {
+              ...(document['x-ferrum-proxy'] as Record<string, unknown>),
+              ...testCase.fields,
+            };
+          } else if (testCase.resource === 'extension') {
+            document['x-ferrum-plugins'] = testCase.fields.value;
+          } else {
+            const plugin = {
+              id: 'import-admission-auth',
+              plugin_name: 'basic_auth',
+              ...testCase.fields,
+            };
+            document['x-ferrum-plugins'] =
+              testCase.resource === 'duplicates' ? [plugin, { ...plugin }] : [plugin];
+          }
+          const beforeState = state();
+          const response = await fetch(`${edgeUrl}${endpoint}`, {
+            method,
+            headers: {
+              authorization: `Bearer ${token}`,
+              'x-ferrum-namespace': 'nexus',
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify(document),
+          });
+          const witness = `${method} ${testCase.resource} ${JSON.stringify(testCase.fields)}`;
+          assert.equal(response.status, testCase.status, witness);
+          const rejection = (await response.json()) as { code: string };
+          assert.equal(rejection.code, testCase.code, witness);
+          assert.deepEqual(state(), beforeState, `${witness}: no importer effects`);
+        }
+      }
+    });
+
+    it('rejects imported timestamp UTC overflow before POST or PUT effects', async () => {
+      const baseline = specDocument('timestamp-admission', '/nexus/timestamp-admission', [
+        '/invoices',
+      ]);
+      baseline['x-ferrum-plugins'] = [
+        { id: 'timestamp-admission-auth', plugin_name: 'basic_auth' },
+      ];
+      const ref = await client.apiSpecs.create(baseline);
+      const companion = specDocument('timestamp-companion', '/nexus/timestamp-companion', [
+        '/companion',
+      ]);
+      companion['x-ferrum-plugins'] = [
+        { id: 'timestamp-companion-auth', plugin_name: 'basic_auth' },
+      ];
+      await client.apiSpecs.create(companion);
+      await client.consumers.create({
+        id: 'timestamp-consumer',
+        username: 'timestamp-consumer',
+        credentials: { keyauth: [{ key: 'timestamp-fixture-key' }] },
+        acl_groups: ['timestamp-approved'],
+      });
+      const minter = createAdminTokenMinter(configFor(edgeUrl));
+      const token = await minter.getToken('timestamp-admission');
+      const state = () =>
+        structuredClone({
+          proxies: [...edge.proxies],
+          plugins: [...edge.pluginConfigs],
+          specs: [...edge.apiSpecs],
+          upstreams: [...edge.upstreams],
+          consumers: [...edge.consumers],
+        });
+      const originalState = state();
+      const originalAuthority = await client.deployments.snapshot();
+      const timestamps = [
+        '+262142-12-31T23:59:59-23:59',
+        '-262143-01-01T00:00:00+23:59',
+        '+262142-12-31T23:59:00-00:01',
+        '-262143-01-01T00:00:59+00:01',
+        '+262142-12-31T23:59:00.0000000001−00:01',
+        '-262143-01-01T00:00:59.999999999+00:01',
+        '+262142-12-31T23:59:60.999999999-00:01',
+        '-262143-01-01T00:00:60.999999999+00:01',
+        '+262142-12-31T23:59:59−2359',
+        '-262143-01-01T0: 0:0+23 : 59',
+      ];
+      for (const method of ['POST', 'PUT'] as const) {
+        const endpoint = method === 'POST' ? '/api-specs' : `/api-specs/${ref.id}`;
+        for (const resource of ['proxy', 'plugin'] as const) {
+          for (const field of ['created_at', 'updated_at'] as const) {
+            for (const timestamp of timestamps) {
+              const document = structuredClone(baseline);
+              const proxy = document['x-ferrum-proxy'] as Record<string, unknown>;
+              if (method === 'POST') {
+                proxy.id = '';
+                proxy.listen_path = '/nexus/timestamp-rejected';
+              }
+              // Deferred plugin admission would let either write regenerate the
+              // validator and create this companion before reaching the bad plugin.
+              const plugin: Record<string, unknown> = {
+                id: method === 'POST' ? '' : 'timestamp-admission-auth',
+                plugin_name: 'basic_auth',
+                labels: { operator: 'changed' },
+              };
+              document['x-ferrum-plugins'] = [
+                { plugin_name: 'basic_auth', labels: { companion: 'new' } },
+                plugin,
+              ];
+              (resource === 'proxy' ? proxy : plugin)[field] = timestamp;
+              const response = await fetch(`${edgeUrl}${endpoint}`, {
+                method,
+                headers: {
+                  authorization: `Bearer ${token}`,
+                  'x-ferrum-namespace': 'nexus',
+                  'x-ferrum-provisioned-by': 'timestamp-import',
+                  'content-type': 'application/json',
+                },
+                body: JSON.stringify(document),
+              });
+              const witness = `${method} ${resource}.${field} ${timestamp}`;
+              assert.equal(response.status, 400, witness);
+              const rejection = (await response.json()) as { code: string; details: string };
+              assert.equal(rejection.code, 'MalformedExtension', witness);
+              assert.equal(rejection.details, `Invalid imported resource ${field}`, witness);
+              assert.deepEqual(
+                state(),
+                originalState,
+                `${witness}: no resource or document effects`,
+              );
+              assert.deepEqual(
+                await client.deployments.snapshot(),
+                originalAuthority,
+                `${witness}: no generation, timestamp, hash or companion effects`,
+              );
+            }
+          }
+        }
+      }
+    });
+
+    it('admits valid metadata before generating IDs and server-owned import timestamps', async () => {
+      const timestamps = [
+        '2024-02-29T12:34:56Z',
+        '2020-01-01T12:34:56.123456789+01:30',
+        '2020-1-1 1: 2:3 UTC',
+        '2016-12-31t23:59:60z',
+        '+10000-01-01T00:00:00+0000',
+        '+262142-12-31T23:59:59Z',
+        '+262142-12-31T23:59:59.999999999+00:00',
+        '+262142-12-31T23:59:59.9999999999-0000',
+        '+262142-12-31T23:59:60.999999999Z',
+        '+262142-12-31T23:59:59+23:59',
+        '+262142-12-31T00:00:00−23:59',
+        '+262142-12-31T23:58:59.9999999999-00:01',
+        '+262142-12-31T23:58:60.999999999-00:01',
+        '-262143-01-01T00:00:00Z',
+        '-262143-01-01T00:00:00+0000',
+        '-262143-01-01T00:00:00.0000000009−00:00',
+        '-262143-01-01T00:00:00−23:59',
+        '-262143-01-01T23:59:00+23:59',
+        '-262143-01-01T00:01:00.000000001+00:01',
+        '-262143-01-01T00:00:60.123456789+00:00',
+        '2017-01-01T00:59:60.123456789+01:00',
+        '2016-12-31T23:59:60.123456789123−00:00',
+        '\u2003-262143-1-1t0: 0:0 −00 : 00\u2003',
+      ];
+      for (const [index, timestamp] of timestamps.entries()) {
+        const document = specDocument(`valid-metadata-${index}`, `/nexus/valid-metadata-${index}`, [
+          '/invoices',
+        ]);
+        const proxy = document['x-ferrum-proxy'] as Record<string, unknown>;
+        proxy.created_at = timestamp;
+        proxy.updated_at = timestamp;
+        proxy.namespace = 'submitted-namespace';
+        proxy.labels = { operator: 'preserve' };
+        const pluginId = index === 0 ? 'A.a_9-' : index === 1 ? 'a'.repeat(254) : '';
+        document['x-ferrum-plugins'] = [
+          {
+            id: pluginId,
+            plugin_name: 'basic_auth',
+            proxy_id: proxy.id,
+            namespace: 'submitted-namespace',
+            labels: { operator: 'preserve' },
+            created_at: timestamp,
+            updated_at: timestamp,
+          },
+        ];
+        const ref = await client.apiSpecs.create(document);
+        const live = (await client.proxies.get(ref.proxy_id))!;
+        const plugin = (await client.pluginConfigs.listByProxy(ref.proxy_id)).find(
+          (row) => row.plugin_name === 'basic_auth',
+        );
+        assert.ok(plugin && plugin.id);
+        if (pluginId !== '') assert.equal(plugin.id, pluginId);
+        assert.equal(live.namespace, 'nexus');
+        assert.equal(plugin.namespace, 'nexus');
+        assert.equal(plugin.proxy_id, live.id);
+        assert.deepEqual(live.labels, { operator: 'preserve', 'provisioned-by': 'ferrum-nexus' });
+        assert.deepEqual(plugin.labels, live.labels);
+        assert.notEqual(live.created_at, timestamp);
+        assert.notEqual(plugin.created_at, timestamp);
+        for (const row of [live, plugin]) {
+          assert.equal(row.api_spec_id, ref.id);
+          for (const field of ['created_at', 'updated_at'] as const) {
+            assert.equal(typeof row[field], 'string');
+            assert.notEqual(row[field], timestamp);
+            assert.equal(new Date(row[field] as string).toISOString(), row[field]);
+          }
+        }
+        assert.deepEqual(await client.apiSpecs.documentByProxy(ref.proxy_id), document);
+        proxy.id = '';
+        delete (document['x-ferrum-plugins'] as Record<string, unknown>[])[0]!.proxy_id;
+        await client.apiSpecs.replace(ref.id, document);
+        const replaced = await client.proxies.get(ref.proxy_id);
+        assert.equal(replaced?.id, ref.proxy_id);
+        assert.equal(replaced?.created_at, live.created_at);
+        const replacedPlugin = (await client.pluginConfigs.listByProxy(ref.proxy_id)).find(
+          (row) => row.plugin_name === 'basic_auth',
+        );
+        assert.ok(replaced && replacedPlugin);
+        for (const row of [replaced, replacedPlugin]) {
+          assert.equal(row.namespace, 'nexus');
+          assert.equal(row.api_spec_id, ref.id);
+          assert.deepEqual(row.labels, live.labels);
+          for (const field of ['created_at', 'updated_at'] as const) {
+            assert.notEqual(row[field], timestamp);
+            assert.equal(new Date(row[field] as string).toISOString(), row[field]);
+          }
+        }
+        assert.equal(replacedPlugin.proxy_id, ref.proxy_id);
+        assert.deepEqual(await client.apiSpecs.documentByProxy(ref.proxy_id), document);
+      }
+      for (const id of [undefined, '']) {
+        const document = specDocument('omitted-import-id', '/nexus/omitted-import-id', [
+          '/invoices',
+        ]);
+        const proxy = document['x-ferrum-proxy'] as Record<string, unknown>;
+        if (id === undefined) delete proxy.id;
+        else proxy.id = id;
+        document['x-ferrum-plugins'] = [{ plugin_name: 'basic_auth', proxy_id: null }];
+        const ref = await client.apiSpecs.create(document);
+        assert.ok(ref.proxy_id);
+        document['x-ferrum-plugins'] = [];
+        await client.apiSpecs.replace(ref.id, document);
+        assert.equal(
+          (await client.pluginConfigs.listByProxy(ref.proxy_id)).some(
+            (plugin) => plugin.plugin_name === 'basic_auth',
+          ),
+          false,
+        );
+        await client.proxies.delete(ref.proxy_id);
+      }
     });
 
     it('models literal root paths and listen/server joins in the importer', async () => {
@@ -1455,14 +2239,20 @@ describe('ferrum admin client', () => {
       await client.consumers.create({ id: 'ser-1', username: 'nexus-user-ser', acl_groups: [] });
 
       const addGroup = async (apiId: string): Promise<void> => {
-        const current = await client.consumers.get('ser-1');
-        if (!current) throw new Error('consumer vanished');
-        await client.consumers.replace('ser-1', {
-          username: current.username,
-          custom_id: current.custom_id ?? null,
-          credentials: current.credentials,
-          acl_groups: [...current.acl_groups, aclGroupForApi(apiId)],
-        });
+        const snapshot = await client.consumers.verification('ser-1');
+        if (!snapshot) throw new Error('consumer vanished');
+        const current = snapshot.consumer;
+        await client.consumers.replace(
+          'ser-1',
+          {
+            username: current.username,
+            custom_id: current.custom_id ?? null,
+            credentials: current.credentials,
+            acl_groups: [...current.acl_groups, aclGroupForApi(apiId)],
+          },
+          undefined,
+          snapshot.etag,
+        );
       };
 
       await Promise.all([

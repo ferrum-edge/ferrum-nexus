@@ -3,8 +3,8 @@
  *
  * The Edge probe must never fail the endpoint. A gateway that is unreachable
  * (`edge.status = 'down'`), reachable-but-unready (`'not_ready'`) or reachable
- * but not routing the portal's namespace (`'degraded'`, `edge.reason =
- * 'namespace_unserved'`) all leave the portal `degraded` on **HTTP 200**, so a
+ * but not routing the portal's namespace or lacking verified egress policy
+ * (`'degraded'`) all leave the portal `degraded` on **HTTP 200**, so a
  * load balancer keeps it in rotation while the gateway recovers. Only a broken
  * database makes the overall status `down`, and that answers **HTTP 503** —
  * container and load-balancer probes key on the status code, not the body.
@@ -182,15 +182,33 @@ function presentEdge(
     ? 'down'
     : result.ready === false
       ? 'not_ready'
-      : routing.unserved
+      : routing.unserved || result.backendEgressVerified !== true
         ? 'degraded'
         : 'ok';
-  const reason: EdgeHealthReason | null = status === 'degraded' ? NAMESPACE_UNSERVED_REASON : null;
+  // The egress verdict describes the gateway's topology and posture, which an
+  // anonymous caller is not told: it reads the generic `unspecified` instead.
+  const reason: EdgeHealthReason | null =
+    status !== 'degraded'
+      ? null
+      : routing.unserved
+        ? NAMESPACE_UNSERVED_REASON
+        : detailAllowed
+          ? 'backend_egress_unverified'
+          : 'unspecified';
   return {
     status,
     reason,
     latency_ms: result.latencyMs,
-    error: result.error === null ? null : detailAllowed ? result.error : OPAQUE_ERROR,
+    error:
+      reason === 'backend_egress_unverified'
+        ? result.backendEgressSchemaUnsupported === true
+          ? 'The gateway publishes a backend egress policy schema this portal does not read; pair it with Ferrum Edge v0.9.12 or earlier'
+          : 'Required backend egress policy could not be verified; check the configured pairing'
+        : result.error === null
+          ? null
+          : detailAllowed
+            ? result.error
+            : OPAQUE_ERROR,
     ready: result.ready,
     // Edge itself only reveals `mode` and `admin_writes_enabled` to an
     // authenticated caller; the portal keeps the same line for its anonymous
@@ -198,6 +216,7 @@ function presentEdge(
     mode: detailAllowed ? result.mode : null,
     admin_writes_enabled: detailAllowed ? result.adminWritesEnabled : null,
     edge_version: result.version,
+    public_egress_guaranteed: detailAllowed ? result.publicEgressGuaranteed === true : null,
     namespace: routing.configured,
     // `unserved` and the reason above are the monitor's signal and stay
     // public; the gateway's *own* namespace and serving scope are deployment
