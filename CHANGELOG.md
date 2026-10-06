@@ -242,6 +242,9 @@ for the supported combination and the upgrade steps.
   gateway holds. Upgrade note: an agent API already published with a larger
   document keeps serving, and any other `PATCH` (visibility, status, metadata)
   still succeeds; turn its agents off (`agents: null`) to revise it again.
+  Resolved Path Item references now count their operations against the 3,000
+  operation cap. Agent hash fallbacks are included in the committing audit row
+  for API `PATCH` updates as well as publish and spec revisions.
 - **The dependency-lock producer no longer hard-codes jsdom and Undici** (Refs #525).
   It checked their exact versions and integrity hashes, so the next reviewed bump
   would have failed it. It now requires both packages, a registry `resolved` URL and

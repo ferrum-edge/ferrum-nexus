@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { MAX_SPEC_OPERATIONS } from '@ferrum-nexus/shared';
 
 import { NexusError } from '../lib/errors.js';
 import {
@@ -542,12 +543,14 @@ describe('agentToolDefinitionHash', () => {
       paths,
       components: { pathItems: { Shared: { post: { responses } } } },
     };
-    const counters = stats();
-    agentToolDefinitionDigests(document, tools, counters);
+    const { counters, reads } = hashPaidFor(document, tools);
     assert.equal(counters.overBudget, true);
-    // Every member is charged before it is read, and the charge that crossed
-    // the budget was at most one listing of the map.
-    assert.ok(counters.scanned <= counters.charged, `scanned ${counters.scanned}`);
+    // Independently count property and collection reads. The build may read
+    // each charged unit four times, plus one whole-document fallback pass.
+    assert.ok(
+      reads <= 4 * MAX_DEFINITION_HASH_WORK + 3 * documentSize(document) + 64 * tools.length,
+      `reads ${reads}`,
+    );
     assert.ok(
       counters.charged <= MAX_DEFINITION_HASH_WORK + Object.keys(responses).length,
       `charged ${counters.charged}`,
@@ -747,6 +750,32 @@ describe('the stamped agent document', () => {
     error.code === 'SPEC_INVALID' &&
     (error.details as { reason?: unknown } | undefined)?.reason === 'agent_document_too_large';
 
+  it('admits and refuses the bridge methods documented by the pinned Edge importer', () => {
+    const methods = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'] as const;
+    const document = {
+      paths: {
+        '/shared': Object.fromEntries(
+          methods.map((method) => [method, { responses: { '200': { description: 'OK' } } }]),
+        ),
+      },
+    };
+    const supported = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+
+    for (const method of methods) {
+      const selection = {
+        operations: [{ ...TOOL, method: method.toUpperCase() as Tool['method'], path: '/shared' }],
+      };
+      if (supported.has(method.toUpperCase())) {
+        assert.doesNotThrow(() => validateAgents(selection, document, 'routes', true, null, null));
+      } else {
+        assert.throws(
+          () => validateAgents(selection, document, 'routes', true, null, null),
+          (error: unknown) => error instanceof NexusError && error.code === 'SPEC_INVALID',
+        );
+      }
+    }
+  });
+
   it('refuses a fan-in past its budget before building, reading the document about once', () => {
     // 2,000 paths reach one Path Item of 150,000 members through 32 hops.
     // Stamped, every path would hold its own copy: about 3 GiB.
@@ -827,6 +856,32 @@ describe('the stamped agent document', () => {
     assert.ok(bytes <= charged + 8_192, `${bytes} bytes, ${charged} charged`);
     // Every route is charged at the longest path the proxy may hold.
     assert.ok(stampedAgentDocumentBytes(document, LISTEN_PATHS, agents) > charged);
+  });
+
+  it('rejects more than the shared operation cap after resolving Path Item references', () => {
+    const paths: Record<string, unknown> = {};
+    for (let index = 0; index < 2_000; index += 1) {
+      paths[`/p${index}`] = { $ref: '#/components/pathItems/Shared' };
+    }
+    const document = {
+      paths,
+      components: {
+        pathItems: {
+          Shared: {
+            get: { responses: OK },
+            post: { responses: OK },
+          },
+        },
+      },
+    };
+
+    assert.throws(
+      () => validateAgents({ operations: [TOOL] }, document, 'routes', true, null, null),
+      (error: unknown) =>
+        error instanceof NexusError &&
+        error.code === 'SPEC_INVALID' &&
+        error.message.includes(`${MAX_SPEC_OPERATIONS} operations`),
+    );
   });
 });
 

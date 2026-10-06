@@ -26,6 +26,46 @@ function selections(agents: ApiAgents | null | undefined): ApiAgents | null {
     : null;
 }
 
+/** A compact schema whose many references make one selected tool hash pass its work budget. */
+function hashFallbackDocument(): Record<string, unknown> {
+  const levels = 120;
+  let deep: Record<string, unknown> = { leaf: 'y'.repeat(200_000) };
+  for (let level = 0; level < levels; level += 1) deep = { a: deep };
+  const refs = Array.from(
+    { length: levels },
+    (_, level) => `#/components/schemas/Deep${'/a'.repeat(level)}`,
+  );
+  return {
+    openapi: '3.1.0',
+    info: { title: 'Agent API', version: '1' },
+    servers: [{ url: 'https://api.example.com' }],
+    paths: {
+      '/items': {
+        get: {
+          operationId: 'items',
+          parameters: [
+            { name: 'q', in: 'query', schema: { allOf: refs.map(($ref) => ({ $ref })) } },
+          ],
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+    },
+    components: { schemas: { Deep: deep } },
+  };
+}
+
+/** A parsed document whose selected Path Item cannot be resolved for hashing. */
+function cyclicPathItemDocument(): Record<string, unknown> {
+  const operation = { responses: { '200': { description: 'OK' } } };
+  return {
+    openapi: '3.1.0',
+    info: { title: 'Agent API', version: '1' },
+    servers: [{ url: 'https://api.example.com' }],
+    paths: { '/items': { $ref: '#/components/pathItems/Loop', get: operation } },
+    components: { pathItems: { Loop: { $ref: '#/components/pathItems/Loop', get: operation } } },
+  };
+}
+
 const DOCUMENT = {
   openapi: '3.1.0',
   info: { title: 'Agent API', version: '1' },
@@ -154,6 +194,78 @@ describe('agent publishing and Nexus authorization', () => {
     assert.ok(
       (await harness.auditRows('api.publish')).some((row) => row.target_id === published.api.id),
     );
+  });
+
+  it('validates before hashing and audits fallbacks on create and PATCH', async () => {
+    const expensiveSpec = hashFallbackDocument();
+    const invalidDocument = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: {
+        name: 'Cyclic agent API',
+        slug: `agent-cyclic-${++sequence}`,
+        spec: JSON.stringify(cyclicPathItemDocument()),
+        auth_plugin: 'key_auth',
+        requestable: true,
+        visibility: 'public',
+        spec_enforcement: 'routes',
+        agents: AGENTS,
+      },
+    });
+    assert.equal(invalidDocument.statusCode, 400, invalidDocument.body);
+
+    const created = await publish({ spec: JSON.stringify(expensiveSpec) });
+    const publishAudit = (await harness.auditRows('api.publish')).find(
+      (row) => row.target_id === created.api.id,
+    );
+    assert.equal(publishAudit?.details.tool_hash_fallback, true);
+
+    const invalidPatch = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${created.api.id}`,
+      payload: {
+        agents: { operations: [{ ...AGENTS.operations[0], name: 'invalid name' }] },
+      },
+    });
+    assert.equal(invalidPatch.statusCode, 400, invalidPatch.body);
+    assert.equal(
+      (await harness.auditRows('api.update')).some((row) => row.target_id === created.api.id),
+      false,
+    );
+
+    const updated = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${created.api.id}`,
+      payload: {
+        agents: {
+          operations: [{ ...AGENTS.operations[0], description: 'Updated description' }],
+        },
+      },
+    });
+    assert.equal(updated.statusCode, 200, updated.body);
+    const updateAudit = (await harness.auditRows('api.update')).find(
+      (row) => row.target_id === created.api.id,
+    );
+    assert.equal(updateAudit?.details.tool_hash_fallback, true);
+
+    const stored = await harness.store.apiSpecs.findCurrentByApi(created.api.id);
+    assert.ok(stored);
+    await harness.store.apiSpecs.create({
+      api_id: created.api.id,
+      version: 'stored-cycle',
+      raw_spec: JSON.stringify(cyclicPathItemDocument()),
+      parsed_title: 'Agent API',
+      parsed_version: 'stored-cycle',
+      is_current: true,
+      created_by: provider.user.id,
+      rolled_back_from_id: null,
+    });
+    const invalidStoredRevision = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${created.api.id}`,
+      payload: { agents: AGENTS },
+    });
+    assert.equal(invalidStoredRevision.statusCode, 400, invalidStoredRevision.body);
   });
 
   it('keeps namespace metacharacters literal in the MCP validator bypass', () => {

@@ -1,4 +1,4 @@
-import { OPENAPI_OPERATION_METHODS, type HttpMethod } from './constants.js';
+import { MAX_SPEC_OPERATIONS, OPENAPI_OPERATION_METHODS, type HttpMethod } from './constants.js';
 import { resolveOpenApiPointer } from './openapi.js';
 
 /** A provider explicitly selected this operation; no spec extension grants access. */
@@ -177,6 +177,11 @@ export function agentOperations(document: Record<string, unknown>): AgentOperati
     for (const method of OPENAPI_OPERATION_METHODS) {
       const operation = agentPathItemMember(item, method);
       if (!record(operation)) continue;
+      if (operations.length >= MAX_SPEC_OPERATIONS) {
+        throw new Error(
+          `OpenAPI document resolves to more than ${MAX_SPEC_OPERATIONS} operations`,
+        );
+      }
       const upper = method.toUpperCase() as HttpMethod;
       const operationId = typeof operation.operationId === 'string' ? operation.operationId : '';
       const fallback = `${method}_${path}`;

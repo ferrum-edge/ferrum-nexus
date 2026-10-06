@@ -4359,7 +4359,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   { id: actor.id, role: actor.role },
                   update.status === 'retired' ? AuditAction.API_RETIRE : AuditAction.API_UPDATE,
                   { type: 'api', id: api.id },
-                  { changed_fields: changed, ...details, ...egress },
+                  { changed_fields: changed, ...details, ...hashFallback, ...egress },
                   ip,
                 );
               return row;
