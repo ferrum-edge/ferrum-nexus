@@ -335,12 +335,15 @@ cache/coalescing still bounds public probe load.
 
 `edge.public_egress_guaranteed` is `true` only when that sampled policy reports
 `enforcement_scope=local-data-plane` with `public_only_guaranteed=true`. A control
-plane with remote data planes always reads `false`, even when it reports
-public-only for its own process, and `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` or
-`NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` admits its writes without changing that verdict.
+plane with remote data planes always reads `false`; Edge v0.9.13 reports
+`public_only_guaranteed=false` for it. `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` admits its
+writes without changing that verdict. `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` still
+requires `public_only_guaranteed=true`, so against Edge v0.9.13 it admits no such
+pairing. Egress policy schema 1 (Edge v0.9.12 and earlier) is refused as
+`unsupported_egress_policy_schema`.
 See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee).
-Published v0.9.12 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
+Published v0.9.13 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
 
 Whole-consumer metadata replacements pair complete server-only verification with
 the original strong row `If-Match`, using Edge's masked projection and hidden-type
@@ -2504,7 +2507,7 @@ the API id, so their existing consumer groups match again. After a missing-proxy
 repair, direct gateway changes were deleted with the proxy and are not restored.
 A failed enforcement conversion instead retains an encrypted recovery snapshot of
 the original proxy and plugins, including operator fields.
-Recovery retains the original id and uses released Edge v0.9.12 selected
+Recovery retains the original id and uses released Edge v0.9.13 selected
 conditional removal and spec replacement. Each operation durably records its
 complete original namespace snapshot and quoted `deployment-v1` token before HTTP;
 only the expected committed/applied result, explicit recovery-cleanup authorization
@@ -2558,8 +2561,12 @@ existence, or an incomplete original-id staging proxy, never counts as restored.
 Audit rows: `api.gateway_restore_start` (before the first gateway call; if it
 fails, nothing is built), `api.gateway_restore` with the new proxy id, and on
 failure `api.gateway_restore_failed` (with `stranded_proxy_id` when the cleanup
-is unconfirmed). Selected cleanup/replacement requires the released Edge v0.9.12
+is unconfirmed). Selected cleanup/replacement requires the released Edge v0.9.13
 original deployment authority and explicit committed/applied cleanup acknowledgement.
+A namespace past Edge's conditional snapshot bound answers `409 CONFLICT` with
+`details.kind` `namespace_snapshot_too_large` (Edge `507`: nothing issued or applied),
+and a journal holding Edge v0.9.12 authority answers `409 CONFLICT` with
+`details.kind` `legacy_deployment_authority` before any gateway write.
 Uncertain/refused results retain the attempted identity, security configs and
 encrypted journal with `withdrawn: false` and `repair_required`; no refreshed-token
 retry or unconditional fallback is performed. See the

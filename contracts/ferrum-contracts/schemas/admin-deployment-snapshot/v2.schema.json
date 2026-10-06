@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ferrum-edge/ferrum-contracts/schemas/admin-deployment-snapshot/v2.schema.json",
+  "title": "Edge deployment snapshot v2",
+  "description": "Body of admin-only GET /deployment-snapshot from Edge v0.9.13. Stored spec documents, external-reference snapshots and other binary values appear in evidence and api_specs only as SHA-256 and length; api_spec_contents carries one base64 copy of the stored spec bytes outside the evidence. Retain the complete secret-bearing original response and its matching HTTP ETag in encrypted recovery storage. JSON conformance checks the owner OpenAPI envelope, not evidence completeness, token authenticity, freshness, authorization, snapshot coherence or that base64 content matches its digest.",
+  "x-contract": {
+    "name": "admin-deployment-snapshot",
+    "version": 2,
+    "status": "implemented",
+    "owner": "ferrum-edge/ferrum-edge",
+    "edge_availability": "Released in Ferrum Edge v0.9.13 at 9b83115de7ec23ab51ec4feae6bed65e596db425 (ferrum-edge#6017; see PRs #5999 and #6012). Replaces v1: api_spec_contents is required, spec bytes are digests, and the deployment_snapshot.v2 MAC domain rejects earlier tokens with 412.",
+    "provenance": [
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.13",
+        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "path": "openapi.yaml",
+        "symbols": [
+          "components.schemas.DeploymentSnapshot",
+          "components.schemas.StoredContentDigest",
+          "components.parameters.DeploymentIfMatch",
+          "components.responses.NamespaceSnapshotTooLarge"
+        ],
+        "note": "Transcribed OpenAPI envelope, required members, StoredContentDigest, the closed api_spec_contents item and the open evidence/resource shapes. The token pattern uses an absolute end assertion to match the exact parse_request implementation, which rejects trailing control bytes. Nested raw evidence is intentionally not narrowed beyond the owner OpenAPI."
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.13",
+        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "path": "src/admin/deployment_mutations.rs",
+        "symbols": [
+          "snapshot",
+          "typed_lists",
+          "api_spec_content",
+          "parse_request",
+          "tag",
+          "DEPLOYMENT_SNAPSHOT_TAG_KIND",
+          "MAX_DEPLOYMENT_SNAPSHOT_CONTENT_BASE64_BYTES"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.13",
+        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "path": "src/config/deployment_mutation.rs",
+        "symbols": [
+          "DeploymentSnapshot::representation",
+          "DeploymentSnapshot::digest",
+          "StoredEvidence"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.13",
+        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "path": "src/config/db_backend.rs",
+        "symbols": [
+          "ConditionalNamespaceSnapshot::representation",
+          "ApiSpecSnapshotView",
+          "stored_bytes_digest",
+          "MAX_NAMESPACE_SNAPSHOT_REPRESENTATION_BYTES"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.13",
+        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "path": "src/config/types.rs",
+        "symbols": [
+          "ApiSpec"
+        ],
+        "note": "Source of the stored gzip spec_content and optional external_ref_snapshot bytes, which ApiSpecSnapshotView replaces with stored_bytes_digest and api_spec_contents carries as standard padded base64."
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.13",
+        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "path": "src/config/db_loader.rs",
+        "symbols": [
+          "deployment_snapshot_tx",
+          "deployment_raw_sql_row"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.13",
+        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "path": "src/config/mongo_store.rs",
+        "symbols": [
+          "deployment_snapshot_in_session"
+        ],
+        "note": "Raw MongoDB documents carry bson_sha256, and binary values binary_sha256/len/subtype, instead of bytes."
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.13",
+        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "path": "docs/deployment_mutations.md",
+        "note": "HTTP/runtime protocol, the 64 MiB evidence bound, the 256 MiB api_spec_contents bound and complete evidence retention are documented in docs/deployment-contracts.md."
+      }
+    ]
+  },
+  "type": "object",
+  "required": [
+    "profile",
+    "namespace",
+    "namespace_etag",
+    "evidence",
+    "proxies",
+    "upstreams",
+    "plugin_configs",
+    "api_specs",
+    "api_spec_contents"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "profile": {
+      "type": "string",
+      "enum": [
+        "deployment-v1"
+      ]
+    },
+    "namespace": {
+      "type": "string"
+    },
+    "namespace_etag": {
+      "type": "string",
+      "pattern": "^\"deployment-v1-[0-9a-f]{32}\"(?![\\s\\S])",
+      "description": "Exactly one original strong quoted deployment token, equal to the response ETag. Distinct from backup namespace and row tokens. From v0.9.13 the token MACs a bounded digest under the deployment_snapshot.v2 domain; tokens issued by v0.9.12 keep this syntax but fail closed with 412. Preserve verbatim; never refresh authority to retry a refused or uncertain mutation."
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Complete typed and raw comparison representation: resources, associations, spec metadata and stored-document digests, historical credentials, trust, namespace metadata and change watermark. resources[5] equals api_specs. SQL retains column_type, value_type and lossless value, including typed nulls and float bits; blobs are {sha256, len}. MongoDB retains documents (binary values as binary_sha256/len/subtype) and bson_sha256. The token fences it within a 64 MiB canonical bound. Preserve every member; this open shape cannot certify completeness."
+    },
+    "proxies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "upstreams": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "plugin_configs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "api_specs": {
+      "type": "array",
+      "description": "Sorted by id in byte order; equals evidence.resources[5]. Stored documents are represented by digest; their bytes are in api_spec_contents.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "id",
+          "proxy_id",
+          "spec_content"
+        ],
+        "properties": {
+          "spec_content": {
+            "$ref": "#/$defs/StoredContentDigest"
+          },
+          "external_ref_snapshot": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/StoredContentDigest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "description": "Full stored spec metadata with spec_content and any external_ref_snapshot as StoredContentDigest. Preserve every member; this envelope does not impose a second ApiSpec schema."
+      }
+    },
+    "api_spec_contents": {
+      "type": "array",
+      "description": "One standard padded base64 copy of every stored API-spec document and external-reference snapshot from the same primary snapshot, in the same order as api_specs. Outside evidence and not part of the token's digest, but each value decodes to the stored bytes whose StoredContentDigest the evidence fences; verify them against api_specs. The base64 values together are bounded at 256 MiB; past that the read returns 507. GET /api-specs/{id} is no substitute.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "spec_content_base64",
+          "external_ref_snapshot_base64"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "spec_content_base64": {
+            "type": "string",
+            "format": "byte",
+            "description": "Standard padded base64 of the stored gzip-compressed document."
+          },
+          "external_ref_snapshot_base64": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "byte",
+            "description": "Standard padded base64 of the stored external-reference snapshot, or null when none is stored."
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "StoredContentDigest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "len"
+      ],
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Lowercase hex SHA-256 of the stored (for specs, gzip-compressed) bytes."
+        },
+        "len": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Stored byte length."
+        }
+      },
+      "description": "Snapshot stand-in for stored binary content. Namespace and deployment snapshot tokens fence this digest instead of embedding the bytes."
+    }
+  }
+}

@@ -8,7 +8,7 @@
     "version": 1,
     "status": "implemented",
     "owner": "ferrum-edge/ferrum-edge",
-    "edge_availability": "Released since Ferrum Edge v0.9.11; re-read at verified v0.9.12 source 0d917701b63ef38210c49df830f48cf0457cbc7d. Canonical contracts-edge-0.9.11 is published; contracts-edge-0.9.12 publication is pending.",
+    "edge_availability": "Emitted as schema_version 1 by Ferrum Edge v0.9.11 and v0.9.12; read at v0.9.12 source 0d917701b63ef38210c49df830f48cf0457cbc7d. Edge v0.9.13 emits schema_version 2 with a narrower public_only_guaranteed meaning; see backend-egress-policy v2.",
     "provenance": [
       {
         "repo": "ferrum-edge/ferrum-edge",

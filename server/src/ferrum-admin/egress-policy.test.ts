@@ -13,18 +13,28 @@ import {
   provesLocalPublicEgress,
 } from './egress-policy.js';
 
+/** A public-mode control plane: schema 2 never reports it as guaranteed. */
+function controlPlanePolicy(): Record<string, unknown> {
+  return {
+    ...publicEgressPolicy(),
+    enforcement_scope: 'admission-only',
+    public_only_guaranteed: false,
+  };
+}
+
 describe('closed owner egress contract', () => {
+  const root = new URL('../../../contracts/ferrum-contracts/', import.meta.url);
+
   it('preserves every field of the published canonical fixtures and rejects all invalid cases', () => {
-    const root = new URL('../../../contracts/ferrum-contracts/', import.meta.url);
     const pin = readFileSync(new URL('PIN', root), 'utf8');
     const schema = JSON.parse(
-      readFileSync(new URL('schemas/backend-egress-policy/v1.schema.json', root), 'utf8'),
+      readFileSync(new URL('schemas/backend-egress-policy/v2.schema.json', root), 'utf8'),
     ) as { required: string[]; properties: Record<string, unknown>; additionalProperties: boolean };
     assert.equal(schema.additionalProperties, false);
     assert.deepEqual(schema.required.sort(), Object.keys(publicEgressPolicy()).sort());
     assert.deepEqual(Object.keys(schema.properties).sort(), schema.required);
     for (const kind of ['valid', 'invalid']) {
-      const base = `fixtures/backend-egress-policy/${kind}/`;
+      const base = `fixtures/backend-egress-policy/v2/${kind}/`;
       for (const name of readdirSync(new URL(base, root))) {
         const path = base + name;
         assert.ok(pin.includes(`  ${path}\n`), 'every canonical fixture must be pinned');
@@ -41,11 +51,27 @@ describe('closed owner egress contract', () => {
           value.enforcement_scope === 'local-data-plane' && value.public_only_guaranteed === true,
           name,
         );
+        // Schema 2 never guarantees anything but local enforcement.
+        if (value.public_only_guaranteed === true) {
+          assert.equal(value.enforcement_scope, 'local-data-plane', name);
+        }
         for (const key of schema.required) {
           const incomplete = { ...value };
           delete incomplete[key];
           assert.equal(parseBackendEgressPolicy(incomplete, String(value.namespace)), null, key);
         }
+      }
+    }
+  });
+
+  it('refuses every Edge v0.9.12 (schema 1) policy as an unsupported schema', () => {
+    for (const kind of ['valid', 'invalid']) {
+      const base = `fixtures/backend-egress-policy/v1/${kind}/`;
+      for (const name of readdirSync(new URL(base, root))) {
+        const bytes = readFileSync(new URL(base + name, root), 'utf8');
+        const value = JSON.parse(bytes) as Record<string, unknown>;
+        assert.equal(parseBackendEgressPolicy(value, String(value.namespace)), null, name);
+        if (kind === 'valid') assert.equal(isUnsupportedEgressPolicySchema(value), true, name);
       }
     }
   });
@@ -60,7 +86,8 @@ describe('closed owner egress contract', () => {
     }
     for (const patch of [
       { extra: 'opaque-canary' },
-      { schema_version: 2 },
+      { schema_version: 1 },
+      { schema_version: 3 },
       { ip_classification: 'future' },
       { namespace: 'another' },
       { policy_scope: 'fleet' },
@@ -75,6 +102,10 @@ describe('closed owner egress contract', () => {
       { evaluation_order: ['deny-cidrs', 'allow-cidrs', 'dangerous-ranges', 'ip-mode'] },
       { public_only_guaranteed: false },
       { allow_cidr_overrides_present: true },
+      // Schema 1's policy-only reading: a guarantee without local enforcement.
+      { enforcement_scope: 'admission-only' },
+      { enforcement_scope: 'unserved-namespace' },
+      { enforcement_scope: 'no-data-plane' },
     ]) {
       assert.equal(parseBackendEgressPolicy({ ...valid, ...patch }, 'nexus'), null);
     }
@@ -83,10 +114,12 @@ describe('closed owner egress contract', () => {
     }
   });
 
-  it('tells a newer schema apart from a malformed policy, and refuses both', () => {
-    const newer = { ...publicEgressPolicy(), schema_version: 2 };
-    assert.equal(parseBackendEgressPolicy(newer, 'nexus'), null);
-    assert.equal(isUnsupportedEgressPolicySchema(newer), true);
+  it('tells another schema apart from a malformed policy, and refuses both', () => {
+    for (const schema_version of [1, 3]) {
+      const other = { ...publicEgressPolicy(), schema_version };
+      assert.equal(parseBackendEgressPolicy(other, 'nexus'), null);
+      assert.equal(isUnsupportedEgressPolicySchema(other), true);
+    }
     for (const value of [
       publicEgressPolicy(),
       { ...publicEgressPolicy(), schema_version: '2' },
@@ -100,10 +133,7 @@ describe('closed owner egress contract', () => {
 
   it('keeps the two opt-outs independent of each other and of the guarantee', () => {
     const local = parseBackendEgressPolicy(publicEgressPolicy(), 'nexus')!;
-    const controlPlane = parseBackendEgressPolicy(
-      { ...publicEgressPolicy(), enforcement_scope: 'admission-only' },
-      'nexus',
-    )!;
+    const controlPlane = parseBackendEgressPolicy(controlPlanePolicy(), 'nexus')!;
     const localBoth = parseBackendEgressPolicy(
       {
         ...publicEgressPolicy(),
@@ -133,10 +163,9 @@ describe('closed owner egress contract', () => {
       guaranteed,
     );
     assert.equal(admitBackendEgress(controlPlane, {}), null);
-    assert.deepEqual(admitBackendEgress(controlPlane, { allowUnattestedEdgeEgress: true }), {
-      egress_profile: 'unattested-edge-opt-in',
-      enforcement_scope: 'admission-only',
-    });
+    // The unattested opt-in still needs public_only_guaranteed=true, which schema 2
+    // reports only for local enforcement: a control plane is never admitted by it.
+    assert.equal(admitBackendEgress(controlPlane, { allowUnattestedEdgeEgress: true }), null);
     assert.equal(admitBackendEgress(localBoth, { allowUnattestedEdgeEgress: true }), null);
     assert.equal(
       admitBackendEgress(controlPlaneWithAllowOverrides, { allowUnattestedEdgeEgress: true }),
@@ -171,7 +200,7 @@ describe('closed owner egress contract', () => {
     }
     for (const enforcement_scope of ['unserved-namespace', 'admission-only', 'no-data-plane']) {
       const policy = parseBackendEgressPolicy(
-        { ...publicEgressPolicy(), enforcement_scope },
+        { ...publicEgressPolicy(), enforcement_scope, public_only_guaranteed: false },
         'nexus',
       );
       assert.ok(policy);
@@ -233,9 +262,10 @@ describe('closed owner egress contract', () => {
     const harness = await buildTestApp();
     t.after(() => harness.close());
     for (const patch of [
+      { enforcement_scope: 'admission-only', public_only_guaranteed: false },
+      { enforcement_scope: 'unserved-namespace', public_only_guaranteed: false },
+      { enforcement_scope: 'no-data-plane', public_only_guaranteed: false },
       { enforcement_scope: 'admission-only' },
-      { enforcement_scope: 'unserved-namespace' },
-      { enforcement_scope: 'no-data-plane' },
       { allow_cidr_overrides_present: true, public_only_guaranteed: false },
       {
         mode: 'both',
@@ -287,8 +317,7 @@ describe('closed owner egress contract', () => {
     const harness = await buildTestApp({ env: { NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'true' } });
     t.after(() => harness.close());
     harness.edge.setBackendEgressPolicy({
-      ...publicEgressPolicy(),
-      enforcement_scope: 'admission-only',
+      ...controlPlanePolicy(),
       mode: 'both',
       mode_allowed_ip_classes: ['public', 'private-reserved'],
       mode_blocked_ip_classes: [],
@@ -299,7 +328,7 @@ describe('closed owner egress contract', () => {
     await assert.rejects(harness.edgeClient.assertBackendEgress());
   });
 
-  it('unattested opt-in waives the attestation but keeps upstream screening', async (t) => {
+  it('unattested opt-in keeps screening and admits no schema 2 control plane', async (t) => {
     const logLines: string[] = [];
     const harness = await buildTestApp({
       env: { NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: 'true' },
@@ -310,10 +339,6 @@ describe('closed owner egress contract', () => {
     t.after(() => harness.close());
     assert.ok(logLines.some((line) => line.includes('NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true')));
     assert.ok(!logLines.some((line) => line.includes('NEXUS_ALLOW_PRIVATE_UPSTREAMS=true')));
-    harness.edge.setBackendEgressPolicy({
-      ...publicEgressPolicy(),
-      enforcement_scope: 'admission-only',
-    });
     await harness.registerUser();
     const provider = await harness.registerUser({ role: 'provider' });
     const payload = (slug: string): Record<string, unknown> => ({
@@ -338,8 +363,19 @@ describe('closed owner egress contract', () => {
     assert.equal((error.details as { reason?: string }).reason, 'private_upstream');
     assert.equal(harness.edge.proxies.size, 0, 'nothing reached the gateway');
 
-    // A screened public upstream publishes through the unattested pairing, and
-    // the audit row records the profile that admitted it.
+    // Edge v0.9.13 reports a public-mode control plane as not guaranteed, and
+    // the opt-in never reinterprets that as the schema 1 policy-only value.
+    harness.edge.setBackendEgressPolicy(controlPlanePolicy());
+    const controlPlane = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: payload('unattested-control-plane'),
+    });
+    assert.notEqual(controlPlane.statusCode, 201, controlPlane.body);
+    assert.equal(harness.edge.proxies.size, 0, 'nothing reached the gateway');
+
+    // A local public-only data plane publishes under the guarantee itself.
+    harness.edge.setBackendEgressPolicy(publicEgressPolicy());
     const published = await harness.authed(provider, {
       method: 'POST',
       url: '/api/apis',
@@ -348,8 +384,8 @@ describe('closed owner egress contract', () => {
     assert.equal(published.statusCode, 201, published.body);
     const apiId = published.json<PublishApiResponse>().api.id;
     const row = (await harness.auditRows('api.publish')).find((entry) => entry.target_id === apiId);
-    assert.equal(row?.details.egress_profile, 'unattested-edge-opt-in');
-    assert.equal(row?.details.enforcement_scope, 'admission-only');
+    assert.equal(row?.details.egress_profile, 'public-guaranteed');
+    assert.equal(row?.details.enforcement_scope, 'local-data-plane');
   });
 
   it('warns at startup for each opt-out that is set, and only for those', async (t) => {

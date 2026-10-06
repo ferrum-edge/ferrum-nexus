@@ -2,6 +2,7 @@
 import { randomBytes } from 'node:crypto';
 
 import type { NexusStore } from '../db/store.js';
+import { isLegacyDeploymentSnapshot } from '../ferrum-admin/deployment.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { conflict } from '../lib/errors.js';
 
@@ -92,6 +93,57 @@ async function load(
     value: JSON.parse(Buffer.from(encoded, 'base64').toString('utf8')) as unknown,
     manifest,
   };
+}
+
+/**
+ * Authority format of the journals this release writes: every deployment snapshot
+ * a marked journal holds is Edge v0.9.13 authority (`admin-deployment-snapshot`
+ * v2, digest-only spec evidence plus `api_spec_contents`). Journals written before
+ * carry no marker and may hold Edge v0.9.12 authority. They stay readable for
+ * custody checks and inspection; that authority is refused before any request,
+ * because Edge v0.9.13 answers its token with `412`.
+ */
+export const JOURNAL_AUTHORITY_FORMAT = 2;
+
+/** Every deployment snapshot a journal holds, wherever it is nested. */
+function heldAuthorities(value: unknown, found: unknown[] = []): unknown[] {
+  if (typeof value !== 'object' || value === null) return found;
+  if (
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>).profile === 'deployment-v1' &&
+    Object.hasOwn(value, 'namespace_etag')
+  ) {
+    found.push(value);
+    return found;
+  }
+  for (const child of Object.values(value)) heldAuthorities(child, found);
+  return found;
+}
+
+/** Mark a journal holding only current authority; one with legacy authority stays unmarked. */
+export function stampJournalAuthorityFormat<T extends object>(journal: T): T {
+  const target = journal as Record<string, unknown>;
+  if (heldAuthorities(journal).some(isLegacyDeploymentSnapshot)) {
+    delete target.authorityFormat;
+  } else {
+    target.authorityFormat = JOURNAL_AUTHORITY_FORMAT;
+  }
+  return journal;
+}
+
+/** Unmarked journals stay readable; an unknown or inconsistent marker is refused. */
+export function assertJournalAuthorityFormat(journal: unknown): void {
+  if (typeof journal !== 'object' || journal === null) return;
+  const format = (journal as Record<string, unknown>).authorityFormat;
+  if (format === undefined) return;
+  if (
+    format !== JOURNAL_AUTHORITY_FORMAT ||
+    heldAuthorities(journal).some(isLegacyDeploymentSnapshot)
+  ) {
+    throw conflict('The gateway recovery journal has an unrecognized authority format; retain it', {
+      kind: 'journal_authority_format_unrecognized',
+    });
+  }
 }
 
 /** Admit atomic custody for every existing journal, including legacy single-row authority. */

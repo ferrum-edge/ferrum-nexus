@@ -243,12 +243,12 @@ The bootstrap token is printed to the container log (`docker logs`). Pass
 ### Full stack with Compose
 
 The Compose example runs Nexus, PostgreSQL and Ferrum Edge. The
-[compatibility record](release/compatibility.env) now selects the published Edge `v0.9.12`
+[compatibility record](release/compatibility.env) now selects the published Edge `v0.9.13`
 default image by digest for this draft candidate. Exact-head hosted qualification
 remains required; see [adoption status](docs/edge-0.9.11-adoption.md). The Nexus
 image is built from your checkout. For the released combination, check out
-`v0.3.0` and use that tag's compatibility record. This branch's v0.9.12 pin
-belongs to the unreleased candidate.
+`v0.3.0` and use that tag's compatibility record. This branch's v0.9.13 pin
+belongs to the unreleased candidate, which pairs with Edge v0.9.13 only.
 
 The four secrets and the Edge image are required. Keep the secrets stable for
 the life of the stack: store them in a secret manager instead of generating new
@@ -285,13 +285,13 @@ Cross-repo contracts — shared vocabularies, JSON schemas and fixtures — live
 [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) store. Nexus vendors the
 Ferrum Edge vocabularies it speaks under
 [`contracts/ferrum-contracts/`](contracts/ferrum-contracts/), pinned by tag
-(`contracts-edge-0.9.12`) and per-file SHA-256 in
+(`contracts-edge-0.9.13`) and per-file SHA-256 in
 [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN). The `shared` contract test
 verifies every digest and checks Nexus's local names against the vendored vocabularies; the
 vendoring and bump procedure is in [`CONTRIBUTING.md`](CONTRIBUTING.md). The unreleased
 [service-manifest preview](docs/service-manifest-preview.md) separately pins its EXISTING shared v1
-schema and fixtures to `contracts-edge-0.9.12`, commit
-`31f0a21d707795be293d15837c2f77c3d84219d8`, in
+schema and fixtures to `contracts-edge-0.9.13`, commit
+`9626821eb089c71f5d4d71268c7b8276a8a5ab50`, in
 [`contracts/ferrum-contracts/SERVICE-MANIFEST-PIN`](contracts/ferrum-contracts/SERVICE-MANIFEST-PIN).
 Alloy owner code remains unreleased; the preview remains read-only. A shared contract changes
 in ferrum-contracts first and is then re-vendored here — never edited locally.

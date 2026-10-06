@@ -47,7 +47,25 @@ export interface EdgeErrorBody {
   detail?: string;
 }
 
-/** Secret-complete original authority. Persist only inside an encrypted recovery journal. */
+/** Edge v0.9.13 snapshot stand-in for stored bytes: lowercase hex SHA-256 and length. */
+export interface EdgeStoredContentDigest {
+  sha256: string;
+  len: number;
+}
+
+/** One standard padded base64 copy of a stored spec, outside the digested evidence. */
+export interface EdgeDeploymentSpecContents {
+  id: string;
+  spec_content_base64: string;
+  external_ref_snapshot_base64: string | null;
+}
+
+/**
+ * Secret-complete original authority (`admin-deployment-snapshot` v2, Edge v0.9.13).
+ * Persist only inside an encrypted recovery journal. `api_specs` carries
+ * `spec_content` and `external_ref_snapshot` as {@link EdgeStoredContentDigest};
+ * the bytes are in `api_spec_contents`.
+ */
 export interface EdgeDeploymentSnapshot {
   profile: 'deployment-v1';
   namespace: string;
@@ -57,6 +75,7 @@ export interface EdgeDeploymentSnapshot {
   plugin_configs: EdgePluginConfig[];
   upstreams: Record<string, unknown>[];
   api_specs: Record<string, unknown>[];
+  api_spec_contents: EdgeDeploymentSpecContents[];
   [field: string]: unknown;
 }
 
@@ -657,7 +676,8 @@ export interface EdgeProbe {
   publicEgressGuaranteed?: boolean;
   /**
    * Whether the sampled policy named a schema version this portal does not
-   * read (Edge v0.9.13 and later publish schema 2). Admin diagnostic only.
+   * read (it reads schema 2, which Edge v0.9.13 publishes; Edge v0.9.12 and
+   * earlier publish schema 1). Admin diagnostic only.
    */
   backendEgressSchemaUnsupported?: boolean;
   /**

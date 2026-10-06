@@ -1,10 +1,10 @@
 # Public-only DNS rebinding proposal fixture
 
 **Hosted qualification pending.** Owner authority is
-published Edge `v0.9.12`, source `0d917701b63ef38210c49df830f48cf0457cbc7d`.
+published Edge `v0.9.13`, source `9b83115de7ec23ab51ec4feae6bed65e596db425`.
 The candidate compatibility pin selects its default multi-architecture image
-`ferrumedge/ferrum-edge:v0.9.12@sha256:80526b59cbbdc2bfcc8bae9241da4e5395414cf07bf0be4effd4c73c51684ee4`.
-Canonical `contracts-edge-0.9.12` at `31f0a21d707795be293d15837c2f77c3d84219d8`
+`ferrumedge/ferrum-edge:v0.9.13@sha256:6caa0987adb4c0a3a368fcd800bb0459cff3d3e219522e2e9c56280205862e50`.
+Canonical `contracts-edge-0.9.13` at `9626821eb089c71f5d4d71268c7b8276a8a5ab50`
 is published and adopted byte-for-byte. See [adoption facts](../../docs/edge-0.9.11-adoption.md).
 Root must supply the packaged Nexus candidate digest and run this in hosted CI.
 Publication establishes artifact identity; it does not attest this fixture. The

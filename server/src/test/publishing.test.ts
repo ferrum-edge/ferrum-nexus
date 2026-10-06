@@ -4081,6 +4081,7 @@ describe('publishing', () => {
           harness.edge.setBackendEgressPolicy({
             ...publicEgressPolicy(),
             enforcement_scope: 'admission-only',
+            public_only_guaranteed: false,
           });
         }
         return original;

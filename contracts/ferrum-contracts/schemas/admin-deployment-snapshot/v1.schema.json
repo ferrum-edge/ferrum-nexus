@@ -8,7 +8,7 @@
     "version": 1,
     "status": "implemented",
     "owner": "ferrum-edge/ferrum-edge",
-    "edge_availability": "Released in Ferrum Edge v0.9.12 at 0d917701b63ef38210c49df830f48cf0457cbc7d with verified distribution. Canonical contracts-edge-0.9.12 publication is pending; contracts-edge-0.9.11 remains published.",
+    "edge_availability": "Emitted by Ferrum Edge v0.9.12 at 0d917701b63ef38210c49df830f48cf0457cbc7d. Edge v0.9.13 replaces it with admin-deployment-snapshot v2 and rejects v0.9.12 deployment-v1 tokens with 412.",
     "provenance": [
       {
         "repo": "ferrum-edge/ferrum-edge",
@@ -84,7 +84,7 @@
         "ref": "v0.9.12",
         "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
         "path": "docs/deployment_mutations.md",
-        "note": "HTTP/runtime protocol and complete evidence retention are documented in docs/deployment-contracts.md; the pinned owner's candidate wording precedes its subsequently verified publication."
+        "note": "HTTP/runtime protocol and complete evidence retention are documented in docs/deployment-contracts.md."
       }
     ]
   },

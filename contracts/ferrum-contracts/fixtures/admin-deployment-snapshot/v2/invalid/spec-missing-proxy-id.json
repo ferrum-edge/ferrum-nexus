@@ -1,0 +1,100 @@
+{
+  "profile": "deployment-v1",
+  "namespace": "deployment-00000000-0000-0000-0000-000000000000",
+  "namespace_etag": "\"deployment-v1-00000000000000000000000000000000\"",
+  "evidence": {
+    "profile": "deployment-v1",
+    "resources": [
+      [],
+      [],
+      [],
+      [],
+      [],
+      [
+        {
+          "id": "spec",
+          "namespace": "deployment-00000000-0000-0000-0000-000000000000",
+          "proxy_id": "deployment",
+          "spec_version": "3.1.0",
+          "spec_format": "json",
+          "spec_content": {
+            "sha256": "16e66c3e9fff83e7f44d55ba3738524e7bcd2ed77a1ff7dc03fc31859fb8cb3a",
+            "len": 88
+          },
+          "content_encoding": "gzip",
+          "uncompressed_size": 75,
+          "content_hash": "0ec971abb58c8fafb8f8addf59b8e0893b79eb1350793f3c81f0bd61b9bb2bb5",
+          "title": "Fixture",
+          "info_version": "1.0.0",
+          "description": null,
+          "contact_name": null,
+          "contact_email": null,
+          "license_name": null,
+          "license_identifier": null,
+          "tags": [],
+          "server_urls": [],
+          "operation_count": 0,
+          "resource_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "external_ref_snapshot": null,
+          "external_ref_digest": null,
+          "created_at": "2026-10-06T00:00:00Z",
+          "updated_at": "2026-10-06T00:00:00Z"
+        }
+      ],
+      null,
+      0
+    ],
+    "stored": {
+      "proxies": [],
+      "consumers": [],
+      "upstreams": [],
+      "plugin_configs": [],
+      "proxy_plugins": [],
+      "api_specs": [],
+      "gateway_trust_bundles": [],
+      "consumer_identity_index": [],
+      "consumer_credential_index": [],
+      "namespaces": []
+    }
+  },
+  "proxies": [],
+  "upstreams": [],
+  "plugin_configs": [],
+  "api_specs": [
+    {
+      "id": "spec",
+      "namespace": "deployment-00000000-0000-0000-0000-000000000000",
+      "spec_version": "3.1.0",
+      "spec_format": "json",
+      "spec_content": {
+        "sha256": "16e66c3e9fff83e7f44d55ba3738524e7bcd2ed77a1ff7dc03fc31859fb8cb3a",
+        "len": 88
+      },
+      "content_encoding": "gzip",
+      "uncompressed_size": 75,
+      "content_hash": "0ec971abb58c8fafb8f8addf59b8e0893b79eb1350793f3c81f0bd61b9bb2bb5",
+      "title": "Fixture",
+      "info_version": "1.0.0",
+      "description": null,
+      "contact_name": null,
+      "contact_email": null,
+      "license_name": null,
+      "license_identifier": null,
+      "tags": [],
+      "server_urls": [],
+      "operation_count": 0,
+      "resource_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "external_ref_snapshot": null,
+      "external_ref_digest": null,
+      "created_at": "2026-10-06T00:00:00Z",
+      "updated_at": "2026-10-06T00:00:00Z"
+    }
+  ],
+  "api_spec_contents": [
+    {
+      "id": "spec",
+      "spec_content_base64": "H4sIAAAAAAACA6tWyi9IzUssyFSyUjLWM9QzUNJRysxLy1eyqlYqySzJSQWKu2VWlJQWpQJlylKLijPz84BiQJVAtbU6SgWJJRnFQNW1tQAieuSaSwAAAA==",
+      "external_ref_snapshot_base64": null
+    }
+  ]
+}

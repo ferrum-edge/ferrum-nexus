@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "ip_classification": "ferrum-private-reserved-v1",
+  "namespace": "staging",
+  "policy_scope": "process",
+  "enforcement_scope": "admission-only",
+  "mode": "public",
+  "mode_allowed_ip_classes": [
+    "public"
+  ],
+  "mode_blocked_ip_classes": [
+    "private-reserved"
+  ],
+  "dangerous_ranges_blocked": true,
+  "allow_cidr_overrides_present": false,
+  "deny_cidr_overrides_present": false,
+  "evaluation_order": [
+    "allow-cidrs",
+    "deny-cidrs",
+    "dangerous-ranges",
+    "ip-mode"
+  ],
+  "public_only_guaranteed": true
+}

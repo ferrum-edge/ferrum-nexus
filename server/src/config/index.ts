@@ -475,6 +475,10 @@ export interface NexusConfig {
    * attestation, so Nexus keeps its own suffix, IP-literal and resolved-address
    * screening of every upstream. The operator takes responsibility for enforcing
    * public-only egress on every data plane. Defaults to `false`.
+   *
+   * It still requires `public_only_guaranteed=true`. Edge v0.9.13 (egress policy
+   * schema 2) reports that only for `local-data-plane`, so against it this opt-in
+   * admits no control plane.
    */
   allowUnattestedEdgeEgress: boolean;
   /**

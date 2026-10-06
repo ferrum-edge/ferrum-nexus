@@ -249,6 +249,20 @@ interface QueuedFailure {
 export interface MockFerrumEdge {
   /** Exact owner-contract response; null models the missing capability. */
   setBackendEgressPolicy(payload: Record<string, unknown> | null): void;
+  /**
+   * Model a namespace past Edge v0.9.13's conditional snapshot bound: `GET
+   * /deployment-snapshot` answers `507` (`durable: "not_started"`) and each
+   * conditional deployment mutation answers `507` from inside its rolled-back
+   * transaction (`durable: "not_committed"`). Nothing is issued or applied.
+   * `reset()` clears it.
+   */
+  setDeploymentSnapshotTooLarge(tooLarge: boolean): void;
+  /**
+   * The `deployment-v1-` token Edge v0.9.12 would have issued for the namespace's
+   * current state (its `deployment_snapshot.v1` MAC domain). Well-formed, but
+   * Edge v0.9.13 refuses it with `412`.
+   */
+  previousReleaseDeploymentTag(namespace: string): string;
   /** Base URL, e.g. `http://127.0.0.1:54321`. Valid after `start()`. */
   readonly url: string;
   /** Every request the mock has served since the last `reset()`. */
@@ -1702,10 +1716,10 @@ function project(consumer: StoredConsumer): Record<string, unknown> {
   };
 }
 
-/** Public serving singleton fixture; not evidence about a deployed gateway. */
+/** Public serving singleton fixture (schema 2); not evidence about a deployed gateway. */
 export function publicEgressPolicy(namespace = 'nexus'): Record<string, unknown> {
   return {
-    schema_version: 1,
+    schema_version: 2,
     ip_classification: 'ferrum-private-reserved-v1',
     namespace,
     policy_scope: 'process',
@@ -1743,6 +1757,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const lostAcks: QueuedFailure[] = [];
   const delays: QueuedDelay[] = [];
   let egressPolicy: Record<string, unknown> | null | undefined;
+  let deploymentSnapshotTooLarge = false;
   /**
    * Responses whose acknowledgement is being dropped, keyed by the response
    * object the handler will eventually write to.
@@ -1927,7 +1942,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     return {
       gateway: {
         mode: 'database',
-        ferrum_version: '0.9.12',
+        ferrum_version: '0.9.13',
         uptime_seconds: MOCK_GATEWAY_UPTIME_SECONDS,
         total_requests: totalRequests,
         proxy_count: proxies.size,
@@ -3395,16 +3410,29 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     const snapshotConsumers = selected(consumers.values());
     const snapshotUpstreams = selected(upstreams.values());
     const snapshotPlugins = selected(pluginConfigs.values());
+    // Edge v0.9.13 evidence carries stored spec bytes only as {sha256, len};
+    // `api_spec_contents` holds one base64 copy outside the digested evidence.
+    const specContents: Record<string, unknown>[] = [];
     const snapshotSpecs = selected(apiSpecs.values()).map((spec) => {
       const bytes = Buffer.from(JSON.stringify(spec.document));
+      const stored = gzipSync(bytes);
       const { document: _document, ...metadata } = spec;
+      specContents.push({
+        id: spec.id,
+        spec_content_base64: stored.toString('base64'),
+        external_ref_snapshot_base64: null,
+      });
       return {
         ...metadata,
         spec_format: 'json',
         content_encoding: 'gzip',
-        spec_content: [...gzipSync(bytes)],
+        spec_content: {
+          sha256: createHash('sha256').update(stored).digest('hex'),
+          len: stored.length,
+        },
         uncompressed_size: bytes.length,
         content_hash: createHash('sha256').update(bytes).digest('hex'),
+        external_ref_snapshot: null,
       };
     });
     const namespaceRecord = namespaces.get(namespace) ?? null;
@@ -3437,20 +3465,36 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         namespaces: storedRows(namespaceRecord ? [namespaceRecord] : []),
       },
     };
-    const digest = createHmac('sha256', options.jwtSecret)
-      .update(JSON.stringify([namespace, evidence]))
-      .digest('hex')
-      .slice(0, 32);
     return {
       profile: 'deployment-v1',
       namespace,
-      namespace_etag: `"deployment-v1-${digest}"`,
+      namespace_etag: deploymentTag('deployment_snapshot.v2', namespace, evidence),
       evidence,
       proxies: snapshotProxies,
       plugin_configs: snapshotPlugins,
       upstreams: snapshotUpstreams,
       api_specs: snapshotSpecs,
+      api_spec_contents: specContents,
     };
+  }
+
+  /** The keyed token; v0.9.13 changed the MAC domain, so v0.9.12 tokens never match. */
+  function deploymentTag(domain: string, namespace: string, evidence: unknown): string {
+    const digest = createHmac('sha256', options.jwtSecret)
+      .update(JSON.stringify([domain, namespace, evidence]))
+      .digest('hex')
+      .slice(0, 32);
+    return `"deployment-v1-${digest}"`;
+  }
+
+  /** Edge v0.9.13's snapshot-bound refusal body for the deployment paths. */
+  function snapshotTooLarge(res: ServerResponse, durable: 'not_started' | 'not_committed'): void {
+    send(res, 507, {
+      error: 'Namespace snapshot representation exceeds the 64 MiB conditional authority limit',
+      durable,
+      live: 'unconfirmed',
+      recovery_cleanup_authorized: false,
+    });
   }
 
   function admitDeployment(
@@ -3493,6 +3537,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       !/^"deployment-v1-[0-9a-f]{32}"(?![\s\S])/.test(token)
     ) {
       return refusal(400, 'not_started');
+    }
+    if (deploymentSnapshotTooLarge) {
+      snapshotTooLarge(res, 'not_committed');
+      return false;
     }
     if (token !== deploymentSnapshot(namespace).namespace_etag) {
       return refusal(412, 'not_committed');
@@ -3650,6 +3698,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     switch (segments[0]) {
       case 'deployment-snapshot': {
         if (method !== 'GET' || url.search !== '') return fail(res, 400, 'Unfiltered GET required');
+        if (deploymentSnapshotTooLarge) return snapshotTooLarge(res, 'not_started');
         const snapshot = deploymentSnapshot(namespace);
         res.setHeader('cache-control', 'no-store');
         res.setHeader('etag', String(snapshot.namespace_etag));
@@ -3658,16 +3707,19 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       case 'backend-egress-policy': {
         if (method !== 'GET') return fail(res, 405, 'Method not allowed');
         if (egressPolicy === null) return fail(res, 404, 'Not found');
+        const scope =
+          health.mode === 'cp'
+            ? 'admission-only'
+            : health.mode === 'node_agent'
+              ? 'no-data-plane'
+              : dataPlaneUnserved(namespace)
+                ? 'unserved-namespace'
+                : 'local-data-plane';
+        // Schema 2: only local enforcement can guarantee public-only egress.
         const payload = egressPolicy ?? {
           ...publicEgressPolicy(namespace),
-          enforcement_scope:
-            health.mode === 'cp'
-              ? 'admission-only'
-              : health.mode === 'node_agent'
-                ? 'no-data-plane'
-                : dataPlaneUnserved(namespace)
-                  ? 'unserved-namespace'
-                  : 'local-data-plane',
+          enforcement_scope: scope,
+          public_only_guaranteed: scope === 'local-data-plane',
         };
         res.setHeader('cache-control', 'no-store');
         return send(res, 200, payload);
@@ -3778,6 +3830,13 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     setBackendEgressPolicy(payload): void {
       egressPolicy = payload;
     },
+    setDeploymentSnapshotTooLarge(tooLarge): void {
+      deploymentSnapshotTooLarge = tooLarge;
+    },
+    previousReleaseDeploymentTag(namespace): string {
+      const current = deploymentSnapshot(namespace);
+      return deploymentTag('deployment_snapshot.v1', namespace, current.evidence);
+    },
 
     async start(): Promise<string> {
       if (server) return baseUrl;
@@ -3804,6 +3863,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     reset(): void {
       egressPolicy = undefined;
+      deploymentSnapshotTooLarge = false;
       consumers.clear();
       proxies.clear();
       upstreams.clear();

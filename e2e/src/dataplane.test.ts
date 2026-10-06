@@ -143,10 +143,21 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         profile: string;
         namespace_etag: string;
         evidence: { resources: unknown[] };
+        api_specs: { id: string; spec_content: unknown }[];
+        api_spec_contents: { id: string; spec_content_base64: string }[];
       };
       assert.equal(before.profile, 'deployment-v1');
       assert.equal(beforeResponse.headers.get('etag'), before.namespace_etag);
       assert.equal(before.evidence.resources.length, 8);
+      // Edge v0.9.13 (admin-deployment-snapshot v2): digest-only spec evidence,
+      // with one base64 copy of each stored document outside it.
+      assert.deepEqual(
+        before.api_spec_contents.map((entry) => entry.id),
+        before.api_specs.map((spec) => spec.id),
+      );
+      for (const spec of before.api_specs) {
+        assert.ok(!Array.isArray(spec.spec_content), 'spec bytes appear only as a digest');
+      }
       const consumers = before.evidence.resources[1] as {
         username: string;
         credentials: { keyauth?: { key: string }[] };
@@ -566,7 +577,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     };
   }
 
-  // The default at the immutable v0.9.12 pin; this client supports that version.
+  // The default at the immutable v0.9.13 pin; this client supports that version.
   const MCP_PROTOCOL_VERSION = '2025-11-25';
 
   async function rpc(

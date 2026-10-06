@@ -15,6 +15,7 @@ import type { EdgeDeploymentSnapshot } from '../ferrum-admin/types.js';
 import { createCrypto } from '../lib/crypto.js';
 import { isNexusError } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
+import { parseOpenApiSpec } from '../publishing/oas.js';
 import {
   deleteRecoveryJournal,
   readRecoveryJournal,
@@ -1071,6 +1072,206 @@ export function runEdgeSecurityAdoptionContract(
         assert.deepEqual(await completionRows(published.api.id), { restore: [], rollback: [] });
       });
     }
+
+    function snapshotTooLarge(error: unknown): boolean {
+      assert.ok(isNexusError(error));
+      assert.equal(error.code, 'CONFLICT');
+      assert.deepEqual(error.details, { status: 507, kind: 'namespace_snapshot_too_large' });
+      return true;
+    }
+
+    it('keeps the journal when Edge v0.9.13 refuses a v0.9.12 deployment token', async () => {
+      const published = await publish('routes');
+      const key = `gateway_recovery:nexus:${published.api.id}`;
+      const snapshot = harness.edgeClient.deployments.snapshot;
+      let previousTag: string | undefined;
+      let state: unknown;
+      harness.edgeClient.deployments.snapshot = async (...args) => {
+        // Authority as Edge v0.9.12 issued it: well-formed, in the old MAC domain.
+        const current = await snapshot(...args);
+        previousTag = harness.edge.previousReleaseDeploymentTag('nexus');
+        state = gatewayState();
+        return { ...current, namespace_etag: previousTag };
+      };
+      restoreMethods.push(() => {
+        harness.edgeClient.deployments.snapshot = snapshot;
+      });
+      const offset = harness.edge.requests.length;
+      await assert.rejects(
+        harness.services.publishing.update(actor, published.api.id, {
+          spec_enforcement: 'docs_only',
+        }),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(error.code, 'CONFLICT');
+          assert.deepEqual(error.details, {
+            status: 412,
+            kind: 'deployment_precondition_failed',
+          });
+          return true;
+        },
+      );
+      assert.deepEqual(gatewayState(), state, 'the refused removal changed nothing');
+      const removals = harness.edge.requests
+        .slice(offset)
+        .filter((call) => call.method === 'DELETE');
+      assert.equal(removals.length, 1, 'one conditional removal and no fresh-token retry');
+      assert.equal(removals[0]!.ifMatch, previousTag);
+      const journal = await readJournal<{
+        mutations: { original: { namespace_etag: string }; acknowledged: boolean }[];
+      }>(key);
+      assert.equal(journal.mutations.length, 1);
+      assert.equal(journal.mutations[0]!.original.namespace_etag, previousTag);
+      assert.equal(journal.mutations[0]!.acknowledged, false);
+      const sealed = await harness.store.settings.get(key);
+      const retryOffset = harness.edge.requests.length;
+      await assert.rejects(
+        harness.services.publishing.restoreGateway(actor, published.api.id),
+        /mutation is unconfirmed/,
+      );
+      assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
+      assert.deepEqual(await harness.store.settings.get(key), sealed);
+      assert.deepEqual(gatewayState(), state);
+    });
+
+    it('issues and applies nothing when the namespace exceeds the snapshot bound', async () => {
+      const published = await publish('docs_only');
+      const key = `gateway_recovery:nexus:${published.api.id}`;
+      harness.edge.setDeploymentSnapshotTooLarge(true);
+      restoreMethods.push(() => harness.edge.setDeploymentSnapshotTooLarge(false));
+      const state = gatewayState();
+      const offset = harness.edge.requests.length;
+      await assert.rejects(
+        harness.services.publishing.update(actor, published.api.id, { spec_enforcement: 'routes' }),
+        snapshotTooLarge,
+      );
+      const calls = harness.edge.requests.slice(offset);
+      assert.ok(calls.some((call) => call.path === '/deployment-snapshot'));
+      assert.ok(calls.every((call) => call.method === 'GET'));
+      assert.deepEqual(gatewayState(), state);
+      assert.equal((await journalRows(key)).length, 1, 'the conversion journal is retained');
+      assert.equal(
+        (await harness.store.apis.findById(published.api.id))?.gateway_state,
+        'repair_required',
+      );
+    });
+
+    it('keeps the journal when a removal is refused past the snapshot bound', async () => {
+      const published = await publish('routes');
+      const key = `gateway_recovery:nexus:${published.api.id}`;
+      const remove = harness.edgeClient.deployments.remove;
+      let state: unknown;
+      harness.edgeClient.deployments.remove = async (...args) => {
+        // The namespace grows past the bound after authority was captured.
+        harness.edge.setDeploymentSnapshotTooLarge(true);
+        state = gatewayState();
+        return remove(...args);
+      };
+      restoreMethods.push(() => {
+        harness.edgeClient.deployments.remove = remove;
+        harness.edge.setDeploymentSnapshotTooLarge(false);
+      });
+      const offset = harness.edge.requests.length;
+      await assert.rejects(
+        harness.services.publishing.update(actor, published.api.id, {
+          spec_enforcement: 'docs_only',
+        }),
+        snapshotTooLarge,
+      );
+      assert.deepEqual(gatewayState(), state, 'nothing was applied');
+      assert.equal(
+        harness.edge.requests.slice(offset).filter((call) => call.method === 'DELETE').length,
+        1,
+      );
+      const journal = await readJournal<{ mutations: { acknowledged: boolean }[] }>(key);
+      assert.equal(journal.mutations.length, 1);
+      assert.equal(journal.mutations[0]!.acknowledged, false);
+      // Even once the namespace shrinks, the retained operation is never replayed.
+      harness.edge.setDeploymentSnapshotTooLarge(false);
+      const sealed = await harness.store.settings.get(key);
+      const retryOffset = harness.edge.requests.length;
+      await assert.rejects(
+        harness.services.publishing.restoreGateway(actor, published.api.id),
+        /mutation is unconfirmed/,
+      );
+      assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
+      assert.deepEqual(await harness.store.settings.get(key), sealed);
+    });
+
+    it('keeps a journal holding Edge v0.9.12 authority readable but never acts on it', async () => {
+      const published = await publish('routes');
+      const apiId = published.api.id;
+      const key = `gateway_recovery:nexus:${apiId}`;
+      const api = await harness.store.apis.findById(apiId);
+      const spec = await harness.store.apiSpecs.findCurrentByApi(apiId);
+      assert.ok(api && spec && api.ferrum_proxy_id);
+      const proxy = await harness.edgeClient.proxies.get(api.ferrum_proxy_id);
+      assert.ok(proxy);
+      // The authority as Edge v0.9.12 journaled it: spec bytes inline, no
+      // api_spec_contents, and a token in the v0.9.12 MAC domain.
+      const current = await harness.edgeClient.deployments.snapshot(actor.id);
+      const inline = (rows: unknown): Record<string, unknown>[] =>
+        (rows as Record<string, unknown>[]).map((row) => {
+          const entry = current.api_spec_contents.find((item) => item.id === row.id);
+          assert.ok(entry);
+          return {
+            ...row,
+            spec_content: [...Buffer.from(entry.spec_content_base64, 'base64')],
+            external_ref_snapshot: null,
+          };
+        });
+      const { api_spec_contents: _contents, ...rest } = current;
+      const resources = [...(current.evidence.resources as unknown[])];
+      resources[5] = inline(resources[5]);
+      const legacy = {
+        ...rest,
+        namespace_etag: harness.edge.previousReleaseDeploymentTag('nexus'),
+        api_specs: inline(current.api_specs),
+        evidence: { ...current.evidence, resources },
+      };
+      const shape = {
+        slug: api.slug,
+        namespace: api.namespace,
+        upstream_url: api.upstream_url,
+        auth_plugin: api.auth_plugin,
+        requestable: api.requestable,
+        rate_limit: api.rate_limit,
+        cors: api.cors,
+        allowed_methods: api.allowed_methods,
+        timeouts: api.timeouts,
+        circuit_breaker: api.circuit_breaker,
+        spec_enforcement: api.spec_enforcement,
+        agents: api.agents ?? null,
+      };
+      const journal = {
+        apiId,
+        namespace: 'nexus',
+        shape,
+        catalogShape: shape,
+        originalSpecId: spec.id,
+        catalogSpecId: spec.id,
+        originalSpecDocument: await harness.edgeClient.apiSpecs.documentByProxy(proxy.id),
+        proxy,
+        plugins: await harness.edgeClient.pluginConfigs.listByProxy(proxy.id),
+        document: parseOpenApiSpec(spec.raw_spec).document,
+        originalAuthority: legacy,
+        attempt: null,
+      };
+      await writeRecoveryJournal(harness.store, harness.app.nexus.crypto, key, journal);
+      await harness.store.apis.update(apiId, { gateway_state: 'repair_required' });
+      // Older journals stay readable for custody checks and inspection.
+      assert.deepEqual(await readJournal(key), journal);
+      const offset = harness.edge.requests.length;
+      await assert.rejects(harness.services.publishing.remove(actor, apiId), (error: unknown) => {
+        assert.ok(isNexusError(error));
+        assert.equal(error.code, 'CONFLICT');
+        assert.deepEqual(error.details, { kind: 'legacy_deployment_authority' });
+        return true;
+      });
+      assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
+      await assertDeleteRetainsCustody(apiId);
+      assert.deepEqual(await readJournal(key), journal);
+    });
 
     it('retains an unacknowledged plain staging create without acquiring cleanup authority', async () => {
       const published = await publish('routes');

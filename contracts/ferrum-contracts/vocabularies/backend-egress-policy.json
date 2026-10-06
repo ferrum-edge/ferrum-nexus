@@ -1,14 +1,14 @@
 {
-  "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v1.schema.json",
+  "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v2.schema.json",
   "vocabulary": "backend-egress-policy",
-  "version": 1,
-  "edge_release": "v0.9.12",
-  "description": "Labels for process-scoped, immutable loaded backend policy metadata. Edge v0.9.12 is published with verified distribution. Canonical contracts-edge-0.9.11 is published; contracts-edge-0.9.12 publication is pending. Mode lists describe the final evaluation stage, not unconditional effective allows. Classifier meaning changes require versioned coordination.",
+  "version": 2,
+  "edge_release": "v0.9.13",
+  "description": "Labels for process-scoped, immutable loaded backend policy metadata, response schema_version 2 (Edge v0.9.13). Mode lists describe the final evaluation stage, not unconditional effective allows. Classifier meaning changes require versioned coordination.",
   "provenance": [
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.12",
-      "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+      "ref": "v0.9.13",
+      "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
       "path": "openapi.yaml",
       "symbols": [
         "components.schemas.BackendEgressPolicyResponse"
@@ -16,8 +16,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.12",
-      "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+      "ref": "v0.9.13",
+      "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
       "path": "src/admin/backend_egress_policy.rs",
       "symbols": [
         "BackendEgressPolicyResponse",
@@ -26,8 +26,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.12",
-      "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+      "ref": "v0.9.13",
+      "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
       "path": "src/config/env_config.rs",
       "symbols": [
         "BackendEgressPolicy",
@@ -38,13 +38,13 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.12",
-      "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+      "ref": "v0.9.13",
+      "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
       "path": "docs/admin_api.md",
-      "note": "Transcribed GET /backend-egress-policy labels, scope limits, v1 classifier and conservative guarantee rule; no raw CIDRs or credentials."
+      "note": "Transcribed GET /backend-egress-policy labels, scope limits, v1 classifier, schema_version 2 and its local-enforcement guarantee rule; no raw CIDRs or credentials."
     }
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "ip_classification": "ferrum-private-reserved-v1",
   "policy_scope": "process",
   "enforcement_scopes": [
@@ -68,6 +68,6 @@
     "dangerous-ranges",
     "ip-mode"
   ],
-  "public_only_guaranteed_rule": "True exactly when mode=public and allow_cidr_overrides_present=false; deny overrides only restrict. Even a wholly public undisclosed allow list yields false. The dangerous-range flag alone does not certify public-only egress.",
-  "consumer_rule": "For public-only publication, recognize the complete version/classification/vocabulary, match the requested namespace, require local-data-plane and public_only_guaranteed=true, and check every serving DP after replacement/restart. Missing/unknown values or authorization failure block publication. CP admission-only metadata never attests its DPs."
+  "public_only_guaranteed_rule": "True exactly when enforcement_scope=local-data-plane, mode=public and allow_cidr_overrides_present=false; always false for admission-only, unserved-namespace and no-data-plane. Deny overrides only restrict. Even a wholly public undisclosed allow list yields false. The dangerous-range flag alone does not certify public-only egress. schema_version 1 reported the policy-only value, including true on a public-mode CP.",
+  "consumer_rule": "For public-only publication, recognize schema_version 2 and the complete classification/vocabulary, match the requested namespace, require local-data-plane and public_only_guaranteed=true, and check every serving DP after replacement/restart. Missing/unknown values, schema_version 1 or authorization failure block publication. CP admission-only metadata never attests its DPs."
 }

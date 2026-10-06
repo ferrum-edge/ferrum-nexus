@@ -1,0 +1,11 @@
+{
+  "profile": "deployment-v1",
+  "namespace": "deployment-00000000-0000-0000-0000-000000000000",
+  "namespace_etag": "\"deployment-v1-00000000000000000000000000000000\"",
+  "evidence": [],
+  "proxies": [],
+  "upstreams": [],
+  "plugin_configs": [],
+  "api_specs": [],
+  "api_spec_contents": []
+}

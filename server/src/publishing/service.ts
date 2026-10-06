@@ -281,6 +281,8 @@ import {
   deploymentSpecDocument,
   deploymentTarget,
   isDeploymentSnapshot,
+  isLegacyDeploymentSnapshot,
+  legacyDeploymentAuthority,
 } from '../ferrum-admin/deployment.js';
 import {
   accessDisruptionConfirmationRequired,
@@ -336,8 +338,11 @@ import {
   submittableProxyBody,
 } from './spec-document.js';
 import {
+  assertJournalAuthorityFormat,
   deleteRecoveryJournal,
+  JOURNAL_AUTHORITY_FORMAT,
   readRecoveryJournal,
+  stampJournalAuthorityFormat,
   writeRecoveryJournal,
 } from './recovery-storage.js';
 
@@ -367,6 +372,8 @@ type DeploymentShape = Pick<
 
 /** Encrypted settings journal; no operator resource body enters DTOs or audits. */
 interface ConversionRecovery {
+  /** Absent on journals written before Edge v0.9.13 authority; see recovery-storage. */
+  authorityFormat?: number;
   apiId: string;
   namespace: string;
   /** Immutable original resources and catalog shape, captured before the PATCH writes. */
@@ -1397,7 +1404,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             throw conflict('The API specification changed during conversion');
           }
         }
-        await writeRecoveryJournal(tx, deps.crypto, recoveryKey(api.id), recovery);
+        await writeRecoveryJournal(
+          tx,
+          deps.crypto,
+          recoveryKey(api.id),
+          stampJournalAuthorityFormat(recovery),
+        );
         if (start) {
           const marked = await tx.apis.update(api.id, { gateway_state: 'repair_required' });
           if (!marked) throw notFound('API', api.id);
@@ -1423,6 +1435,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       recoveryKey(api.id),
     );
     if (!recovery) return null;
+    assertJournalAuthorityFormat(recovery);
     if (
       recovery.apiId !== api.id ||
       api.namespace !== namespace ||
@@ -1483,6 +1496,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     const record = (value: unknown): value is Record<string, unknown> =>
       typeof value === 'object' && value !== null && !Array.isArray(value);
     const authority = (value: unknown): value is EdgeDeploymentSnapshot => {
+      // Edge v0.9.12 authority in an older journal: readable, never usable.
+      if (isLegacyDeploymentSnapshot(value)) throw legacyDeploymentAuthority();
       if (!isDeploymentSnapshot(value) || value.namespace !== namespace) return false;
       assertDeploymentEvidence(value, namespace);
       return true;
@@ -1495,6 +1510,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       );
     }
     if (recovery !== null) {
+      assertJournalAuthorityFormat(recovery);
       const proxy = record(recovery) && record(recovery.proxy) ? recovery.proxy : null;
       const proxyId = proxy?.id;
       if (
@@ -1599,6 +1615,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       throw conflict('The failed restore journal is unavailable; retain its original custody');
     }
     if (cleanup !== null) {
+      assertJournalAuthorityFormat(cleanup);
       if (
         !record(cleanup) ||
         typeof cleanup.proxyId !== 'string' ||
@@ -1631,8 +1648,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   function assertReplayableReferences(original: EdgeDeploymentSnapshot, proxyId: string): void {
-    const frozen = deploymentTarget(original, proxyId).spec?.external_ref_snapshot;
-    if (Array.isArray(frozen) && frozen.length > 0) {
+    // A stored external-reference snapshot is a {sha256, len} digest; only an
+    // empty one is replayable.
+    const frozen = deploymentTarget(original, proxyId).spec?.external_ref_snapshot ?? null;
+    if (frozen !== null && (frozen as { len?: unknown }).len !== 0) {
       throw conflict('The original deployment has frozen external references Nexus cannot replay');
     }
   }
@@ -1647,6 +1666,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     },
     message = 'The gateway deployment changed before its original authority was captured',
   ): void {
+    // Journaled Edge v0.9.12 authority fails 412 on Edge v0.9.13. Refuse it here,
+    // before any comparison could lead to a request or a fresh-token retry.
+    if (isLegacyDeploymentSnapshot(original)) throw legacyDeploymentAuthority();
     const target = deploymentTarget(original, expected.proxy.id);
     const sorted = (plugins: EdgePluginConfig[]): EdgePluginConfig[] =>
       [...plugins].sort((left, right) => left.id.localeCompare(right.id));
@@ -1657,7 +1679,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       ) ||
       !isDeepStrictEqual(sorted(target.plugins), sorted(expected.plugins)) ||
       !isDeepStrictEqual(
-        target.spec ? deploymentSpecDocument(target.spec) : null,
+        target.spec ? deploymentSpecDocument(original, target.spec) : null,
         expected.document,
       )
     ) {
@@ -1738,7 +1760,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           if ((await tx.apis.findById(api.id)) || !(await tx.settings.get(recoveryKey(api.id)))) {
             throw conflict('The orphan conversion identity changed before cleanup admission');
           }
-          await writeRecoveryJournal(tx, deps.crypto, recoveryKey(api.id), recovery);
+          await writeRecoveryJournal(
+            tx,
+            deps.crypto,
+            recoveryKey(api.id),
+            stampJournalAuthorityFormat(recovery),
+          );
         },
         { requireAtomic: true },
       );
@@ -5128,6 +5155,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             });
             conditionalCutover = async (id, document): Promise<void> => {
               const journal = {
+                authorityFormat: JOURNAL_AUTHORITY_FORMAT,
                 apiId: api.id,
                 catalogSpecId: current.id,
                 catalogShape: deploymentShape(api),
@@ -5325,7 +5353,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 }
               }
               if (target.spec) {
-                const document = deploymentSpecDocument(target.spec);
+                const document = deploymentSpecDocument(original, target.spec);
                 if (
                   !attemptedSpecDocument ||
                   !isDeepStrictEqual(document, attemptedSpecDocument) ||
@@ -5351,12 +5379,17 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   if (previous && previous.acknowledged !== true) {
                     throw conflict('The failed restore already has pending cleanup');
                   }
-                  await writeRecoveryJournal(tx, deps.crypto, cleanupKey, {
-                    original,
-                    cutover: previous,
-                    proxyId: present.id,
-                    acknowledged: false,
-                  });
+                  await writeRecoveryJournal(
+                    tx,
+                    deps.crypto,
+                    cleanupKey,
+                    stampJournalAuthorityFormat({
+                      original,
+                      cutover: previous,
+                      proxyId: present.id,
+                      acknowledged: false,
+                    }),
+                  );
                 },
                 { requireAtomic: true },
               );

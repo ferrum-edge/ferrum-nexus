@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { describe, it, type TestContext } from 'node:test';
+import { gzipSync } from 'node:zlib';
 
 import type { EdgeConfig } from '../config/index.js';
 import { isNexusError } from '../lib/errors.js';
@@ -636,11 +638,11 @@ describe('Edge response contracts over HTTP sockets', () => {
 });
 
 describe('released deployment authority over HTTP sockets', () => {
-  function original(): EdgeDeploymentSnapshot {
+  function fixtureSnapshot(version: 'v1' | 'v2'): EdgeDeploymentSnapshot {
     const value = JSON.parse(
       readFileSync(
         new URL(
-          '../../../contracts/ferrum-contracts/fixtures/admin-deployment-snapshot/valid/empty-sql.json',
+          `../../../contracts/ferrum-contracts/fixtures/admin-deployment-snapshot/${version}/valid/empty-sql.json`,
           import.meta.url,
         ),
         'utf8',
@@ -650,6 +652,23 @@ describe('released deployment authority over HTTP sockets', () => {
     value.proxies = [{ ...proxy } as EdgeDeploymentSnapshot['proxies'][number]];
     value.evidence.resources = [value.proxies, [], [], [], [], [], null, 0];
     return value;
+  }
+
+  function original(): EdgeDeploymentSnapshot {
+    return fixtureSnapshot('v2');
+  }
+
+  const tooLarge = {
+    error: 'Namespace snapshot representation exceeds the 64 MiB conditional authority limit',
+    live: 'unconfirmed',
+    recovery_cleanup_authorized: false,
+  };
+
+  function tooLargeRefusal(error: unknown): boolean {
+    assert.ok(isNexusError(error));
+    assert.equal(error.code, 'CONFLICT');
+    assert.deepEqual(error.details, { status: 507, kind: 'namespace_snapshot_too_large' });
+    return true;
   }
 
   it('retains original evidence and sends one strong token with the exact DELETE query', async (t) => {
@@ -717,6 +736,57 @@ describe('released deployment authority over HTTP sockets', () => {
     });
   }
 
+  it('507: refuses a namespace past the snapshot bound as definite, without a retry', async (t) => {
+    const { client, reply, requests } = await fixture(t);
+    reply.policyForDeployment = true;
+    reply.status = 507;
+    for (const durable of ['not_started', 'not_committed']) {
+      reply.body = JSON.stringify({ ...tooLarge, durable });
+      await assert.rejects(client.deployments.remove('proxy-1', original()), tooLargeRefusal);
+    }
+    // A 507 that does not prove nothing was committed stays uncertain.
+    reply.body = JSON.stringify({ ...tooLarge, durable: 'unknown' });
+    await assert.rejects(client.deployments.remove('proxy-1', original()), (error: unknown) => {
+      assert.ok(isNexusError(error));
+      assert.equal(
+        (error.details as { kind?: string }).kind,
+        'deployment_acknowledgement_uncertain',
+      );
+      return true;
+    });
+    assert.equal(requests.filter((request) => request.startsWith('DELETE ')).length, 3);
+    assert.equal(requests.filter((request) => request === 'GET /deployment-snapshot').length, 0);
+
+    // The snapshot read itself issues no authority past the bound.
+    reply.policyForDeployment = false;
+    reply.body = JSON.stringify({ ...tooLarge, durable: 'not_started' });
+    await assert.rejects(client.deployments.snapshot(), tooLargeRefusal);
+  });
+
+  it('refuses Edge v0.9.12 authority before sending any request', async (t) => {
+    const { client, reply, requests } = await fixture(t);
+    reply.policyForDeployment = true;
+    const legacy = fixtureSnapshot('v1');
+    for (const attempt of [
+      () => client.deployments.prepare('remove', 'proxy-1', legacy),
+      () => client.deployments.remove('proxy-1', legacy),
+    ]) {
+      await assert.rejects(attempt(), (error: unknown) => {
+        assert.ok(isNexusError(error));
+        assert.equal(error.code, 'CONFLICT');
+        assert.deepEqual(error.details, { kind: 'legacy_deployment_authority' });
+        return true;
+      });
+    }
+    assert.deepEqual(requests, []);
+
+    // A v1 body from an Edge v0.9.12 gateway is not current authority either.
+    reply.policyForDeployment = false;
+    reply.body = JSON.stringify(legacy);
+    reply.headers = { 'cache-control': 'no-store', etag: legacy.namespace_etag };
+    await assert.rejects(client.deployments.snapshot(), protocolFailure);
+  });
+
   it('does not retry a deployment write whose connection loses the acknowledgement', async (t) => {
     const { client, reply, requests } = await fixture(t);
     reply.policyForDeployment = true;
@@ -729,8 +799,26 @@ describe('released deployment authority over HTTP sockets', () => {
   it('uses the spec target and original deployment authority for ordinary-document PUT', async (t) => {
     const { client, reply, requests, ifMatches } = await fixture(t);
     const snapshot = original();
+    const stored = gzipSync(Buffer.from('{"openapi":"3.1.0","paths":{}}'));
     snapshot.proxies[0]!.api_spec_id = 'spec-1';
-    snapshot.api_specs = [{ id: 'spec-1', proxy_id: 'proxy-1' }];
+    snapshot.api_specs = [
+      {
+        id: 'spec-1',
+        proxy_id: 'proxy-1',
+        spec_content: {
+          sha256: createHash('sha256').update(stored).digest('hex'),
+          len: stored.length,
+        },
+        external_ref_snapshot: null,
+      },
+    ];
+    snapshot.api_spec_contents = [
+      {
+        id: 'spec-1',
+        spec_content_base64: stored.toString('base64'),
+        external_ref_snapshot_base64: null,
+      },
+    ];
     snapshot.evidence.resources = [snapshot.proxies, [], [], [], [], snapshot.api_specs, null, 0];
     reply.policyForDeployment = true;
     reply.headers = { 'x-ferrum-config-cursor': '7:13' };
