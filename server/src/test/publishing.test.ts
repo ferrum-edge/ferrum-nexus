@@ -3835,10 +3835,67 @@ describe('publishing', () => {
       );
     });
 
-    it('restores docs_only when the routes cutover fails', async () => {
-      await assertConversionRestores('enf-fail-cutover-routes', 'docs_only', () =>
-        harness.edge.queueFailure(500, { error: 'spec rejected' }, '/api-specs/', 'PUT'),
+    /**
+     * The `routes` cutover is a conditional deployment-v1 `PUT /api-specs/{id}`,
+     * and anything but a confirmed acknowledgement may still have landed. So
+     * unlike the other failures above, the original is not replayed over it and
+     * no fresh authority is fetched to retry it: the journal is kept, the API
+     * says `repair_required`, and the real path stays closed.
+     */
+    it('retains the journal when the routes cutover is not confirmed', async () => {
+      const slug = 'enf-fail-cutover-routes';
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+      const repairsBefore = await auditIds(harness, 'api.gateway_repair_required');
+      const offset = harness.edge.requests.length;
+
+      harness.edge.queueFailure(500, { error: 'spec rejected' }, '/api-specs/', 'PUT');
+      const failed = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(failed.statusCode, 502, failed.body);
+
+      // Nothing follows the unconfirmed cutover but reads: no replay of the
+      // original, no cleanup of the staged rebuild.
+      const calls = harness.edge.requests.slice(offset);
+      let cutover = -1;
+      calls.forEach((call, index) => {
+        if (call.method === 'PUT' && call.path.startsWith('/api-specs/')) cutover = index;
+      });
+      assert.ok(cutover >= 0, 'the conditional cutover was attempted');
+      assert.equal(calls[cutover]?.query.conditional, 'true');
+      assert.ok(calls.slice(cutover + 1).every((call) => call.method === 'GET'));
+
+      // One proxy, under the same id, still parked on its staging path: the
+      // real path answers 404 rather than open.
+      assert.equal(harness.edge.proxies.size, 1);
+      assert.match(
+        String(storedProxy(harness, proxyId).listen_path),
+        /^\/nexus\/\.staging\/[0-9a-f]{32}$/,
       );
+      assert.equal(harness.edge.proxyServing(`/nexus/${slug}`), undefined);
+      assert.ok(effectiveNames(harness, proxyId).includes('key_auth'));
+
+      const row = await harness.store.apis.findById(apiId);
+      assert.equal(row?.gateway_state, 'repair_required');
+      assert.equal(row?.spec_enforcement, 'docs_only');
+      assert.equal(row?.ferrum_proxy_id, proxyId);
+      const journal = await harness.store.settings.get(`gateway_recovery:nexus:${apiId}`);
+      assert.equal(journal?.encrypted, true, 'the encrypted recovery journal is retained');
+      const repairs = await auditRowsSince(harness, 'api.gateway_repair_required', repairsBefore);
+      assert.equal(repairs.length, 1);
+      assert.equal(repairs[0]?.target_id, apiId);
+      assert.equal(repairs[0]?.details.phase, 'conversion');
+      assert.equal(repairs[0]?.details.attempted_spec_enforcement, 'routes');
+      assert.equal(repairs[0]?.details.recovery_retained, true);
     });
 
     it('restores routes when the docs_only replacement cannot be created', async () => {

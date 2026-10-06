@@ -24,6 +24,17 @@ import { faultInjectingStore, type FaultInjectingStore } from './fault-injection
 import { buildTestApp, SAMPLE_SPEC_YAML, specWithServer, type TestApp } from './helpers.js';
 import { mockBasicPasswordHash, publicEgressPolicy } from './mock-ferrum-edge.js';
 
+/**
+ * A corrected revision that redefines the selected `GET /invoices` agent tool.
+ * A tool keeps its exposure id while its published definition is unchanged,
+ * and `info` is not part of that definition, so a version bump alone no longer
+ * gives the corrected catalog new tool ids.
+ */
+const REDEFINED_TOOL_SPEC_YAML = SAMPLE_SPEC_YAML.replace('2.4.0', '2.5.0').replace(
+  'summary: List invoices',
+  'summary: List every invoice',
+);
+
 /** Ownership replacement preserves every field except its intentional update stamp. */
 function assertRefreshedOwnership(
   actual: ApiGatewayPluginRecord[],
@@ -1581,7 +1592,26 @@ export function runEdgeSecurityAdoptionContract(
       for (const refusal of ['catalog', 'audit'] as const) {
         it(`${level}: keeps the journal through ${refusal} commit refusal`, async () => {
           const published = await publish(level);
-          const key = `gateway_recovery:nexus:${published.api.id}`;
+          const apiId = published.api.id;
+          const proxyId = published.api.ferrum_proxy_id!;
+          const key = `gateway_recovery:nexus:${apiId}`;
+          // What the catalog said as each conditional removal was dispatched:
+          // the conversion's teardown, then the rollback's removal of the
+          // converted deployment the refused completion left behind.
+          const remove = harness.edgeClient.deployments.remove;
+          const removals: { state?: string; enforcement?: string; journal: boolean }[] = [];
+          harness.edgeClient.deployments.remove = async (...args) => {
+            const row = await harness.store.apis.findById(apiId);
+            removals.push({
+              state: row?.gateway_state,
+              enforcement: row?.spec_enforcement,
+              journal: (await harness.store.settings.get(key))?.encrypted === true,
+            });
+            return remove(...args);
+          };
+          restoreMethods.push(() => {
+            harness.edgeClient.deployments.remove = remove;
+          });
           faults.failAfter(
             refusal === 'catalog' ? 'apis' : 'auditLogs',
             refusal === 'catalog' ? 'update' : 'create',
@@ -1589,17 +1619,33 @@ export function runEdgeSecurityAdoptionContract(
             new Error('catalog completion refused'),
           );
           await assert.rejects(
-            harness.services.publishing.update(actor, published.api.id, {
+            harness.services.publishing.update(actor, apiId, {
               spec_enforcement: level === 'routes' ? 'docs_only' : 'routes',
             }),
             /catalog completion refused/,
           );
-          const row = await harness.store.apis.findById(published.api.id);
-          assert.equal(row?.gateway_state, 'repair_required');
+          harness.edgeClient.deployments.remove = remove;
+          assert.deepEqual(faults.pending(), [], 'the completion commit consumed the fault');
+          // The refused completion cleared neither the repair state nor the
+          // journal: both were still in force when the rollback removed the
+          // converted deployment under its acknowledged staging authority.
+          assert.deepEqual(removals, [
+            { state: 'repair_required', enforcement: level, journal: true },
+            { state: 'repair_required', enforcement: level, journal: true },
+          ]);
+          // Released conditional removal lets that rollback complete, and it
+          // clears repair state and journal in one transaction with its audit.
+          const row = await harness.store.apis.findById(apiId);
+          assert.equal(row?.gateway_state, 'deployed');
           assert.equal(row?.spec_enforcement, level);
-          assert.equal(row?.ferrum_proxy_id, published.api.ferrum_proxy_id);
-          assert.equal((await harness.store.settings.get(key))?.encrypted, true);
-          assert.ok(harness.edge.proxyServing(`/nexus/${published.api.slug}`));
+          assert.equal(row?.ferrum_proxy_id, proxyId);
+          assert.equal(await harness.store.settings.get(key), null);
+          assert.equal((await completionRows(apiId)).rollback.length, 1);
+          assert.equal(Boolean(harness.edge.apiSpecForProxy(proxyId)), level === 'routes');
+          assert.equal(
+            String(harness.edge.proxyServing(`/nexus/${published.api.slug}`)?.id),
+            proxyId,
+          );
         });
       }
 
@@ -1879,11 +1925,7 @@ export function runEdgeSecurityAdoptionContract(
       const metadataError = new Error('repaired metadata refused');
       faults.failNext('settings', 'set', metadataError);
       await assert.rejects(
-        harness.services.publishing.updateSpec(
-          actor,
-          apiId,
-          SAMPLE_SPEC_YAML.replace('2.4.0', '2.5.0'),
-        ),
+        harness.services.publishing.updateSpec(actor, apiId, REDEFINED_TOOL_SPEC_YAML),
         (error: unknown) => {
           assert.equal(error, metadataError, 'the intended settings.set fault was reached');
           return true;
@@ -1896,7 +1938,7 @@ export function runEdgeSecurityAdoptionContract(
       const uploaded = await harness.services.publishing.updateSpec(
         actor,
         apiId,
-        SAMPLE_SPEC_YAML.replace('2.4.0', '2.5.0'),
+        REDEFINED_TOOL_SPEC_YAML,
       );
       assert.notDeepEqual(uploaded.api.agents, originalAgents);
       const revisedSealed = await harness.store.settings.get(key);
@@ -2019,11 +2061,7 @@ export function runEdgeSecurityAdoptionContract(
       const failedUploadOffset = harness.edge.requests.length;
       let metadataRefusals = 0;
       await assert.rejects(
-        harness.services.publishing.updateSpec(
-          actor,
-          apiId,
-          SAMPLE_SPEC_YAML.replace('2.4.0', '2.5.0'),
-        ),
+        harness.services.publishing.updateSpec(actor, apiId, REDEFINED_TOOL_SPEC_YAML),
         (error: unknown) => {
           assert.equal(error, metadataError, 'the intended settings.set fault was reached');
           metadataRefusals += 1;
@@ -2046,7 +2084,7 @@ export function runEdgeSecurityAdoptionContract(
       const uploaded = await harness.services.publishing.updateSpec(
         actor,
         apiId,
-        SAMPLE_SPEC_YAML.replace('2.4.0', '2.5.0'),
+        REDEFINED_TOOL_SPEC_YAML,
       );
       assert.notDeepEqual(uploaded.api.agents, originalAgents);
       assert.equal(uploaded.spec.parsed_version, '2.5.0');
