@@ -32,6 +32,12 @@ FIELD = re.compile(
     r'(?=,|}|#|$)',
     re.IGNORECASE,
 )
+# Workflow `env:` values for the two runner-recognized image variables. Literal
+# values must be digest-pinned; expressions fail closed.
+WORKFLOW_IMAGE_VARIABLE = re.compile(
+    r'^\s*(?:export\s+)?["\']?(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)["\']?\s*:\s*(.*?)\s*$'
+)
+TOP_LEVEL_SERVICES = re.compile(r'^services\s*:', re.M)
 
 
 def error_for(image, local_ok=True):
@@ -51,6 +57,24 @@ def error_for(image, local_ok=True):
     if tag and not VERSION.fullmatch(tag) and name_tag not in TAG_EXCEPTIONS:
         return 'tag must be an exact version or have a documented exception'
     return None
+
+
+def workflow_env_error(image):
+    """Workflow env values must be pinned literals; local build images are allowed."""
+    if image in LOCAL_IMAGES:
+        return None
+    return error_for(image, local_ok=False)
+
+
+def workflow_env_image_fields(path, source):
+    for line_no, line in enumerate(source.splitlines(), 1):
+        match = WORKFLOW_IMAGE_VARIABLE.match(line)
+        if not match:
+            continue
+        value = match.group(2).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        yield line_no, value
 
 
 def image_fields(path, source):
@@ -125,24 +149,51 @@ DOCKER_SWITCH_OPTIONS = {
 }
 
 
-def _skip_options(words, value_options, switch_options):
+def _open_substitutions(state, token):
+    """Track `$(...)` and backtick nesting across punctuation-only tokens."""
+    parens, in_tick = state
+    if token and set(token) <= set(';&|()`'):
+        parens = max(0, parens + token.count('(') - token.count(')'))
+        if token.count('`') % 2:
+            in_tick = not in_tick
+    return parens, in_tick
+
+
+def _consume_word_rest(words, glued, value):
+    # A shell word may continue past punctuation the tokenizer split:
+    # `-v $(pwd):/src` becomes `-v`, `$`, `(`, `pwd`, `)`, `:/src`, and a
+    # substitution may contain spaces (`-e F=$(cat foo)`).
+    state = _open_substitutions((0, False), value)
+    while words and glued and (glued[0] or state[0] or state[1]):
+        state = _open_substitutions(state, words.pop(0))
+        glued.pop(0)
+
+
+def _skip_options(words, glued, value_options, switch_options):
     while words and words[0].startswith('-') and words[0] != '-':
         option = words.pop(0)
+        glued.pop(0)
         if option == '--':
             return
         if '=' in option:
             name = option.split('=', 1)[0]
             if name in value_options:
+                _consume_word_rest(words, glued, option)
                 continue
             words.insert(0, '<unsupported docker option>')
+            glued.insert(0, False)
             return
         if option in value_options:
             if not words:
                 words.append('<missing docker option value>')
+                glued.append(False)
                 return
-            words.pop(0)
+            value = words.pop(0)
+            glued.pop(0)
+            _consume_word_rest(words, glued, value)
         elif option not in switch_options:
             words.insert(0, '<unsupported docker option>')
+            glued.insert(0, False)
             return
 
 
@@ -188,33 +239,55 @@ def _shell_words(text):
     return list(lexer)
 
 
-def _docker_images_in_words(words, depth=0):
+def _lex(text):
+    """Tokenize `text` and flag tokens joined to the previous one without a space.
+
+    shlex splits shell punctuation (`$(...)`, backticks) into separate tokens, so
+    the flag lets an option value reclaim the rest of its shell word.
+    """
+    words = _shell_words(text)
+    glued = [False] * len(words)
+    cursor = 0
+    for index, word in enumerate(words):
+        position = text.find(word, cursor)
+        if position == -1:
+            continue
+        glued[index] = index > 0 and position == cursor
+        cursor = position + len(word)
+    return words, glued
+
+
+def _docker_images_in_words(words, glued, depth=0):
     images = []
     for index, word in enumerate(words):
         if depth < 2 and 'docker' in word and len(word.split()) > 1:
             # A quoted command string (`bash -c "docker run ..."`, `"$(docker ...)"`).
             try:
-                images.extend(_docker_images_in_words(_shell_words(word), depth + 1))
+                inner_words, inner_glued = _lex(word)
+                images.extend(_docker_images_in_words(inner_words, inner_glued, depth + 1))
             except ValueError:
                 pass
             continue
         if word.rsplit('/', 1)[-1] != 'docker':
             continue
         command_words = words[index + 1:].copy()
+        command_glued = glued[index + 1:]
         if not command_words:
             continue
-        _skip_options(command_words, DOCKER_GLOBAL_VALUES, DOCKER_GLOBAL_SWITCHES)
+        _skip_options(command_words, command_glued, DOCKER_GLOBAL_VALUES, DOCKER_GLOBAL_SWITCHES)
         if command_words and command_words[0] == '<unsupported docker option>':
             images.append(command_words[0])
             continue
         if not command_words:
             continue
         command = command_words.pop(0)
+        command_glued.pop(0)
         if command in {'container', 'image'} and command_words:
             command = command_words.pop(0)
+            command_glued.pop(0)
         if command not in {'run', 'create', 'pull'}:
             continue
-        _skip_options(command_words, DOCKER_VALUE_OPTIONS, DOCKER_SWITCH_OPTIONS)
+        _skip_options(command_words, command_glued, DOCKER_VALUE_OPTIONS, DOCKER_SWITCH_OPTIONS)
         images.append(command_words[0] if command_words else '<missing docker image>')
     return images
 
@@ -223,12 +296,21 @@ def workflow_docker_images(line):
     line = _workflow_run_text(line)
     expected = len(DOCKER_COMMAND.findall(re.sub(r'(?:^|\s)#.*$', '', line)))
     try:
-        images = _docker_images_in_words(_shell_words(line))
+        words, glued = _lex(line)
+        images = _docker_images_in_words(words, glued)
     except ValueError:
         images = []
     if len(images) < expected:
         images.append('<unparsed docker command>')
     return images
+
+
+def is_compose(path, source):
+    """A Compose file either names `compose` or has a top-level `services:` key."""
+    name = path.name.lower()
+    if not name.endswith(('.yml', '.yaml')):
+        return False
+    return 'compose' in name or TOP_LEVEL_SERVICES.search(source) is not None
 
 
 def files(root):
@@ -242,7 +324,7 @@ def files(root):
             or basename.endswith('.dockerfile')
         )
         workflow = path.parts[:2] == ('.github', 'workflows') and yaml
-        compose = 'compose' in basename and yaml
+        compose = yaml and path.is_file() and is_compose(path, path.read_text())
         env_file = basename == '.env' or basename.startswith('.env.') or basename.endswith('.env')
         if path.is_file() and (dockerfile or workflow or compose or env_file):
             yield path
@@ -267,15 +349,25 @@ def main(root):
     for path in files(root):
         source = path.read_text()
         relative_path = Path(path.relative_to(root).as_posix())
-        refs = [(line, image, True) for line, image in image_fields(relative_path, source)]
+        refs = [(line, image, 'image') for line, image in image_fields(relative_path, source)]
         if path.name == '.env' or path.name.startswith('.env.') or path.name.endswith('.env'):
             # Env files may name a local image only through the explicit
             # e2e/.env.example exception in env_image_fields.
             refs.extend(
-                (line, image, False) for line, image in env_image_fields(relative_path, source)
+                (line, image, 'env') for line, image in env_image_fields(relative_path, source)
             )
-        for line, image, local_ok in refs:
-            reason = error_for(image, local_ok)
+        if relative_path.parts[:2] == ('.github', 'workflows'):
+            # `e2e/run.sh` honours an exported FERRUM_EDGE_IMAGE, so a workflow
+            # env value must be a pinned literal; expressions fail closed.
+            refs.extend(
+                (line, image, 'workflow_env')
+                for line, image in workflow_env_image_fields(relative_path, source)
+            )
+        for line, image, policy in refs:
+            if policy == 'workflow_env':
+                reason = workflow_env_error(image)
+            else:
+                reason = error_for(image, policy == 'image')
             if reason:
                 errors.append(f'{path.relative_to(root)}:{line}: {image}: {reason}')
     if errors:
