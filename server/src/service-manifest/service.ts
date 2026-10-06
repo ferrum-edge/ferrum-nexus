@@ -8,7 +8,7 @@ import type { UserRecord } from '../db/store.js';
 import { forbidden, validationFailed } from '../lib/errors.js';
 import { manifestDefaults, manifestSchema, manifestValidator } from './schema.js';
 
-const CONTRACT_COMMIT = '31f0a21d707795be293d15837c2f77c3d84219d8';
+const CONTRACT_COMMIT = '9626821eb089c71f5d4d71268c7b8276a8a5ab50';
 
 interface Manifest {
   service: { name: string };

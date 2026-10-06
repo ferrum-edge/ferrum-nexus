@@ -22,7 +22,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   closed credential fields; the delayed issue/disable regression keeps its `ok`
   teardown requirement. Four-store service/protocol regressions and a separate
   controlled packaged DNS-rebinding fixture are included. The candidate pins
-  published Edge v0.9.12 and contracts-edge-0.9.12; Nexus version markers remain
+  published Edge v0.9.13 and contracts-edge-0.9.13; Nexus version markers remain
   unchanged. See [limitations](docs/security.md#1-threat-model).
 
 - **Public-only egress topology decision**: Nexus grants the verified public-only
@@ -35,8 +35,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   only the gateway attestation and keeps Nexus's own upstream screening;
   `NEXUS_ALLOW_PRIVATE_UPSTREAMS` keeps its existing meaning. Neither opt-out
   reports public-only, startup warns while either is set, and publish, update and
-  restore audit rows record `egress_profile` and `enforcement_scope`. Egress policy
-  schema 2 (Edge `v0.9.13` and later) is refused under its own
+  restore audit rows record `egress_profile` and `enforcement_scope`. Against Edge
+  v0.9.13 the unattested opt-in admits no CP/DP pairing (see the v0.9.13 adoption
+  below), and an unread policy schema is refused under its own
   `unsupported_egress_policy_schema` reason. See the
   [topology decision](docs/operations.md#backend-egress-admission-and-the-public-only-guarantee).
 
@@ -59,6 +60,41 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   [operator runbook](docs/operations.md#resolving-an-unconfirmed-gateway-deployment-mutation)
   covers unconfirmed mutations. See the
   [released protocol and replay limits](docs/edge-conversion-recovery-blocker.md).
+
+- **Published Edge v0.9.13 candidate adoption**: pin source
+  `9b83115de7ec23ab51ec4feae6bed65e596db425`, default image index
+  `sha256:6caa0987adb4c0a3a368fcd800bb0459cff3d3e219522e2e9c56280205862e50`, and
+  published `contracts-edge-0.9.13` at `9626821eb089c71f5d4d71268c7b8276a8a5ab50`
+  (vocabularies, both majors of the egress and deployment schemas with their
+  per-major fixtures, the two new `507` acknowledgement fixtures, byte for byte; the
+  service-manifest pin moves to the same tag with unchanged manifest bytes). This
+  candidate pairs with Edge v0.9.13 only. Read
+  [Upgrading to Edge v0.9.13](docs/operations.md#upgrading-to-edge-v0913) first:
+  settle every conversion and restore journal before upgrading Edge, and upgrade both
+  sides in one window. See [adoption facts](docs/edge-0.9.11-adoption.md).
+  - **Egress policy schema 2.** Nexus reads `schema_version: 2`, whose
+    `public_only_guaranteed` is true only for `local-data-plane`; schema 1 (Edge
+    v0.9.12 and earlier) is refused as `unsupported_egress_policy_schema`. The
+    guarantee rule still requires `local-data-plane` explicitly.
+    `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` still requires
+    `public_only_guaranteed=true`, so against Edge v0.9.13 it no longer admits a
+    CP/DP pairing (a control plane now reports `false`); such a pairing publishes
+    only under `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`.
+  - **Deployment snapshot v2.** Recovery reads stored spec documents from the
+    required `api_spec_contents` array and verifies each against the
+    `{sha256, len}` digest the token fences; `api_specs` must equal
+    `evidence.resources[5]`, MongoDB rows carry `bson_sha256`, and a frozen
+    external-reference snapshot is a digest.
+  - **`507` and old tokens.** A `507` whose acknowledgement reports nothing
+    committed is a definite refusal (`409 CONFLICT`,
+    `kind: "namespace_snapshot_too_large"`): nothing is issued or applied, the
+    journal is kept and it is never retried. Edge v0.9.13 answers every v0.9.12
+    token with `412`; the journal and its pending operation are kept and never
+    retried with a fresh token.
+  - **Versioned recovery journals.** New journals carry `authorityFormat: 2`.
+    Journals written before stay readable; Edge v0.9.12 authority in them is refused
+    before any request (`kind: "legacy_deployment_authority"`), and an unknown marker
+    is refused.
 
 - **Published Edge v0.9.12 candidate adoption** (PR #522): pin immutable source
   `0d917701b63ef38210c49df830f48cf0457cbc7d`, default image index

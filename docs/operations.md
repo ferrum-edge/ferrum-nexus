@@ -235,7 +235,7 @@ accepted CP pairing; see its topology decision.**
 
 Unless an opt-out below is set, every backend-writing Admin boundary
 requires fresh authenticated, namespace-matched, no-store process metadata from
-`GET /backend-egress-policy`, schema v1. Only `local-data-plane` with
+`GET /backend-egress-policy`, schema 2 (Edge v0.9.13). Only `local-data-plane` with
 `public_only_guaranteed=true` passes. Nexus validates the complete closed vocabulary,
 exact allowed/blocked class arrays, evaluation order and cross-field consistency.
 Unknown/missing/malformed metadata, auth/network/timeout failures, cached answers,
@@ -266,13 +266,19 @@ the previous generation, including every original credential, raw row, spec and
 token. Treat these rows as one journal in paired backups and writer-drain procedures;
 never manually trim or remove chunks. Existing single-row journals remain readable,
 and normal encrypted-setting key rotation includes each manifest and chunk.
+Journals this release writes carry `authorityFormat: 2`: every deployment snapshot
+they hold is Edge v0.9.13 authority. Older journals carry no marker and stay
+readable, but Edge v0.9.12 authority in them is refused before any request (see
+[Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913)); an unknown marker is refused.
 The `gateway_restore_cleanup:<namespace>:<api_id>` cutover/cleanup journal uses the
 same format and custody rules.
 `POST /api/apis/:id/restore-gateway` repeats admission, takes the API and proxy
 leases, and verifies resources against that record before rebuilding an absent
-identity. Live selected removal and API-spec replacement use the released v0.9.12
+identity. Live selected removal and API-spec replacement use the released v0.9.13
 conditional deployment API: a complete encrypted original snapshot and its strong
-`deployment-v1` token, never a backup/row token or namespace replacement. Each
+`deployment-v1` token, never a backup/row token or namespace replacement. Stored spec
+documents appear in the snapshot evidence only as `{sha256, len}`; Nexus reads their
+bytes from `api_spec_contents` and verifies each against that digest. Each
 pending operation is durable before HTTP. Only HTTP 200 with the expected profile
 and target, committed/applied acknowledgement, explicit cleanup authorization and
 applicable covering cursor allows dependent recovery or journal removal. CP/unserved
@@ -299,8 +305,11 @@ Two opt-outs relax different checks, and each one relaxes only its own:
   cannot also run a public-only gateway, so recognized consistent weaker metadata
   is accepted too, including CP, `both`, `private` and overlays.
 - `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` waives only the gateway's public-only
-  attestation, for a pairing such as CP/DP that cannot provide it. Nexus keeps its
-  suffix, IP-literal and resolved-address screening of every upstream.
+  attestation. Nexus keeps its suffix, IP-literal and resolved-address screening of
+  every upstream. It still requires the gateway to report
+  `public_only_guaranteed=true`, and Edge v0.9.13 (schema 2) reports that only for
+  `local-data-plane`, so against Edge v0.9.13 it admits nothing the public profile
+  refuses. See the compatibility notes below.
 
 Under either opt-out, missing, malformed or unsupported-schema metadata is still
 refused, the pairing is never reported as public-only, startup logs a
@@ -332,31 +341,42 @@ verdict as `public_egress_guaranteed`. Every other pairing reads
 `public_only_guaranteed=true` for its own process: its policy describes admission,
 not the remote data planes that connect to backends.
 
-| Pairing                                                      | Public profile (default)                          | `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`         | `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`              |
+| Pairing (Edge v0.9.13, schema 2)                             | Public profile (default)                          | `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`         | `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`              |
 | ------------------------------------------------------------ | ------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- |
 | Local data plane, public mode, no allow overrides            | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
-| Control plane with remote data planes (CP/DP)                | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      | Writes admitted; health `ok`; not guaranteed      |
-| Any other recognized policy                                  | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      | Writes admitted; health `ok`; not guaranteed      |
+| Control plane with remote data planes (CP/DP)                | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
+| Any other recognized policy                                  | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
 | Missing, malformed, unsupported-schema or unreachable policy | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed |
 
 Nexus upstream screening runs in the first two columns and is skipped only in the
-last. A CP/DP deployment therefore publishes with
-`NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` and keeps that screening; it does not
-need `NEXUS_ALLOW_PRIVATE_UPSTREAMS`. Nexus never describes it as public-only, and
-the operator enforces public-only egress on every data plane (see the
+last. Nexus never describes a CP/DP pairing as public-only, and the operator enforces
+public-only egress on every data plane (see the
 [security guide](security.md#1-threat-model)).
 
-**Compatibility ceiling.** Nexus reads egress policy schema 1 only, which Edge
-publishes up to `v0.9.12`. Edge `v0.9.13` and later publish schema 2; Nexus refuses
-it under the protocol reason `unsupported_egress_policy_schema`, health reads
-`degraded`, and an admin's `edge.error` names the unsupported schema. Every backend
-write is refused in every profile, so pair this release with Edge `v0.9.12` or
-earlier until schema 2 is adopted. Adopting it must keep requiring
-`enforcement_scope=local-data-plane` explicitly, not schema 2's narrowed
-`public_only_guaranteed` alone.
+**CP/DP pairings on Edge v0.9.13.** Against Edge v0.9.12, a public-mode control plane
+reported `public_only_guaranteed=true` for its own policy, and
+`NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` admitted its writes while keeping Nexus's
+upstream screening. Edge v0.9.13 withdrew that reading: a control plane now reports
+`false`. Nexus does not reinterpret the field from `mode` and the overlay flags, so
+the unattested opt-in no longer admits a CP/DP pairing. Until Nexus adopts
+data-plane attestation, such a pairing publishes only with
+`NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which also skips Nexus's upstream screening;
+enforce `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs on every data plane.
 
-The candidate pins the published Edge `v0.9.12` default image and canonical
-`contracts-edge-0.9.12` at `31f0a21d707795be293d15837c2f77c3d84219d8`.
+**Compatibility.** Nexus reads egress policy schema 2 only, which Edge publishes from
+`v0.9.13`. Schema 1 (Edge `v0.9.11` and `v0.9.12`) reported the policy-only value of
+`public_only_guaranteed`, so the same field meant something else; Nexus refuses it
+under the protocol reason `unsupported_egress_policy_schema` rather than reinterpret
+it, health reads `degraded`, and an admin's `edge.error` names the unsupported schema.
+Every backend write is then refused in every profile. The same holds for any newer
+schema. Nexus also requires the v0.9.13 deployment snapshot (`api_spec_contents`), so
+this candidate pairs with Edge `v0.9.13` only: upgrade Edge and Nexus together, as
+described in [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913). The guarantee
+still requires `enforcement_scope=local-data-plane` explicitly, not schema 2's
+narrowed `public_only_guaranteed` alone.
+
+The candidate pins the published Edge `v0.9.13` default image and canonical
+`contracts-edge-0.9.13` at `9626821eb089c71f5d4d71268c7b8276a8a5ab50`.
 See [the adoption facts](edge-0.9.11-adoption.md) and the separate
 [packaged public-only fixture](../e2e/public-only/README.md).
 
@@ -369,7 +389,11 @@ published under the old one must be republished.
 
 A conditional deployment removal or replacement that Edge did not confirm (a lost
 reply, a timeout, `503`, a CP/unserved durable-only result) may still settle after
-Nexus gave up on it. Nexus never guesses the outcome, so the API stays
+Nexus gave up on it. A definite refusal is kept the same way: a `412` (the original
+token no longer matches, including every token Edge v0.9.12 issued) or a `507` past
+the snapshot bound changed nothing, but Nexus never replaces the journal's original
+authority with a fresh token, so the journal and its pending operation stay until an
+operator resolves them. Nexus never guesses the outcome, so the API stays
 `gateway_state: repair_required` with its encrypted journal, and every portal path
 that would act on it refuses with `409 CONFLICT`:
 
@@ -381,10 +405,10 @@ that would act on it refuses with `409 CONFLICT`:
   `recovery_retained: true`, or an `api.gateway_restore_failed` row with
   `cleanup_refused: "deployment_cleanup_unconfirmed"`. Both name the `proxy_id`.
 
-A request refused before anything was sent (for example by egress admission) is
-never journaled as unconfirmed, so this state always means a request reached the
-gateway. There is no portal endpoint that marks it confirmed. Resolve it by
-observation:
+A request refused before anything was sent (for example by egress admission, or
+because the journal holds Edge v0.9.12 authority) is never journaled as unconfirmed,
+so this state always means a request reached the gateway. There is no portal
+endpoint that marks it confirmed. Resolve it by observation:
 
 1. **Do not retry around it.** Do not repeat the PATCH, recreate the proxy, or edit
    the API through the portal. A second operation could overlap the one that may
@@ -418,6 +442,73 @@ observation:
 
 Never release a journal while the outcome is still unsettled, and never edit or
 remove individual chunk rows of a journal that is kept.
+
+**Refusals Edge v0.9.13 reports.** The audit and error details name the cause:
+
+- `details.kind: "deployment_precondition_failed"` (`412`): the held token no longer
+  matches. Step 3 normally finds the operation not applied. A token issued by Edge
+  v0.9.12 or earlier always lands here after the Edge upgrade.
+- `details.kind: "namespace_snapshot_too_large"` (`507`): the namespace's canonical
+  representation exceeds Edge's 64 MiB conditional bound (spec bytes excluded), or its
+  stored spec documents exceed 256 MiB of base64. No authority was issued and nothing
+  was applied; the refusal repeats until the namespace shrinks, so Nexus never
+  retries it. Reduce the namespace (remove unused resources or split tenants across
+  namespaces), then resolve any kept journal as above.
+- `details.kind: "legacy_deployment_authority"` (`409`, nothing sent): the journal was
+  written before the Edge v0.9.13 upgrade and holds v0.9.12 authority that Edge now
+  refuses. Resolve it by observation as above.
+
+### Upgrading to Edge v0.9.13
+
+This candidate pairs with Edge v0.9.13 only, and Edge v0.9.13 refuses every
+deployment token an earlier Edge issued (see the
+[Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.13/docs/upgrade_guide.md#upgrading-to-0913)).
+A conversion or restore that is still in flight across the upgrade cannot finish on
+its own: its journal holds authority the new gateway would answer with `412`, so
+Nexus refuses to send it and never refreshes it. Drain and settle them first, then
+upgrade both sides in one maintenance window:
+
+1. **Stop new conversions.** Ask providers not to change `spec_enforcement` or
+   restore gateways until the upgrade is done.
+2. **Settle every journal on the old pairing.** List the journals: `app_settings` rows
+   whose key starts with `gateway_recovery:<namespace>:` or
+   `gateway_restore_cleanup:<namespace>:` (not `gateway_recovery_chunk:`), and APIs
+   with `gateway_state` `repair_required`. Run `POST /api/apis/:id/restore-gateway`
+   for each until it completes. Resolve one that reports an unconfirmed mutation with
+   [the runbook above](#resolving-an-unconfirmed-gateway-deployment-mutation) before
+   going on. Repeat the listing until it is empty.
+3. **Drain writers and take a paired backup**: stop every Nexus instance and follow
+   [Ordering and consistency](#ordering-and-consistency).
+4. **Upgrade Edge to v0.9.13.** Control plane and data planes must run the same build.
+5. **Start this Nexus release** with the pinned image from
+   [`release/compatibility.env`](../release/compatibility.env). Check
+   `GET /api/health/edge` as an admin: `status: "ok"`, and
+   `public_egress_guaranteed: true` for a local public-only data plane. A CP/DP
+   pairing reads `degraded`; see
+   [CP/DP pairings on Edge v0.9.13](#backend-egress-admission-and-the-public-only-guarantee).
+
+Between steps 4 and 5 neither side can talk to the other: an older Nexus refuses
+egress policy schema 2, and this release refuses schema 1. Backend writes are refused
+rather than guessed, so keep Nexus stopped for that window.
+
+A journal that was missed in step 2 stays readable. If its recorded operations are
+all acknowledged and the live deployment already matches the catalog, a restore
+completes it by observation. Anything that would act on its v0.9.12 authority is
+refused before a request is sent (`details.kind: "legacy_deployment_authority"`), and
+an operation that was still pending is refused locally as unconfirmed ("A gateway
+deployment mutation is unconfirmed") and never sent again; resolve either with
+[the runbook](#resolving-an-unconfirmed-gateway-deployment-mutation).
+
+A namespace near Edge's conditional bound (64 MiB of canonical representation with
+spec bytes excluded, or 256 MiB of base64 spec content) answers `507` on the snapshot
+read and on conditional mutations after the upgrade, so enforcement conversions and
+restores that need deployment authority are refused there until it shrinks. Consumer
+verification reads answer `507` the same way, so credential and access changes for
+that namespace fail closed with `details.kind: "namespace_snapshot_too_large"`.
+
+**Rolling back** means rolling back both sides together, after settling journals
+again: tokens issued by Edge v0.9.13 do not verify on v0.9.12, and the earlier Nexus
+cannot read egress policy schema 2 or the v0.9.13 snapshot.
 
 ### Email
 
@@ -1161,7 +1252,7 @@ docker compose up -d
 The four secrets and `FERRUM_EDGE_IMAGE` are required (`${VAR:?…}`); keep the
 secrets stable across restarts. [`release/compatibility.env`](../release/compatibility.env)
 pins the Edge image by digest. The current acceptance suite
-([`e2e/`](../e2e/README.md)) selects published Ferrum Edge `v0.9.12` for candidate qualification; the released Nexus
+([`e2e/`](../e2e/README.md)) selects published Ferrum Edge `v0.9.13` for candidate qualification; the released Nexus
 `v0.3.0` pairing with Edge `v0.9.9` is recorded in the
 [`v0.3.0` release notes](release-notes.md#supported-combination).
 
@@ -1345,8 +1436,8 @@ never accepted by verification; an invalid hidden Basic shape reports
 Nexus has no namespace Admin restore caller. Its API gateway restore rebuilds
 individual resources and repeats egress admission. Conditional Edge backup does not
 make Nexus and Edge backups jointly atomic; keep the writer-drain and paired-backup
-procedure below. The current unreleased candidate selects published Edge `v0.9.12`
-and `contracts-edge-0.9.12` pins; its exact-head recovery and packaged-image
+procedure below. The current unreleased candidate selects published Edge `v0.9.13`
+and `contracts-edge-0.9.13` pins; its exact-head recovery and packaged-image
 qualification remains pending. Historical Nexus `v0.3.0` remains paired with Edge
 `v0.9.9`. See [the adoption facts and remaining gates](edge-0.9.11-adoption.md).
 

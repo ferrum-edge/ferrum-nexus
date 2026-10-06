@@ -1,65 +1,98 @@
-# Draft Edge v0.9.12 adoption
+# Draft Edge v0.9.13 adoption
 
-Nexus PR #522 remains DRAFT. The filename preserves existing links from the
-v0.9.11 candidate. The current candidate selects published v0.9.12 artifacts;
-it does not finalize a Nexus release. The public-only guarantee is granted only to
-a local data plane (see the
+The filename preserves existing links from the v0.9.11 candidate. Nexus PR #522
+adopted published Edge v0.9.12; this change advances the candidate to published
+Edge v0.9.13 and `contracts-edge-0.9.13`. It does not finalize a Nexus release.
+The public-only guarantee is granted only to a local data plane (see the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)).
-Nexus reads egress policy schema 1 only, so the supported pairing ends at Edge
-`v0.9.12` until schema 2 is adopted.
 
 ## Published identities
 
-- [Edge v0.9.12](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.12)
-  is published at immutable unsigned lightweight tag source
-  `0d917701b63ef38210c49df830f48cf0457cbc7d`. The default Docker Hub
-  multi-architecture index in [`release/compatibility.env`](../release/compatibility.env)
-  is `sha256:80526b59cbbdc2bfcc8bae9241da4e5395414cf07bf0be4effd4c73c51684ee4`.
-  Root recorded successful hosted release jobs and verified distribution facts:
-  release assets and sidecars, image indexes/configurations, default gateway/CNI
-  pairing, authenticated hosted cosign/SLSA/SPDX evidence and ABI. This consumer
-  change does not claim independent cryptographic verification. Anonymous GHCR
-  pulls returned 401; the selected public image is Docker Hub.
-- [contracts-edge-0.9.12](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.12)
-  was published on 2026-10-05 at immutable unsigned lightweight tag commit
-  `31f0a21d707795be293d15837c2f77c3d84219d8`. Its protected merge tree
-  `1b480bf3e14e33d8a013247d2a30406159b6c04b` equals reviewed source
-  `d9c84810152732524c54a9ed292dc59103f0619d`. Selected vocabularies, egress
-  schema/fixtures and both new deployment schemas/fixtures are copied byte for
-  byte. `PIN` records all 46 adopted paths and hashes. `SERVICE-MANIFEST-PIN`
-  remains separate; shared manifest v1 and unreleased Alloy owner flags stay
-  unchanged. Historical publication-pending prose inside canonical assets stays
-  byte-identical even though the canonical release is now published.
+- [Edge v0.9.13](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.13)
+  was published on 2026-10-06 at tag source
+  `9b83115de7ec23ab51ec4feae6bed65e596db425`, the merge of Edge #6026. The
+  default Docker Hub multi-architecture index in
+  [`release/compatibility.env`](../release/compatibility.env) is
+  `sha256:6caa0987adb4c0a3a368fcd800bb0459cff3d3e219522e2e9c56280205862e50`.
+  Root recorded the successful hosted release run and verified distribution facts:
+  release assets and checksum sidecars, the default, `-ebpf` and `-ebpf-tools`
+  image indexes, and image signing and attestation. This consumer change does not
+  claim independent cryptographic verification.
+- [contracts-edge-0.9.13](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.13)
+  was published on 2026-10-06 at tag commit
+  `9626821eb089c71f5d4d71268c7b8276a8a5ab50`, the merge of contracts #20, and
+  reads every Edge-owned file at Edge `v0.9.13`. The vocabularies, the egress and
+  deployment schemas (both majors of each) with their per-major fixtures, the
+  acknowledgement schema and fixtures, and `fixtures/invalid-expectations.json`
+  are copied byte for byte. `PIN` records all 96 adopted paths and hashes;
+  `SERVICE-MANIFEST-PIN` moves to the same tag, and the shared manifest v1 schema
+  and fixtures are byte-identical to `contracts-edge-0.9.12`.
 - The released owner OpenAPI SHA-256 is
-  `f7242228d73d34ad2d7da3c989ec6ba15bb6ae1f2f4c94a8e0a181b000caae77`.
-  Full gzip ApiSpec content, raw SQL/BSON evidence and original namespace tokens
-  come from `GET /deployment-snapshot`, not ordinary resource views or backup.
+  `5f3e50e217b22b97d068490bdad9563ea450097a2daf7df4f80ff61f98559a81`.
 
-## Consumer adoption and remaining gates
+## What changed for Nexus
 
-The candidate uses the actual [released partial deployment protocol](edge-conversion-recovery-blocker.md):
-original strong deployment authority, conditional selected proxy removal and
-API-spec replacement, encrypted evidence retained before HTTP, and explicit
-commit/application acknowledgement before dependent recovery or journal removal.
-It preserves the released credential-complete row verification and ordinary CRUD
-contracts. Refused or uncertain operations do not refresh authority or fall back
-to unconditional cleanup or namespace replacement.
+Edge v0.9.13 changes two response contracts incompatibly and every snapshot token
+([Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.13/docs/upgrade_guide.md#upgrading-to-0913)):
 
-The older v0.9.11 missing-owner-capability blocker is satisfied by the published
-Edge and canonical releases. Nexus qualification is still pending: fresh exact-head
-Node checks, four-store service contracts, protocol/format gates and packaged
-acceptance against the selected image. Strict cancellation, audit, lease, cleanup,
-original replay and concurrent Admin controls remain required. Static inspection
-and integrity checks establish no hosted test or acceptance result.
+- **Backend egress policy schema 2.** `public_only_guaranteed` is now true only with
+  `enforcement_scope=local-data-plane`. Nexus reads schema 2 only and refuses schema
+  1 (Edge v0.9.12 and earlier) under `unsupported_egress_policy_schema`, so this
+  candidate pairs with Edge v0.9.13 only. The guarantee rule is unchanged: Nexus
+  still requires `local-data-plane` explicitly together with
+  `public_only_guaranteed=true`. `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` still
+  requires `public_only_guaranteed=true` and is never relaxed to the policy-only
+  reading schema 1 reported. Against Edge v0.9.13 it therefore admits no pairing
+  the public profile refuses: a control plane now reports `false`, so a CP/DP
+  pairing has no writes unless the operator sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`
+  (see [the compatibility notes](operations.md#backend-egress-admission-and-the-public-only-guarantee)).
+- **Deployment snapshot v2.** `GET /deployment-snapshot` carries stored spec
+  documents and external-reference snapshots as `{sha256, len}` in the evidence and
+  in `api_specs` (sorted by id and equal to `evidence.resources[5]`), raw SQL blobs
+  as `{sha256, len}` and MongoDB rows with `bson_sha256`. The required
+  `api_spec_contents` array carries one standard padded base64 copy of each stored
+  document. Nexus requires that array, checks that it names every spec in order,
+  and verifies each decoded value against the digest the token fences before it
+  uses a stored document. `GET /api-specs/{id}` is never a substitute.
+- **Snapshot tokens.** Deployment tokens now MAC the `deployment_snapshot.v2`
+  domain. Every token issued by Edge v0.9.12 or earlier keeps its syntax but fails
+  with `412`. Nexus never retries a refused operation with a fresh token: the
+  journal and its pending operation are kept for operator resolution.
+- **`507 Insufficient Storage`.** A namespace whose canonical representation would
+  exceed 64 MiB (spec bytes excluded), or whose `api_spec_contents` would exceed
+  256 MiB, is refused on the snapshot read and on both conditional mutations. Nexus
+  treats a `507` whose acknowledgement reports `durable` `not_started` or
+  `not_committed` as a definite refusal (`409 CONFLICT`, `details.kind`
+  `namespace_snapshot_too_large`): no authority was issued and nothing was applied.
+  It is deterministic for unchanged state, so it is never retried, and any journal
+  is kept. Any other `507` body stays an unconfirmed result.
 
-The [controlled public-only fixture](../e2e/public-only/README.md) additionally
-requires a packaged Nexus digest and hosted DNS-rebinding/zero-private-canary
-qualification. It covers the local data-plane profile only, and private-opt-in
-acceptance does not qualify public-only support.
+## Recovery journals
+
+Journals written by this candidate carry `authorityFormat: 2`: every deployment
+snapshot they hold is Edge v0.9.13 authority. Journals written before carry no
+marker and may hold Edge v0.9.12 authority (inline spec bytes, no
+`api_spec_contents`). They remain readable, so custody checks, inspection and key
+rotation keep working, and a journal whose recorded operations are all
+acknowledged and whose live deployment already matches the catalog still completes
+by observation. Anything that would use the older authority (a conditional
+mutation, a stored-document comparison or deletion custody) is refused with
+`409 CONFLICT`, `details.kind` `legacy_deployment_authority`, before any request
+is sent. Settle conversions and restores before upgrading Edge; see the
+[upgrade procedure](operations.md#upgrading-to-edge-v0913).
+
+## Remaining gates
+
+Nexus qualification is still pending: fresh exact-head Node checks, four-store
+service contracts, protocol and format gates, and packaged acceptance against the
+selected image. Static inspection and integrity checks establish no hosted test or
+acceptance result. The [controlled public-only fixture](../e2e/public-only/README.md)
+additionally requires a packaged Nexus digest and hosted qualification, and covers
+the local data-plane profile only.
 
 Nexus version markers remain unchanged. The owner-approved unreleased Node range is
 `^22.22.2 || ^24.15.0 || >=26.0.0`, adopted through #521; the candidate still requires
-exact-head qualification of every declared minimum and current major. Historical
-Nexus releases retain their published Node support facts.
-Released migrations 001–006 and hashes are immutable; prepared 007–011 remain
-unreleased. No Nexus tag, release or advisory completion is created here.
+exact-head qualification of every declared minimum and current major. Released
+migrations 001–006 and hashes are immutable; prepared 007–011 remain unreleased.
+This adoption adds no migration. No Nexus tag, release or advisory completion is
+created here.

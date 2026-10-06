@@ -3,9 +3,10 @@
 Nexus [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519) implements its
 consumer portion of [Alloy #27](https://github.com/ferrum-edge/ferrum-alloy/issues/27).
 The Nexus preview remains Unreleased. Its shared v1 contract is now
-EXISTING/implemented in published `contracts-edge-0.9.12`, commit
-`31f0a21d707795be293d15837c2f77c3d84219d8` in
-[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts/tree/31f0a21d707795be293d15837c2f77c3d84219d8).
+EXISTING/implemented in published `contracts-edge-0.9.13`, commit
+`9626821eb089c71f5d4d71268c7b8276a8a5ab50` in
+[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts/tree/9626821eb089c71f5d4d71268c7b8276a8a5ab50).
+The manifest schema and fixtures are byte-identical to `contracts-edge-0.9.12`.
 [`SERVICE-MANIFEST-PIN`](../contracts/ferrum-contracts/SERVICE-MANIFEST-PIN) records
 SHA-256 for the schema, every shared manifest fixture and shared expectations.
 The separate Edge vocabulary [`PIN`](../contracts/ferrum-contracts/PIN) adopts
@@ -79,7 +80,7 @@ independent review before the protected squash merge at
 published older releases retain their historical floors until a new release ships.
 
 This deployment-adoption candidate integrates that qualified main and selects published
-Edge v0.9.12 and the published shared canonical contract. Earlier consumer qualification
+Edge v0.9.13 and the published shared canonical contract. Earlier consumer qualification
 does not qualify the changed source, pins or combined head. All fresh hosted gates,
 including `Supported Node minimum`, full root review and fresh independent review remain
 required. The CP/public-only topology decision is recorded in the

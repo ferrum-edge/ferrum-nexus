@@ -1,27 +1,64 @@
-/** Released Edge v0.9.12 deployment authority; never derive or refresh its keyed token. */
+/**
+ * Released Edge v0.9.13 deployment authority (contracts `admin-deployment-snapshot` v2);
+ * never derive or refresh its keyed token.
+ */
 import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { isDeepStrictEqual } from 'node:util';
 import { parseDocument } from 'yaml';
 
-import { conflict, edgeError } from '../lib/errors.js';
+import { conflict, edgeError, type NexusError } from '../lib/errors.js';
 import type {
   EdgeDeploymentAcknowledgement,
   EdgeDeploymentSnapshot,
+  EdgeDeploymentSpecContents,
   EdgePluginConfig,
   EdgeProxy,
+  EdgeStoredContentDigest,
 } from './types.js';
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function exactKeys(value: Record<string, unknown>, keys: string[]): boolean {
+  return (
+    Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
+  );
+}
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
 export function isDeploymentTag(value: unknown): value is string {
   return typeof value === 'string' && /^"deployment-v1-[0-9a-f]{32}"(?![\s\S])/.test(value);
 }
 
-/** Envelope validation is not a certificate of complete raw SQL/BSON evidence. */
-export function isDeploymentSnapshot(value: unknown): value is EdgeDeploymentSnapshot {
+/** `StoredContentDigest`: the snapshot's stand-in for stored bytes. */
+function isStoredDigest(value: unknown): value is EdgeStoredContentDigest {
+  return (
+    record(value) &&
+    exactKeys(value, ['sha256', 'len']) &&
+    typeof value.sha256 === 'string' &&
+    SHA256_HEX.test(value.sha256) &&
+    Number.isSafeInteger(value.len) &&
+    Number(value.len) >= 0
+  );
+}
+
+/** The closed `api_spec_contents` item. */
+function isSpecContents(value: unknown): value is EdgeDeploymentSpecContents {
+  return (
+    record(value) &&
+    exactKeys(value, ['id', 'spec_content_base64', 'external_ref_snapshot_base64']) &&
+    typeof value.id === 'string' &&
+    typeof value.spec_content_base64 === 'string' &&
+    (value.external_ref_snapshot_base64 === null ||
+      typeof value.external_ref_snapshot_base64 === 'string')
+  );
+}
+
+/** The envelope both snapshot majors share. */
+function isSnapshotEnvelope(value: unknown): value is Record<string, unknown> {
   return (
     record(value) &&
     value.profile === 'deployment-v1' &&
@@ -32,6 +69,58 @@ export function isDeploymentSnapshot(value: unknown): value is EdgeDeploymentSna
       const rows = value[field];
       return Array.isArray(rows) && rows.every(record);
     })
+  );
+}
+
+/** Envelope validation is not a certificate of complete raw SQL/BSON evidence. */
+export function isDeploymentSnapshot(value: unknown): value is EdgeDeploymentSnapshot {
+  return (
+    isSnapshotEnvelope(value) &&
+    (value.api_specs as Record<string, unknown>[]).every(
+      (spec) =>
+        typeof spec.id === 'string' &&
+        typeof spec.proxy_id === 'string' &&
+        isStoredDigest(spec.spec_content) &&
+        (spec.external_ref_snapshot === undefined ||
+          spec.external_ref_snapshot === null ||
+          isStoredDigest(spec.external_ref_snapshot)),
+    ) &&
+    Array.isArray(value.api_spec_contents) &&
+    value.api_spec_contents.every(isSpecContents)
+  );
+}
+
+/**
+ * Authority issued by Edge v0.9.12 or earlier (`admin-deployment-snapshot` v1): spec
+ * bytes inline and no `api_spec_contents`. Recovery journals written before Edge
+ * v0.9.13 still hold it, and Edge v0.9.13 refuses its token with `412`. It is
+ * recognized only so that it is refused before any request is sent.
+ */
+export function isLegacyDeploymentSnapshot(value: unknown): boolean {
+  return isSnapshotEnvelope(value) && !Object.hasOwn(value, 'api_spec_contents');
+}
+
+/** Never re-read authority for a legacy journal: that would be a fresh-token retry. */
+export function legacyDeploymentAuthority(): NexusError {
+  return conflict(
+    'The recovery journal holds deployment authority issued by Ferrum Edge v0.9.12 or ' +
+      'earlier, which Edge v0.9.13 refuses; retain the journal and resolve it by observation',
+    { kind: 'legacy_deployment_authority' },
+  );
+}
+
+/**
+ * A `507 Insufficient Storage` whose acknowledgement proves nothing was committed:
+ * the namespace exceeds the owner's conditional snapshot bound. Deterministic for
+ * unchanged state, so it is never retried. Any other `507` body stays uncertain.
+ */
+export function isSnapshotTooLargeRefusal(value: unknown): boolean {
+  return (
+    isDeploymentAcknowledgement(value) &&
+    record(value) &&
+    (value.durable === 'not_started' || value.durable === 'not_committed') &&
+    value.live === 'unconfirmed' &&
+    value.recovery_cleanup_authorized === false
   );
 }
 
@@ -94,6 +183,7 @@ export function assertDeploymentEvidence(
   snapshot: EdgeDeploymentSnapshot,
   namespace: string,
 ): void {
+  if (isLegacyDeploymentSnapshot(snapshot)) throw legacyDeploymentAuthority();
   const resources = snapshot.evidence.resources;
   const stored = snapshot.evidence.stored;
   const sqlTables = [
@@ -109,7 +199,8 @@ export function assertDeploymentEvidence(
     'namespaces',
   ];
   // Mongo has embedded associations and credential indexes. Its stored rows
-  // carry document/bson_hex; SQL rows carry lossless typed column values.
+  // carry document/bson_sha256; SQL rows carry lossless typed column values,
+  // with blobs as {sha256, len}.
   const mongoCollections = sqlTables.filter(
     (table) => table !== 'proxy_plugins' && table !== 'consumer_credential_index',
   );
@@ -152,31 +243,87 @@ export function assertDeploymentEvidence(
         (rows) =>
           Array.isArray(rows) &&
           rows.every(
-            (row) => record(row) && record(row.document) && typeof row.bson_hex === 'string',
+            (row) =>
+              record(row) &&
+              record(row.document) &&
+              typeof row.bson_sha256 === 'string' &&
+              SHA256_HEX.test(row.bson_sha256),
           ),
       )
     ) ||
     !isDeepStrictEqual(ordered(snapshot.proxies.map(deploymentProxyShape)), resources[0]) ||
     !isDeepStrictEqual(ordered(snapshot.upstreams), resources[2]) ||
     !isDeepStrictEqual(ordered(snapshot.plugin_configs), resources[3]) ||
-    !isDeepStrictEqual(ordered(snapshot.api_specs), resources[5])
+    // The owner sorts api_specs by id in byte order; it equals resources[5].
+    !isDeepStrictEqual(snapshot.api_specs, resources[5]) ||
+    !contentsVerified(snapshot)
   ) {
     throw edgeError('The gateway deployment snapshot cannot establish original authority');
   }
 }
 
-/** Decode only the bounded target document; keep gzip/external-reference bytes in the journal. */
-export function deploymentSpecDocument(spec: Record<string, unknown>): Record<string, unknown> {
+/** Strict standard padded base64 whose bytes match the digest the token fences. */
+function decodedContent(encoded: unknown, digest: unknown): Buffer | null {
+  if (typeof encoded !== 'string' || !isStoredDigest(digest)) return null;
+  const bytes = Buffer.from(encoded, 'base64');
+  if (
+    bytes.toString('base64') !== encoded ||
+    bytes.length !== digest.len ||
+    createHash('sha256').update(bytes).digest('hex') !== digest.sha256
+  ) {
+    return null;
+  }
+  return bytes;
+}
+
+/**
+ * `api_spec_contents` lies outside the digested evidence: each entry must name its
+ * spec in `api_specs` order and decode to the stored bytes the evidence fences.
+ */
+function contentsVerified(snapshot: EdgeDeploymentSnapshot): boolean {
+  const contents: unknown = snapshot.api_spec_contents;
+  if (!Array.isArray(contents) || contents.length !== snapshot.api_specs.length) return false;
+  const seen = new Set<string>();
+  return snapshot.api_specs.every((spec, index) => {
+    const entry: unknown = contents[index];
+    const id = spec.id;
+    if (!isSpecContents(entry) || typeof id !== 'string' || entry.id !== id || seen.has(id)) {
+      return false;
+    }
+    seen.add(id);
+    const external = spec.external_ref_snapshot ?? null;
+    return (
+      decodedContent(entry.spec_content_base64, spec.spec_content) !== null &&
+      (external === null) === (entry.external_ref_snapshot_base64 === null) &&
+      (external === null || decodedContent(entry.external_ref_snapshot_base64, external) !== null)
+    );
+  });
+}
+
+/**
+ * Decode only the bounded target document. Its stored gzip bytes come from
+ * `api_spec_contents`, verified against the digest the token fences; the journal
+ * keeps them as captured.
+ */
+export function deploymentSpecDocument(
+  snapshot: EdgeDeploymentSnapshot,
+  spec: Record<string, unknown>,
+): Record<string, unknown> {
+  if (isLegacyDeploymentSnapshot(snapshot)) throw legacyDeploymentAuthority();
   try {
+    const entries = Array.isArray(snapshot.api_spec_contents)
+      ? snapshot.api_spec_contents.filter((entry) => isSpecContents(entry) && entry.id === spec.id)
+      : [];
+    const entry = entries.length === 1 ? entries[0] : undefined;
+    const compressed = entry ? decodedContent(entry.spec_content_base64, spec.spec_content) : null;
     if (
+      !compressed ||
       spec.content_encoding !== 'gzip' ||
-      !Array.isArray(spec.spec_content) ||
-      !spec.spec_content.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255) ||
       !['json', 'yaml'].includes(String(spec.spec_format))
     ) {
       throw new Error('Invalid stored spec');
     }
-    const bytes = gunzipSync(Buffer.from(spec.spec_content), { maxOutputLength: 2 * 1024 * 1024 });
+    const bytes = gunzipSync(compressed, { maxOutputLength: 2 * 1024 * 1024 });
     if (
       bytes.length !== spec.uncompressed_size ||
       createHash('sha256').update(bytes).digest('hex') !== spec.content_hash

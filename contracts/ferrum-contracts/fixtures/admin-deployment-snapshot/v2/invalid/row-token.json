@@ -1,0 +1,35 @@
+{
+  "profile": "deployment-v1",
+  "namespace": "deployment-00000000-0000-0000-0000-000000000000",
+  "namespace_etag": "\"row-token\"",
+  "evidence": {
+    "profile": "deployment-v1",
+    "resources": [
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      null,
+      0
+    ],
+    "stored": {
+      "proxies": [],
+      "consumers": [],
+      "upstreams": [],
+      "plugin_configs": [],
+      "proxy_plugins": [],
+      "api_specs": [],
+      "gateway_trust_bundles": [],
+      "consumer_identity_index": [],
+      "consumer_credential_index": [],
+      "namespaces": []
+    }
+  },
+  "proxies": [],
+  "upstreams": [],
+  "plugin_configs": [],
+  "api_specs": [],
+  "api_spec_contents": []
+}
