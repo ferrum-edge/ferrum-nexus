@@ -230,7 +230,7 @@ function followReference(reader: DefinitionReader, value: Record<string, unknown
   for (let index = chain.length - 1; index >= 0; index -= 1) {
     const node = chain[index] as Record<string, unknown>;
     if (end.resolved && end.hops < MAX_OPENAPI_REF_HOPS) {
-      const inner = end;
+      const inner: Extract<FollowedObject, { resolved: true }> = end;
       const member = (key: 'content' | 'required' | 'description'): unknown =>
         Object.hasOwn(node, key) ? node[key] : inner[key];
       end = {
