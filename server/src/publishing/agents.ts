@@ -13,10 +13,13 @@ import {
   mcpToolGroupForApi,
   agentEndpointPath,
   agentOperations,
+  agentPathItemMember,
   agentPathItems,
   agentToolName,
   isReadOnlyAgentMethod,
+  resolveAgentPathItem,
   resolveOpenApiPointer,
+  type AgentPathItem,
   type AgentTool,
   type ApiAgents,
   type HttpMethod,
@@ -52,17 +55,114 @@ function isJsonMediaType(mediaType: string): boolean {
 }
 
 /**
- * One build's reads of the document while it assembles tool definitions:
- * every key it examines and every pointer it follows is charged to the
- * build's budget, and each Content map is scanned once however many tools
- * and statuses reach it.
+ * Work, in units, that one build of tool hashes (every tool of one document)
+ * may cost before it falls back to the whole document: a unit for every
+ * member of a document collection the build iterates (a key, an array element
+ * or a reference hop), plus every character hashed and every key or pointer
+ * it parses. A legitimate document reads each part of itself about once, so
+ * it stays far below this; past it, references or shared objects are
+ * amplifying the work.
+ */
+export const MAX_DEFINITION_HASH_WORK = 8 * MAX_SPEC_BYTES;
+
+/** Nesting, through values and references together, one tool hash may descend. */
+export const MAX_DEFINITION_HASH_DEPTH = 1_024;
+
+/** Work counters a test may pass, to assert what hashing cost without timing it. */
+export interface DefinitionHashStats {
+  /** Units charged to the work meter, by every build these counters were passed to. */
+  charged: number;
+  /** Characters fed to SHA-256, the whole-document fallback included. */
+  hashed: number;
+  /** Local schema references looked up in the document. */
+  lookups: number;
+  /** Members of document collections iterated: keys, array elements and reference hops. */
+  scanned: number;
+  /** Whether a build ran out of budget and hashed every tool by the whole document. */
+  overBudget: boolean;
+}
+
+/** Fresh counters for {@link agentToolDefinitionDigests}. */
+export function definitionHashStats(): DefinitionHashStats {
+  return { charged: 0, hashed: 0, lookups: 0, scanned: 0, overBudget: false };
+}
+
+/** Thrown when one build of tool hashes exceeds its work or depth budget. */
+class HashBudgetExceeded extends Error {}
+
+/**
+ * The one meter a build of tool hashes charges its work to, shared by every
+ * tool of the build. Each iteration over something the document controls
+ * (Path Item and reference chains, Responses and Content maps, and every
+ * object and array the digest walks: parameters, schemas and their
+ * subschemas, examples) is charged before it runs, and every character as it
+ * is hashed. Past {@link MAX_DEFINITION_HASH_WORK} the build is abandoned.
+ */
+interface WorkMeter {
+  /** Charge `cost` units for work about to be done. */
+  charge: (cost: number) => void;
+  /** Charge `count` members of a collection about to be iterated, `cost` units in all. */
+  members: (count: number, cost?: number) => void;
+  stats: DefinitionHashStats;
+}
+
+function workMeter(stats: DefinitionHashStats): WorkMeter {
+  let work = 0;
+  const charge = (cost: number): void => {
+    work += cost;
+    stats.charged += cost;
+    if (work > MAX_DEFINITION_HASH_WORK) throw new HashBudgetExceeded();
+  };
+  return {
+    charge,
+    members: (count, cost = count) => {
+      stats.scanned += count;
+      charge(cost);
+    },
+    stats,
+  };
+}
+
+/**
+ * What a tool definition reads of a Request Body or Response, through its
+ * references, or that the chain did not resolve.
+ */
+type FollowedObject =
+  | { resolved: true; hops: number; content: unknown; required: unknown; description: unknown }
+  | { resolved: false };
+
+const UNRESOLVED: FollowedObject = { resolved: false };
+
+/**
+ * One build's reads of the document while it assembles tool definitions. Each
+ * selected Path Item, each Request Body or Response reference and each
+ * Content map is read once, however many tools and statuses reach it, and
+ * nothing the document holds is copied.
  */
 interface DefinitionReader {
   document: Record<string, unknown>;
-  paths: Record<string, unknown>;
-  charge: (count: number) => void;
-  stats: DefinitionHashStats;
+  meter: WorkMeter;
+  pathItems: WeakMap<object, AgentPathItem>;
+  followed: WeakMap<object, FollowedObject>;
   contents: WeakMap<object, Record<string, unknown>>;
+}
+
+function own(value: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(value, key) ? value[key] : undefined;
+}
+
+/** The selected Path Item at `path`, resolved in place, or undefined when there is none. */
+function selectedPathItem(reader: DefinitionReader, path: string): AgentPathItem | undefined {
+  const { document, meter } = reader;
+  const paths = document.paths;
+  if (!record(paths) || !path.startsWith('/') || !Object.hasOwn(paths, path)) return undefined;
+  const value = paths[path];
+  if (!record(value)) return undefined;
+  // Throws for a chain Edge would not follow, which abandons the build.
+  return resolveAgentPathItem(document, path, value, {
+    memo: reader.pathItems,
+    charge: (cost) => meter.members(1, cost),
+  });
 }
 
 /** The schemas of every JSON media type in a Content map, keyed by media type. */
@@ -73,10 +173,12 @@ function jsonMediaSchemas(
   if (!record(content)) return null;
   const known = reader.contents.get(content);
   if (known) return known;
+  const mediaTypes = Object.keys(content);
+  reader.meter.members(mediaTypes.length);
   const schemas: Record<string, unknown> = {};
-  for (const mediaType of Object.keys(content)) {
-    reader.stats.scanned += 1;
-    reader.charge(mediaType.length + 1);
+  for (const mediaType of mediaTypes) {
+    // Charged before it is parsed, however long it is.
+    reader.meter.charge(mediaType.length);
     const media = content[mediaType];
     if (isJsonMediaType(mediaType)) schemas[mediaType] = record(media) ? media.schema : media;
   }
@@ -85,32 +187,71 @@ function jsonMediaSchemas(
 }
 
 /**
- * A Request Body or Response, through its chain of local Reference Objects,
- * with each reference's sibling fields laid over its target. Anything that
- * does not resolve is returned as it is, for the canonical form to fold in.
+ * A Request Body or Response through its chain of local Reference Objects, as
+ * the members a tool definition reads: `content`, `required` and
+ * `description`, each from the outermost reference that sets it, else from
+ * the target. Nothing is copied, and every node's outcome is kept for the
+ * build, so each reference is followed once however many statuses and tools
+ * reach it. A chain that leaves the document (external, anchor, dangling),
+ * cycles, passes {@link MAX_OPENAPI_REF_HOPS} hops or ends at something other
+ * than an object does not resolve.
  */
-function followReference(reader: DefinitionReader, value: unknown): unknown {
+function followReference(reader: DefinitionReader, value: Record<string, unknown>): FollowedObject {
+  const chain: Record<string, unknown>[] = [];
+  const onChain = new Set<object>();
   let current = value;
-  const overlays: Record<string, unknown>[] = [];
-  const seen = new Set<string>();
-  while (record(current) && typeof current.$ref === 'string') {
+  let end = reader.followed.get(current);
+  while (!end) {
     const ref = current.$ref;
-    if (!ref.startsWith('#/') || seen.has(ref) || seen.size >= MAX_OPENAPI_REF_HOPS) {
-      return value;
+    // The node, its pointer and the three members read from it.
+    reader.meter.members(1, typeof ref === 'string' ? ref.length + 3 : 3);
+    if (typeof ref !== 'string') {
+      end = {
+        resolved: true,
+        hops: 0,
+        content: own(current, 'content'),
+        required: own(current, 'required'),
+        description: own(current, 'description'),
+      };
+      reader.followed.set(current, end);
+      break;
     }
-    reader.charge(ref.length);
-    const target = resolveOpenApiPointer(reader.document, ref);
-    if (target === undefined) return value;
-    seen.add(ref);
-    const { $ref: _ref, ...overlay } = current;
-    overlays.push(overlay);
+    chain.push(current);
+    onChain.add(current);
+    const target = ref.startsWith('#/') ? resolveOpenApiPointer(reader.document, ref) : undefined;
+    if (!record(target) || onChain.has(target)) {
+      end = UNRESOLVED;
+      break;
+    }
     current = target;
+    end = reader.followed.get(current);
   }
-  if (!record(current)) return current;
-  // The outermost reference's siblings win, as in agentPathItems.
-  let resolved = { ...current };
-  for (const overlay of overlays.reverse()) resolved = { ...resolved, ...overlay };
-  return resolved;
+  // Each reference's own members over what it names, innermost first.
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    const node = chain[index] as Record<string, unknown>;
+    if (end.resolved && end.hops < MAX_OPENAPI_REF_HOPS) {
+      const inner = end;
+      const member = (key: 'content' | 'required' | 'description'): unknown =>
+        Object.hasOwn(node, key) ? node[key] : inner[key];
+      end = {
+        resolved: true,
+        hops: inner.hops + 1,
+        content: member('content'),
+        required: member('required'),
+        description: member('description'),
+      };
+    } else {
+      end = UNRESOLVED;
+    }
+    reader.followed.set(node, end);
+  }
+  return end;
+}
+
+/** A tool's definition, and whether a Request Body or Response it reads did not resolve. */
+interface ToolDefinition {
+  definition: Record<string, unknown>;
+  unresolved: boolean;
 }
 
 /**
@@ -120,13 +261,16 @@ function followReference(reader: DefinitionReader, value: unknown): unknown {
  * extra field only costs a re-approval, a missing one would let an explicit
  * subset follow a changed tool.
  */
-function toolDefinition(
-  reader: DefinitionReader,
-  tool: AgentToolSelection,
-): Record<string, unknown> {
-  const { document } = reader;
-  const item = reader.paths[tool.path];
-  const operation = record(item) ? item[tool.method.toLowerCase()] : undefined;
+function toolDefinition(reader: DefinitionReader, tool: AgentToolSelection): ToolDefinition {
+  const { document, meter } = reader;
+  const item = selectedPathItem(reader, tool.path);
+  /** A Path Item member, read through the item's reference chain. */
+  const member = (key: string): unknown => {
+    if (!item) return undefined;
+    meter.members(item.chain.length + 1);
+    return agentPathItemMember(item, key);
+  };
+  const operation = member(tool.method.toLowerCase());
   const definition: Record<string, unknown> = {
     // Edge normalizes schemas by the document's OpenAPI version.
     openapi: document.openapi ?? null,
@@ -136,33 +280,63 @@ function toolDefinition(
     description: tool.description,
   };
   // validateAgents refuses a selection with no operation; this stays total.
-  if (!record(item) || !record(operation)) return { ...definition, operation: null };
-  const body = followReference(reader, operation.requestBody ?? null);
+  if (!item || !record(operation)) {
+    return { definition: { ...definition, operation: null }, unresolved: false };
+  }
+  let unresolved = false;
+  // A Request Body or Response that does not resolve is named by its own
+  // reference, and the tool folds in the whole document.
+  const follow = (value: Record<string, unknown>): FollowedObject => {
+    const followed = followReference(reader, value);
+    if (!followed.resolved) unresolved = true;
+    return followed;
+  };
+  const unresolvedRef = (value: Record<string, unknown>): Record<string, unknown> => ({
+    unresolved_ref: value.$ref ?? null,
+  });
+  const body = operation.requestBody ?? null;
+  let requestBody: unknown = body;
+  if (record(body)) {
+    const followed = follow(body);
+    requestBody = followed.resolved
+      ? {
+          required: followed.required ?? null,
+          description: followed.description ?? null,
+          content: jsonMediaSchemas(reader, followed.content),
+        }
+      : unresolvedRef(body);
+  }
   const responses = record(operation.responses) ? operation.responses : {};
+  const statuses = Object.keys(responses);
+  meter.members(statuses.length);
   const outputs: Record<string, unknown> = {};
-  for (const status of Object.keys(responses)) {
-    reader.stats.scanned += 1;
-    reader.charge(status.length + 1);
+  for (const status of statuses) {
+    // Charged before it is matched, however long it is.
+    meter.charge(status.length);
     if (!/^2([0-9]{2}|XX)$/.test(status)) continue;
-    const response = followReference(reader, responses[status]);
-    outputs[status] = record(response) ? jsonMediaSchemas(reader, response.content) : response;
+    const response = responses[status];
+    if (!record(response)) {
+      outputs[status] = response;
+      continue;
+    }
+    const followed = follow(response);
+    outputs[status] = followed.resolved
+      ? jsonMediaSchemas(reader, followed.content)
+      : unresolvedRef(response);
   }
   return {
-    ...definition,
-    // Edge's tool title.
-    summary: operation.summary ?? null,
-    operation_description: operation.description ?? null,
-    // Path Item parameters, then the operation's own, which override them.
-    parameters: [item.parameters ?? null, operation.parameters ?? null],
-    request_body: record(body)
-      ? {
-          required: body.required ?? null,
-          description: body.description ?? null,
-          content: jsonMediaSchemas(reader, body.content),
-        }
-      : body,
-    // Edge publishes the first 2xx JSON object schema as the output schema.
-    responses: outputs,
+    definition: {
+      ...definition,
+      // Edge's tool title.
+      summary: operation.summary ?? null,
+      operation_description: operation.description ?? null,
+      // Path Item parameters, then the operation's own, which override them.
+      parameters: [member('parameters') ?? null, operation.parameters ?? null],
+      request_body: requestBody,
+      // Edge publishes the first 2xx JSON object schema as the output schema.
+      responses: outputs,
+    },
+    unresolved,
   };
 }
 
@@ -172,48 +346,6 @@ function toolDefinition(
  * references beneath it, and dynamic references resolve at evaluation time.
  */
 const REBASING_KEYWORDS = ['$id', '$dynamicRef', '$recursiveRef'];
-
-/**
- * Work, in characters, that one build of tool hashes (every tool of one
- * document) may cost before it falls back to the whole document: every
- * character hashed, every key of a Responses or Content map examined, and
- * every pointer followed to a Request Body or Response. A legitimate document
- * reads each part of itself about once, so it stays far below this; past it,
- * references or shared objects are amplifying the work.
- */
-export const MAX_DEFINITION_HASH_WORK = 8 * MAX_SPEC_BYTES;
-
-/** Nesting, through values and references together, one tool hash may descend. */
-export const MAX_DEFINITION_HASH_DEPTH = 1_024;
-
-/** Work counters a test may pass, to assert what hashing cost without timing it. */
-export interface DefinitionHashStats {
-  /** Characters fed to SHA-256, the whole-document fallback included. */
-  hashed: number;
-  /** Local references looked up in the document. */
-  lookups: number;
-  /** Keys of Responses and Content maps examined while assembling definitions. */
-  scanned: number;
-  /** Whether the build ran out of budget and hashed every tool by the whole document. */
-  overBudget: boolean;
-}
-
-/** Fresh counters for {@link agentToolDefinitionDigests}. */
-export function definitionHashStats(): DefinitionHashStats {
-  return { hashed: 0, lookups: 0, scanned: 0, overBudget: false };
-}
-
-/** Thrown when one build of tool hashes exceeds its work or depth budget. */
-class HashBudgetExceeded extends Error {}
-
-/** One build's charge against {@link MAX_DEFINITION_HASH_WORK}. */
-function workBudget(): (count: number) => void {
-  let work = 0;
-  return (count) => {
-    work += count;
-    if (work > MAX_DEFINITION_HASH_WORK) throw new HashBudgetExceeded();
-  };
-}
 
 /** A reference target's digest, and whether anything beneath it was unresolvable. */
 interface TargetDigest {
@@ -290,8 +422,9 @@ function literalDigest(value: unknown, stats: DefinitionHashStats): string {
  *   that reached one depends on where the cycle was entered, so it is reused
  *   within its tool only. Either way a tool's hash never depends on which
  *   other tools were hashed.
- * - **Budget.** Every character hashed is charged, through `charge`, to the
- *   build's {@link MAX_DEFINITION_HASH_WORK}, and nesting to
+ * - **Budget.** Every object's keys and array's elements are charged to the
+ *   build's {@link WorkMeter} before they are walked, each reference before
+ *   it is looked up, and every character as it is hashed; nesting is held to
  *   {@link MAX_DEFINITION_HASH_DEPTH}. Past either, {@link HashBudgetExceeded}
  *   abandons the build.
  * - Anything Nexus cannot resolve from the document root (an external or
@@ -300,13 +433,13 @@ function literalDigest(value: unknown, stats: DefinitionHashStats): string {
  */
 function resolvingDigester(
   document: Record<string, unknown>,
-  charge: (count: number) => void,
-  stats: DefinitionHashStats,
+  meter: WorkMeter,
 ): (definition: Record<string, unknown>) => TargetDigest {
+  const { stats } = meter;
   const shared = new Map<unknown, TargetDigest>();
   const spend = (count: number): void => {
     stats.hashed += count;
-    charge(count);
+    meter.charge(count);
   };
   return (definition) => {
     const local = new Map<unknown, TargetDigest>();
@@ -324,6 +457,8 @@ function resolvingDigester(
     };
 
     const target = (ref: string): string => {
+      // A hop, charged with its pointer before the pointer is parsed.
+      meter.members(1, ref.length + 1);
       const quoted = JSON.stringify(ref);
       if (ref !== '#' && !ref.startsWith('#/')) {
         frame.unresolved = true;
@@ -368,6 +503,7 @@ function resolvingDigester(
       depth += 1;
       if (depth > MAX_DEFINITION_HASH_DEPTH) throw new HashBudgetExceeded();
       if (Array.isArray(value)) {
+        meter.members(value.length);
         write('[');
         value.forEach((item, index) => {
           if (index > 0) write(',');
@@ -378,15 +514,17 @@ function resolvingDigester(
         if (REBASING_KEYWORDS.some((keyword) => Object.hasOwn(value, keyword))) {
           frame.unresolved = true;
         }
+        // Listing the keys is the only work done before they are charged.
+        const keys = Object.keys(value);
+        meter.members(keys.length);
+        keys.sort();
         write('{');
-        Object.keys(value)
-          .sort()
-          .forEach((key, index) => {
-            write(`${index > 0 ? ',' : ''}${JSON.stringify(key)}:`);
-            const child = value[key];
-            if (key === '$ref' && typeof child === 'string') write(target(child));
-            else emit(child, write);
-          });
+        keys.forEach((key, index) => {
+          write(`${index > 0 ? ',' : ''}${JSON.stringify(key)}:`);
+          const child = value[key];
+          if (key === '$ref' && typeof child === 'string') write(target(child));
+          else emit(child, write);
+        });
         write('}');
       } else {
         write(JSON.stringify(value ?? null));
@@ -421,24 +559,25 @@ function definitionDigests(
     return (whole ??= literalDigest(rest, stats));
   };
   try {
-    const charge = workBudget();
+    const meter = workMeter(stats);
     const reader: DefinitionReader = {
       document,
-      paths: agentPathItems(document),
-      charge,
-      stats,
+      meter,
+      pathItems: new WeakMap(),
+      followed: new WeakMap(),
       contents: new WeakMap(),
     };
-    const digester = resolvingDigester(document, charge, stats);
+    const digester = resolvingDigester(document, meter);
     return tools.map((tool) => {
-      const definition = digester(toolDefinition(reader, tool));
-      return definition.unresolved
-        ? sha256(`resolved\n${definition.text}\n${wholeDigest()}`)
-        : definition.text;
+      const { definition, unresolved } = toolDefinition(reader, tool);
+      const digest = digester(definition);
+      return unresolved || digest.unresolved
+        ? sha256(`resolved\n${digest.text}\n${wholeDigest()}`)
+        : digest.text;
     });
   } catch (error) {
-    // Over budget, or not walkable at all (a Path Item that does not
-    // resolve): every tool of the build is its selection and the whole
+    // Over budget, or not walkable at all (a selected Path Item that does
+    // not resolve): every tool of the build is its selection and the whole
     // document, so the outcome never depends on which tool ran out.
     if (error instanceof HashBudgetExceeded) stats.overBudget = true;
     return tools.map((tool) => sha256(`document\n${selectionText(tool)}\n${wholeDigest()}`));
@@ -457,13 +596,20 @@ function definitionDigests(
  * references, instead of guessing what they name, when:
  *
  * - a reference it reaches is external (`other.yaml#/…`), an anchor
- *   (`#name`), or a local pointer that names nothing; or a node it reaches has
- *   a `$id`, `$dynamicRef` or `$recursiveRef` member, a property of that name
- *   included. Its resolved definition is hashed with the whole document.
- * - a Path Item does not resolve, or reading and hashing every tool of the
- *   call would pass {@link MAX_DEFINITION_HASH_WORK} or
+ *   (`#name`), or a local pointer that names nothing; its Request Body or a
+ *   2xx Response is a reference chain that does not resolve to an object
+ *   within {@link MAX_OPENAPI_REF_HOPS} acyclic local hops; or a node it
+ *   reaches has a `$id`, `$dynamicRef` or `$recursiveRef` member, a property
+ *   of that name included. Its definition, as far as it resolved, is hashed
+ *   with the whole document.
+ * - a selected Path Item does not resolve, or reading and hashing every tool
+ *   of the call would pass {@link MAX_DEFINITION_HASH_WORK} or
  *   {@link MAX_DEFINITION_HASH_DEPTH}.
  *   Then every tool of the call is its selection and the whole document.
+ *
+ * Cost: at most the work budget, plus the one charge that crosses it, plus
+ * one canonical pass over the whole document when a tool or the build falls
+ * back. Nothing the document holds is copied.
  *
  * A `$ref: "#"` names the whole document, `info` included. A fallback only
  * ever folds in more than Edge publishes, so it costs a re-approval and
@@ -606,13 +752,12 @@ export function validateAgents(
   } catch (error) {
     invalid(error instanceof Error ? error.message : 'Cannot resolve agent operations');
   }
+  const byKey = new Map(operations.map((item) => [`${item.method} ${item.path}`, item]));
   const names = new Set<string>();
   const selected = new Set<string>();
   for (const tool of agents.operations) {
     const key = `${tool.method} ${tool.path}`;
-    const operation = operations.find(
-      (item) => item.method === tool.method && item.path === tool.path,
-    );
+    const operation = byKey.get(key);
     if (!operation?.supported) invalid(`Unsupported or missing agent operation: ${key}`);
     if (methods !== null && !methods.includes(tool.method)) {
       invalid(`The method allow-list does not permit ${key}`);

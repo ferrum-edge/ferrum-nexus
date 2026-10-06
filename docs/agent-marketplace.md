@@ -178,18 +178,24 @@ the tool's ID, so a hash copied onto another ID never matches.
 Some references are not followed. The whole document except `info`, hashed as text
 without following its references, is folded into a tool's hash when the definition
 reaches an external or anchor `$ref`, a local pointer that names nothing, or a `$id`,
-`$dynamicRef` or `$recursiveRef` member (a schema property of that name included). Every
-tool of the document is hashed from its selection and that whole-document digest
-instead when a Path Item does not resolve, or when reading and hashing every selected
-tool would pass a fixed work budget: 16 Mi characters across the document's tools
-(characters hashed, response-status and media-type keys read, and Request Body and
-Response references followed), or 1,024 levels of nesting through values and
-references. Reference targets and Content maps are processed once per document however
-many tools reach them, so a legitimate document stays far below the budget. A budget
-fallback is logged and recorded as `tool_hash_fallback: true` in the `api.publish`,
-`api.update`, `api.spec_update` or `api.spec_rollback` audit row, which explains a later
-mass rotation: once every tool hashes the whole document, any change outside `info`
-re-ids all of them. A
+`$dynamicRef` or `$recursiveRef` member (a schema property of that name included), or
+when its Request Body or a 2xx Response is a reference chain that does not end at an
+object within 32 acyclic local hops. Every tool of the document is hashed from its
+selection and that whole-document digest instead when a selected Path Item does not
+resolve, or when reading and hashing every selected tool would pass a fixed work
+budget: 16 Mi units across the document's tools, or 1,024 levels of nesting through
+values and references. One meter per build is charged a unit for every member of a
+document collection read (each Path Item, Request Body and Response reference hop,
+each key of a Responses or Content map, and each key and array element of the
+parameters, schemas and examples hashed) before it is read, plus every key and pointer
+before it is parsed and every character as it is hashed. Nothing is copied out of the
+document, and each selected Path Item, Request Body or Response reference, Content map
+and acyclic schema reference target is read once per build however many tools and
+statuses reach it, so a legitimate document stays far below the budget. A budget
+fallback is recorded as `tool_hash_fallback: true` in the `api.publish`, `api.update`,
+`api.spec_update` or `api.spec_rollback` audit row that commits the change, which
+explains a later mass rotation: once every tool hashes the whole document, any change
+outside `info` re-ids all of them. A
 `$ref: "#"` names the whole document, `info` included. Each fallback only folds in more
 than Edge publishes, so it can cost a re-approval but never carries a changed tool.
 Selections are validated (existing, unique operations and names) before any hashing.

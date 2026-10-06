@@ -262,12 +262,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   definition Edge publishes for it: description, operation summary and description,
   parameters, request body, 2xx JSON schemas and OpenAPI version, with each `$ref`
   hashed as its text and its target's digest, bound to the tool's id. Hashing is
-  bounded: selections are validated before anything is hashed; reference targets and
-  Content maps are processed once per document, shared across its tools; and every
-  character hashed, key read and reference followed is charged to a fixed work budget.
-  A document past the budget, like one with a reference Nexus cannot resolve, folds in
-  the whole document but `info` without following references, and the fallback is
-  logged and recorded as `tool_hash_fallback` in the audit row. A spec revision,
+  bounded: selections are validated before anything is hashed, reading each Path Item
+  in place; one work meter per build, shared by its tools, is charged for every key,
+  array element and reference hop of the document read, before it is read, and for
+  every character hashed; nothing is copied out of the document; and each selected
+  Path Item, Request Body or Response reference, Content map and acyclic schema
+  reference target is read once per build. A document past the budget, like one with a
+  reference Nexus cannot resolve (a Request Body or Response chain that does not end at
+  an object included), folds in the whole document but `info` without following
+  references, and the fallback is recorded as `tool_hash_fallback` in the audit row
+  that commits the change. A spec revision,
   rollback or agents edit that changes the hash, a description-only edit included, mints
   a new exposure id and drops the old one from every explicit subset in the same
   transaction, recording `access.tools_prune` with `reason: 'definition_changed'`.

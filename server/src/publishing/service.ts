@@ -1595,7 +1595,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         previous ? safeSpecDocument(previous.raw_spec) : parsed.document,
         hashing,
       );
-      const hashFallback = toolHashFallback(api.id, hashing);
+      const hashFallback = toolHashFallback(hashing);
       // Named in the change summary, so grantees are told which tools left
       // their explicit approvals, even for a description-only edit the
       // structural comparison does not report.
@@ -1977,7 +1977,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         parsed.document,
         hashing,
       );
-      const hashFallback = toolHashFallback(apiId, hashing);
+      const hashFallback = toolHashFallback(hashing);
       const agentApi = { id: apiId, slug, agents };
 
       // Where the proxy is *born*. It stays here until every security plugin
@@ -2346,7 +2346,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 hashing,
               );
         const agentsMoved = !isDeepStrictEqual(nextAgents, api.agents ?? null);
-        Object.assign(details, toolHashFallback(api.id, hashing));
+        Object.assign(details, toolHashFallback(hashing));
         if (agentsMoved) {
           update.agents = nextAgents;
           changed.push('agents');
@@ -4390,18 +4390,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   /* ── Spec-owned proxies (`routes` mode) ───────────────────────────────── */
 
   /**
-   * Audit details for a tool hash build that passed its work budget, logged
-   * as it happens. Every tool was then hashed with the whole document, so
-   * the next change outside `info` re-ids all of them; this is what explains
-   * that mass rotation.
+   * Audit details for a tool hash build that passed its work budget. Every
+   * tool was then hashed with the whole document, so the next change outside
+   * `info` re-ids all of them; this is what explains that mass rotation. It
+   * is recorded only in the audit row that commits the change, so a request
+   * that fails afterwards leaves no record of a fallback that never took
+   * effect.
    */
-  function toolHashFallback(apiId: Uuid, hashing: DefinitionHashStats): Record<string, unknown> {
-    if (!hashing.overBudget) return {};
-    deps.log?.(
-      { api_id: apiId },
-      'agent tool hashing passed its work budget; every tool was hashed with the whole document',
-    );
-    return { tool_hash_fallback: true };
+  function toolHashFallback(hashing: DefinitionHashStats): Record<string, unknown> {
+    return hashing.overBudget ? { tool_hash_fallback: true } : {};
   }
 
   /**

@@ -892,16 +892,27 @@ the operation's summary, which is the tool title, and description; parameters; t
 request body's `required`, `description` and JSON schemas; the 2xx JSON response
 schemas; the OpenAPI version), each `$ref` hashed as its own text and its target's
 digest, and the result bound to the tool's ID. A selection is validated (existing,
-unique operations and names, at most 256) before anything is hashed. Reading and hashing
-one document's tools is charged to a fixed work budget of 16 Mi characters: every
-character hashed, every response-status and media-type key read, and every Request Body
-or Response reference followed. Reference targets and Content maps are each processed
-once per document, however many tools reach them. A reference Nexus cannot resolve from
-the document root, an unresolvable Path Item, or a document that passes the budget folds
-in the whole document except `info`, hashed as text without following references, so
-hashing one document costs at most the budget plus one linear pass over the document. A
-budget fallback is logged and recorded as `tool_hash_fallback` in the `api.publish`,
-`api.update`, `api.spec_update` or `api.spec_rollback` audit row
+unique operations and names, at most 256) before anything is hashed; validation reads
+each Path Item in place, resolving each reference node once, and cuts an operation's
+name and description to their limits before cleaning them. Reading and hashing one
+document's tools is charged to one work meter per build, shared by its tools, with a
+fixed budget of 16 Mi units. Every iteration over a collection the document controls is
+charged before it runs: a unit per Path Item, Request Body or Response reference hop,
+per key of a Responses or Content map, and per key and array element of the
+parameters, schemas (properties, items, compositions) and examples hashed; so is every
+key and pointer before it is parsed, and every character as it is hashed. Nothing is
+copied out of the document, and each selected Path Item, Request Body or Response
+reference, Content map and acyclic schema reference target is read once per build,
+however many tools and statuses reach it. A reference Nexus cannot resolve from the
+document root (a Request Body or Response chain that does not end at an object within
+32 acyclic local hops included), an unresolvable selected Path Item, or a document that
+passes the budget folds in the whole document except `info`, hashed as text without
+following references. So one build costs work proportional to the budget (the charge
+that crosses it being at most one collection or string of the document), plus a
+constant per selected tool, plus, on a fallback, one canonical pass over the document
+that sorts each object's keys. A budget fallback is recorded as `tool_hash_fallback` in
+the `api.publish`, `api.update`, `api.spec_update` or `api.spec_rollback` audit row that
+commits the change
 (cases in [agent-marketplace.md](agent-marketplace.md#optional-subsets-and-cross-repository-follow-up)).
 A spec revision, rollback or agents edit keeps the ID only while the tool's
 method, path, name and hash are unchanged. Any other change mints a new ID, including a
