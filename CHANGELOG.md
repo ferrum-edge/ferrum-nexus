@@ -119,11 +119,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   document keeps serving, and any other `PATCH` (visibility, status, metadata)
   still succeeds; turn its agents off (`agents: null`) to revise it again.
 - **The dependency-lock producer no longer hard-codes jsdom and Undici** (Refs #525).
-  It checks that every copy matches its declaring semver range, resolves from the
-  npm registry with sha512 integrity, and declares `engines` (checked with npm's
-  own semver) that admit every Node version supported by the manifests. If no
-  manifest changes a jsdom or Undici range, re-resolution cannot move those copies
-  from the committed lock.
+  It checked their exact versions and integrity hashes, so the next reviewed bump
+  would have failed it. It now requires both packages, a registry `resolved` URL and
+  sha512 integrity for every copy, and `engines` (checked with npm's own semver) that
+  admit every Node version the manifests support. While no manifest moves a jsdom
+  or Undici spec, every copy's version, `resolved` URL and integrity must still equal
+  the committed lock's, so a re-resolution forced by another bump cannot move them.
 
 - **A disabled grantee no longer blocks a provider's agent-enabled API** (Refs #519).
   Every spec build enrolled each all-tools grantee in the MCP-all group and refused
