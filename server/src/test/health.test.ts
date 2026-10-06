@@ -204,7 +204,10 @@ describe('health endpoints', () => {
   it('grants the public egress guarantee only to a local public-only data plane', async (t) => {
     // A public-mode control plane: its own process reports public-only, but it
     // only admits configuration; remote data planes serve the traffic.
-    const controlPlane = { ...publicEgressPolicy(), enforcement_scope: 'admission-only' };
+    const controlPlane: Record<string, unknown> = {
+      ...publicEgressPolicy(),
+      enforcement_scope: 'admission-only',
+    };
     assert.equal(controlPlane['public_only_guaranteed'], true);
     const strict = await buildTestApp();
     t.after(() => strict.close());
