@@ -3,7 +3,7 @@
 import unittest
 from pathlib import Path
 
-from check_image_pins import error_for, image_fields
+from check_image_pins import env_image_fields, error_for, image_fields
 
 
 DIGEST = 'a' * 64
@@ -23,7 +23,12 @@ class ImagePinTests(unittest.TestCase):
 
     def test_documented_tag_and_compose_variable_exceptions(self):
         self.assertIsNone(error_for(f'alpine:3@sha256:{DIGEST}'))
-        self.assertIsNone(error_for('${FERRUM_EDGE_IMAGE:?set FERRUM_EDGE_IMAGE}'))
+        self.assertIsNone(error_for('${FERRUM_EDGE_IMAGE:?provide the candidate image}'))
+        self.assertIsNone(error_for('${NEXUS_IMAGE:?provide the candidate image}'))
+        self.assertIsNotNone(error_for('${OTHER_IMAGE:?provide an image}'))
+        self.assertIsNotNone(error_for('${FERRUM_EDGE_IMAGE:-ferrumedge/edge:latest}'))
+        self.assertIsNone(error_for('${NEXUS_IMAGE:-ferrum-nexus:e2e}'))
+        self.assertIsNotNone(error_for('${NEXUS_IMAGE:-registry.example/app:latest}'))
 
     def test_dockerfile_base_and_external_copy_images(self):
         source = f'''FROM registry.example/base:1.2.3@sha256:{DIGEST} AS build
@@ -45,6 +50,86 @@ FROM build AS runtime
     def test_workflow_direct_docker_command(self):
         workflow = f'''steps:\n  - run: docker run --rm registry.example/job:1.2.3@sha256:{DIGEST}\n'''
         self.assertEqual(len(list(image_fields(Path('.github/workflows/ci.yml'), workflow))), 1)
+
+    def test_compose_quoted_list_and_flow_image_keys_fail_closed(self):
+        for source in (
+            'services:\n  app:\n    "image": alpine:latest\n',
+            'services: {app: {image: alpine:latest, restart: always}}\n',
+            'images:\n  - image: alpine:latest\n',
+        ):
+            with self.subTest(source=source):
+                refs = list(image_fields(Path('docker-compose.yml'), source))
+                self.assertTrue(refs)
+                self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_public_only_required_image_variables_are_allowed(self):
+        source = '''services:\n  edge:\n    image: ${FERRUM_EDGE_IMAGE:?supply a qualified Edge image}\n  nexus:\n    image: ${NEXUS_IMAGE:?supply the candidate image}\n'''
+        refs = list(image_fields(Path('docker-compose.yml'), source))
+        self.assertEqual(len(refs), 2)
+        self.assertTrue(all(error_for(ref) is None for _, ref in refs))
+
+    def test_dotenv_image_overrides_are_checked(self):
+        source = (
+            f'FERRUM_EDGE_IMAGE=registry.example/edge:1.2.3@sha256:{DIGEST}\n'
+            'NEXUS_IMAGE=registry.example/nexus:latest\n'
+        )
+        refs = list(env_image_fields(Path('release/compatibility.env'), source))
+        self.assertEqual(len(refs), 2)
+        self.assertIsNone(error_for(refs[0][1]))
+        self.assertIsNotNone(error_for(refs[1][1]))
+        unpinned = next(
+            env_image_fields(Path('release/compatibility.env'), 'FERRUM_EDGE_IMAGE=latest')
+        )[1]
+        self.assertIsNotNone(error_for(unpinned))
+
+    def test_workflow_docker_options_and_subcommands_find_the_image(self):
+        image = f'registry.example/job:1.2.3@sha256:{DIGEST}'
+        workflow = (
+            'steps:\n  - run: docker --host unix:///var/run/docker.sock run '
+            f'--label a=b -e K=V --name svc {image}\n'
+            f'  - run: docker image pull {image}\n'
+        )
+        refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
+        self.assertEqual([ref for _, ref in refs], [
+            f'registry.example/job:1.2.3@sha256:{DIGEST}',
+            f'registry.example/job:1.2.3@sha256:{DIGEST}',
+        ])
+
+    def test_workflow_option_value_cannot_hide_an_unpinned_image(self):
+        workflow = 'steps:\n  - run: docker run --label a=b@sha256:' + DIGEST + ' nginx:latest\n'
+        refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
+        self.assertTrue(refs)
+        self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_dockerfile_comment_inside_continuation_does_not_hide_image(self):
+        source = 'FROM \\\n# BuildKit ignores this comment\nnode:latest AS runtime\n'
+        refs = list(image_fields(Path('Dockerfile'), source))
+        self.assertTrue(refs)
+        self.assertIsNotNone(error_for(refs[0][1]))
+
+
+    def test_dockerfile_platform_and_substituted_images_are_checked(self):
+        pinned = f'registry.example/base:v1.2.3@sha256:{DIGEST}'
+        source = (
+            f'FROM --platform=linux/amd64 {pinned} AS build\n'
+            'FROM ${BASE_IMAGE} AS runtime\n'
+            'COPY --from=${BUILD_IMAGE} /src /src\n'
+        )
+        refs = list(image_fields(Path('Dockerfile'), source))
+        self.assertEqual(refs[0][1], pinned)
+        self.assertTrue(all(error_for(ref) is not None for _, ref in refs[1:]))
+
+    def test_local_env_image_exception_is_scoped_to_acceptance_example(self):
+        image = 'NEXUS_IMAGE=ferrum-nexus:e2e'
+        self.assertEqual(list(env_image_fields(Path('e2e/.env.example'), image)), [])
+        ref = next(env_image_fields(Path('.env.example'), image))[1]
+        self.assertIsNotNone(error_for(ref))
+
+    def test_workflow_unknown_docker_option_fails_closed(self):
+        workflow = 'steps:\n  - run: docker run --mystery value registry.example/app:1.2.3\n'
+        refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
+        self.assertEqual(len(refs), 1)
+        self.assertIsNotNone(error_for(refs[0][1]))
 
 
 if __name__ == '__main__':

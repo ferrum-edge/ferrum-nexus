@@ -2,6 +2,7 @@
 """Check image fields in tracked workflows, Compose files, and Dockerfiles."""
 
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -20,19 +21,26 @@ TAG_EXCEPTIONS = {
 }
 
 # These Compose values are deliberate runtime inputs; see docs/image-pin-check.md.
-VARIABLE_EXCEPTIONS = {
-    '${FERRUM_EDGE_IMAGE:?set FERRUM_EDGE_IMAGE}',
-    '${FERRUM_EDGE_IMAGE:?set FERRUM_EDGE_IMAGE to a published version or digest}',
-    '${NEXUS_IMAGE:-ferrum-nexus:e2e}',
-}
+REQUIRED_VARIABLE = re.compile(r'^\$\{(FERRUM_EDGE_IMAGE|NEXUS_IMAGE):\?[^}]+\}$')
+NEXUS_FALLBACK = re.compile(r'^\$\{NEXUS_IMAGE:-([^}]+)\}$')
 LOCAL_IMAGES = {'ferrum-nexus:ci', 'ferrum-nexus:e2e'}
 VERSION = re.compile(r'v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\Z')
 PIN = re.compile(r'[^\s"\'@$]+(?::[^\s"\'@$]+)?@sha256:[0-9a-f]{64}\Z')
-FIELD = re.compile(r'^\s*(image|container)\s*:\s*(.*?)\s*(?:#.*)?$', re.IGNORECASE)
+FIELD = re.compile(
+    r'(?:^|[\s{,\-])\s*["\']?(image|container)["\']?\s*:\s*'
+    r'((?:\$\{[^}]*\}|[^,}#])*?)\s*'
+    r'(?=,|}|#|$)',
+    re.IGNORECASE,
+)
 
 
 def error_for(image):
-    if image in VARIABLE_EXCEPTIONS | LOCAL_IMAGES:
+    if REQUIRED_VARIABLE.fullmatch(image):
+        return None
+    fallback = NEXUS_FALLBACK.fullmatch(image)
+    if fallback:
+        return error_for(fallback.group(1))
+    if image in LOCAL_IMAGES:
         return None
     if not PIN.fullmatch(image):
         return 'expected name[:tag]@sha256:<64 lowercase hex>'
@@ -47,6 +55,10 @@ def error_for(image):
 def image_fields(path, source):
     name = path.name.lower()
     if name == 'dockerfile' or name.startswith('dockerfile.') or name.endswith('.dockerfile'):
+        # Docker ignores comment-only lines between continued instructions.
+        source = '\n'.join(
+            line for line in source.splitlines() if not line.lstrip().startswith('#')
+        )
         logical = re.sub(r'\\\n\s*', ' ', source)
         stages = set()
         for line_no, line in enumerate(logical.splitlines(), 1):
@@ -63,24 +75,82 @@ def image_fields(path, source):
                     yield line_no, ref
         return
     for line_no, line in enumerate(source.splitlines(), 1):
-        match = FIELD.match(line)
-        if match and (match.group(1).lower() == 'image' or match.group(2).strip()):
+        for match in FIELD.finditer(line):
             ref = match.group(2).strip().strip("'\"")
+            if not ref:
+                ref = '<empty image field>'
             yield line_no, ref
-        elif path.parts[:2] == ('.github', 'workflows'):
+        if path.parts[:2] == ('.github', 'workflows'):
             match = re.search(r'\buses\s*:\s*["\']?docker://([^\s"\']+)', line)
             if match:
                 yield line_no, match.group(1)
-            command = re.search(r'\bdocker\s+(?:container\s+)?(?:run|create|pull)\s+(.+)', line)
-            if command:
-                words = command.group(1).split()
-                values = {'--name', '-p', '--publish', '-e', '--env', '--platform'}
-                while words and words[0].startswith('-'):
-                    option = words.pop(0)
-                    if '=' not in option and option in values and words:
-                        words.pop(0)
-                if words:
-                    yield line_no, words[0].strip("'\"")
+            ref = workflow_docker_image(line)
+            if ref is not None:
+                yield line_no, ref
+
+
+DOCKER_GLOBAL_VALUES = {'--config', '-c', '--context', '--host', '-H', '--log-level'}
+DOCKER_GLOBAL_SWITCHES = {'--debug', '--tls', '--tlsverify'}
+DOCKER_VALUE_OPTIONS = {
+    '--add-host', '--annotation', '--attach', '--blkio-weight', '--cap-add', '--cap-drop',
+    '--cgroup-parent', '--device', '--device-cgroup-rule', '--dns', '--dns-option', '--dns-search',
+    '--domainname', '--entrypoint', '--env', '-e', '--env-file', '--expose', '--gpus', '--group-add',
+    '--health-cmd', '--health-interval', '--health-retries', '--health-start-period',
+    '--health-timeout',
+    '--hostname', '--ip', '--ip6', '--ipc', '--kernel-memory', '-l', '--label', '--link', '--log-driver',
+    '--log-opt', '--mac-address', '--memory', '--memory-reservation', '--memory-swap', '--mount',
+    '--name', '--network', '--network-alias', '--pid', '--pids-limit',
+    '--platform', '-p', '--publish', '--restart', '--runtime', '--security-opt',
+    '--shm-size', '--stop-signal', '--stop-timeout', '--storage-opt', '--sysctl', '--tmpfs', '-u',
+    '--ulimit', '--user', '--userns', '--uts', '-v', '--volume', '--volumes-from', '-w', '--workdir',
+}
+DOCKER_SWITCH_OPTIONS = {
+    '--all-tags', '-a', '--detach', '-d', '--help', '--interactive', '-i', '--oom-kill-disable',
+    '--privileged',
+    '--publish-all', '-P', '--quiet', '-q', '--rm', '--sig-proxy', '--tty', '-t', '--init',
+    '--read-only', '--no-healthcheck',
+}
+
+
+def _skip_options(words, value_options, switch_options):
+    while words and words[0].startswith('-') and words[0] != '-':
+        option = words.pop(0)
+        if option == '--':
+            return
+        if '=' in option:
+            continue
+        if option in value_options:
+            if not words:
+                words.append('<missing docker option value>')
+                return
+            words.pop(0)
+        elif option not in switch_options:
+            words.insert(0, '<unsupported docker option>')
+            return
+
+
+def workflow_docker_image(line):
+    try:
+        words = shlex.split(line, comments=False)
+    except ValueError:
+        return None
+    try:
+        index = words.index('docker')
+    except ValueError:
+        return None
+    words = words[index + 1:]
+    _skip_options(words, DOCKER_GLOBAL_VALUES, DOCKER_GLOBAL_SWITCHES)
+    if not words:
+        return None
+    command = words.pop(0)
+    if command == 'container' and words:
+        command = words.pop(0)
+    elif command == 'image' and words:
+        command = words.pop(0)
+    if command not in {'run', 'create', 'pull'}:
+        return None
+    _skip_options(words, DOCKER_VALUE_OPTIONS, DOCKER_SWITCH_OPTIONS)
+    return words[0] if words else '<missing docker image>'
 
 
 def files(root):
@@ -95,14 +165,32 @@ def files(root):
         )
         workflow = path.parts[:2] == ('.github', 'workflows') and yaml
         compose = 'compose' in basename and yaml
-        if path.is_file() and (dockerfile or workflow or compose):
+        env_file = basename == '.env' or basename.startswith('.env.') or basename.endswith('.env')
+        if path.is_file() and (dockerfile or workflow or compose or env_file):
             yield path
+
+
+def env_image_fields(path, source):
+    for line_no, line in enumerate(source.splitlines(), 1):
+        match = re.match(r'^\s*(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)\s*=\s*(.*?)\s*$', line)
+        if not match:
+            continue
+        image = match.group(2).strip().strip("'\"")
+        if path.as_posix() == 'e2e/.env.example' and match.group(1) == 'NEXUS_IMAGE':
+            if image == 'ferrum-nexus:e2e':
+                continue
+        yield line_no, image
 
 
 def main(root):
     errors = []
     for path in files(root):
-        for line, image in image_fields(path, path.read_text()):
+        source = path.read_text()
+        relative_path = Path(path.relative_to(root).as_posix())
+        refs = list(image_fields(relative_path, source))
+        if path.name == '.env' or path.name.startswith('.env.') or path.name.endswith('.env'):
+            refs.extend(env_image_fields(relative_path, source))
+        for line, image in refs:
             reason = error_for(image)
             if reason:
                 errors.append(f'{path.relative_to(root)}:{line}: {image}: {reason}')
