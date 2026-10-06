@@ -273,6 +273,7 @@ FROM build AS runtime
             'docker run --mount type=bind,source=$(pwd),target=/src nginx:latest',
             'docker run -e FILE=$(cat foo) nginx:latest',
             'docker run -v $(pwd)/data:/app nginx:latest',
+            'docker run --env=FILE=$(cat foo) nginx:latest',
         ):
             with self.subTest(command=command):
                 refs = list(image_fields(

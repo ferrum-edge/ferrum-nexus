@@ -149,6 +149,26 @@ DOCKER_SWITCH_OPTIONS = {
 }
 
 
+def _open_substitutions(state, token):
+    """Track `$(...)` and backtick nesting across punctuation-only tokens."""
+    parens, in_tick = state
+    if token and set(token) <= set(';&|()`'):
+        parens = max(0, parens + token.count('(') - token.count(')'))
+        if token.count('`') % 2:
+            in_tick = not in_tick
+    return parens, in_tick
+
+
+def _consume_word_rest(words, glued, value):
+    # A shell word may continue past punctuation the tokenizer split:
+    # `-v $(pwd):/src` becomes `-v`, `$`, `(`, `pwd`, `)`, `:/src`, and a
+    # substitution may contain spaces (`-e F=$(cat foo)`).
+    state = _open_substitutions((0, False), value)
+    while words and glued and (glued[0] or state[0] or state[1]):
+        state = _open_substitutions(state, words.pop(0))
+        glued.pop(0)
+
+
 def _skip_options(words, glued, value_options, switch_options):
     while words and words[0].startswith('-') and words[0] != '-':
         option = words.pop(0)
@@ -158,6 +178,7 @@ def _skip_options(words, glued, value_options, switch_options):
         if '=' in option:
             name = option.split('=', 1)[0]
             if name in value_options:
+                _consume_word_rest(words, glued, option)
                 continue
             words.insert(0, '<unsupported docker option>')
             glued.insert(0, False)
@@ -167,13 +188,9 @@ def _skip_options(words, glued, value_options, switch_options):
                 words.append('<missing docker option value>')
                 glued.append(False)
                 return
-            words.pop(0)
+            value = words.pop(0)
             glued.pop(0)
-            # A shell word may continue past punctuation the tokenizer split:
-            # `-v $(pwd):/src` becomes `-v`, `$`, `(`, `pwd`, `)`, `:/src`.
-            while words and glued and glued[0]:
-                words.pop(0)
-                glued.pop(0)
+            _consume_word_rest(words, glued, value)
         elif option not in switch_options:
             words.insert(0, '<unsupported docker option>')
             glued.insert(0, False)
