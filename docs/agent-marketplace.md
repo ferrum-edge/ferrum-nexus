@@ -188,16 +188,36 @@ changes, removing and re-adding exposure, or disabling and re-enabling agents al
 new IDs. A revision cannot drop a selected operation.
 
 The write that retires an ID drops it from every explicit subset in the same transaction
-and records `access.tools_prune` per grant, with `reason` `definition_changed` or
-`tool_removed`. Those holders keep REST access and their remaining tools, and do not
-regain a tool if its old name or definition returns. A revision that changes a tool's
-definition names it in the change summary (`agent_tools_changed`) and the grantee notice;
-an agents edit that redefines a tool sends the affected subset holders an in-app notice.
-Getting a changed tool back takes a new access request, which the provider can approve
-once the holder's current grant is revoked.
+and records `access.tools_prune` per grant, with `reason` `definition_changed`,
+`tool_renamed` or `tool_removed`. Those holders keep REST access and their remaining
+tools, and do not regain a tool if its old name or definition returns. A revision that
+changes a tool's definition names it in the change summary (`agent_tools_changed`) and
+the grantee notice; an agents edit that redefines or renames a tool sends the affected
+subset holders an in-app notice, naming a renamed tool by its old and new name. Without
+it a renamed tool would just vanish from an explicit subset, while an all-tools grant
+keeps it under the new name.
+
+Getting a changed or renamed tool back takes a tool request on the grant the holder
+already has (`POST /api/grants/:id/tool-requests`): a pending request with `grant_id`
+set, decided through the ordinary approve, deny and cancel endpoints under the same
+review check, proxy lease, application key and daily budget as a request for access.
+Approval rewrites the identity's consumer once with the REST group and the widened tool
+groups, then commits the grant's new subset inside the consumer key, so REST access and
+the tools already held never lapse (`access.tools_request`, `access.tools_approve`). A
+failure after the gateway write takes back only the added tool groups, or every group of
+the API if the grant was revoked meanwhile and no other active grant needs them. Denial
+changes nothing. An API's owner cannot file one. Revoking a grant cancels its pending tool
+request.
+
 Null grants retain their all-published-tools meaning, changed tools included. Revocation,
 deletion and bulk teardown remove both REST and MCP groups; re-enable rebuilds only
 active grants, preserving operator groups.
+
+All-tools grantees approved while agents were enabled receive the MCP-all group with
+their approval, and account re-enable and consumer repair rebuild it. Only a change that
+turns agents on, or that gives a retained phase-1 selection its exposure IDs, enrolls
+existing all-tools grantees (`access.mcp_enroll`); ordinary spec revisions, rollbacks,
+agents edits, restores and conversions read no grantee consumer from the gateway.
 
 Existing phase-1 APIs require an authenticated provider republish before accepting a
 subset, including empty subsets. See the [upgrade tradeoff](mcp-subsets-migration-draft.md).

@@ -7,11 +7,14 @@ import {
   consumerUsernameForUser,
   MAX_SPEC_OPERATIONS,
   type ApiAgents,
+  type ApiErrorBody,
   type ApproveAccessRequestResponse,
   type CreateAccessRequestResponse,
   type PublishApiResponse,
+  type RequestGrantToolsResponse,
   type UpdateApiSpecResponse,
 } from '@ferrum-nexus/shared';
+import type { NexusStore, TransactionOptions } from '../db/store.js';
 import type { EdgePluginConfigWrite } from '../ferrum-admin/types.js';
 import { stampAgentDocument } from '../publishing/agents.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
@@ -19,6 +22,11 @@ import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 const AGENTS: ApiAgents = {
   operations: [{ path: '/items', method: 'GET', name: 'list_items', description: 'List items' }],
 };
+
+function errorCode(body: string): string {
+  return (JSON.parse(body) as ApiErrorBody).error.code;
+}
+
 function selections(agents: ApiAgents | null | undefined): ApiAgents | null {
   return agents
     ? {
@@ -1288,7 +1296,7 @@ describe('agent publishing and Nexus authorization', () => {
     const told = notices.items.filter((notice) => /changed its agent tools/.test(notice.title));
     assert.equal(told.length, 1);
     assert.match(told[0]?.body ?? '', /1 agent tool changed \(list_items\)\./);
-    assert.match(told[0]?.body ?? '', /ask the provider to revoke your current grant/);
+    assert.match(told[0]?.body ?? '', /request it on your existing grant/);
   });
 
   it('compares a tool stored without a hash against the revision it was published with', async () => {
@@ -1389,5 +1397,461 @@ describe('agent publishing and Nexus authorization', () => {
       await harness.store.users.update(userId, { status: 'disabled' });
     });
     assert.deepEqual(groupsOf(grantee), [aclGroupForApi(api.id)]);
+  });
+
+  function requestTools(grantee: TestSession, grantId: string, tools: string[]) {
+    return harness.authed(grantee, {
+      method: 'POST',
+      url: `/api/grants/${grantId}/tool-requests`,
+      payload: { requested_tools: tools, justification: 'Need more tools' },
+    });
+  }
+
+  function decide(
+    requestId: string,
+    kind: 'approve' | 'deny',
+    payload: Record<string, unknown> = {},
+  ) {
+    return harness.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/${kind}`,
+      payload,
+    });
+  }
+
+  /** An API exposing `list_items` and `remove`, and a grantee approved for `list_items` alone. */
+  async function narrowFixture() {
+    const { api } = await publish({ agents: { operations: [...AGENTS.operations, REMOVE_TOOL] } });
+    const [listId, removeId] = api.agents?.operations.map((tool) => tool.id) ?? [];
+    assert.ok(listId && removeId);
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id, [listId]);
+    const live = harness.edge.consumerByUsername(consumerUsernameForUser(grantee.user.id));
+    assert.ok(live);
+    return { api, listId, removeId, grantee, grant, consumerId: live.id };
+  }
+
+  it('adds requested tools to an existing grant without interrupting its access', async () => {
+    const f = await narrowFixture();
+    // Only the grantee may ask, and only for published tools the grant lacks.
+    assert.equal((await requestTools(other, f.grant.id, [f.removeId])).statusCode, 404);
+    assert.equal((await requestTools(f.grantee, f.grant.id, [f.listId])).statusCode, 400);
+    assert.equal((await requestTools(f.grantee, f.grant.id, [])).statusCode, 400);
+    const unknown = '00000000-0000-4000-8000-000000000000';
+    assert.equal((await requestTools(f.grantee, f.grant.id, [unknown])).statusCode, 400);
+
+    const puts = () => harness.edge.callsTo('PUT', `/consumers/${f.consumerId}`);
+    const before = puts().length;
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const pending = asked.json<RequestGrantToolsResponse>().access_request;
+    assert.equal(pending.grant_id, f.grant.id);
+    assert.equal(pending.status, 'pending');
+    assert.deepEqual(pending.requested_tools, [f.removeId]);
+    assert.equal(puts().length, before, 'asking writes nothing to the gateway');
+    assert.equal((await requestTools(f.grantee, f.grant.id, [f.removeId])).statusCode, 409);
+    assert.equal(await countAudit('access.tools_request', pending.id), 1);
+
+    // Approval cannot broaden the request, and widens the grant in place.
+    const broadened = await decide(pending.id, 'approve', {
+      approved_tools: [f.removeId, f.listId],
+    });
+    assert.equal(broadened.statusCode, 400, broadened.body);
+    const approved = await decide(pending.id, 'approve');
+    assert.equal(approved.statusCode, 200, approved.body);
+    const result = approved.json<ApproveAccessRequestResponse>();
+    assert.equal(result.grant.id, f.grant.id);
+    assert.deepEqual(result.grant.approved_tools, [f.listId, f.removeId]);
+    assert.equal(result.access_request.status, 'approved');
+    assert.deepEqual(result.access_request.approved_tools, [f.removeId]);
+    assert.equal((await harness.store.grants.listActiveByApi(f.api.id)).length, 1);
+    const groups = groupsOf(f.grantee);
+    assert.ok(groups.includes(aclGroupForApi(f.api.id)));
+    assert.ok(groups.includes(mcpToolGroupForApi(f.api.id, f.listId)));
+    assert.ok(groups.includes(mcpToolGroupForApi(f.api.id, f.removeId)));
+    assert.equal(groups.includes(mcpAllGroupForApi(f.api.id)), false);
+    // Every consumer write kept the REST group and the tool already held.
+    const writes = puts().slice(before);
+    assert.ok(writes.length > 0);
+    for (const write of writes) {
+      const written = (write.body as { acl_groups?: string[] }).acl_groups ?? [];
+      assert.ok(written.includes(aclGroupForApi(f.api.id)));
+      assert.ok(written.includes(mcpToolGroupForApi(f.api.id, f.listId)));
+    }
+    const rows = (await harness.auditRows('access.tools_approve')).filter(
+      (row) => row.target_id === pending.id,
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.details.grant_id, f.grant.id);
+    assert.deepEqual(rows[0]?.details.added_tools, [f.removeId]);
+    assert.deepEqual(rows[0]?.details.approved_tools, [f.listId, f.removeId]);
+    assert.equal((await requestTools(f.grantee, f.grant.id, [f.removeId])).statusCode, 400);
+  });
+
+  it('refuses tool requests on all-tools grants and leaves a denied grant unchanged', async () => {
+    const { api } = await publish();
+    const whole = await harness.registerUser({ role: 'client' });
+    const wholeGrant = await approveFor(whole, api.id);
+    const toolId = api.agents?.operations[0]?.id ?? '';
+    assert.equal((await requestTools(whole, wholeGrant.id, [toolId])).statusCode, 409);
+
+    const f = await narrowFixture();
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const pending = asked.json<RequestGrantToolsResponse>().access_request;
+    const denied = await decide(pending.id, 'deny', { decision_note: 'Not yet' });
+    assert.equal(denied.statusCode, 200, denied.body);
+    assert.deepEqual((await harness.store.grants.findById(f.grant.id))?.approved_tools, [f.listId]);
+    assert.equal((await harness.store.grants.findById(f.grant.id))?.status, 'active');
+    assert.ok(groupsOf(f.grantee).includes(aclGroupForApi(f.api.id)));
+    assert.equal(groupsOf(f.grantee).includes(mcpToolGroupForApi(f.api.id, f.removeId)), false);
+  });
+
+  it('recovers a redefined tool on the same grant, keeping REST access throughout', async () => {
+    const f = await subsetFixture();
+    const revised = await reviseDocument(
+      f.api.id,
+      withListOperation(
+        { ...DOCUMENT.paths['/items'].get, summary: 'List items, now with a new prompt' },
+        '7',
+      ),
+    );
+    assert.equal(revised.statusCode, 200, revised.body);
+    const current = (await harness.store.apis.findById(f.api.id))?.agents?.operations ?? [];
+    const listId = current.find((tool) => tool.name === 'list_items')?.id;
+    assert.ok(listId && listId !== f.listId);
+    assert.deepEqual((await harness.store.grants.findById(f.grant.id))?.approved_tools, [
+      f.removeId,
+    ]);
+    assert.ok(groupsOf(f.grantee).includes(aclGroupForApi(f.api.id)));
+
+    const asked = await requestTools(f.grantee, f.grant.id, [listId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const askedId = asked.json<RequestGrantToolsResponse>().access_request.id;
+    const approved = await decide(askedId, 'approve');
+    assert.equal(approved.statusCode, 200, approved.body);
+    assert.deepEqual((await harness.store.grants.findById(f.grant.id))?.approved_tools, [
+      f.removeId,
+      listId,
+    ]);
+    assert.ok(groupsOf(f.grantee).includes(aclGroupForApi(f.api.id)));
+    assert.ok(groupsOf(f.grantee).includes(mcpToolGroupForApi(f.api.id, listId)));
+  });
+
+  it('cancels a pending tool request when its grant is revoked', async () => {
+    const f = await narrowFixture();
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const pending = asked.json<RequestGrantToolsResponse>().access_request;
+    const revoked = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/grants/${f.grant.id}/revoke`,
+      payload: {},
+    });
+    assert.equal(revoked.statusCode, 200, revoked.body);
+    assert.equal((await harness.store.accessRequests.findById(pending.id))?.status, 'cancelled');
+    const cancelled = (await harness.auditRows('access.cancel')).filter(
+      (row) => row.target_id === pending.id,
+    );
+    assert.equal(cancelled.length, 1);
+    assert.equal(cancelled[0]?.actor_user_id, provider.user.id);
+    assert.equal(cancelled[0]?.details.reason, 'grant_inactive');
+    assert.equal(cancelled[0]?.details.grant_id, f.grant.id);
+    assert.equal((await decide(pending.id, 'approve')).statusCode, 409);
+
+    // The identity's one pending slot is free again.
+    const again = await harness.authed(f.grantee, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: f.api.id, justification: 'Again', requested_tools: [f.listId] },
+    });
+    assert.equal(again.statusCode, 201, again.body);
+  });
+
+  it('clears a tool request whose grant was revoked when the identity asks for access again', async () => {
+    const f = await narrowFixture();
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const pending = asked.json<RequestGrantToolsResponse>().access_request;
+    const revoked = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/grants/${f.grant.id}/revoke`,
+      payload: {},
+    });
+    assert.equal(revoked.statusCode, 200, revoked.body);
+    // A tool request left pending on a revoked grant, as one written before
+    // revocation cancelled them would be.
+    const reopened = await harness.store.accessRequests.updateIfStatus(pending.id, 'cancelled', {
+      status: 'pending',
+      decided_by: null,
+      decided_at: null,
+      decision_note: null,
+    });
+    assert.ok(reopened);
+    assert.equal((await decide(pending.id, 'approve')).statusCode, 409);
+    assert.equal((await harness.store.accessRequests.findById(pending.id))?.status, 'pending');
+
+    const again = await harness.authed(f.grantee, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: f.api.id, justification: 'Again', requested_tools: [f.listId] },
+    });
+    assert.equal(again.statusCode, 201, again.body);
+    assert.equal((await harness.store.accessRequests.findById(pending.id))?.status, 'cancelled');
+    const cancelled = (await harness.auditRows('access.cancel')).filter(
+      (row) => row.target_id === pending.id,
+    );
+    assert.equal(cancelled.length, 2);
+    assert.equal(cancelled[0]?.actor_user_id, f.grantee.user.id);
+    assert.equal(cancelled[0]?.details.reason, 'grant_inactive');
+  });
+
+  it('refuses a tool request from the owner of the API', async () => {
+    const f = await narrowFixture();
+    await harness.store.apis.update(f.api.id, { owner_user_id: f.grantee.user.id });
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 409, asked.body);
+    assert.equal(
+      await harness.store.accessRequests.findPendingByApiAndUser(f.api.id, f.grantee.user.id, null),
+      null,
+    );
+  });
+
+  it('charges tool requests to the daily access-request budget', async () => {
+    const limit = harness.config.maxAccessRequestsPerUserPerDay;
+    assert.ok(limit > 2);
+    const f = await narrowFixture();
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const askedId = asked.json<RequestGrantToolsResponse>().access_request.id;
+    const withdrawn = await harness.authed(f.grantee, {
+      method: 'POST',
+      url: `/api/access-requests/${askedId}/cancel`,
+    });
+    assert.equal(withdrawn.statusCode, 200, withdrawn.body);
+    // The access request behind the grant and the tool request make two; spend
+    // the rest of the window on tool requests alone.
+    for (let index = 0; index < limit - 2; index += 1) {
+      await harness.store.auditLogs.create({
+        actor_user_id: f.grantee.user.id,
+        actor_role: 'client',
+        action: 'access.tools_request',
+        target_type: 'access_request',
+        target_id: null,
+        details: {},
+        ip: null,
+        created_at: new Date().toISOString(),
+      });
+    }
+
+    const refused = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(refused.statusCode, 429, refused.body);
+    assert.equal(errorCode(refused.body), 'QUOTA_EXCEEDED');
+    const { api: elsewhere } = await publish();
+    const plain = await harness.authed(f.grantee, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: elsewhere.id, justification: 'Another API' },
+    });
+    assert.equal(plain.statusCode, 429, plain.body);
+    assert.equal(errorCode(plain.body), 'QUOTA_EXCEEDED');
+  });
+
+  it('takes back only the added tool groups when a tool approval cannot commit', async () => {
+    const f = await narrowFixture();
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const pending = asked.json<RequestGrantToolsResponse>().access_request;
+
+    const grants = harness.store.grants;
+    const realUpdate = grants.updateIfStatus.bind(grants);
+    grants.updateIfStatus = async () => {
+      throw new Error('grant storage is unavailable');
+    };
+    try {
+      const approved = await decide(pending.id, 'approve');
+      assert.equal(approved.statusCode, 500, approved.body);
+    } finally {
+      grants.updateIfStatus = realUpdate;
+    }
+
+    const groups = groupsOf(f.grantee);
+    assert.ok(groups.includes(aclGroupForApi(f.api.id)), 'REST access never lapses');
+    assert.ok(groups.includes(mcpToolGroupForApi(f.api.id, f.listId)));
+    assert.equal(groups.includes(mcpToolGroupForApi(f.api.id, f.removeId)), false);
+    const grant = await harness.store.grants.findById(f.grant.id);
+    assert.equal(grant?.status, 'active');
+    assert.deepEqual(grant?.approved_tools, [f.listId]);
+    assert.equal((await harness.store.accessRequests.findById(pending.id))?.status, 'pending');
+    const rollback = (await harness.auditRows('access.tools_approve_rollback')).find(
+      (row) => row.target_id === pending.id,
+    );
+    assert.ok(rollback);
+    assert.deepEqual(rollback.details.tool_groups_removed, [
+      mcpToolGroupForApi(f.api.id, f.removeId),
+    ]);
+    assert.equal(rollback.details.request_released, true);
+
+    // The request is back in the provider's inbox, and approving it again works.
+    const retried = await decide(pending.id, 'approve');
+    assert.equal(retried.statusCode, 200, retried.body);
+    assert.ok(groupsOf(f.grantee).includes(mcpToolGroupForApi(f.api.id, f.removeId)));
+  });
+
+  it('keeps the added tool groups when only the approval acknowledgement was lost', async () => {
+    const f = await narrowFixture();
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const pending = asked.json<RequestGrantToolsResponse>().access_request;
+
+    const store = harness.store;
+    const realTransaction = store.transaction.bind(store);
+    let armed = true;
+    store.transaction = async <T>(
+      fn: (tx: NexusStore) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> => {
+      const result = await realTransaction(fn, options);
+      if (armed && (result as { id?: unknown } | null)?.id === f.grant.id) {
+        armed = false;
+        throw new Error('the connection dropped after the commit');
+      }
+      return result;
+    };
+    try {
+      const approved = await decide(pending.id, 'approve');
+      assert.equal(approved.statusCode, 500, approved.body);
+    } finally {
+      store.transaction = realTransaction;
+    }
+    assert.equal(armed, false);
+
+    const groups = groupsOf(f.grantee);
+    assert.ok(groups.includes(aclGroupForApi(f.api.id)));
+    assert.ok(groups.includes(mcpToolGroupForApi(f.api.id, f.listId)));
+    assert.ok(groups.includes(mcpToolGroupForApi(f.api.id, f.removeId)));
+    assert.deepEqual((await harness.store.grants.findById(f.grant.id))?.approved_tools, [
+      f.listId,
+      f.removeId,
+    ]);
+    assert.equal((await harness.store.accessRequests.findById(pending.id))?.status, 'approved');
+    const rollback = (await harness.auditRows('access.tools_approve_rollback')).find(
+      (row) => row.target_id === pending.id,
+    );
+    assert.ok(rollback);
+    assert.deepEqual(rollback.details.tool_groups_kept, [mcpToolGroupForApi(f.api.id, f.removeId)]);
+    assert.equal(rollback.details.tool_groups_removed, undefined);
+  });
+
+  it('strips every group of the API when a failed tool approval finds its grant revoked', async () => {
+    // The disable-account sweep revokes without the proxy lease. A sweep and a
+    // re-enable that both finish between the approval's claim and its consumer
+    // write leave the user active, so the write puts the REST group and every
+    // tool group back for a grant that is no longer active.
+    const f = await narrowFixture();
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const pending = asked.json<RequestGrantToolsResponse>().access_request;
+
+    const requests = harness.store.accessRequests;
+    const realUpdate = requests.updateIfStatus.bind(requests);
+    requests.updateIfStatus = async (...args: Parameters<typeof realUpdate>) => {
+      const result = await realUpdate(...args);
+      const [id, expected, patch] = args;
+      if (id === pending.id && expected === 'pending' && patch.status === 'approved') {
+        await harness.store.grants.updateIfStatus(f.grant.id, 'active', {
+          status: 'revoked',
+          revoked_by: admin.user.id,
+          revoked_at: new Date().toISOString(),
+        });
+      }
+      return result;
+    };
+    try {
+      const approved = await decide(pending.id, 'approve');
+      assert.equal(approved.statusCode, 409, approved.body);
+    } finally {
+      requests.updateIfStatus = realUpdate;
+    }
+
+    assert.equal(
+      await harness.store.grants.findActiveByApiAndUser(f.api.id, f.grantee.user.id, null),
+      null,
+    );
+    const groups = groupsOf(f.grantee);
+    assert.deepEqual(
+      groups.filter((group) => group.startsWith(`nexus:api:${f.api.id}:`)),
+      [],
+      'no REST or tool group remains without an active grant',
+    );
+    assert.equal((await harness.store.accessRequests.findById(pending.id))?.status, 'cancelled');
+    const rollback = (await harness.auditRows('access.tools_approve_rollback')).find(
+      (row) => row.target_id === pending.id,
+    );
+    assert.ok(rollback);
+    assert.equal(rollback.details.acl_group_removed, aclGroupForApi(f.api.id));
+    assert.equal(rollback.details.all_tool_groups_removed, true);
+    assert.equal(rollback.details.request_cancelled, true);
+  });
+
+  it('tells explicit-subset holders when a tool is renamed', async () => {
+    const f = await subsetFixture();
+    const whole = await harness.registerUser({ role: 'client' });
+    const wholeGrant = await approveFor(whole, f.api.id);
+    const renamed = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${f.api.id}`,
+      payload: {
+        agents: { operations: [{ ...AGENTS.operations[0], name: 'items_list' }, REMOVE_TOOL] },
+      },
+    });
+    assert.equal(renamed.statusCode, 200, renamed.body);
+    assert.deepEqual((await harness.store.grants.findById(f.grant.id))?.approved_tools, [
+      f.removeId,
+    ]);
+    const pruned = await pruneRows(f.grant.id);
+    assert.equal(pruned.length, 1);
+    assert.deepEqual(pruned[0]?.details.removed_tools, [f.listId]);
+    assert.equal(pruned[0]?.details.reason, 'tool_renamed');
+
+    async function told(subject: TestSession) {
+      const notices = await harness.store.notifications.list({
+        user_id: subject.user.id,
+        type: 'system',
+      });
+      return notices.items.filter((notice) => /changed its agent tools/.test(notice.title));
+    }
+    const notices = await told(f.grantee);
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]?.body ?? '', /renamed 1 agent tool \(list_items to items_list\)/);
+    assert.match(notices[0]?.body ?? '', /request it on your existing grant/);
+    // An all-tools grant keeps the tool under its new name, so it is not told.
+    assert.equal((await harness.store.grants.findById(wholeGrant.id))?.approved_tools, null);
+    assert.deepEqual(await told(whole), []);
+    assert.equal(await countAudit('access.tools_prune', wholeGrant.id), 0);
+  });
+
+  it('reads no all-tools grantee from the gateway on an ordinary spec build', async () => {
+    const { api } = await publish();
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id);
+    const live = harness.edge.consumerByUsername(consumerUsernameForUser(grantee.user.id));
+    assert.ok(live);
+    assert.ok(groupsOf(grantee).includes(mcpAllGroupForApi(api.id)));
+    const reads = (): number => harness.edge.callsTo('GET', `/consumers/${live.id}`).length;
+    const before = reads();
+    const revised = await revise(api.id, '2');
+    assert.equal(revised.statusCode, 200, revised.body);
+    const edited = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: {
+        agents: { operations: [{ ...AGENTS.operations[0], description: 'List every item' }] },
+      },
+    });
+    assert.equal(edited.statusCode, 200, edited.body);
+    assert.equal(reads(), before);
+    assert.equal(await countAudit('access.mcp_enroll', grant.id), 0);
+    assert.ok(groupsOf(grantee).includes(mcpAllGroupForApi(api.id)));
   });
 });

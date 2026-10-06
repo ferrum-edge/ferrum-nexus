@@ -657,6 +657,7 @@ function mapAccessRequest(row: Row): AccessRequestRecord {
     justification: str(row.justification),
     requested_tools: (row.requested_tools as string[] | null | undefined) ?? null,
     approved_tools: (row.approved_tools as string[] | null | undefined) ?? null,
+    grant_id: strOrNull(row.grant_id),
     status: str(row.status) as AccessRequestStatus,
     decided_by: strOrNull(row.decided_by),
     decided_at: strOrNull(row.decided_at),
@@ -1558,6 +1559,15 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
             .updateMany({ [field]: { $exists: false } }, { $set: { [field]: null } });
         }
       }
+    },
+  },
+  {
+    id: '012_access_request_grant',
+    indexes: [],
+    apply: async (db: Db): Promise<void> => {
+      await db
+        .collection(COLLECTIONS.accessRequests)
+        .updateMany({ grant_id: { $exists: false } }, { $set: { grant_id: null } });
     },
   },
 ];
@@ -2946,6 +2956,7 @@ class MongoStore implements NexusStore {
             justification: input.justification,
             requested_tools: input.requested_tools ?? null,
             approved_tools: input.approved_tools ?? null,
+            grant_id: input.grant_id ?? null,
             status: input.status,
             decided_by: input.decided_by ?? null,
             decided_at: input.decided_at ?? null,

@@ -386,16 +386,10 @@ per-IP budgets.
 
 _public_ → `201`
 
-| Field             | Type                       | Notes                                                                     |
-| ----------------- | -------------------------- | ------------------------------------------------------------------------- |
-| `email`           | string                     | Valid address, ≤ 320 chars. Stored lowercased; unique case-insensitively. |
-| `password`        | string                     | 12–1024 characters (`MIN_PASSWORD_LENGTH` = 12).                          |
-| `display_name`    | string                     | 1–200 chars.                                                              |
-| `role`            | `"client"` \| `"provider"` | Ignored for the founding account.                                         |
-| `company`         | string \| null             | optional, ≤ 200                                                           |
-| `phone`           | string \| null             | optional, ≤ 64                                                            |
-| `captcha_token`   | string                     | required when CAPTCHA is enabled                                          |
-| `bootstrap_token` | string                     | **Required while the portal has no active `super_admin`**; ignored after. |
+| Field             | Type                                                                   |
+| ----------------- | ---------------------------------------------------------------------- |
+| `requested_tools` | 1–256 unique, currently published `AgentTool.id` UUIDs the grant lacks |
+| `justification`   | 1–2000 chars                                                           |
 
 ```json
 { "user": { "id": "…", "email": "…", "role": "client", … }, "email_verification_required": false }
@@ -2790,6 +2784,10 @@ Edge consumer is created if needed and gets the ACL group
 notification and an `access_approved` email. Approval holds the API's proxy
 lease, so it cannot interleave with retirement or a revocation.
 
+A request with `grant_id` set (a [tool request](#post-apigrantsidtool-requests))
+adds tools to that grant instead of creating one; see that section for its
+response and errors.
+
 Errors: `403 FORBIDDEN`; `409 CONFLICT` (already decided, the identity already
 holds an active grant, the API is retired or no longer requestable, or the
 request's application is disabled or deleted — the request stays `pending`);
@@ -2828,6 +2826,72 @@ Removes the ACL group from the grantee's consumer, marks the grant `revoked`,
 and moves the originating access request to `revoked`. The grantee is notified
 and emailed. `409 CONFLICT` when already revoked. Revocation holds the API's
 proxy lease, like approval.
+
+### `POST /api/grants/:id/tool-requests`
+
+_session_, **the grantee's own account only** →
+`201 { "access_request": AccessRequest }`.
+
+Asks for more MCP tools on an active explicit-subset grant (one whose
+`approved_tools` is an array) without giving up the access it already gives:
+the usual recovery after a tool's definition changed or it was renamed, which
+drops it from explicit subsets. Body (no other keys):
+
+| Field             | Type                                                                   |
+| ----------------- | ---------------------------------------------------------------------- |
+| `requested_tools` | 1–256 unique, currently published `AgentTool.id` UUIDs the grant lacks |
+| `justification`   | 1–2000 chars                                                           |
+
+The result is an ordinary pending access request for the grant's identity, with
+`grant_id` set to the grant and `requested_tools` listing only the tools to add.
+It is cancelled, denied and approved through the
+[access-request endpoints](#access-requests) by the same people, under the
+same API proxy lease, application key and limits as `POST /api/access-requests`:
+10 a minute per account, and the same rolling daily budget, which counts
+`access.request` and `access.tools_request` rows together. It takes the
+identity's one pending-request slot. Nothing is written to the gateway until it
+is approved, and the provider is notified as for a new request.
+
+Approval (`POST /api/access-requests/:id/approve`) accepts `approved_tools` as
+a non-empty subset of `requested_tools` (omitted means all of them; `null` and
+`[]` are refused, so a provider who wants none denies instead). It claims the
+request, rewrites the identity's consumer once with the REST group and the
+widened tool groups (REST access never lapses), then commits the grant's new
+`approved_tools` — the old subset followed by the added tools — inside the
+consumer key, compare-and-set on the subset it checked. The response's `grant`
+is the existing grant, now covering the added tools, and `access_request.approved_tools`
+lists the tools added. A failure after the gateway write takes back only the
+added tool groups and returns the request to `pending`
+(`access.tools_approve_rollback`). If the grant was revoked meanwhile and the
+identity holds no other active grant for the API, it takes back the REST group
+and every tool group instead, and cancels the request. Denial leaves the grant
+exactly as it was.
+
+Errors:
+
+- `400 VALIDATION_FAILED` — an empty, unknown, expired, duplicate or
+  already-covered tool ID; on approval, an empty subset or one that broadens
+  the request.
+- `404 NOT_FOUND` — unknown grant, or a grant of another account.
+- `409 CONFLICT` — the caller owns the API; the grant is revoked; it covers
+  every published tool (`approved_tools` null); the API is retired, not
+  requestable, exposes no agent tools or still has phase-1 exposure without
+  IDs; the identity already has a pending request; the application is
+  disabled. Approving after the grant was revoked is a `409` too.
+
+Revoking a grant cancels its pending tool request in the revocation's
+transaction (`access.cancel` with `reason: "grant_inactive"`), so it holds no
+pending slot and leaves the provider's inbox. A revocation the gateway refuses
+puts the grant back but not the request. A tool request still pending on a
+revoked grant (one filed before this release) can only be cancelled or denied,
+and the identity's next `POST /api/access-requests` cancels it the same way in
+its own transaction, so it never blocks the new request.
+
+```bash
+curl -sS -b cookies.txt -X POST http://127.0.0.1:8787/api/grants/7f3e…/tool-requests \
+  -H 'content-type: application/json' -H "X-Nexus-CSRF: $CSRF" \
+  -d '{"requested_tools":["0b8c…"],"justification":"The list tool changed; we still need it."}'
+```
 
 ---
 
@@ -3124,11 +3188,15 @@ to the tool's ID. A tool ID persists across spec revisions, rollbacks and agents
 method, path, name and `definition_hash` are unchanged. Any definition change,
 description-only edits included, mints a new ID, as do rename, path/method changes,
 removing/re-adding exposure and disable/re-enable. The write that does so removes the
-old IDs from every explicit subset (`access.tools_prune`, `reason` `definition_changed`
-or `tool_removed`), which keeps REST access and its other tools. A revision's change
-report lists redefined tools by name in `agent_tools_changed`. `id` and
-`definition_hash` are accepted on input and ignored. Omitted/null grants continue to
-cover all published tools. See the [migration notes](mcp-subsets-migration-draft.md).
+old IDs from every explicit subset (`access.tools_prune`, `reason` `definition_changed`,
+`tool_renamed` or `tool_removed`), which keeps REST access and its other tools. A
+revision's change report lists redefined tools by name in `agent_tools_changed`; an
+agents edit that redefines or renames a tool sends each affected subset holder an
+in-app notice naming it (old and new name for a rename). A holder gets such a tool back
+with [`POST /api/grants/:id/tool-requests`](#post-apigrantsidtool-requests) on the
+grant it already holds. `id` and `definition_hash` are accepted on input and ignored.
+Omitted/null grants continue to cover all published tools, renamed and redefined ones
+included. See the [migration notes](mcp-subsets-migration-draft.md).
 
 ## Service-manifest preview
 

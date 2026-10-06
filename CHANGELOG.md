@@ -6,6 +6,40 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Request more MCP tools on an existing grant** (Refs #525). A holder of an
+  explicit-subset grant, which loses a tool when the provider redefines or renames it,
+  had to have the grant revoked and request access again, losing REST access in
+  between. `POST /api/grants/:id/tool-requests` now files a pending request with the
+  new `grant_id` field, decided through the ordinary approve, deny and cancel
+  endpoints under the same owner check, proxy lease, application key, rate limit and
+  daily budget. Approval rewrites the consumer once with the REST group and the
+  widened tool groups and commits the grant's new subset inside the consumer key, so
+  existing access never lapses; it cannot broaden the request, and a failure takes
+  back only the added tool groups (or, when the grant was revoked meanwhile and no
+  other active grant remains, every group of the API). Revoking a grant cancels its
+  pending tool request, and an API's owner cannot file one. New audit actions
+  `access.tools_request`, `access.tools_approve` and `access.tools_approve_rollback`.
+  The catalog's access card offers the uncovered tools on a grant, and the provider's
+  Requests tab marks these requests. Forward migration `012_access_request_grant` adds
+  the nullable `grant_id` in every store; retained requests keep `null`.
+- **Renamed agent tools are announced to explicit-subset holders** (Refs #525). An
+  agents edit that renames a tool drops it from explicit subsets (all-tools grants
+  keep it under the new name); the affected holders now get the same in-app notice
+  as for a redefined tool, naming the old and new name, and `access.tools_prune`
+  records `reason: "tool_renamed"` instead of `tool_removed`.
+
+### Changed
+
+- **Spec builds no longer read every all-tools grantee from the gateway** (Refs #525).
+  Each spec revision, rollback, agents edit, restore or conversion of an agent API did
+  one consumer `GET` per all-tools grantee under the proxy lease to enroll it in the
+  MCP-all group. Enrollment now runs only when agents are turned on, or when a retained
+  phase-1 selection is given its exposure IDs; grantees approved while agents are on
+  already receive the group, and account re-enable and consumer repair rebuild it. A
+  conversion that turns agents on enrolls before it captures its deployment token.
+
 ## [0.4.0] - 2026-10-06
 
 Paired with Ferrum Edge `v0.9.13`. Adds optional MCP tool subsets, whose

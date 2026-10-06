@@ -43,6 +43,7 @@ import {
   type PublishApiResponse,
   type CreateAccessRequestResponse,
   type ApproveAccessRequestResponse,
+  type RequestGrantToolsResponse,
   type DbDriver,
   type SpecChangeReport,
 } from '@ferrum-nexus/shared';
@@ -2125,7 +2126,31 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         assert.deepEqual((await store.accessRequests.findById(requestId))?.requested_tools, [id]);
         await store.grants.update(grant.id, { approved_tools: [] });
         assert.deepEqual((await store.grants.findById(grant.id))?.approved_tools, []);
-        await store.grants.update(grant.id, { approved_tools: [id] });
+        // A request for more tools names its grant, and its approval widens
+        // that grant in place rather than creating another.
+        const toolRequest = await harness.authed(client, {
+          method: 'POST',
+          url: `/api/grants/${grant.id}/tool-requests`,
+          payload: { requested_tools: [id], justification: 'More tools' },
+        });
+        assert.equal(toolRequest.statusCode, 201, toolRequest.body);
+        const toolRequestId = toolRequest.json<RequestGrantToolsResponse>().access_request.id;
+        const storedToolRequest = await store.accessRequests.findById(toolRequestId);
+        assert.equal(storedToolRequest?.grant_id, grant.id);
+        assert.deepEqual(storedToolRequest?.requested_tools, [id]);
+        assert.equal((await store.accessRequests.findById(requestId))?.grant_id, null);
+        const listed = await store.accessRequests.list({ user_id: client.user.id });
+        assert.equal(listed.items.find((row) => row.id === toolRequestId)?.grant_id, grant.id);
+        const toolsApproved = await harness.authed(provider, {
+          method: 'POST',
+          url: `/api/access-requests/${toolRequestId}/approve`,
+          payload: {},
+        });
+        assert.equal(toolsApproved.statusCode, 200, toolsApproved.body);
+        assert.equal(toolsApproved.json<ApproveAccessRequestResponse>().grant.id, grant.id);
+        assert.deepEqual((await store.grants.findById(grant.id))?.approved_tools, [id]);
+        assert.equal((await store.accessRequests.findById(toolRequestId))?.status, 'approved');
+        assert.equal((await store.grants.listActiveByApi(api.id)).length, 1);
         const revoked = await harness.authed(provider, {
           method: 'POST',
           url: `/api/grants/${grant.id}/revoke`,

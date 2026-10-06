@@ -202,11 +202,15 @@ Changing what a tool does or says invalidates its exposure ID: renaming or remov
 it, disabling agents, editing its description in Settings, or uploading a spec that
 changes its summary, description, parameters, request body or success response
 schemas. The change removes the old ID from every subset, so affected holders keep REST
-access and their other tools but need a new grant for the changed tool. Revoke the old
-grant before accepting that identity's new request. A spec update that leaves a tool's
+access and their other tools but need your approval for the changed tool. They ask for
+it on the grant they already hold; the request appears in your Requests tab marked
+**More agent tools**, and approving it adds only the tools you approve to that grant,
+without interrupting the access it already gives. Denying it leaves the grant as it is.
+A spec update that leaves a tool's
 definition alone (an `info.version` bump, another operation, an unreferenced schema)
 keeps its ID, so subsets carry; a bump of the document's `openapi` version rotates every
-tool. Grantees are told which tools changed, after a spec update or an edit in Settings.
+tool. Grantees are told which tools changed, after a spec update or an edit in Settings,
+including the new name of a tool you renamed.
 Historical request/grant coverage marks expired IDs explicitly.
 
 Existing phase-1 APIs must be republished once before accepting subsets. Review the

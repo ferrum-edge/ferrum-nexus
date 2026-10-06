@@ -966,15 +966,21 @@ A spec revision, rollback or agents edit keeps the ID only while the tool's
 method, path, name and hash are unchanged. Any other change mints a new ID, including a
 description-only edit, since descriptions are prompt text an agent acts on (the tool
 poisoning, or rug-pull, pattern). The same transaction drops retired IDs from every
-explicit subset (`access.tools_prune`, `reason` `definition_changed` or `tool_removed`),
-and a revision names redefined tools in its change summary and grantee notice (an agents
-edit notifies the affected subset holders directly), so a
-consumer never runs a changed tool on an approval given for the old one. Providers must
-still explicitly select mutations. A spec build enrolls all-tools grantees that hold the
-REST group but not the MCP-all group, committing an `access.mcp_enroll` intent row before
-each consumer write. It skips disabled grantees (their grant rows remain, and re-enable
-rebuilds their groups) and consumers missing from the gateway, so no grantee's state can
-fail a provider's build.
+explicit subset (`access.tools_prune`, `reason` `definition_changed`, `tool_renamed` or
+`tool_removed`), and a revision names redefined tools in its change summary and grantee
+notice (an agents edit notifies the affected subset holders directly, naming a renamed
+tool by its old and new name), so a
+consumer never runs a changed tool on an approval given for the old one. The holder asks
+for it again on its existing grant (`POST /api/grants/:id/tool-requests`), which only
+the grantee's own account may do; the provider decides it under the same owner check,
+proxy lease and audit as an access request, and an approval only ever adds the tools it
+names to that grant, never broadening the request or touching its REST access. Providers
+must still explicitly select mutations. A change that turns agents on, or gives a
+retained phase-1 selection its IDs, enrolls all-tools grantees that hold the REST group
+but not the MCP-all group, committing an `access.mcp_enroll` intent row before each
+consumer write; other builds read no grantee consumer. Enrollment skips disabled
+grantees (their grant rows remain, and re-enable rebuilds their groups) and consumers
+missing from the gateway, so no grantee's state can fail a provider's build.
 
 The document submitted for an agent API cannot keep a path's Path Item reference: each
 operation carries its own `x-ferrum-mcp` mark, and two paths sharing one Path Item expose
@@ -2040,17 +2046,20 @@ portal responses.
   `application_missing` or `group_absent`; a lock wait timeout is retried until
   an attempt has also timed out beyond the lease TTL.
 
-| Action                    | Target type      | Description                                                                                                                                                                                                                                                                                                             |
-| ------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `access.request`          | `access_request` | A client requested access. `details`: api id and slug. Also the row the daily request budget counts.                                                                                                                                                                                                                    |
-| `access.cancel`           | `access_request` | The requester withdrew their pending request.                                                                                                                                                                                                                                                                           |
-| `access.approve`          | `access_request` | Approved; the ACL group is on the consumer. Committed with the grant. `details`: api id/slug, user id, grant id, `acl_group`.                                                                                                                                                                                           |
-| `access.approve_rollback` | `access_request` | An approval failed after the gateway write. `details`: api id/slug, user id, `cause`, `acl_group_possibly_applied`, then `acl_group_removed` + `request_released`, or `acl_group_kept` + `kept_for_grant_id`, or `acl_group_orphaned` (investigate).                                                                    |
-| `access.deny`             | `access_request` | Declined; nothing changed on the gateway. `details`: api id/slug, user id, `has_note`.                                                                                                                                                                                                                                  |
-| `access.revoke`           | `grant`          | A grant was withdrawn. Committed with the claim, before the gateway call. `details`: api id/slug, user id, `acl_group`, `reason`, `bulk: true` for the god-mode sweep. Exactly one row per grant.                                                                                                                       |
-| `access.revoke_rollback`  | `grant`          | A targeted revocation's ACL removal failed. `details`: api id, user id, `acl_group`, `cause`, `grant_restored`, optional `restore_skipped_reason` (`grantee_disabled`, `grantee_missing`, `application_missing`, `group_absent`). **Investigate `grant_restored: false` without a skip reason**: the group may be live. |
-| `access.mcp_enroll`       | `grant`          | Intent row before a spec build tries to add the MCP-all group to an active all-tools grantee whose consumer holds the REST group. `details`: api id, user id, application id, `consumer_id`, `acl_group`. Disabled grantees are skipped, never enrolled.                                                                |
-| `access.tools_prune`      | `grant`          | An exposure ID this explicit subset held stopped being published, and left it. Committed with the agents edit or spec revision. `details`: api id, user id, application id, `removed_tools`, `reason` (`definition_changed`, `tool_removed`). The grant keeps REST access and its remaining tools.                      |
+| Action                          | Target type      | Description                                                                                                                                                                                                                                                                                                             |
+| ------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `access.request`                | `access_request` | A client requested access. `details`: api id and slug. Also counted, with `access.tools_request`, by the daily request budget.                                                                                                                                                                                          |
+| `access.cancel`                 | `access_request` | The requester withdrew their pending request, or (`reason: "grant_inactive"`, with `grant_id`) the grant's revocation or a new access request closed a tool request whose grant was no longer active.                                                                                                                   |
+| `access.approve`                | `access_request` | Approved; the ACL group is on the consumer. Committed with the grant. `details`: api id/slug, user id, grant id, `acl_group`.                                                                                                                                                                                           |
+| `access.approve_rollback`       | `access_request` | An approval failed after the gateway write. `details`: api id/slug, user id, `cause`, `acl_group_possibly_applied`, then `acl_group_removed` + `request_released`, or `acl_group_kept` + `kept_for_grant_id`, or `acl_group_orphaned` (investigate).                                                                    |
+| `access.deny`                   | `access_request` | Declined; nothing changed on the gateway. `details`: api id/slug, user id, `has_note`, and `grant_id` for a tool request (whose grant is left as it was).                                                                                                                                                               |
+| `access.revoke`                 | `grant`          | A grant was withdrawn. Committed with the claim, before the gateway call. `details`: api id/slug, user id, `acl_group`, `reason`, `bulk: true` for the god-mode sweep. Exactly one row per grant.                                                                                                                       |
+| `access.revoke_rollback`        | `grant`          | A targeted revocation's ACL removal failed. `details`: api id, user id, `acl_group`, `cause`, `grant_restored`, optional `restore_skipped_reason` (`grantee_disabled`, `grantee_missing`, `application_missing`, `group_absent`). **Investigate `grant_restored: false` without a skip reason**: the group may be live. |
+| `access.mcp_enroll`             | `grant`          | Intent row before a change that turns agents on (or gives a phase-1 selection its IDs) adds the MCP-all group to an active all-tools grantee whose consumer holds the REST group. `details`: api id, user id, application id, `consumer_id`, `acl_group`. Disabled grantees are skipped, never enrolled.                |
+| `access.tools_prune`            | `grant`          | An exposure ID this explicit subset held stopped being published, and left it. Committed with the agents edit or spec revision. `details`: api id, user id, application id, `removed_tools`, `reason` (`definition_changed`, `tool_renamed`, `tool_removed`). The grant keeps REST access and its remaining tools.      |
+| `access.tools_request`          | `access_request` | A grantee asked for more MCP tools on its active explicit-subset grant. Committed with the pending request. `details`: api id/slug, `grant_id`, application id, `requested_tools`. Counted by the daily request budget.                                                                                                 |
+| `access.tools_approve`          | `access_request` | Tools were added to a grant. Committed with the grant's new subset, inside the consumer key, after the gateway write. `details`: api id/slug, user id, application id, `grant_id`, `requested_tools`, `added_tools`, `approved_tools` (the whole new subset).                                                           |
+| `access.tools_approve_rollback` | `access_request` | A tool approval failed after the gateway write. `details`: ids, `added_tools`, `cause`, `acl_group_possibly_applied`; then `tool_groups_removed` + `request_released`, or with no active grant `acl_group_removed` + `all_tool_groups_removed` + `request_cancelled`, or `tool_groups_kept`. Investigate `*_orphaned`.  |
 
 ### Credentials
 

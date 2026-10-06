@@ -821,6 +821,35 @@ function AccessPagination({
   );
 }
 
+/**
+ * The decision dialog's copy, by whether the request is for access or for more
+ * agent tools on a grant the identity already holds.
+ */
+const DECISION_COPY = {
+  access: {
+    approve: {
+      title: 'Approve access request',
+      description: "The requester's gateway consumer gains this API's approved ACL group.",
+    },
+    deny: {
+      title: 'Deny access request',
+      description: 'The requester is notified and no ACL group is added.',
+    },
+  },
+  tools: {
+    approve: {
+      title: 'Approve tool request',
+      description:
+        "The approved tools are added to the requester's existing grant; the access it already " +
+        'gives is unchanged.',
+    },
+    deny: {
+      title: 'Deny tool request',
+      description: 'The requester is notified, and their existing grant stays as it is.',
+    },
+  },
+} as const;
+
 export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
   const [page, setPage] = useState(0);
   const [status, setStatus] = useState<'pending' | 'approved' | 'denied' | 'all'>('pending');
@@ -849,6 +878,8 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
   const [messageTarget, setMessageTarget] = useState<AccessRequest | null>(null);
 
   const requests = query.data?.items ?? [];
+  const decisionFor = decision?.request.grant_id ? 'tools' : 'access';
+  const decisionCopy = DECISION_COPY[decisionFor][decision?.kind ?? 'approve'];
 
   return (
     <>
@@ -911,6 +942,9 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
                         {request.application ? (
                           <Badge tone="accent">{request.application.name}</Badge>
                         ) : null}
+                        {/* More tools on a grant the identity already holds:
+                            deciding it never touches that grant's access. */}
+                        {request.grant_id ? <Badge tone="info">More agent tools</Badge> : null}
                       </p>
                       <p className="mt-1 text-xs text-fg-subtle">
                         Submitted {formatDateTime(request.created_at)}
@@ -1000,12 +1034,8 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
         onOpenChange={(open) => {
           if (!open) setDecision(null);
         }}
-        title={decision?.kind === 'deny' ? 'Deny access request' : 'Approve access request'}
-        description={
-          decision?.kind === 'deny'
-            ? 'The requester is notified and no ACL group is added.'
-            : "The requester's gateway consumer gains this API's approved ACL group."
-        }
+        title={decisionCopy.title}
+        description={decisionCopy.description}
         confirmLabel={decision?.kind === 'deny' ? 'Deny' : 'Approve'}
         danger={decision?.kind === 'deny'}
         loading={approve.isPending || deny.isPending}

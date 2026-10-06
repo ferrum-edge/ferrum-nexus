@@ -330,7 +330,12 @@ import {
   type UpstreamPolicy,
   type UpstreamResolver,
 } from './oas.js';
-import { agentToolsChangedText, oneLine, type SpecChangeNotifier } from './spec-change-notices.js';
+import {
+  agentToolsChangedText,
+  agentToolsRenamedText,
+  oneLine,
+  type SpecChangeNotifier,
+} from './spec-change-notices.js';
 import { compareSpecRevisionsSafely } from './spec-changes.js';
 import { diffSpecDocuments } from './spec-diff.js';
 import {
@@ -1010,6 +1015,36 @@ function revisionChanges(
 /** A thrown value as a string, for a log line or an audit detail. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** The agent tools one account's explicit subsets lost in a change, for its notice. */
+interface ToolSubsetLoss {
+  /** Names of tools whose definition changed. */
+  redefined: Set<string>;
+  /** Old name to new name, for tools the provider renamed. */
+  renamed: Map<string, string>;
+}
+
+/**
+ * The tools of `previous` still published at the same operation (method and
+ * path) under another name in `next`, by retired id, with their new name.
+ * Selections are unique per operation, so an operation names one tool on
+ * each side.
+ */
+function renamedAgentTools(
+  previous: ApiAgents | null,
+  next: ApiAgents | null,
+): Map<string, { from: string; to: string }> {
+  const renamed = new Map<string, { from: string; to: string }>();
+  for (const tool of previous?.operations ?? []) {
+    const current = next?.operations.find(
+      (item) => item.method === tool.method && item.path === tool.path,
+    );
+    if (tool.id !== undefined && current !== undefined && current.name !== tool.name) {
+      renamed.set(tool.id, { from: tool.name, to: current.name });
+    }
+  }
+  return renamed;
 }
 
 /* ── Service ────────────────────────────────────────────────────────────── */
@@ -2793,6 +2828,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 },
                 { ...api, agents: nextAgents },
                 actor.id,
+                agentsFirstEnabled(api.agents ?? null, nextAgents),
               ),
               actor.id,
             );
@@ -3796,9 +3832,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           undo.push(step);
         };
         let updated: ApiRecord;
-        // Accounts whose explicit subsets lost a redefined tool, by the
-        // transaction attempt that committed.
-        let redefinedFor = new Map<Uuid, Set<string>>();
+        // Accounts whose explicit subsets lost a redefined or renamed tool, by
+        // the transaction attempt that committed.
+        let lostTools = new Map<Uuid, ToolSubsetLoss>();
 
         try {
           // ── OpenAPI enforcement ─────────────────────────────────────────
@@ -4274,6 +4310,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 submittableProxyBody(live),
                 { ...api, agents: nextAgents },
                 actor.id,
+                agentsFirstEnabled(api.agents ?? null, nextAgents),
               ),
               actor.id,
             );
@@ -4351,7 +4388,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 row = persisted;
               }
               if (recordOwnership) await tx.apiGatewayPlugins.replace(api.id, nextOwned);
-              redefinedFor = agentsMoved
+              lostTools = agentsMoved
                 ? await pruneToolSubsets(tx, actor, api.id, api.agents ?? null, nextAgents, ip)
                 : new Map();
               if (enforcementMoved) {
@@ -4541,17 +4578,27 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         }
 
         // A spec revision tells grantees through its change summary; an edit
-        // in the agent settings has none, so the accounts it took a tool from
-        // are told here. Best-effort: the edit has committed.
-        for (const [userId, tools] of redefinedFor) {
+        // in the agent settings has none, so the accounts it took a redefined
+        // or renamed tool from are told here. A renamed tool would otherwise
+        // just vanish from an explicit subset, while an all-tools grant keeps
+        // it under the new name. Best-effort: the edit has committed.
+        for (const [userId, loss] of lostTools) {
           if (userId === actor.id) continue;
+          const sentences: string[] = [];
+          if (loss.renamed.size > 0) {
+            const pairs = [...loss.renamed].sort(([left], [right]) => left.localeCompare(right));
+            sentences.push(agentToolsRenamedText(pairs));
+          }
+          if (loss.redefined.size > 0) {
+            sentences.push(agentToolsChangedText([...loss.redefined].sort()));
+          }
           await notifications
             .notify(
               userId,
               'system',
               `${oneLine(updated.name)} changed its agent tools`,
               `The provider edited the agent tool settings of ${oneLine(updated.name)}. ` +
-                agentToolsChangedText([...tools].sort()),
+                sentences.join(' '),
               `/catalog/${encodeURIComponent(updated.slug)}`,
             )
             .catch(() => undefined);
@@ -6145,10 +6192,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * over; a grant left with `[]` keeps its REST access and covers no MCP tool.
    * Each grant gets one `access.tools_prune` row per reason: `definition_changed`
    * for a tool still published under the same binding with a new id,
-   * `tool_removed` for one that was removed, renamed or disabled.
+   * `tool_renamed` for one still published at the same operation under another
+   * name, and `tool_removed` for one that was removed or disabled.
    *
-   * Returns, per account, the names of the redefined tools that left its
-   * subsets, for the caller to tell it once the transaction commits.
+   * Returns, per account, the redefined and renamed tools that left its
+   * subsets, for the caller to tell it once the transaction commits. An
+   * all-tools grant loses nothing: it keeps a renamed tool under its new name.
    */
   async function pruneToolSubsets(
     tx: NexusStore,
@@ -6157,22 +6206,25 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     previous: ApiAgents | null,
     next: ApiAgents | null,
     ip: string | null,
-  ): Promise<Map<Uuid, Set<string>>> {
+  ): Promise<Map<Uuid, ToolSubsetLoss>> {
     const kept = new Set(next?.operations.map((tool) => tool.id) ?? []);
     // Each redefined tool's retired id, to its name.
     const changed = new Map<string, string>();
     for (const tool of rotatedAgentTools(previous, next)) {
       if (tool.id !== undefined) changed.set(tool.id, tool.name);
     }
-    const redefined = new Map<Uuid, Set<string>>();
+    const renamed = renamedAgentTools(previous, next);
+    const reasonFor = (id: string): 'definition_changed' | 'tool_renamed' | 'tool_removed' =>
+      changed.has(id) ? 'definition_changed' : renamed.has(id) ? 'tool_renamed' : 'tool_removed';
+    const lost = new Map<Uuid, ToolSubsetLoss>();
     for (const grant of await tx.grants.listActiveByApi(apiId)) {
       const removed = grant.approved_tools?.filter((id) => !kept.has(id)) ?? [];
       if (removed.length === 0) continue;
       await tx.grants.update(grant.id, {
         approved_tools: grant.approved_tools?.filter((id) => kept.has(id)) ?? null,
       });
-      for (const reason of ['definition_changed', 'tool_removed'] as const) {
-        const tools = removed.filter((id) => changed.has(id) === (reason === 'definition_changed'));
+      for (const reason of ['definition_changed', 'tool_renamed', 'tool_removed'] as const) {
+        const tools = removed.filter((id) => reasonFor(id) === reason);
         if (tools.length === 0) continue;
         await audit.forStore(tx).record(
           { id: actor.id, role: actor.role },
@@ -6187,25 +6239,44 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           },
           ip,
         );
-        if (reason !== 'definition_changed') continue;
-        const names = redefined.get(grant.user_id) ?? new Set<string>();
-        for (const id of tools) {
-          const name = changed.get(id);
-          if (name !== undefined) names.add(name);
-        }
-        redefined.set(grant.user_id, names);
       }
+      let loss = lost.get(grant.user_id);
+      if (!loss) loss = { redefined: new Set<string>(), renamed: new Map<string, string>() };
+      for (const id of removed) {
+        const name = changed.get(id);
+        const rename = renamed.get(id);
+        if (name !== undefined) loss.redefined.add(name);
+        else if (rename !== undefined) loss.renamed.set(rename.from, rename.to);
+      }
+      if (loss.redefined.size > 0 || loss.renamed.size > 0) lost.set(grant.user_id, loss);
     }
-    return redefined;
+    return lost;
   }
 
-  /** Build fixed agent policy from fresh resources under the caller's proxy lease. */
+  /**
+   * Whether a change from `previous` to `next` exposes tools to all-tools
+   * grantees that may not hold the MCP-all group yet: agents turned on, or a
+   * retained phase-1 selection (tools without exposure ids) given its ids.
+   * Every other all-tools grantee received the group when it was approved,
+   * enrolled or rebuilt, so only these changes enroll; every other build skips
+   * enrollment and the gateway read it costs per grantee.
+   */
+  function agentsFirstEnabled(previous: ApiAgents | null, next: ApiAgents | null): boolean {
+    if (!next) return false;
+    return !previous || previous.operations.some((tool) => tool.id === undefined);
+  }
+
+  /**
+   * Build fixed agent policy from fresh resources under the caller's proxy
+   * lease. `enroll` first enrolls the API's all-tools grantees; pass
+   * {@link agentsFirstEnabled} for the change being built.
+   */
   async function buildSpecDocument(
     document: Record<string, unknown>,
     proxy: Record<string, unknown>,
     api: Pick<ApiRecord, 'id' | 'slug' | 'agents'> | undefined,
     subject: string,
-    enroll = true,
+    enroll = false,
   ): Promise<Record<string, unknown>> {
     await edge.assertBackendEgress();
     if (!api?.agents) {
@@ -6234,7 +6305,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * Put the MCP-all group on each active all-tools grantee whose REST group
    * proves membership but which lacks it: a grant approved before this API
    * exposed tools, or one retained from phase 1. Called under the proxy lease,
-   * including compensation.
+   * only for a change {@link agentsFirstEnabled} names: it reads each such
+   * grantee's consumer from the gateway.
    *
    * Never the provider's failure. A disabled grantee keeps its grant row for
    * audit and is not enrolled; re-enabling it rebuilds its groups, MCP
@@ -6410,7 +6482,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       { ...submittableProxyBody(proxy), listen_path: listenPath },
       api,
       subject,
-      !options?.recovery,
     );
     await options?.beforeWrite?.(submitted);
     if (original && options?.recovery) {
@@ -6584,9 +6655,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       });
     try {
       // Enrollment is an acknowledged consumer mutation. It must precede the
-      // namespace comparison token, never invalidate an admitted original.
-      if (api.agents) {
-        await buildSpecDocument(document, submittableProxyBody(before), api, actor.id);
+      // namespace comparison token, never invalidate an admitted original, so
+      // a conversion that turns agents on enrolls here and its builds never do.
+      if (agentsFirstEnabled(api.agents ?? null, nextAgents)) {
+        await enrollAllToolGrantees(api.id, actor.id);
       }
       const originalAuthority = await edge.deployments.snapshot(actor.id);
       assertSnapshotTarget(originalAuthority, {

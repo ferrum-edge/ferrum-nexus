@@ -20,6 +20,7 @@ import {
   type DenyAccessRequestResponse,
   type ListAccessRequestsResponse,
   type ListGrantsResponse,
+  type RequestGrantToolsResponse,
   type RevokeGrantResponse,
 } from '@ferrum-nexus/shared';
 
@@ -76,6 +77,13 @@ const listGrantsQuery = listQuerySchema.extend({
 });
 
 const revokeBody = z.object({ reason: z.string().trim().max(2_000).nullish() });
+
+const toolRequestBody = z
+  .object({
+    requested_tools: z.array(z.string().uuid()).min(1).max(MAX_AGENT_TOOLS),
+    justification: z.string().trim().min(1).max(MAX_JUSTIFICATION_LENGTH),
+  })
+  .strict();
 
 /**
  * Per-account burst limits on the two client write paths, enforced by the
@@ -186,6 +194,27 @@ export const grantRoutes: FastifyPluginAsync<AccessRoutesOptions> = async (app, 
       listOptions(query),
     );
   });
+
+  // The grantee asks for more MCP tools on its own grant. Limited like a new
+  // access request, whose daily budget it shares.
+  app.post(
+    '/:id/tool-requests',
+    { config: { rateLimit: { ...ACCESS_REQUEST_CREATE_RATE_LIMIT } } },
+    async (request, reply): Promise<RequestGrantToolsResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const input = parseOrThrow(toolRequestBody, request.body ?? {});
+      const created = await access.requestTools(
+        user,
+        id,
+        input.justification,
+        input.requested_tools,
+        clientIp(request),
+      );
+      reply.status(201);
+      return { access_request: created };
+    },
+  );
 
   app.post('/:id/revoke', async (request): Promise<RevokeGrantResponse> => {
     const { user } = requireAuth(request);

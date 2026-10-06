@@ -104,6 +104,8 @@
  * only after the original section releases all its keys.
  */
 
+import { isDeepStrictEqual } from 'node:util';
+
 import {
   MAX_JUSTIFICATION_LENGTH,
   MAX_AGENT_TOOLS,
@@ -200,9 +202,31 @@ export interface AccessService {
     ip?: string | null,
     requestedTools?: string[] | null,
   ): Promise<AccessRequest>;
+  /**
+   * Grantee asks for more MCP tools on its own active explicit-subset grant.
+   *
+   * The request is an ordinary pending access request with `grant_id` set and
+   * `requested_tools` listing only the tools to add, so it is cancelled,
+   * denied and approved through the same endpoints, under the same review
+   * check, proxy lease, application key and daily budget as {@link request}.
+   * The grant keeps its REST access and its current tools while it waits; an
+   * approval widens it in place (see {@link approve}).
+   */
+  requestTools(
+    user: UserRecord,
+    grantId: Uuid,
+    justification: string,
+    requestedTools: string[],
+    ip?: string | null,
+  ): Promise<AccessRequest>;
   /** Requester withdraws their own pending request. */
   cancel(user: UserRecord, requestId: Uuid, ip?: string | null): Promise<AccessRequest>;
-  /** Provider (or admin) approves: the ACL group lands on the consumer. */
+  /**
+   * Provider (or admin) approves: the ACL group lands on the consumer. A tool
+   * request instead adds the approved tools to its grant: the identity's
+   * consumer is rewritten with the REST group and the widened tool groups in
+   * one write, and the grant's new subset commits inside the consumer key.
+   */
   approve(
     actor: UserRecord,
     requestId: Uuid,
@@ -584,6 +608,43 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       decision_note: note ?? request.decision_note,
     });
     return moved ? request : null;
+  }
+
+  /**
+   * Cancel the pending tool request that would extend `grant`, inside the
+   * revocation's transaction. It can never be approved once the grant is
+   * revoked, and it would otherwise hold the identity's one pending slot and
+   * sit in the provider's inbox. Store-only, so safe in a re-run body.
+   */
+  async function cancelPendingToolRequest(
+    tx: NexusStore,
+    grant: GrantRecord,
+    actor: UserRecord,
+    at: string,
+    ip: string | null,
+  ): Promise<void> {
+    const pending = await tx.accessRequests.findPendingByApiAndUser(
+      grant.api_id,
+      grant.user_id,
+      grant.application_id,
+    );
+    if (!pending || pending.grant_id !== grant.id) return;
+    const closed = await tx.accessRequests.updateIfStatus(pending.id, 'pending', {
+      status: 'cancelled',
+      decided_by: actor.id,
+      decided_at: at,
+      decision_note: 'The grant this request would extend is no longer active',
+    });
+    if (!closed) return;
+    await audit
+      .forStore(tx)
+      .record(
+        { id: actor.id, role: actor.role },
+        AuditAction.ACCESS_CANCEL,
+        { type: 'access_request', id: pending.id },
+        { api_id: grant.api_id, grant_id: grant.id, reason: 'grant_inactive' },
+        ip,
+      );
   }
 
   /**
@@ -1158,11 +1219,19 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     const limit = config.maxAccessRequestsPerUserPerDay;
     if (limit <= 0) return;
     const since = new Date(Date.now() - ACCESS_REQUEST_BUDGET_WINDOW_MS).toISOString();
-    const used = await audit.forStore(tx).count({
-      actor_user_id: requesterUserId,
-      action: AuditAction.ACCESS_REQUEST,
-      from: since,
-    });
+    // A request for more tools on a grant is charged like a request for access.
+    const scoped = audit.forStore(tx);
+    const used =
+      (await scoped.count({
+        actor_user_id: requesterUserId,
+        action: AuditAction.ACCESS_REQUEST,
+        from: since,
+      })) +
+      (await scoped.count({
+        actor_user_id: requesterUserId,
+        action: AuditAction.ACCESS_TOOLS_REQUEST,
+        from: since,
+      }));
     if (used < limit) return;
     throw new NexusError(
       'QUOTA_EXCEEDED',
@@ -1181,6 +1250,365 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     return locks(accessRequestBudgetLockKey(requesterUserId), write);
   }
 
+  /** The trimmed justification, refused when empty or too long. */
+  function checkedJustification(justification: string): string {
+    const trimmed = justification.trim();
+    if (trimmed === '') throw validationFailed('A justification is required');
+    if (trimmed.length > MAX_JUSTIFICATION_LENGTH) {
+      throw validationFailed(
+        `A justification may be at most ${MAX_JUSTIFICATION_LENGTH} characters`,
+      );
+    }
+    return trimmed;
+  }
+
+  /**
+   * Refuse a request or approval on behalf of an application that is gone,
+   * no longer the owner's, or disabled. Read through `db`, under the
+   * application's key, so the answer holds until the caller commits.
+   */
+  async function assertApplicationActive(
+    db: NexusStore,
+    applicationId: Uuid,
+    ownerUserId: Uuid,
+  ): Promise<void> {
+    const application = await db.applications.findById(applicationId);
+    if (!application || application.owner_user_id !== ownerUserId) {
+      throw notFound('Application', applicationId);
+    }
+    if (application.status !== 'active') {
+      throw conflict('This application is disabled', { application_id: applicationId });
+    }
+  }
+
+  /**
+   * The error a tool request or its approval raises when the grant it would
+   * extend is gone, revoked, or no longer the requesting identity's.
+   */
+  function inactiveGrant(): NexusError {
+    return conflict('The grant this request would extend is no longer active');
+  }
+
+  /**
+   * Undo a tool approval whose grant update did not commit.
+   *
+   * The mirror of {@link unwindApproval} for a grant that already existed: the
+   * REST group and the tools the grant still covers stay on the consumer, so
+   * only the tool groups this approval may have added are taken back, and the
+   * request returns to `pending`. When the grant turns out to cover the added
+   * tools after all — the update committed and only its acknowledgement was
+   * lost — nothing is undone. Called under the proxy lease the approval holds,
+   * which every other writer of a grant's subset holds too. Best-effort: the
+   * caller re-throws the original failure.
+   *
+   * A grant that is no longer active is different. The approval's consumer
+   * write was a whole-resource rewrite that put the REST group and every tool
+   * group back, and the disable-account sweep revokes without the proxy lease:
+   * a sweep and re-enable that both finished between the claim and that write
+   * leave the consumer holding access no grant stands behind. So when no active
+   * grant exists for the identity, every group of the API comes off, as
+   * {@link unwindApproval} does, and the request is cancelled rather than
+   * released: it could never be approved.
+   */
+  async function unwindToolApproval(input: {
+    actor: UserRecord;
+    api: ApiRecord;
+    requester: UserRecord;
+    request: AccessRequestRecord;
+    grantId: Uuid;
+    added: string[];
+    groupPossiblyApplied: boolean;
+    /** Whether the consumer write may have run at all. */
+    attempted: boolean;
+    cause: unknown;
+    ip: string | null;
+  }): Promise<void> {
+    const { actor, api, requester, request, added, ip } = input;
+    const details: Record<string, unknown> = {
+      api_id: api.id,
+      api_slug: api.slug,
+      user_id: requester.id,
+      application_id: request.application_id,
+      grant_id: input.grantId,
+      added_tools: added,
+      acl_group_possibly_applied: input.groupPossiblyApplied,
+      cause: input.cause instanceof Error ? input.cause.message : String(input.cause),
+    };
+
+    const live = await store.grants.findById(input.grantId).catch(() => null);
+    const active = live?.status === 'active' ? live : null;
+    // The grant this approval extended is gone or revoked. Another active grant
+    // for the identity may still own the REST group; without one, nothing does.
+    const holder =
+      active ??
+      (await store.grants
+        .findActiveByApiAndUser(api.id, requester.id, request.application_id)
+        .catch(() => null));
+    const covered = holder?.approved_tools;
+    const uncovered = covered === null ? [] : added.filter((id) => !covered?.includes(id));
+    if (active && uncovered.length === 0) {
+      // The grant already covers every added tool: the update committed, so
+      // the groups and the decision both stand.
+      details.tool_groups_kept = mcpGroupsForGrant(api.id, added);
+    } else {
+      if (input.attempted && !holder) {
+        // No active grant for the identity: the REST group and every tool
+        // group the write put back come off together.
+        try {
+          await setGroupMembership(requester, api.id, false, request.application_id, {
+            absentIsDone: true,
+          });
+          details.acl_group_removed = aclGroupForApi(api.id);
+          details.all_tool_groups_removed = true;
+        } catch (error) {
+          details.acl_group_orphaned = aclGroupForApi(api.id);
+          deps.log?.(
+            {
+              api_id: api.id,
+              user_id: requester.id,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'Could not take back the groups of a failed tool approval whose grant is gone',
+          );
+        }
+      } else if (input.attempted && uncovered.length > 0) {
+        const strip = new Set(mcpGroupsForGrant(api.id, uncovered));
+        try {
+          const consumer = await store.consumers.findByUserAndNamespace(
+            requester.id,
+            namespace,
+            request.application_id,
+          );
+          if (consumer) {
+            await provisioner.mutateAclGroups(
+              consumer.ferrum_consumer_id,
+              (groups) => groups.filter((group) => !strip.has(group)),
+              requester.id,
+              { absentIsDone: true },
+            );
+          }
+          details.tool_groups_removed = [...strip];
+        } catch (error) {
+          details.tool_groups_orphaned = [...strip];
+          deps.log?.(
+            {
+              api_id: api.id,
+              user_id: requester.id,
+              tool_groups: [...strip],
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'Could not take back the tool groups of a failed tool approval',
+          );
+        }
+      }
+      try {
+        if (active) {
+          const released = await store.accessRequests.updateIfStatus(request.id, 'approved', {
+            status: 'pending',
+            decided_by: null,
+            decided_at: null,
+            decision_note: null,
+            approved_tools: null,
+          });
+          details.request_released = released !== null;
+        } else {
+          // It would extend a grant that is gone: it could never be approved.
+          const cancelled = await store.accessRequests.updateIfStatus(request.id, 'approved', {
+            status: 'cancelled',
+            approved_tools: null,
+            decision_note: 'The grant this request would extend is no longer active',
+          });
+          details.request_cancelled = cancelled !== null;
+        }
+      } catch (error) {
+        details[active ? 'request_released' : 'request_cancelled'] = false;
+        deps.log?.(
+          {
+            request_id: request.id,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'Could not settle the request of a failed tool approval',
+        );
+      }
+    }
+
+    await audit
+      .record(
+        { id: actor.id, role: actor.role },
+        AuditAction.ACCESS_TOOLS_APPROVE_ROLLBACK,
+        { type: 'access_request', id: request.id },
+        details,
+        ip,
+      )
+      .catch(() => undefined);
+    deps.log?.(details, 'Rolled back a tool approval that could not be committed');
+  }
+
+  /**
+   * Approve a tool request: add the approved tools to its grant without
+   * touching the access the grant already gives.
+   *
+   * Runs inside {@link AccessService.approve}'s proxy lease, after its common
+   * admission checks. The same three steps as an approval, in the same order:
+   * claim the decision, write the consumer (the REST group and the widened
+   * tool groups, in one whole-resource write that never drops the REST group),
+   * then commit the grant's new subset inside the consumer key, compare-and-set
+   * on the subset the claim was checked against.
+   */
+  async function approveTools(
+    actor: UserRecord,
+    request: AccessRequestRecord,
+    api: ApiRecord,
+    requester: UserRecord,
+    note: string | null,
+    ip: string | null,
+    approvedTools: string[] | null | undefined,
+  ): Promise<{ access_request: AccessRequest; grant: Grant }> {
+    const grantId = request.grant_id as Uuid;
+    const grant = await store.grants.findById(grantId);
+    if (
+      !grant ||
+      grant.status !== 'active' ||
+      grant.api_id !== api.id ||
+      grant.user_id !== requester.id ||
+      grant.application_id !== request.application_id
+    ) {
+      throw inactiveGrant();
+    }
+    const current = grant.approved_tools;
+    if (current == null) throw conflict('This grant already covers every published tool');
+    const requested = request.requested_tools ?? [];
+    const added = approvedTools === undefined ? requested : approvedTools;
+    if (added === null || added.length === 0) {
+      throw validationFailed('Approve at least one requested tool, or deny the request');
+    }
+    if (added.some((id) => !requested.includes(id))) {
+      throw validationFailed('Approval cannot broaden the requested tool subset');
+    }
+    if (added.some((id) => current.includes(id))) {
+      throw validationFailed('The grant already covers some of these tools');
+    }
+    validateToolSubset(api, added);
+    const next = [...current, ...added];
+
+    const decidedAt = nowIso();
+    const updated = await store.accessRequests.updateIfStatus(request.id, 'pending', {
+      status: 'approved',
+      approved_tools: added,
+      decided_by: actor.id,
+      decided_at: decidedAt,
+      decision_note: note ?? null,
+    });
+    if (!updated) throw await decisionConflict(request.id);
+
+    let attempted = true;
+    let groupPossiblyApplied = true;
+    const committed: { grant?: GrantRecord } = {};
+    try {
+      try {
+        await setGroupMembership(
+          requester,
+          api.id,
+          true,
+          request.application_id,
+          {
+            afterWrite: async () => {
+              groupPossiblyApplied = false;
+              committed.grant = await store.transaction(async (tx) => {
+                if (request.application_id !== null) {
+                  await assertApplicationActive(tx, request.application_id, requester.id);
+                }
+                // Compare-and-set on the subset admitted above. Every other
+                // writer of it holds this proxy lease, so a mismatch is a
+                // bulk revocation or a direct store write, never a race to
+                // merge.
+                const live = await tx.grants.findById(grantId);
+                if (
+                  !live ||
+                  live.status !== 'active' ||
+                  !isDeepStrictEqual(live.approved_tools ?? null, current)
+                ) {
+                  throw inactiveGrant();
+                }
+                const widened = await tx.grants.updateIfStatus(grantId, 'active', {
+                  approved_tools: next,
+                });
+                if (!widened) throw inactiveGrant();
+                await audit.forStore(tx).record(
+                  { id: actor.id, role: actor.role },
+                  AuditAction.ACCESS_TOOLS_APPROVE,
+                  { type: 'access_request', id: request.id },
+                  {
+                    api_id: api.id,
+                    api_slug: api.slug,
+                    user_id: requester.id,
+                    application_id: request.application_id,
+                    grant_id: grantId,
+                    requested_tools: requested,
+                    added_tools: added,
+                    approved_tools: next,
+                  },
+                  ip,
+                );
+                return widened;
+              });
+            },
+          },
+          next,
+        );
+      } catch (error) {
+        // The provisioner's active-user guard runs before the ACL write.
+        if (isNexusError(error) && error.code === 'USER_DISABLED') {
+          attempted = false;
+          groupPossiblyApplied = false;
+        }
+        throw error;
+      }
+    } catch (error) {
+      await unwindToolApproval({
+        actor,
+        api,
+        requester,
+        request: updated,
+        grantId,
+        added,
+        groupPossiblyApplied,
+        attempted,
+        cause: error,
+        ip,
+      });
+      throw error;
+    }
+    const widened = committed.grant;
+    if (!widened) throw new NexusError('INTERNAL', 'The tool approval recorded no grant');
+
+    await announce(
+      requester,
+      {
+        type: 'access_request_approved',
+        title: `Agent tools approved: ${api.name}`,
+        body:
+          `${actor.display_name} approved your request for more agent tools on ${api.name}. ` +
+          'Your grant now covers them alongside the access it already gave.',
+        link: `/catalog/${api.slug}`,
+      },
+      {
+        templateKey: 'access_approved',
+        vars: {
+          api_name: api.name,
+          api_slug: api.slug,
+          api_url: catalogUrl(api.slug),
+          decided_by_name: actor.display_name,
+          decision_note: note ?? '',
+        },
+      },
+    );
+
+    const [decoratedRequest] = await decorateRequests([updated]);
+    const [decoratedGrant] = await decorateGrants([widened]);
+    return { access_request: decoratedRequest ?? updated, grant: decoratedGrant ?? widened };
+  }
+
   return {
     async request(
       user,
@@ -1190,13 +1618,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       ip = null,
       requestedTools = null,
     ): Promise<AccessRequest> {
-      const trimmed = justification.trim();
-      if (trimmed === '') throw validationFailed('A justification is required');
-      if (trimmed.length > MAX_JUSTIFICATION_LENGTH) {
-        throw validationFailed(
-          `A justification may be at most ${MAX_JUSTIFICATION_LENGTH} characters`,
-        );
-      }
+      const trimmed = checkedJustification(justification);
 
       const api = await store.apis.findById(apiId);
       if (!api) throw notFound('API', apiId);
@@ -1257,20 +1679,44 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         // for an application that no longer existed (issue #365). Refused
         // here, before the budget or the audit trail is touched.
         if (applicationId !== null) {
-          const application = await store.applications.findById(applicationId);
-          if (!application || application.owner_user_id !== user.id) {
-            throw notFound('Application', applicationId);
-          }
-          if (application.status !== 'active') {
-            throw conflict('This application is disabled', { application_id: applicationId });
-          }
+          await assertApplicationActive(store, applicationId, user.id);
         }
 
         const row = await spendBudget(user.id, () =>
           store.transaction(async (tx) => {
             await assertWithinBudget(tx, user.id);
-            if (await tx.accessRequests.findPendingByApiAndUser(api.id, user.id, applicationId)) {
-              throw conflict('You already have a pending request for this API');
+            const pending = await tx.accessRequests.findPendingByApiAndUser(
+              api.id,
+              user.id,
+              applicationId,
+            );
+            if (pending) {
+              // A tool request outlives the grant it would extend only until
+              // the identity asks for access again: it can never be approved,
+              // and it holds the identity's one pending slot. Anything else
+              // pending is a duplicate.
+              const extended = pending.grant_id ? await tx.grants.findById(pending.grant_id) : null;
+              const stale = pending.grant_id != null && extended?.status !== 'active';
+              const closed = stale
+                ? await tx.accessRequests.updateIfStatus(pending.id, 'pending', {
+                    status: 'cancelled',
+                    decided_by: user.id,
+                    decided_at: nowIso(),
+                    decision_note: 'The grant this request would extend is no longer active',
+                  })
+                : null;
+              if (!closed) throw conflict('You already have a pending request for this API');
+              await audit.forStore(tx).record(
+                { id: user.id, role: user.role },
+                AuditAction.ACCESS_CANCEL,
+                { type: 'access_request', id: pending.id },
+                {
+                  api_id: api.id,
+                  grant_id: pending.grant_id ?? null,
+                  reason: 'grant_inactive',
+                },
+                ip,
+              );
             }
             const inserted = await tx.accessRequests.create({
               api_id: api.id,
@@ -1323,6 +1769,137 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           ? admit()
           : edge.serializePerKey(
               canonicalConsumerLockKey(namespace, consumerUsernameForApplication(applicationId)),
+              admit,
+            );
+      const created = api.ferrum_proxy_id
+        ? await edge.serializePerKey(`proxy:${api.ferrum_proxy_id}`, submit)
+        : await submit();
+
+      const [decorated] = await decorateRequests([created]);
+      return decorated ?? created;
+    },
+
+    async requestTools(
+      user,
+      grantId,
+      justification,
+      requestedTools,
+      ip = null,
+    ): Promise<AccessRequest> {
+      const trimmed = checkedJustification(justification);
+      const initial = await store.grants.findById(grantId);
+      // Only the grantee's own account may ask, for any of its identities. To
+      // anybody else the grant is absent, as it is in their grant listings.
+      if (!initial || initial.user_id !== user.id) throw notFound('Grant', grantId);
+      const api = await store.apis.findById(initial.api_id);
+      if (!api) throw notFound('Grant', grantId);
+      if (api.owner_user_id === user.id) {
+        throw conflict('You already own this API');
+      }
+      if (initial.status !== 'active') throw inactiveGrant();
+      if (api.status !== 'published') {
+        throw conflict('This API is retired and is no longer accepting access requests');
+      }
+      if (!api.requestable) throw conflict('This API does not accept access requests');
+      if (initial.approved_tools == null) {
+        throw conflict('This grant already covers every published tool');
+      }
+      if (requestedTools.length === 0) {
+        throw validationFailed('Request at least one tool the grant does not cover yet');
+      }
+
+      // The same admission as `request`, re-read under the same keys: the
+      // proxy lease publishing holds while it retires or redefines tools, then
+      // the application's provisioning key, then the budget key.
+      const admit = async (): Promise<AccessRequestRecord> => {
+        const fresh = await store.apis.findById(api.id);
+        if (
+          !fresh ||
+          fresh.ferrum_proxy_id !== api.ferrum_proxy_id ||
+          fresh.status !== 'published' ||
+          !fresh.requestable
+        ) {
+          throw conflict('This API changed while the request was waiting; reload and retry');
+        }
+        if (
+          fresh.visibility === 'private' &&
+          !canViewApi(user, fresh, await resolveReadAccess(store, user, fresh))
+        ) {
+          throw notFound('Grant', grantId);
+        }
+        if (!fresh.agents) throw conflict('This API does not expose agent tools');
+        validateToolSubset(fresh, requestedTools);
+        const grant = await store.grants.findById(grantId);
+        if (!grant || grant.status !== 'active' || grant.user_id !== user.id) {
+          throw inactiveGrant();
+        }
+        const covered = grant.approved_tools;
+        if (covered == null) throw conflict('This grant already covers every published tool');
+        if (requestedTools.some((id) => covered.includes(id))) {
+          throw validationFailed('Request only tools the grant does not cover yet');
+        }
+        if (grant.application_id !== null) {
+          await assertApplicationActive(store, grant.application_id, user.id);
+        }
+
+        const row = await spendBudget(user.id, () =>
+          store.transaction(async (tx) => {
+            await assertWithinBudget(tx, user.id);
+            if ((await tx.grants.findById(grantId))?.status !== 'active') throw inactiveGrant();
+            if (
+              await tx.accessRequests.findPendingByApiAndUser(api.id, user.id, grant.application_id)
+            ) {
+              throw conflict('You already have a pending request for this API');
+            }
+            const inserted = await tx.accessRequests.create({
+              api_id: api.id,
+              user_id: user.id,
+              application_id: grant.application_id,
+              justification: trimmed,
+              requested_tools: requestedTools,
+              grant_id: grantId,
+              status: 'pending',
+            });
+            // The budget's charge, like `access.request`: it commits exactly
+            // when the request does.
+            await audit.forStore(tx).record(
+              { id: user.id, role: user.role },
+              AuditAction.ACCESS_TOOLS_REQUEST,
+              { type: 'access_request', id: inserted.id },
+              {
+                api_id: api.id,
+                api_slug: api.slug,
+                grant_id: grantId,
+                application_id: grant.application_id,
+                requested_tools: requestedTools,
+              },
+              ip,
+            );
+            return inserted;
+          }),
+        );
+
+        await notifications
+          .notify(
+            api.owner_user_id,
+            'access_request_created',
+            `Agent tools requested: ${api.name}`,
+            `${user.display_name} requested more agent tools on an existing grant for ` +
+              `${api.name}.`,
+            `/apis/${api.id}`,
+          )
+          .catch(() => undefined);
+        return row;
+      };
+
+      const submit = (): Promise<AccessRequestRecord> =>
+        initial.application_id === null
+          ? admit()
+          : edge.serializePerKey(
+              canonicalConsumerLockKey(
+                namespace,
+                consumerUsernameForApplication(initial.application_id),
+              ),
               admit,
             );
       const created = api.ferrum_proxy_id
@@ -1404,6 +1981,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
               application_id: request.application_id,
             });
           }
+        }
+        // A tool request extends the grant it names instead of creating one.
+        if (request.grant_id != null) {
+          return approveTools(actor, request, api, requester, note, ip, approvedTools);
         }
         // Scoped to the requesting identity: an account holding an
         // account-scoped grant may still request one for an application of
@@ -1593,25 +2174,34 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           decision_note: note ?? null,
         });
         if (!moved) return null;
-        await audit
-          .forStore(tx)
-          .record(
-            { id: actor.id, role: actor.role },
-            AuditAction.ACCESS_DENY,
-            { type: 'access_request', id: request.id },
-            { api_id: api.id, api_slug: api.slug, user_id: requester.id, has_note: note !== null },
-            ip,
-          );
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.ACCESS_DENY,
+          { type: 'access_request', id: request.id },
+          {
+            api_id: api.id,
+            api_slug: api.slug,
+            user_id: requester.id,
+            has_note: note !== null,
+            ...(request.grant_id ? { grant_id: request.grant_id } : {}),
+          },
+          ip,
+        );
         return moved;
       });
       if (!updated) throw await decisionConflict(request.id);
 
+      // A declined tool request leaves its grant exactly as it was.
+      const tools = request.grant_id != null;
       await announce(
         requester,
         {
           type: 'access_request_denied',
-          title: `Access declined: ${api.name}`,
-          body: `${actor.display_name} declined your request for ${api.name}.`,
+          title: tools ? `Agent tools declined: ${api.name}` : `Access declined: ${api.name}`,
+          body: tools
+            ? `${actor.display_name} declined your request for more agent tools on ${api.name}. ` +
+              'Your existing access is unchanged.'
+            : `${actor.display_name} declined your request for ${api.name}.`,
           link: `/catalog/${api.slug}`,
         },
         {
@@ -1690,6 +2280,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           // history reads "approved, then revoked" rather than staying
           // approved.
           movedRequest = await moveRequestToRevoked(tx, grant, actor.id, revokedAt, reason);
+          await cancelPendingToolRequest(tx, grant, actor, revokedAt, ip);
           // The revocation is recorded with the claim that makes it. Written
           // after the gateway step, a failed insert left the grant revoked and
           // unaudited behind a `500`, and a repeat found it already revoked
@@ -1831,6 +2422,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             });
             if (!result) return null;
             await moveRequestToRevoked(tx, grant, actor.id, revokedAt, reason);
+            await cancelPendingToolRequest(tx, grant, actor, revokedAt, ip);
             await audit.forStore(tx).record(
               { id: actor.id, role: actor.role },
               AuditAction.ACCESS_REVOKE,

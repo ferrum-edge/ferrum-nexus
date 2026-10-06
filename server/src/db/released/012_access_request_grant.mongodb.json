@@ -1,0 +1,6 @@
+{
+  "id": "012_access_request_grant",
+  "backend": "mongodb",
+  "description": "Default retained access requests to grant_id: null (a request for access, not for more tools)",
+  "indexes": []
+}

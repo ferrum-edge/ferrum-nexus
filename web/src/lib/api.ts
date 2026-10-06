@@ -137,6 +137,8 @@ import {
   type RetryGatewayTeardownResponse,
   type RevokeGrantRequest,
   type RevokeGrantResponse,
+  type RequestGrantToolsRequest,
+  type RequestGrantToolsResponse,
   type ReconcileCredentialsRequest,
   type ReconcileCredentialsResponse,
   type ReconcileGatewayResponse,
@@ -618,6 +620,8 @@ export const grantsApi = {
     get<ListGrantsResponse>('/grants', { ...query }),
   revoke: (id: string, body: RevokeGrantRequest = {}): Promise<RevokeGrantResponse> =>
     post<RevokeGrantResponse>(`/grants/${encodeURIComponent(id)}/revoke`, body),
+  requestTools: (id: string, body: RequestGrantToolsRequest): Promise<RequestGrantToolsResponse> =>
+    post<RequestGrantToolsResponse>(`/grants/${encodeURIComponent(id)}/tool-requests`, body),
 };
 
 /* ── Credentials ────────────────────────────────────────────────────────── */
