@@ -3,6 +3,7 @@ import {
   AGENT_TOOL_CALL_LIMIT,
   AGENT_TOOL_NAME_PATTERN,
   MAX_AGENT_DESCRIPTION_LENGTH,
+  MAX_SPEC_OPERATIONS,
   agentOperations,
   type ApiAgents,
   type AgentTool,
@@ -32,7 +33,9 @@ export function AgentOperationPicker({
     const result = parseSpecText(spec);
     if (!result.ok) return { operations: [], error: result.error };
     try {
-      return { operations: agentOperations(result.spec.doc), error: null };
+      // The cap the server admits a selection under.
+      const operations = agentOperations(result.spec.doc, { maxOperations: MAX_SPEC_OPERATIONS });
+      return { operations, error: null };
     } catch (error) {
       return {
         operations: [],

@@ -1,7 +1,11 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { useState, type ReactElement } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ApiAgents, SpecEnforcementLevel } from '@ferrum-nexus/shared';
+import {
+  MAX_SPEC_OPERATIONS,
+  type ApiAgents,
+  type SpecEnforcementLevel,
+} from '@ferrum-nexus/shared';
 import { AgentOperationPicker } from './AgentOperationPicker';
 
 const SPEC = JSON.stringify({
@@ -16,12 +20,18 @@ const SPEC = JSON.stringify({
   },
 });
 
-function Picker({ enforcement = 'routes' }: { enforcement?: SpecEnforcementLevel }): ReactElement {
+function Picker({
+  enforcement = 'routes',
+  spec = SPEC,
+}: {
+  enforcement?: SpecEnforcementLevel;
+  spec?: string;
+}): ReactElement {
   const [value, setValue] = useState<ApiAgents | null>(null);
   return (
     <>
       <AgentOperationPicker
-        spec={SPEC}
+        spec={spec}
         value={value}
         onChange={setValue}
         enforcement={enforcement}
@@ -38,6 +48,25 @@ describe('provider agent operation selection', () => {
   it('is off by default and cannot be enabled in docs-only mode', () => {
     render(<Picker enforcement="docs_only" />);
     expect(screen.getByLabelText('Available to AI agents')).not.toBeChecked();
+    expect(screen.getByLabelText('Available to AI agents')).toBeDisabled();
+  });
+
+  it('cannot be enabled when Path Item references resolve past the operation cap', () => {
+    // Every path shares one Path Item of two operations: one more than the
+    // cap once resolved, though no path declares a method of its own.
+    const paths: Record<string, unknown> = {};
+    for (let index = 0; index <= MAX_SPEC_OPERATIONS / 2; index += 1) {
+      paths[`/items/${index}`] = { $ref: '#/components/pathItems/Item' };
+    }
+    const spec = JSON.stringify({
+      openapi: '3.1.0',
+      info: { title: 'Items', version: '1' },
+      paths,
+      components: {
+        pathItems: { Item: { get: { summary: 'Read' }, post: { summary: 'Write' } } },
+      },
+    });
+    render(<Picker spec={spec} />);
     expect(screen.getByLabelText('Available to AI agents')).toBeDisabled();
   });
 

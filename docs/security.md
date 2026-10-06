@@ -955,8 +955,10 @@ document root (a Request Body or Response chain that does not end at an object w
 passes the budget folds in the whole document except `info`, hashed as text without
 following references. So one build costs work proportional to the budget (the charge
 that crosses it being at most one collection or string of the document), plus a
-constant per selected tool, plus, on a fallback, one canonical pass over the document
-that sorts each object's keys. A budget fallback is recorded as `tool_hash_fallback` in
+constant per selected tool. Sorting each object's keys adds a log factor to the
+collection sizes. A fallback first makes one shallow top-level copy without `info`,
+then takes one canonical pass over the document and sorts each object's keys. A budget
+fallback is recorded as `tool_hash_fallback` in
 the `api.publish`, `api.update`, `api.spec_update` or `api.spec_rollback` audit row that
 commits the change
 (cases in [agent-marketplace.md](agent-marketplace.md#optional-subsets-and-cross-repository-follow-up)).
@@ -985,19 +987,45 @@ anything or writes to the gateway: an upper bound on its compact JSON size is ch
 root member, every path's reference chain and resolved Path Item in full, a route per
 operation at the longer of the real and staging listen paths, and every selected tool.
 Each object of the document is measured once and remembered, so the check reads the
-document about once however much the stamp would copy, and stops at the first charge
-past the budget with `400 SPEC_INVALID` (`reason: "agent_document_too_large"`).
-Compensation rebuilds the document the gateway already holds, so it is not refused. A
-PATCH that leaves the gateway document alone (visibility, status, name, description and
-the other catalog or proxy settings) is not bounded either, so an agent API published
-before the bound whose document is larger can still be edited and retired. Turning its
-agents off submits the document without copies, and is the way to revise it again.
+document about once however much the stamp would copy, plus each path's reference chain
+and operation slots. It stops at the first charge past the budget with `400 SPEC_INVALID`
+(`reason: "agent_document_too_large"`).
+
+An agent selection is admitted only if the document has at most 3,000
+(`MAX_SPEC_OPERATIONS`) operations after Path Item references resolve. Each path counts
+every operation its resolved Path Item holds, so a Path Item that 2,000 paths reference
+counts 2,000 times. The upload limit uses the same number but counts differently. It
+counts only the method keys each path declares itself, so a path that is a `$ref` counts
+none. A document can therefore pass the upload and still be refused for agents with
+`400 SPEC_INVALID`. The resolved count is checked:
+
+- on publish, spec revision, rollback and restore of an agent API;
+- on a PATCH that edits the agents or converts the enforcement level;
+- by the provider's operation picker, which will not enable agents past it.
+
+Checking a live deployment's routes is not capped (restore, enforcement conversion and
+their recovery all do this). That check reads every operation, however many the document
+resolves to, so a routes API without agents is never refused for it.
+
+Compensation rebuilds the document the gateway already holds, so neither bound refuses
+it. A PATCH that leaves the agents and the enforcement level alone (visibility, status,
+name, description and the other catalog or proxy settings) is not bounded either. So an
+agent API published before the bounds, whose document is larger or resolves to more
+operations, can still be edited and retired. Turning its agents off submits the document
+without copies, and is the way to revise it again.
 
 Provider `x-ferrum-*` extensions cannot override endpoint, selection, grants or
 governance. Endpoint paths are derived from the namespace/slug and reserve a
 collision-checked subtree. The validator bypass is an anchored exact endpoint,
 not a general prefix or a method-wide exemption; the gateway claims it instead
 of passing RPC bodies upstream. REST operations keep the same backend and auth.
+Nexus validates the MCP operation selection before hashing and writes its extension in
+a fixed shape. Edge v0.9.13's [API-spec documentation](https://github.com/ferrum-edge/ferrum-edge/blob/9b83115de7ec23ab51ec4feae6bed65e596db425/docs/api_specs.md)
+documents admission, Path Item reference resolution and the MCP bridge's supported
+methods, but `ferrum-contracts` publishes no machine-readable OpenAPI MCP-extension
+schema or validation fixtures. The parity regression covers the documented reference
+and method behavior; broader extension parity remains a cross-repository gap until Edge
+publishes fixtures.
 Fixed configs preserve live resource-level operator fields, and only matching
 spec-owned recorded proxy ids are rewritten. Agent descriptions render as text.
 The catalog's connection snippets use credential-header placeholders and a public
