@@ -1198,9 +1198,15 @@ export function runEdgeSecurityAdoptionContract(
       assert.deepEqual(await harness.store.settings.get(key), sealed);
     });
 
-    it('keeps a journal holding Edge v0.9.12 authority readable but never acts on it', async () => {
-      const published = await publish('routes');
-      const apiId = published.api.id;
+    /**
+     * Journal a conversion of `apiId` as a release paired with Edge v0.9.12 wrote it:
+     * unmarked, with v0.9.12 authority (spec bytes inline, no api_spec_contents, a
+     * token in the v0.9.12 MAC domain), optionally with an acknowledged operation.
+     */
+    async function writeLegacyConversionJournal(
+      apiId: string,
+      acknowledged = false,
+    ): Promise<Record<string, unknown>> {
       const key = `gateway_recovery:nexus:${apiId}`;
       const api = await harness.store.apis.findById(apiId);
       const spec = await harness.store.apiSpecs.findCurrentByApi(apiId);
@@ -1256,9 +1262,24 @@ export function runEdgeSecurityAdoptionContract(
         document: parseOpenApiSpec(spec.raw_spec).document,
         originalAuthority: legacy,
         attempt: null,
+        ...(acknowledged
+          ? {
+              mutations: [
+                { kind: 'replace', id: proxy.api_spec_id, original: legacy, acknowledged: true },
+              ],
+            }
+          : {}),
       };
       await writeRecoveryJournal(harness.store, harness.app.nexus.crypto, key, journal);
       await harness.store.apis.update(apiId, { gateway_state: 'repair_required' });
+      return journal;
+    }
+
+    it('keeps a journal holding Edge v0.9.12 authority readable but never acts on it', async () => {
+      const published = await publish('routes');
+      const apiId = published.api.id;
+      const key = `gateway_recovery:nexus:${apiId}`;
+      const journal = await writeLegacyConversionJournal(apiId);
       // Older journals stay readable for custody checks and inspection.
       assert.deepEqual(await readJournal(key), journal);
       const offset = harness.edge.requests.length;
@@ -1272,6 +1293,28 @@ export function runEdgeSecurityAdoptionContract(
       await assertDeleteRetainsCustody(apiId);
       assert.deepEqual(await readJournal(key), journal);
     });
+
+    for (const acknowledged of [false, true]) {
+      it(`completes a missed v0.9.12 journal by observation (acked=${String(acknowledged)})`, async () => {
+        const published = await publish('routes');
+        const apiId = published.api.id;
+        const key = `gateway_recovery:nexus:${apiId}`;
+        await writeLegacyConversionJournal(apiId, acknowledged);
+        // The live deployment already matches the catalog: nothing needs the
+        // journal's v0.9.12 authority, so the restore only observes and commits.
+        const state = gatewayState();
+        const offset = harness.edge.requests.length;
+        const restored = await harness.services.publishing.restoreGateway(actor, apiId);
+        assert.equal(restored.api.gateway_state, 'deployed');
+        assert.equal(restored.api.ferrum_proxy_id, published.api.ferrum_proxy_id);
+        assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
+        assert.deepEqual(gatewayState(), state, 'no deployment authority was exercised');
+        assert.deepEqual(await journalRows(key), []);
+        const completed = await completionRows(apiId);
+        assert.equal(completed.restore.length, 1);
+        assert.equal(completed.restore[0]!.details.rebuilt, false);
+      });
+    }
 
     it('retains an unacknowledged plain staging create without acquiring cleanup authority', async () => {
       const published = await publish('routes');
@@ -1463,9 +1506,12 @@ export function runEdgeSecurityAdoptionContract(
     }
 
     function refusePolicy(): void {
+      // A well-formed schema 2 control plane: never guaranteed, so a write is refused
+      // for its policy rather than for an unreadable document.
       harness.edge.setBackendEgressPolicy({
         ...publicEgressPolicy(),
         enforcement_scope: 'admission-only',
+        public_only_guaranteed: false,
       });
     }
 

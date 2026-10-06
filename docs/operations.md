@@ -464,9 +464,9 @@ This candidate pairs with Edge v0.9.13 only, and Edge v0.9.13 refuses every
 deployment token an earlier Edge issued (see the
 [Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.13/docs/upgrade_guide.md#upgrading-to-0913)).
 A conversion or restore that is still in flight across the upgrade cannot finish on
-its own: its journal holds authority the new gateway answers with `412`, and Nexus
-never refreshes it. Drain and settle them first, then upgrade both sides in one
-maintenance window:
+its own: its journal holds authority the new gateway would answer with `412`, so
+Nexus refuses to send it and never refreshes it. Drain and settle them first, then
+upgrade both sides in one maintenance window:
 
 1. **Stop new conversions.** Ask providers not to change `spec_enforcement` or
    restore gateways until the upgrade is done.
@@ -495,13 +495,16 @@ A journal that was missed in step 2 stays readable. If its recorded operations a
 all acknowledged and the live deployment already matches the catalog, a restore
 completes it by observation. Anything that would act on its v0.9.12 authority is
 refused before a request is sent (`details.kind: "legacy_deployment_authority"`), and
-an operation that was pending answers `412`; resolve either with
+an operation that was still pending is refused locally as unconfirmed ("A gateway
+deployment mutation is unconfirmed") and never sent again; resolve either with
 [the runbook](#resolving-an-unconfirmed-gateway-deployment-mutation).
 
 A namespace near Edge's conditional bound (64 MiB of canonical representation with
 spec bytes excluded, or 256 MiB of base64 spec content) answers `507` on the snapshot
 read and on conditional mutations after the upgrade, so enforcement conversions and
-restores that need deployment authority are refused there until it shrinks.
+restores that need deployment authority are refused there until it shrinks. Consumer
+verification reads answer `507` the same way, so credential and access changes for
+that namespace fail closed with `details.kind: "namespace_snapshot_too_large"`.
 
 **Rolling back** means rolling back both sides together, after settling journals
 again: tokens issued by Edge v0.9.13 do not verify on v0.9.12, and the earlier Nexus

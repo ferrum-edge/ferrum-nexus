@@ -1355,6 +1355,15 @@ export function createFerrumAdminClient(
       }
       return edgeError('The gateway deployment authority is unavailable', { status });
     }
+    // Edge v0.9.13 answers a bare 507 when the namespace exceeds its conditional
+    // snapshot bound. The verification read issued nothing; name the cause and
+    // keep failing closed.
+    if (status === 507 && /^\/consumers\/[^/]+\/verification$/.test(path)) {
+      return edgeError('The gateway namespace is too large for consumer verification', {
+        status,
+        kind: 'namespace_snapshot_too_large',
+      });
+    }
     if (credentialWrite && status === 412) {
       return conflict('The gateway consumer changed; read it again before retrying', {
         status,

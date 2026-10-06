@@ -65,14 +65,39 @@ describe('closed owner egress contract', () => {
   });
 
   it('refuses every Edge v0.9.12 (schema 1) policy as an unsupported schema', () => {
+    let schemaOne = 0;
     for (const kind of ['valid', 'invalid']) {
       const base = `fixtures/backend-egress-policy/v1/${kind}/`;
       for (const name of readdirSync(new URL(base, root))) {
         const bytes = readFileSync(new URL(base + name, root), 'utf8');
         const value = JSON.parse(bytes) as Record<string, unknown>;
+        if (value.schema_version !== 1) {
+          // The v1 set's "unknown" version is schema 2, which this pairing supports: it is
+          // asserted on the v2 path below, never silently skipped.
+          assert.equal(`${kind}/${name}`, 'invalid/unknown-version.json');
+          assert.equal(value.schema_version, 2, name);
+          const parsed = parseBackendEgressPolicy(value, String(value.namespace));
+          assert.deepEqual(parsed, value, name);
+          assert.equal(provesLocalPublicEgress(parsed!), false, name);
+          assert.equal(isUnsupportedEgressPolicySchema(value), false, name);
+          continue;
+        }
+        schemaOne += 1;
         assert.equal(parseBackendEgressPolicy(value, String(value.namespace)), null, name);
-        if (kind === 'valid') assert.equal(isUnsupportedEgressPolicySchema(value), true, name);
+        assert.equal(isUnsupportedEgressPolicySchema(value), true, name);
       }
+    }
+    assert.ok(schemaOne >= 12, 'every published schema 1 fixture is exercised');
+  });
+
+  it('refuses a genuinely unknown schema version as unsupported', () => {
+    for (const name of ['unknown-version.json', 'previous-version.json']) {
+      const path = `fixtures/backend-egress-policy/v2/invalid/${name}`;
+      const bytes = readFileSync(new URL(path, root), 'utf8');
+      const value = JSON.parse(bytes) as Record<string, unknown>;
+      assert.notEqual(value.schema_version, 2, name);
+      assert.equal(parseBackendEgressPolicy(value, String(value.namespace)), null, name);
+      assert.equal(isUnsupportedEgressPolicySchema(value), true, name);
     }
   });
 

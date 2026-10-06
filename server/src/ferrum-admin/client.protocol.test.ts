@@ -162,6 +162,18 @@ describe('Edge response contracts over HTTP sockets', () => {
         return true;
       });
     }
+    // Past Edge's conditional snapshot bound the read is a definite refusal.
+    Object.assign(reply, {
+      status: 507,
+      body: JSON.stringify({ error: 'verification-secret-canary' }),
+    });
+    await assert.rejects(client.consumers.verification('consumer-1'), (error: unknown) => {
+      assert.ok(isNexusError(error));
+      assert.equal(error.code, 'EDGE_ERROR');
+      assert.deepEqual(error.details, { status: 507, kind: 'namespace_snapshot_too_large' });
+      assert.ok(!JSON.stringify(error).includes('verification-secret-canary'));
+      return true;
+    });
     assert.ok(!JSON.stringify(logs).includes('verification-secret-canary'));
     assert.ok(!JSON.stringify(logs).includes('hidden-secret-canary'));
   });
