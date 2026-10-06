@@ -161,9 +161,23 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  store-contracts:
+  # One lane per pooled backend, each with its own 15-minute budget; the
+  # combined suite outgrew a single job. Every lane also runs SQLite.
+  store-contract-lanes:
+    name: store-contracts (${{ matrix.backend }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: postgres
+            postgres_url: postgres://postgres:nexus_test@127.0.0.1:5432/postgres
+          - backend: mysql
+            mysql_url: mysql://root:nexus_test@127.0.0.1:3306/mysql
+          - backend: mongodb
+            mongo_url: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
+            mongo_standalone_url: mongodb://127.0.0.1:27018/?directConnection=true
     services:
       postgres:
         image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
@@ -203,6 +217,7 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - name: Start MongoDB replica set
+        if: ${{ matrix.backend == 'mongodb' }}
         run: |
           docker run -d --name nexus-mongo -p 27017:27017 mongo:7@sha256:1f995ad6fdb93244a1addab1b58f934a0bc2f5643c38e02f5e9d7f0c7d227a7b --replSet rs0 --bind_ip_all
           for attempt in $(seq 1 60); do
@@ -219,17 +234,33 @@ jobs:
       - run: npm run build --workspace shared
       # Also the released-baseline upgrade fixture (issue #286) on every
       # backend; `npm test` in `checks` covers only its SQLite lane.
-      - name: Run all four store contracts
+      - name: Run the ${{ matrix.backend }} and SQLite store contracts
         working-directory: server
         env:
-          NEXUS_TEST_POSTGRES_URL: postgres://postgres:nexus_test@127.0.0.1:5432/postgres
-          NEXUS_TEST_MYSQL_URL: mysql://root:nexus_test@127.0.0.1:3306/mysql
-          NEXUS_TEST_MONGO_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
-          NEXUS_TEST_MONGO_STANDALONE_URL: mongodb://127.0.0.1:27018/?directConnection=true
+          NEXUS_TEST_POSTGRES_URL: ${{ matrix.postgres_url }}
+          NEXUS_TEST_MYSQL_URL: ${{ matrix.mysql_url }}
+          NEXUS_TEST_MONGO_URL: ${{ matrix.mongo_url }}
+          NEXUS_TEST_MONGO_STANDALONE_URL: ${{ matrix.mongo_standalone_url }}
         run: >-
           node --import tsx --test src/test/smoke.test.ts
           src/test/mysql-migration-recovery.test.ts src/test/mysql-user-transition.test.ts
           src/test/baseline-upgrade.test.ts
+
+  # The required check: every backend lane must pass.
+  store-contracts:
+    needs: store-contract-lanes
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every store-contract lane
+        env:
+          LANES_RESULT: ${{ needs.store-contract-lanes.result }}
+        run: |
+          if [ "$LANES_RESULT" != 'success' ]; then
+            echo "::error::Every store-contract lane must pass (result: ${LANES_RESULT:-missing})."
+            exit 1
+          fi
 
   docker:
     runs-on: ubuntu-latest

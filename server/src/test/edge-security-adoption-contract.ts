@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, afterEach, before, describe, it } from 'node:test';
+import { after, afterEach, before, describe, it as nodeIt } from 'node:test';
 
 import type { PublishApiResponse } from '@ferrum-nexus/shared';
 
@@ -23,6 +23,18 @@ import {
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, specWithServer, type TestApp } from './helpers.js';
 import { mockBasicPasswordHash, publicEgressPolicy } from './mock-ferrum-edge.js';
+
+/**
+ * Bounds every contract test. The slowest one takes about 22 seconds on a CI
+ * runner, so a lease or lock cycle across a pooled store's connections fails
+ * the test that hit it instead of stalling the whole store-contracts lane until
+ * the job is cancelled.
+ */
+const CONTRACT_TEST_TIMEOUT_MS = 120_000;
+
+function it(name: string, fn: () => Promise<void>): void {
+  void nodeIt(name, { timeout: CONTRACT_TEST_TIMEOUT_MS }, fn);
+}
 
 /**
  * A corrected revision that redefines the selected `GET /invoices` agent tool.
@@ -3174,6 +3186,46 @@ export function runEdgeSecurityAdoptionContract(
       assert.equal((await harness.store.apis.findById(published.api.id))?.agents, null);
       assert.ok(harness.edge.requests.slice(offset).every((request) => request.method === 'GET'));
     });
+
+    for (const deleteFirst of [false, true]) {
+      it(`settles a conversion racing a delete (delete first=${String(deleteFirst)})`, async () => {
+        // Both take the API restore lease and then the proxy lease. On the pooled
+        // stores a lease is a row the other connection waits out, so a reversed
+        // order, or a lease held across its own wait, would stall here; the
+        // per-test bound turns that into a failure.
+        const published = await publish('docs_only');
+        const apiId = published.api.id;
+        const proxyId = published.api.ferrum_proxy_id!;
+        const convert = (): Promise<unknown> =>
+          harness.services.publishing.update(actor, apiId, { spec_enforcement: 'routes' });
+        const remove = (): Promise<unknown> => harness.services.publishing.remove(actor, apiId);
+        let removing: Promise<unknown>;
+        let converting: Promise<unknown>;
+        if (deleteFirst) {
+          removing = remove();
+          converting = convert();
+        } else {
+          converting = convert();
+          removing = remove();
+        }
+        const [removed, converted] = await Promise.allSettled([removing, converting]);
+        assert.equal(
+          removed.status,
+          'fulfilled',
+          removed.status === 'rejected' ? String(removed.reason) : '',
+        );
+        if (converted.status === 'rejected') {
+          assert.ok(
+            isNexusError(converted.reason) && converted.reason.code === 'NOT_FOUND',
+            String(converted.reason),
+          );
+        }
+        assert.equal(await harness.store.apis.findById(apiId), null);
+        assert.equal(harness.edge.proxies.get(`nexus/${proxyId}`), undefined);
+        assert.equal(harness.edge.proxyServing(`/nexus/${published.api.slug}`), undefined);
+        assert.equal(await harness.store.settings.get(`gateway_recovery:nexus:${apiId}`), null);
+      });
+    }
 
     it('three consumer callers preserve data and refuse stale writes', async () => {
       const session = await harness.registerUser({ role: 'client' });
