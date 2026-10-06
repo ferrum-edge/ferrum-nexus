@@ -867,8 +867,11 @@ export type EdgeHealthStatus = 'ok' | 'degraded' | 'not_ready' | 'down';
  * {@link EdgeNamespaceRouting}.
  * `backend_egress_unverified` — sampled process metadata cannot establish the
  * configured upstream profile. This observation never authorizes a mutation.
+ * Reported to admins only.
+ * `unspecified` — what a caller below `admin` reads in place of
+ * `backend_egress_unverified`: the gateway's egress posture is not public.
  */
-export type EdgeHealthReason = 'namespace_unserved' | 'backend_egress_unverified';
+export type EdgeHealthReason = 'namespace_unserved' | 'backend_egress_unverified' | 'unspecified';
 
 /**
  * Which namespace the portal writes to and which one the gateway's data plane
@@ -931,11 +934,13 @@ export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
    * `public_only_guaranteed`. Nexus grants this guarantee to nothing else.
    * `false` for every control-plane/data-plane pairing (Nexus cannot yet attest
    * a remote data plane), any weaker or unreadable policy and an unreachable
-   * gateway. `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` does not change it: that
-   * opt-in accepts a weaker policy for writes without making it public-only.
-   * Observational only; it never authorizes a mutation.
+   * gateway. Neither `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` nor
+   * `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` changes it: each opt-out accepts a
+   * weaker policy for writes without making it public-only. `null` for a caller
+   * below `admin`, the same way {@link EdgeHealth.mode} is. Observational only;
+   * it never authorizes a mutation.
    */
-  public_egress_guaranteed: boolean;
+  public_egress_guaranteed: boolean | null;
   namespace: string;
   /** Namespace routability; `unserved` is what makes `status` `degraded`. */
   namespace_routing: EdgeNamespaceRouting;

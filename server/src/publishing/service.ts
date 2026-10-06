@@ -253,7 +253,12 @@ import {
   LIVE_CREDENTIAL_STATUSES,
   type CredentialsService,
 } from '../credentials/service.js';
-import { assertNamespaceServed, type FerrumAdminClient } from '../ferrum-admin/index.js';
+import {
+  assertNamespaceServed,
+  deploymentNotDispatched,
+  type BackendEgressAdmission,
+  type FerrumAdminClient,
+} from '../ferrum-admin/index.js';
 import {
   edgeTriggerFor,
   paletteGatewaySettings,
@@ -1437,6 +1442,42 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     }
   }
 
+  /**
+   * Completion trusts the stored journal, not the in-memory copy: it must still
+   * exist, name the same proxy and original authority, and be fully
+   * acknowledged. Read inside the completion transaction, as the conversion
+   * commit does.
+   */
+  async function assertStoredRecoveryComplete(
+    tx: NexusStore,
+    apiId: string,
+    expected: ConversionRecovery,
+  ): Promise<void> {
+    const stored = await readRecoveryJournal<ConversionRecovery>(
+      tx,
+      deps.crypto,
+      recoveryKey(apiId),
+    );
+    if (
+      !stored ||
+      stored.proxy.id !== expected.proxy.id ||
+      stored.originalAuthority?.namespace_etag !== expected.originalAuthority?.namespace_etag
+    ) {
+      throw conflict('The gateway recovery journal changed before its completion could commit');
+    }
+    assertRecoveryAcknowledged(stored);
+  }
+
+  /**
+   * A retained conversion journal owns the API's deployment. A plain restore
+   * must never build around it: only the recovery branch may act on it.
+   */
+  async function assertNoConversionJournal(tx: NexusStore, apiId: string): Promise<void> {
+    if (await tx.settings.get(recoveryKey(apiId))) {
+      throw conflict('This API has an incomplete gateway conversion; restore it again to recover');
+    }
+  }
+
   /** Authenticated custody is read-only admission, never a new operation or authority. */
   async function assertDeletionCustody(tx: NexusStore, api: ApiRecord): Promise<void> {
     const record = (value: unknown): value is Record<string, unknown> =>
@@ -1675,8 +1716,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     document?: Record<string, unknown>,
   ): Promise<void> {
     assertRecoveryAcknowledged(recovery);
+    if (kind === 'replace' && !document) throw conflict('A replacement specification is required');
+    // Every pre-send check runs before the pending entry is journaled: a
+    // request that was never sent must not be recorded as possibly settling.
+    await edge.deployments.prepare(kind, id, original);
+    const hadMutations = recovery.mutations !== undefined;
     const mutation = { kind, id, original, acknowledged: false };
-    (recovery.mutations ??= []).push(mutation);
+    recovery.mutations ??= [];
+    const mutations = recovery.mutations;
+    mutations.push(mutation);
     const persist = async (): Promise<void> => {
       if (await store.apis.findById(api.id)) {
         await saveConversionRecovery(api, recovery);
@@ -1696,11 +1744,25 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       );
     };
     await persist();
-    if (kind === 'remove') {
-      await edge.deployments.remove(id, original, subject);
-    } else {
-      if (!document) throw conflict('A replacement specification is required');
-      await edge.deployments.replace(id, document, original, subject);
+    try {
+      if (kind === 'remove') {
+        await edge.deployments.remove(id, original, subject);
+      } else if (document) {
+        await edge.deployments.replace(id, document, original, subject);
+      }
+    } catch (error) {
+      // A boundary re-check (an egress flap since `prepare`) refused before
+      // sending. Only then is the entry retracted, in a fenced transaction; if
+      // that write fails, the entry stays pending and recovery fails closed.
+      if (deploymentNotDispatched(error) && mutations[mutations.length - 1] === mutation) {
+        mutations.pop();
+        if (!hadMutations) delete recovery.mutations;
+        await persist().catch(() => {
+          recovery.mutations = mutations;
+          mutations.push(mutation);
+        });
+      }
+      throw error;
     }
     mutation.acknowledged = true;
     try {
@@ -3043,7 +3105,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // solved here because solving it needs a counter row the store does not
       // have and a lock the four adapters do not share.
       const persisted = await edge.serializePerKey(`publish-owner:${owner.id}`, async () => {
-        await edge.assertBackendEgress();
+        // The verdict that admitted this publish is recorded with it.
+        const egress = await edge.assertBackendEgress();
         // Before the first gateway write, so a refused publish costs nothing on
         // Edge and leaves nothing to roll back.
         await assertOwnerHasApiRoom(owner.id);
@@ -3224,6 +3287,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 upstream: `${upstream.scheme}://${upstream.host}:${upstream.port}`,
                 spec_paths: parsed.pathCount,
                 spec_operations: parsed.operationCount,
+                ...egress,
               },
               ip,
             );
@@ -3306,6 +3370,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     async update(actor, apiId, patch, ip = null): Promise<UpdateApiResponse> {
       const initial = await loadApi(apiId);
       assertCanAdminister(actor, initial);
+      // An enforcement conversion can leave a retained recovery journal behind
+      // a missing proxy. It takes the API restore key first, in the API-then-
+      // proxy order restore, delete and reconciliation use, so a restore can
+      // never read "no journal", wait on the proxy, and then build around one.
+      const holdsRestoreKey =
+        patch.spec_enforcement !== undefined && patch.spec_enforcement !== initial.spec_enforcement;
       // The read, gateway mutations, rollback, and catalog write are one
       // canonical proxy operation. Helpers inside must not reacquire the key.
       const apply = async (): Promise<UpdateApiResponse> => {
@@ -3319,10 +3389,19 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         } = binder;
         const api = await loadApi(apiId);
         assertCanAdminister(actor, api);
+        if (
+          !holdsRestoreKey &&
+          patch.spec_enforcement !== undefined &&
+          patch.spec_enforcement !== api.spec_enforcement
+        ) {
+          throw conflict('The API changed while this update was waiting; try again');
+        }
         // Conversion seals a temporary repair flag while holding this lease.
         // Wait for its completion before judging whether settings are writable.
         assertGatewaySettingsWritable(api, patch);
 
+        // The verdict that admitted a gateway-backed change is recorded with it.
+        let egress: BackendEgressAdmission | null = null;
         if (
           api.ferrum_proxy_id &&
           [
@@ -3338,7 +3417,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             'agents',
           ].some((key) => Object.hasOwn(patch, key))
         ) {
-          await edge.assertBackendEgress();
+          egress = await edge.assertBackendEgress();
         }
 
         const update: Partial<ApiRecord> = {};
@@ -4253,7 +4332,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   { id: actor.id, role: actor.role },
                   update.status === 'retired' ? AuditAction.API_RETIRE : AuditAction.API_UPDATE,
                   { type: 'api', id: api.id },
-                  { changed_fields: changed, ...details },
+                  { changed_fields: changed, ...details, ...egress },
                   ip,
                 );
               return row;
@@ -4454,7 +4533,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             : {}),
         };
       };
-      return initial.ferrum_proxy_id ? binder.withProxy(initial.ferrum_proxy_id, apply) : apply();
+      const proxied = (): Promise<UpdateApiResponse> =>
+        initial.ferrum_proxy_id ? binder.withProxy(initial.ferrum_proxy_id, apply) : apply();
+      return holdsRestoreKey ? edge.serializePerKey(apiRestoreLockKey(apiId), proxied) : proxied();
     },
 
     updateSpec(actor, apiId, specText, version, ip = null): Promise<PublishResult> {
@@ -4530,6 +4611,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         spec: ApiSpecRecord,
         proxyId: string,
         rebuilt: boolean,
+        egress: BackendEgressAdmission,
       ): Record<string, unknown> => ({
         slug: row.slug,
         listen_path: listenPathFor(namespace, row.slug),
@@ -4542,6 +4624,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // all, so only the stale flag was dropped. One row either way — the two
         // paths differ in what they did, not in whether they happened.
         rebuilt,
+        // The verdict that admitted the restore, never policy detail.
+        ...egress,
       });
 
       // Serialised per API so two missing-deployment restores cannot build
@@ -4556,7 +4640,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         if (await store.settings.get(`gateway_restore_cleanup:${namespace}:${api.id}`)) {
           throw conflict('A failed restore has unconfirmed deployment cleanup; retain its journal');
         }
-        await edge.assertBackendEgress();
+        const egress = await edge.assertBackendEgress();
 
         // What the restore redeploys. A provider may upload a corrected
         // document first — `updateSpec` keeps working on an undeployed API —
@@ -4579,7 +4663,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             if (!snapshot || latestSpec?.id !== current.id) {
               throw conflict('The API changed while gateway recovery was waiting');
             }
-            await edge.assertBackendEgress();
+            const recoveryEgress = await edge.assertBackendEgress();
             await store.transaction(
               async (tx) => {
                 await audit
@@ -4686,6 +4770,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   ) {
                     throw conflict('The API changed while its gateway recovery was running');
                   }
+                  await assertStoredRecoveryComplete(tx, api.id, snapshot);
                   const updated = await tx.apis.update(api.id, {
                     ferrum_proxy_id: snapshot.proxy.id,
                     gateway_state: 'deployed',
@@ -4710,7 +4795,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                       { id: actor.id, role: actor.role },
                       AuditAction.API_GATEWAY_RESTORE,
                       { type: 'api', id: api.id },
-                      restoreDetails(updated, current, snapshot.proxy.id, rebuilt),
+                      restoreDetails(updated, current, snapshot.proxy.id, rebuilt, recoveryEgress),
                       ip,
                     );
                   return updated;
@@ -4759,6 +4844,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             ) {
               throw conflict('The API changed while gateway validation was waiting');
             }
+            // Re-read under the proxy lease: a conversion that retained its
+            // journal while this restore waited owns the deployment now.
+            await assertNoConversionJournal(store, api.id);
             const live = await edge.proxies.get(recorded);
             if (!live) return null;
             if (!(await deploymentMatches(latest, current, live))) {
@@ -4784,6 +4872,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               ) {
                 throw conflict('The API changed during gateway validation');
               }
+              await assertNoConversionJournal(tx, api.id);
               const row = await tx.apis.update(api.id, { gateway_state: 'deployed' });
               if (!row) throw notFound('API', api.id);
               await audit
@@ -4792,7 +4881,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   { id: actor.id, role: actor.role },
                   AuditAction.API_GATEWAY_RESTORE,
                   { type: 'api', id: row.id },
-                  restoreDetails(row, current, recorded, false),
+                  restoreDetails(row, current, recorded, false, egress),
                   ip,
                 );
               return row;
@@ -4816,6 +4905,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               if (latest.ferrum_proxy_id !== recorded) {
                 throw conflict('The gateway reference changed');
               }
+              await assertNoConversionJournal(tx, api.id);
               await tx.apis.update(api.id, {
                 ferrum_proxy_id: null,
                 gateway_state: 'repair_required',
@@ -5114,6 +5204,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   { api_id: api.id },
                 );
               }
+              await assertNoConversionJournal(tx, api.id);
               const journal = await readRecoveryJournal<{ acknowledged: boolean }>(
                 tx,
                 deps.crypto,
@@ -5153,7 +5244,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   { id: actor.id, role: actor.role },
                   AuditAction.API_GATEWAY_RESTORE,
                   { type: 'api', id: updated.id },
-                  restoreDetails(updated, current, gatewayProxyId, true),
+                  restoreDetails(updated, current, gatewayProxyId, true, egress),
                   ip,
                 );
               return updated;
@@ -6419,11 +6510,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             !latest ||
             latest.ferrum_proxy_id !== proxyId ||
             !isDeepStrictEqual(deploymentShape(latest), recovery.shape) ||
-            (await tx.apiSpecs.findCurrentByApi(api.id))?.id !== originalSpec.id ||
-            !(await tx.settings.get(recoveryKey(api.id)))
+            (await tx.apiSpecs.findCurrentByApi(api.id))?.id !== originalSpec.id
           ) {
             throw conflict('The API changed before its conversion rollback could commit');
           }
+          await assertStoredRecoveryComplete(tx, api.id, recovery);
           await tx.apis.update(api.id, { gateway_state: 'deployed' });
           await tx.apiGatewayPlugins.replace(api.id, ownership.ids);
           await deleteRecoveryJournal(tx, deps.crypto, recoveryKey(api.id));

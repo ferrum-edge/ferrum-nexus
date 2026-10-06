@@ -5,6 +5,10 @@ const portal = 'http://nexus:8787';
 const gateway = 'http://ferrum-edge:8000';
 const control = 'http://10.203.0.10:9101';
 const password = 'correct-horse-battery-staple';
+// The negative control: Edge runs FERRUM_BACKEND_ALLOW_IPS=both and Nexus the
+// private opt-in, so the same rebinding MUST reach the canary. A harness that
+// cannot see that leak cannot vouch for the enforcing run either.
+const controlRun = process.env.FIXTURE_CONTROL_RUN === 'true';
 let cookie = '';
 let csrf = '';
 
@@ -55,6 +59,14 @@ const founder = await call(
 );
 assert.equal(founder.user.role, 'super_admin', 'fixture must start from an empty Nexus database');
 await call('POST', '/api/auth/login', { email: 'operator@fixture.test', password });
+// The verdict is admin-only detail. The enforcing run must start from a gateway
+// Nexus certifies; the control run from one it explicitly does not.
+const adminHealth = await call('GET', '/api/health');
+assert.equal(
+  adminHealth.edge.public_egress_guaranteed,
+  !controlRun,
+  'public_egress_guaranteed must match the fixture mode',
+);
 await call('PUT', '/api/admin/settings', { registration: { require_email_verification: false } });
 await call(
   'POST',
@@ -115,19 +127,40 @@ assert.equal(rebound.status, 200, 'controlled DNS switch must be acknowledged');
 await rebound.json();
 await delay(3_000); // Exceeds the one-second positive and stale DNS TTLs.
 let observedPrivateAnswer = false;
+let leaked = false;
 for (let attempt = 0; attempt < 20; attempt += 1) {
   const response = await traffic();
   const body = await response.text();
-  assert.ok(!body.includes('PRIVATE-CANARY'), 'gateway reached the private canary');
   const statsResponse = await fetch(control + '/stats', { signal: AbortSignal.timeout(5_000) });
   assert.equal(statsResponse.status, 200, 'controlled canary counters must remain readable');
   const stats = await statsResponse.json();
-  assert.equal(stats.privateRequests, 0, 'private canary must receive no request');
-  if (stats.edgePrivateAnswers > 0) {
-    assert.ok(response.status >= 400, 'fresh private resolution must refuse the connection');
-    observedPrivateAnswer = true;
+  if (controlRun) {
+    if (stats.privateRequests > 0 && body.includes('PRIVATE-CANARY')) {
+      leaked = true;
+      break;
+    }
+  } else {
+    assert.ok(!body.includes('PRIVATE-CANARY'), 'gateway reached the private canary');
+    assert.equal(stats.privateRequests, 0, 'private canary must receive no request');
+    if (stats.edgePrivateAnswers > 0) {
+      // Edge's coarse refusal for a pre-dial egress-policy decision. DNS has
+      // answered (counted above) and the canary saw nothing, so this is the
+      // egress refusal, not a lookup or connect failure that happened to coincide.
+      assert.equal(response.status, 502, 'egress refusal must answer 502');
+      assert.equal(
+        response.headers.get('x-gateway-error'),
+        'connection_failure',
+        'egress refusal must carry the gateway connection_failure token',
+      );
+      observedPrivateAnswer = true;
+    }
   }
   await delay(500);
 }
-assert.ok(observedPrivateAnswer, 'Edge must refresh DNS to the controlled private answer');
-console.log('Packaged singleton public-only DNS-rebinding fixture passed');
+if (controlRun) {
+  assert.ok(leaked, 'control run: the non-enforcing gateway must reach the private canary');
+  console.log('Packaged public-only DNS-rebinding negative control observed the leak');
+} else {
+  assert.ok(observedPrivateAnswer, 'Edge must refresh DNS to the controlled private answer');
+  console.log('Packaged singleton public-only DNS-rebinding fixture passed');
+}

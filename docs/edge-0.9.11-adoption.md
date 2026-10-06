@@ -2,10 +2,11 @@
 
 Nexus PR #522 remains DRAFT. The filename preserves existing links from the
 v0.9.11 candidate. The current candidate selects published v0.9.12 artifacts;
-it does not finalize a Nexus release or close GHSA-93rq-89vr-38pc Part B. The
-public-only guarantee is granted only to a local data plane; the CP/DP part of
-Part B stays open until Nexus adopts Edge data-plane attestation (see the
+it does not finalize a Nexus release. The public-only guarantee is granted only to
+a local data plane (see the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)).
+Nexus reads egress policy schema 1 only, so the supported pairing ends at Edge
+`v0.9.12` until schema 2 is adopted.
 
 ## Published identities
 
@@ -53,8 +54,7 @@ and integrity checks establish no hosted test or acceptance result.
 
 The [controlled public-only fixture](../e2e/public-only/README.md) additionally
 requires a packaged Nexus digest and hosted DNS-rebinding/zero-private-canary
-qualification. It covers the local data-plane profile only; internal deployment API
-adoption does not close advisory Part B for CP/DP pairings. Private-opt-in
+qualification. It covers the local data-plane profile only, and private-opt-in
 acceptance does not qualify public-only support.
 
 Nexus version markers remain unchanged. The owner-approved unreleased Node range is

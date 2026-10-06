@@ -62,8 +62,11 @@ import {
 } from './namespace.js';
 import { parsePrometheusText, type PrometheusSample } from './prometheus.js';
 import {
+  admitBackendEgress,
+  isUnsupportedEgressPolicySchema,
   parseBackendEgressPolicy,
   provesLocalPublicEgress,
+  type BackendEgressAdmission,
   type BackendEgressPolicy,
 } from './egress-policy.js';
 import type {
@@ -202,11 +205,26 @@ export interface FerrumAdminClient {
   probe(timeoutMs?: number): Promise<EdgeProbe>;
   /** Fresh authenticated process policy; never backed by health or startup caches. */
   backendEgressPolicy(signal?: AbortSignal): Promise<BackendEgressPolicy>;
-  /** Admission before side effects; each backend write repeats it at the boundary. */
-  assertBackendEgress(): Promise<void>;
+  /**
+   * Admission before side effects; each backend write repeats it at the
+   * boundary. Returns the bounded verdict the caller records in its audit row.
+   */
+  assertBackendEgress(): Promise<BackendEgressAdmission>;
 
   readonly deployments: {
     snapshot(subject?: string): Promise<EdgeDeploymentSnapshot>;
+    /**
+     * Every check `remove`/`replace` makes before sending anything: evidence,
+     * target ownership and fresh egress admission. A caller journals a pending
+     * mutation only after this passes, so a refusal here never leaves an
+     * unconfirmed entry behind. `remove`/`replace` repeat it at the boundary;
+     * a refusal there is marked {@link deploymentNotDispatched}.
+     */
+    prepare(
+      kind: 'remove' | 'replace',
+      id: string,
+      original: EdgeDeploymentSnapshot,
+    ): Promise<void>;
     remove(id: string, original: EdgeDeploymentSnapshot, subject?: string): Promise<void>;
     replace(
       id: string,
@@ -959,6 +977,27 @@ function isUnavailable(error: unknown): boolean {
   return error.message.includes('fetch failed');
 }
 
+/** Deployment-mutation errors raised before the request was sent. */
+const NOT_DISPATCHED = new WeakSet<object>();
+
+/**
+ * True when a deployment `remove`/`replace` refused before sending any request,
+ * so the gateway cannot have applied it. Transport, `409`/`412`, `503` and
+ * acknowledgement failures are never marked: those may still settle.
+ */
+export function deploymentNotDispatched(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && NOT_DISPATCHED.has(error);
+}
+
+/** Protocol-error reason for a policy schema newer than this portal reads. */
+const UNSUPPORTED_SCHEMA_REASON = 'unsupported_egress_policy_schema';
+
+function isUnsupportedSchemaRefusal(error: unknown): boolean {
+  if (!(error instanceof NexusError)) return false;
+  const details = error.details as { reason?: unknown } | undefined;
+  return details?.reason === UNSUPPORTED_SCHEMA_REASON;
+}
+
 /** Injectable dependencies of {@link createFerrumAdminClient}. */
 export interface FerrumAdminClientDeps {
   /** Admin JWT minter. Defaults to one derived from `config`. */
@@ -975,6 +1014,11 @@ export interface FerrumAdminClientDeps {
   leases?: LeaseRepo;
   /** Derived only from NEXUS_ALLOW_PRIVATE_UPSTREAMS; defaults to the public profile. */
   allowPrivateUpstreams?: boolean;
+  /**
+   * Derived only from NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS. Waives the gateway's
+   * public-only attestation and nothing else; defaults to requiring it.
+   */
+  allowUnattestedEdgeEgress?: boolean;
 }
 
 /** Build the Ferrum Edge Admin API client. */
@@ -1373,28 +1417,33 @@ export function createFerrumAdminClient(
       signal,
       maxResponseBytes: 4_096,
     });
+    // A newer schema is still refused, under its own reason: the operator
+    // needs to tell a version ceiling from a malformed answer.
+    if (isUnsupportedEgressPolicySchema(value)) {
+      throw protocolError(200, UNSUPPORTED_SCHEMA_REASON, 'GET', '/backend-egress-policy');
+    }
     const policy = parseBackendEgressPolicy(value, namespace);
     if (!policy) throw protocolError(200, 'invalid_egress_policy', 'GET', '/backend-egress-policy');
     return policy;
   }
 
-  async function assertBackendEgress(): Promise<void> {
+  async function assertBackendEgress(): Promise<BackendEgressAdmission> {
     const policy = await backendEgressPolicy();
-    // Private opt-in still delegates reachability to Edge. Recognized weaker
-    // process policies are accepted, but are never described as public-only.
-    if (!deps.allowPrivateUpstreams && !provesLocalPublicEgress(policy)) {
+    // Either opt-out admits a recognized weaker process policy, but neither
+    // describes it as public-only, and neither skips the parse above.
+    const admission = admitBackendEgress(policy, deps);
+    if (admission === null) {
       throw edgeError('The gateway cannot establish the required local public egress policy', {
         kind: 'backend_egress_unverified',
       });
     }
+    return admission;
   }
 
-  async function deploymentMutation(
+  async function prepareDeploymentMutation(
     method: 'PUT' | 'DELETE',
     id: string,
     original: EdgeDeploymentSnapshot,
-    subject?: string,
-    document?: EdgeApiSpecDocument,
   ): Promise<void> {
     assertDeploymentEvidence(original, namespace);
     if (!isDeploymentTag(original.namespace_etag)) {
@@ -1410,6 +1459,22 @@ export function createFerrumAdminClient(
       deploymentTarget(original, specs[0]!.proxy_id);
     }
     await assertBackendEgress();
+  }
+
+  async function deploymentMutation(
+    method: 'PUT' | 'DELETE',
+    id: string,
+    original: EdgeDeploymentSnapshot,
+    subject?: string,
+    document?: EdgeApiSpecDocument,
+  ): Promise<void> {
+    try {
+      await prepareDeploymentMutation(method, id, original);
+    } catch (error) {
+      // Nothing was sent: the caller may retract its pending journal entry.
+      if (typeof error === 'object' && error !== null) NOT_DISPATCHED.add(error);
+      throw error;
+    }
     let headers: Record<string, string | string[] | undefined> = {};
     const acknowledgement = await callRequired<EdgeDeploymentAcknowledgement>(
       method,
@@ -1649,6 +1714,9 @@ export function createFerrumAdminClient(
         assertDeploymentEvidence(snapshot, namespace);
         return snapshot;
       },
+      async prepare(kind, id, original): Promise<void> {
+        await prepareDeploymentMutation(kind === 'remove' ? 'DELETE' : 'PUT', id, original);
+      },
       async remove(id, original, subject): Promise<void> {
         await deploymentMutation('DELETE', id, original, subject);
       },
@@ -1683,14 +1751,16 @@ export function createFerrumAdminClient(
         const health = await callRequired<EdgeHealth>('GET', '/health', { signal });
         let backendEgressVerified = false;
         let publicEgressGuaranteed = false;
+        let backendEgressSchemaUnsupported = false;
         try {
           const policy = await backendEgressPolicy(signal);
-          // The guarantee is the gateway's alone: the private opt-in accepts a
-          // weaker policy for writes, but never turns it into public-only egress.
+          // The guarantee is the gateway's alone: an opt-out accepts a weaker
+          // policy for writes, but never turns it into public-only egress.
           publicEgressGuaranteed = provesLocalPublicEgress(policy);
-          backendEgressVerified = deps.allowPrivateUpstreams === true || publicEgressGuaranteed;
-        } catch {
+          backendEgressVerified = admitBackendEgress(policy, deps) !== null;
+        } catch (error) {
           // Observational only. No mutation ever consults this sampled result.
+          backendEgressSchemaUnsupported = isUnsupportedSchemaRefusal(error);
         }
         let version: string | null = null;
         try {
@@ -1722,6 +1792,7 @@ export function createFerrumAdminClient(
           namespace: serving,
           backendEgressVerified,
           publicEgressGuaranteed,
+          backendEgressSchemaUnsupported,
         };
       } catch (error) {
         return {
@@ -1736,6 +1807,7 @@ export function createFerrumAdminClient(
           namespace: null,
           backendEgressVerified: false,
           publicEgressGuaranteed: false,
+          backendEgressSchemaUnsupported: false,
         };
       }
     },

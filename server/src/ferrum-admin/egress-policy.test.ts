@@ -2,9 +2,16 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
-import { buildTestApp } from '../test/helpers.js';
+import type { ApiErrorBody, PublishApiResponse } from '@ferrum-nexus/shared';
+
+import { buildTestApp, SAMPLE_SPEC_YAML } from '../test/helpers.js';
 import { publicEgressPolicy } from '../test/mock-ferrum-edge.js';
-import { parseBackendEgressPolicy, provesLocalPublicEgress } from './egress-policy.js';
+import {
+  admitBackendEgress,
+  isUnsupportedEgressPolicySchema,
+  parseBackendEgressPolicy,
+  provesLocalPublicEgress,
+} from './egress-policy.js';
 
 describe('closed owner egress contract', () => {
   it('preserves every field of the published canonical fixtures and rejects all invalid cases', () => {
@@ -74,6 +81,47 @@ describe('closed owner egress contract', () => {
     for (const value of [null, [], 'public', 1]) {
       assert.equal(parseBackendEgressPolicy(value, 'nexus'), null);
     }
+  });
+
+  it('tells a newer schema apart from a malformed policy, and refuses both', () => {
+    const newer = { ...publicEgressPolicy(), schema_version: 2 };
+    assert.equal(parseBackendEgressPolicy(newer, 'nexus'), null);
+    assert.equal(isUnsupportedEgressPolicySchema(newer), true);
+    for (const value of [
+      publicEgressPolicy(),
+      { ...publicEgressPolicy(), schema_version: '2' },
+      { ...publicEgressPolicy(), schema_version: 1.5 },
+      null,
+      [],
+    ]) {
+      assert.equal(isUnsupportedEgressPolicySchema(value), false);
+    }
+  });
+
+  it('keeps the two opt-outs independent of each other and of the guarantee', () => {
+    const local = parseBackendEgressPolicy(publicEgressPolicy(), 'nexus')!;
+    const controlPlane = parseBackendEgressPolicy(
+      { ...publicEgressPolicy(), enforcement_scope: 'admission-only' },
+      'nexus',
+    )!;
+    const guaranteed = {
+      egress_profile: 'public-guaranteed',
+      enforcement_scope: 'local-data-plane',
+    };
+    assert.deepEqual(admitBackendEgress(local, {}), guaranteed);
+    assert.deepEqual(
+      admitBackendEgress(local, { allowPrivateUpstreams: true, allowUnattestedEdgeEgress: true }),
+      guaranteed,
+    );
+    assert.equal(admitBackendEgress(controlPlane, {}), null);
+    assert.deepEqual(admitBackendEgress(controlPlane, { allowUnattestedEdgeEgress: true }), {
+      egress_profile: 'unattested-edge-opt-in',
+      enforcement_scope: 'admission-only',
+    });
+    assert.deepEqual(admitBackendEgress(controlPlane, { allowPrivateUpstreams: true }), {
+      egress_profile: 'private-upstreams-opt-in',
+      enforcement_scope: 'admission-only',
+    });
   });
 
   it('recognizes modes and requires local serving without allow overlays', () => {
@@ -225,5 +273,79 @@ describe('closed owner egress contract', () => {
     await harness.edgeClient.assertBackendEgress();
     harness.edge.setBackendEgressPolicy(null);
     await assert.rejects(harness.edgeClient.assertBackendEgress());
+  });
+
+  it('unattested opt-in waives the attestation but keeps upstream screening', async (t) => {
+    const logLines: string[] = [];
+    const harness = await buildTestApp({
+      env: { NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: 'true' },
+      deps: {
+        logger: { level: 'warn', stream: { write: (line: string) => logLines.push(line) } },
+      },
+    });
+    t.after(() => harness.close());
+    assert.ok(logLines.some((line) => line.includes('NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true')));
+    assert.ok(!logLines.some((line) => line.includes('NEXUS_ALLOW_PRIVATE_UPSTREAMS=true')));
+    harness.edge.setBackendEgressPolicy({
+      ...publicEgressPolicy(),
+      enforcement_scope: 'admission-only',
+    });
+    await harness.registerUser();
+    const provider = await harness.registerUser({ role: 'provider' });
+    const payload = (slug: string): Record<string, unknown> => ({
+      name: `API ${slug}`,
+      slug,
+      version: '1.0.0',
+      spec: SAMPLE_SPEC_YAML,
+      auth_plugin: 'key_auth',
+      requestable: true,
+      visibility: 'public',
+    });
+
+    // Nexus's own screening still refuses a private upstream.
+    const refused = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: { ...payload('unattested-ssrf'), upstream_url: 'http://169.254.169.254/latest' },
+    });
+    assert.equal(refused.statusCode, 400, refused.body);
+    const error = refused.json<ApiErrorBody>().error;
+    assert.equal(error.code, 'SPEC_INVALID');
+    assert.equal((error.details as { reason?: string }).reason, 'private_upstream');
+    assert.equal(harness.edge.proxies.size, 0, 'nothing reached the gateway');
+
+    // A screened public upstream publishes through the unattested pairing, and
+    // the audit row records the profile that admitted it.
+    const published = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: payload('unattested'),
+    });
+    assert.equal(published.statusCode, 201, published.body);
+    const apiId = published.json<PublishApiResponse>().api.id;
+    const row = (await harness.auditRows('api.publish')).find((entry) => entry.target_id === apiId);
+    assert.equal(row?.details.egress_profile, 'unattested-edge-opt-in');
+    assert.equal(row?.details.enforcement_scope, 'admission-only');
+  });
+
+  it('warns at startup for each opt-out that is set, and only for those', async (t) => {
+    for (const [env, expected] of [
+      [{}, []],
+      [{ NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'true' }, ['NEXUS_ALLOW_PRIVATE_UPSTREAMS=true']],
+      [{ NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: 'true' }, ['NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true']],
+    ] as const) {
+      const logLines: string[] = [];
+      const harness = await buildTestApp({
+        env,
+        deps: {
+          logger: { level: 'warn', stream: { write: (line: string) => logLines.push(line) } },
+        },
+      });
+      t.after(() => harness.close());
+      const warned = logLines
+        .filter((line) => line.includes('BACKEND EGRESS NOT GUARANTEED'))
+        .map((line) => /NEXUS_ALLOW_[A-Z_]+=true/.exec(line)?.[0]);
+      assert.deepEqual(warned, expected);
+    }
   });
 });

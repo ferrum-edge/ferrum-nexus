@@ -185,19 +185,25 @@ function presentEdge(
       : routing.unserved || result.backendEgressVerified !== true
         ? 'degraded'
         : 'ok';
+  // The egress verdict describes the gateway's topology and posture, which an
+  // anonymous caller is not told: it reads the generic `unspecified` instead.
   const reason: EdgeHealthReason | null =
     status !== 'degraded'
       ? null
       : routing.unserved
         ? NAMESPACE_UNSERVED_REASON
-        : 'backend_egress_unverified';
+        : detailAllowed
+          ? 'backend_egress_unverified'
+          : 'unspecified';
   return {
     status,
     reason,
     latency_ms: result.latencyMs,
     error:
-      reason === 'backend_egress_unverified' && detailAllowed
-        ? 'Required backend egress policy could not be verified; check the configured pairing'
+      reason === 'backend_egress_unverified'
+        ? result.backendEgressSchemaUnsupported === true
+          ? 'The gateway publishes a backend egress policy schema this portal does not read; pair it with Ferrum Edge v0.9.12 or earlier'
+          : 'Required backend egress policy could not be verified; check the configured pairing'
         : result.error === null
           ? null
           : detailAllowed
@@ -210,7 +216,7 @@ function presentEdge(
     mode: detailAllowed ? result.mode : null,
     admin_writes_enabled: detailAllowed ? result.adminWritesEnabled : null,
     edge_version: result.version,
-    public_egress_guaranteed: result.publicEgressGuaranteed === true,
+    public_egress_guaranteed: detailAllowed ? result.publicEgressGuaranteed === true : null,
     namespace: routing.configured,
     // `unserved` and the reason above are the monitor's signal and stay
     // public; the gateway's *own* namespace and serving scope are deployment

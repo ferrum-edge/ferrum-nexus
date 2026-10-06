@@ -17,8 +17,7 @@ encrypted journal and attempted identity without fresh-token retry or unconditio
 cleanup. Large journals preserve complete evidence in authenticated encrypted chunks
 committed atomically with their manifest. This DNS fixture does not qualify conversion
 custody, native-store boundaries or every recovery interleaving; those require their
-own exact-head hosted gates. Advisory Part B remains open for CP/DP pairings until
-Nexus adopts Edge data-plane attestation.
+own exact-head hosted gates.
 
 This stack is separate from the private-opt-in acceptance stack. It admits
 `rebind.fixture.test` while DNS returns `11.203.0.10`, proves real authenticated
@@ -49,6 +48,25 @@ docker compose -f e2e/public-only/docker-compose.yml run --build --rm probe
 docker compose -f e2e/public-only/docker-compose.yml logs --no-color
 docker compose -f e2e/public-only/docker-compose.yml down -v
 ```
+
+The probe first asserts, as the founding admin, that health reports
+`public_egress_guaranteed: true`. After the rebind it requires Edge's coarse egress
+refusal, HTTP `502` with `X-Gateway-Error: connection_failure`, while the controlled
+DNS server has counted a private answer delivered to Edge and the canary has counted
+nothing.
+
+**Negative control.** Run the same stack once more, on a fresh project and volume,
+with the enforcement turned off. The probe then requires the private canary to
+receive the rebound request, proving the harness detects a leak:
+
+```sh
+export FIXTURE_EDGE_ALLOW_IPS=both
+export FIXTURE_NEXUS_ALLOW_PRIVATE_UPSTREAMS=true
+export FIXTURE_CONTROL_RUN=true
+```
+
+then repeat the commands above. A control run that does not observe the leak fails,
+and so does an enforcing run that observes one.
 
 Keep logs as hosted artifacts; do not print session cookies or show-once credentials.
 A missing capability is a failure, never a skip or mocked production pass. Successful

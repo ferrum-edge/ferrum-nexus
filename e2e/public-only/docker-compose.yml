@@ -31,7 +31,8 @@ services:
       FERRUM_ADMIN_JWT_SECRET: ${FERRUM_ADMIN_JWT_SECRET:?set a throwaway secret}
       FERRUM_ADMIN_BIND_ADDRESS: 0.0.0.0
       FERRUM_ALLOW_INSECURE_ADMIN_HTTP: 'true'
-      FERRUM_BACKEND_ALLOW_IPS: public
+      # `both` only for the negative control run; see README.md.
+      FERRUM_BACKEND_ALLOW_IPS: ${FIXTURE_EDGE_ALLOW_IPS:-public}
       FERRUM_BACKEND_BLOCK_DANGEROUS_RANGES: 'true'
       FERRUM_DNS_RESOLVER_ADDRESS: '10.203.0.10:53'
       FERRUM_DNS_MIN_TTL_SECONDS: '1'
@@ -62,7 +63,7 @@ services:
       NEXUS_DB_DRIVER: sqlite
       NEXUS_SQLITE_PATH: /app/data/nexus.sqlite
       NEXUS_RATE_LIMIT_ENABLED: 'false'
-      NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'false'
+      NEXUS_ALLOW_PRIVATE_UPSTREAMS: ${FIXTURE_NEXUS_ALLOW_PRIVATE_UPSTREAMS:-false}
       FERRUM_ADMIN_URL: http://ferrum-edge:9000
       FERRUM_ADMIN_JWT_SECRET: ${FERRUM_ADMIN_JWT_SECRET:?set a throwaway secret}
       FERRUM_ADMIN_ALLOW_INSECURE_HTTP: 'true'
@@ -78,6 +79,7 @@ services:
     command: ['node', 'probe.mjs']
     environment:
       NEXUS_BOOTSTRAP_TOKEN: ${NEXUS_BOOTSTRAP_TOKEN:?set a throwaway secret}
+      FIXTURE_CONTROL_RUN: ${FIXTURE_CONTROL_RUN:-false}
     networks: [private]
     depends_on:
       nexus:

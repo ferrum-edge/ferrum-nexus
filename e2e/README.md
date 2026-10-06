@@ -139,7 +139,7 @@ suite. These are hosted CI gates; adding cases does not claim they have passed.
 ## Draft public-only pairing qualification
 
 The existing stack deliberately sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` and keeps
-its private-service acceptance suite. It cannot prove Part B DNS-rebinding enforcement.
+its private-service acceptance suite. It cannot prove DNS-rebinding enforcement.
 The separate [public-only fixture](public-only/README.md) uses controlled isolated
 DNS and canaries, with no unrelated public-service traffic. It remains unqualified
 pending a packaged Nexus digest, hosted qualification and an explicit supported-profile

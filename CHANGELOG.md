@@ -8,7 +8,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
-- **Draft Edge security adoption proposal** (GHSA-93rq-89vr-38pc Part B): fresh,
+- **Draft Edge security adoption proposal**: fresh,
   closed namespace-matched egress admission on all proxy/spec write boundaries,
   preflight before destructive/staging/ACL effects, fail-closed compensation with
   truthful `repair_required` state with encrypted owned-resource recovery records,
@@ -25,15 +25,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   published Edge v0.9.12 and contracts-edge-0.9.12; Nexus version markers remain
   unchanged. See [limitations](docs/security.md#1-threat-model).
 
-- **Public-only egress topology decision** (GHSA-93rq-89vr-38pc Part B): Nexus
-  grants the verified public-only guarantee only when Edge reports
-  `public_only_guaranteed=true` with `enforcement_scope=local-data-plane`, and
-  `GET /api/health/edge` reports it as `edge.public_egress_guaranteed`. A control
-  plane with remote data planes reads not guaranteed (health `degraded` in the
-  public profile), and its backend writes keep requiring the explicit
-  `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` opt-out, which never reports public-only.
-  The CP/DP part of the advisory stays open until Nexus adopts Edge data-plane
-  egress attestation. See the
+- **Public-only egress topology decision**: Nexus grants the verified public-only
+  guarantee only when Edge reports `public_only_guaranteed=true` with
+  `enforcement_scope=local-data-plane`, and `GET /api/health/edge` reports it to
+  admins as `edge.public_egress_guaranteed` (`null` for everyone else, whose
+  degraded reason is the generic `unspecified`). A control plane with remote data
+  planes reads not guaranteed (health `degraded` in the public profile). Its backend
+  writes require the new `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`, which waives
+  only the gateway attestation and keeps Nexus's own upstream screening;
+  `NEXUS_ALLOW_PRIVATE_UPSTREAMS` keeps its existing meaning. Neither opt-out
+  reports public-only, startup warns while either is set, and publish, update and
+  restore audit rows record `egress_profile` and `enforcement_scope`. Egress policy
+  schema 2 (Edge `v0.9.13` and later) is refused under its own
+  `unsupported_egress_policy_schema` reason. See the
   [topology decision](docs/operations.md#backend-egress-admission-and-the-public-only-guarantee).
 
 - **Draft conversion recovery hardening** (PR #522): encrypted baseline, repair
@@ -47,7 +51,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   writes retain journals and block replay without refreshing tokens. Credential teardown
   removes Nexus-supported keyauth/Basic/JWT state and retains custom/mTLS state.
   Native concurrent Admin, uncertain-acknowledgement, original replay and transactional
-  fault controls remain strict and require exact-head hosted qualification. See the
+  fault controls remain strict and require exact-head hosted qualification. An
+  enforcement conversion takes the API restore lease before the proxy lease, and every
+  restore commit re-checks for a retained conversion journal, so a concurrent restore
+  cannot build around one. Pre-send refusals are checked before a pending operation is
+  journaled, restore and rollback completion re-read the stored journal, and an
+  [operator runbook](docs/operations.md#resolving-an-unconfirmed-gateway-deployment-mutation)
+  covers unconfirmed mutations. See the
   [released protocol and replay limits](docs/edge-conversion-recovery-blocker.md).
 
 - **Published Edge v0.9.12 candidate adoption** (PR #522): pin immutable source
@@ -57,8 +67,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `31f0a21d707795be293d15837c2f77c3d84219d8`. Adopt exact-byte deployment
   snapshot/acknowledgement schemas and meaningful valid/invalid fixtures alongside
   refreshed vocabularies and egress assets. The separate manifest pin and unreleased
-  Alloy flags are preserved. The owner API release dependency is complete; the
-  CP/DP part of advisory Part B remains open pending Edge data-plane attestation.
+  Alloy flags are preserved. The owner API release dependency is complete.
   No Nexus release or migration release marker is changed.
   See [actual publication facts](docs/edge-0.9.11-adoption.md).
 

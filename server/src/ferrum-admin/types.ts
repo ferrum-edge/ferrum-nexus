@@ -656,6 +656,11 @@ export interface EdgeProbe {
    */
   publicEgressGuaranteed?: boolean;
   /**
+   * Whether the sampled policy named a schema version this portal does not
+   * read (Edge v0.9.13 and later publish schema 2). Admin diagnostic only.
+   */
+  backendEgressSchemaUnsupported?: boolean;
+  /**
    * Whether the gateway answered at all. A gateway that answered `503` because
    * it is `starting`/`draining`/`unavailable` is **reachable** — read `ready`.
    */
