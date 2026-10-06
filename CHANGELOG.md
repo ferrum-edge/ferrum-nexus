@@ -37,27 +37,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 - **jsdom 30.1.2 / Undici 8.11.2 use the approved Node profile** (Refs #449).
   The current unreleased supported range is `^22.22.2 || ^24.15.0 || >=26.0.0`,
-  with owner approval, exact minima and current majors in hosted CI and aligned
-  workspace declarations. Owned Admin, OIDC and CAPTCHA
-  agents explicitly retain HTTP/1.1. New real-network regressions cover TLS
-  negotiation/reset recovery, no mutation replay, JWT/namespace delivery,
+  with exact minima and aligned workspace declarations. Owned Admin, OIDC and
+  CAPTCHA agents explicitly retain HTTP/1.1. New real-network regressions cover
+  TLS negotiation/reset recovery, no mutation replay, JWT/namespace delivery,
   confidential OIDC exchange and CAPTCHA form/redirect behavior. Notification
   controls name their visible title and action and describe their body/time,
   retaining accessible-role assertions under jsdom 30. The existing Node image
   digest already contains 22.23.3. Node 22 remains supported; older Node 22/24
   patches and Node 23/25 are excluded. Published releases retain their historical
-  Node 22.14+ profile until a new release ships. Both locks were originally
-  imported byte-for-byte from verified hosted artifact
-  `11308824128`, produced by run `37217928511`, attempt 1, from source
-  `15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`; the root lock is unchanged. The current e2e
-  lock incorporates qualified main PR #523's `@types/node` 22.20.4 to 22.20.5 patch while
-  preserving the approved engine range. Prior head `059b428` passed all 15 hosted checks after
-  integrating qualified main PRs #519 and #523 and completed full root and fresh independent
-  review. Its hosted producer artifact `11336281445` verified the current locks with an
-  empty diff. This documentation adoption head requires fresh hosted qualification,
-  full root and independent review. See
-  [candidate and rollback notes](docs/dependency-majors-449-higher-floor-draft.md) for
-  historical producer provenance and current hashes in the main integration section.
+  Node 22.14+ profile until a new release ships.
 
 - **Node 22.14-compatible dependency majors are migrated** (Refs #449).
   All four TypeScript manifests use 7.0.2; the transactional audit scan uses
@@ -131,12 +119,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   document keeps serving, and any other `PATCH` (visibility, status, metadata)
   still succeeds; turn its agents off (`agents: null`) to revise it again.
 - **The dependency-lock producer no longer hard-codes jsdom and Undici** (Refs #525).
-  It checked their exact versions and integrity hashes, so the next reviewed bump
-  would have failed it. It now requires both packages, a registry `resolved` URL and
-  sha512 integrity for every copy, and `engines` (checked with npm's own semver) that
-  admit every Node version the manifests support. While no manifest moves a jsdom
-  or Undici spec, every copy's version, `resolved` URL and integrity must still equal
-  the committed lock's, so a re-resolution forced by another bump cannot move them.
+  It checks that every copy matches its declaring semver range, resolves from the
+  npm registry with sha512 integrity, and declares `engines` (checked with npm's
+  own semver) that admit every Node version supported by the manifests. If no
+  manifest changes a jsdom or Undici range, re-resolution cannot move those copies
+  from the committed lock.
 
 - **A disabled grantee no longer blocks a provider's agent-enabled API** (Refs #519).
   Every spec build enrolled each all-tools grantee in the MCP-all group and refused

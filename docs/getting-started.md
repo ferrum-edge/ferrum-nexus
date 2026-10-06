@@ -39,12 +39,9 @@ without the web UI. The matching UI steps are noted as you go.
 
 No database server is needed: Nexus defaults to SQLite.
 
-The Node prerequisite above describes the retained released support profile. This
-unreleased **draft source branch** proposes `^22.22.2 || ^24.15.0 || >=26.0.0`
-and pins [`.nvmrc`](../.nvmrc) to 22.22.2. Both jsdom 30 / Undici 8 candidate locks are
-imported from verified hosted artifact `11308824128`. Final-head runtime/CI qualification,
-full root and fresh independent review, and owner approval remain pending; see the
-[candidate notes](dependency-majors-449-higher-floor-draft.md).
+The current supported Node range is `^22.22.2 || ^24.15.0 || >=26.0.0`, and
+[`.nvmrc`](../.nvmrc) pins Node 22 to 22.22.2. Published releases retain their
+historical Node 22.14+ profile until a new release ships.
 
 ---
 

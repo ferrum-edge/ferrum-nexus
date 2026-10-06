@@ -181,6 +181,18 @@ jobs:
               const pinned = path.match(floorCopy)?.[1];
               if (!pinned) continue;
               found.add(pinned);
+              const parentPath = path.replace(new RegExp(`(?:^|/)node_modules/${pinned}$`), '');
+              const parent = lock.packages[parentPath];
+              const ranges = specFields
+                .map((field) => parent?.[field]?.[pinned])
+                .filter((range) => typeof range === 'string');
+              assert.ok(ranges.length > 0, `${path}: no declared range`);
+              for (const range of ranges) {
+                assert.ok(
+                  semver.satisfies(pkg.version, range),
+                  `${path}: ${pkg.version} not in ${range}`,
+                );
+              }
               assert.ok(pkg.resolved?.startsWith(registry(pinned)), `${path}: resolved`);
               assert.match(pkg.integrity ?? '', /^sha512-[A-Za-z0-9+/]{86}==$/, `${path}: integrity`);
               const engines = pkg.engines?.node;
