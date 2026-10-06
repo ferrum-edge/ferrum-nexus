@@ -6,12 +6,14 @@ import {
   mcpToolGroupForApi,
   consumerUsernameForUser,
   type ApiAgents,
+  type ApiErrorBody,
   type ApproveAccessRequestResponse,
   type CreateAccessRequestResponse,
   type PublishApiResponse,
   type RequestGrantToolsResponse,
   type UpdateApiSpecResponse,
 } from '@ferrum-nexus/shared';
+import type { NexusStore, TransactionOptions } from '../db/store.js';
 import type { EdgePluginConfigWrite } from '../ferrum-admin/types.js';
 import { stampAgentDocument } from '../publishing/agents.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
@@ -19,6 +21,11 @@ import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 const AGENTS: ApiAgents = {
   operations: [{ path: '/items', method: 'GET', name: 'list_items', description: 'List items' }],
 };
+
+function errorCode(body: string): string {
+  return (JSON.parse(body) as ApiErrorBody).error.code;
+}
+
 function selections(agents: ApiAgents | null | undefined): ApiAgents | null {
   return agents
     ? {
@@ -1322,6 +1329,36 @@ describe('agent publishing and Nexus authorization', () => {
     assert.ok(groupsOf(f.grantee).includes(mcpToolGroupForApi(f.api.id, listId)));
   });
 
+  it('cancels a pending tool request when its grant is revoked', async () => {
+    const f = await narrowFixture();
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const pending = asked.json<RequestGrantToolsResponse>().access_request;
+    const revoked = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/grants/${f.grant.id}/revoke`,
+      payload: {},
+    });
+    assert.equal(revoked.statusCode, 200, revoked.body);
+    assert.equal((await harness.store.accessRequests.findById(pending.id))?.status, 'cancelled');
+    const cancelled = (await harness.auditRows('access.cancel')).filter(
+      (row) => row.target_id === pending.id,
+    );
+    assert.equal(cancelled.length, 1);
+    assert.equal(cancelled[0]?.actor_user_id, provider.user.id);
+    assert.equal(cancelled[0]?.details.reason, 'grant_inactive');
+    assert.equal(cancelled[0]?.details.grant_id, f.grant.id);
+    assert.equal((await decide(pending.id, 'approve')).statusCode, 409);
+
+    // The identity's one pending slot is free again.
+    const again = await harness.authed(f.grantee, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: f.api.id, justification: 'Again', requested_tools: [f.listId] },
+    });
+    assert.equal(again.statusCode, 201, again.body);
+  });
+
   it('clears a tool request whose grant was revoked when the identity asks for access again', async () => {
     const f = await narrowFixture();
     const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
@@ -1333,6 +1370,15 @@ describe('agent publishing and Nexus authorization', () => {
       payload: {},
     });
     assert.equal(revoked.statusCode, 200, revoked.body);
+    // A tool request left pending on a revoked grant, as one written before
+    // revocation cancelled them would be.
+    const reopened = await harness.store.accessRequests.updateIfStatus(pending.id, 'cancelled', {
+      status: 'pending',
+      decided_by: null,
+      decided_at: null,
+      decision_note: null,
+    });
+    assert.ok(reopened);
     assert.equal((await decide(pending.id, 'approve')).statusCode, 409);
     assert.equal((await harness.store.accessRequests.findById(pending.id))?.status, 'pending');
 
@@ -1346,8 +1392,197 @@ describe('agent publishing and Nexus authorization', () => {
     const cancelled = (await harness.auditRows('access.cancel')).filter(
       (row) => row.target_id === pending.id,
     );
-    assert.equal(cancelled.length, 1);
+    assert.equal(cancelled.length, 2);
+    assert.equal(cancelled[0]?.actor_user_id, f.grantee.user.id);
     assert.equal(cancelled[0]?.details.reason, 'grant_inactive');
+  });
+
+  it('refuses a tool request from the owner of the API', async () => {
+    const f = await narrowFixture();
+    await harness.store.apis.update(f.api.id, { owner_user_id: f.grantee.user.id });
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 409, asked.body);
+    assert.equal(
+      await harness.store.accessRequests.findPendingByApiAndUser(f.api.id, f.grantee.user.id, null),
+      null,
+    );
+  });
+
+  it('charges tool requests to the daily access-request budget', async () => {
+    const limit = harness.config.maxAccessRequestsPerUserPerDay;
+    assert.ok(limit > 2);
+    const f = await narrowFixture();
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const askedId = asked.json<RequestGrantToolsResponse>().access_request.id;
+    const withdrawn = await harness.authed(f.grantee, {
+      method: 'POST',
+      url: `/api/access-requests/${askedId}/cancel`,
+    });
+    assert.equal(withdrawn.statusCode, 200, withdrawn.body);
+    // The access request behind the grant and the tool request make two; spend
+    // the rest of the window on tool requests alone.
+    for (let index = 0; index < limit - 2; index += 1) {
+      await harness.store.auditLogs.create({
+        actor_user_id: f.grantee.user.id,
+        actor_role: 'client',
+        action: 'access.tools_request',
+        target_type: 'access_request',
+        target_id: null,
+        details: {},
+        ip: null,
+        created_at: new Date().toISOString(),
+      });
+    }
+
+    const refused = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(refused.statusCode, 429, refused.body);
+    assert.equal(errorCode(refused.body), 'QUOTA_EXCEEDED');
+    const { api: elsewhere } = await publish();
+    const plain = await harness.authed(f.grantee, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: elsewhere.id, justification: 'Another API' },
+    });
+    assert.equal(plain.statusCode, 429, plain.body);
+    assert.equal(errorCode(plain.body), 'QUOTA_EXCEEDED');
+  });
+
+  it('takes back only the added tool groups when a tool approval cannot commit', async () => {
+    const f = await narrowFixture();
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const pending = asked.json<RequestGrantToolsResponse>().access_request;
+
+    const grants = harness.store.grants;
+    const realUpdate = grants.updateIfStatus.bind(grants);
+    grants.updateIfStatus = async () => {
+      throw new Error('grant storage is unavailable');
+    };
+    try {
+      const approved = await decide(pending.id, 'approve');
+      assert.equal(approved.statusCode, 500, approved.body);
+    } finally {
+      grants.updateIfStatus = realUpdate;
+    }
+
+    const groups = groupsOf(f.grantee);
+    assert.ok(groups.includes(aclGroupForApi(f.api.id)), 'REST access never lapses');
+    assert.ok(groups.includes(mcpToolGroupForApi(f.api.id, f.listId)));
+    assert.equal(groups.includes(mcpToolGroupForApi(f.api.id, f.removeId)), false);
+    const grant = await harness.store.grants.findById(f.grant.id);
+    assert.equal(grant?.status, 'active');
+    assert.deepEqual(grant?.approved_tools, [f.listId]);
+    assert.equal((await harness.store.accessRequests.findById(pending.id))?.status, 'pending');
+    const rollback = (await harness.auditRows('access.tools_approve_rollback')).find(
+      (row) => row.target_id === pending.id,
+    );
+    assert.ok(rollback);
+    assert.deepEqual(rollback.details.tool_groups_removed, [
+      mcpToolGroupForApi(f.api.id, f.removeId),
+    ]);
+    assert.equal(rollback.details.request_released, true);
+
+    // The request is back in the provider's inbox, and approving it again works.
+    const retried = await decide(pending.id, 'approve');
+    assert.equal(retried.statusCode, 200, retried.body);
+    assert.ok(groupsOf(f.grantee).includes(mcpToolGroupForApi(f.api.id, f.removeId)));
+  });
+
+  it('keeps the added tool groups when only the approval acknowledgement was lost', async () => {
+    const f = await narrowFixture();
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const pending = asked.json<RequestGrantToolsResponse>().access_request;
+
+    const store = harness.store;
+    const realTransaction = store.transaction.bind(store);
+    let armed = true;
+    store.transaction = async <T>(
+      fn: (tx: NexusStore) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> => {
+      const result = await realTransaction(fn, options);
+      if (armed && (result as { id?: unknown } | null)?.id === f.grant.id) {
+        armed = false;
+        throw new Error('the connection dropped after the commit');
+      }
+      return result;
+    };
+    try {
+      const approved = await decide(pending.id, 'approve');
+      assert.equal(approved.statusCode, 500, approved.body);
+    } finally {
+      store.transaction = realTransaction;
+    }
+    assert.equal(armed, false);
+
+    const groups = groupsOf(f.grantee);
+    assert.ok(groups.includes(aclGroupForApi(f.api.id)));
+    assert.ok(groups.includes(mcpToolGroupForApi(f.api.id, f.listId)));
+    assert.ok(groups.includes(mcpToolGroupForApi(f.api.id, f.removeId)));
+    assert.deepEqual((await harness.store.grants.findById(f.grant.id))?.approved_tools, [
+      f.listId,
+      f.removeId,
+    ]);
+    assert.equal((await harness.store.accessRequests.findById(pending.id))?.status, 'approved');
+    const rollback = (await harness.auditRows('access.tools_approve_rollback')).find(
+      (row) => row.target_id === pending.id,
+    );
+    assert.ok(rollback);
+    assert.deepEqual(rollback.details.tool_groups_kept, [mcpToolGroupForApi(f.api.id, f.removeId)]);
+    assert.equal(rollback.details.tool_groups_removed, undefined);
+  });
+
+  it('strips every group of the API when a failed tool approval finds its grant revoked', async () => {
+    // The disable-account sweep revokes without the proxy lease. A sweep and a
+    // re-enable that both finish between the approval's claim and its consumer
+    // write leave the user active, so the write puts the REST group and every
+    // tool group back for a grant that is no longer active.
+    const f = await narrowFixture();
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const pending = asked.json<RequestGrantToolsResponse>().access_request;
+
+    const requests = harness.store.accessRequests;
+    const realUpdate = requests.updateIfStatus.bind(requests);
+    requests.updateIfStatus = async (...args: Parameters<typeof realUpdate>) => {
+      const result = await realUpdate(...args);
+      const [id, expected, patch] = args;
+      if (id === pending.id && expected === 'pending' && patch.status === 'approved') {
+        await harness.store.grants.updateIfStatus(f.grant.id, 'active', {
+          status: 'revoked',
+          revoked_by: admin.user.id,
+          revoked_at: new Date().toISOString(),
+        });
+      }
+      return result;
+    };
+    try {
+      const approved = await decide(pending.id, 'approve');
+      assert.equal(approved.statusCode, 409, approved.body);
+    } finally {
+      requests.updateIfStatus = realUpdate;
+    }
+
+    assert.equal(
+      await harness.store.grants.findActiveByApiAndUser(f.api.id, f.grantee.user.id, null),
+      null,
+    );
+    const groups = groupsOf(f.grantee);
+    assert.deepEqual(
+      groups.filter((group) => group.startsWith(`nexus:api:${f.api.id}:`)),
+      [],
+      'no REST or tool group remains without an active grant',
+    );
+    assert.equal((await harness.store.accessRequests.findById(pending.id))?.status, 'cancelled');
+    const rollback = (await harness.auditRows('access.tools_approve_rollback')).find(
+      (row) => row.target_id === pending.id,
+    );
+    assert.ok(rollback);
+    assert.equal(rollback.details.acl_group_removed, aclGroupForApi(f.api.id));
+    assert.equal(rollback.details.all_tool_groups_removed, true);
+    assert.equal(rollback.details.request_cancelled, true);
   });
 
   it('tells explicit-subset holders when a tool is renamed', async () => {

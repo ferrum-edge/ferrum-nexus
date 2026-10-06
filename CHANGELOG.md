@@ -17,11 +17,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   daily budget. Approval rewrites the consumer once with the REST group and the
   widened tool groups and commits the grant's new subset inside the consumer key, so
   existing access never lapses; it cannot broaden the request, and a failure takes
-  back only the added tool groups. New audit actions `access.tools_request`,
-  `access.tools_approve` and `access.tools_approve_rollback`. The catalog's access
-  card offers the uncovered tools on a grant, and the provider's Requests tab marks
-  these requests. Forward migration `012_access_request_grant` adds the nullable
-  `grant_id` in every store; retained requests keep `null`.
+  back only the added tool groups (or, when the grant was revoked meanwhile and no
+  other active grant remains, every group of the API). Revoking a grant cancels its
+  pending tool request, and an API's owner cannot file one. New audit actions
+  `access.tools_request`, `access.tools_approve` and `access.tools_approve_rollback`.
+  The catalog's access card offers the uncovered tools on a grant, and the provider's
+  Requests tab marks these requests. Forward migration `012_access_request_grant` adds
+  the nullable `grant_id` in every store; retained requests keep `null`.
 - **Renamed agent tools are announced to explicit-subset holders** (Refs #525). An
   agents edit that renames a tool drops it from explicit subsets (all-tools grants
   keep it under the new name); the affected holders now get the same in-app notice

@@ -2858,7 +2858,10 @@ consumer key, compare-and-set on the subset it checked. The response's `grant`
 is the existing grant, now covering the added tools, and `access_request.approved_tools`
 lists the tools added. A failure after the gateway write takes back only the
 added tool groups and returns the request to `pending`
-(`access.tools_approve_rollback`). Denial leaves the grant exactly as it was.
+(`access.tools_approve_rollback`). If the grant was revoked meanwhile and the
+identity holds no other active grant for the API, it takes back the REST group
+and every tool group instead, and cancels the request. Denial leaves the grant
+exactly as it was.
 
 Errors:
 
@@ -2866,16 +2869,19 @@ Errors:
   already-covered tool ID; on approval, an empty subset or one that broadens
   the request.
 - `404 NOT_FOUND` — unknown grant, or a grant of another account.
-- `409 CONFLICT` — the grant is revoked; it covers every published tool
-  (`approved_tools` null); the API is retired, not requestable, exposes no
-  agent tools or still has phase-1 exposure without IDs; the identity already
-  has a pending request; the application is disabled. Approving after the
-  grant was revoked is a `409` too, and the request stays `pending`.
+- `409 CONFLICT` — the caller owns the API; the grant is revoked; it covers
+  every published tool (`approved_tools` null); the API is retired, not
+  requestable, exposes no agent tools or still has phase-1 exposure without
+  IDs; the identity already has a pending request; the application is
+  disabled. Approving after the grant was revoked is a `409` too.
 
-A tool request whose grant was revoked can only be cancelled or denied. When
-the identity next asks for access with `POST /api/access-requests`, it is
-cancelled (`access.cancel` with `reason: "grant_inactive"`) in the same
-transaction, so it never blocks the new request.
+Revoking a grant cancels its pending tool request in the revocation's
+transaction (`access.cancel` with `reason: "grant_inactive"`), so it holds no
+pending slot and leaves the provider's inbox. A revocation the gateway refuses
+puts the grant back but not the request. A tool request still pending on a
+revoked grant (one filed before this release) can only be cancelled or denied,
+and the identity's next `POST /api/access-requests` cancels it the same way in
+its own transaction, so it never blocks the new request.
 
 ```bash
 curl -sS -b cookies.txt -X POST http://127.0.0.1:8787/api/grants/7f3e…/tool-requests \

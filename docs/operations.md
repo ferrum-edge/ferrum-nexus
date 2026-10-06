@@ -848,7 +848,8 @@ checksums and `release: 'v0.1.0'`, the forward migrations
 `005_notification_preferences` and `006_user_identities` with
 `release: 'v0.3.0'`, and `007_outbox_recipient`, `008_email_lifecycle_fence`,
 `009_outbox_priority`, `010_api_agents` and `011_mcp_tool_subsets` with
-`release: 'v0.4.0'`.
+`release: 'v0.4.0'`. The pending forward migration `012_access_request_grant`
+is listed with `release: null` until the release that ships it.
 
 **A released migration never changes.** A database only applies migrations its
 ledger lacks, so editing an applied one would make fresh and upgraded installs
@@ -962,6 +963,13 @@ handler and background writer: an older publisher can overwrite tool policy, and
 older consumer-group rebuild does not understand subset membership. Do not roll back
 while explicit subset grants exist. See the
 [MCP subset rollout](mcp-subsets-migration-draft.md).
+
+`012_access_request_grant` (unreleased) adds a nullable `grant_id` column to
+`access_requests` on SQL backends and backfills `grant_id: null` on retained
+MongoDB documents. A set `grant_id` marks a request for more MCP tools on that
+existing grant; `null` keeps every retained request a request for access. The
+column has no foreign key: a grant row is only deleted with its API or
+application, which removes the request too. It changes no other data.
 
 `003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
 `ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,

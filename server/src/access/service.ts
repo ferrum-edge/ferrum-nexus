@@ -611,6 +611,41 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   }
 
   /**
+   * Cancel the pending tool request that would extend `grant`, inside the
+   * revocation's transaction. It can never be approved once the grant is
+   * revoked, and it would otherwise hold the identity's one pending slot and
+   * sit in the provider's inbox. Store-only, so safe in a re-run body.
+   */
+  async function cancelPendingToolRequest(
+    tx: NexusStore,
+    grant: GrantRecord,
+    actor: UserRecord,
+    at: string,
+    ip: string | null,
+  ): Promise<void> {
+    const pending = await tx.accessRequests.findPendingByApiAndUser(
+      grant.api_id,
+      grant.user_id,
+      grant.application_id,
+    );
+    if (!pending || pending.grant_id !== grant.id) return;
+    const closed = await tx.accessRequests.updateIfStatus(pending.id, 'pending', {
+      status: 'cancelled',
+      decided_by: actor.id,
+      decided_at: at,
+      decision_note: 'The grant this request would extend is no longer active',
+    });
+    if (!closed) return;
+    await audit.forStore(tx).record(
+      { id: actor.id, role: actor.role },
+      AuditAction.ACCESS_CANCEL,
+      { type: 'access_request', id: pending.id },
+      { api_id: grant.api_id, grant_id: grant.id, reason: 'grant_inactive' },
+      ip,
+    );
+  }
+
+  /**
    * Why a grant this revocation still holds must stay `revoked`, or `null`
    * when its grantee is still entitled to it.
    *
@@ -1263,6 +1298,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * lost — nothing is undone. Called under the proxy lease the approval holds,
    * which every other writer of a grant's subset holds too. Best-effort: the
    * caller re-throws the original failure.
+   *
+   * A grant that is no longer active is different. The approval's consumer
+   * write was a whole-resource rewrite that put the REST group and every tool
+   * group back, and the disable-account sweep revokes without the proxy lease:
+   * a sweep and re-enable that both finished between the claim and that write
+   * leave the consumer holding access no grant stands behind. So when no active
+   * grant exists for the identity, every group of the API comes off, as
+   * {@link unwindApproval} does, and the request is cancelled rather than
+   * released: it could never be approved.
    */
   async function unwindToolApproval(input: {
     actor: UserRecord;
@@ -1290,14 +1334,42 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     };
 
     const live = await store.grants.findById(input.grantId).catch(() => null);
-    const covered = live?.status === 'active' ? live.approved_tools : [];
-    const uncovered = covered == null ? [] : added.filter((id) => !covered.includes(id));
-    if (live?.status === 'active' && uncovered.length === 0) {
+    const active = live?.status === 'active' ? live : null;
+    // The grant this approval extended is gone or revoked. Another active grant
+    // for the identity may still own the REST group; without one, nothing does.
+    const holder =
+      active ??
+      (await store.grants
+        .findActiveByApiAndUser(api.id, requester.id, request.application_id)
+        .catch(() => null));
+    const covered = holder?.approved_tools;
+    const uncovered = covered === null ? [] : added.filter((id) => !covered?.includes(id));
+    if (active && uncovered.length === 0) {
       // The grant already covers every added tool: the update committed, so
       // the groups and the decision both stand.
       details.tool_groups_kept = mcpGroupsForGrant(api.id, added);
     } else {
-      if (input.attempted && uncovered.length > 0) {
+      if (input.attempted && !holder) {
+        // No active grant for the identity: the REST group and every tool
+        // group the write put back come off together.
+        try {
+          await setGroupMembership(requester, api.id, false, request.application_id, {
+            absentIsDone: true,
+          });
+          details.acl_group_removed = aclGroupForApi(api.id);
+          details.all_tool_groups_removed = true;
+        } catch (error) {
+          details.acl_group_orphaned = aclGroupForApi(api.id);
+          deps.log?.(
+            {
+              api_id: api.id,
+              user_id: requester.id,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'Could not take back the groups of a failed tool approval whose grant is gone',
+          );
+        }
+      } else if (input.attempted && uncovered.length > 0) {
         const strip = new Set(mcpGroupsForGrant(api.id, uncovered));
         try {
           const consumer = await store.consumers.findByUserAndNamespace(
@@ -1328,22 +1400,32 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         }
       }
       try {
-        const released = await store.accessRequests.updateIfStatus(request.id, 'approved', {
-          status: 'pending',
-          decided_by: null,
-          decided_at: null,
-          decision_note: null,
-          approved_tools: null,
-        });
-        details.request_released = released !== null;
+        if (active) {
+          const released = await store.accessRequests.updateIfStatus(request.id, 'approved', {
+            status: 'pending',
+            decided_by: null,
+            decided_at: null,
+            decision_note: null,
+            approved_tools: null,
+          });
+          details.request_released = released !== null;
+        } else {
+          // It would extend a grant that is gone: it could never be approved.
+          const cancelled = await store.accessRequests.updateIfStatus(request.id, 'approved', {
+            status: 'cancelled',
+            approved_tools: null,
+            decision_note: 'The grant this request would extend is no longer active',
+          });
+          details.request_cancelled = cancelled !== null;
+        }
       } catch (error) {
-        details.request_released = false;
+        details[active ? 'request_released' : 'request_cancelled'] = false;
         deps.log?.(
           {
             request_id: request.id,
             error: error instanceof Error ? error.message : String(error),
           },
-          'Could not return a failed tool approval to pending',
+          'Could not settle the request of a failed tool approval',
         );
       }
     }
@@ -1709,6 +1791,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       if (!initial || initial.user_id !== user.id) throw notFound('Grant', grantId);
       const api = await store.apis.findById(initial.api_id);
       if (!api) throw notFound('Grant', grantId);
+      if (api.owner_user_id === user.id) {
+        throw conflict('You already own this API');
+      }
       if (initial.status !== 'active') throw inactiveGrant();
       if (api.status !== 'published') {
         throw conflict('This API is retired and is no longer accepting access requests');
@@ -2195,6 +2280,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           // history reads "approved, then revoked" rather than staying
           // approved.
           movedRequest = await moveRequestToRevoked(tx, grant, actor.id, revokedAt, reason);
+          await cancelPendingToolRequest(tx, grant, actor, revokedAt, ip);
           // The revocation is recorded with the claim that makes it. Written
           // after the gateway step, a failed insert left the grant revoked and
           // unaudited behind a `500`, and a repeat found it already revoked
@@ -2336,6 +2422,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             });
             if (!result) return null;
             await moveRequestToRevoked(tx, grant, actor.id, revokedAt, reason);
+            await cancelPendingToolRequest(tx, grant, actor, revokedAt, ip);
             await audit.forStore(tx).record(
               { id: actor.id, role: actor.role },
               AuditAction.ACCESS_REVOKE,
