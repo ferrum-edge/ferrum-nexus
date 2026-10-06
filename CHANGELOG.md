@@ -121,18 +121,22 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **An agent API's submitted document is bounded before it is built** (Refs #525).
   The document Nexus sends Edge for an agent API gives every path its own copy of
   the Path Item it references, so 2,000 paths referencing one large Path Item
-  stamped to gigabytes on every publish or revision. Every request that publishes a
-  selection now charges an upper bound on that document's size to a work meter
+  stamped to gigabytes on every publish or revision. Every request that rebuilds that
+  document (publish, revision, rollback, restore, or a `PATCH` of `agents` or
+  `spec_enforcement`) now charges an upper bound on its size to a work meter
   before it builds anything, measuring each object of the document once, and
   refuses one past 8 MiB with `400 SPEC_INVALID`
   (`reason: "agent_document_too_large"`). Compensation still restores what the
-  gateway holds.
+  gateway holds. Upgrade note: an agent API already published with a larger
+  document keeps serving, and any other `PATCH` (visibility, status, metadata)
+  still succeeds; turn its agents off (`agents: null`) to revise it again.
 - **The dependency-lock producer no longer hard-codes jsdom and Undici** (Refs #525).
   It checked their exact versions and integrity hashes, so the next reviewed bump
   would have failed it. It now requires both packages, a registry `resolved` URL and
   sha512 integrity for every copy, and `engines` (checked with npm's own semver) that
-  admit every Node version the manifests support. The existing graph check still
-  ties each copy to the committed lock while the manifests are unchanged.
+  admit every Node version the manifests support. While no manifest moves a jsdom
+  or Undici spec, every copy's version, `resolved` URL and integrity must still equal
+  the committed lock's, so a re-resolution forced by another bump cannot move them.
 
 - **A disabled grantee no longer blocks a provider's agent-enabled API** (Refs #519).
   Every spec build enrolled each all-tools grantee in the MCP-all group and refused

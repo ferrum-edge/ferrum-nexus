@@ -932,16 +932,20 @@ The document submitted for an agent API cannot keep a path's Path Item reference
 operation carries its own `x-ferrum-mcp` mark, and two paths sharing one Path Item expose
 different tools. So every path holds a copy of the Path Item it resolves to, and 2,000
 paths referencing one large Path Item would otherwise stamp to gigabytes on every publish.
-Every request that publishes a selection (publish, agents edit, spec revision, rollback,
-restore) bounds that document before it builds anything or writes to the gateway: an
-upper bound on its compact JSON size is charged to a work meter with a budget of
+Every request that rebuilds that document (publish, spec revision, rollback, restore, and
+a PATCH that edits the agents or converts the enforcement level) bounds it before it builds
+anything or writes to the gateway: an upper bound on its compact JSON size is charged to a work meter with a budget of
 `MAX_AGENT_DOCUMENT_BYTES` (8 MiB, twice the expanded upload limit). It charges every
 root member, every path's reference chain and resolved Path Item in full, a route per
 operation at the longer of the real and staging listen paths, and every selected tool.
 Each object of the document is measured once and remembered, so the check reads the
 document about once however much the stamp would copy, and stops at the first charge
 past the budget with `400 SPEC_INVALID` (`reason: "agent_document_too_large"`).
-Compensation rebuilds the document the gateway already holds, so it is not refused.
+Compensation rebuilds the document the gateway already holds, so it is not refused. A
+PATCH that leaves the gateway document alone (visibility, status, name, description and
+the other catalog or proxy settings) is not bounded either, so an agent API published
+before the bound whose document is larger can still be edited and retired. Turning its
+agents off submits the document without copies, and is the way to revise it again.
 
 Provider `x-ferrum-*` extensions cannot override endpoint, selection, grants or
 governance. Endpoint paths are derived from the namespace/slug and reserve a

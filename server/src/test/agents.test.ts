@@ -233,6 +233,95 @@ describe('agent publishing and Nexus authorization', () => {
     }
   });
 
+  it('bounds the stamped document only where it is rebuilt, before any gateway write', async () => {
+    // 48 paths share one 200 KB Path Item: a small upload, but stamped, each
+    // path holds its own copy, past MAX_AGENT_DOCUMENT_BYTES.
+    const shared = {
+      description: 'x'.repeat(200_000),
+      get: { responses: { '200': { description: 'OK' } } },
+    };
+    const paths: Record<string, unknown> = { '/items': DOCUMENT.paths['/items'] };
+    for (let index = 0; index < 48; index += 1) {
+      paths[`/shared-${index}`] = { $ref: '#/components/pathItems/Shared' };
+    }
+    const spec = JSON.stringify({
+      ...DOCUMENT,
+      paths,
+      components: { pathItems: { Shared: shared } },
+    });
+    const tooLarge = (response: { statusCode: number; body: string }): void => {
+      assert.equal(response.statusCode, 400, response.body);
+      const error = JSON.parse(response.body) as { error: { code: string; details?: unknown } };
+      assert.equal(error.error.code, 'SPEC_INVALID');
+      assert.equal(
+        (error.error.details as { reason?: unknown }).reason,
+        'agent_document_too_large',
+      );
+    };
+    const writesSince = (before: number): number =>
+      harness.edge.requests.slice(before).filter((request) => request.method !== 'GET').length;
+
+    let before = harness.edge.requests.length;
+    const published = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: {
+        name: 'Fan-in agent API',
+        slug: `fan-in-${sequence++}`,
+        spec,
+        auth_plugin: 'key_auth',
+        requestable: true,
+        visibility: 'public',
+        spec_enforcement: 'routes',
+        agents: AGENTS,
+      },
+    });
+    tooLarge(published);
+    assert.equal(writesSince(before), 0);
+
+    // An agent API published before the bound existed, still live.
+    const { api } = await publish({ spec, agents: null });
+    await harness.store.apis.update(api.id, { agents: AGENTS });
+
+    // A PATCH that leaves the gateway document alone is not refused.
+    const edited = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { description: 'Being retired', visibility: 'private', status: 'retired' },
+    });
+    assert.equal(edited.statusCode, 200, edited.body);
+    const row = await harness.store.apis.findById(api.id);
+    assert.equal(row?.status, 'retired');
+    assert.deepEqual(selections(row?.agents), AGENTS);
+
+    // An agents edit and a revision rebuild it, so both are refused unwritten.
+    before = harness.edge.requests.length;
+    const reselected = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: {
+        agents: { operations: [{ ...AGENTS.operations[0], description: 'List every item' }] },
+      },
+    });
+    tooLarge(reselected);
+    const revised = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${api.id}/spec`,
+      payload: { spec },
+    });
+    tooLarge(revised);
+    assert.equal(writesSince(before), 0);
+    assert.deepEqual(selections((await harness.store.apis.findById(api.id))?.agents), AGENTS);
+
+    // Turning agents off submits the document without copies, so it is the way out.
+    const off = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: null },
+    });
+    assert.equal(off.statusCode, 200, off.body);
+  });
+
   it('uses the existing approval and revocation group for public and private APIs', async () => {
     for (const visibility of ['public', 'private']) {
       const { api } = await publish({ visibility });

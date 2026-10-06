@@ -921,6 +921,10 @@ export function stampedAgentDocumentBytes(
  * bypasses, and no document that would stamp past
  * {@link MAX_AGENT_DOCUMENT_BYTES} at any of `listenPaths`: every listen path
  * the API's proxy may hold while it is published.
+ *
+ * `listenPaths` is `null` for a caller that may not stamp the document at
+ * all, a PATCH: it calls {@link stampedAgentDocumentBytes} itself, only once
+ * it knows the gateway document will be rebuilt.
  */
 export function validateAgents(
   agents: ApiAgents | null | undefined,
@@ -928,7 +932,7 @@ export function validateAgents(
   enforcement: SpecEnforcementLevel,
   requestable: boolean,
   methods: HttpMethod[] | null,
-  listenPaths: readonly string[],
+  listenPaths: readonly string[] | null,
 ): void {
   if (!agents) return;
   const invalid = (message: string): never => {
@@ -995,7 +999,7 @@ export function validateAgents(
   // Last, once every selection is known to be valid, and before anything is
   // built. The submitted copy only drops members from this document, so it
   // never stamps larger than this.
-  stampedAgentDocumentBytes(document, listenPaths, agents);
+  if (listenPaths) stampedAgentDocumentBytes(document, listenPaths, agents);
 }
 
 /**
@@ -1005,8 +1009,9 @@ export function validateAgents(
  * and its descendants. REST bodies, backend and auth remain unchanged.
  *
  * Every path gets its own copy of the Path Item it references. Its size is
- * bounded before any of this runs: {@link validateAgents}, at every request
- * that publishes a selection, refuses a document past
+ * bounded before any of this runs: every request that publishes a selection
+ * (through {@link validateAgents}, or a PATCH that rebuilds the document
+ * through {@link stampedAgentDocumentBytes}) refuses a document past
  * {@link MAX_AGENT_DOCUMENT_BYTES}. A compensation rebuilds the document the
  * gateway already holds, so it is not refused here.
  */

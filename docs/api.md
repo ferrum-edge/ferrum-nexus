@@ -1925,6 +1925,11 @@ of each path's Path Item, references resolved, so one whose submitted size would
 pass 8 MiB (for example, thousands of paths referencing one large Path Item) is
 refused before anything is built, with `400 SPEC_INVALID` and
 `details: { field: "agents", reason: "agent_document_too_large", limit: 8388608 }`.
+Only a request that rebuilds that document is refused: a publish, revision, rollback or
+restore, or a `PATCH` that changes `agents` or `spec_enforcement`. Any other `PATCH`
+(visibility, status, name, description or proxy settings) still succeeds for an agent
+API published before this limit, and `agents: null` turns its agents off so it can be
+revised again.
 
 Catalog `ApiSummary` includes the selection for tool metadata. MCP is served by
 Edge at `<invoke_url>/mcp` with tools named `<slug>.<name>`. A normal Nexus account

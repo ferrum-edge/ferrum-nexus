@@ -127,18 +127,47 @@ jobs:
           assert.equal(e2e.packages['node_modules/typescript']?.version, typescript);
           // jsdom and Undici set the supported Node floor (#449). No version or
           // integrity is written here, so a reviewed bump (Dependabot's
-          // included) passes. This proves that both are in the regenerated
-          // locks, and that every copy was resolved from the npm registry with
-          // a sha512 integrity and declares `engines` that admit every Node
-          // version a manifest of its lock supports: no bump can raise the
-          // floor unless the manifests' `engines` move with it. That each copy
-          // is the reviewed tarball is the graph check above: a lock whose
-          // manifests are unchanged must equal the committed one, integrity
-          // included, and any other change is a diff the reviewer applies.
+          // included) passes. While no manifest of a lock moves a jsdom or
+          // Undici spec, every copy must be the committed one, version,
+          // resolved URL and integrity: another change that re-resolves the
+          // graph (a zod bump) cannot move or dedupe either. jsdom depends on
+          // Undici, so either spec moving releases both, and then the copies
+          // that moved are a diff the reviewer applies. Either way, both must
+          // be in the regenerated locks, and every copy must be resolved from
+          // the npm registry with a sha512 integrity and declare `engines`
+          // that admit every Node version a manifest of its lock supports: no
+          // bump can raise the floor unless the manifests' `engines` move
+          // with it.
           const semver = createRequire(`${process.cwd()}/`)(process.env.NPM_SEMVER);
           const registry = (name) => `https://registry.npmjs.org/${name}/-/${name}-`;
+          const floor = ['jsdom', 'undici'];
+          const floorCopy = /(?:^|\/)node_modules\/(jsdom|undici)$/;
+          const floorCopies = (lock) =>
+            Object.fromEntries(
+              Object.entries(lock.packages)
+                .filter(([path]) => floorCopy.test(path))
+                .map(([path, { version, resolved, integrity }]) => [
+                  path,
+                  { version, resolved, integrity },
+                ]),
+            );
+          const specFields = [
+            'dependencies',
+            'devDependencies',
+            'optionalDependencies',
+            'peerDependencies',
+          ];
           const found = new Set();
-          for (const [lock, , sources] of locks) {
+          for (const [lock, input, sources] of locks) {
+            const floorUnchanged = Object.entries(sources).every(([path, manifest]) => {
+              const committed = input.packages[path] ?? {};
+              return specFields.every((field) =>
+                floor.every((name) => manifest[field]?.[name] === committed[field]?.[name]),
+              );
+            });
+            if (floorUnchanged) {
+              assert.deepEqual(floorCopies(lock), floorCopies(input), 'jsdom/Undici copies moved');
+            }
             const supported = Object.values(sources).map((manifest) => manifest.engines?.node);
             for (const range of supported) assert.equal(typeof range, 'string', 'engines.node');
             for (const [path, pkg] of Object.entries(lock.packages)) {
@@ -149,7 +178,7 @@ jobs:
               if (vitestPackage && !vitestPackage.startsWith('istanbul-lib-')) {
                 assert.equal(pkg.version, vitest, path);
               }
-              const pinned = path.match(/(?:^|\/)node_modules\/(jsdom|undici)$/)?.[1];
+              const pinned = path.match(floorCopy)?.[1];
               if (!pinned) continue;
               found.add(pinned);
               assert.ok(pkg.resolved?.startsWith(registry(pinned)), `${path}: resolved`);
