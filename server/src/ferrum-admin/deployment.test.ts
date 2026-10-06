@@ -47,7 +47,7 @@ function oneSpecSnapshot(document: Record<string, unknown>): EdgeDeploymentSnaps
     content_hash: createHash('sha256').update(bytes).digest('hex'),
     future_owner_field: { opaque: true },
   };
-  snapshot.api_specs = [spec];
+  snapshot.api_specs = [spec as unknown as (typeof snapshot.api_specs)[number]];
   (snapshot.evidence.resources as unknown[])[5] = [structuredClone(spec)];
   snapshot.api_spec_contents = [
     {
