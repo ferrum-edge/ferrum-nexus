@@ -28,7 +28,7 @@ VARIABLE_EXCEPTIONS = {
 LOCAL_IMAGES = {'ferrum-nexus:ci', 'ferrum-nexus:e2e'}
 VERSION = re.compile(r'v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\Z')
 PIN = re.compile(r'[^\s"\'@$]+(?::[^\s"\'@$]+)?@sha256:[0-9a-f]{64}\Z')
-FIELD = re.compile(r'^\s*image\s*:\s*(.*?)\s*(?:#.*)?$', re.IGNORECASE)
+FIELD = re.compile(r'^\s*(image|container)\s*:\s*(.*?)\s*(?:#.*)?$', re.IGNORECASE)
 
 
 def error_for(image):
@@ -64,8 +64,8 @@ def image_fields(path, source):
         return
     for line_no, line in enumerate(source.splitlines(), 1):
         match = FIELD.match(line)
-        if match:
-            ref = match.group(1).strip().strip("'\"")
+        if match and (match.group(1).lower() == 'image' or match.group(2).strip()):
+            ref = match.group(2).strip().strip("'\"")
             yield line_no, ref
         elif path.parts[:2] == ('.github', 'workflows'):
             match = re.search(r'\buses\s*:\s*["\']?docker://([^\s"\']+)', line)

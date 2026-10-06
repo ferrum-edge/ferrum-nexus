@@ -38,7 +38,7 @@ FROM build AS runtime
 
     def test_compose_and_workflow_structural_fields(self):
         compose = f'''services:\n  app:\n    image: registry.example/app:1.2.3@sha256:{DIGEST}\n'''
-        workflow = f'''jobs:\n  check:\n    container:\n      image: registry.example/ci:2.3.4@sha256:{DIGEST}\n    steps:\n      - uses: docker://registry.example/action:3.4.5@sha256:{DIGEST}\n'''
+        workflow = f'''jobs:\n  check:\n    container: registry.example/ci:2.3.4@sha256:{DIGEST}\n    steps:\n      - uses: docker://registry.example/action:3.4.5@sha256:{DIGEST}\n'''
         self.assertEqual(len(list(image_fields(Path('compose.yml'), compose))), 1)
         self.assertEqual(len(list(image_fields(Path('.github/workflows/ci.yml'), workflow))), 2)
 
