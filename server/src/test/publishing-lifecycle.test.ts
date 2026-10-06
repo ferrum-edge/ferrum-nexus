@@ -28,6 +28,7 @@ import { after, afterEach, before, describe, it } from 'node:test';
 import type { GetApiResponse, PublishApiResponse } from '@ferrum-nexus/shared';
 
 import type { ApiRecord } from '../db/store.js';
+import { apiRestoreLockKey } from '../lib/keyed-serializer.js';
 import { createConversionRaceFixture, createOwnedOperation } from './conversion-race-fixture.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
@@ -88,8 +89,9 @@ describe('deleting an API that races an enforcement conversion', () => {
    *
    * `hold` parks one gateway call of the first operation inside its proxy lease; the second
    * operation is started only once that call has arrived, and released only
-   * once it has been seen asking for `proxy:<id>` — which is the claim issue
-   * #135's fix makes, and the thing a `setTimeout` stagger could only hope for.
+   * once it has been seen queueing on the API's lease behind it — which is the
+   * claim issue #135's fix makes, and the thing a `setTimeout` stagger could
+   * only hope for.
    *
    * The end state is the assertion. Whichever operation wins, the gateway must
    * not be left serving an API the portal has no row for.
@@ -141,9 +143,13 @@ describe('deleting an API that races an enforcement conversion', () => {
           await fixture.held;
         }),
       );
-      // The second operation's own lease request is the proof it contended: both
-      // take `proxy:<id>` through `binder.withProxy`, so the second call for that
-      // key is the one queued behind the held operation.
+      // The second operation's own lease request is the proof it contended. Both
+      // take the API restore key and then `proxy:<id>`, the order restore and
+      // reconciliation also use, so the second request for the API key is the
+      // one queued behind the held operation, before it can ask for the proxy.
+      const restoreKey = apiRestoreLockKey(api.id);
+      const proxyKey = `proxy:${proxyId}`;
+      const leases: string[] = [];
       let waiting = (): void => {};
       const contending = new Promise<void>((resolve) => {
         waiting = resolve;
@@ -152,11 +158,12 @@ describe('deleting an API that races an enforcement conversion', () => {
       restorations.push(() => {
         harness.edgeClient.serializePerKey = serialize;
       });
-      let requests = 0;
       harness.edgeClient.serializePerKey = (key, fn) => {
-        if (key === `proxy:${proxyId}`) {
-          requests += 1;
-          if (requests === 2) waiting();
+        if (key === restoreKey || key === proxyKey) {
+          leases.push(key);
+          if (key === restoreKey && leases.filter((held) => held === restoreKey).length === 2) {
+            waiting();
+          }
         }
         return serialize(key, fn);
       };
@@ -164,7 +171,12 @@ describe('deleting an API that races an enforcement conversion', () => {
       const first = fixture.own(deleteFirst ? remove() : convert());
       await fixture.waitFor(arrived, first, 'first lifecycle gateway mutation');
       const second = fixture.own(deleteFirst ? convert() : remove());
-      await fixture.waitFor(contending, second, 'second lifecycle proxy lease contention');
+      await fixture.waitFor(contending, second, 'second lifecycle API lease contention');
+      assert.deepEqual(
+        leases,
+        [restoreKey, proxyKey, restoreKey],
+        'the first operation holds the API then the proxy lease; the second waits on the API',
+      );
       fixture.release();
       const responses = await fixture.within(Promise.all([first, second]), 'lifecycle responses');
 

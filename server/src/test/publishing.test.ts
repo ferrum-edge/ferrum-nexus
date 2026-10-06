@@ -1410,6 +1410,9 @@ describe('publishing', () => {
         assert.deepEqual(added[0]?.details, {
           changed_fields: [],
           gateway_reconciled: true,
+          // A drift repair writes the gateway, so it records what admitted it.
+          egress_profile: 'public-guaranteed',
+          enforcement_scope: 'local-data-plane',
         });
       });
     }
@@ -1957,6 +1960,9 @@ describe('publishing', () => {
       assert.deepEqual(added[0]?.details, {
         changed_fields: [],
         gateway_reconciled: true,
+        // A drift repair writes the gateway, so it records what admitted it.
+        egress_profile: 'public-guaranteed',
+        enforcement_scope: 'local-data-plane',
       });
     });
 
@@ -2348,6 +2354,9 @@ describe('publishing', () => {
       assert.deepEqual(added[0]?.details, {
         changed_fields: [],
         gateway_reconciled: true,
+        // A drift repair writes the gateway, so it records what admitted it.
+        egress_profile: 'public-guaranteed',
+        enforcement_scope: 'local-data-plane',
       });
     });
 
