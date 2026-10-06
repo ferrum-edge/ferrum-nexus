@@ -3,7 +3,14 @@
 import unittest
 from pathlib import Path
 
-from check_image_pins import env_image_fields, error_for, image_fields
+from check_image_pins import (
+    env_image_fields,
+    error_for,
+    image_fields,
+    is_compose,
+    workflow_env_error,
+    workflow_env_image_fields,
+)
 
 
 DIGEST = 'a' * 64
@@ -228,6 +235,65 @@ FROM build AS runtime
         refs = list(image_fields(Path('Dockerfile'), source))
         self.assertEqual([ref for _, ref in refs], ['docker/dockerfile:1', 'nginx:latest'])
         self.assertTrue(all(error_for(ref) is not None for _, ref in refs))
+
+    def test_workflow_env_image_variables_must_be_pinned_literals(self):
+        for value in (
+            'registry.example/edge:1.2.3',
+            'nginx:latest',
+            '${{ needs.build.outputs.image }}',
+            '${NEXUS_IMAGE:?must be resolved before use}',
+        ):
+            with self.subTest(value=value):
+                source = f'    env:\n      FERRUM_EDGE_IMAGE: {value}\n'
+                refs = list(workflow_env_image_fields(Path('.github/workflows/ci.yml'), source))
+                self.assertEqual([ref for _, ref in refs], [value])
+                self.assertIsNotNone(workflow_env_error(refs[0][1]))
+
+    def test_workflow_env_pinned_and_local_images_pass(self):
+        pinned = f'registry.example/edge:v1.2.3@sha256:{DIGEST}'
+        source = (
+            f'env:\n  FERRUM_EDGE_IMAGE: {pinned}\n'
+            'jobs:\n  acceptance:\n    steps:\n      - run: ./e2e/run.sh\n'
+            '        env:\n          NEXUS_IMAGE: ferrum-nexus:e2e\n'
+        )
+        refs = list(workflow_env_image_fields(Path('.github/workflows/ci.yml'), source))
+        self.assertEqual([ref for _, ref in refs], [pinned, 'ferrum-nexus:e2e'])
+        self.assertTrue(all(workflow_env_error(ref) is None for _, ref in refs))
+
+    def test_workflow_env_quoted_key_and_value_are_checked(self):
+        source = '    env:\n      "NEXUS_IMAGE": "registry.example/nexus:latest"\n'
+        refs = list(workflow_env_image_fields(Path('.github/workflows/ci.yml'), source))
+        self.assertEqual([ref for _, ref in refs], ['registry.example/nexus:latest'])
+        self.assertIsNotNone(workflow_env_error(refs[0][1]))
+
+    def test_workflow_option_value_with_substitution_is_consumed(self):
+        for command in (
+            'docker run -v $(pwd):/src nginx:latest',
+            'docker run -v `pwd`:/src nginx:latest',
+            'docker run --mount type=bind,source=$(pwd),target=/src nginx:latest',
+            'docker run -e FILE=$(cat foo) nginx:latest',
+            'docker run -v $(pwd)/data:/app nginx:latest',
+            'docker run --env=FILE=$(cat foo) nginx:latest',
+        ):
+            with self.subTest(command=command):
+                refs = list(image_fields(
+                    Path('.github/workflows/ci.yml'), f'steps:\n  - run: {command}\n'
+                ))
+                self.assertEqual([ref for _, ref in refs], ['nginx:latest'])
+                self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_workflow_option_value_with_substitution_keeps_pinned_image(self):
+        pinned = f'registry.example/job:v1.2.3@sha256:{DIGEST}'
+        workflow = f'steps:\n  - run: docker run -v $(pwd):/src {pinned}\n'
+        refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
+        self.assertEqual([ref for _, ref in refs], [pinned])
+        self.assertIsNone(error_for(refs[0][1]))
+
+    def test_compose_discovery_broadens_to_top_level_services(self):
+        self.assertTrue(is_compose(Path('deploy/stack.yml'), 'services:\n  app:\n    image: x\n'))
+        self.assertTrue(is_compose(Path('docker-compose.yml'), 'name: x\n'))
+        self.assertFalse(is_compose(Path('deploy/stack.yml'), 'jobs:\n  a:\n    services: {}\n'))
+        self.assertFalse(is_compose(Path('config.yml'), 'kind: ConfigMap\n'))
 
 
 if __name__ == '__main__':
