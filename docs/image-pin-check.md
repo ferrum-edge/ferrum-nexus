@@ -1,9 +1,10 @@
 # Image pin check
 
 The required `checks` job runs `ci/check-image-pins.sh`. Its structural scan checks
-tracked Dockerfiles (`FROM` and external `COPY --from`), Compose and workflow YAML
-image fields, workflow `docker://` actions and direct Docker `run`, `create`, and
-`pull` commands, plus `FERRUM_EDGE_IMAGE` and `NEXUS_IMAGE` assignments in
+tracked Dockerfiles (`FROM`, external `COPY --from`, syntax frontends and external
+`RUN --mount` images), Compose and workflow YAML image fields, workflow `docker://`
+actions and Docker `run`, `create`, and `pull` commands (including backslash
+continuations), plus `FERRUM_EDGE_IMAGE` and `NEXUS_IMAGE` assignments in
 `.env`, `.env.*` and `*.env` files. Docker options before the command,
 `docker container` commands and `docker image pull` are recognized. Known options
 that take image-independent values (including `--label`, `-e` and `--name`) are
@@ -26,7 +27,8 @@ the local `ferrum-nexus:e2e` image.
 This is a bounded static scan, not a full YAML or shell interpreter. It does not
 execute files, scan shell scripts, expand variables, or resolve computed command
 names, shell aliases, sourced files or values assembled indirectly. Workflow
-Docker commands must be written directly on a line; wrapped or dynamically
-constructed commands are outside the check. Arbitrary YAML flow collections
+Docker commands are checked on individual lines, including quoted `run:` scalars
+and backslash continuations; dynamically constructed commands are outside the
+check. Arbitrary YAML flow collections
 that do not expose an `image` or `container` key in a recognizable key position
 are outside the scan.

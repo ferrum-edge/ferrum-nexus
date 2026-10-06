@@ -36,10 +36,10 @@ FIELD = re.compile(
 
 def error_for(image, local_ok=True):
     """Return why `image` is not acceptable, or None. Env files pass local_ok=False."""
-    if REQUIRED_VARIABLE.fullmatch(image):
+    if local_ok and REQUIRED_VARIABLE.fullmatch(image):
         return None
     fallback = NEXUS_FALLBACK.fullmatch(image)
-    if fallback:
+    if local_ok and fallback:
         return error_for(fallback.group(1), local_ok)
     if local_ok and image in LOCAL_IMAGES:
         return None
@@ -56,6 +56,10 @@ def error_for(image, local_ok=True):
 def image_fields(path, source):
     name = path.name.lower()
     if name == 'dockerfile' or name.startswith('dockerfile.') or name.endswith('.dockerfile'):
+        for line_no, line in enumerate(source.splitlines(), 1):
+            match = re.match(r'^\s*#\s*syntax\s*=\s*([^\s]+)', line, re.I)
+            if match:
+                yield line_no, match.group(1)
         # Docker ignores comment-only lines between continued instructions.
         source = '\n'.join(
             line for line in source.splitlines() if not line.lstrip().startswith('#')
@@ -74,8 +78,17 @@ def image_fields(path, source):
             for ref in re.findall(r'--from(?:=|\s+)([^\s]+)', line, re.I):
                 if not ref.isdigit() and ref.lower() not in stages:
                     yield line_no, ref
+            for mount in re.findall(r'--mount=([^\s]+)', line, re.I):
+                match = re.search(r'(?:^|,)from=([^,]+)', mount, re.I)
+                if match:
+                    ref = match.group(1)
+                    if not ref.isdigit() and ref.lower() not in stages:
+                        yield line_no, ref
         return
-    for line_no, line in enumerate(source.splitlines(), 1):
+    lines = list(enumerate(source.splitlines(), 1))
+    if path.parts[:2] == ('.github', 'workflows'):
+        lines = list(workflow_lines(lines))
+    for line_no, line in lines:
         for match in FIELD.finditer(line):
             ref = match.group(2).strip().strip("'\"")
             if not ref:
@@ -85,8 +98,7 @@ def image_fields(path, source):
             match = re.search(r'\buses\s*:\s*["\']?docker://([^\s"\']+)', line)
             if match:
                 yield line_no, match.group(1)
-            ref = workflow_docker_image(line)
-            if ref is not None:
+            for ref in workflow_docker_images(line):
                 yield line_no, ref
 
 
@@ -119,7 +131,11 @@ def _skip_options(words, value_options, switch_options):
         if option == '--':
             return
         if '=' in option:
-            continue
+            name = option.split('=', 1)[0]
+            if name in value_options:
+                continue
+            words.insert(0, '<unsupported docker option>')
+            return
         if option in value_options:
             if not words:
                 words.append('<missing docker option value>')
@@ -130,28 +146,62 @@ def _skip_options(words, value_options, switch_options):
             return
 
 
-def workflow_docker_image(line):
+def workflow_lines(lines):
+    pending = ''
+    first_line = None
+    for line_no, line in lines:
+        if first_line is None:
+            first_line = line_no
+        stripped = line.rstrip()
+        if stripped.endswith('\\'):
+            pending += stripped[:-1] + ' '
+            continue
+        yield first_line, pending + line
+        pending = ''
+        first_line = None
+    if first_line is not None:
+        yield first_line, pending
+
+
+def _workflow_run_text(line):
+    match = re.match(r'^\s*-?\s*run\s*:\s*(.*)$', line)
+    if not match:
+        return line
+    text = match.group(1).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        return text[1:-1]
+    return text
+
+
+def workflow_docker_images(line):
+    line = _workflow_run_text(line)
     try:
-        words = shlex.split(line, comments=False)
+        words = shlex.split(line, comments=True)
     except ValueError:
-        return None
-    try:
-        index = words.index('docker')
-    except ValueError:
-        return None
-    words = words[index + 1:]
-    _skip_options(words, DOCKER_GLOBAL_VALUES, DOCKER_GLOBAL_SWITCHES)
-    if not words:
-        return None
-    command = words.pop(0)
-    if command == 'container' and words:
-        command = words.pop(0)
-    elif command == 'image' and words:
-        command = words.pop(0)
-    if command not in {'run', 'create', 'pull'}:
-        return None
-    _skip_options(words, DOCKER_VALUE_OPTIONS, DOCKER_SWITCH_OPTIONS)
-    return words[0] if words else '<missing docker image>'
+        return ['<unparsed docker command>'] if re.search(
+            r'(?<![\w.-])docker\b[^;\n]*\b(run|create|pull)\b', line
+        ) else []
+    images = []
+    for index, word in enumerate(words):
+        if word != 'docker':
+            continue
+        command_words = words[index + 1:].copy()
+        if not command_words:
+            continue
+        _skip_options(command_words, DOCKER_GLOBAL_VALUES, DOCKER_GLOBAL_SWITCHES)
+        if command_words and command_words[0] == '<unsupported docker option>':
+            images.append(command_words[0])
+            continue
+        if not command_words:
+            continue
+        command = command_words.pop(0)
+        if command in {'container', 'image'} and command_words:
+            command = command_words.pop(0)
+        if command not in {'run', 'create', 'pull'}:
+            continue
+        _skip_options(command_words, DOCKER_VALUE_OPTIONS, DOCKER_SWITCH_OPTIONS)
+        images.append(command_words[0] if command_words else '<missing docker image>')
+    return images
 
 
 def files(root):
@@ -173,7 +223,9 @@ def files(root):
 
 def env_image_fields(path, source):
     for line_no, line in enumerate(source.splitlines(), 1):
-        match = re.match(r'^\s*(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)\s*=\s*(.*?)\s*$', line)
+        match = re.match(
+            r'^\s*(?:export\s+)?(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)\s*=\s*(.*?)\s*$', line
+        )
         if not match:
             continue
         image = match.group(2).strip().strip("'\"")

@@ -131,6 +131,63 @@ FROM build AS runtime
         self.assertEqual(len(refs), 1)
         self.assertIsNotNone(error_for(refs[0][1]))
 
+    def test_workflow_continued_docker_run_fails_closed(self):
+        workflow = 'steps:\n  - run: docker run --rm \\\n    nginx:latest\n'
+        refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
+        self.assertEqual(len(refs), 1)
+        self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_workflow_docker_comment_with_apostrophe_is_scanned(self):
+        workflow = "steps:\n  - run: docker pull alpine:latest  # we'll test this\n"
+        refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
+        self.assertEqual([ref for _, ref in refs], ['alpine:latest'])
+        self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_workflow_quoted_run_scalar_is_scanned(self):
+        workflow = 'steps:\n  - run: "docker run nginx:latest"\n'
+        refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
+        self.assertEqual([ref for _, ref in refs], ['nginx:latest'])
+        self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_workflow_unknown_global_options_fail_closed(self):
+        for command in (
+            'docker -D run x',
+            'docker -l debug run x',
+            'docker --tlscacert ca.pem run nginx:latest',
+        ):
+            with self.subTest(command=command):
+                refs = list(image_fields(
+                    Path('.github/workflows/ci.yml'), f'steps:\n  - run: {command}\n'
+                ))
+                self.assertEqual(len(refs), 1)
+                self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_workflow_scans_each_docker_command_on_a_line(self):
+        workflow = 'steps:\n  - run: docker version && docker run nginx:latest\n'
+        refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
+        self.assertEqual([ref for _, ref in refs], ['nginx:latest'])
+        self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_env_file_exports_and_required_variables_are_checked(self):
+        source = (
+            'export FERRUM_EDGE_IMAGE=nginx:latest\n'
+            'NEXUS_IMAGE=${NEXUS_IMAGE:?must not expand in an env file}\n'
+        )
+        refs = list(env_image_fields(Path('release/compatibility.env'), source))
+        self.assertEqual([ref for _, ref in refs], [
+            'nginx:latest', '${NEXUS_IMAGE:?must not expand in an env file}'
+        ])
+        self.assertTrue(all(error_for(ref, local_ok=False) is not None for _, ref in refs))
+
+    def test_dockerfile_frontend_and_mount_images_are_checked(self):
+        source = (
+            '# syntax=docker/dockerfile:1\n'
+            'RUN --mount=type=bind,from=nginx:latest,target=/src echo ok\n'
+        )
+        refs = list(image_fields(Path('Dockerfile'), source))
+        self.assertEqual([ref for _, ref in refs], ['docker/dockerfile:1', 'nginx:latest'])
+        self.assertTrue(all(error_for(ref) is not None for _, ref in refs))
+
 
 if __name__ == '__main__':
     unittest.main()

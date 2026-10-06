@@ -1272,15 +1272,16 @@ images in workflow `docker run` commands are not tracked by Dependabot; refresh
 those digests manually when updating their readable tags. The required `checks`
 job runs `ci/check-image-pins.sh` on every PR. The checker scans tracked
 Dockerfiles (`FROM` and external `COPY --from`), Compose and workflow YAML image
-fields, workflow `docker://` actions and direct Docker `run`, `create` and
-`pull` commands, plus `FERRUM_EDGE_IMAGE` and `NEXUS_IMAGE` assignments in
+fields, workflow `docker://` actions and Docker `run`, `create` and `pull`
+commands, including shell continuations, plus `FERRUM_EDGE_IMAGE` and `NEXUS_IMAGE` assignments in
 `.env`, `.env.*` and `*.env` files. It handles `docker container` commands,
 `docker image pull`, Docker global options before the command, and known
 image-option values such as `--label`, `-e` and `--name`. Unsupported Docker
 options fail closed. Quoted and flow-style image keys that the simple field
 scanner recognizes are checked; malformed or empty image fields fail closed.
 Dockerfile comment-only lines inside a continued instruction are ignored as
-Docker ignores them.
+Docker ignores them. Dockerfile syntax frontends and external images in
+`RUN --mount` are checked too.
 
 Literal image references require their own full `@sha256:` digest of 64
 lowercase hexadecimal characters. Version tags can remain before the digest.
@@ -1293,9 +1294,10 @@ exception. Exact-tag exceptions and their reasons are listed in
 This is a bounded static scan of tracked operational files, not a full YAML or
 shell interpreter. It does not execute files, scan shell scripts, expand
 variables, or resolve computed command names, shell aliases, sourced files or
-values assembled indirectly. Workflow Docker commands must be written directly
-on a line. The checker can only cover image references represented in the
-tracked file forms it recognizes.
+values assembled indirectly. Workflow Docker commands are checked on individual
+lines, including quoted `run:` scalars and backslash continuations. The checker
+can only cover image references represented in the tracked file forms it
+recognizes.
 The local `ferrum-nexus:ci` image in `.github/workflows/ci.yml` and
 `ferrum-nexus:e2e` images in `e2e/docker-compose.yml` and
 `e2e/.env.example` remain allowed because those are locally built acceptance
