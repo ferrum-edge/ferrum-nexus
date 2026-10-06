@@ -104,6 +104,25 @@ describe('closed owner egress contract', () => {
       { ...publicEgressPolicy(), enforcement_scope: 'admission-only' },
       'nexus',
     )!;
+    const localBoth = parseBackendEgressPolicy(
+      {
+        ...publicEgressPolicy(),
+        mode: 'both',
+        mode_allowed_ip_classes: ['public', 'private-reserved'],
+        mode_blocked_ip_classes: [],
+        public_only_guaranteed: false,
+      },
+      'nexus',
+    )!;
+    const controlPlaneWithAllowOverrides = parseBackendEgressPolicy(
+      {
+        ...publicEgressPolicy(),
+        enforcement_scope: 'admission-only',
+        allow_cidr_overrides_present: true,
+        public_only_guaranteed: false,
+      },
+      'nexus',
+    )!;
     const guaranteed = {
       egress_profile: 'public-guaranteed',
       enforcement_scope: 'local-data-plane',
@@ -118,6 +137,11 @@ describe('closed owner egress contract', () => {
       egress_profile: 'unattested-edge-opt-in',
       enforcement_scope: 'admission-only',
     });
+    assert.equal(admitBackendEgress(localBoth, { allowUnattestedEdgeEgress: true }), null);
+    assert.equal(
+      admitBackendEgress(controlPlaneWithAllowOverrides, { allowUnattestedEdgeEgress: true }),
+      null,
+    );
     assert.deepEqual(admitBackendEgress(controlPlane, { allowPrivateUpstreams: true }), {
       egress_profile: 'private-upstreams-opt-in',
       enforcement_scope: 'admission-only',

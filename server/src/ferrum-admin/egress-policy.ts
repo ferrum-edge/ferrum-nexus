@@ -157,7 +157,7 @@ export function admitBackendEgress(
   if (optOuts.allowPrivateUpstreams === true) {
     return { egress_profile: 'private-upstreams-opt-in', enforcement_scope };
   }
-  if (optOuts.allowUnattestedEdgeEgress === true) {
+  if (optOuts.allowUnattestedEdgeEgress === true && policy.public_only_guaranteed === true) {
     return { egress_profile: 'unattested-edge-opt-in', enforcement_scope };
   }
   return null;

@@ -246,6 +246,30 @@ describe('health endpoints', () => {
       t.after(() => optedOut.close());
       const optedOutAdmin = await optedOut.registerUser();
       optedOut.edge.setBackendEgressPolicy(controlPlane);
+      if (env === 'NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS') {
+        for (const refusedPolicy of [
+          {
+            ...publicEgressPolicy(),
+            mode: 'both',
+            mode_allowed_ip_classes: ['public', 'private-reserved'],
+            mode_blocked_ip_classes: [],
+            public_only_guaranteed: false,
+          },
+          {
+            ...controlPlane,
+            allow_cidr_overrides_present: true,
+            public_only_guaranteed: false,
+          },
+        ]) {
+          optedOut.edge.setBackendEgressPolicy(refusedPolicy);
+          const refusedPolicyHealth = await edgeHealth(optedOut, optedOutAdmin);
+          assert.equal(refusedPolicyHealth.json<EdgeHealth>().status, 'degraded');
+          assert.equal(refusedPolicyHealth.json<EdgeHealth>().reason, 'backend_egress_unverified');
+          assert.equal(refusedPolicyHealth.json<EdgeHealth>().public_egress_guaranteed, false);
+          await assert.rejects(optedOut.edgeClient.assertBackendEgress());
+        }
+        optedOut.edge.setBackendEgressPolicy(controlPlane);
+      }
       const admitted = await edgeHealth(optedOut, optedOutAdmin);
       assert.equal(admitted.json<EdgeHealth>().status, 'ok', env);
       assert.equal(admitted.json<EdgeHealth>().public_egress_guaranteed, false, env);
