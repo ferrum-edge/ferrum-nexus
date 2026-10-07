@@ -32,6 +32,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE`, `NOTICE` and the README Required Notice (previously "Ferrum Nexus"), and in `LICENSE-COMMERCIAL.md`.
 - **Spec builds no longer read every all-tools grantee from the gateway** (Refs #525).
   Each spec revision, rollback, agents edit, restore or conversion of an agent API did
   one consumer `GET` per all-tools grantee under the proxy lease to enroll it in the
