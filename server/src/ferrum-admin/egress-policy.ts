@@ -128,10 +128,11 @@ function modeClasses(mode: EgressMode): { allowed: IpClass[]; blocked: IpClass[]
 }
 
 /**
- * The only policy schema this portal reads. Edge v0.9.13 publishes schema 2 and
- * never 1. Schema 1 (Edge v0.9.11 and v0.9.12) reported the policy-only value of
- * `public_only_guaranteed`, so the same field meant something else: it is refused
- * rather than reinterpreted, and this portal pairs with Edge v0.9.13 only.
+ * The only policy schema this portal reads. Edge v0.9.13 and later publish
+ * schema 2 and never 1 (Edge v0.9.14 adds the optional control-plane
+ * `data_plane_attestation` within it). Schema 1 (Edge v0.9.11 and v0.9.12)
+ * reported the policy-only value of `public_only_guaranteed`, so the same field
+ * meant something else: it is refused rather than reinterpreted.
  */
 export const SUPPORTED_EGRESS_POLICY_SCHEMA = 2;
 
@@ -150,16 +151,41 @@ export function isUnsupportedEgressPolicySchema(value: unknown): boolean {
   );
 }
 
-/** Closed parsing: never infer policy from mode alone or tolerate future vocabulary. */
-export function parseBackendEgressPolicy(
+/**
+ * Why a `data_plane_attestation` was set aside. Bounded vocabulary, logged as is.
+ *
+ * - `malformed`: not the owner shape (a missing, unknown or mistyped key).
+ * - `inconsistent`: the summary disagrees with the listed streams.
+ * - `out_of_scope`: attached to an answer that is not a control plane's.
+ */
+export type DataPlaneAttestationProblem = 'malformed' | 'inconsistent' | 'out_of_scope';
+
+/** A recognized policy, and whether its data-plane attestation had to be set aside. */
+export interface BackendEgressPolicyReading {
+  /** Never carries an attestation that was set aside. */
+  policy: BackendEgressPolicy;
+  attestationProblem: DataPlaneAttestationProblem | null;
+}
+
+/**
+ * Closed parsing of the process policy: never infer policy from mode alone or
+ * tolerate future vocabulary there, which refuses the answer in every profile.
+ *
+ * The attestation can only add a guarantee, so a problem inside it degrades
+ * rather than refuses: the policy is returned without it, the problem is
+ * named, and the answer then proves nothing (see {@link assessBackendEgress}).
+ * An opt-out profile keeps working; nothing is ever granted on that shape.
+ */
+export function readBackendEgressPolicy(
   value: unknown,
   namespace: string,
-): BackendEgressPolicy | null {
+): BackendEgressPolicyReading | null {
   if (!isRecord(value)) return null;
-  const row = value;
   // Edge v0.9.14 adds the attestation within schema 2; nothing else is optional.
-  const attested = Object.hasOwn(row, DATA_PLANE_ATTESTATION_KEY);
-  if (!hasExactKeys(row, attested ? [...KEYS, DATA_PLANE_ATTESTATION_KEY] : KEYS)) return null;
+  const attested = Object.hasOwn(value, DATA_PLANE_ATTESTATION_KEY);
+  const row: Record<string, unknown> = { ...value };
+  delete row[DATA_PLANE_ATTESTATION_KEY];
+  if (!hasExactKeys(row, KEYS)) return null;
   if (
     row.schema_version !== SUPPORTED_EGRESS_POLICY_SCHEMA ||
     row.ip_classification !== 'ferrum-private-reserved-v1' ||
@@ -200,16 +226,27 @@ export function parseBackendEgressPolicy(
   ) {
     return null;
   }
-  // Edge sends the attestation from a control plane only, and a malformed one is
-  // not the owner shape: the whole answer is refused, never read as "absent".
-  if (
-    attested &&
-    (row.enforcement_scope !== 'admission-only' ||
-      parseDataPlaneAttestation(row[DATA_PLANE_ATTESTATION_KEY]) === null)
-  ) {
-    return null;
+  const policy = row as unknown as BackendEgressPolicy;
+  if (!attested) return { policy, attestationProblem: null };
+  // Edge sends the attestation from a control plane only.
+  if (row.enforcement_scope !== 'admission-only') {
+    return { policy, attestationProblem: 'out_of_scope' };
   }
-  return row as unknown as BackendEgressPolicy;
+  const attestation = readDataPlaneAttestation(value[DATA_PLANE_ATTESTATION_KEY]);
+  if (typeof attestation === 'string') return { policy, attestationProblem: attestation };
+  return { policy: { ...policy, data_plane_attestation: attestation }, attestationProblem: null };
+}
+
+/**
+ * The exact owner shape: {@link readBackendEgressPolicy} with nothing set
+ * aside, or `null`. Admission reads the degrading form instead.
+ */
+export function parseBackendEgressPolicy(
+  value: unknown,
+  namespace: string,
+): BackendEgressPolicy | null {
+  const reading = readBackendEgressPolicy(value, namespace);
+  return reading !== null && reading.attestationProblem === null ? reading.policy : null;
 }
 
 /** One data plane's self-reported policy, with Edge's serving guarantee rule. */
@@ -274,10 +311,12 @@ function weakenPolicy(a: DataPlaneEgressPolicy, b: DataPlaneEgressPolicy): DataP
 /**
  * Closed and self-consistent: every summary field must be exactly what Edge's
  * own aggregation computes from the listed streams, so a summary that disagrees
- * with its entries (or entries that disagree with the count) is refused.
+ * with its entries (or entries that disagree with the count) is set aside.
  */
-function parseDataPlaneAttestation(value: unknown): DataPlaneEgressAttestation | null {
-  if (!isRecord(value) || !hasExactKeys(value, ATTESTATION_KEYS)) return null;
+function readDataPlaneAttestation(
+  value: unknown,
+): DataPlaneEgressAttestation | DataPlaneAttestationProblem {
+  if (!isRecord(value) || !hasExactKeys(value, ATTESTATION_KEYS)) return 'malformed';
   const connected = value.connected_data_planes;
   const planes = value.data_planes;
   if (
@@ -285,25 +324,25 @@ function parseDataPlaneAttestation(value: unknown): DataPlaneEgressAttestation |
     typeof connected !== 'number' ||
     !Number.isSafeInteger(connected) ||
     connected < 0 ||
-    !Array.isArray(planes) ||
-    planes.length !== connected
+    !Array.isArray(planes)
   ) {
-    return null;
+    return 'malformed';
   }
   let weakest: DataPlaneEgressPolicy | null = null;
   let reporting = 0;
   for (const plane of planes as unknown[]) {
     const entry = parseDataPlaneEntry(plane);
-    if (entry === null) return null;
+    if (entry === null) return 'malformed';
     if (entry.policy === null) continue;
     reporting += 1;
     weakest = weakest === null ? entry.policy : weakenPolicy(weakest, entry.policy);
   }
   if (value.weakest_policy !== null && parseDataPlanePolicy(value.weakest_policy) === null) {
-    return null;
+    return 'malformed';
   }
   const complete = connected > 0 && reporting === connected;
   if (
+    planes.length !== connected ||
     value.reporting_data_planes !== reporting ||
     value.unknown_data_planes !== connected - reporting ||
     !isDeepStrictEqual(value.weakest_policy, weakest) ||
@@ -311,7 +350,7 @@ function parseDataPlaneAttestation(value: unknown): DataPlaneEgressAttestation |
     value.all_connected_public_only_guaranteed !==
       (complete && weakest?.public_only_guaranteed === true)
   ) {
-    return null;
+    return 'inconsistent';
   }
   return value as unknown as DataPlaneEgressAttestation;
 }
@@ -326,18 +365,54 @@ export function provesLocalPublicEgress(policy: BackendEgressPolicy): boolean {
 }
 
 /**
- * A control plane enforces nothing itself (its own `public_only_guaranteed` is
- * always false); it can only relay what its connected data planes reported
- * (Edge v0.9.14). The guarantee needs at least one connected data plane, every
- * one of them reporting, and every report public-only without allow overlays.
- * The parser already checked the summary against the streams; the rule is still
- * recomputed from the streams here, so the summary flag alone never grants it.
- * It covers the data planes connected at the moment of this read only.
+ * What a control plane's data-plane attestation proves (Edge v0.9.14).
+ *
+ * - `guaranteed`: every condition below holds.
+ * - `attestation_absent`: the control plane reports none (Edge v0.9.13).
+ * - `attestation_unreadable`: it was set aside ({@link DataPlaneAttestationProblem}).
+ * - `data_planes_not_public_only`: no data plane is connected, one did not
+ *   report, or one is not `public` mode without allow overrides.
+ * - `expected_data_planes_unset`: `NEXUS_EXPECTED_DATA_PLANES` is not set, so
+ *   nothing says the connected set is the whole fleet.
+ * - `fewer_data_planes_than_expected`: fewer streams are connected than it says.
+ * - `not_control_plane`: the answer is not a control plane's.
  */
-export function provesDataPlanePublicEgress(policy: BackendEgressPolicy): boolean {
+export type DataPlaneAttestationVerdict =
+  | 'guaranteed'
+  | 'attestation_absent'
+  | 'attestation_unreadable'
+  | 'data_planes_not_public_only'
+  | 'expected_data_planes_unset'
+  | 'fewer_data_planes_than_expected'
+  | 'not_control_plane';
+
+/** Only a positive integer is an inventory; anything else counts as unset. */
+function isExpectedDataPlanes(value: number | undefined): value is number {
+  return value !== undefined && Number.isSafeInteger(value) && value > 0;
+}
+
+/**
+ * A control plane enforces nothing itself (its own `public_only_guaranteed` is
+ * always false); it can only relay what its connected data planes reported.
+ * The guarantee needs at least one connected data plane, every one of them
+ * reporting, and every report public-only without allow overlays. The parser
+ * already checked the summary against the streams; the rule is still recomputed
+ * from the streams here, so the summary flag alone never grants it.
+ *
+ * A control plane sees only the data planes streaming from it, so the operator's
+ * `expectedDataPlanes` (`NEXUS_EXPECTED_DATA_PLANES`) must also be set and the
+ * connected stream count, as Edge counts it (one per listed entry), must reach
+ * it. Unset, an attestation never grants the guarantee. It covers the data
+ * planes connected at the moment of this read only.
+ */
+export function dataPlaneAttestationVerdict(
+  policy: BackendEgressPolicy,
+  expectedDataPlanes?: number,
+): DataPlaneAttestationVerdict {
+  if (policy.enforcement_scope !== 'admission-only') return 'not_control_plane';
   const attestation = policy.data_plane_attestation;
-  if (policy.enforcement_scope !== 'admission-only' || attestation === undefined) return false;
-  return (
+  if (attestation === undefined) return 'attestation_absent';
+  const allPublicOnly =
     attestation.all_connected_public_only_guaranteed &&
     attestation.weakest_policy_complete &&
     attestation.connected_data_planes > 0 &&
@@ -349,16 +424,54 @@ export function provesDataPlanePublicEgress(policy: BackendEgressPolicy): boolea
         entry.policy !== null &&
         entry.policy.mode === 'public' &&
         !entry.policy.allow_cidr_overrides_present,
-    )
-  );
+    );
+  if (!allPublicOnly) return 'data_planes_not_public_only';
+  if (!isExpectedDataPlanes(expectedDataPlanes)) return 'expected_data_planes_unset';
+  if (attestation.data_planes.length < expectedDataPlanes) {
+    return 'fewer_data_planes_than_expected';
+  }
+  return 'guaranteed';
+}
+
+/** {@link dataPlaneAttestationVerdict} is `guaranteed`. */
+export function provesDataPlanePublicEgress(
+  policy: BackendEgressPolicy,
+  expectedDataPlanes?: number,
+): boolean {
+  return dataPlaneAttestationVerdict(policy, expectedDataPlanes) === 'guaranteed';
 }
 
 /**
  * The public-only guarantee: proved by the serving process itself, or by a
- * control plane whose every connected data plane attests it.
+ * control plane whose every expected data plane is connected and attests it.
  */
-export function provesPublicEgress(policy: BackendEgressPolicy): boolean {
-  return provesLocalPublicEgress(policy) || provesDataPlanePublicEgress(policy);
+export function provesPublicEgress(
+  policy: BackendEgressPolicy,
+  expectedDataPlanes?: number,
+): boolean {
+  return provesLocalPublicEgress(policy) || provesDataPlanePublicEgress(policy, expectedDataPlanes);
+}
+
+/**
+ * Why a control plane's attestation did not grant the guarantee, for the
+ * operator: the health error and the write refusal. `null` when it did, or
+ * when the answer is not a control plane's.
+ */
+export function describeDataPlaneAttestation(verdict: DataPlaneAttestationVerdict): string | null {
+  switch (verdict) {
+    case 'attestation_absent':
+      return 'the control plane reports no data-plane egress attestation (Edge v0.9.14 adds it)';
+    case 'attestation_unreadable':
+      return 'the data-plane egress attestation is unreadable and was set aside';
+    case 'data_planes_not_public_only':
+      return 'not every connected data plane attests public-only egress, or none is connected';
+    case 'expected_data_planes_unset':
+      return 'NEXUS_EXPECTED_DATA_PLANES is not set, so the data-plane attestation cannot grant it';
+    case 'fewer_data_planes_than_expected':
+      return 'fewer data planes are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES';
+    default:
+      return null;
+  }
 }
 
 /**
@@ -367,7 +480,7 @@ export function provesPublicEgress(policy: BackendEgressPolicy): boolean {
  *
  * - `public-guaranteed`: the gateway proved public-only egress, on its own data
  *   plane ({@link provesLocalPublicEgress}, `enforcement_scope` `local-data-plane`)
- *   or through every connected data plane of a control plane
+ *   or through every expected data plane of a control plane
  *   ({@link provesDataPlanePublicEgress}, `enforcement_scope` `admission-only`).
  * - `private-upstreams-opt-in`: `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`. The portal
  *   publishes private upstreams on purpose, so the gateway cannot also be
@@ -375,8 +488,8 @@ export function provesPublicEgress(policy: BackendEgressPolicy): boolean {
  * - `unattested-edge-opt-in`: `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`. Only
  *   the gateway attestation is waived; Nexus still screens every upstream. It
  *   still requires `public_only_guaranteed=true`, which schema 2 reports only
- *   for `local-data-plane`, so against Edge v0.9.13 it admits no pairing the
- *   public profile would refuse (a control plane reports `false`).
+ *   for `local-data-plane`, so it admits no pairing the public profile would
+ *   refuse (a control plane reports `false`).
  */
 export type EgressProfile =
   'public-guaranteed' | 'private-upstreams-opt-in' | 'unattested-edge-opt-in';
@@ -393,25 +506,57 @@ export interface EgressOptOuts {
   allowUnattestedEdgeEgress?: boolean;
 }
 
+/** The opt-outs, and the operator's data-plane inventory for a control plane. */
+export interface EgressAdmissionOptions extends EgressOptOuts {
+  /** `NEXUS_EXPECTED_DATA_PLANES`; unset, an attestation never grants the guarantee. */
+  expectedDataPlanes?: number;
+}
+
+/** Everything one policy reading establishes. */
+export interface BackendEgressAssessment {
+  /** Whether the reading proves public-only egress; independent of the opt-outs. */
+  publicEgressGuaranteed: boolean;
+  /** The admission verdict, or `null` to refuse the write. */
+  admission: BackendEgressAdmission | null;
+  /** What the data-plane attestation proved; `attestation_unreadable` on any problem. */
+  dataPlaneAttestation: DataPlaneAttestationVerdict;
+}
+
+/**
+ * Assess one reading. A set-aside attestation proves nothing, whatever the rest
+ * of the answer says, but it never refuses what an opt-out admits.
+ */
+export function assessBackendEgress(
+  reading: BackendEgressPolicyReading,
+  options: EgressAdmissionOptions,
+): BackendEgressAssessment {
+  const { policy } = reading;
+  const usable = reading.attestationProblem === null;
+  const publicEgressGuaranteed = usable && provesPublicEgress(policy, options.expectedDataPlanes);
+  const dataPlaneAttestation = usable
+    ? dataPlaneAttestationVerdict(policy, options.expectedDataPlanes)
+    : 'attestation_unreadable';
+  const enforcement_scope = policy.enforcement_scope;
+  let admission: BackendEgressAdmission | null = null;
+  if (publicEgressGuaranteed) {
+    admission = { egress_profile: 'public-guaranteed', enforcement_scope };
+  } else if (options.allowPrivateUpstreams === true) {
+    admission = { egress_profile: 'private-upstreams-opt-in', enforcement_scope };
+  } else if (options.allowUnattestedEdgeEgress === true && policy.public_only_guaranteed === true) {
+    // Never relaxed to `mode === 'public'`: under schema 2 that would grant a
+    // control plane the policy-only reading the owner withdrew.
+    admission = { egress_profile: 'unattested-edge-opt-in', enforcement_scope };
+  }
+  return { publicEgressGuaranteed, admission, dataPlaneAttestation };
+}
+
 /**
  * Admit a recognized policy, or return `null` to refuse it. A policy that
  * proves public-only egress is always reported as such, whatever the opt-outs.
  */
 export function admitBackendEgress(
   policy: BackendEgressPolicy,
-  optOuts: EgressOptOuts,
+  options: EgressAdmissionOptions,
 ): BackendEgressAdmission | null {
-  const enforcement_scope = policy.enforcement_scope;
-  if (provesPublicEgress(policy)) {
-    return { egress_profile: 'public-guaranteed', enforcement_scope };
-  }
-  if (optOuts.allowPrivateUpstreams === true) {
-    return { egress_profile: 'private-upstreams-opt-in', enforcement_scope };
-  }
-  // Never relaxed to `mode === 'public'`: under schema 2 that would grant a
-  // control plane the policy-only reading the owner withdrew.
-  if (optOuts.allowUnattestedEdgeEgress === true && policy.public_only_guaranteed === true) {
-    return { egress_profile: 'unattested-edge-opt-in', enforcement_scope };
-  }
-  return null;
+  return assessBackendEgress({ policy, attestationProblem: null }, options).admission;
 }

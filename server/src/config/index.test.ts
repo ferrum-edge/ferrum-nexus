@@ -122,6 +122,7 @@ describe('loadConfig', () => {
     assert.equal(config.trustedProxies, false);
     assert.equal(config.allowPrivateUpstreams, false);
     assert.equal(config.allowUnattestedEdgeEgress, false);
+    assert.equal(config.expectedDataPlanes, undefined);
     assert.equal(config.logLevel, 'info');
     assert.equal(config.sessionTtlSeconds, 43_200);
     assert.equal(config.captchaEnforcement, 'enforced');
@@ -571,5 +572,21 @@ describe('loadConfig', () => {
       baseEnv({ NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: 'sometimes' }),
       'NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS must be true or false',
     );
+  });
+
+  it('reads NEXUS_EXPECTED_DATA_PLANES as an optional positive integer', () => {
+    const expected = (value: string): number | undefined =>
+      loadConfig(baseEnv({ NEXUS_EXPECTED_DATA_PLANES: value })).expectedDataPlanes;
+    assert.equal(expected(''), undefined);
+    assert.equal(expected('1'), 1);
+    assert.equal(expected(' 12 '), 12);
+    assert.equal(expected('1000000'), 1_000_000);
+    // A typo is a startup error, never a silently different (or absent) inventory.
+    for (const value of ['0', '-1', '1.5', '1e3', '0x10', '+3', 'three', '1000001']) {
+      expectConfigError(
+        baseEnv({ NEXUS_EXPECTED_DATA_PLANES: value }),
+        'NEXUS_EXPECTED_DATA_PLANES must be a positive integer',
+      );
+    }
   });
 });

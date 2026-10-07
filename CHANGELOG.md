@@ -46,17 +46,25 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **Harden the public-only egress guarantee for control-plane/data-plane topologies**
   (Refs #525). When a control plane reports data-plane egress attestation (the
   additive `data_plane_attestation` object Edge `v0.9.14` adds within egress policy
-  schema 2), Nexus grants the verified public-only guarantee only if at least one
-  data plane is connected for the namespace, every connected data plane reported,
-  every report is `public` mode without allow CIDRs, and Edge's aggregate matches the
-  listed reports, which Nexus recomputes rather than trusting the summary flag. No
-  connected data plane, an unknown or weaker data plane, or a control plane without
-  the object (Edge `v0.9.13`) stays "not guaranteed": backend writes are refused
-  unless an opt-out admits them and health reads `degraded`. A malformed or
-  inconsistent attestation, or one on anything but a control plane, is refused in
-  every profile. The verdict is re-read for every backend write and health probe
-  with no caching or grace period. The policy answer bound rises from 4 KiB to 1 MiB
-  so a control plane can list its fleet. Writes admitted this way record
+  schema 2), Nexus grants the verified public-only guarantee only if the new
+  `NEXUS_EXPECTED_DATA_PLANES` setting is set and at least that many data-plane
+  streams are connected, every connected data plane reported, every report is
+  `public` mode without allow CIDRs, and Edge's aggregate matches the listed reports,
+  which Nexus recomputes rather than trusting the summary flag. A control plane sees
+  only the data planes connected to it, so the setting is the namespace's inventory
+  across every control plane; with several control plane replicas, a load balancer in
+  front of them, or data-plane failover, the count falls short and the guarantee is
+  withheld. Unset (the default), the count not reached, no connected data plane, an
+  unknown or weaker data plane, or a control plane without the object (Edge `v0.9.13`)
+  stays "not guaranteed": backend writes are refused unless an opt-out admits them,
+  health reads `degraded`, and the admin diagnostic and the write refusal name the
+  reason. `NEXUS_EXPECTED_DATA_PLANES` must be a positive integer; anything else
+  refuses startup. A malformed or inconsistent attestation, or one on anything but a
+  control plane, is set aside with a warning log and reads "not guaranteed" without
+  refusing what an opt-out admits; the rest of the policy answer stays strict. The
+  verdict is re-read for every backend write and health probe with no caching or grace
+  period. The policy answer bound rises from 4 KiB to 4 MiB, roughly 10,000 data-plane
+  streams per namespace. Writes admitted this way record
   `egress_profile: public-guaranteed` with `enforcement_scope: admission-only`. See
   [CP/DP pairings and data-plane attestation](docs/operations.md#cpdp-pairings-and-data-plane-attestation).
 

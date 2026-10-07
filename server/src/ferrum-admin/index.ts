@@ -77,5 +77,6 @@ export function createFerrumAdmin(
     leases,
     allowPrivateUpstreams: config.allowPrivateUpstreams,
     allowUnattestedEdgeEgress: config.allowUnattestedEdgeEgress,
+    expectedDataPlanes: config.expectedDataPlanes,
   });
 }

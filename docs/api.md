@@ -288,16 +288,16 @@ Example for an admin session:
 `"unreachable"` (the driver's message goes to the server log); `edge.error` is
 the real probe failure for an admin and `"unreachable"` for everyone else.
 
-| Field                           | Values and meaning                                                                                                                                                                                                                                                                                        |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status`                        | `ok` \| `degraded` \| `down`                                                                                                                                                                                                                                                                              |
-| `version`                       | the server package version                                                                                                                                                                                                                                                                                |
-| `edge.status`                   | `ok` \| `degraded` \| `not_ready` \| `down`                                                                                                                                                                                                                                                               |
-| `edge.reason`                   | why a `degraded` gateway is degraded: `"namespace_unserved"`, or `"backend_egress_unverified"` for an admin and the generic `"unspecified"` for everyone else; `null` otherwise                                                                                                                           |
-| `edge.ready`                    | Edge's own readiness from its health payload; `null` when nothing answered. Edge answers `503` with a full payload while `starting`, `draining` or `unavailable`, which Nexus reports as `not_ready`                                                                                                      |
-| `edge.edge_version`             | always `null` against a stock gateway — Edge has no version endpoint                                                                                                                                                                                                                                      |
-| `edge.public_egress_guaranteed` | admin only (`null` otherwise): `true` only when the sampled gateway policy proves public-only backend egress on its local data plane, or on every connected data plane of a control plane through data-plane attestation; unchanged by either egress opt-out. Observational, never mutation authorization |
-| `edge.namespace`                | `FERRUM_NAMESPACE` on the portal                                                                                                                                                                                                                                                                          |
+| Field                           | Values and meaning                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`                        | `ok` \| `degraded` \| `down`                                                                                                                                                                                                                                                                                                                                   |
+| `version`                       | the server package version                                                                                                                                                                                                                                                                                                                                     |
+| `edge.status`                   | `ok` \| `degraded` \| `not_ready` \| `down`                                                                                                                                                                                                                                                                                                                    |
+| `edge.reason`                   | why a `degraded` gateway is degraded: `"namespace_unserved"`, or `"backend_egress_unverified"` for an admin and the generic `"unspecified"` for everyone else; `null` otherwise                                                                                                                                                                                |
+| `edge.ready`                    | Edge's own readiness from its health payload; `null` when nothing answered. Edge answers `503` with a full payload while `starting`, `draining` or `unavailable`, which Nexus reports as `not_ready`                                                                                                                                                           |
+| `edge.edge_version`             | always `null` against a stock gateway — Edge has no version endpoint                                                                                                                                                                                                                                                                                           |
+| `edge.public_egress_guaranteed` | admin only (`null` otherwise): `true` only when the sampled gateway policy proves public-only backend egress on its local data plane, or on every connected data plane of a control plane through data-plane attestation with at least `NEXUS_EXPECTED_DATA_PLANES` connected; unchanged by either egress opt-out. Observational, never mutation authorization |
+| `edge.namespace`                | `FERRUM_NAMESPACE` on the portal                                                                                                                                                                                                                                                                                                                               |
 
 #### Is the published API actually reachable?
 
@@ -329,18 +329,24 @@ generic `"unspecified"`, because the egress posture is deployment topology. This
 HTTP-200 degraded liveness, not mutation authorization: every backend
 write obtains its own authenticated namespace policy, including compensation. The
 public profile accepts only local-serving/public-only metadata or a control plane whose
-data planes all attest public-only; missing, stale, unknown, unattested CP-only,
+data planes all attest public-only with at least `NEXUS_EXPECTED_DATA_PLANES`
+connected; missing, stale, unknown, unattested CP-only,
 default-both and allow-overlay cases refuse with bounded opaque
 `EDGE_ERROR` / `EDGE_PROTOCOL_ERROR` / `EDGE_UNAVAILABLE` diagnostics. Health's
 cache/coalescing still bounds public probe load.
 
 `edge.public_egress_guaranteed` is `true` only when that sampled policy reports
 `enforcement_scope=local-data-plane` with `public_only_guaranteed=true`, or comes from a
-control plane whose `data_plane_attestation` (Edge v0.9.14) shows at least one
-connected data plane and every connected one reporting public-only without allow
-CIDRs. Any other control plane reads `false`: no connected or an unknown or weaker
-data plane, or Edge v0.9.13, which sends no attestation and reports
-`public_only_guaranteed=false` for it. `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` admits its
+control plane whose `data_plane_attestation` (Edge v0.9.14) shows every connected data
+plane reporting public-only without allow CIDRs, with at least
+`NEXUS_EXPECTED_DATA_PLANES` (and at least one) connected. Any other control plane
+reads `false`: `NEXUS_EXPECTED_DATA_PLANES` unset or not reached, no connected or an
+unknown or weaker data plane, an attestation Nexus set aside as malformed or
+inconsistent, or Edge v0.9.13, which sends no attestation and reports
+`public_only_guaranteed=false` for it. An admin's `edge.error` then names which
+condition failed, and a refused write's `EDGE_ERROR` carries the same reason in its
+message and a bounded `details.data_plane_attestation` code.
+`NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` admits its
 writes without changing that verdict. `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` still
 requires `public_only_guaranteed=true`, so against Edge v0.9.13 it admits no such
 pairing. Egress policy schema 1 (Edge v0.9.12 and earlier) is refused as

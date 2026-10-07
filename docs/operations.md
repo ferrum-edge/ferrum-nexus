@@ -103,6 +103,7 @@ See the README for a two-stack example.
 | `NEXUS_MAX_MASS_EMAILS_PER_DAY`              | `5`                                   | Mass-email campaigns per administrator per rolling 24 h, 0–100 000; `0` disables. A retry with the same `idempotency_key`, content and audience is not counted again; the same key with anything else is `409 CONFLICT`. Security mail has claim priority; this cap still bounds campaign storage.                                                                                                                                                                                                                                                                    |
 | `NEXUS_ALLOW_PRIVATE_UPSTREAMS`              | `false`                               | Whether an API upstream may be loopback, private (RFC 1918, CGNAT, link-local) or a `.local`/`.internal`/`.localhost`/`.home.arpa` name. At `false` Nexus also resolves every other upstream hostname and refuses it if any answer is private or the name does not resolve, so **the Nexus process needs public DNS**. Refusals are `400 SPEC_INVALID`. Set `true` for internal-only portals and local development. See [`security.md`](security.md#1-threat-model).                                                                                                  |
 | `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS`         | `false`                               | Whether backend writes may proceed when the gateway cannot attest public-only egress on its own data plane, as in a control-plane/data-plane pairing. Relaxes only that attestation: Nexus keeps the upstream screening above, health keeps `public_egress_guaranteed: false`, startup logs a warning, and each admitted write records `egress_profile` in its audit row. Set `true` only when every data plane enforces `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs. See [the topology decision](#backend-egress-admission-and-the-public-only-guarantee). |
+| `NEXUS_EXPECTED_DATA_PLANES`                 | _(unset)_                             | Control-plane/data-plane pairings only: the namespace's total data-plane streams across every control plane, a positive integer up to 1 000 000 (anything else refuses startup). A control plane's data-plane attestation proves public-only egress only while at least this many streams are connected to the control plane Nexus reads and every one attests it. Unset, an attestation never proves it. See [CP/DP pairings and data-plane attestation](#cpdp-pairings-and-data-plane-attestation).                                                                 |
 | `NEXUS_ALLOW_ENV_OVERRIDE`                   | `false`                               | Allow the process environment to override `.env` for `FERRUM_NAMESPACE`/`FERRUM_ADMIN_URL` outside production (see above). No effect in production.                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `NEXUS_WEB_DIST`                             | _(unset)_                             | Directory of the built SPA. Nexus uses the first of this, `../../web/dist` relative to the server, and `./web/dist` under the working directory that contains an `index.html`; with none, only the API is served.                                                                                                                                                                                                                                                                                                                                                     |
 | `NEXUS_BOOTSTRAP_TOKEN`                      | _(unset)_                             | Token the founding registration must present. At least 16 characters. When unset, each process generates one. Set it for any multi-instance deployment. See [First run](#first-run-and-the-bootstrap-token).                                                                                                                                                                                                                                                                                                                                                          |
@@ -237,13 +238,14 @@ Unless an opt-out below is set, every backend-writing Admin boundary
 requires fresh authenticated, namespace-matched, no-store process metadata from
 `GET /backend-egress-policy`, schema 2 (Edge v0.9.13). Only `local-data-plane` with
 `public_only_guaranteed=true` passes, or a control plane whose data-plane attestation
-proves every connected data plane public-only (see
+proves every connected data plane public-only with at least
+`NEXUS_EXPECTED_DATA_PLANES` of them connected (see
 [CP/DP pairings and data-plane attestation](#cpdp-pairings-and-data-plane-attestation)).
 Nexus validates the complete closed vocabulary,
 exact allowed/blocked class arrays, evaluation order and cross-field consistency.
 Unknown/missing/malformed metadata, auth/network/timeout failures, cached answers,
-a control plane without that attestation, unserved/no data plane, mode `both` and any
-allow-CIDR overlay refuse writes. Preflight precedes destructive conversions, staging and ACL building;
+a control plane without a qualifying attestation, unserved/no data plane, mode `both`
+and any allow-CIDR overlay refuse writes. Preflight precedes destructive conversions, staging and ACL building;
 compensation repeats admission and records repair-required failures. Before
 teardown, conversion atomically seals its original baseline, retains its proxy
 reference, sets `gateway_state=repair_required` and records an intent audit. The
@@ -327,8 +329,8 @@ remains unchanged (see the security guide).
 A direct singleton requires operator-established identity of its Admin and traffic
 process. Process metadata has no process identity or fleet inventory; on its own it
 cannot attest a remote DP, other process, load-balanced Admin endpoint or future
-replacement (a control plane's data-plane attestation covers only its connected data
-planes; see below). Check
+replacement (a control plane's data-plane attestation covers only the data planes
+connected to it, checked against `NEXUS_EXPECTED_DATA_PLANES`; see below). Check
 both endpoints and configuration on replacement/reconfiguration, and enforce policy
 for existing traffic outside Nexus. Startup and cached health successes authorize no
 mutation. Health keeps HTTP 200 for degraded liveness and retains probe
@@ -345,7 +347,8 @@ cases only:
   traffic.
 - Edge is a control plane (`enforcement_scope=admission-only`) whose
   `data_plane_attestation` proves that every data plane connected for the namespace
-  enforces public-only egress (Edge `v0.9.14` and later; see
+  enforces public-only egress, and at least `NEXUS_EXPECTED_DATA_PLANES` data-plane
+  streams are connected (Edge `v0.9.14` and later; see
   [CP/DP pairings and data-plane attestation](#cpdp-pairings-and-data-plane-attestation)).
 
 `GET /api/health/edge` reports that verdict as `public_egress_guaranteed`. Every other
@@ -353,13 +356,13 @@ pairing reads `public_egress_guaranteed: false`. That includes a control plane t
 reports `public_only_guaranteed=true` for its own process: its own policy describes
 admission, not the remote data planes that connect to backends.
 
-| Pairing (schema 2)                                                        | Public profile (default)                          | `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`         | `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`              |
-| ------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- |
-| Local data plane, public mode, no allow overrides                         | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
-| Control plane; every connected data plane attests public-only (v0.9.14+)  | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
-| Control plane without that attestation (v0.9.13, none, unknown or weaker) | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
-| Any other recognized policy                                               | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
-| Missing, malformed, unsupported-schema or unreachable policy              | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed |
+| Pairing (schema 2)                                                                                                               | Public profile (default)                          | `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`         | `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`              |
+| -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- |
+| Local data plane, public mode, no allow overrides                                                                                | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
+| Control plane; every connected data plane attests public-only and at least `NEXUS_EXPECTED_DATA_PLANES` are connected (v0.9.14+) | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
+| Any other control plane (v0.9.13; count unset or short; attestation unreadable; none, unknown or weaker data planes)             | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
+| Any other recognized policy                                                                                                      | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
+| Missing, malformed, unsupported-schema or unreachable policy                                                                     | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed |
 
 Nexus upstream screening runs in the first two columns and is skipped only in the
 last. Without the attestation Nexus never describes a CP/DP pairing as public-only,
@@ -375,6 +378,9 @@ one entry per live stream, plus Edge's aggregate over them. The control plane's 
 fields keep their admission-only meaning, and its own `public_only_guaranteed` stays
 `false`. Nexus grants the guarantee from the attestation only when all of these hold:
 
+- `NEXUS_EXPECTED_DATA_PLANES` is set, and the number of connected data-plane streams
+  (Edge's `connected_data_planes`, which Nexus recomputes as the number of listed
+  entries) is at least that value;
 - at least one data plane is connected for the namespace;
 - every connected data plane sent a recognised report (none is `unknown`), so the
   aggregate is complete;
@@ -385,17 +391,53 @@ fields keep their admission-only meaning, and its own `public_only_guaranteed` s
   listed streams produce. Nexus recomputes it from the entries and never trusts the
   summary flag alone.
 
-Anything else fails closed. No connected data plane, an unknown or weaker data plane,
-an allow overlay, or a control plane without the object (Edge `v0.9.13`) reads "not
+Anything else fails closed. `NEXUS_EXPECTED_DATA_PLANES` unset, fewer streams
+connected than it says, no connected data plane, an unknown or weaker data plane, an
+allow overlay, or a control plane without the object (Edge `v0.9.13`) reads "not
 guaranteed": writes are refused unless an opt-out admits them, and health is
-`degraded`. An attestation that is malformed, carries an unknown key, disagrees with
-its own entries, or appears on anything but a control plane makes the whole answer
-unreadable (`invalid_egress_policy`), refused in every profile. The namespace check
-is unchanged: an answer for another namespace is refused before the attestation is
-read. Answers are read up to 1 MiB, which leaves room for thousands of data planes;
-a larger answer is refused like any other unreadable policy. Admission audit rows
-record `egress_profile: public-guaranteed` with `enforcement_scope: admission-only`
-for a write admitted on attestation.
+`degraded`. An admin's `edge.error` and the write refusal name which condition
+failed.
+
+The attestation can only add the guarantee, so a problem inside it degrades rather
+than refuses. An attestation that is malformed, carries a missing or unknown key,
+disagrees with its own entries, or appears on anything but a control plane is set
+aside: that answer reads "not guaranteed" (even a local data plane's), Nexus logs a
+warning with a bounded `reason` (`malformed`, `inconsistent` or `out_of_scope`), and
+the opt-outs still admit writes by their own rules. The rest of
+the answer stays as strict as before: a missing, unknown or malformed top-level
+field, another schema, or an answer for another namespace is still unreadable
+(`invalid_egress_policy`) and refused in every profile.
+
+Answers are read up to 4 MiB. An entry takes about 400 bytes with realistic node
+ids, so that is roughly 10,000 data-plane streams per namespace, above Edge's
+default `FERRUM_XDS_MAX_TOTAL_STREAMS` (8192). A larger answer cannot be parsed, so
+it is refused like any other unreadable policy, in every profile. Admission audit
+rows record `egress_profile: public-guaranteed` with
+`enforcement_scope: admission-only` for a write admitted on attestation.
+
+**Setting `NEXUS_EXPECTED_DATA_PLANES`.** A control plane lists only the data planes
+streaming from that control plane process; one using another control plane is never
+seen. So the value is the namespace's whole data-plane inventory across every
+control plane: count each data-plane process serving the namespace (each holds one
+stream). Nexus reads only the control plane at `FERRUM_ADMIN_URL`, so the guarantee
+is available only when that control plane sees every data plane:
+
+- **One control plane.** Set the value to the fleet size. A data plane that has not
+  connected yet keeps the count short and the guarantee withheld.
+- **Several control plane replicas, a load balancer in front of them, or data planes
+  that fail over between control planes** (`FERRUM_DP_CP_GRPC_URLS`). Any control
+  plane that does not hold every stream reports a short count, so the guarantee is
+  withheld; behind a load balancer, writes and health then follow whichever replica
+  answered. Nexus cannot combine answers from several control planes. Such a fleet
+  publishes only under an opt-out, or by pointing `FERRUM_ADMIN_URL` at a control
+  plane every data plane uses.
+
+Never set the value lower than the real inventory: the count is the only check
+that the connected set is the whole fleet, and a value below it lets a data plane
+on another control plane, or one not yet connected, go unchecked. Raise the value
+when you add data planes, before they connect. Edge counts streams, so while a data
+plane reconnects it can briefly hold two and the count can exceed the real fleet by
+one for that moment.
 
 **Freshness and flapping.** The attestation describes the data planes connected at
 the moment of the read, and Nexus does not cache or smooth it. Every backend write
@@ -411,8 +453,9 @@ data plane connected, writes are refused; retry once a data plane has reconnecte
 authenticated data planes running the control plane's build, not a cryptographic
 attestation of the data-plane host. A data plane that has disconnected but keeps
 serving cached configuration is not listed, and one that connects after a write was
-admitted is not covered by that admission. Compare `connected_data_planes` (and
-Edge's `GET /cluster`) against your expected data-plane inventory, keep
+admitted is not covered by that admission. A data plane on a control plane Nexus
+does not read is covered only by `NEXUS_EXPECTED_DATA_PLANES`: keep it equal to the
+real inventory (Edge's `GET /cluster` helps to check it), keep
 `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs on every data plane, and
 requalify when a data plane is added, replaced or reconfigured.
 
@@ -436,7 +479,9 @@ it, health reads `degraded`, and an admin's `edge.error` names the unsupported s
 Every backend write is then refused in every profile. The same holds for any newer
 schema. Nexus also requires the v0.9.13 deployment snapshot (`api_spec_contents`), so
 Nexus `v0.4.0` pairs with Edge `v0.9.13` only: upgrade Edge and Nexus together, as
-described in [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913). The guarantee
+described in [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913). The unreleased
+build also reads the Edge `v0.9.14` control-plane attestation within schema 2; the
+release pin is unchanged. The guarantee
 still requires `enforcement_scope=local-data-plane` explicitly, not schema 2's
 narrowed `public_only_guaranteed` alone.
 

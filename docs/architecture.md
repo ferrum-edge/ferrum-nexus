@@ -415,10 +415,16 @@ See the [released protocol and remaining qualification](edge-conversion-recovery
 Health caches observations only.
 The public profile requires namespace-matched local serving/public-only metadata and
 operator-established Admin/traffic singleton identity, or a control plane whose Edge
-data-plane attestation (Edge v0.9.14) proves every connected data plane public-only.
-Process evidence alone cannot attest CPs, remote DPs, load-balanced Admin endpoints or
-fleets, so without that attestation Nexus reports those pairings as not guaranteed
-and admits their writes only under the explicit private opt-in. See the
+data-plane attestation (Edge v0.9.14) proves every data plane connected to it
+public-only while at least `NEXUS_EXPECTED_DATA_PLANES` are connected. That count is
+the operator's inventory across every control plane, and the only evidence that the
+connected set is the whole fleet: a control plane never sees a data plane that uses
+another one, so the guarantee holds only when the control plane Nexus reads sees
+every data plane. Multiple control plane replicas, load-balanced Admin endpoints and
+data-plane failover between control planes are not attested; there the count falls
+short and the guarantee is withheld. Process evidence alone cannot attest CPs, remote
+DPs or fleets, so without a qualifying attestation Nexus reports those pairings as
+not guaranteed and admits their writes only under the explicit private opt-in. See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)
 and [packaged fixture](../e2e/public-only/README.md). Source authority is Edge
 `9b83115de7ec23ab51ec4feae6bed65e596db425` (`v0.9.13`). Nexus adopts its
