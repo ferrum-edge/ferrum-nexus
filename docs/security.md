@@ -96,10 +96,11 @@ public-upstream profile requires a fresh authenticated, namespace-matched
 including staging, rebuilds, plugin association writes and compensation. Service
 preflight runs before destructive conversion and spec ACL enrollment. Schema 2
 (Edge v0.9.13) must be complete and closed, with exact class arrays and evaluation order; only
-`enforcement_scope=local-data-plane` and `public_only_guaranteed=true` authorize
-public-profile writes. Missing capability, timeouts, authentication failures,
-unknown/inconsistent responses, cache evidence, CP admission-only, unserved/no
-local plane, default `both` and any allow-CIDR override refuse the mutation.
+`enforcement_scope=local-data-plane` and `public_only_guaranteed=true`, or a control plane
+whose data-plane attestation (Edge v0.9.14) proves every connected data plane public-only,
+authorize public-profile writes. Missing capability, timeouts, authentication failures,
+unknown/inconsistent responses, cache evidence, a control plane without that attestation,
+unserved/no local plane, default `both` and any allow-CIDR override refuse the mutation.
 The dangerous-range baseline alone is insufficient. A refused compensation uses
 existing repair-required reporting; it does not bypass the policy.
 
@@ -119,34 +120,48 @@ allow override needed for Redis removes public-only certification. Edge's
 re-resolved by the Redis client; use a literal-IP TLS endpoint or the owner-documented
 plaintext hostname path where appropriate. Metadata does not expand this coverage.
 
-This is process evidence only. Operators must establish that a direct singleton's
-Admin endpoint and traffic listener belong to the same serving process. CP-only,
-remote/fleet/load-balanced Admin pairings cannot acquire that proof from this API.
+Local-data-plane metadata is process evidence only. Operators must establish that a
+direct singleton's Admin endpoint and traffic listener belong to the same serving
+process. Remote/fleet/load-balanced Admin pairings cannot acquire that proof from this
+API, and a control plane can prove only what its connected data planes report.
 Health is sampled, cached and observational, never mutation authorization. Replacing
 or reconfiguring Edge, retargeting Admin or traffic endpoints, and existing traffic
 require operator enforcement and requalification; a startup/sample success does not
 secure future fleet traffic.
 
 **Topology decision.** Nexus grants the verified public-only guarantee only to
-`enforcement_scope=local-data-plane` with `public_only_guaranteed=true`, and health
-reports it to admins as `edge.public_egress_guaranteed`. Edge source authority is
+`enforcement_scope=local-data-plane` with `public_only_guaranteed=true`, or to a control
+plane whose data-plane attestation proves every connected data plane public-only, and
+health reports it to admins as `edge.public_egress_guaranteed`. Edge source authority is
 `9b83115de7ec23ab51ec4feae6bed65e596db425` (`v0.9.13`); the Edge and canonical
 releases are published and pinned. Nexus reads egress policy schema 2 only. Schema 1
 (Edge `v0.9.12` and earlier) reported the policy-only value of the same field and is
 refused rather than reinterpreted (see
 [the compatibility notes](operations.md#backend-egress-admission-and-the-public-only-guarantee)).
 
-**Operator guidance for control-plane/data-plane pairings.** Nexus cannot verify
-data-plane egress for a CP/DP pairing: the control plane's policy describes
-admission, not the remote data planes that connect to backends, so such a pairing
-always reads "not guaranteed". Enforce `FERRUM_BACKEND_ALLOW_IPS=public` without
-allow CIDRs on every data plane. Against Edge v0.9.12,
-`NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` admitted such a pairing while keeping
-Nexus's own upstream screening. Edge v0.9.13 reports `public_only_guaranteed=false`
-for a control plane, and Nexus does not reinterpret that, so the pairing now publishes
-only under `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which also skips Nexus's upstream
-screening, until Nexus adopts data-plane attestation. Requalify that enforcement
-whenever a data plane is added, replaced or reconfigured.
+**Operator guidance for control-plane/data-plane pairings.** A control plane's own
+policy describes admission, not the remote data planes that connect to backends, so
+on its own it never proves public-only egress. From Edge v0.9.14 the control plane
+also relays the egress policy each connected data plane reported when it subscribed.
+Nexus grants the guarantee from that attestation only when at least one data plane is
+connected for the namespace, every connected data plane reported, every report is
+`public` mode without allow CIDRs, and the aggregate matches the listed reports.
+Anything else, including no connected data plane, an unknown or weaker data plane,
+or Edge v0.9.13 (which sends no attestation), reads "not guaranteed"; a malformed or
+inconsistent attestation is refused in every profile. The verdict is re-read for
+every backend write and every health probe, with no caching or grace period. See
+[CP/DP pairings and data-plane attestation](operations.md#cpdp-pairings-and-data-plane-attestation).
+
+The attestation is self-reported by authenticated data planes running the control
+plane's build, not host attestation, and it covers only the data planes connected at
+the moment of the read: one that disconnected but keeps serving cached configuration
+is not listed. Enforce `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs on every
+data plane, check the connected count against the expected inventory, and requalify
+whenever a data plane is added, replaced or reconfigured. Without the attestation
+(Edge v0.9.13), `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` does not admit such a pairing
+either (Edge reports `public_only_guaranteed=false` for a control plane, and Nexus
+does not reinterpret that), so it publishes only under
+`NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which also skips Nexus's upstream screening.
 
 ### Out of scope
 
@@ -2178,10 +2193,12 @@ Before going live:
       `FERRUM_BACKEND_ALLOW_IPS=public` and lists intended private destinations
       in `FERRUM_BACKEND_ALLOW_CIDRS` (including private plugin endpoints) only
       under the private opt-in profile; every allow overlay prevents public-only certification.
-- [ ] `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS` is `false`. Against Edge v0.9.13 it admits
-      no pairing the public profile refuses; a control plane with remote data
-      planes publishes only under the private opt-in, with every data plane
-      enforcing `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs.
+- [ ] `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS` is `false`. It admits no pairing the
+      public profile refuses. A control plane with remote data planes publishes
+      under the public profile only when its data-plane attestation (Edge v0.9.14)
+      proves every connected data plane public-only, and otherwise only under the
+      private opt-in; either way every data plane enforces
+      `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs.
 - [ ] The Nexus process can resolve public DNS; with private upstreams refused,
       an unresolvable name cannot be published.
 - [ ] Ferrum Edge runs with `FERRUM_BACKEND_ALLOW_IPS=public` (or an equivalent

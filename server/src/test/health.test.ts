@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import type { ApiErrorBody, AppHealth, EdgeHealth } from '@ferrum-nexus/shared';
 
+import { attestedControlPlanePolicy } from './edge-egress-attestation-fixtures.js';
 import { publicEgressPolicy } from './mock-ferrum-edge.js';
 import type { NexusError } from '../lib/errors.js';
 import { OPAQUE_ERROR } from '../routes/health.js';
@@ -209,7 +210,8 @@ describe('health endpoints', () => {
 
   it('grants the public egress guarantee only to a local public-only data plane', async (t) => {
     // A public-mode control plane only admits configuration; remote data planes
-    // serve the traffic. Schema 2 (Edge v0.9.13) reports it as not guaranteed.
+    // serve the traffic. Schema 2 reports it as not guaranteed, and without
+    // data-plane attestation (Edge v0.9.13) nothing else can prove it.
     const controlPlane: Record<string, unknown> = {
       ...publicEgressPolicy(),
       enforcement_scope: 'admission-only',
@@ -227,8 +229,8 @@ describe('health endpoints', () => {
       egress_profile: 'public-guaranteed',
       enforcement_scope: 'local-data-plane',
     });
-    // Until Nexus adopts data-plane attestation, the public profile reads that
-    // pairing as not guaranteed: degraded, and every backend write is refused.
+    // Without data-plane attestation the public profile reads that pairing as
+    // not guaranteed: degraded, and every backend write is refused.
     strict.edge.setBackendEgressPolicy(controlPlane);
     const refused = await edgeHealth(strict, strictAdmin);
     assert.equal(refused.json<EdgeHealth>().status, 'degraded');
@@ -280,6 +282,27 @@ describe('health endpoints', () => {
         egress_profile: profile,
         enforcement_scope: 'admission-only',
       });
+    }
+  });
+
+  it('grants a control plane the guarantee only from full data-plane attestation', async (t) => {
+    const portal = await buildTestApp();
+    t.after(() => portal.close());
+    const admin = await portal.registerUser();
+    const edgeHealth = () => portal.authed(admin, { method: 'GET', url: '/api/health/edge' });
+    portal.edge.setBackendEgressPolicy(
+      attestedControlPlanePolicy([{ mode: 'public' }, { mode: 'public' }]),
+    );
+    const attested = await edgeHealth();
+    assert.equal(attested.json<EdgeHealth>().status, 'ok');
+    assert.equal(attested.json<EdgeHealth>().reason, null);
+    assert.equal(attested.json<EdgeHealth>().public_egress_guaranteed, true);
+    for (const reports of [[], [{ mode: 'public' }, null]] as const) {
+      portal.edge.setBackendEgressPolicy(attestedControlPlanePolicy([...reports]));
+      const unproven = await edgeHealth();
+      assert.equal(unproven.json<EdgeHealth>().status, 'degraded');
+      assert.equal(unproven.json<EdgeHealth>().reason, 'backend_egress_unverified');
+      assert.equal(unproven.json<EdgeHealth>().public_egress_guaranteed, false);
     }
   });
 

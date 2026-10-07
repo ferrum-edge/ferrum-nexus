@@ -4,13 +4,22 @@ import { describe, it } from 'node:test';
 
 import type { ApiErrorBody, PublishApiResponse } from '@ferrum-nexus/shared';
 
+import {
+  attestedControlPlanePolicy,
+  EDGE_CP_ATTESTING_PUBLIC_ONLY,
+  EDGE_CP_NO_DATA_PLANES,
+  type DataPlaneReport,
+} from '../test/edge-egress-attestation-fixtures.js';
 import { buildTestApp, SAMPLE_SPEC_YAML } from '../test/helpers.js';
 import { publicEgressPolicy } from '../test/mock-ferrum-edge.js';
+import { EGRESS_POLICY_MAX_BYTES } from './client.js';
 import {
   admitBackendEgress,
   isUnsupportedEgressPolicySchema,
   parseBackendEgressPolicy,
+  provesDataPlanePublicEgress,
   provesLocalPublicEgress,
+  provesPublicEgress,
 } from './egress-policy.js';
 
 /** A public-mode control plane: schema 2 never reports it as guaranteed. */
@@ -330,7 +339,10 @@ describe('closed owner egress contract', () => {
         return true;
       });
     }
-    harness.edge.setBackendEgressPolicy({ ...publicEgressPolicy(), extra: 'x'.repeat(5_000) });
+    harness.edge.setBackendEgressPolicy({
+      ...publicEgressPolicy(),
+      extra: 'x'.repeat(EGRESS_POLICY_MAX_BYTES),
+    });
     await assert.rejects(harness.edgeClient.assertBackendEgress(), /invalid protocol/);
     harness.edge.setBackendEgressPolicy(publicEgressPolicy());
     harness.edge.delay('/backend-egress-policy', 500, 'GET');
@@ -432,5 +444,278 @@ describe('closed owner egress contract', () => {
         .map((line) => /NEXUS_ALLOW_[A-Z_]+=true/.exec(line)?.[0]);
       assert.deepEqual(warned, expected);
     }
+  });
+});
+
+describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
+  const PUBLIC: DataPlaneReport = { mode: 'public' };
+
+  /** Deep copy of a fixture's attestation, for building inconsistent answers. */
+  function attestationOf(policy: Record<string, unknown>): Record<string, unknown> {
+    return structuredClone(policy.data_plane_attestation) as Record<string, unknown>;
+  }
+
+  function withAttestation(
+    policy: Record<string, unknown>,
+    patch: (attestation: Record<string, unknown>) => void,
+  ): Record<string, unknown> {
+    const attestation = attestationOf(policy);
+    patch(attestation);
+    return { ...policy, data_plane_attestation: attestation };
+  }
+
+  it('reads the owner examples without omitting or inferring a field', () => {
+    for (const example of [EDGE_CP_NO_DATA_PLANES, EDGE_CP_ATTESTING_PUBLIC_ONLY]) {
+      const parsed = parseBackendEgressPolicy(example, 'ferrum');
+      assert.ok(parsed);
+      assert.deepEqual(parsed, example);
+      assert.equal(provesLocalPublicEgress(parsed), false);
+    }
+    const empty = parseBackendEgressPolicy(EDGE_CP_NO_DATA_PLANES, 'ferrum')!;
+    assert.equal(provesPublicEgress(empty), false);
+    const attested = parseBackendEgressPolicy(EDGE_CP_ATTESTING_PUBLIC_ONLY, 'ferrum')!;
+    assert.equal(provesDataPlanePublicEgress(attested), true);
+    assert.equal(provesPublicEgress(attested), true);
+    // The CP's own policy is `both` and not guaranteed; only the data planes count.
+    assert.equal(attested.public_only_guaranteed, false);
+    assert.deepEqual(admitBackendEgress(attested, {}), {
+      egress_profile: 'public-guaranteed',
+      enforcement_scope: 'admission-only',
+    });
+    // Another namespace's answer is never read, attestation or not.
+    assert.equal(parseBackendEgressPolicy(EDGE_CP_ATTESTING_PUBLIC_ONLY, 'nexus'), null);
+  });
+
+  it('grants the guarantee when every connected data plane reports public-only', () => {
+    const fleets: DataPlaneReport[][] = [
+      [PUBLIC],
+      [PUBLIC, PUBLIC, PUBLIC],
+      // Deny overlays only restrict, and the dangerous baseline is not the rule.
+      [PUBLIC, { mode: 'public', deny_cidr_overrides_present: true }],
+      [{ mode: 'public', dangerous_ranges_blocked: false }],
+    ];
+    for (const reports of fleets) {
+      const policy = parseBackendEgressPolicy(attestedControlPlanePolicy(reports), 'nexus');
+      assert.ok(policy, JSON.stringify(reports));
+      assert.equal(provesPublicEgress(policy), true, JSON.stringify(reports));
+    }
+  });
+
+  it('fails closed on an empty, partial or weaker data-plane set', () => {
+    const cases: [string, (DataPlaneReport | null)[]][] = [
+      ['no connected data plane', []],
+      ['one unknown data plane', [null]],
+      ['an unknown data plane among public ones', [PUBLIC, null, PUBLIC]],
+      ['a data plane in both mode', [PUBLIC, { mode: 'both' }]],
+      ['a data plane in private mode', [PUBLIC, { mode: 'private' }]],
+      ['an allow overlay', [PUBLIC, { mode: 'public', allow_cidr_overrides_present: true }]],
+    ];
+    for (const [name, reports] of cases) {
+      const policy = parseBackendEgressPolicy(attestedControlPlanePolicy(reports), 'nexus');
+      assert.ok(policy, name);
+      assert.equal(provesDataPlanePublicEgress(policy), false, name);
+      assert.equal(provesPublicEgress(policy), false, name);
+      assert.equal(admitBackendEgress(policy, {}), null, name);
+      // The unattested opt-in still needs the CP's own guarantee, which is never set.
+      assert.equal(admitBackendEgress(policy, { allowUnattestedEdgeEgress: true }), null, name);
+      assert.deepEqual(
+        admitBackendEgress(policy, { allowPrivateUpstreams: true }),
+        { egress_profile: 'private-upstreams-opt-in', enforcement_scope: 'admission-only' },
+        name,
+      );
+    }
+  });
+
+  it('keeps an Edge v0.9.13 control plane, without attestation, not guaranteed', () => {
+    const older = { ...attestedControlPlanePolicy([PUBLIC]) };
+    delete older.data_plane_attestation;
+    const policy = parseBackendEgressPolicy(older, 'nexus');
+    assert.ok(policy);
+    assert.equal(provesPublicEgress(policy), false);
+    assert.equal(admitBackendEgress(policy, {}), null);
+  });
+
+  it('refuses an attestation that is malformed or disagrees with its own streams', () => {
+    const attested = attestedControlPlanePolicy([PUBLIC, PUBLIC]);
+    const mixed = attestedControlPlanePolicy([PUBLIC, null]);
+    const weaker = attestedControlPlanePolicy([PUBLIC, { mode: 'both' }]);
+    const empty = attestedControlPlanePolicy([]);
+    const cases: [string, Record<string, unknown>][] = [
+      ['on a local data plane', { ...publicEgressPolicy(), data_plane_attestation: {} }],
+      [
+        'on a local data plane, even a valid one',
+        { ...publicEgressPolicy(), data_plane_attestation: attestationOf(attested) },
+      ],
+      ['null', { ...attested, data_plane_attestation: null }],
+      ['not an object', { ...attested, data_plane_attestation: [] }],
+      ['an unknown key', withAttestation(attested, (a) => (a.extra = 'opaque-canary'))],
+      ['a missing key', withAttestation(attested, (a) => delete a.weakest_policy_complete)],
+      ['another source', withAttestation(attested, (a) => (a.source = 'cluster'))],
+      ['a negative count', withAttestation(empty, (a) => (a.connected_data_planes = -1))],
+      ['a fractional count', withAttestation(attested, (a) => (a.connected_data_planes = 1.5))],
+      ['a count above the list', withAttestation(attested, (a) => (a.connected_data_planes = 3))],
+      [
+        'a stream missing from the list',
+        withAttestation(attested, (a) => (a.data_planes as unknown[]).pop()),
+      ],
+      ['a wrong reporting count', withAttestation(mixed, (a) => (a.reporting_data_planes = 2))],
+      ['a wrong unknown count', withAttestation(mixed, (a) => (a.unknown_data_planes = 0))],
+      [
+        'an aggregate claiming an unknown data plane is public-only',
+        withAttestation(mixed, (a) => {
+          a.weakest_policy_complete = true;
+          a.all_connected_public_only_guaranteed = true;
+        }),
+      ],
+      [
+        'an aggregate flag over a weaker data plane',
+        withAttestation(weaker, (a) => (a.all_connected_public_only_guaranteed = true)),
+      ],
+      [
+        'a weakest policy stronger than its streams',
+        withAttestation(weaker, (a) => {
+          a.weakest_policy = attestationOf(attested).weakest_policy;
+          a.all_connected_public_only_guaranteed = true;
+        }),
+      ],
+      ['a missing weakest policy', withAttestation(attested, (a) => (a.weakest_policy = null))],
+      [
+        'a complete flag over an empty set',
+        withAttestation(empty, (a) => (a.weakest_policy_complete = true)),
+      ],
+      [
+        'an unknown stream that carries a policy',
+        withAttestation(attested, (a) => {
+          (a.data_planes as Record<string, unknown>[])[0]!.attestation = 'unknown';
+        }),
+      ],
+      [
+        'a reported stream without a policy',
+        withAttestation(mixed, (a) => {
+          (a.data_planes as Record<string, unknown>[])[1]!.attestation = 'reported';
+        }),
+      ],
+      [
+        'an unrecognised stream status',
+        withAttestation(attested, (a) => {
+          (a.data_planes as Record<string, unknown>[])[0]!.attestation = 'attested';
+        }),
+      ],
+      [
+        'a stream with an unknown key',
+        withAttestation(attested, (a) => {
+          (a.data_planes as Record<string, unknown>[])[0]!.build = '0.9.14';
+        }),
+      ],
+      [
+        'a stream without a node id',
+        withAttestation(attested, (a) => {
+          (a.data_planes as Record<string, unknown>[])[0]!.node_id = '';
+        }),
+      ],
+      [
+        'a stream policy claiming a guarantee its mode denies',
+        withAttestation(weaker, (a) => {
+          const plane = (a.data_planes as Record<string, unknown>[])[1]!;
+          (plane.policy as Record<string, unknown>).public_only_guaranteed = true;
+        }),
+      ],
+      [
+        'a stream policy with mismatched class lists',
+        withAttestation(attested, (a) => {
+          const plane = (a.data_planes as Record<string, unknown>[])[0]!;
+          (plane.policy as Record<string, unknown>).mode_blocked_ip_classes = [];
+        }),
+      ],
+      [
+        'a stream policy in an unknown mode',
+        withAttestation(attested, (a) => {
+          const plane = (a.data_planes as Record<string, unknown>[])[0]!;
+          (plane.policy as Record<string, unknown>).mode = 'future';
+        }),
+      ],
+    ];
+    for (const [name, value] of cases) {
+      assert.equal(parseBackendEgressPolicy(value, 'nexus'), null, name);
+      assert.equal(isUnsupportedEgressPolicySchema(value), false, name);
+    }
+  });
+
+  it('re-reads the attestation for every write and health probe, with no grace', async (t) => {
+    const harness = await buildTestApp();
+    t.after(() => harness.close());
+    const edge = harness.edgeClient;
+    harness.edge.setBackendEgressPolicy(attestedControlPlanePolicy([PUBLIC, PUBLIC]));
+    assert.deepEqual(await edge.assertBackendEgress(), {
+      egress_profile: 'public-guaranteed',
+      enforcement_scope: 'admission-only',
+    });
+    const probe = await edge.probe();
+    assert.equal(probe.publicEgressGuaranteed, true);
+    assert.equal(probe.backendEgressVerified, true);
+
+    // A data plane that connects without a report, or with a weaker policy, ends
+    // the guarantee on the very next read; so does the last one disconnecting.
+    const unproven: (DataPlaneReport | null)[][] = [[PUBLIC, null], [PUBLIC, { mode: 'both' }], []];
+    for (const reports of unproven) {
+      harness.edge.setBackendEgressPolicy(attestedControlPlanePolicy(reports));
+      await assert.rejects(edge.assertBackendEgress(), /required local public egress policy/);
+      const degraded = await edge.probe();
+      assert.equal(degraded.publicEgressGuaranteed, false);
+      assert.equal(degraded.backendEgressVerified, false);
+    }
+    // And it is restored as soon as every connected data plane attests again.
+    harness.edge.setBackendEgressPolicy(attestedControlPlanePolicy([PUBLIC]));
+    await edge.assertBackendEgress();
+    assert.equal((await edge.probe()).publicEgressGuaranteed, true);
+  });
+
+  it('reads a large data-plane fleet within the response bound', async (t) => {
+    const harness = await buildTestApp();
+    t.after(() => harness.close());
+    const fleet = attestedControlPlanePolicy(Array.from({ length: 1_000 }, () => PUBLIC));
+    assert.ok(JSON.stringify(fleet).length < EGRESS_POLICY_MAX_BYTES);
+    harness.edge.setBackendEgressPolicy(fleet);
+    assert.deepEqual(await harness.edgeClient.assertBackendEgress(), {
+      egress_profile: 'public-guaranteed',
+      enforcement_scope: 'admission-only',
+    });
+  });
+
+  it('publishes on an attested control plane and records how it was admitted', async (t) => {
+    const harness = await buildTestApp();
+    t.after(() => harness.close());
+    await harness.registerUser();
+    const provider = await harness.registerUser({ role: 'provider' });
+    const payload = (slug: string): Record<string, unknown> => ({
+      name: `API ${slug}`,
+      slug,
+      version: '1.0.0',
+      spec: SAMPLE_SPEC_YAML,
+      auth_plugin: 'key_auth',
+      requestable: true,
+      visibility: 'public',
+    });
+
+    harness.edge.setBackendEgressPolicy(attestedControlPlanePolicy([PUBLIC, null]));
+    const refused = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: payload('partially-attested'),
+    });
+    assert.notEqual(refused.statusCode, 201, refused.body);
+    assert.equal(harness.edge.proxies.size, 0, 'nothing reached the gateway');
+
+    harness.edge.setBackendEgressPolicy(attestedControlPlanePolicy([PUBLIC, PUBLIC]));
+    const published = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: payload('attested'),
+    });
+    assert.equal(published.statusCode, 201, published.body);
+    const apiId = published.json<PublishApiResponse>().api.id;
+    const row = (await harness.auditRows('api.publish')).find((entry) => entry.target_id === apiId);
+    assert.equal(row?.details.egress_profile, 'public-guaranteed');
+    assert.equal(row?.details.enforcement_scope, 'admission-only');
   });
 });

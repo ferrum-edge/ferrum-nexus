@@ -236,11 +236,14 @@ accepted CP pairing; see its topology decision.**
 Unless an opt-out below is set, every backend-writing Admin boundary
 requires fresh authenticated, namespace-matched, no-store process metadata from
 `GET /backend-egress-policy`, schema 2 (Edge v0.9.13). Only `local-data-plane` with
-`public_only_guaranteed=true` passes. Nexus validates the complete closed vocabulary,
+`public_only_guaranteed=true` passes, or a control plane whose data-plane attestation
+proves every connected data plane public-only (see
+[CP/DP pairings and data-plane attestation](#cpdp-pairings-and-data-plane-attestation)).
+Nexus validates the complete closed vocabulary,
 exact allowed/blocked class arrays, evaluation order and cross-field consistency.
 Unknown/missing/malformed metadata, auth/network/timeout failures, cached answers,
-CP-only/admission-only, unserved/no data plane, mode `both` and any allow-CIDR overlay
-refuse writes. Preflight precedes destructive conversions, staging and ACL building;
+a control plane without that attestation, unserved/no data plane, mode `both` and any
+allow-CIDR overlay refuse writes. Preflight precedes destructive conversions, staging and ACL building;
 compensation repeats admission and records repair-required failures. Before
 teardown, conversion atomically seals its original baseline, retains its proxy
 reference, sets `gateway_state=repair_required` and records an intent audit. The
@@ -322,8 +325,10 @@ considers the override harmless. Edge's `rediss://` hostname rebinding limitatio
 remains unchanged (see the security guide).
 
 A direct singleton requires operator-established identity of its Admin and traffic
-process. Metadata has no process identity or fleet inventory; it cannot attest a
-remote DP, other process, load-balanced Admin endpoint or future replacement. Check
+process. Process metadata has no process identity or fleet inventory; on its own it
+cannot attest a remote DP, other process, load-balanced Admin endpoint or future
+replacement (a control plane's data-plane attestation covers only its connected data
+planes; see below). Check
 both endpoints and configuration on replacement/reconfiguration, and enforce policy
 for existing traffic outside Nexus. Startup and cached health successes authorize no
 mutation. Health keeps HTTP 200 for degraded liveness and retains probe
@@ -332,36 +337,96 @@ and `public_egress_guaranteed: null`; an admin reads `backend_egress_unverified`
 the boolean verdict and a fixed bounded diagnostic, never policy bodies, CIDRs or
 secrets.
 
-**Topology decision.** Nexus grants the verified public-only egress guarantee only
-when Edge reports `public_only_guaranteed=true` with
-`enforcement_scope=local-data-plane`, that is, a single gateway process that both
-answers the Admin API and serves the traffic. `GET /api/health/edge` reports that
-verdict as `public_egress_guaranteed`. Every other pairing reads
-`public_egress_guaranteed: false`, including a control plane that reports
-`public_only_guaranteed=true` for its own process: its policy describes admission,
-not the remote data planes that connect to backends.
+**Topology decision.** Nexus grants the verified public-only egress guarantee in two
+cases only:
 
-| Pairing (Edge v0.9.13, schema 2)                             | Public profile (default)                          | `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`         | `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`              |
-| ------------------------------------------------------------ | ------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- |
-| Local data plane, public mode, no allow overrides            | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
-| Control plane with remote data planes (CP/DP)                | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
-| Any other recognized policy                                  | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
-| Missing, malformed, unsupported-schema or unreachable policy | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed |
+- Edge reports `public_only_guaranteed=true` with `enforcement_scope=local-data-plane`,
+  that is, a single gateway process that both answers the Admin API and serves the
+  traffic.
+- Edge is a control plane (`enforcement_scope=admission-only`) whose
+  `data_plane_attestation` proves that every data plane connected for the namespace
+  enforces public-only egress (Edge `v0.9.14` and later; see
+  [CP/DP pairings and data-plane attestation](#cpdp-pairings-and-data-plane-attestation)).
+
+`GET /api/health/edge` reports that verdict as `public_egress_guaranteed`. Every other
+pairing reads `public_egress_guaranteed: false`. That includes a control plane that
+reports `public_only_guaranteed=true` for its own process: its own policy describes
+admission, not the remote data planes that connect to backends.
+
+| Pairing (schema 2)                                                        | Public profile (default)                          | `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`         | `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`              |
+| ------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- |
+| Local data plane, public mode, no allow overrides                         | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
+| Control plane; every connected data plane attests public-only (v0.9.14+)  | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
+| Control plane without that attestation (v0.9.13, none, unknown or weaker) | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
+| Any other recognized policy                                               | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
+| Missing, malformed, unsupported-schema or unreachable policy              | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed |
 
 Nexus upstream screening runs in the first two columns and is skipped only in the
-last. Nexus never describes a CP/DP pairing as public-only, and the operator enforces
-public-only egress on every data plane (see the
+last. Without the attestation Nexus never describes a CP/DP pairing as public-only,
+and the operator enforces public-only egress on every data plane (see the
 [security guide](security.md#1-threat-model)).
+
+#### CP/DP pairings and data-plane attestation
+
+From Edge `v0.9.14`, a control plane's `GET /backend-egress-policy` answer carries an
+additive `data_plane_attestation` object within schema 2: the egress policy each data
+plane connected for the namespace reported when it subscribed to the control plane,
+one entry per live stream, plus Edge's aggregate over them. The control plane's own
+fields keep their admission-only meaning, and its own `public_only_guaranteed` stays
+`false`. Nexus grants the guarantee from the attestation only when all of these hold:
+
+- at least one data plane is connected for the namespace;
+- every connected data plane sent a recognised report (none is `unknown`), so the
+  aggregate is complete;
+- every report is `public` mode without allow CIDRs (deny CIDRs and the
+  dangerous-range baseline do not matter, as for a local data plane);
+- the aggregate (`weakest_policy`, `weakest_policy_complete`,
+  `all_connected_public_only_guaranteed` and the three counts) is exactly what the
+  listed streams produce. Nexus recomputes it from the entries and never trusts the
+  summary flag alone.
+
+Anything else fails closed. No connected data plane, an unknown or weaker data plane,
+an allow overlay, or a control plane without the object (Edge `v0.9.13`) reads "not
+guaranteed": writes are refused unless an opt-out admits them, and health is
+`degraded`. An attestation that is malformed, carries an unknown key, disagrees with
+its own entries, or appears on anything but a control plane makes the whole answer
+unreadable (`invalid_egress_policy`), refused in every profile. The namespace check
+is unchanged: an answer for another namespace is refused before the attestation is
+read. Answers are read up to 1 MiB, which leaves room for thousands of data planes;
+a larger answer is refused like any other unreadable policy. Admission audit rows
+record `egress_profile: public-guaranteed` with `enforcement_scope: admission-only`
+for a write admitted on attestation.
+
+**Freshness and flapping.** The attestation describes the data planes connected at
+the moment of the read, and Nexus does not cache or smooth it. Every backend write
+reads a fresh, no-store answer at its boundary, and every health probe evaluates its
+own sample. There is no grace period or hysteresis: a single read that does not
+prove the guarantee refuses that write and degrades health, and the next read that
+proves it restores both. A data plane's report is not aged out, because Edge's
+policy is fixed for the life of a process: a reconfigured data plane restarts and
+subscribes again with a new report. During a rolling restart that briefly leaves no
+data plane connected, writes are refused; retry once a data plane has reconnected.
+
+**What the attestation does not cover.** Reports are self-described by
+authenticated data planes running the control plane's build, not a cryptographic
+attestation of the data-plane host. A data plane that has disconnected but keeps
+serving cached configuration is not listed, and one that connects after a write was
+admitted is not covered by that admission. Compare `connected_data_planes` (and
+Edge's `GET /cluster`) against your expected data-plane inventory, keep
+`FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs on every data plane, and
+requalify when a data plane is added, replaced or reconfigured.
 
 **CP/DP pairings on Edge v0.9.13.** Against Edge v0.9.12, a public-mode control plane
 reported `public_only_guaranteed=true` for its own policy, and
 `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` admitted its writes while keeping Nexus's
 upstream screening. Edge v0.9.13 withdrew that reading: a control plane now reports
 `false`. Nexus does not reinterpret the field from `mode` and the overlay flags, so
-the unattested opt-in no longer admits a CP/DP pairing. Until Nexus adopts
-data-plane attestation, such a pairing publishes only with
+the unattested opt-in no longer admits a CP/DP pairing. Edge v0.9.13 sends no
+data-plane attestation, so such a pairing publishes only with
 `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which also skips Nexus's upstream screening;
 enforce `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs on every data plane.
+With Edge v0.9.14 a fully attested pairing publishes under the default public
+profile instead.
 
 **Compatibility.** Nexus reads egress policy schema 2 only, which Edge publishes from
 `v0.9.13`. Schema 1 (Edge `v0.9.11` and `v0.9.12`) reported the policy-only value of

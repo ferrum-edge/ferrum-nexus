@@ -668,10 +668,11 @@ export interface EdgeProbe {
   /** Sampled observation only; never authorizes a backend mutation. */
   backendEgressVerified?: boolean;
   /**
-   * Whether the sampled policy proves public-only egress on the local data
-   * plane (`enforcement_scope=local-data-plane`, `public_only_guaranteed`).
-   * Independent of the private opt-in, and always false for a control-plane
-   * or remote data-plane pairing. Observational only.
+   * Whether the sampled policy proves public-only egress: on the local data
+   * plane (`enforcement_scope=local-data-plane`, `public_only_guaranteed`), or
+   * on a control plane whose data-plane attestation (Edge v0.9.14) shows at
+   * least one connected data plane and every connected one public-only.
+   * Independent of either opt-out. Observational only.
    */
   publicEgressGuaranteed?: boolean;
   /**

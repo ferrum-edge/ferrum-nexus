@@ -41,6 +41,25 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   already receive the group, and account re-enable and consumer repair rebuild it. A
   conversion that turns agents on enrolls before it captures its deployment token.
 
+### Security
+
+- **Harden the public-only egress guarantee for control-plane/data-plane topologies**
+  (Refs #525). When a control plane reports data-plane egress attestation (the
+  additive `data_plane_attestation` object Edge `v0.9.14` adds within egress policy
+  schema 2), Nexus grants the verified public-only guarantee only if at least one
+  data plane is connected for the namespace, every connected data plane reported,
+  every report is `public` mode without allow CIDRs, and Edge's aggregate matches the
+  listed reports, which Nexus recomputes rather than trusting the summary flag. No
+  connected data plane, an unknown or weaker data plane, or a control plane without
+  the object (Edge `v0.9.13`) stays "not guaranteed": backend writes are refused
+  unless an opt-out admits them and health reads `degraded`. A malformed or
+  inconsistent attestation, or one on anything but a control plane, is refused in
+  every profile. The verdict is re-read for every backend write and health probe
+  with no caching or grace period. The policy answer bound rises from 4 KiB to 1 MiB
+  so a control plane can list its fleet. Writes admitted this way record
+  `egress_profile: public-guaranteed` with `enforcement_scope: admission-only`. See
+  [CP/DP pairings and data-plane attestation](docs/operations.md#cpdp-pairings-and-data-plane-attestation).
+
 ## [0.4.0] - 2026-10-06
 
 Paired with Ferrum Edge `v0.9.13`. Adds optional MCP tool subsets, whose

@@ -65,7 +65,7 @@ import {
   admitBackendEgress,
   isUnsupportedEgressPolicySchema,
   parseBackendEgressPolicy,
-  provesLocalPublicEgress,
+  provesPublicEgress,
   type BackendEgressAdmission,
   type BackendEgressPolicy,
 } from './egress-policy.js';
@@ -994,6 +994,14 @@ export function deploymentNotDispatched(error: unknown): boolean {
 /** Protocol-error reason for a policy schema this portal does not read (older or newer). */
 const UNSUPPORTED_SCHEMA_REASON = 'unsupported_egress_policy_schema';
 
+/**
+ * Bound on one `GET /backend-egress-policy` answer. A control plane lists every
+ * connected data plane of the namespace (a few hundred bytes each), so this
+ * leaves room for thousands; a larger answer is a protocol error, refused in
+ * every profile like any other unreadable policy.
+ */
+export const EGRESS_POLICY_MAX_BYTES = 1024 * 1024;
+
 function isUnsupportedSchemaRefusal(error: unknown): boolean {
   if (!(error instanceof NexusError)) return false;
   const details = error.details as { reason?: unknown } | undefined;
@@ -1443,7 +1451,7 @@ export function createFerrumAdminClient(
   async function backendEgressPolicy(signal?: AbortSignal): Promise<BackendEgressPolicy> {
     const value = await callRequired<unknown>('GET', '/backend-egress-policy', {
       signal,
-      maxResponseBytes: 4_096,
+      maxResponseBytes: EGRESS_POLICY_MAX_BYTES,
     });
     // Another schema (schema 1 from Edge v0.9.12 or earlier, or a newer one) is
     // still refused, under its own reason: the operator needs to tell a version
@@ -1785,7 +1793,7 @@ export function createFerrumAdminClient(
           const policy = await backendEgressPolicy(signal);
           // The guarantee is the gateway's alone: an opt-out accepts a weaker
           // policy for writes, but never turns it into public-only egress.
-          publicEgressGuaranteed = provesLocalPublicEgress(policy);
+          publicEgressGuaranteed = provesPublicEgress(policy);
           backendEgressVerified = admitBackendEgress(policy, deps) !== null;
         } catch (error) {
           // Observational only. No mutation ever consults this sampled result.

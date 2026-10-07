@@ -414,10 +414,11 @@ fenced transaction. Successful rollback reconciles the catalog and journal toget
 See the [released protocol and remaining qualification](edge-conversion-recovery-blocker.md).
 Health caches observations only.
 The public profile requires namespace-matched local serving/public-only metadata and
-operator-established Admin/traffic singleton identity. Process evidence cannot attest
-CPs, remote DPs, load-balanced Admin endpoints or fleets, so Nexus reports those
-pairings as not guaranteed and admits their writes only under the explicit private
-opt-in, until it adopts Edge data-plane attestation. See the
+operator-established Admin/traffic singleton identity, or a control plane whose Edge
+data-plane attestation (Edge v0.9.14) proves every connected data plane public-only.
+Process evidence alone cannot attest CPs, remote DPs, load-balanced Admin endpoints or
+fleets, so without that attestation Nexus reports those pairings as not guaranteed
+and admits their writes only under the explicit private opt-in. See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)
 and [packaged fixture](../e2e/public-only/README.md). Source authority is Edge
 `9b83115de7ec23ab51ec4feae6bed65e596db425` (`v0.9.13`). Nexus adopts its
