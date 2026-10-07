@@ -98,7 +98,8 @@ preflight runs before destructive conversion and spec ACL enrollment. Schema 2
 (Edge v0.9.13) must be complete and closed, with exact class arrays and evaluation order; only
 `enforcement_scope=local-data-plane` and `public_only_guaranteed=true`, or a control plane
 whose data-plane attestation (Edge v0.9.14) proves every connected data plane public-only
-with at least `NEXUS_EXPECTED_DATA_PLANES` connected, authorize public-profile writes.
+with at least `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`) connected,
+authorize public-profile writes.
 Missing capability, timeouts, authentication failures,
 unknown/inconsistent responses, cache evidence, a control plane without that attestation,
 unserved/no local plane, default `both` and any allow-CIDR override refuse the mutation.
@@ -133,7 +134,8 @@ secure future fleet traffic.
 **Topology decision.** Nexus grants the verified public-only guarantee only to
 `enforcement_scope=local-data-plane` with `public_only_guaranteed=true`, or to a control
 plane whose data-plane attestation proves every connected data plane public-only with
-at least `NEXUS_EXPECTED_DATA_PLANES` connected, and health reports it to admins as
+at least `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`) connected, and
+health reports it to admins as
 `edge.public_egress_guaranteed`. Edge source authority is
 `9b83115de7ec23ab51ec4feae6bed65e596db425` (`v0.9.13`); the Edge and canonical
 releases are published and pinned. Nexus reads egress policy schema 2 only. Schema 1
@@ -146,8 +148,8 @@ policy describes admission, not the remote data planes that connect to backends,
 on its own it never proves public-only egress. From Edge v0.9.14 the control plane
 also relays the egress policy each connected data plane reported when it subscribed.
 Nexus grants the guarantee from that attestation only when `NEXUS_EXPECTED_DATA_PLANES`
-is set and at least that many data-plane streams are connected, at least one data
-plane is connected for the namespace, every connected data plane reported, every
+is set and at least that many distinct data-plane identities (`node_id`) are connected,
+at least one data plane is connected for the namespace, every connected data plane reported, every
 report is `public` mode without allow CIDRs, and the aggregate matches the listed
 reports. Anything else, including the count unset or not reached, no connected data
 plane, an unknown or weaker data plane, or Edge v0.9.13 (which sends no attestation),
@@ -161,14 +163,19 @@ The attestation is self-reported by authenticated data planes running the contro
 plane's build, not host attestation, and it covers only the data planes connected at
 the moment of the read: one that disconnected but keeps serving cached configuration
 is not listed. A control plane also never sees a data plane that uses another control
-plane, so `NEXUS_EXPECTED_DATA_PLANES` must be the inventory across every control plane,
-and the guarantee is available only when the control plane at `FERRUM_ADMIN_URL` sees
+plane, so `NEXUS_EXPECTED_DATA_PLANES` must be the inventory of distinct data-plane
+identities (`node_id`) across every control plane, and the guarantee is available only when the control plane at `FERRUM_ADMIN_URL` sees
 every data plane. With several control plane replicas, a load balancer in front of them
 or data-plane failover between control planes, the count falls short and the guarantee
 is withheld; Nexus does not combine answers from several control planes. A value set
 below the real inventory defeats this check. Enforce `FERRUM_BACKEND_ALLOW_IPS=public`
 without allow CIDRs on every data plane, keep the expected count equal to the real
 inventory, and requalify whenever a data plane is added, replaced or reconfigured.
+Nexus counts distinct `node_id`s rather than streams, so a reconnect overlap that lists
+one data plane twice can only make the count fall short. Data-plane replicas that
+share one CP/DP credential share a `node_id` and count as one identity: set the count
+to the distinct identities, and note that Nexus then cannot prove each replica is
+connected. Give each data plane its own credential (subject) for per-replica proof.
 Without the attestation
 (Edge v0.9.13), `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` does not admit such a pairing
 either (Edge reports `public_only_guaranteed=false` for a control plane, and Nexus
@@ -2209,8 +2216,8 @@ Before going live:
       public profile refuses. A control plane with remote data planes publishes
       under the public profile only when its data-plane attestation (Edge v0.9.14)
       proves every connected data plane public-only with at least
-      `NEXUS_EXPECTED_DATA_PLANES` (the inventory across every control plane)
-      connected, and otherwise only under the
+      `NEXUS_EXPECTED_DATA_PLANES` (the inventory of distinct data-plane
+      identities, `node_id`, across every control plane) connected, and otherwise only under the
       private opt-in; either way every data plane enforces
       `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs.
 - [ ] The Nexus process can resolve public DNS; with private upstreams refused,

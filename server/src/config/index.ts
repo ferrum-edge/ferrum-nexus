@@ -482,9 +482,10 @@ export interface NexusConfig {
    */
   allowUnattestedEdgeEgress: boolean;
   /**
-   * How many data-plane streams a control plane must report connected for its
-   * data-plane attestation to prove public-only egress
-   * (`NEXUS_EXPECTED_DATA_PLANES`, a positive integer).
+   * How many distinct data-plane identities (`node_id`) a control plane must
+   * report connected for its data-plane attestation to prove public-only egress
+   * (`NEXUS_EXPECTED_DATA_PLANES`, a positive integer). Replicas sharing one
+   * CP/DP credential share a `node_id` and count once.
    *
    * A control plane attests only the data planes streaming from it, so this is
    * the operator's whole inventory for the namespace, across every control

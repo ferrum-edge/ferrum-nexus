@@ -47,13 +47,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   (Refs #525). When a control plane reports data-plane egress attestation (the
   additive `data_plane_attestation` object Edge `v0.9.14` adds within egress policy
   schema 2), Nexus grants the verified public-only guarantee only if the new
-  `NEXUS_EXPECTED_DATA_PLANES` setting is set and at least that many data-plane
-  streams are connected, every connected data plane reported, every report is
-  `public` mode without allow CIDRs, and Edge's aggregate matches the listed reports,
+  `NEXUS_EXPECTED_DATA_PLANES` setting is set and at least that many distinct
+  data-plane identities (`node_id`) are connected, every connected data plane
+  reported, every report is `public` mode without allow CIDRs, and Edge's aggregate matches the listed reports,
   which Nexus recomputes rather than trusting the summary flag. A control plane sees
   only the data planes connected to it, so the setting is the namespace's inventory
-  across every control plane; with several control plane replicas, a load balancer in
-  front of them, or data-plane failover, the count falls short and the guarantee is
+  across every control plane, counted by distinct `node_id` so a reconnect overlap that
+  lists one data plane twice cannot stand in for a missing one. Data-plane replicas
+  sharing one CP/DP credential share a `node_id` and count once, so Nexus cannot prove
+  each replica is connected; give each data plane its own credential for that. With
+  several control plane replicas, a load balancer in front of them, or data-plane failover, the count falls short and the guarantee is
   withheld. Unset (the default), the count not reached, no connected data plane, an
   unknown or weaker data plane, or a control plane without the object (Edge `v0.9.13`)
   stays "not guaranteed": backend writes are refused unless an opt-out admits them,

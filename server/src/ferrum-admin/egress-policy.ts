@@ -374,7 +374,8 @@ export function provesLocalPublicEgress(policy: BackendEgressPolicy): boolean {
  *   report, or one is not `public` mode without allow overrides.
  * - `expected_data_planes_unset`: `NEXUS_EXPECTED_DATA_PLANES` is not set, so
  *   nothing says the connected set is the whole fleet.
- * - `fewer_data_planes_than_expected`: fewer streams are connected than it says.
+ * - `fewer_data_planes_than_expected`: fewer distinct data planes are connected
+ *   than it says.
  * - `not_control_plane`: the answer is not a control plane's.
  */
 export type DataPlaneAttestationVerdict =
@@ -401,9 +402,13 @@ function isExpectedDataPlanes(value: number | undefined): value is number {
  *
  * A control plane sees only the data planes streaming from it, so the operator's
  * `expectedDataPlanes` (`NEXUS_EXPECTED_DATA_PLANES`) must also be set and the
- * connected stream count, as Edge counts it (one per listed entry), must reach
- * it. Unset, an attestation never grants the guarantee. It covers the data
- * planes connected at the moment of this read only.
+ * number of distinct `node_id`s among the listed streams must reach it. Edge
+ * lists one entry per Subscribe stream, so a reconnect overlap can list one
+ * data plane twice; counting streams would let that duplicate stand in for a
+ * missing data plane, while counting distinct ids can only undercount. Replicas
+ * sharing one CP/DP credential share a `node_id` and count once. Unset, an
+ * attestation never grants the guarantee. It covers the data planes connected
+ * at the moment of this read only.
  */
 export function dataPlaneAttestationVerdict(
   policy: BackendEgressPolicy,
@@ -427,9 +432,8 @@ export function dataPlaneAttestationVerdict(
     );
   if (!allPublicOnly) return 'data_planes_not_public_only';
   if (!isExpectedDataPlanes(expectedDataPlanes)) return 'expected_data_planes_unset';
-  if (attestation.data_planes.length < expectedDataPlanes) {
-    return 'fewer_data_planes_than_expected';
-  }
+  const distinctDataPlanes = new Set(attestation.data_planes.map((entry) => entry.node_id)).size;
+  if (distinctDataPlanes < expectedDataPlanes) return 'fewer_data_planes_than_expected';
   return 'guaranteed';
 }
 
@@ -468,7 +472,7 @@ export function describeDataPlaneAttestation(verdict: DataPlaneAttestationVerdic
     case 'expected_data_planes_unset':
       return 'NEXUS_EXPECTED_DATA_PLANES is not set, so the data-plane attestation cannot grant it';
     case 'fewer_data_planes_than_expected':
-      return 'fewer data planes are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES';
+      return 'fewer distinct data planes (node_id) are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES';
     default:
       return null;
   }

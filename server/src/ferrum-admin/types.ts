@@ -672,7 +672,7 @@ export interface EdgeProbe {
    * plane (`enforcement_scope=local-data-plane`, `public_only_guaranteed`), or
    * on a control plane whose data-plane attestation (Edge v0.9.14) shows every
    * connected data plane public-only and at least `NEXUS_EXPECTED_DATA_PLANES`
-   * of them connected. Independent of either opt-out. Observational only.
+   * distinct data planes (`node_id`) connected. Independent of either opt-out. Observational only.
    */
   publicEgressGuaranteed?: boolean;
   /**

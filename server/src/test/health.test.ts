@@ -315,7 +315,10 @@ describe('health endpoints', () => {
     const fleet = attestedControlPlanePolicy([{ mode: 'public' }, { mode: 'public' }]);
     const cases: [string | undefined, RegExp | null][] = [
       [undefined, /NEXUS_EXPECTED_DATA_PLANES is not set/],
-      ['3', /fewer data planes are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES/],
+      [
+        '3',
+        /fewer distinct data planes \(node_id\) are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES/,
+      ],
       ['2', null],
       ['1', null],
     ];

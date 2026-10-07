@@ -559,7 +559,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
     assert.equal(admitBackendEgress(policy, { expectedDataPlanes: 1 }), null);
   });
 
-  it('grants the guarantee only when the connected streams reach the expected count', () => {
+  it('grants the guarantee only when the distinct data planes reach the expected count', () => {
     const policy = parseBackendEgressPolicy(
       attestedControlPlanePolicy([PUBLIC, PUBLIC, PUBLIC]),
       'nexus',
@@ -598,6 +598,25 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
     const local = parseBackendEgressPolicy(publicEgressPolicy(), 'nexus')!;
     assert.equal(dataPlaneAttestationVerdict(local, 5), 'not_control_plane');
     assert.equal(provesPublicEgress(local), true);
+  });
+
+  it('counts distinct node_ids, so a duplicated stream never stands in for a missing one', () => {
+    // A reconnect overlap: Edge lists one stream per Subscribe, so dp-0 appears twice.
+    const streams = attestedControlPlanePolicy([PUBLIC, PUBLIC, PUBLIC]);
+    const overlap = withAttestation(streams, (a) => {
+      (a.data_planes as Record<string, unknown>[])[2]!.node_id = 'dp-0';
+    });
+    const policy = parseBackendEgressPolicy(overlap, 'nexus');
+    assert.ok(policy);
+    assert.equal(policy.data_plane_attestation?.connected_data_planes, 3);
+    assert.equal(dataPlaneAttestationVerdict(policy, 3), 'fewer_data_planes_than_expected');
+    assert.equal(provesPublicEgress(policy, 3), false);
+    assert.equal(admitBackendEgress(policy, { expectedDataPlanes: 3 }), null);
+    assert.equal(dataPlaneAttestationVerdict(policy, 2), 'guaranteed');
+    assert.deepEqual(admitBackendEgress(policy, { expectedDataPlanes: 2 }), {
+      egress_profile: 'public-guaranteed',
+      enforcement_scope: 'admission-only',
+    });
   });
 
   it('re-checks every stream rather than trusting the summary flags', () => {
@@ -896,6 +915,9 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
     t.after(() => harness.close());
     const fleet = attestedControlPlanePolicy(Array.from({ length: 8_192 }, () => PUBLIC));
     assert.ok(JSON.stringify(fleet).length < EGRESS_POLICY_MAX_BYTES);
+    // The expected count is met by distinct node_ids, not by stream entries alone.
+    const entries = attestationOf(fleet).data_planes as { node_id: string }[];
+    assert.equal(new Set(entries.map((entry) => entry.node_id)).size, 8_192);
     harness.edge.setBackendEgressPolicy(fleet);
     assert.deepEqual(await harness.edgeClient.assertBackendEgress(), {
       egress_profile: 'public-guaranteed',
