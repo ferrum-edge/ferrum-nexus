@@ -10,7 +10,7 @@
  * container deployment (`NEXUS_ENV`, `NEXUS_RATE_LIMIT_ENABLED`,
  * `NEXUS_HEALTH_CACHE_MS`, `NEXUS_BRANDING_CACHE_MS`, `NEXUS_HEALTH_PROBE_TIMEOUT_MS`,
  * `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`, `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS`,
- * `FERRUM_ADMIN_TIMEOUT_MS`, `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
+ * `NEXUS_EXPECTED_DATA_PLANES`, `FERRUM_ADMIN_TIMEOUT_MS`, `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
  * they are all optional and default to production-safe values.
  */
 
@@ -482,6 +482,18 @@ export interface NexusConfig {
    */
   allowUnattestedEdgeEgress: boolean;
   /**
+   * How many distinct data-plane processes (`node_id`) a control plane must
+   * report connected for its data-plane attestation to prove public-only egress
+   * (`NEXUS_EXPECTED_DATA_PLANES`, a positive integer). Each Edge data-plane
+   * process reports its own random `node_id` for its lifetime, whatever CP/DP
+   * credential it uses, so this counts running replicas.
+   *
+   * A control plane attests only the data planes streaming from it, so this is
+   * the operator's whole inventory for the namespace, across every control
+   * plane. `undefined` (the default) means an attestation never proves it.
+   */
+  expectedDataPlanes: number | undefined;
+  /**
    * Permit the process environment to override `.env` for `FERRUM_NAMESPACE`
    * and `FERRUM_ADMIN_URL` outside production (`NEXUS_ALLOW_ENV_OVERRIDE`).
    *
@@ -555,6 +567,26 @@ const optionalString = (): z.ZodType<string | undefined, string | undefined> =>
     .string()
     .optional()
     .transform((raw) => (raw === undefined || raw.trim() === '' ? undefined : raw.trim()));
+
+/** An optional positive integer: blank and absent both mean "not configured". */
+const optionalPositiveInt = (max: number): z.ZodType<number | undefined, string | undefined> =>
+  z
+    .string()
+    .optional()
+    .transform((raw, ctx) => {
+      if (raw === undefined || raw.trim() === '') return undefined;
+      // Plain decimal digits only, as for `intish`.
+      const digits = raw.trim();
+      const value = /^\d+$/.test(digits) ? Number(digits) : Number.NaN;
+      if (!Number.isSafeInteger(value) || value < 1 || value > max) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `must be a positive integer no greater than ${max}`,
+        });
+        return z.NEVER;
+      }
+      return value;
+    });
 
 /** Hosts that never need `FERRUM_ADMIN_ALLOW_INSECURE_HTTP` to be spoken to over plaintext. */
 function isLoopbackHost(hostname: string): boolean {
@@ -637,6 +669,7 @@ const envSchema = z.object({
   NEXUS_MAX_MASS_EMAILS_PER_DAY: intish(DEFAULT_MAX_MASS_EMAILS_PER_DAY, 0, 100_000),
   NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
   NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: boolish(false),
+  NEXUS_EXPECTED_DATA_PLANES: optionalPositiveInt(1_000_000),
   NEXUS_ALLOW_ENV_OVERRIDE: boolish(false),
   NEXUS_WEB_DIST: optionalString(),
 
@@ -900,6 +933,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     maxMassEmailsPerDay: raw.NEXUS_MAX_MASS_EMAILS_PER_DAY,
     allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,
     allowUnattestedEdgeEgress: raw.NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS,
+    expectedDataPlanes: raw.NEXUS_EXPECTED_DATA_PLANES,
     allowEnvOverride: raw.NEXUS_ALLOW_ENV_OVERRIDE,
     webDistPath: raw.NEXUS_WEB_DIST,
     db: {

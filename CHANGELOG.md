@@ -41,6 +41,38 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   already receive the group, and account re-enable and consumer repair rebuild it. A
   conversion that turns agents on enrolls before it captures its deployment token.
 
+### Security
+
+- **Harden the public-only egress guarantee for control-plane/data-plane topologies**
+  (Refs #525). When a control plane reports data-plane egress attestation (the
+  additive `data_plane_attestation` object Edge `v0.9.14` adds within egress policy
+  schema 2), Nexus grants the verified public-only guarantee only if the new
+  `NEXUS_EXPECTED_DATA_PLANES` setting is set and at least that many distinct
+  data-plane processes (`node_id`) are connected, every connected data plane
+  reported, every report is `public` mode without allow CIDRs, and Edge's aggregate matches the listed reports,
+  which Nexus recomputes rather than trusting the summary flag. A control plane sees
+  only the data planes connected to it, so the setting is the number of running
+  data-plane processes (replicas or pods) for the namespace across every control
+  plane. Each Edge data-plane process reports its own random `node_id` for its
+  lifetime, even when replicas share one CP/DP secret; counting distinct `node_id`s
+  collapses a reconnect overlap of one process. A process that restarts without
+  closing its stream returns under a new `node_id` and counts twice until Edge drops
+  the stale stream, which can briefly cover one missing data plane. With
+  several control plane replicas, a load balancer in front of them, or data-plane failover, the count falls short and the guarantee is
+  withheld. Unset (the default), the count not reached, no connected data plane, an
+  unknown or weaker data plane, or a control plane without the object (Edge `v0.9.13`)
+  stays "not guaranteed": backend writes are refused unless an opt-out admits them,
+  health reads `degraded`, and the admin diagnostic and the write refusal name the
+  reason. `NEXUS_EXPECTED_DATA_PLANES` must be a positive integer; anything else
+  refuses startup. A malformed or inconsistent attestation, or one on anything but a
+  control plane, is set aside with a warning log and reads "not guaranteed" without
+  refusing what an opt-out admits; the rest of the policy answer stays strict. The
+  verdict is re-read for every backend write and health probe with no caching or grace
+  period. The policy answer bound rises from 4 KiB to 4 MiB, roughly 10,000 data-plane
+  streams per namespace. Writes admitted this way record
+  `egress_profile: public-guaranteed` with `enforcement_scope: admission-only`. See
+  [CP/DP pairings and data-plane attestation](docs/operations.md#cpdp-pairings-and-data-plane-attestation).
+
 ## [0.4.0] - 2026-10-06
 
 Paired with Ferrum Edge `v0.9.13`. Adds optional MCP tool subsets, whose

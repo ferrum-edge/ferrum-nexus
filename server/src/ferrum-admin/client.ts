@@ -62,12 +62,13 @@ import {
 } from './namespace.js';
 import { parsePrometheusText, type PrometheusSample } from './prometheus.js';
 import {
-  admitBackendEgress,
+  assessBackendEgress,
+  describeDataPlaneAttestation,
   isUnsupportedEgressPolicySchema,
-  parseBackendEgressPolicy,
-  provesLocalPublicEgress,
+  readBackendEgressPolicy,
   type BackendEgressAdmission,
   type BackendEgressPolicy,
+  type BackendEgressPolicyReading,
 } from './egress-policy.js';
 import type {
   EdgeApiSpecDocument,
@@ -994,6 +995,15 @@ export function deploymentNotDispatched(error: unknown): boolean {
 /** Protocol-error reason for a policy schema this portal does not read (older or newer). */
 const UNSUPPORTED_SCHEMA_REASON = 'unsupported_egress_policy_schema';
 
+/**
+ * Bound on one `GET /backend-egress-policy` answer. A control plane lists every
+ * connected data-plane stream of the namespace (about 400 bytes each with
+ * realistic node ids), so this leaves room for roughly 10,000 streams, above
+ * Edge's default `FERRUM_XDS_MAX_TOTAL_STREAMS`. A larger answer is a protocol
+ * error, refused in every profile like any other unreadable policy.
+ */
+export const EGRESS_POLICY_MAX_BYTES = 4 * 1024 * 1024;
+
 function isUnsupportedSchemaRefusal(error: unknown): boolean {
   if (!(error instanceof NexusError)) return false;
   const details = error.details as { reason?: unknown } | undefined;
@@ -1021,6 +1031,11 @@ export interface FerrumAdminClientDeps {
    * public-only attestation and nothing else; defaults to requiring it.
    */
   allowUnattestedEdgeEgress?: boolean;
+  /**
+   * Derived only from NEXUS_EXPECTED_DATA_PLANES. Unset, a control plane's
+   * data-plane attestation never proves public-only egress.
+   */
+  expectedDataPlanes?: number;
 }
 
 /** Build the Ferrum Edge Admin API client. */
@@ -1440,10 +1455,10 @@ export function createFerrumAdminClient(
     return edgeError('The gateway rejected the request', { status });
   }
 
-  async function backendEgressPolicy(signal?: AbortSignal): Promise<BackendEgressPolicy> {
+  async function readEgressPolicy(signal?: AbortSignal): Promise<BackendEgressPolicyReading> {
     const value = await callRequired<unknown>('GET', '/backend-egress-policy', {
       signal,
-      maxResponseBytes: 4_096,
+      maxResponseBytes: EGRESS_POLICY_MAX_BYTES,
     });
     // Another schema (schema 1 from Edge v0.9.12 or earlier, or a newer one) is
     // still refused, under its own reason: the operator needs to tell a version
@@ -1451,22 +1466,41 @@ export function createFerrumAdminClient(
     if (isUnsupportedEgressPolicySchema(value)) {
       throw protocolError(200, UNSUPPORTED_SCHEMA_REASON, 'GET', '/backend-egress-policy');
     }
-    const policy = parseBackendEgressPolicy(value, namespace);
-    if (!policy) throw protocolError(200, 'invalid_egress_policy', 'GET', '/backend-egress-policy');
-    return policy;
+    const reading = readBackendEgressPolicy(value, namespace);
+    if (!reading) {
+      throw protocolError(200, 'invalid_egress_policy', 'GET', '/backend-egress-policy');
+    }
+    // The attestation can only add a guarantee, so a problem in it degrades to
+    // "not guaranteed" instead of refusing the answer. Bounded reason only.
+    if (reading.attestationProblem !== null) {
+      logger.warn(
+        { namespace, reason: reading.attestationProblem },
+        'Ferrum Edge data-plane egress attestation set aside; public-only egress not guaranteed',
+      );
+    }
+    return reading;
+  }
+
+  async function backendEgressPolicy(signal?: AbortSignal): Promise<BackendEgressPolicy> {
+    return (await readEgressPolicy(signal)).policy;
   }
 
   async function assertBackendEgress(): Promise<BackendEgressAdmission> {
-    const policy = await backendEgressPolicy();
+    const reading = await readEgressPolicy();
     // Either opt-out admits a recognized weaker process policy, but neither
     // describes it as public-only, and neither skips the parse above.
-    const admission = admitBackendEgress(policy, deps);
-    if (admission === null) {
-      throw edgeError('The gateway cannot establish the required local public egress policy', {
+    const assessment = assessBackendEgress(reading, deps);
+    if (assessment.admission === null) {
+      const message = 'The gateway cannot establish the required local public egress policy';
+      // A control plane's refusal also says why its attestation did not count.
+      const why = describeDataPlaneAttestation(assessment.dataPlaneAttestation);
+      if (why === null) throw edgeError(message, { kind: 'backend_egress_unverified' });
+      throw edgeError(`${message}: ${why}`, {
         kind: 'backend_egress_unverified',
+        data_plane_attestation: assessment.dataPlaneAttestation,
       });
     }
-    return admission;
+    return assessment.admission;
   }
 
   async function prepareDeploymentMutation(
@@ -1781,12 +1815,14 @@ export function createFerrumAdminClient(
         let backendEgressVerified = false;
         let publicEgressGuaranteed = false;
         let backendEgressSchemaUnsupported = false;
+        let backendEgressDetail: string | null = null;
         try {
-          const policy = await backendEgressPolicy(signal);
+          const assessment = assessBackendEgress(await readEgressPolicy(signal), deps);
           // The guarantee is the gateway's alone: an opt-out accepts a weaker
           // policy for writes, but never turns it into public-only egress.
-          publicEgressGuaranteed = provesLocalPublicEgress(policy);
-          backendEgressVerified = admitBackendEgress(policy, deps) !== null;
+          publicEgressGuaranteed = assessment.publicEgressGuaranteed;
+          backendEgressVerified = assessment.admission !== null;
+          backendEgressDetail = describeDataPlaneAttestation(assessment.dataPlaneAttestation);
         } catch (error) {
           // Observational only. No mutation ever consults this sampled result.
           backendEgressSchemaUnsupported = isUnsupportedSchemaRefusal(error);
@@ -1822,6 +1858,7 @@ export function createFerrumAdminClient(
           backendEgressVerified,
           publicEgressGuaranteed,
           backendEgressSchemaUnsupported,
+          backendEgressDetail,
         };
       } catch (error) {
         return {

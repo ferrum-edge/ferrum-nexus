@@ -938,10 +938,17 @@ export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
   /**
    * Whether the last sampled `GET /backend-egress-policy` proved public-only
    * backend egress: `enforcement_scope` `local-data-plane` with
-   * `public_only_guaranteed`. Nexus grants this guarantee to nothing else.
-   * `false` for every control-plane/data-plane pairing (Nexus cannot yet attest
-   * a remote data plane), any weaker or unreadable policy and an unreachable
-   * gateway. Neither `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` nor
+   * `public_only_guaranteed`, or a control plane (`admission-only`) whose
+   * `data_plane_attestation` (Edge v0.9.14) shows every connected data plane
+   * reporting public-only without allow overrides, with at least
+   * `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`, and at least
+   * one) connected. Nexus grants this
+   * guarantee to nothing else. `false` for a control plane without that
+   * attestation (Edge v0.9.13), with the expected count unset or not reached,
+   * with no, an unknown or a weaker data plane, or whose attestation Nexus set
+   * aside as malformed or inconsistent; for any weaker or unreadable policy; and
+   * for an unreachable gateway.
+   * Neither `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` nor
    * `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` changes it: each opt-out accepts a
    * weaker policy for writes without making it public-only. `null` for a caller
    * below `admin`, the same way {@link EdgeHealth.mode} is. Observational only;

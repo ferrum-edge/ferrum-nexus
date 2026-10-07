@@ -668,18 +668,25 @@ export interface EdgeProbe {
   /** Sampled observation only; never authorizes a backend mutation. */
   backendEgressVerified?: boolean;
   /**
-   * Whether the sampled policy proves public-only egress on the local data
-   * plane (`enforcement_scope=local-data-plane`, `public_only_guaranteed`).
-   * Independent of the private opt-in, and always false for a control-plane
-   * or remote data-plane pairing. Observational only.
+   * Whether the sampled policy proves public-only egress: on the local data
+   * plane (`enforcement_scope=local-data-plane`, `public_only_guaranteed`), or
+   * on a control plane whose data-plane attestation (Edge v0.9.14) shows every
+   * connected data plane public-only and at least `NEXUS_EXPECTED_DATA_PLANES`
+   * distinct data planes (`node_id`) connected. Independent of either opt-out. Observational only.
    */
   publicEgressGuaranteed?: boolean;
   /**
    * Whether the sampled policy named a schema version this portal does not
-   * read (it reads schema 2, which Edge v0.9.13 publishes; Edge v0.9.12 and
-   * earlier publish schema 1). Admin diagnostic only.
+   * read (it reads schema 2, which Edge v0.9.13 and later publish; Edge v0.9.12
+   * and earlier publish schema 1). Admin diagnostic only.
    */
   backendEgressSchemaUnsupported?: boolean;
+  /**
+   * Why a control plane's data-plane attestation did not prove public-only
+   * egress, from a fixed set of sentences; `null` when it did or when the
+   * answer was not a control plane's. Admin diagnostic only.
+   */
+  backendEgressDetail?: string | null;
   /**
    * Whether the gateway answered at all. A gateway that answered `503` because
    * it is `starting`/`draining`/`unavailable` is **reachable** — read `ready`.

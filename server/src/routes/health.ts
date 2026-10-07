@@ -202,8 +202,10 @@ function presentEdge(
     error:
       reason === 'backend_egress_unverified'
         ? result.backendEgressSchemaUnsupported === true
-          ? 'The gateway publishes a backend egress policy schema this portal does not read; pair it with Ferrum Edge v0.9.13'
-          : 'Required backend egress policy could not be verified; check the configured pairing'
+          ? 'The gateway publishes a backend egress policy schema this portal does not read; pair it with Ferrum Edge v0.9.13 or later'
+          : typeof result.backendEgressDetail === 'string'
+            ? `Required backend egress policy could not be verified: ${result.backendEgressDetail}`
+            : 'Required backend egress policy could not be verified; check the configured pairing'
         : result.error === null
           ? null
           : detailAllowed

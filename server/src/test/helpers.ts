@@ -436,6 +436,7 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
       leases: store.leases,
       allowPrivateUpstreams: config.allowPrivateUpstreams,
       allowUnattestedEdgeEgress: config.allowUnattestedEdgeEgress,
+      expectedDataPlanes: config.expectedDataPlanes,
     }),
   );
   const { mailbox, factory } = createTestMailbox();

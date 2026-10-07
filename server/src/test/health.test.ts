@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import type { ApiErrorBody, AppHealth, EdgeHealth } from '@ferrum-nexus/shared';
 
+import { attestedControlPlanePolicy } from './edge-egress-attestation-fixtures.js';
 import { publicEgressPolicy } from './mock-ferrum-edge.js';
 import type { NexusError } from '../lib/errors.js';
 import { OPAQUE_ERROR } from '../routes/health.js';
@@ -209,7 +210,8 @@ describe('health endpoints', () => {
 
   it('grants the public egress guarantee only to a local public-only data plane', async (t) => {
     // A public-mode control plane only admits configuration; remote data planes
-    // serve the traffic. Schema 2 (Edge v0.9.13) reports it as not guaranteed.
+    // serve the traffic. Schema 2 reports it as not guaranteed, and without
+    // data-plane attestation (Edge v0.9.13) nothing else can prove it.
     const controlPlane: Record<string, unknown> = {
       ...publicEgressPolicy(),
       enforcement_scope: 'admission-only',
@@ -227,8 +229,8 @@ describe('health endpoints', () => {
       egress_profile: 'public-guaranteed',
       enforcement_scope: 'local-data-plane',
     });
-    // Until Nexus adopts data-plane attestation, the public profile reads that
-    // pairing as not guaranteed: degraded, and every backend write is refused.
+    // Without data-plane attestation the public profile reads that pairing as
+    // not guaranteed: degraded, and every backend write is refused.
     strict.edge.setBackendEgressPolicy(controlPlane);
     const refused = await edgeHealth(strict, strictAdmin);
     assert.equal(refused.json<EdgeHealth>().status, 'degraded');
@@ -283,6 +285,70 @@ describe('health endpoints', () => {
     }
   });
 
+  it('grants a control plane the guarantee only from full data-plane attestation', async (t) => {
+    const portal = await buildTestApp({ env: { NEXUS_EXPECTED_DATA_PLANES: '2' } });
+    t.after(() => portal.close());
+    const admin = await portal.registerUser();
+    const edgeHealth = () => portal.authed(admin, { method: 'GET', url: '/api/health/edge' });
+    portal.edge.setBackendEgressPolicy(
+      attestedControlPlanePolicy([{ mode: 'public' }, { mode: 'public' }]),
+    );
+    const attested = await edgeHealth();
+    assert.equal(attested.json<EdgeHealth>().status, 'ok');
+    assert.equal(attested.json<EdgeHealth>().reason, null);
+    assert.equal(attested.json<EdgeHealth>().error, null);
+    assert.equal(attested.json<EdgeHealth>().public_egress_guaranteed, true);
+    for (const reports of [[], [{ mode: 'public' }, null]] as const) {
+      portal.edge.setBackendEgressPolicy(attestedControlPlanePolicy([...reports]));
+      const unproven = await edgeHealth();
+      assert.equal(unproven.json<EdgeHealth>().status, 'degraded');
+      assert.equal(unproven.json<EdgeHealth>().reason, 'backend_egress_unverified');
+      assert.equal(unproven.json<EdgeHealth>().public_egress_guaranteed, false);
+      assert.match(
+        unproven.json<EdgeHealth>().error ?? '',
+        /not every connected data plane attests public-only egress/,
+      );
+    }
+  });
+
+  it('tells an admin why the expected data-plane count withholds the guarantee', async (t) => {
+    const fleet = attestedControlPlanePolicy([{ mode: 'public' }, { mode: 'public' }]);
+    const cases: [string | undefined, RegExp | null][] = [
+      [undefined, /NEXUS_EXPECTED_DATA_PLANES is not set/],
+      [
+        '3',
+        /fewer distinct data planes \(node_id\) are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES/,
+      ],
+      ['2', null],
+      ['1', null],
+    ];
+    for (const [expected, why] of cases) {
+      const portal = await buildTestApp({
+        env: expected === undefined ? {} : { NEXUS_EXPECTED_DATA_PLANES: expected },
+      });
+      t.after(() => portal.close());
+      const admin = await portal.registerUser();
+      portal.edge.setBackendEgressPolicy(fleet);
+      const response = await portal.authed(admin, { method: 'GET', url: '/api/health/edge' });
+      const health = response.json<EdgeHealth>();
+      assert.equal(health.public_egress_guaranteed, why === null, String(expected));
+      if (why === null) {
+        assert.equal(health.status, 'ok', String(expected));
+        assert.equal(health.error, null, String(expected));
+        await portal.edgeClient.assertBackendEgress();
+        continue;
+      }
+      assert.equal(health.status, 'degraded', String(expected));
+      assert.equal(health.reason, 'backend_egress_unverified', String(expected));
+      assert.match(health.error ?? '', why, String(expected));
+      await assert.rejects(portal.edgeClient.assertBackendEgress(), why);
+      // Anonymous callers still learn nothing about the topology.
+      const anonymous = await portal.app.inject({ method: 'GET', url: '/api/health/edge' });
+      assert.equal(anonymous.json<EdgeHealth>().reason, 'unspecified');
+      assert.equal(anonymous.json<EdgeHealth>().error, null);
+    }
+  });
+
   it('names an unsupported policy schema to admins and keeps refusing writes', async (t) => {
     const portal = await buildTestApp({
       env: { NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'true', NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: 'true' },
@@ -303,7 +369,7 @@ describe('health endpoints', () => {
     const detailed = await portal.authed(operator, { method: 'GET', url: '/api/health/edge' });
     assert.equal(detailed.json<EdgeHealth>().status, 'degraded');
     assert.equal(detailed.json<EdgeHealth>().reason, 'backend_egress_unverified');
-    assert.match(detailed.json<EdgeHealth>().error ?? '', /Ferrum Edge v0\.9\.13/);
+    assert.match(detailed.json<EdgeHealth>().error ?? '', /Ferrum Edge v0\.9\.13 or later/);
     const anonymous = await portal.app.inject({ method: 'GET', url: '/api/health/edge' });
     assert.equal(anonymous.json<EdgeHealth>().reason, 'unspecified');
     assert.equal(anonymous.json<EdgeHealth>().error, null);

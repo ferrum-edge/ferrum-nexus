@@ -414,10 +414,22 @@ fenced transaction. Successful rollback reconciles the catalog and journal toget
 See the [released protocol and remaining qualification](edge-conversion-recovery-blocker.md).
 Health caches observations only.
 The public profile requires namespace-matched local serving/public-only metadata and
-operator-established Admin/traffic singleton identity. Process evidence cannot attest
-CPs, remote DPs, load-balanced Admin endpoints or fleets, so Nexus reports those
-pairings as not guaranteed and admits their writes only under the explicit private
-opt-in, until it adopts Edge data-plane attestation. See the
+operator-established Admin/traffic singleton identity, or a control plane whose Edge
+data-plane attestation (Edge v0.9.14) proves every data plane connected to it
+public-only while at least `NEXUS_EXPECTED_DATA_PLANES` distinct data planes
+(`node_id`) are connected. Each Edge data-plane process reports its own random
+`node_id` for its lifetime, so the count is of running data-plane processes. Nexus
+counts distinct `node_id`s, not streams, so a reconnect overlap of one process counts
+once; a process that restarts without closing its stream returns under a new
+`node_id` and counts twice until Edge drops the stale stream. That count is
+the operator's inventory across every control plane, and the only evidence that the
+connected set is the whole fleet: a control plane never sees a data plane that uses
+another one, so the guarantee holds only when the control plane Nexus reads sees
+every data plane. Multiple control plane replicas, load-balanced Admin endpoints and
+data-plane failover between control planes are not attested; there the count falls
+short and the guarantee is withheld. Process evidence alone cannot attest CPs, remote
+DPs or fleets, so without a qualifying attestation Nexus reports those pairings as
+not guaranteed and admits their writes only under the explicit private opt-in. See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)
 and [packaged fixture](../e2e/public-only/README.md). Source authority is Edge
 `9b83115de7ec23ab51ec4feae6bed65e596db425` (`v0.9.13`). Nexus adopts its
