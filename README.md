@@ -23,7 +23,7 @@ The browser never calls the Ferrum Edge Admin API. Every gateway change goes
 through the Nexus backend, which checks roles and ownership and writes an audit
 row before calling Edge.
 
-> Required Notice: Copyright Ferrum Nexus (https://github.com/ferrum-edge)
+> Required Notice: Copyright Ferrum Edge LLC (https://github.com/ferrum-edge)
 
 ## Development status
 
