@@ -402,13 +402,15 @@ function isExpectedDataPlanes(value: number | undefined): value is number {
  *
  * A control plane sees only the data planes streaming from it, so the operator's
  * `expectedDataPlanes` (`NEXUS_EXPECTED_DATA_PLANES`) must also be set and the
- * number of distinct `node_id`s among the listed streams must reach it. Edge
- * lists one entry per Subscribe stream, so a reconnect overlap can list one
- * data plane twice; counting streams would let that duplicate stand in for a
- * missing data plane, while counting distinct ids can only undercount. Replicas
- * sharing one CP/DP credential share a `node_id` and count once. Unset, an
- * attestation never grants the guarantee. It covers the data planes connected
- * at the moment of this read only.
+ * number of distinct `node_id`s among the listed streams must reach it. Each
+ * Edge data-plane process subscribes under its own random `node_id`, kept for
+ * the process lifetime, so the value counts data-plane processes. Edge lists
+ * one entry per Subscribe stream, so a reconnect overlap can list one process
+ * twice; counting distinct ids collapses that duplicate. A process that
+ * restarts without closing its stream comes back under a new `node_id`, so
+ * until Edge drops the stale stream it counts twice and can briefly cover one
+ * missing data plane. Unset, an attestation never grants the guarantee. It
+ * covers the data planes connected at the moment of this read only.
  */
 export function dataPlaneAttestationVerdict(
   policy: BackendEgressPolicy,
