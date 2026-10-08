@@ -477,9 +477,7 @@ export async function buildServer(
     locks,
     log: warn,
   });
-  revokeForAccountRecovery = async (user, ip) => {
-    await credentials.revokeForAccountRecovery(user, ip);
-  };
+  revokeForAccountRecovery = (user, ip) => credentials.revokeForAccountRecovery(user, ip);
   // One-off upgrade scan for `basicauth` appends an earlier release left
   // without a row. It must not keep the portal down: a failure is logged, the
   // service reports the scan `failed`, and — since completion is recorded only
