@@ -75,6 +75,21 @@ describe('isGatewayOwnedConsumerHeader', () => {
     }
   });
 
+  it('matches X-Authenticated-Identity exactly, case- and separator-insensitively', () => {
+    // Edge v0.9.15 adds the external identity header to the same gateway-owned check.
+    for (const name of [
+      'X-Authenticated-Identity',
+      'x_authenticated_identity',
+      'x-Authenticated_identity',
+      ' x-authenticated-identity ',
+    ]) {
+      assert.equal(isGatewayOwnedConsumerHeader(name), true, name);
+    }
+    for (const name of ['x-authenticated-identity-id', 'x-authenticated', 'x-identity']) {
+      assert.equal(isGatewayOwnedConsumerHeader(name), false, name);
+    }
+  });
+
   it('leaves names outside the namespace alone', () => {
     for (const name of ['x-consumer', 'consumer-id', 'x-custom-consumer-id', 'x-request-id']) {
       assert.equal(isGatewayOwnedConsumerHeader(name), false);

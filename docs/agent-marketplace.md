@@ -11,8 +11,20 @@ governance) was first published in
 [Edge v0.9.10](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.10), whose
 tag resolves to `ee040d5e3281fde424aa65f5b18004852c5b53b0`; the source links below
 point at that release. Nexus `v0.5.1` pins Edge v0.9.14, as `v0.5.0` did (Nexus `v0.4.0`
-pinned Edge v0.9.13), in [`release/compatibility.env`](../release/compatibility.env); the packaged
-acceptance suite runs the agent journeys against the pinned image.
+pinned Edge v0.9.13), and `main` pins Edge v0.9.15, in
+[`release/compatibility.env`](../release/compatibility.env); the packaged acceptance suite
+runs the agent journeys against the pinned image.
+
+From Edge v0.9.15 an agent-enabled API serves MCP and its REST operations over HTTP
+only. Its `mcp_gateway`, blocking `openapi_validator`, `ai_tool_governor`,
+`ai_prompt_shield` and tool-call `rate_limiting` configs gate admission and run on
+HTTP requests only, so Edge refuses a native gRPC or WebSocket request to that proxy
+with `403` (rejection phase `route_protocol_admission`) instead of serving it without
+that governance. Aggregate MCP sessions keep Edge's default cap of 128 per
+authenticated principal (`sessions.max_sessions_per_principal`, which Nexus does not
+set); at the cap the principal's oldest session is replaced. When the gateway-wide
+session store is full, a caller with no session to replace is refused instead of
+evicting another caller's session.
 
 Primary source contracts (Edge v0.9.10):
 

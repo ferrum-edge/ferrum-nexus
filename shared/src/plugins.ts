@@ -296,12 +296,14 @@ export const CORRELATION_ID_RESERVED_HEADERS: readonly string[] = [
  *
  * Since Ferrum Edge `v0.9.9` the gateway strips every client header whose name
  * starts with `x-consumer-` and refuses a `correlation_id` or
- * `request_deduplication` `header_name` beneath it. Case is ignored, and `_`
- * and `-` are equivalent in the prefix, as in Edge's
+ * `request_deduplication` `header_name` beneath it. Edge `v0.9.15` adds the
+ * exact name `x-authenticated-identity`, the external identity header, to the
+ * same check. Case is ignored, and `_` and `-` are equivalent, as in Edge's
  * `is_consumer_assertion_header`.
  */
 export function isGatewayOwnedConsumerHeader(name: string): boolean {
-  return /^x[-_]consumer[-_]/i.test(name.trim());
+  const trimmed = name.trim();
+  return /^x[-_]consumer[-_]/i.test(trimmed) || /^x[-_]authenticated[-_]identity$/i.test(trimmed);
 }
 
 /* ── The palette ────────────────────────────────────────────────────────── */
@@ -670,7 +672,9 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
         kind: 'boolean',
         key: 'enforce_required',
         label: 'Reject a call that omits the header',
-        help: 'Answers 400 when one of the methods above arrives without a key.',
+        help:
+          'Answers 400 when one of the methods above arrives without a key. The gateway also ' +
+          'refuses native gRPC and WebSocket calls (403), which this check cannot inspect.',
         default: false,
       },
     ],

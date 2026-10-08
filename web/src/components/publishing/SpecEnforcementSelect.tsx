@@ -20,7 +20,9 @@ const LEVEL_LABELS: Readonly<Record<SpecEnforcementLevel, string>> = {
 
 const LEVEL_DESCRIPTIONS: Readonly<Record<SpecEnforcementLevel, string>> = {
   docs_only: 'The document is catalog metadata; the gateway forwards any path.',
-  routes: 'The gateway answers 400 for an undeclared path or method.',
+  routes:
+    'The gateway answers 400 for an undeclared path or method. ' +
+    'With Edge v0.9.15, native gRPC and WebSocket requests to this API are refused (403).',
 };
 
 const BODY_CAVEAT =

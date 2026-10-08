@@ -8,12 +8,12 @@
     "version": 1,
     "status": "implemented",
     "owner": "ferrum-edge/ferrum-edge",
-    "edge_availability": "Released since Ferrum Edge v0.9.12; unchanged shape re-read at v0.9.13 source 9b83115de7ec23ab51ec4feae6bed65e596db425, where a 507 NamespaceSnapshotTooLarge body reports durable not_started (snapshot read or pre-transaction check) or not_committed (rolled-back mutation transaction). Unchanged shape and durable enum re-read at v0.9.14 source 9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d (ferrum-edge#6027, issue #6021): a 503 store failure before the mutation transaction opens reports not_started, one inside the rolled-back transaction reports not_committed, and only a failed commit or commit acknowledgement, or a lost settlement task, reports unknown. Edge v0.9.12 and v0.9.13 reported unknown for every 503 store failure.",
+    "edge_availability": "Released since Ferrum Edge v0.9.12; unchanged shape re-read at v0.9.13 source 9b83115de7ec23ab51ec4feae6bed65e596db425, where a 507 NamespaceSnapshotTooLarge body reports durable not_started (snapshot read or pre-transaction check) or not_committed (rolled-back mutation transaction). Unchanged shape and durable enum re-read at v0.9.14 source 9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d (ferrum-edge#6027, issue #6021): a 503 store failure before the mutation transaction opens reports not_started, one inside the rolled-back transaction reports not_committed, and only a failed commit or commit acknowledgement, or a lost settlement task, reports unknown. Edge v0.9.12 and v0.9.13 reported unknown for every 503 store failure. Unchanged shape and durable outcomes re-read at v0.9.15 source 25b37395ff61bfea0f3ffd189d9011c4984fa755.",
     "provenance": [
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.14",
-        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+        "ref": "v0.9.15",
+        "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
         "path": "openapi.yaml",
         "symbols": [
           "components.schemas.DeploymentMutationAcknowledgement",
@@ -24,8 +24,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.14",
-        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+        "ref": "v0.9.15",
+        "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
         "path": "src/admin/deployment_mutations.rs",
         "symbols": [
           "refusal",
@@ -38,8 +38,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.14",
-        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+        "ref": "v0.9.15",
+        "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
         "path": "src/config/deployment_mutation.rs",
         "symbols": [
           "DeploymentMutationNotStarted",
@@ -52,8 +52,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.14",
-        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+        "ref": "v0.9.15",
+        "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
         "path": "docs/deployment_mutations.md"
       }
     ]

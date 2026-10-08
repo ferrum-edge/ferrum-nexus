@@ -217,20 +217,21 @@ const PLUGIN_INVARIANTS: Readonly<
       return `The gateway owns '${header}' and rejects it as a correlation header; choose a name of your own, such as x-request-id`;
     }
     if (header !== '' && isGatewayOwnedConsumerHeader(header)) {
-      return `The gateway owns every x-consumer-* header and rejects '${header}' as a correlation header; choose a name of your own, such as x-request-id`;
+      return `The gateway owns every x-consumer-* header and X-Authenticated-Identity, and rejects '${header}' as a correlation header; choose a name of your own, such as x-request-id`;
     }
     return null;
   },
 
   /**
    * `RequestDeduplicationConfig.header_name` may not be in the gateway-owned
-   * `x-consumer-*` namespace (Edge `v0.9.9`): the gateway strips those headers
-   * from every client request, so the key could never arrive.
+   * `x-consumer-*` namespace (Edge `v0.9.9`) or be `X-Authenticated-Identity`
+   * (Edge `v0.9.15`): the gateway strips those headers from every client
+   * request, so the key could never arrive.
    */
   request_deduplication: (config) => {
     const header = typeof config.header_name === 'string' ? config.header_name.trim() : '';
     if (header !== '' && isGatewayOwnedConsumerHeader(header)) {
-      return `The gateway strips every x-consumer-* header from client requests, so '${header}' could never carry an idempotency key; choose a name of your own, such as Idempotency-Key`;
+      return `The gateway strips every x-consumer-* header and X-Authenticated-Identity from client requests, so '${header}' could never carry an idempotency key; choose a name of your own, such as Idempotency-Key`;
     }
     return null;
   },

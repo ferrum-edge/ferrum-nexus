@@ -433,7 +433,7 @@ DPs or fleets, so without a qualifying attestation Nexus reports those pairings 
 not guaranteed and admits their writes only under the explicit private opt-in. See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)
 and [packaged fixture](../e2e/public-only/README.md). Source authority is Edge
-`9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d` (`v0.9.14`). Nexus adopts its
+`25b37395ff61bfea0f3ffd189d9011c4984fa755` (`v0.9.15`). Nexus adopts its
 [published image and canonical contracts](edge-0.9.11-adoption.md).
 
 **Leases.** One row per key with an owner token and expiry: 60 s TTL renewed at
@@ -958,7 +958,10 @@ Details that matter:
   to N times. In `redis` mode the operator's Redis settings are stamped into
   the config. Replay and in-flight semantics are Edge's
   ([ferrum-edge#4844](https://github.com/ferrum-edge/ferrum-edge/pull/4844));
-  clients must reuse the same key when retrying the same operation.
+  clients must reuse the same key when retrying the same operation. With
+  `enforce_required` the plugin gates admission, so Edge v0.9.15 refuses a native
+  gRPC or WebSocket request to that proxy with `403` (`route_protocol_admission`):
+  the plugin runs on HTTP only.
 
 **Ownership is by config id.** The `api_plugins` row records the Edge config id
 it created (`ferrum_plugin_config_id`); saves and removals act on that config
@@ -1313,5 +1316,5 @@ are never interpreted as omission. Local presentation/reference budgets further 
 accepted input. The configured Edge namespace is the authorization boundary for this
 single-namespace portal. The service returns an allow-listed redacted DTO from `shared/`
 and has no store, gateway, network or source-file reader dependency. The shared v1 format
-is implemented in published `contracts-edge-0.9.14`. Preview cannot invoke publishing or
+is implemented in published `contracts-edge-0.9.15`. Preview cannot invoke publishing or
 install agent policy.

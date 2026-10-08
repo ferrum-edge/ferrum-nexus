@@ -154,7 +154,7 @@ plane whose data-plane attestation proves every connected data plane public-only
 at least `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`) connected,
 counting only those that did not just start, and health reports it to admins as
 `edge.public_egress_guaranteed`. Edge source authority is
-`9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d` (`v0.9.14`); the Edge and canonical
+`25b37395ff61bfea0f3ffd189d9011c4984fa755` (`v0.9.15`); the Edge and canonical
 releases are published and pinned. Nexus reads egress policy schema 2 only. Schema 1
 (Edge `v0.9.12` and earlier) reported the policy-only value of the same field and is
 refused rather than reinterpreted (see

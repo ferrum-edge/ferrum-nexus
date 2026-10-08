@@ -813,6 +813,9 @@ describe('provider plugin palette', () => {
         ['correlation_id', 'X-Consumer-Trace'],
         ['correlation_id', 'x_consumer-trace'],
         ['request_deduplication', 'X-Consumer-Idempotency-Key'],
+        // Edge v0.9.15 refuses the external identity header the same way.
+        ['correlation_id', 'X-Authenticated-Identity'],
+        ['request_deduplication', 'x_authenticated-identity'],
       ] as const) {
         const response = await setPlugin(name, { config: { header_name: header } });
         assert.equal(response.statusCode, 400, `${name} should refuse ${header}`);

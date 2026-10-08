@@ -15,8 +15,8 @@ describe('published immutable service-manifest consumer', () => {
   it('verifies the exact commit, schema, shared fixtures and invalid-expectation integrity pins', () => {
     const pin = readFileSync(new URL('SERVICE-MANIFEST-PIN', root), 'utf8');
     assert.deepEqual(pin.split('\n').slice(0, 2), [
-      'tag: contracts-edge-0.9.14',
-      'commit: ddbdd845733b7046c4393ac951011dafb774db33',
+      'tag: contracts-edge-0.9.15',
+      'commit: 6fb64c5dc2e014204c17609fc717d976f3b4589e',
     ]);
     const schema = fixture('schemas/service-manifest/v1.schema.json') as {
       'x-contract': { status: string; provenance: { commit: string; availability?: string }[] };
@@ -134,7 +134,7 @@ describe('published immutable service-manifest consumer', () => {
       assert.equal(response.statusCode, 200, response.body);
       assert.equal(response.json().preview_only, true);
       assert.equal(response.json().contract_status, 'implemented');
-      assert.equal(response.json().contract_commit, 'ddbdd845733b7046c4393ac951011dafb774db33');
+      assert.equal(response.json().contract_commit, '6fb64c5dc2e014204c17609fc717d976f3b4589e');
       assert.equal(response.json().references.values, '[REDACTED]');
       for (const secret of [
         'edge-client',

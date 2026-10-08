@@ -162,7 +162,7 @@ describe('validateDraft', () => {
   it('reports a header name in the gateway-owned x-consumer-* namespace', () => {
     for (const name of ['correlation_id', 'request_deduplication']) {
       const spec = descriptor(name);
-      for (const header of ['X-Consumer-Trace', 'x_consumer-a']) {
+      for (const header of ['X-Consumer-Trace', 'x_consumer-a', 'X-Authenticated-Identity']) {
         const errors = validateDraft(spec, { ...draftFor(spec, null), header_name: header });
         expect(errors.header_name).toMatch(/x-consumer-\*/);
       }

@@ -1227,6 +1227,78 @@ describe('ferrum admin client', () => {
       assert.equal(accepted.plugin_name, 'rate_limiting');
     });
 
+    it('accepts the Edge v0.9.15 rate_limiting ipv6_prefix from 1 through 128 only', async () => {
+      await client.proxies.create({
+        id: 'rl-ipv6-proxy',
+        listen_path: '/nexus/rl-ipv6',
+        backend_host: 'rl.internal',
+        backend_port: 443,
+      });
+      const limits = [{ scope: 'default', window_seconds: 60, max_requests: 10 }];
+
+      for (const ipv6Prefix of [0, 129, 56.5, '64', null]) {
+        await assert.rejects(
+          () =>
+            client.pluginConfigs.create({
+              plugin_name: 'rate_limiting',
+              scope: 'proxy',
+              proxy_id: 'rl-ipv6-proxy',
+              enabled: true,
+              config: { limit_by: 'ip', ipv6_prefix: ipv6Prefix, limits },
+            }),
+          (error: unknown) => isNexusError(error) && /ipv6_prefix/.test(error.message),
+          `ipv6_prefix ${String(ipv6Prefix)}`,
+        );
+      }
+
+      for (const ipv6Prefix of [1, 64, 128]) {
+        const created = await client.pluginConfigs.create({
+          plugin_name: 'rate_limiting',
+          scope: 'proxy',
+          proxy_id: 'rl-ipv6-proxy',
+          enabled: true,
+          config: { limit_by: 'ip', ipv6_prefix: ipv6Prefix, limits },
+        });
+        assert.equal(created.config?.ipv6_prefix, ipv6Prefix);
+      }
+    });
+
+    it('refuses X-Authenticated-Identity as a correlation or idempotency header', async () => {
+      await client.proxies.create({
+        id: 'identity-header-proxy',
+        listen_path: '/nexus/identity-header',
+        backend_host: 'identity.internal',
+        backend_port: 443,
+      });
+      // Edge v0.9.15 adds the external identity header to the gateway-owned check.
+      for (const [pluginName, headerName] of [
+        ['correlation_id', 'X-Authenticated-Identity'],
+        ['request_deduplication', 'x_authenticated_identity'],
+      ] as const) {
+        await assert.rejects(
+          () =>
+            client.pluginConfigs.create({
+              plugin_name: pluginName,
+              scope: 'proxy',
+              proxy_id: 'identity-header-proxy',
+              enabled: true,
+              config: { header_name: headerName },
+            }),
+          (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
+          pluginName,
+        );
+      }
+
+      const created = await client.pluginConfigs.create({
+        plugin_name: 'correlation_id',
+        scope: 'proxy',
+        proxy_id: 'identity-header-proxy',
+        enabled: true,
+        config: { header_name: 'X-Authenticated-Identity-Trace' },
+      });
+      assert.equal(created.config?.header_name, 'X-Authenticated-Identity-Trace');
+    });
+
     it('requires a non-empty cors allowed_origins', async () => {
       await client.proxies.create({
         id: 'cors-proxy',
