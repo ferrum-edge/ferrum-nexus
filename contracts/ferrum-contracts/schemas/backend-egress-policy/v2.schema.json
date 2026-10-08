@@ -2,38 +2,60 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ferrum-edge/ferrum-contracts/schemas/backend-egress-policy/v2.schema.json",
   "title": "Edge backend egress policy response v2",
-  "description": "GET /backend-egress-policy response for the immutable process policy, schema_version 2. Version 2 changes the meaning of public_only_guaranteed: it also requires enforcement_scope=local-data-plane. JWT namespace authorization and Cache-Control: no-store are HTTP/runtime requirements. JSON conformance cannot establish authentication, serving DP identity or actual enforcement; CP metadata is not DP attestation.",
+  "description": "GET /backend-egress-policy response for the immutable process policy, schema_version 2. Version 2 changes the meaning of public_only_guaranteed: it also requires enforcement_scope=local-data-plane. On a control plane (enforcement_scope=admission-only), Edge v0.9.14 adds the optional data_plane_attestation object within schema_version 2: the policies the namespace's connected data planes self-reported over ConfigSync Subscribe. JWT namespace authorization and Cache-Control: no-store are HTTP/runtime requirements. JSON conformance cannot establish authentication, serving DP identity or actual enforcement; the CP's own top-level fields are not DP attestation, and data_plane_attestation is a self-reported, point-in-time view, not cryptographic host attestation.",
   "x-contract": {
     "name": "backend-egress-policy",
     "version": 2,
     "status": "implemented",
     "owner": "ferrum-edge/ferrum-edge",
-    "edge_availability": "Released in Ferrum Edge v0.9.13 at 9b83115de7ec23ab51ec4feae6bed65e596db425 (ferrum-edge#6017; see issue #5994 and PR #5999). Replaces v1, which Edge v0.9.11 and v0.9.12 emitted; v0.9.13 never emits schema_version 1.",
+    "edge_availability": "Released in Ferrum Edge v0.9.13 at 9b83115de7ec23ab51ec4feae6bed65e596db425 (ferrum-edge#6017; see issue #5994 and PR #5999). Edge v0.9.14 at 9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d adds the optional, CP-only data_plane_attestation object (ferrum-edge#6029, issue #6020) without changing schema_version; v0.9.13 never emits it. Replaces v1, which Edge v0.9.11 and v0.9.12 emitted; v0.9.13 and v0.9.14 never emit schema_version 1.",
     "provenance": [
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "openapi.yaml",
         "symbols": [
-          "components.schemas.BackendEgressPolicyResponse"
+          "components.schemas.BackendEgressPolicyResponse",
+          "components.schemas.DataPlaneEgressAttestation",
+          "components.schemas.DataPlaneEgressSummary",
+          "components.schemas.DataPlaneEgressEntry",
+          "components.schemas.DataPlaneEgressAttestationStatus",
+          "components.schemas.DataPlaneEgressPolicy"
         ]
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "src/admin/backend_egress_policy.rs",
         "symbols": [
           "BackendEgressPolicyResponse",
-          "handle_get"
+          "DataPlaneAttestation",
+          "DataPlaneEgressEntry",
+          "handle_get",
+          "connected_data_planes"
         ],
-        "note": "Transcribed OpenAPI response shape. Additional cross-field assertions copy the handler's exact mode class lists and its v2 public-only guarantee calculation (local-data-plane, public mode, no allow overrides); no authorization or cryptographic validity is modeled as JSON validation."
+        "note": "Transcribed OpenAPI response shape. DataPlaneEgressAttestation is transcribed as one closed object (the owner's allOf of DataPlaneEgressSummary and the source/data_planes members with unevaluatedProperties: false). Additional cross-field assertions copy the handler's exact mode class lists, its v2 public-only guarantee calculation (local-data-plane, public mode, no allow overrides), the CP-only presence of data_plane_attestation, and the attestation rules of src/grpc/backend_egress_attestation.rs; no authorization or cryptographic validity is modeled as JSON validation."
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+        "path": "src/grpc/backend_egress_attestation.rs",
+        "symbols": [
+          "EgressMode",
+          "ReportedEgressPolicy",
+          "ReportedEgressPolicy::public_only_guaranteed",
+          "ReportedEgressPolicy::weaken",
+          "attestation_label",
+          "DataPlaneEgressSummary::from_reports"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "src/config/env_config.rs",
         "symbols": [
           "BackendEgressPolicy::metadata",
@@ -43,10 +65,10 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "docs/admin_api.md",
-        "note": "schema_version 2 and the local-enforcement guarantee rule; the upgrade note is in docs/upgrade_guide.md, Upgrading to 0.9.13."
+        "note": "schema_version 2, the local-enforcement guarantee rule and \"Data-plane attestation on a control plane\"; docs/cp_dp_mode.md \"Backend egress policy attestation\" and docs/upgrade_guide.md \"Upgrading to 0.9.14\" describe the ConfigSync report and its limits."
       }
     ]
   },
@@ -128,6 +150,10 @@
     "public_only_guaranteed": {
       "type": "boolean",
       "description": "True exactly when enforcement_scope=local-data-plane, mode=public and allow_cidr_overrides_present=false. Always false for admission-only, unserved-namespace and no-data-plane, which enforce nothing for the selected namespace. Deny overrides only restrict. It is not DNS validation, a connect test, or external firewall attestation."
+    },
+    "data_plane_attestation": {
+      "$ref": "#/$defs/DataPlaneEgressAttestation",
+      "description": "CP-only (enforcement_scope=admission-only), from Edge v0.9.14: every live ConfigSync Subscribe stream for the selected namespace with the policy it self-reported. Absent on every other response and on Edge v0.9.13. Additive within schema_version 2; the CP's own top-level fields keep their admission-only meaning."
     }
   },
   "allOf": [
@@ -241,6 +267,427 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "required": [
+          "data_plane_attestation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "enforcement_scope": {
+            "const": "admission-only"
+          }
+        }
+      }
     }
-  ]
+  ],
+  "$defs": {
+    "DataPlaneEgressAttestation": {
+      "type": "object",
+      "description": "DataPlaneEgressAttestation: DataPlaneEgressSummary plus source and data_planes. Streams are counted per stream, not per distinct node_id; another namespace's streams never appear. Disconnected data planes that still serve cached config are not listed, so compare connected_data_planes with the expected inventory. connected_data_planes equals reporting_data_planes plus unknown_data_planes and the length of data_planes; JSON Schema cannot express those sums.",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "connected_data_planes",
+        "reporting_data_planes",
+        "unknown_data_planes",
+        "weakest_policy",
+        "weakest_policy_complete",
+        "all_connected_public_only_guaranteed",
+        "data_planes"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v2.schema.json#/$defs/DataPlaneAttestationSource"
+        },
+        "connected_data_planes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Live ConfigSync Subscribe streams for the selected namespace, one per stream rather than per distinct node_id."
+        },
+        "reporting_data_planes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Connected data planes that sent a recognised egress policy report."
+        },
+        "unknown_data_planes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Connected data planes whose egress policy is unknown."
+        },
+        "weakest_policy": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DataPlaneEgressPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Field-wise least restrictive combination of the reporting data planes' policies: the mode admitting the union of their mode-stage classes, dangerous_ranges_blocked only if every one blocks, allow overrides if any has them, deny overrides only if every one has them. Null exactly when no data plane reported; it omits unknown data planes."
+        },
+        "weakest_policy_complete": {
+          "type": "boolean",
+          "description": "True only when at least one data plane is connected and every connected data plane reported."
+        },
+        "all_connected_public_only_guaranteed": {
+          "type": "boolean",
+          "description": "True exactly when weakest_policy_complete is true and weakest_policy.public_only_guaranteed is true. False for an empty set or any unknown data plane; covers only data planes connected at the time of the read."
+        },
+        "data_planes": {
+          "type": "array",
+          "description": "Live streams for the selected namespace, sorted by node_id then connected_at.",
+          "items": {
+            "$ref": "#/$defs/DataPlaneEgressEntry"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "weakest_policy": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "weakest_policy"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reporting_data_planes": {
+                "const": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reporting_data_planes": {
+                "minimum": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "weakest_policy_complete": {
+                "const": true
+              }
+            },
+            "required": [
+              "weakest_policy_complete"
+            ]
+          },
+          "then": {
+            "properties": {
+              "connected_data_planes": {
+                "minimum": 1
+              },
+              "unknown_data_planes": {
+                "const": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "all_connected_public_only_guaranteed": {
+                "const": true
+              }
+            },
+            "required": [
+              "all_connected_public_only_guaranteed"
+            ]
+          },
+          "then": {
+            "properties": {
+              "weakest_policy_complete": {
+                "const": true
+              },
+              "weakest_policy": {
+                "type": "object",
+                "required": [
+                  "public_only_guaranteed"
+                ],
+                "properties": {
+                  "public_only_guaranteed": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "weakest_policy_complete": {
+                "const": true
+              },
+              "weakest_policy": {
+                "type": "object",
+                "required": [
+                  "public_only_guaranteed"
+                ],
+                "properties": {
+                  "public_only_guaranteed": {
+                    "const": true
+                  }
+                }
+              }
+            },
+            "required": [
+              "weakest_policy_complete",
+              "weakest_policy"
+            ]
+          },
+          "then": {
+            "properties": {
+              "all_connected_public_only_guaranteed": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "DataPlaneEgressEntry": {
+      "type": "object",
+      "description": "One live Subscribe stream (DataPlaneEgressEntry). No build version is included: the ConfigSync build gate pins it to the CP's own build, and GET /cluster reports it.",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "connected_at",
+        "attestation",
+        "policy"
+      ],
+      "properties": {
+        "node_id": {
+          "type": "string",
+          "description": "Authenticated ConfigSync node identity. Several streams may share one node_id."
+        },
+        "connected_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the data plane's Subscribe stream was established."
+        },
+        "attestation": {
+          "$ref": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v2.schema.json#/$defs/DataPlaneAttestationStatus"
+        },
+        "policy": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DataPlaneEgressPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Policy the data plane reported; null when unknown."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "attestation": {
+                "const": "reported"
+              }
+            },
+            "required": [
+              "attestation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "policy": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "attestation": {
+                "const": "unknown"
+              }
+            },
+            "required": [
+              "attestation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "policy": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "DataPlaneEgressPolicy": {
+      "type": "object",
+      "description": "Presence-only backend egress policy metadata a data plane reported (DataPlaneEgressPolicy). Field meanings match the same-named top-level fields for a local data plane; CIDRs, addresses and counts are withheld.",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "mode_allowed_ip_classes",
+        "mode_blocked_ip_classes",
+        "dangerous_ranges_blocked",
+        "allow_cidr_overrides_present",
+        "deny_cidr_overrides_present",
+        "public_only_guaranteed"
+      ],
+      "properties": {
+        "mode": {
+          "$ref": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v2.schema.json#/$defs/Mode"
+        },
+        "mode_allowed_ip_classes": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 2,
+          "items": {
+            "$ref": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v2.schema.json#/$defs/IpClass"
+          }
+        },
+        "mode_blocked_ip_classes": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 1,
+          "items": {
+            "$ref": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v2.schema.json#/$defs/IpClass"
+          }
+        },
+        "dangerous_ranges_blocked": {
+          "type": "boolean"
+        },
+        "allow_cidr_overrides_present": {
+          "type": "boolean"
+        },
+        "deny_cidr_overrides_present": {
+          "type": "boolean"
+        },
+        "public_only_guaranteed": {
+          "type": "boolean",
+          "description": "True exactly for mode=public with no allow CIDR overrides."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "both"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "properties": {
+              "mode_allowed_ip_classes": {
+                "const": [
+                  "public",
+                  "private-reserved"
+                ]
+              },
+              "mode_blocked_ip_classes": {
+                "const": []
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "public"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "properties": {
+              "mode_allowed_ip_classes": {
+                "const": [
+                  "public"
+                ]
+              },
+              "mode_blocked_ip_classes": {
+                "const": [
+                  "private-reserved"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "private"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "properties": {
+              "mode_allowed_ip_classes": {
+                "const": [
+                  "private-reserved"
+                ]
+              },
+              "mode_blocked_ip_classes": {
+                "const": [
+                  "public"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "public"
+              },
+              "allow_cidr_overrides_present": {
+                "const": false
+              }
+            },
+            "required": [
+              "mode",
+              "allow_cidr_overrides_present"
+            ]
+          },
+          "then": {
+            "properties": {
+              "public_only_guaranteed": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "public_only_guaranteed": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
 }

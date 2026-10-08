@@ -5,7 +5,9 @@ The internal owner API dependency was first published in Edge v0.9.12. Nexus
 [Edge v0.9.13](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.13),
 source `9b83115de7ec23ab51ec4feae6bed65e596db425`, and canonical
 [contracts-edge-0.9.13](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.13),
-commit `9626821eb089c71f5d4d71268c7b8276a8a5ab50`. See the
+commit `9626821eb089c71f5d4d71268c7b8276a8a5ab50`. `main` pairs with Edge v0.9.14 and
+`contracts-edge-0.9.14`, which keep this protocol and report a store failure before
+commit as `durable` `not_started` or `not_committed` instead of `unknown`. See the
 [artifact identities](edge-0.9.11-adoption.md). To resolve an
 unconfirmed mutation, follow the
 [operator runbook](operations.md#resolving-an-unconfirmed-gateway-deployment-mutation).

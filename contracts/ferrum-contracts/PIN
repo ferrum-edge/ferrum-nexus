@@ -1,5 +1,5 @@
-tag: contracts-edge-0.9.13
-commit: 9626821eb089c71f5d4d71268c7b8276a8a5ab50
+tag: contracts-edge-0.9.14
+commit: ddbdd845733b7046c4393ac951011dafb774db33
 sha256: b0d445463a479eb36a4e1a3d9e12c77120a7679ea91801fbaeb613c731daa2a7  fixtures/admin-deployment-mutation-acknowledgement/invalid/cleanup-not-boolean.json
 sha256: d43fe26366ecd744c1d7083d24f9508d3f800e322b3df22082baf38c65c3d542  fixtures/admin-deployment-mutation-acknowledgement/invalid/durable-only-cleanup.json
 sha256: 0c568aad86e7011b0d5044681cabf46f4251e44fe9a3b13bf3372c5510878fb2  fixtures/admin-deployment-mutation-acknowledgement/invalid/missing-cleanup-authorization.json
@@ -15,6 +15,7 @@ sha256: f3147ce99be645db491deb1f72be742400efb486a7c77b7ce57adcdd41d448c6  fixtur
 sha256: 53bd9249016da971c68c4814035d520937541c545a47e688ddd48658605221b7  fixtures/admin-deployment-mutation-acknowledgement/valid/snapshot-too-large-not-committed.json
 sha256: 3d668494883a8585c8c192235b992ed4ce83c2d75147c274555beecf9f5953ae  fixtures/admin-deployment-mutation-acknowledgement/valid/snapshot-too-large-not-started.json
 sha256: 93e7ed7165a49c1bc997ad6fa600321fbc8cdb340b157bf55d69bfb2c6c26428  fixtures/admin-deployment-mutation-acknowledgement/valid/stale.json
+sha256: 362035a55b7eb8345463413f26ebf91b52c5d1774a802ec09b75fa7456e70acd  fixtures/admin-deployment-mutation-acknowledgement/valid/store-failure-not-committed.json
 sha256: 2243d8b0d06e20739c0b033e8218b1d6977d1459532151e9bf7e2410402377ae  fixtures/admin-deployment-mutation-acknowledgement/valid/unknown.json
 sha256: fed9da119d7a5643c7700ac4c4d3ba5fb70e90ebb41bea51cc7c68b6f9e953e9  fixtures/admin-deployment-snapshot/v1/invalid/evidence-not-object.json
 sha256: b8a698fefe7c97ab3db3f822a7e207f5b67765f93f925d3f98dac25fe2bdbedb  fixtures/admin-deployment-snapshot/v1/invalid/missing-evidence.json
@@ -67,17 +68,43 @@ sha256: ca37246cf701fa673f56ab563161f9a95f2358d528324d90cb75c74868caac58  fixtur
 sha256: 0ae2ce4e1d3bda71d8cba01e8a681f6cf3bd6d68b6c53df7ffa5e1fc344559cf  fixtures/backend-egress-policy/v1/valid/public-with-allow-overrides.json
 sha256: 0ddbbc9de825c46df57943fd2de5745701bedc7afbb16c8ecb0321ac5b2a1d28  fixtures/backend-egress-policy/v2/invalid/admission-only-guarantee.json
 sha256: 64ad73748dce0371abcec1b275ffd20fe2b533661c8e0c1aa140094c406ac36c  fixtures/backend-egress-policy/v2/invalid/allow-overlay-guarantee.json
+sha256: 0eaa83c52d4e5fd6eab57b31005517aca2eb17e549a73ffad91a6686529bc89f  fixtures/backend-egress-policy/v2/invalid/attestation-leaked-cidr-field.json
+sha256: 5514be0876ccdc32de78337909d49d037ab294f6e418d330d0f68cfb56377d8a  fixtures/backend-egress-policy/v2/invalid/attestation-missing-data-planes.json
+sha256: f82a93c3e433a38e369126baa2cb25da4c5e46c76f26ceb26ed43356a52cfe37  fixtures/backend-egress-policy/v2/invalid/attestation-negative-count.json
+sha256: 5450c76203fe21dcc3f0c4e9b8e2bd41f7fba4c5652220db2bcac421a47de65c  fixtures/backend-egress-policy/v2/invalid/attestation-on-local-data-plane.json
+sha256: f0639cfb52be16f2a55df5486fe06978ff68ad0d4e1c87b4b5e272f6ba578823  fixtures/backend-egress-policy/v2/invalid/attestation-unknown-source.json
+sha256: b0db21c11042f43099789a4064233ffc24749d4e15a1d2351905837789d5d3ae  fixtures/backend-egress-policy/v2/invalid/empty-set-complete.json
+sha256: 199069097bc028471ac0a7afcd8c2c09be8918cd69e703a70974a056e82103d8  fixtures/backend-egress-policy/v2/invalid/entry-build-version.json
+sha256: 3a7a3536cf8656a4e343937878a607e73b11adcd3aa60932cc5198275c30b67e  fixtures/backend-egress-policy/v2/invalid/entry-connected-at-without-offset.json
+sha256: 26a7c26593fe01c7d695449126bcc6d9d3f3e22913f969ca1994c6a8eccd4dd1  fixtures/backend-egress-policy/v2/invalid/entry-policy-allow-overlay-guarantee.json
+sha256: fbef1a6beb87d94720df76499fe9aba7a5de00de06858189f8b83a6c87fb4974  fixtures/backend-egress-policy/v2/invalid/entry-policy-false-public-guarantee.json
+sha256: 3151a2ac0843512d72d7c8ba582c8b9c62e62f934d3c7ab2dc513a52560c7327  fixtures/backend-egress-policy/v2/invalid/entry-policy-leaked-cidr-field.json
+sha256: d19f639c71d08b856c9d15179cfca142d81a6824dbc3c8cb38687bc55fcf2746  fixtures/backend-egress-policy/v2/invalid/entry-policy-mode-class-mismatch.json
+sha256: 212b6628c89448ed93255767bad9b90ef1d30e7596e535881f28e87a46ebad1b  fixtures/backend-egress-policy/v2/invalid/entry-reported-without-policy.json
+sha256: f518a23a4ebd0c62c53342d5c33df8dae44008552f78c3e39cb1e3cebf3ef276  fixtures/backend-egress-policy/v2/invalid/entry-unknown-attestation.json
+sha256: c5c878724c7805ae77c976e5d831fe40fc53c6a471dddd0cbc1b9c4c4b7ea4a6  fixtures/backend-egress-policy/v2/invalid/entry-unknown-with-policy.json
 sha256: 7a6a0ac8b6e9ecf4eebaa84d52d1204b5a118c3128a677507b4cf317c16105f2  fixtures/backend-egress-policy/v2/invalid/false-public-guarantee.json
+sha256: 5ab62e626d17222ad6923922029f0a6220c7cd1ef81a2a031e5c293464e87cf6  fixtures/backend-egress-policy/v2/invalid/guarantee-with-allow-overlay.json
+sha256: 66097e42dcc9d10f020971630fa180c5de9dc5a3689a028e947bdf949c3941d8  fixtures/backend-egress-policy/v2/invalid/guarantee-with-unknown-data-plane.json
 sha256: 3f8e7b30e8c916529adceb88998364656c5f460a0099b733e1170fbd569aa321  fixtures/backend-egress-policy/v2/invalid/leaked-cidr-field.json
 sha256: dea2141bee4524b93d7fd8d382948d84f8bc3d257b45d45b2937ed4745a63abd  fixtures/backend-egress-policy/v2/invalid/mode-class-mismatch.json
 sha256: afeb538f007adb58e13f9eb157d23caf64b67c385d61e8c059b68f4180206913  fixtures/backend-egress-policy/v2/invalid/no-data-plane-guarantee.json
 sha256: b32c9a1f4c7f5277da58ad6327d460b23288f7fe6d0e2b5fc2a4334d5e6391c2  fixtures/backend-egress-policy/v2/invalid/previous-version.json
+sha256: 7911e930e62c7701fad415685724c1ca8afae1188b8ac86ab39529157b553292  fixtures/backend-egress-policy/v2/invalid/public-only-not-aggregated.json
+sha256: ea64c68a381de3abe1ce02c3f5bbc1db7ca7f3729e4f49abdc05be056ffdc40f  fixtures/backend-egress-policy/v2/invalid/reports-without-weakest-policy.json
 sha256: 3758d2a84a284f0b97c78fc34fe54699b875ded4a44841f3438448baacddd64d  fixtures/backend-egress-policy/v2/invalid/unknown-classification.json
 sha256: 09fdc24d6e493bdf42484fa60ee6bb2e75457811afa0de1f108755068f708924  fixtures/backend-egress-policy/v2/invalid/unknown-enforcement-scope.json
 sha256: 6d2cc882bc08e64fecef8a785e5e82de02ae13666ae3cdf22c9e647370a41623  fixtures/backend-egress-policy/v2/invalid/unknown-mode.json
 sha256: 4f11967c0eef421a9b4a0e81118cc03930ea03b6d55c8ba018b604daae036cd5  fixtures/backend-egress-policy/v2/invalid/unknown-version.json
 sha256: 829277ff80efa25bc2c3b1307ce4e97dbaf1910815635b955beda3a35870d1f1  fixtures/backend-egress-policy/v2/invalid/unserved-namespace-guarantee.json
+sha256: 561f4da09ef5e111896246fe3acaade7a33b420fe149e6cfce43f558b413b83b  fixtures/backend-egress-policy/v2/invalid/weakest-policy-unknown-mode.json
+sha256: 3488ccaabf242df60df5a95f8cc7e5e199aa0ad92411ec8efde8b43b7dabfadd  fixtures/backend-egress-policy/v2/invalid/weakest-policy-without-reports.json
 sha256: 11ce14d9fde5f60324ebd89ad914fbd0d11125a314df7b8f425d1894dc0d528e  fixtures/backend-egress-policy/v2/invalid/wrong-evaluation-stage.json
+sha256: c57330bb74ba227ca85934bff163a124bca61f34a920c208dd2cf8986ad638c2  fixtures/backend-egress-policy/v2/valid/control-plane-attestation-allow-overlay.json
+sha256: 01df2a6f8095a3ac3e9ae3bdcd9d513f47b756499764848dfb7e0c4d6193cf90  fixtures/backend-egress-policy/v2/valid/control-plane-attestation-empty.json
+sha256: 034f6c3070dca5223e31f5fcc44af518a43e8b68bc03470686f110306703497f  fixtures/backend-egress-policy/v2/valid/control-plane-attestation-reported.json
+sha256: a7bc9b45915f4a4f228aa71c486f822dfab08bfdbaf6a2f6da216528fce7df8a  fixtures/backend-egress-policy/v2/valid/control-plane-attestation-shared-node-id.json
+sha256: 59cfd1911de7f1d24561c87f9005bd3c7bb211b2e498a7a4bb2b6ee02ba42d02  fixtures/backend-egress-policy/v2/valid/control-plane-attestation-unknown.json
 sha256: 720ebe21e9a84ec6193e8717ac5b5969388f5808f20d0b26581d78f55d7c461f  fixtures/backend-egress-policy/v2/valid/default-control-plane.json
 sha256: 14e255bebc1fb6c075f7b15b7ad929874cc3a9f90d4dd4e33777ba9b8b08a7ee  fixtures/backend-egress-policy/v2/valid/private-control-plane.json
 sha256: af52da2675856d64252164492a8fb369081064a2bc71517e5e7c4919c0879309  fixtures/backend-egress-policy/v2/valid/public-control-plane.json
@@ -85,14 +112,14 @@ sha256: 2dffc359c133dc948f9715e1d7ecc0e3db9d4a6f9490865c0b0e2906e327b0b3  fixtur
 sha256: ee5d9de5ac3d04d6ba1a492c2ce6bbc96a7d59e2fb69df7b224bef10ef28e46a  fixtures/backend-egress-policy/v2/valid/public-serving.json
 sha256: 6ce32d50d7465ad390e8c2f91b93b81097b073caa548d87db8f2c0da15b7db6f  fixtures/backend-egress-policy/v2/valid/public-unserved-namespace.json
 sha256: e493586a1f39a45e64260fb594a3da00190dd61cd6d933a1c69fba79fbfcbd73  fixtures/backend-egress-policy/v2/valid/public-with-allow-overrides.json
-sha256: 048ded8e16600e116bcfb3cf6eaae4c00aca49a9061395c8cc647e1f66191699  fixtures/invalid-expectations.json
-sha256: ea10a7a57d91b83199e1e13a12bb7ed5754b707d253c8feb0ccfe18fd4697956  schemas/admin-deployment-mutation-acknowledgement/v1.schema.json
+sha256: 6ada3d48b250fc100a83067d8ee0441d3cd07de632f958ce87ce31111d8b1c7e  fixtures/invalid-expectations.json
+sha256: 5087f9037e866786e7e358678f3d94232821f4c1865af42e724088d10a83d22b  schemas/admin-deployment-mutation-acknowledgement/v1.schema.json
 sha256: 7c5b2c55560e2a6df3b7af139d04f5f8779c414debed33a75f109b742c8c797a  schemas/admin-deployment-snapshot/v1.schema.json
-sha256: d31a5f353a4c6b2aa707d0e6f90efcc6ef331660625a80c00f9313744cf729c5  schemas/admin-deployment-snapshot/v2.schema.json
+sha256: 171bcdc9e319d00140754d7967a303030353dc8d2513f8f266d0e83bcee15403  schemas/admin-deployment-snapshot/v2.schema.json
 sha256: ca10c8262ceacea2e039522de008dbfddc27a9021a6b1862958b84ebac80a79b  schemas/backend-egress-policy/v1.schema.json
-sha256: f92eacacf582fc4d1d98c4a93277fce4c5a9d94c70a7e81ba8c5c4cd39799e53  schemas/backend-egress-policy/v2.schema.json
-sha256: 53018ddb17fef074f51a7e784080c214a4c28a96782f89cea71db9aa86650176  vocabularies/backend-egress-policy.json
-sha256: 7e2daa808ccf83e54cdd8b7880164982a0ab5423bb621c3eb2ff3f37cb7f9af0  vocabularies/gateway-errors.json
-sha256: 6a3d26e21abd444ce3f3a422bf2beb62fc259794b2e4ac21edebe974f116225d  vocabularies/gateway-headers.json
-sha256: be31cc53508042c6efd0e745e8c673fb66bbbdb1d2dd1a2eaa1a813f09ae80c3  vocabularies/plugin-catalog.json
-sha256: 514913de70c0caf3b5092363fb34d11c46da3f9ff9d0c98b0a83bfe2e04c76c9  vocabularies/provisioned-by.json
+sha256: 13d278b150ac98f067c3c96a684df4fd7efcc5465635a5f911c97656699d09fa  schemas/backend-egress-policy/v2.schema.json
+sha256: 1df0635e3768c4c3e336c6997b0189f20a5f3762bfa125192682733e1c4fe6ee  vocabularies/backend-egress-policy.json
+sha256: 5adcd8f9913e1efb99f111d7f5208016d4bd76206a8ce0555531af36094cc081  vocabularies/gateway-errors.json
+sha256: ada929455ce8b98d6382040471dd2cc4c2aeec186d2d7b134a1e0e147339e8a1  vocabularies/gateway-headers.json
+sha256: a21a3de12f02dd7e9440110582049672cc56ac5357efa13dc2194ad3a985b408  vocabularies/plugin-catalog.json
+sha256: 620e2a9eaf4a1f116124d5b057aa0cd7a0e34b3b36a0b4175c8546b954a07227  vocabularies/provisioned-by.json

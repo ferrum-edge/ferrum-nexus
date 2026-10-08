@@ -432,7 +432,7 @@ DPs or fleets, so without a qualifying attestation Nexus reports those pairings 
 not guaranteed and admits their writes only under the explicit private opt-in. See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)
 and [packaged fixture](../e2e/public-only/README.md). Source authority is Edge
-`9b83115de7ec23ab51ec4feae6bed65e596db425` (`v0.9.13`). Nexus adopts its
+`9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d` (`v0.9.14`). Nexus adopts its
 [published image and canonical contracts](edge-0.9.11-adoption.md).
 
 **Leases.** One row per key with an owner token and expiry: 60 s TTL renewed at
@@ -1312,5 +1312,5 @@ are never interpreted as omission. Local presentation/reference budgets further 
 accepted input. The configured Edge namespace is the authorization boundary for this
 single-namespace portal. The service returns an allow-listed redacted DTO from `shared/`
 and has no store, gateway, network or source-file reader dependency. The shared v1 format
-is implemented in published `contracts-edge-0.9.13`. Preview cannot invoke publishing or
+is implemented in published `contracts-edge-0.9.14`. Preview cannot invoke publishing or
 install agent policy.

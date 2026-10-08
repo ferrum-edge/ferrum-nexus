@@ -1,6 +1,6 @@
-tag: contracts-edge-0.9.13
-commit: 9626821eb089c71f5d4d71268c7b8276a8a5ab50
-sha256: 048ded8e16600e116bcfb3cf6eaae4c00aca49a9061395c8cc647e1f66191699  fixtures/invalid-expectations.json
+tag: contracts-edge-0.9.14
+commit: ddbdd845733b7046c4393ac951011dafb774db33
+sha256: 6ada3d48b250fc100a83067d8ee0441d3cd07de632f958ce87ce31111d8b1c7e  fixtures/invalid-expectations.json
 sha256: db87d1f238f6f81e258dfcc2c7ff400f34c807866fd4cd354258386622130316  fixtures/service-manifest/invalid/agents-bad-namespace.json
 sha256: 112341075e1e64ad0e1c4e652ec78de2eebae3c50303f7d81a1a931309c668c5  fixtures/service-manifest/invalid/agents-enabled-not-boolean.json
 sha256: 07ce370e9fbc5a4f8f704773bda051843704d7be1c8f3a0f92413b9cf2154068  fixtures/service-manifest/invalid/agents-unknown-key.json

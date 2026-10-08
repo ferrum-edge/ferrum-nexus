@@ -103,6 +103,7 @@ import {
   assertDeploymentEvidence,
   deploymentTarget,
   isDeploymentAcknowledgement,
+  isDeploymentNonCommit,
   isDeploymentSnapshot,
   isDeploymentTag,
   isSnapshotTooLargeRefusal,
@@ -1353,6 +1354,17 @@ export function createFerrumAdminClient(
           'The gateway namespace is too large for conditional deployment authority; nothing ' +
             'was applied',
           { status, kind: 'namespace_snapshot_too_large' },
+        );
+      }
+      // A definite non-commit (Edge v0.9.14 also reports a store failure before or
+      // inside the rolled-back transaction this way). Nothing was applied, but it
+      // authorizes neither cleanup nor replay: the caller keeps its journal. Only
+      // `durable: "unknown"` (a failed commit or its acknowledgement) is uncertain.
+      if (isDeploymentNonCommit(parsed)) {
+        return edgeError(
+          'The gateway did not commit the deployment mutation; nothing was applied. Retain ' +
+            'recovery state',
+          { status, kind: 'deployment_not_committed' },
         );
       }
       return edgeError('Gateway deployment mutation was not confirmed; retain recovery state', {

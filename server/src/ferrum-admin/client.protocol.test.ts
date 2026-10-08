@@ -775,6 +775,51 @@ describe('released deployment authority over HTTP sockets', () => {
     await assert.rejects(client.deployments.snapshot(), tooLargeRefusal);
   });
 
+  it('503: tells a definite non-commit from an uncertain commit, without a retry', async (t) => {
+    const { client, reply, requests } = await fixture(t);
+    // Edge v0.9.14's store-failure body: the rolled-back transaction committed nothing.
+    const storeFailure = JSON.parse(
+      readFileSync(
+        new URL(
+          '../../../contracts/ferrum-contracts/fixtures/admin-deployment-mutation-acknowledgement/valid/store-failure-not-committed.json',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    reply.policyForDeployment = true;
+    reply.status = 503;
+    for (const durable of ['not_committed', 'not_started']) {
+      reply.body = JSON.stringify({ ...storeFailure, durable });
+      await assert.rejects(client.deployments.remove('proxy-1', original()), (error: unknown) => {
+        assert.ok(isNexusError(error));
+        assert.equal(error.code, 'EDGE_ERROR');
+        assert.deepEqual(error.details, { status: 503, kind: 'deployment_not_committed' });
+        return true;
+      });
+    }
+    // Only a failed commit or its acknowledgement is uncertain, as is any body
+    // that is not an acknowledgement at all.
+    for (const body of [
+      { ...storeFailure, durable: 'unknown' },
+      { ...storeFailure, recovery_cleanup_authorized: true },
+      { error: 'Service Unavailable' },
+    ]) {
+      reply.body = JSON.stringify(body);
+      await assert.rejects(client.deployments.remove('proxy-1', original()), (error: unknown) => {
+        assert.ok(isNexusError(error));
+        assert.deepEqual(error.details, {
+          status: 503,
+          kind: 'deployment_acknowledgement_uncertain',
+        });
+        return true;
+      });
+    }
+    // Neither outcome authorizes a replay or fresh authority.
+    assert.equal(requests.filter((request) => request.startsWith('DELETE ')).length, 5);
+    assert.equal(requests.filter((request) => request === 'GET /deployment-snapshot').length, 0);
+  });
+
   it('refuses Edge v0.9.12 authority before sending any request', async (t) => {
     const { client, reply, requests } = await fixture(t);
     reply.policyForDeployment = true;

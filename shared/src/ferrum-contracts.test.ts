@@ -44,8 +44,8 @@ describe('pinned Ferrum contracts', () => {
   it('keeps every vendored contract file byte-identical to its recorded digest', () => {
     const pin = readFileSync(join(contractsDirectory, 'PIN'), 'utf8');
     const lines = pin.trim().split('\n');
-    assert.equal(lines[0], 'tag: contracts-edge-0.9.13');
-    assert.equal(lines[1], 'commit: 9626821eb089c71f5d4d71268c7b8276a8a5ab50');
+    assert.equal(lines[0], 'tag: contracts-edge-0.9.14');
+    assert.equal(lines[1], 'commit: ddbdd845733b7046c4393ac951011dafb774db33');
 
     const digestLines = lines.slice(2);
     assert.ok(digestLines.length > 0, 'PIN must list the vendored contract file digests');
@@ -83,6 +83,7 @@ describe('pinned Ferrum contracts', () => {
         'fixtures/admin-deployment-mutation-acknowledgement/valid/snapshot-too-large-not-committed.json',
         'fixtures/admin-deployment-mutation-acknowledgement/valid/snapshot-too-large-not-started.json',
         'fixtures/admin-deployment-mutation-acknowledgement/valid/stale.json',
+        'fixtures/admin-deployment-mutation-acknowledgement/valid/store-failure-not-committed.json',
         'fixtures/admin-deployment-mutation-acknowledgement/valid/unknown.json',
         'fixtures/admin-deployment-snapshot/v1/invalid/evidence-not-object.json',
         'fixtures/admin-deployment-snapshot/v1/invalid/missing-evidence.json',
@@ -135,17 +136,43 @@ describe('pinned Ferrum contracts', () => {
         'fixtures/backend-egress-policy/v1/valid/public-with-allow-overrides.json',
         'fixtures/backend-egress-policy/v2/invalid/admission-only-guarantee.json',
         'fixtures/backend-egress-policy/v2/invalid/allow-overlay-guarantee.json',
+        'fixtures/backend-egress-policy/v2/invalid/attestation-leaked-cidr-field.json',
+        'fixtures/backend-egress-policy/v2/invalid/attestation-missing-data-planes.json',
+        'fixtures/backend-egress-policy/v2/invalid/attestation-negative-count.json',
+        'fixtures/backend-egress-policy/v2/invalid/attestation-on-local-data-plane.json',
+        'fixtures/backend-egress-policy/v2/invalid/attestation-unknown-source.json',
+        'fixtures/backend-egress-policy/v2/invalid/empty-set-complete.json',
+        'fixtures/backend-egress-policy/v2/invalid/entry-build-version.json',
+        'fixtures/backend-egress-policy/v2/invalid/entry-connected-at-without-offset.json',
+        'fixtures/backend-egress-policy/v2/invalid/entry-policy-allow-overlay-guarantee.json',
+        'fixtures/backend-egress-policy/v2/invalid/entry-policy-false-public-guarantee.json',
+        'fixtures/backend-egress-policy/v2/invalid/entry-policy-leaked-cidr-field.json',
+        'fixtures/backend-egress-policy/v2/invalid/entry-policy-mode-class-mismatch.json',
+        'fixtures/backend-egress-policy/v2/invalid/entry-reported-without-policy.json',
+        'fixtures/backend-egress-policy/v2/invalid/entry-unknown-attestation.json',
+        'fixtures/backend-egress-policy/v2/invalid/entry-unknown-with-policy.json',
         'fixtures/backend-egress-policy/v2/invalid/false-public-guarantee.json',
+        'fixtures/backend-egress-policy/v2/invalid/guarantee-with-allow-overlay.json',
+        'fixtures/backend-egress-policy/v2/invalid/guarantee-with-unknown-data-plane.json',
         'fixtures/backend-egress-policy/v2/invalid/leaked-cidr-field.json',
         'fixtures/backend-egress-policy/v2/invalid/mode-class-mismatch.json',
         'fixtures/backend-egress-policy/v2/invalid/no-data-plane-guarantee.json',
         'fixtures/backend-egress-policy/v2/invalid/previous-version.json',
+        'fixtures/backend-egress-policy/v2/invalid/public-only-not-aggregated.json',
+        'fixtures/backend-egress-policy/v2/invalid/reports-without-weakest-policy.json',
         'fixtures/backend-egress-policy/v2/invalid/unknown-classification.json',
         'fixtures/backend-egress-policy/v2/invalid/unknown-enforcement-scope.json',
         'fixtures/backend-egress-policy/v2/invalid/unknown-mode.json',
         'fixtures/backend-egress-policy/v2/invalid/unknown-version.json',
         'fixtures/backend-egress-policy/v2/invalid/unserved-namespace-guarantee.json',
+        'fixtures/backend-egress-policy/v2/invalid/weakest-policy-unknown-mode.json',
+        'fixtures/backend-egress-policy/v2/invalid/weakest-policy-without-reports.json',
         'fixtures/backend-egress-policy/v2/invalid/wrong-evaluation-stage.json',
+        'fixtures/backend-egress-policy/v2/valid/control-plane-attestation-allow-overlay.json',
+        'fixtures/backend-egress-policy/v2/valid/control-plane-attestation-empty.json',
+        'fixtures/backend-egress-policy/v2/valid/control-plane-attestation-reported.json',
+        'fixtures/backend-egress-policy/v2/valid/control-plane-attestation-shared-node-id.json',
+        'fixtures/backend-egress-policy/v2/valid/control-plane-attestation-unknown.json',
         'fixtures/backend-egress-policy/v2/valid/default-control-plane.json',
         'fixtures/backend-egress-policy/v2/valid/private-control-plane.json',
         'fixtures/backend-egress-policy/v2/valid/public-control-plane.json',

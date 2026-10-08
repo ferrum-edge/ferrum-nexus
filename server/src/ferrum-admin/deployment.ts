@@ -110,11 +110,14 @@ export function legacyDeploymentAuthority(): NexusError {
 }
 
 /**
- * A `507 Insufficient Storage` whose acknowledgement proves nothing was committed:
- * the namespace exceeds the owner's conditional snapshot bound. Deterministic for
- * unchanged state, so it is never retried. Any other `507` body stays uncertain.
+ * An acknowledgement that proves the mutation was never committed: `durable`
+ * `not_started` (refused before the mutation transaction opened) or
+ * `not_committed` (raised inside it, rolled back). Edge v0.9.14 also reports a
+ * `503` store failure this way, and keeps `unknown` for a failed commit, a failed
+ * commit acknowledgement or a lost settlement task. A definite non-commit still
+ * authorizes neither cleanup nor replay: the caller keeps its journal.
  */
-export function isSnapshotTooLargeRefusal(value: unknown): boolean {
+export function isDeploymentNonCommit(value: unknown): boolean {
   return (
     isDeploymentAcknowledgement(value) &&
     record(value) &&
@@ -122,6 +125,15 @@ export function isSnapshotTooLargeRefusal(value: unknown): boolean {
     value.live === 'unconfirmed' &&
     value.recovery_cleanup_authorized === false
   );
+}
+
+/**
+ * A `507 Insufficient Storage` whose acknowledgement proves nothing was committed:
+ * the namespace exceeds the owner's conditional snapshot bound. Deterministic for
+ * unchanged state, so it is never retried. Any other `507` body stays uncertain.
+ */
+export function isSnapshotTooLargeRefusal(value: unknown): boolean {
+  return isDeploymentNonCommit(value);
 }
 
 export function isDeploymentAcknowledgement(value: unknown): boolean {

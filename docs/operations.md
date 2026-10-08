@@ -236,7 +236,7 @@ accepted CP pairing; see its topology decision.**
 
 Unless an opt-out below is set, every backend-writing Admin boundary
 requires fresh authenticated, namespace-matched, no-store process metadata from
-`GET /backend-egress-policy`, schema 2 (Edge v0.9.13). Only `local-data-plane` with
+`GET /backend-egress-policy`, schema 2 (Edge v0.9.13 and later). Only `local-data-plane` with
 `public_only_guaranteed=true` passes, or a control plane whose data-plane attestation
 proves every connected data plane public-only with at least
 `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`) connected (see
@@ -272,15 +272,16 @@ token. Treat these rows as one journal in paired backups and writer-drain proced
 never manually trim or remove chunks. Existing single-row journals remain readable,
 and normal encrypted-setting key rotation includes each manifest and chunk.
 Journals this release writes carry `authorityFormat: 2`: every deployment snapshot
-they hold is Edge v0.9.13 authority. Older journals carry no marker and stay
+they hold is authority in the Edge v0.9.13 format, which Edge v0.9.14 keeps (snapshot
+v2 and `deployment_snapshot.v2` tokens). Older journals carry no marker and stay
 readable, but Edge v0.9.12 authority in them is refused before any request (see
 [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913)); an unknown marker is refused.
 The `gateway_restore_cleanup:<namespace>:<api_id>` cutover/cleanup journal uses the
 same format and custody rules.
 `POST /api/apis/:id/restore-gateway` repeats admission, takes the API and proxy
 leases, and verifies resources against that record before rebuilding an absent
-identity. Live selected removal and API-spec replacement use the released v0.9.13
-conditional deployment API: a complete encrypted original snapshot and its strong
+identity. Live selected removal and API-spec replacement use the conditional
+deployment API released in Edge v0.9.13 and unchanged in v0.9.14: a complete encrypted original snapshot and its strong
 `deployment-v1` token, never a backup/row token or namespace replacement. Stored spec
 documents appear in the snapshot evidence only as `{sha256, len}`; Nexus reads their
 bytes from `api_spec_contents` and verifies each against that digest. Each
@@ -498,15 +499,17 @@ it, health reads `degraded`, and an admin's `edge.error` names the unsupported s
 Every backend write is then refused in every profile. The same holds for any newer
 schema. Nexus also requires the v0.9.13 deployment snapshot (`api_spec_contents`), so
 Nexus `v0.4.0` pairs with Edge `v0.9.13` only: upgrade Edge and Nexus together, as
-described in [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913). The unreleased
-build also reads the Edge `v0.9.14` control-plane attestation within schema 2; the
-release pin is unchanged. The guarantee
+described in [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913). The next release
+pairs with Edge `v0.9.14`, the version its acceptance suite tests: it reads the
+control-plane attestation within schema 2 and Edge's narrower `durable` outcomes, and
+the snapshot and token formats are unchanged (see
+[Upgrading to Edge v0.9.14](#upgrading-to-edge-v0914)). The guarantee
 still requires `enforcement_scope=local-data-plane` explicitly, not schema 2's
 narrowed `public_only_guaranteed` alone.
 
 [`release/compatibility.env`](../release/compatibility.env) pins the published Edge
-`v0.9.13` default image, and Nexus vendors `contracts-edge-0.9.13` at
-`9626821eb089c71f5d4d71268c7b8276a8a5ab50`. See [the adoption facts](edge-0.9.11-adoption.md)
+`v0.9.14` default image, and Nexus vendors `contracts-edge-0.9.14` at
+`ddbdd845733b7046c4393ac951011dafb774db33`. See [the adoption facts](edge-0.9.11-adoption.md)
 and the separate [packaged public-only fixture](../e2e/public-only/README.md).
 
 **Fixing a mismatch.** Set the portal's `FERRUM_NAMESPACE` to the gateway's
@@ -517,10 +520,12 @@ published under the old one must be republished.
 ### Resolving an unconfirmed gateway deployment mutation
 
 A conditional deployment removal or replacement that Edge did not confirm (a lost
-reply, a timeout, `503`, a CP/unserved durable-only result) may still settle after
-Nexus gave up on it. A definite refusal is kept the same way: a `412` (the original
-token no longer matches, including every token Edge v0.9.12 issued) or a `507` past
-the snapshot bound changed nothing, but Nexus never replaces the journal's original
+reply, a timeout, a `503` with `durable: "unknown"`, a CP/unserved durable-only
+result) may still settle after Nexus gave up on it. A definite refusal is kept the
+same way: a `412` (the original token no longer matches, including every token Edge
+v0.9.12 issued), a `507` past the snapshot bound, or a store failure that Edge
+v0.9.14 reports as `durable` `not_started` or `not_committed` changed nothing, but
+Nexus never replaces the journal's original
 authority with a fresh token, so the journal and its pending operation stay until an
 operator resolves them. Nexus never guesses the outcome, so the API stays
 `gateway_state: repair_required` with its encrypted journal, and every portal path
@@ -572,7 +577,7 @@ endpoint that marks it confirmed. Resolve it by observation:
 Never release a journal while the outcome is still unsettled, and never edit or
 remove individual chunk rows of a journal that is kept.
 
-**Refusals Edge v0.9.13 reports.** The audit and error details name the cause:
+**Refusals Edge reports.** The audit and error details name the cause:
 
 - `details.kind: "deployment_precondition_failed"` (`412`): the held token no longer
   matches. Step 3 normally finds the operation not applied. A token issued by Edge
@@ -583,6 +588,14 @@ remove individual chunk rows of a journal that is kept.
   was applied; the refusal repeats until the namespace shrinks, so Nexus never
   retries it. Reduce the namespace (remove unused resources or split tenants across
   namespaces), then resolve any kept journal as above.
+- `details.kind: "deployment_not_committed"` (`502 EDGE_ERROR`): Edge answered with
+  an acknowledgement whose `durable` is `not_started` or `not_committed`, which Edge
+  v0.9.14 also reports for a store failure (`503`) before or inside the rolled-back
+  mutation transaction. Nothing was committed, so step 3 finds the operation not
+  applied, but the outcome authorizes neither cleanup nor replay: the journal is kept
+  and Nexus never sends the operation again. Restore the gateway's store, then
+  resolve the journal as above. `durable: "unknown"` (a failed commit or commit
+  acknowledgement) stays `deployment_acknowledgement_uncertain`.
 - `details.kind: "legacy_deployment_authority"` (`409`, nothing sent): the journal was
   written before the Edge v0.9.13 upgrade and holds v0.9.12 authority that Edge now
   refuses. Resolve it by observation as above.
@@ -638,6 +651,49 @@ that namespace fail closed with `details.kind: "namespace_snapshot_too_large"`.
 **Rolling back** means rolling back both sides together, after settling journals
 again: tokens issued by Edge v0.9.13 do not verify on v0.9.12, and the earlier Nexus
 cannot read egress policy schema 2 or the v0.9.13 snapshot.
+
+### Upgrading to Edge v0.9.14
+
+The next Nexus release pairs with Edge v0.9.14 (see the
+[Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.14/docs/upgrade_guide.md#upgrading-to-0914)).
+Unlike v0.9.13, this upgrade keeps every contract Nexus depends on: egress policy
+schema 2, deployment snapshot v2 and its `deployment_snapshot.v2` tokens, and the
+acknowledgement shape. What changes for Nexus:
+
+- **Control-plane attestation.** A control plane's egress policy answer gains the
+  optional `data_plane_attestation` object. With `NEXUS_EXPECTED_DATA_PLANES` set, a
+  CP/DP pairing whose data planes all attest public-only can publish under the default
+  public profile; see
+  [CP/DP pairings and data-plane attestation](#cpdp-pairings-and-data-plane-attestation).
+  Without the setting, or on Edge v0.9.13, nothing changes.
+- **Narrower `durable` outcomes.** A conditional removal or replacement whose store
+  fails before commit now answers `503` with `durable` `not_started` or
+  `not_committed`, which Nexus reports as `details.kind: "deployment_not_committed"`
+  instead of `deployment_acknowledgement_uncertain`. The journal is kept either way
+  (see [the runbook](#resolving-an-unconfirmed-gateway-deployment-mutation)).
+- **Error classification.** Backend HTTP/2 resets other than `NO_ERROR` are now
+  `protocol_error` and charged to the target's circuit breaker and passive health, and
+  a buffered response read timeout is `504` instead of `502`. Nexus's per-API metrics
+  count requests by method and status code, never by `error_class`, so some backend
+  failures move from the `502` bucket to `504`; adjust any alert that keys on it.
+
+Procedure:
+
+1. **Settle journals** as in step 2 of the v0.9.13 procedure. Tokens a v0.9.13
+   gateway issued keep verifying on v0.9.14, but settling first keeps the upgrade
+   window free of in-flight conversions.
+2. **Upgrade Edge to v0.9.14.** The ConfigSync protocol revision is now `3`, so the
+   control plane and every data plane must run the same build: upgrade them together.
+   A data plane on an older build cannot connect, and the control plane cannot list
+   it in its attestation.
+3. **Upgrade Nexus** to the release that pins Edge v0.9.14 in
+   [`release/compatibility.env`](../release/compatibility.env), and check
+   `GET /api/health/edge` as an admin. On a CP/DP pairing, set
+   `NEXUS_EXPECTED_DATA_PLANES` first if you want the attested guarantee.
+
+**Rolling back** Edge to v0.9.13 keeps Nexus working: the attestation disappears, so
+a pairing that relied on it reads "not guaranteed" again and its writes are refused
+unless an opt-out admits them.
 
 ### Email
 
@@ -1403,8 +1459,8 @@ docker compose up -d
 
 The four secrets and `FERRUM_EDGE_IMAGE` are required (`${VAR:?…}`); keep the
 secrets stable across restarts. [`release/compatibility.env`](../release/compatibility.env)
-pins the Edge image by digest: Ferrum Edge `v0.9.13` for Nexus `v0.4.0`. That is
-the release the acceptance suite ([`e2e/`](../e2e/README.md)) tests against;
+pins the Edge image by digest: Ferrum Edge `v0.9.13` for Nexus `v0.4.0`, and Edge
+`v0.9.14` for the next release on `main`. That is the release the acceptance suite ([`e2e/`](../e2e/README.md)) tests against;
 other Edge versions are unverified.
 
 The quickstart pins its PostgreSQL and Alpine images by multi-architecture
@@ -1598,7 +1654,8 @@ Nexus has no namespace Admin restore caller. Its API gateway restore rebuilds
 individual resources and repeats egress admission. Conditional Edge backup does not
 make Nexus and Edge backups jointly atomic; keep the writer-drain and paired-backup
 procedure below. Nexus `v0.4.0` pairs with Edge `v0.9.13` and vendors
-`contracts-edge-0.9.13`. See [the adoption facts](edge-0.9.11-adoption.md).
+`contracts-edge-0.9.13`; `main` pairs with Edge `v0.9.14` and vendors
+`contracts-edge-0.9.14`. See [the adoption facts](edge-0.9.11-adoption.md).
 
 ### Ordering and consistency
 
