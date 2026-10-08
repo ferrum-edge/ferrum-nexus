@@ -452,6 +452,16 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
           ? 'a bearer token is forwarded to the backend: jwt_auth cannot hide it'
           : 'the Authorization header is stripped at the gateway',
       );
+
+      // Edge v0.9.15 sends `X-Consumer-Username` only for a mapped Consumer and
+      // an external identity as `X-Authenticated-Identity`. Every Nexus caller
+      // is a mapped Consumer, so the backend keeps the username and never sees
+      // the external-identity header.
+      assert.equal(echoed.headers['x-consumer-username'], credential.consumerUsername);
+      assert.ok(
+        !names.has('x-authenticated-identity'),
+        'a mapped Consumer is never sent as an external identity',
+      );
     });
   }
 
@@ -577,7 +587,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     };
   }
 
-  // The default at the immutable v0.9.14 pin; this client supports that version.
+  // The default at the immutable v0.9.15 pin; this client supports that version.
   const MCP_PROTOCOL_VERSION = '2025-11-25';
 
   async function rpc(

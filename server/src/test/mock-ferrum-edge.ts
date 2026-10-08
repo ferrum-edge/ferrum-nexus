@@ -657,6 +657,8 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
   rate_limiting: [
     'mcp_tool_calls',
     'limit_by',
+    // Edge v0.9.15: the IPv6 prefix that groups IP keys (default 64).
+    'ipv6_prefix',
     'expose_headers',
     'limits',
     'sync_mode',
@@ -1173,9 +1175,12 @@ function literalListenPathProblem(body: Record<string, unknown>): string | null 
 /**
  * Edge v0.9.9 owns the whole `x-consumer-*` request-header namespace, ignoring
  * case and treating `_` and `-` alike in the prefix (`is_consumer_assertion_header`).
+ * Edge v0.9.15 adds the exact name `x-authenticated-identity` to the same check.
  */
 function isConsumerAssertionHeader(name: unknown): boolean {
-  return typeof name === 'string' && /^x[-_]consumer[-_]/i.test(name.trim());
+  if (typeof name !== 'string') return false;
+  const trimmed = name.trim();
+  return /^x[-_]consumer[-_]/i.test(trimmed) || /^x[-_]authenticated[-_]identity$/i.test(trimmed);
 }
 
 function nowIso(): string {
@@ -1233,6 +1238,15 @@ function validatePluginConfig(pluginName: string, config: unknown): string | nul
       !['ip', 'consumer', 'spiffe', 'spiffe_identity'].includes(String(config.limit_by))
     ) {
       return `rate_limiting: unsupported limit_by '${String(config.limit_by)}'`;
+    }
+    const ipv6Prefix = config.ipv6_prefix;
+    const validIpv6Prefix =
+      typeof ipv6Prefix === 'number' &&
+      Number.isInteger(ipv6Prefix) &&
+      ipv6Prefix >= 1 &&
+      ipv6Prefix <= 128;
+    if (ipv6Prefix !== undefined && !validIpv6Prefix) {
+      return 'rate_limiting: `ipv6_prefix` must be an integer from 1 through 128';
     }
     const limits = config.limits;
     if (!Array.isArray(limits) || limits.length === 0) {
@@ -1948,7 +1962,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     return {
       gateway: {
         mode: 'database',
-        ferrum_version: '0.9.14',
+        ferrum_version: '0.9.15',
         uptime_seconds: MOCK_GATEWAY_UPTIME_SECONDS,
         total_requests: totalRequests,
         proxy_count: proxies.size,

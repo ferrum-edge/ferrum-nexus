@@ -35,7 +35,7 @@ import {
   type DataPlaneFreshness,
 } from './egress-policy.js';
 
-/** The vendored canonical `backend-egress-policy` v2 fixtures (contracts-edge-0.9.14). */
+/** The vendored canonical `backend-egress-policy` v2 fixtures (contracts-edge-0.9.15). */
 const EGRESS_FIXTURES = new URL(
   '../../../contracts/ferrum-contracts/fixtures/backend-egress-policy/v2/',
   import.meta.url,

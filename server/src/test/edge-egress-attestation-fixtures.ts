@@ -5,7 +5,7 @@
  * `src/grpc/backend_egress_attestation.rs` and generates fleets of any size and
  * mix for parametrized tests. The owner examples and the conformance cases are
  * the vendored canonical fixtures (`contracts/ferrum-contracts/fixtures/
- * backend-egress-policy/v2/`, contracts-edge-0.9.14), which the tests read
+ * backend-egress-policy/v2/`, contracts-edge-0.9.15), which the tests read
  * directly; this builder's output must agree with them (`egress-policy.test.ts`).
  */
 import { publicEgressPolicy } from './mock-ferrum-edge.js';

@@ -30,7 +30,7 @@ interface ProvisionedByContract {
 }
 
 interface GatewayHeadersContract {
-  headers: { name: string }[];
+  headers: { name: string; match?: string; role?: string; availability?: string }[];
 }
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -44,8 +44,8 @@ describe('pinned Ferrum contracts', () => {
   it('keeps every vendored contract file byte-identical to its recorded digest', () => {
     const pin = readFileSync(join(contractsDirectory, 'PIN'), 'utf8');
     const lines = pin.trim().split('\n');
-    assert.equal(lines[0], 'tag: contracts-edge-0.9.14');
-    assert.equal(lines[1], 'commit: ddbdd845733b7046c4393ac951011dafb774db33');
+    assert.equal(lines[0], 'tag: contracts-edge-0.9.15');
+    assert.equal(lines[1], 'commit: 6fb64c5dc2e014204c17609fc717d976f3b4589e');
 
     const digestLines = lines.slice(2);
     assert.ok(digestLines.length > 0, 'PIN must list the vendored contract file digests');
@@ -266,5 +266,13 @@ describe('pinned Ferrum contracts', () => {
       headers.some(({ name }) => isGatewayOwnedConsumerHeader(name)),
       'The pinned gateway-headers vocabulary declares no gateway-owned x-consumer-* header',
     );
+
+    // Edge v0.9.15 sends an external identity as the exact, gateway-owned
+    // `X-Authenticated-Identity`, which shares the `x-consumer-*` check.
+    const identity = headers.find(({ name }) => name.toLowerCase() === 'x-authenticated-identity');
+    assert.ok(identity, 'The pinned gateway-headers vocabulary has no X-Authenticated-Identity');
+    assert.equal(identity.match, 'exact');
+    assert.equal(identity.role, 'gateway_assertion');
+    assert.equal(isGatewayOwnedConsumerHeader(identity.name), true);
   });
 });

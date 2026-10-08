@@ -2,13 +2,13 @@
   "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v2.schema.json",
   "vocabulary": "backend-egress-policy",
   "version": 2,
-  "edge_release": "v0.9.14",
-  "description": "Labels for process-scoped, immutable loaded backend policy metadata, response schema_version 2 (Edge v0.9.13 and v0.9.14), and for the CP-only data_plane_attestation object Edge v0.9.14 adds within schema_version 2. Mode lists describe the final evaluation stage, not unconditional effective allows. Classifier meaning changes require versioned coordination.",
+  "edge_release": "v0.9.15",
+  "description": "Labels for process-scoped, immutable loaded backend policy metadata, response schema_version 2 (Edge v0.9.13 through v0.9.15), and for the CP-only data_plane_attestation object Edge v0.9.14 adds within schema_version 2. Mode lists describe the final evaluation stage, not unconditional effective allows. Classifier meaning changes require versioned coordination.",
   "provenance": [
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.14",
-      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+      "ref": "v0.9.15",
+      "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
       "path": "openapi.yaml",
       "symbols": [
         "components.schemas.BackendEgressPolicyResponse",
@@ -18,8 +18,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.14",
-      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+      "ref": "v0.9.15",
+      "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
       "path": "src/admin/backend_egress_policy.rs",
       "symbols": [
         "BackendEgressPolicyResponse",
@@ -30,8 +30,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.14",
-      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+      "ref": "v0.9.15",
+      "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
       "path": "src/grpc/backend_egress_attestation.rs",
       "symbols": [
         "ATTESTATION_REPORTED",
@@ -42,8 +42,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.14",
-      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+      "ref": "v0.9.15",
+      "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
       "path": "src/config/env_config.rs",
       "symbols": [
         "BackendEgressPolicy",
@@ -54,8 +54,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.14",
-      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+      "ref": "v0.9.15",
+      "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
       "path": "docs/admin_api.md",
       "note": "Transcribed GET /backend-egress-policy labels, scope limits, v1 classifier, schema_version 2 and its local-enforcement guarantee rule, and the \"Data-plane attestation on a control plane\" rules; no raw CIDRs or credentials."
     }

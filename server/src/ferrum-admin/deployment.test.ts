@@ -60,7 +60,7 @@ function oneSpecSnapshot(document: Record<string, unknown>): EdgeDeploymentSnaps
   return snapshot;
 }
 
-describe('published contracts-edge-0.9.14 deployment fixtures', () => {
+describe('published contracts-edge-0.9.15 deployment fixtures', () => {
   for (const contract of [
     { name: 'admin-deployment-snapshot/v2', accepts: isDeploymentSnapshot },
     { name: 'admin-deployment-mutation-acknowledgement', accepts: isDeploymentAcknowledgement },

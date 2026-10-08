@@ -367,7 +367,7 @@ pairing. Egress policy schema 1 (Edge v0.9.12 and earlier) is refused as
 `unsupported_egress_policy_schema`.
 See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee).
-Published Edge v0.9.14 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
+Published Edge v0.9.15 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
 
 Whole-consumer metadata replacements pair complete server-only verification with
 the original strong row `If-Match`, using Edge's masked projection and hidden-type
@@ -2661,6 +2661,10 @@ The palette itself — which plugins exist and what each accepts — is the stat
   values of 3005 and 4060, so compression finishes before deduplication
   fingerprints the request. An operator's overrides survive saves; an
   incompatible pair is `400 VALIDATION_FAILED` naming both plugins.
+- `request_deduplication` with `enforce_required: true` is admission policy, and it
+  runs on HTTP requests only. From Edge v0.9.15 the gateway therefore refuses a
+  native gRPC or WebSocket request to that API with `403` (rejection phase
+  `route_protocol_admission`) instead of serving it without the check.
 - `response_caching` is **retired**: Edge only caches an authenticated
   response when the backend opts in with `Cache-Control: public`,
   `must-revalidate` or `s-maxage`, which consumer settings cannot provide.
@@ -2687,8 +2691,9 @@ before any `;` parameter (`/..;x`, `/a//b` and `/;x/b` are refused, as Edge
 `v0.9.10` refuses them).
 
 A `correlation_id` or `request_deduplication` `header_name` in the
-gateway-owned `x-consumer-*` namespace (any case, `_` and `-` alike) is
-`400 VALIDATION_FAILED`: Edge strips those headers from every client request.
+gateway-owned `x-consumer-*` namespace, or `X-Authenticated-Identity` (Edge
+v0.9.15), is `400 VALIDATION_FAILED` (any case, `_` and `-` alike): Edge strips
+those headers from every client request.
 
 Plugins whose descriptor has `supports_trigger: false` — `security_headers`,
 `request_size_limiting`, `response_size_limiting`, `compression`,

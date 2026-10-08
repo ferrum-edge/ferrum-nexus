@@ -387,6 +387,11 @@ export interface EdgeRateLimitRule {
 export interface EdgeRateLimitingConfig {
   /** Only `ip`, `consumer` or `spiffe`. */
   limit_by?: 'ip' | 'consumer' | 'spiffe';
+  /**
+   * Edge v0.9.15: the IPv6 prefix (`1`-`128`, default `64`) that groups IP keys,
+   * including the IP fallback of an unidentified caller. Nexus never sets it.
+   */
+  ipv6_prefix?: number;
   expose_headers?: boolean;
   limits: EdgeRateLimitRule[];
   /**
