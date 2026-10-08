@@ -175,7 +175,9 @@ plane, an unknown or weaker data plane, or Edge v0.9.13 (which sends no attestat
 reads "not guaranteed". A malformed or inconsistent attestation, or one on anything
 but a control plane, is set aside with a logged warning: that answer reads "not
 guaranteed", and an opt-out still admits writes by its own rules. The verdict is re-read for
-every backend write and every health probe, with no caching or grace period. See
+every backend write and every health probe, with no caching or grace period. The only
+state Nexus keeps across reads is when it first saw each `node_id`, which can settle a
+data plane but never adds one to the count. See
 [CP/DP pairings and data-plane attestation](operations.md#cpdp-pairings-and-data-plane-attestation).
 
 The attestation is self-reported by authenticated data planes running the control
@@ -199,8 +201,13 @@ liveness detection drops the stale stream that data plane would count twice (#54
 Nexus therefore counts a `node_id` only once it has existed for 60 seconds, longer
 than Edge v0.9.14 takes to drop a dead stream, so a stale stream and its replacement
 never count together: this Nexus process saw it listed that long ago on its monotonic
-clock, or its earliest `connected_at` is 90 seconds old on Nexus's clock and on the
-gateway's `Date` header. While fewer than `NEXUS_EXPECTED_DATA_PLANES` count, and when
+clock, or the answer carries the gateway's `Date` header and the `node_id`'s earliest
+`connected_at` is 90 seconds old on both Nexus's clock and that header. Without the
+header only the first applies, so a control-plane clock behind Nexus's cannot settle a
+data plane early. The 60 seconds assume the control plane terminates each data plane's
+HTTP/2 connection itself, directly or through an L4 pass-through: behind a proxy that
+terminates HTTP/2, a dead data plane's stream can stay listed for minutes, and a
+restarted data plane can count twice. While fewer than `NEXUS_EXPECTED_DATA_PLANES` count, and when
 a `connected_at` contradicts those clocks, the guarantee is withheld. A newer data
 plane must still attest public-only, but more connected data planes than the value
 never withhold it, so a scale-up or a rolling update keeps the guarantee while the

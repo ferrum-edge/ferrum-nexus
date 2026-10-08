@@ -419,8 +419,9 @@ export function provesLocalPublicEgress(policy: BackendEgressPolicy): boolean {
  *   nothing says the connected set is the whole fleet.
  * - `fewer_data_planes_than_expected`: fewer distinct data planes are connected
  *   than it says.
- * - `data_plane_recently_connected`: enough are connected, but too few have
- *   existed long enough for a stale stream of a process they replaced to be gone.
+ * - `data_plane_recently_connected`: enough are connected, but too few are known
+ *   to have existed long enough for a stale stream of a process they replaced to
+ *   be gone (without the gateway's `Date`, only this process's sightings tell).
  * - `data_plane_clock_skew`: the same, and a `connected_at` is implausible
  *   against Nexus's clock or the gateway's, so stream age cannot be read from it.
  * - `not_control_plane`: the answer is not a control plane's.
@@ -442,6 +443,13 @@ export type DataPlaneAttestationVerdict =
  * ConfigSync HTTP/2 keepalive fails (a ping every 30 s, a 10 s timeout); this
  * adds 20 s of slack. A process listed this long started after any process it
  * replaced died, so that process's stale stream is gone.
+ *
+ * This assumes the control plane terminates each data plane's HTTP/2
+ * connection itself, directly or through an L4 pass-through. Behind a proxy
+ * that terminates HTTP/2, the proxy answers the pings, so a dead data plane's
+ * stream can stay listed until the proxy notices, which can take minutes. The
+ * bound follows Edge v0.9.14's `CONFIGSYNC_HTTP2_KEEPALIVE_*` constants; a
+ * change to them must be tracked here.
  */
 export const DATA_PLANE_SETTLE_MS = 60_000;
 
@@ -464,7 +472,10 @@ const MAX_PLAUSIBLE_AGE_MS = STREAM_AGE_CEILING_MS + CLOCK_SKEW_ALLOWANCE_MS;
 export interface DataPlaneFreshness {
   /** Nexus's wall clock when the request was sent, in epoch milliseconds; now by default. */
   readAt?: number;
-  /** The answer's HTTP `Date` (the gateway's clock), in epoch milliseconds, when it had one. */
+  /**
+   * The answer's HTTP `Date` (the control plane's clock), in epoch milliseconds,
+   * when it had one. Without it, only `settledNodeIds` settles a data plane.
+   */
   gatewayDate?: number;
   /**
    * `node_id`s this process saw listed at least {@link DATA_PLANE_SETTLE_MS}
@@ -500,11 +511,12 @@ function isExpectedDataPlanes(value: number | undefined): value is number {
  * {@link DATA_PLANE_SETTLE_MS}: by then any process it replaced has been dead
  * long enough for Edge to drop its stream, so a stale stream and its
  * replacement never both count. Either this process saw it listed that long ago
- * (`settledNodeIds`, which no clock skew affects), or its earliest
- * `connected_at` is that old, plus {@link CLOCK_SKEW_ALLOWANCE_MS}, on Nexus's
- * clock and, when the answer carried one, on the gateway's `Date` too. A
- * `connected_at` later than either clock or older than any live stream can be
- * proves nothing, so then only sightings settle a data plane. A newer data
+ * (`settledNodeIds`, which no clock skew affects), or the answer carried the
+ * gateway's `Date` and its earliest `connected_at` is that old, plus
+ * {@link CLOCK_SKEW_ALLOWANCE_MS}, on both Nexus's clock and that `Date`.
+ * Without a `Date`, a control-plane clock behind Nexus's would go unseen, so
+ * only sightings settle a data plane; so too when a `connected_at` is later
+ * than either clock or older than any live stream can be. A newer data
  * plane still has to attest public-only; it just does not count yet, so a
  * scale-up or a rolling update keeps the guarantee while the settled ones reach
  * the value. Unset, an attestation never grants the guarantee. It covers the
@@ -512,8 +524,8 @@ function isExpectedDataPlanes(value: number | undefined): value is number {
  */
 export function dataPlaneAttestationVerdict(
   policy: BackendEgressPolicy,
-  expectedDataPlanes?: number,
-  freshness: DataPlaneFreshness = {},
+  expectedDataPlanes: number | undefined,
+  freshness: DataPlaneFreshness,
 ): DataPlaneAttestationVerdict {
   if (policy.enforcement_scope !== 'admission-only') return 'not_control_plane';
   const attestation = policy.data_plane_attestation;
@@ -533,8 +545,9 @@ export function dataPlaneAttestationVerdict(
     );
   if (!allPublicOnly) return 'data_planes_not_public_only';
   if (!isExpectedDataPlanes(expectedDataPlanes)) return 'expected_data_planes_unset';
+  const { gatewayDate } = freshness;
   const clocks = [freshness.readAt ?? Date.now()];
-  if (freshness.gatewayDate !== undefined) clocks.push(freshness.gatewayDate);
+  if (gatewayDate !== undefined) clocks.push(gatewayDate);
   // Each node_id's earliest listed stream: its process connected no later.
   const firstConnected = new Map<string, number>();
   let plausible = true;
@@ -549,11 +562,13 @@ export function dataPlaneAttestationVerdict(
   }
   if (firstConnected.size < expectedDataPlanes) return 'fewer_data_planes_than_expected';
   const sighted = freshness.settledNodeIds;
+  // Stream age needs the control plane's own clock as well as Nexus's.
+  const ageReadable = plausible && gatewayDate !== undefined;
   let settled = 0;
   for (const [nodeId, connectedAt] of firstConnected) {
     const isSettled =
       sighted?.has(nodeId) === true ||
-      (plausible && clocks.every((clock) => clock - connectedAt >= SETTLED_AGE_MS));
+      (ageReadable && clocks.every((clock) => clock - connectedAt >= SETTLED_AGE_MS));
     if (isSettled) settled += 1;
   }
   if (settled >= expectedDataPlanes) return 'guaranteed';
@@ -563,8 +578,8 @@ export function dataPlaneAttestationVerdict(
 /** {@link dataPlaneAttestationVerdict} is `guaranteed`. */
 export function provesDataPlanePublicEgress(
   policy: BackendEgressPolicy,
-  expectedDataPlanes?: number,
-  freshness?: DataPlaneFreshness,
+  expectedDataPlanes: number | undefined,
+  freshness: DataPlaneFreshness,
 ): boolean {
   return dataPlaneAttestationVerdict(policy, expectedDataPlanes, freshness) === 'guaranteed';
 }
@@ -575,8 +590,8 @@ export function provesDataPlanePublicEgress(
  */
 export function provesPublicEgress(
   policy: BackendEgressPolicy,
-  expectedDataPlanes?: number,
-  freshness?: DataPlaneFreshness,
+  expectedDataPlanes: number | undefined,
+  freshness: DataPlaneFreshness,
 ): boolean {
   return (
     provesLocalPublicEgress(policy) ||
@@ -613,7 +628,7 @@ export function describeDataPlaneAttestation(verdict: DataPlaneAttestationVerdic
 /** How long a `node_id` no longer listed is remembered, across a reconnect gap. */
 const SIGHTING_RETENTION_MS = 15 * 60_000;
 /** Bound on remembered `node_id`s; past it, those not listed in the latest read go first. */
-const MAX_SIGHTINGS = 20_000;
+export const MAX_SIGHTINGS = 20_000;
 
 /**
  * This process's own record of when it first saw each data-plane `node_id`
@@ -720,7 +735,7 @@ export interface BackendEgressAssessment {
 export function assessBackendEgress(
   reading: BackendEgressPolicyReading,
   options: EgressAdmissionOptions,
-  freshness?: DataPlaneFreshness,
+  freshness: DataPlaneFreshness,
 ): BackendEgressAssessment {
   const { policy } = reading;
   const usable = reading.attestationProblem === null;
@@ -750,7 +765,7 @@ export function assessBackendEgress(
 export function admitBackendEgress(
   policy: BackendEgressPolicy,
   options: EgressAdmissionOptions,
-  freshness?: DataPlaneFreshness,
+  freshness: DataPlaneFreshness,
 ): BackendEgressAdmission | null {
   return assessBackendEgress({ policy, attestationProblem: null }, options, freshness).admission;
 }

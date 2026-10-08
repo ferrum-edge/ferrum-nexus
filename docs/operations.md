@@ -463,26 +463,34 @@ that is missing or connected to another control plane. Edge's stream liveness
 detection bounds the window: in Edge v0.9.14, the ConfigSync HTTP/2 keepalive sends a
 ping every 30 seconds with a 10-second timeout. So Nexus counts a `node_id` only once
 it has existed for 60 seconds, by which time Edge has dropped the stream of any process
-it replaced: a stale stream and its replacement never count together, so a count of
-settled `node_id`s that reaches the value is never short a data plane. A `node_id`
-qualifies in either of two ways:
+it replaced, so a stale stream and its replacement do not count together. Both numbers
+are Edge v0.9.14 constants, and the bound assumes the control plane terminates each
+data plane's HTTP/2 connection itself, directly or through an L4 (TCP) pass-through. A
+proxy that terminates HTTP/2 between them, such as an L7 gRPC ingress, answers the
+control plane's pings on the data plane's behalf, so a dead data plane's stream can stay
+listed until the proxy notices, which can take minutes; in that topology a restarted
+data plane can still count twice. A `node_id` qualifies in either of two ways:
 
 - this Nexus process saw it listed at least 60 seconds before the read. Nexus measures
   this on its own monotonic clock, so no clock skew affects it, and it remembers a
   `node_id` for 15 minutes after it stops being listed. A data plane renews its stream
   about every hour under the same `node_id`, so this keeps a routine reconnect counted;
-- the earliest stream listed under it has a `connected_at` at least 90 seconds old (60
-  seconds plus a 30-second clock-skew allowance) on Nexus's clock and, when the answer
-  carries an HTTP `Date` header, on the gateway's clock as well.
+- the answer carries an HTTP `Date` header, and the earliest stream listed under the
+  `node_id` has a `connected_at` at least 90 seconds old (60 seconds plus a 30-second
+  clock-skew allowance) on both Nexus's clock and that `Date`. Without a `Date`, a
+  control-plane clock behind Nexus's would go unseen, so only the first way applies.
+  Edge always sends the header; it must reach Nexus as the control plane wrote it, not
+  replaced by a reverse proxy's own clock.
 
 While enough `node_id`s are listed but fewer than `NEXUS_EXPECTED_DATA_PLANES` qualify,
 the verdict is `data_plane_recently_connected`: writes are refused and health is
 `degraded`. After a restart this lasts up to about a minute and a half after the data
 plane starts, unless enough other data planes already qualify; it also applies after
-Nexus itself starts while data planes are that new. Once Edge drops the stale stream,
-the short count reads `fewer_data_planes_than_expected` until the fleet is whole again. Alert on transitions of the health check's egress
-verdict, and treat a data-plane crash as a reason to confirm the inventory with Edge's
-`GET /cluster`.
+Nexus itself starts while data planes are that new, or, when the answers carry no
+`Date` header, for the first minute after Nexus starts. Once Edge drops the stale
+stream, the short count reads `fewer_data_planes_than_expected` until the fleet is
+whole again. Alert on transitions of the health check's egress verdict, and treat a
+data-plane crash as a reason to confirm the inventory with Edge's `GET /cluster`.
 
 **Clock skew.** `connected_at` is the control plane's clock. A `connected_at` more than
 30 seconds later than Nexus's clock or the gateway's `Date`, or older than any live
@@ -490,9 +498,10 @@ stream can be (Edge ends every stream within
 `FERRUM_CP_GRPC_MAX_STREAM_LIFETIME_SECONDS`, at most a day), proves nothing. Only
 the data planes that this Nexus process has itself seen listed for 60 seconds then
 count, and when they fall short the verdict is `data_plane_clock_skew` and the
-guarantee is withheld. Keep Nexus and the control plane
-on synchronized time. When the gateway sends no `Date` header, a Nexus clock running
-more than 30 seconds ahead of the control plane's can count a new data plane early.
+guarantee is withheld. Keep Nexus and the control plane on synchronized time. When
+the gateway sends no `Date` header, Nexus cannot see a control-plane clock running
+behind its own, so it never reads stream age from `connected_at` alone: only data
+planes it has itself seen listed for 60 seconds count.
 
 **What the stream age does not cover.** Edge v0.9.14 reports no stream liveness, so a
 stale stream that has not yet been dropped is indistinguishable from a live one. If a

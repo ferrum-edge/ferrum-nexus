@@ -15,9 +15,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   stale stream of the process it replaced. The guarantee still needs at least that
   many such data planes, so a scale-up or a rolling update keeps it while the settled
   ones reach the value. Until they do, and when stream timestamps contradict Nexus's
-  or the gateway's clock, backend writes are refused and health is `degraded` with a
-  new bounded reason (`data_plane_recently_connected` or `data_plane_clock_skew`). A
-  data plane's routine reconnect keeps counting once Nexus has seen it.
+  or the gateway's clock, backend writes are refused and health is `degraded`
+  (`backend_egress_unverified`); an admin's `edge.error` says why, and a refused
+  write's `details.data_plane_attestation` is `data_plane_recently_connected` or
+  `data_plane_clock_skew`. Stream age is read from `connected_at` only when the answer
+  carries the gateway's `Date` header; without one, only data planes Nexus itself has
+  seen listed for a minute count. A data plane's routine reconnect keeps counting once
+  Nexus has seen it.
 
 ### Security
 

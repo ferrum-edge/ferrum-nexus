@@ -1014,7 +1014,8 @@ const IMF_FIXDATE = /^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2}
 /**
  * The gateway's clock from a response `Date` header, in epoch milliseconds, or
  * `undefined` when it sent none Nexus can read. The header has whole seconds
- * and is stamped no earlier than the answer was built.
+ * and is stamped no earlier than the answer was built. Without it, stream age
+ * is never read from `connected_at`; only this process's sightings settle.
  */
 export function gatewayDateMillis(value: string | string[] | undefined): number | undefined {
   if (typeof value !== 'string' || !IMF_FIXDATE.test(value)) return undefined;
