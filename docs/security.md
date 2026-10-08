@@ -295,11 +295,11 @@ does not reinterpret that), so it publishes only under
   issued after that survive. Before it completes, the revocation waits for any
   credential write already in progress on the account's and its applications'
   consumers and sweeps again, so a key an issue appended while the reset
-  committed is revoked too. The refusal covers the account's own and its
-  applications' credentials, not a provider's API test-consumer credential:
-  one created while the row still refuses issuance is attributed to the
-  account and is revoked with the rest when the job lands, so create it again
-  afterwards.
+  committed is revoked too. A provider's API test-consumer credential is
+  attributed to the account and revoked with the rest. Issuing one is refused
+  the same way while the row refuses issuance, before an existing test consumer
+  is replaced, and the revocation waits out a test-consumer issue already in
+  progress before its final sweep.
 - **Sign-in does not reveal which addresses exist.** A missing account still
   costs a scrypt derivation against a decoy hash, and both failures return the
   same `401 UNAUTHORIZED`.
