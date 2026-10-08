@@ -210,6 +210,20 @@ export function publicUpstreamResolver(): UpstreamResolver {
 }
 
 /**
+ * The address the gateway's own origins resolve to under {@link buildTestApp}.
+ *
+ * It differs from {@link TEST_PUBLIC_ADDRESS} so the loop guard does not read
+ * every fixture upstream as the gateway itself. A test that fakes DNS through
+ * `deps.upstreamResolver` keeps faking it for the gateway origins too.
+ */
+export const TEST_GATEWAY_ADDRESS = '93.184.216.35';
+
+/** A resolver answering {@link TEST_GATEWAY_ADDRESS} for every hostname. */
+export function publicGatewayResolver(): UpstreamResolver {
+  return async () => [{ address: TEST_GATEWAY_ADDRESS, family: 4 }];
+}
+
+/**
  * A resolver answering `answers[host]`, falling back to a public address.
  *
  * `null` as an answer rejects, which is how a test drives the
@@ -446,6 +460,9 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
     serveStatic: false,
     mailTransportFactory: factory,
     upstreamResolver: publicUpstreamResolver(),
+    ...(options.deps?.upstreamResolver || options.deps?.gatewayResolver
+      ? {}
+      : { gatewayResolver: publicGatewayResolver() }),
     captchaTransport: testCaptchaTransport,
     ...options.deps,
   });
