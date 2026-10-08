@@ -1161,23 +1161,21 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
           await tx.verificationTokens.deleteForUser(record.id, 'password_reset');
           await tx.sessions.deleteForUser(record.id);
 
-          await audit
-            .forStore(tx)
-            .record(
-              { id: updated.id, role: updated.role },
-              AuditAction.AUTH_PASSWORD_RESET,
-              { type: 'user', id: updated.id },
-              {
-                email: updated.email,
-                ...(firstTrustedProof
-                  ? {
-                      credentials_revocation_pending: true,
-                      cancelled_access_requests: cancelledRequests,
-                    }
-                  : {}),
-              },
-              context.ip,
-            );
+          await audit.forStore(tx).record(
+            { id: updated.id, role: updated.role },
+            AuditAction.AUTH_PASSWORD_RESET,
+            { type: 'user', id: updated.id },
+            {
+              email: updated.email,
+              ...(firstTrustedProof
+                ? {
+                    credentials_revocation_pending: true,
+                    cancelled_access_requests: cancelledRequests,
+                  }
+                : {}),
+            },
+            context.ip,
+          );
           return { user: updated, firstTrustedProof };
         });
         if (reset.firstTrustedProof) {

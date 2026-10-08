@@ -166,9 +166,7 @@ export async function runAccountRecovery(
       // worker applies the backoff to claims it supplies. A failed store write
       // leaves SENDING for the stale sweep, which recovers it on a later tick.
       const delay =
-        input.job?.status === 'pending'
-          ? 0
-          : accountRecoveryBackoffMs(claimed.attempts, random);
+        input.job?.status === 'pending' ? 0 : accountRecoveryBackoffMs(claimed.attempts, random);
       const nextAt = new Date(now().getTime() + delay).toISOString();
       const job = claimed;
       // The first failure at or past the threshold stops the job blocking.

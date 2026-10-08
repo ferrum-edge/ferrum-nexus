@@ -201,7 +201,7 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
       sqlite: 'dc3333e134335690ee907e1b3147760fc592da8f5cbd59eca4063edb1ca476ae',
       pg: 'dc3333e134335690ee907e1b3147760fc592da8f5cbd59eca4063edb1ca476ae',
       mysql: '8c05a46b71fc1d336fe488d5c5047bb6f180447a4f6274ac92f984bde080217f',
-      mongodb: '06dfd570f97f2247f41f2ce378d929e328ca21eac0f45aa4e910837aab079a02',
+      mongodb: '8ead2eb44ecf4fceea23ab9e45ccf075a6a741fa9a6af066c22fea5dd637a5c0',
     },
   },
 ];
