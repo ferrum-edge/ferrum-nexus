@@ -63,9 +63,10 @@ The full review is in
   `request_deduplication` `header_name`, as Edge does, and the mock gateway models
   the same refusal. Nexus writes no LDAP config, so the removed `consumer_mapping`
   does not affect it.
-- **Protocol flavor admission** (Edge #6090). A native gRPC or WebSocket request is
-  refused with `403` (`route_protocol_admission`) when the route's HTTP view runs an
-  authentication or admission plugin its flavor view omits. On Nexus proxies that is
+- **Protocol flavor admission** (Edge #6090). A native WebSocket request is refused
+  with `403`, and a native gRPC request with a trailers-only `PERMISSION_DENIED`
+  (gRPC status 7), both as `route_protocol_admission`, when the route's HTTP view
+  runs an authentication or admission plugin its flavor view omits. On Nexus proxies that is
   `routes` spec enforcement, agent APIs and idempotency keys with
   `enforce_required`; the palette help and provider guide say so.
 - **Plugin-config limits** (Edge #6079). `rate_limiting` adds `ipv6_prefix`, which

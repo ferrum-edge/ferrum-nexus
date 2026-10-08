@@ -162,8 +162,8 @@ HEAD is read-only but unavailable in the published Edge bridge, as are OPTIONS
 and TRACE. Choose a unique tool name and a plain-text description for each
 selected operation. Destructive annotations describe risk; a client must still
 decide when to ask its user for confirmation.
-Edge v0.9.15 refuses native gRPC and WebSocket requests to an agent-enabled API
-with `403`.
+Edge v0.9.15 refuses native WebSocket requests to an agent-enabled API with `403`
+and native gRPC requests with a trailers-only `PERMISSION_DENIED` (gRPC status 7).
 
 The MCP endpoint is `/<namespace>/<slug>/mcp`, and public tool names are
 `<slug>.<tool-name>`. REST calls continue to use the same upstream, authentication
@@ -366,8 +366,9 @@ configured).
 preflights before the route check, so you do not declare `options`.
 
 **Native gRPC and WebSocket calls are refused at `routes`.** The route check runs on
-plain HTTP requests only, so from Edge v0.9.15 the gateway answers a native gRPC or
-WebSocket request to an API at `routes` with `403` rather than letting it skip the
+plain HTTP requests only, so from Edge v0.9.15 the gateway refuses a native
+WebSocket request to an API at `routes` with `403`, and a native gRPC request with a
+trailers-only `PERMISSION_DENIED` (gRPC status 7), rather than letting it skip the
 check. Keep such an API at `docs_only`, or publish that traffic as a separate API.
 The same holds for an API **available to AI agents**, whose MCP governance also runs
 on HTTP only.
@@ -468,8 +469,9 @@ Notes:
   to change.
 - **Requiring an idempotency key turns away gRPC and WebSocket.** The key check
   runs on plain HTTP requests only. With **Reject a call that omits the header**
-  on, the gateway answers a native gRPC or WebSocket request to your API with
-  `403` rather than letting it skip the check (Edge v0.9.15 and later).
+  on, the gateway refuses a native WebSocket request to your API with `403`, and a
+  native gRPC request with a trailers-only `PERMISSION_DENIED` (gRPC status 7),
+  rather than letting it skip the check (Edge v0.9.15 and later).
 - **Response caching is no longer offered.** The gateway will not cache
   authenticated responses unless your backend opts in (`Cache-Control: public`,
   `must-revalidate` or `s-maxage`), so the portal could not promise hits. An

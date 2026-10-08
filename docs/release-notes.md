@@ -5,8 +5,11 @@ pair is recorded in [`release/compatibility.env`](../release/compatibility.env),
 the README quickstart, the Compose example, the getting-started walkthrough and the
 real-stack `acceptance` CI job all read, so every one of them runs the same gateway
 build. `v0.5.2` ships that pairing: Edge `v0.9.15` fixes 26 published Ferrum Edge
-security advisories, listed in its
-[release notes](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.15), and
+security advisories (see the
+[Edge security advisories](https://github.com/ferrum-edge/ferrum-edge/security/advisories);
+the Security section of the Edge `v0.9.15`
+[changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.15/CHANGELOG.md)
+describes the fixes), and
 **operators should upgrade Edge to `v0.9.15` for those fixes.** Nexus itself adds no
 migration, so a `v0.5.1` database opens unchanged, and the gateway's database opens in
 place. **Read the [upgrade](#upgrading-from-v051) before starting:** it upgrades Edge,
@@ -142,9 +145,10 @@ credentials. From `v0.5.1`, Nexus adds no migration; what changes is Edge. Follo
    still receiving `X-Consumer-Username`.
 
 Nexus `v0.5.1` reads Edge `v0.9.15`, and `v0.5.2` reads Edge `v0.9.14`, so a
-deployment that cannot keep Nexus stopped across step 5 may upgrade Edge with
-`v0.5.1` still running and then upgrade Nexus. Do not stay on a mixed pair: the
-palette would accept a header name the gateway refuses.
+deployment that cannot keep Nexus stopped across step 5 may restart `v0.5.1` after
+the step-4 backup, upgrade Edge, and then upgrade Nexus. Do not stay on a mixed pair:
+`v0.5.1` with Edge `v0.9.15` would accept a palette header name the gateway refuses,
+and `v0.5.2` with Edge `v0.9.14` leaves the Edge vulnerabilities open.
 
 On the Compose stack, from the checkout you installed from, with the four
 secrets you saved at install time exported again (never newly generated
@@ -182,10 +186,11 @@ All are listed in the [changelog](../CHANGELOG.md#052---2026-10-08) and reviewed
   `header_name` of that name, in any case and with `_` or `-`, is
   `400 VALIDATION_FAILED` in the portal and the plugin form, before any gateway
   write.
-- **gRPC and WebSocket requests are refused for some APIs.** Edge `v0.9.15` answers
-  a native gRPC or WebSocket request with `403` (trailers-only `PERMISSION_DENIED`
-  for gRPC; rejection phase `route_protocol_admission`) when the proxy runs, on
-  HTTP, an authentication or admission plugin that cannot run on that flavor. These
+- **gRPC and WebSocket requests are refused for some APIs.** Edge `v0.9.15` refuses
+  a native WebSocket request with `403` and a native gRPC request with a trailers-only
+  `PERMISSION_DENIED` (gRPC status 7); both are logged with rejection phase
+  `route_protocol_admission`. It does so when the proxy runs, on HTTP, an
+  authentication or admission plugin that cannot run on that flavor. These
   requests used to skip that policy. On Nexus proxies that means an API at the
   `routes` enforcement level (a blocking `openapi_validator`), every API available
   to AI agents (`mcp_gateway`, `openapi_validator`, `ai_tool_governor`,
@@ -215,26 +220,31 @@ service. Settle recovery journals before rolling back.
 Rollback is a restore of the backup taken in step 4, Nexus and Edge together:
 restore the Edge database and run Edge `v0.9.14` on it, and restore the Nexus
 database and run `v0.5.1` on it. Every post-upgrade change is lost with the restore.
-Never run an older image over a database a newer one has used.
+Never run an older Nexus image over a database a newer Nexus has migrated.
 
-Rolling back Edge alone to `v0.9.14` keeps Nexus `v0.5.2` working, since `v0.5.2`
-reads Edge `v0.9.14`'s answers and Edge `v0.9.15` adds no core schema change. Nexus
-then still refuses `X-Authenticated-Identity` as a header name, which `v0.9.14`
-would accept; nothing else Nexus does changes.
+Rolling back Edge alone runs Edge `v0.9.14` on the current Edge database, without
+restoring either side: Edge `v0.9.15` adds no core schema change, and Nexus `v0.5.2`
+reads Edge `v0.9.14`'s answers, so it keeps working. Nexus then still refuses
+`X-Authenticated-Identity` as a header name, which `v0.9.14` would accept; nothing
+else Nexus does changes.
 
 ## Security
 
 `v0.5.2` pairs Nexus with Edge `v0.9.15`, which fixes 26 published Ferrum Edge
-security advisories. They are listed in the
-[Edge `v0.9.15` release notes](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.15)
-and the Security section of its
-[changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.15/CHANGELOG.md). Two
-of them change what Nexus users see:
+security advisories. They are listed among the
+[Edge security advisories](https://github.com/ferrum-edge/ferrum-edge/security/advisories),
+and the Security section of the Edge `v0.9.15`
+[changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.15/CHANGELOG.md)
+describes the fixes. Several of them change what Nexus users see:
 
 - a native gRPC or WebSocket request no longer skips the `routes` enforcement level,
   MCP governance or a required idempotency key; it is refused instead;
-- `X-Consumer-Username` carries only a mapped Consumer, and an external identity
-  travels in the gateway-owned `X-Authenticated-Identity`.
+- when the gateway-wide MCP session store is full, a caller with no session to
+  replace is refused a new session instead of evicting another caller's;
+- a client that nominates `Authorization` in `Connection` has it removed before
+  authentication and gets `401`;
+- `X-Authenticated-Identity` is a reserved, gateway-owned header name, so the
+  portal refuses it as a palette header name.
 
 Nexus itself carries no new security fix in `v0.5.2`. Upgrade any deployment running
 Edge `v0.9.14` or earlier; a deployment still on Nexus `v0.5.0` or earlier also needs
@@ -261,8 +271,9 @@ the fixes of [`v0.5.1`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.1/
   accepts only replay-safe forms and checks live definitions before replaying
   one. MongoDB requires a replica set; a standalone server
   (`NEXUS_DB_ALLOW_STANDALONE=true`) carries no upgrade guarantee.
-- **Downgrades are not supported.** Roll back by restoring the pre-upgrade
-  backup, never by running an older image over an upgraded database.
+- **Downgrades are not supported.** Roll Nexus back by restoring the pre-upgrade
+  backup, never by running an older Nexus image over a database a newer Nexus has
+  migrated. The Edge-only [rollback](#rollback) needs no restore.
 
 ## Operations
 

@@ -781,10 +781,11 @@ or journal change is needed. What changes for Nexus:
   so does Nexus: a `correlation_id` or `request_deduplication` `header_name` of that
   name (any case, `_` or `-`) is `400 VALIDATION_FAILED`. Rename any existing one
   before upgrading.
-- **gRPC and WebSocket admission.** Edge now refuses a native gRPC or WebSocket
-  request with `403` (trailers-only `PERMISSION_DENIED` for gRPC, rejection phase
-  `route_protocol_admission`) when the route runs an authentication or admission
-  plugin on HTTP that cannot run on that flavor. On Nexus proxies that is the
+- **gRPC and WebSocket admission.** Edge now refuses a native WebSocket request with
+  `403` and a native gRPC request with a trailers-only `PERMISSION_DENIED` (gRPC
+  status 7), both with rejection phase `route_protocol_admission`, when the route
+  runs an authentication or admission plugin on HTTP that cannot run on that
+  flavor. On Nexus proxies that is the
   `routes` [enforcement level](guides/provider-guide.md#enforcement-level)
   (a blocking `openapi_validator`), every API available to AI agents (`mcp_gateway`,
   `openapi_validator`, `ai_tool_governor`, `ai_prompt_shield` and the tool-call

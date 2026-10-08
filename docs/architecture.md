@@ -960,8 +960,9 @@ Details that matter:
   ([ferrum-edge#4844](https://github.com/ferrum-edge/ferrum-edge/pull/4844));
   clients must reuse the same key when retrying the same operation. With
   `enforce_required` the plugin gates admission, so Edge v0.9.15 refuses a native
-  gRPC or WebSocket request to that proxy with `403` (`route_protocol_admission`):
-  the plugin runs on HTTP only.
+  WebSocket request to that proxy with `403` and a native gRPC request with a
+  trailers-only `PERMISSION_DENIED` (gRPC status 7), both as
+  `route_protocol_admission`: the plugin runs on HTTP only.
 
 **Ownership is by config id.** The `api_plugins` row records the Edge config id
 it created (`ferrum_plugin_config_id`); saves and removals act on that config

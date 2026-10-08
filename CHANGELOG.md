@@ -10,12 +10,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 Paired with Ferrum Edge `v0.9.15`, a security release that fixes 26 published Ferrum
 Edge advisories (see the
-[Edge `v0.9.15` release](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.15)).
+[Edge security advisories](https://github.com/ferrum-edge/ferrum-edge/security/advisories);
+the Security section of the
+[Edge `v0.9.15` changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.15/CHANGELOG.md)
+describes the fixes).
 Upgrade Edge to `v0.9.15` for its security fixes: `v0.5.2` exists to ship that pairing,
 and it is the only Edge version its acceptance suite tests. Nexus adds no migration,
 so a `v0.5.1` database opens unchanged, and the gateway's database opens in place. On
 Nexus proxies Edge `v0.9.15` reserves `X-Authenticated-Identity`, and refuses native
-gRPC and WebSocket requests with `403` at the `routes` enforcement level, on APIs
+WebSocket requests with `403` and native gRPC requests with a trailers-only
+`PERMISSION_DENIED` (gRPC status 7) at the `routes` enforcement level, on APIs
 available to AI agents and with required idempotency keys. See
 [`docs/release-notes.md`](docs/release-notes.md) for the supported combination and
 the upgrade steps.
@@ -31,9 +35,10 @@ the upgrade steps.
   its acceptance suite tests. Edge `v0.9.15` keeps egress policy schema 2,
   deployment snapshot v2 and its tokens, and the acknowledgement shape, so no journal,
   token or schema migration is needed. On Nexus proxies, Edge now refuses a native
-  gRPC or WebSocket request with `403` (`route_protocol_admission`) at the `routes`
-  enforcement level, on APIs available to AI agents, and with required idempotency
-  keys, where such requests used to skip that policy. Backends keep receiving
+  WebSocket request with `403` and a native gRPC request with a trailers-only
+  `PERMISSION_DENIED` (gRPC status 7), both logged as `route_protocol_admission`, at
+  the `routes` enforcement level, on APIs available to AI agents, and with required
+  idempotency keys, where such requests used to skip that policy. Backends keep receiving
   `X-Consumer-Username`, because every Nexus caller is a mapped Consumer. See
   [Upgrading to Edge v0.9.15](docs/operations.md#upgrading-to-edge-v0915).
 
@@ -46,9 +51,12 @@ the upgrade steps.
   `400 VALIDATION_FAILED` in the portal and in the plugin form, before any gateway
   write. The mock gateway models the refusal and Edge's new `rate_limiting`
   `ipv6_prefix` (`1` to `128`).
-- **The idempotency-key help names the gRPC and WebSocket refusal** (#552). With
-  `enforce_required` on, Edge `v0.9.15` refuses native gRPC and WebSocket requests to
-  the API; the palette help, the provider guide and the API reference say so.
+- **Palette and publishing help name the gRPC and WebSocket refusal** (#552). Edge
+  `v0.9.15` refuses native gRPC and WebSocket requests to an API at the `routes`
+  enforcement level, to an API available to AI agents, and to an API whose
+  idempotency keys use `enforce_required`. The `routes` enforcement-level help, the
+  "Available to AI agents" help and the idempotency-key palette help say so, as do the
+  provider guide and the API reference.
 
 ## [0.5.1] - 2026-10-08
 
