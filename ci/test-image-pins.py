@@ -321,6 +321,19 @@ FROM build AS runtime
         self.assertEqual([ref for _, ref in refs], [pinned])
         self.assertIsNone(error_for(refs[0][1]))
 
+    def test_workflow_punctuation_inside_quoted_words_cannot_hide_the_image(self):
+        pinned = f'alpine:3@sha256:{DIGEST}'
+        for command in (
+            f"docker run --label 'x`' nginx:latest --label 'y`' {pinned}",
+            f"docker run -e X=$(echo 'a)' {pinned}) nginx:latest",
+        ):
+            with self.subTest(command=command):
+                refs = [ref for _, ref in image_fields(
+                    Path('.github/workflows/ci.yml'), f'steps:\n  - run: {command}\n'
+                )]
+                self.assertIn('nginx:latest', refs)
+                self.assertIsNotNone(error_for('nginx:latest'))
+
     def test_compose_discovery_broadens_to_top_level_services(self):
         self.assertTrue(is_compose(Path('deploy/stack.yml'), 'services:\n  app:\n    image: x\n'))
         self.assertTrue(is_compose(Path('docker-compose.yml'), 'name: x\n'))

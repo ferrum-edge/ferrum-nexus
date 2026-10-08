@@ -157,7 +157,7 @@ def _open_substitutions(state, token, quoted, follows_dollar):
     follows an unquoted `$`; `)` still closes, and backticks toggle.
     """
     parens, in_tick = state
-    if quoted or not token or set(token) > set(';&|()`'):
+    if quoted or not token or not set(token) <= set(';&|()`'):
         return state
     if follows_dollar:
         parens += token.count('(')
