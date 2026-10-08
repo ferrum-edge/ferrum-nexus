@@ -1,5 +1,7 @@
 """Small positive and negative cases for the image pin policy."""
 
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,6 +10,7 @@ from check_image_pins import (
     error_for,
     image_fields,
     is_compose,
+    main,
     workflow_env_error,
     workflow_env_image_fields,
 )
@@ -107,6 +110,35 @@ FROM build AS runtime
         refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
         self.assertTrue(refs)
         self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_workflow_quoted_option_paren_does_not_hide_the_real_image(self):
+        for quote in ("'", '"'):
+            with self.subTest(quote=quote):
+                workflow = (
+                    f'steps:\n  - run: docker run --rm --label {quote}({quote} '
+                    f'--entrypoint /bin/echo nginx:latest {quote}){quote} alpine:latest\n'
+                )
+                refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
+                self.assertEqual([ref for _, ref in refs], ['nginx:latest'])
+                self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_workflow_quoted_backtick_option_value_is_not_a_substitution(self):
+        workflow = "steps:\n  - run: docker run --label '`' nginx:latest\n"
+        refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
+        self.assertEqual([ref for _, ref in refs], ['nginx:latest'])
+        self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_workflow_files_are_discovered_and_enforced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            subprocess.run(['git', 'init', '-q'], cwd=root, check=True)
+            workflow = root / '.github' / 'workflows' / 'ci.yml'
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                'jobs:\n  build:\n    services:\n      db:\n        image: postgres:latest\n'
+            )
+            subprocess.run(['git', 'add', '.'], cwd=root, check=True)
+            self.assertEqual(main(root), 1)
 
     def test_dockerfile_comment_inside_continuation_does_not_hide_image(self):
         source = 'FROM \\\n# BuildKit ignores this comment\nnode:latest AS runtime\n'

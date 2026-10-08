@@ -397,10 +397,16 @@ per-IP budgets.
 
 _public_ → `201`
 
-| Field             | Type                                                                   |
-| ----------------- | ---------------------------------------------------------------------- |
-| `requested_tools` | 1–256 unique, currently published `AgentTool.id` UUIDs the grant lacks |
-| `justification`   | 1–2000 chars                                                           |
+| Field             | Type                       | Notes                                                                     |
+| ----------------- | -------------------------- | ------------------------------------------------------------------------- |
+| `email`           | string                     | Valid address, ≤ 320 chars. Stored lowercased; unique case-insensitively. |
+| `password`        | string                     | 12–1024 characters (`MIN_PASSWORD_LENGTH` = 12).                          |
+| `display_name`    | string                     | 1–200 chars.                                                              |
+| `role`            | `"client"` \| `"provider"` | Ignored for the founding account.                                         |
+| `company`         | string \| null             | optional, ≤ 200                                                           |
+| `phone`           | string \| null             | optional, ≤ 64                                                            |
+| `captcha_token`   | string                     | required when CAPTCHA is enabled                                          |
+| `bootstrap_token` | string                     | **Required while the portal has no active `super_admin`**; ignored after. |
 
 ```json
 { "user": { "id": "…", "email": "…", "role": "client", … }, "email_verification_required": false }
