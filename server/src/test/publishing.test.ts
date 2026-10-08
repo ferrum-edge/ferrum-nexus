@@ -5052,6 +5052,10 @@ describe('publishing — an upstream name that resolves to a private address', (
   // an attacker-controlled record can point anywhere. The policy resolves the
   // name, so all three places a backend reaches the gateway must refuse it.
   const REBIND = 'rebind.example.com';
+  // A private address that is not the gateway's own host (the test harness's
+  // mock Edge listens on 127.0.0.1), so this exercises the privacy refusal
+  // rather than the gateway-origin loop guard.
+  const REBIND_ADDRESS = '10.20.30.40';
   let harness: TestApp;
   let provider: TestSession;
 
@@ -5059,7 +5063,7 @@ describe('publishing — an upstream name that resolves to a private address', (
     harness = await buildTestApp({
       deps: {
         upstreamResolver: fakeUpstreamResolver({
-          [REBIND]: [{ address: '127.0.0.1', family: 4 }],
+          [REBIND]: [{ address: REBIND_ADDRESS, family: 4 }],
         }),
       },
     });
@@ -5083,7 +5087,7 @@ describe('publishing — an upstream name that resolves to a private address', (
       field: 'upstream_url',
       host: REBIND,
       reason: 'private_upstream',
-      resolved: ['127.0.0.1'],
+      resolved: [REBIND_ADDRESS],
     });
   }
 

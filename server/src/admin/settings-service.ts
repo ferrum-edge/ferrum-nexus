@@ -396,6 +396,13 @@ export interface SettingsService {
    * `null`. Cached for a few seconds — a catalog page asks once per row.
    */
   getGatewayPublicUrl(): Promise<string | null>;
+  /**
+   * Every origin that may be the gateway's own proxy listener: the stored
+   * `gateway.public_url` override, `FERRUM_GATEWAY_PUBLIC_URL`, and the Admin
+   * API origin — unioned, not "first one wins". The publishing upstream guard
+   * refuses a backend that names or resolves to any of them.
+   */
+  listGatewayPublicUrls(): Promise<string[]>;
   /** The stored template for a key, or the built-in default. */
   getEmailTemplate(key: EmailTemplateKey): Promise<{
     template: EmailTemplate;
@@ -448,6 +455,27 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
     const value = await resolveGatewayPublicUrl();
     gatewayUrlCache = { value, expires: now + GATEWAY_URL_CACHE_MS };
     return value;
+  }
+
+  /**
+   * Every origin the upstream guard must treat as the gateway itself.
+   *
+   * The stored override and the environment value are unioned rather than one
+   * replacing the other, and the Admin API origin is always included: the
+   * gateway commonly shares a host across its control and data planes, and
+   * when no public URL is configured it is the only origin Nexus knows.
+   */
+  async function listGatewayPublicUrls(): Promise<string[]> {
+    const urls = new Set<string>();
+    const stored = await readStoredGatewayPublicUrl(store);
+    if (stored !== null) urls.add(stored);
+    if (config.edge.gatewayPublicUrl !== undefined) urls.add(config.edge.gatewayPublicUrl);
+    try {
+      urls.add(new URL(config.edge.adminUrl).origin);
+    } catch {
+      // `config` validated the Admin URL on load; skip a value this cannot read.
+    }
+    return [...urls];
   }
 
   async function readGateway(): Promise<GatewaySettings> {
@@ -622,6 +650,8 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
     getBranding: async () => readBranding(store),
 
     getGatewayPublicUrl,
+
+    listGatewayPublicUrls,
 
     getAdminSettings: snapshot,
 

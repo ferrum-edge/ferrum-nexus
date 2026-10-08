@@ -1,0 +1,18 @@
+{
+  "id": "013_account_recovery_jobs",
+  "backend": "mongodb",
+  "description": "Durable credential revocations owed after a trusted password reset (one outstanding row per account)",
+  "indexes": [
+    {
+      "collection": "account_recovery_jobs",
+      "name": "ux_account_recovery_jobs_user",
+      "key": { "user_id": 1 },
+      "unique": true
+    },
+    {
+      "collection": "account_recovery_jobs",
+      "name": "ix_account_recovery_jobs_due",
+      "key": { "status": 1, "next_attempt_at": 1 }
+    }
+  ]
+}

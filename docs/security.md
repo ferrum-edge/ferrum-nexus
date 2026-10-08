@@ -78,11 +78,15 @@ only lets a proxy point at a public destination
 
 The check runs at publish, on a `PATCH` of `upstream_url`, when a spec revision
 moves a proxy that follows its document, and on a gateway restore. Nexus also
-refuses an upstream that names the configured public gateway host or resolves
-to any of its current addresses, including when private upstreams are enabled.
-A refusal is `400 SPEC_INVALID` with `details.reason` `private_upstream` (plus
-the `resolved` addresses when DNS decided), `unresolvable_upstream`, or
-`gateway_origin`.
+refuses an upstream that names or resolves to any of the gateway's own origins —
+the stored `gateway.public_url`, `FERRUM_GATEWAY_PUBLIC_URL`, and the Admin API
+host, unioned rather than one replacing another. Addresses are canonicalized
+before comparison, so an IPv4-mapped, NAT64 or 6to4 literal — or a matching AAAA
+answer — that embeds the gateway's IPv4 address is refused too. A gateway origin
+that cannot be resolved fails the publish closed. This runs even when private
+upstreams are enabled. A refusal is `400 SPEC_INVALID` with `details.reason`
+`private_upstream` (plus the `resolved` addresses when DNS decided),
+`unresolvable_upstream`, `gateway_origin`, or `gateway_unresolvable`.
 
 `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` skips the destination privacy checks,
 including their lookup, but does not skip gateway-origin loop detection.
@@ -93,6 +97,11 @@ while keeping `FERRUM_BACKEND_ALLOW_IPS=public`. The latter selects a filtering
 mode; it does not name allowed destinations. Public mode also screens plugin
 endpoints, so a private plugin dependency such as Redis must be included in the
 CIDR allowlist.
+
+Gateway-origin detection runs at write time only: re-pointing DNS after a
+publish, or moving the gateway, is invisible to Nexus. That gap is covered at
+request time by Ferrum Edge's own egress screening (`FERRUM_BACKEND_ALLOW_IPS`)
+and the request-time hop/`Via` loop guard filed as a ferrum-edge issue.
 
 **Gateway egress admission.** Since `v0.4.0` the
 public-upstream profile requires a fresh authenticated, namespace-matched
@@ -243,8 +252,13 @@ does not reinterpret that), so it publishes only under
   replacement for the calling tab.
 - **A password reset ends every session.** `POST /api/auth/reset-password`
   deletes them all and clears the calling browser's cookies. When the reset
-  records the account's first trusted proof of its address, it also revokes all
-  credentials held by the account and its applications before returning.
+  records the account's first trusted proof of its address, it also cancels the
+  account's pending access requests and revokes all credentials held by the
+  account and its applications. The revocation is owed as a durable
+  `account_recovery_jobs` row written in the same transaction as the proof, so a
+  gateway that is unreachable cannot leave a squatter's key live with no record
+  that it is owed; a worker retries until it lands, and credential issuance is
+  refused (`409 CONFLICT`) while the row is outstanding.
 - **Sign-in does not reveal which addresses exist.** A missing account still
   costs a scrypt derivation against a decoy hash, and both failures return the
   same `401 UNAUTHORIZED`.
@@ -1473,22 +1487,22 @@ Two crash windows remain:
 `@fastify/rate-limit` is registered per route group so unrelated surfaces do not
 share counters. Every group answers `429 RATE_LIMITED`.
 
-| Routes                                                                                                         | Limit           | Keyed on |
-| -------------------------------------------------------------------------------------------------------------- | --------------- | -------- |
-| `/api/auth` POSTs: register, login, logout, verify-email, resend-verification, forgot-password, reset-password | 20/min, shared  | IP       |
-| `GET /api/auth/me`, `GET /api/auth/captcha`                                                                    | 120/min, shared | IP       |
-| `/api/health*`                                                                                                 | 120/min         | IP       |
-| `GET /api/branding`                                                                                            | 120/min         | IP       |
-| `PATCH /api/users/me`                                                                                          | 10/min          | account  |
-| `PATCH /api/users/me/notification-preferences`                                                                 | 10/min          | account  |
-| `POST /api/threads` / `POST /api/threads/:id/messages`                                                         | 10/min / 30/min | account  |
-| `GET /api/catalog/:slug/spec`, `…/changes`, `…/changes/:revisionId`, per route                                 | 60/min          | account  |
-| `/api/apis` mutations and the two spec-diff routes                                                             | 30/min          | account  |
-| `GET /api/apis/:id/usage`                                                                                      | 30/min          | IP       |
-| `POST /api/access-requests` / `POST /api/access-requests/:id/cancel`                                           | 10/min / 30/min | account  |
-| `/api/applications` create, update, delete                                                                     | 30/min          | account  |
-| `/api/credentials` issue, rotate, revoke                                                                        | 20/min per route | account  |
-| `POST /api/notifications/read`                                                                                  | 60/min          | account  |
+| Routes                                                                                                         | Limit            | Keyed on |
+| -------------------------------------------------------------------------------------------------------------- | ---------------- | -------- |
+| `/api/auth` POSTs: register, login, logout, verify-email, resend-verification, forgot-password, reset-password | 20/min, shared   | IP       |
+| `GET /api/auth/me`, `GET /api/auth/captcha`                                                                    | 120/min, shared  | IP       |
+| `/api/health*`                                                                                                 | 120/min          | IP       |
+| `GET /api/branding`                                                                                            | 120/min          | IP       |
+| `PATCH /api/users/me`                                                                                          | 10/min           | account  |
+| `PATCH /api/users/me/notification-preferences`                                                                 | 10/min           | account  |
+| `POST /api/threads` / `POST /api/threads/:id/messages`                                                         | 10/min / 30/min  | account  |
+| `GET /api/catalog/:slug/spec`, `…/changes`, `…/changes/:revisionId`, per route                                 | 60/min           | account  |
+| `/api/apis` mutations and the two spec-diff routes                                                             | 30/min           | account  |
+| `GET /api/apis/:id/usage`                                                                                      | 30/min           | IP       |
+| `POST /api/access-requests` / `POST /api/access-requests/:id/cancel`                                           | 10/min / 30/min  | account  |
+| `/api/applications` create, update, delete                                                                     | 30/min           | account  |
+| `/api/credentials` issue, rotate, revoke                                                                       | 20/min per route | account  |
+| `POST /api/notifications/read`                                                                                 | 60/min           | account  |
 
 "Account" means `userOrIpKey`: the signed-in user, falling back to the IP
 without a session. Per-account keys are the thing an attacker cannot cheaply
@@ -2118,17 +2132,17 @@ credential rows whose owner's derived username (`nexus-user-<user_id>`,
 matches the live consumer. Any other `consumer_id` is `403 FORBIDDEN` before any
 gateway write; a malformed id is `400 VALIDATION_FAILED`.
 
-| Action                          | Target type  | Description                                                                                                                                                                                                                                                                                                                                                                                  |
-| ------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `credential.issue`              | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                                                                                                                                           |
-| `credential.rotate`             | `credential` | Rotation by the credential's owner (an administrator is refused); target is the **new** credential. `details`: type, consumer id, `rotated_from`, `previous_last4`. Rows written before GHSA-mr69-2744-f78w may carry `owner_user_id`, naming the owner an administrator rotated for.                                                                                                        |
-| `credential.revoke_start`       | `credential` | Intent, committed with the row's move to `retiring`, before the gateway delete. `details` as `credential.revoke`; a rotation at the per-type cap writes one with `operation: "rotate"`. Completed by `credential.revoke`, `credential.rotate` or `credential.revoke_rollback`.                                                                                                               |
+| Action                          | Target type  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credential.issue`              | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                                                                                                                                                                                          |
+| `credential.rotate`             | `credential` | Rotation by the credential's owner (an administrator is refused); target is the **new** credential. `details`: type, consumer id, `rotated_from`, `previous_last4`. Rows written before GHSA-mr69-2744-f78w may carry `owner_user_id`, naming the owner an administrator rotated for.                                                                                                                                                       |
+| `credential.revoke_start`       | `credential` | Intent, committed with the row's move to `retiring`, before the gateway delete. `details` as `credential.revoke`; a rotation at the per-type cap writes one with `operation: "rotate"`. Completed by `credential.revoke`, `credential.rotate` or `credential.revoke_rollback`.                                                                                                                                                              |
 | `credential.revoke`             | `credential` | Deleted from Edge and marked `revoked`. `details`: type, consumer id, `last4`, optional `scope: "whole-type"`, and — when caused by an `auth_plugin` change on the API's own test consumer — `reason`, `api_id` and the `auth_plugin` pair. Account recovery may set `reason: "account_recovery"`. The target row lists settled rows in `swept_credential_ids`; each swept row also gets its own event with `swept_by` and `owner_user_id`. |
-| `credential.revoke_rollback`    | `credential` | A retirement whose gateway delete provably never applied; the row went back to `active`. `details`: `credential_type`, `consumer_id`, `last4`, `operation` (`revoke` \| `rotate`), `cause`, `owner_user_id`.                                                                                                                                                                                 |
-| `credential.settle`             | `credential` | A retirement Edge applied but the portal never recorded, settled by a later call. `details`: `credential_type`, `consumer_id`, `last4`, `owner_user_id`, `mirror_rows`, `gateway_entries`.                                                                                                                                                                                                   |
-| `credential.append_rollback`    | `consumer`   | An appended entry had to be taken back after an issue or rotation failed. `details`: `credential_type`, `consumer_id`, `operation` (`issue` \| `rotate`), `withdrawn`, `last4`, `append_index`, `owner_user_id`, `cause`, and `stranded_credential_id`, `retired_credential_id`, `suspected` where they apply.                                                                               |
-| `credential.reconcile`          | `consumer`   | An admin emptied one credential type on a consumer and revoked its rows. `details`: `credential_type`, `consumer_id`, `gateway_cleared`, `revoked_credentials`, `revoked_credential_ids`, `owner_user_ids`, optional `reason`.                                                                                                                                                               |
-| `credential.legacy_placeholder` | `credential` | The upgrade scan found a `basicauth` append an earlier release recorded as not taken back (`credential.append_rollback`, `withdrawn: false`) that no live row accounts for, and wrote a `retiring` placeholder row that holds the consumer's positions closed until the type is cleared. `details`: `credential_type`, `consumer_id`, `last4`, `owner_user_id`, `source_event_id`. No actor. |
+| `credential.revoke_rollback`    | `credential` | A retirement whose gateway delete provably never applied; the row went back to `active`. `details`: `credential_type`, `consumer_id`, `last4`, `operation` (`revoke` \| `rotate`), `cause`, `owner_user_id`.                                                                                                                                                                                                                                |
+| `credential.settle`             | `credential` | A retirement Edge applied but the portal never recorded, settled by a later call. `details`: `credential_type`, `consumer_id`, `last4`, `owner_user_id`, `mirror_rows`, `gateway_entries`.                                                                                                                                                                                                                                                  |
+| `credential.append_rollback`    | `consumer`   | An appended entry had to be taken back after an issue or rotation failed. `details`: `credential_type`, `consumer_id`, `operation` (`issue` \| `rotate`), `withdrawn`, `last4`, `append_index`, `owner_user_id`, `cause`, and `stranded_credential_id`, `retired_credential_id`, `suspected` where they apply.                                                                                                                              |
+| `credential.reconcile`          | `consumer`   | An admin emptied one credential type on a consumer and revoked its rows. `details`: `credential_type`, `consumer_id`, `gateway_cleared`, `revoked_credentials`, `revoked_credential_ids`, `owner_user_ids`, optional `reason`.                                                                                                                                                                                                              |
+| `credential.legacy_placeholder` | `credential` | The upgrade scan found a `basicauth` append an earlier release recorded as not taken back (`credential.append_rollback`, `withdrawn: false`) that no live row accounts for, and wrote a `retiring` placeholder row that holds the consumer's positions closed until the type is cleared. `details`: `credential_type`, `consumer_id`, `last4`, `owner_user_id`, `source_event_id`. No actor.                                                |
 
 A `credential.revoke_start` with no completion row means one of:
 

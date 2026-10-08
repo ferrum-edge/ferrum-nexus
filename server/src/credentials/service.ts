@@ -2665,6 +2665,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     },
 
     async issue(user, input, ip = null): Promise<IssueCredentialResponse> {
+      await assertNoPendingRecovery(user.id);
       if (!(CREDENTIAL_TYPES as readonly string[]).includes(input.credential_type)) {
         throw validationFailed(`Unsupported credential type '${input.credential_type}'`);
       }
@@ -2708,6 +2709,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     },
 
     async rotate(user, credentialId, label, ip = null): Promise<RotateCredentialResponse> {
+      await assertNoPendingRecovery(user.id);
       // Owner only: the response carries the replacement's plaintext.
       const target = await loadForRotate(user, credentialId);
       if (target.status === 'revoked') {
@@ -3275,6 +3277,23 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     if (!owner) throw notFound('User', userId);
     if (owner.status !== 'active') {
       throw userDisabled('This account has been disabled; its gateway access cannot be extended');
+    }
+  }
+
+  /**
+   * Refuse to mint new credential material while a recovery revocation is owed.
+   *
+   * A trusted password reset writes a durable `account_recovery_jobs` row that
+   * blocks issuance until the revocation lands, so a squatter cannot race the
+   * reset by minting a replacement key before Edge is reached.
+   */
+  async function assertNoPendingRecovery(userId: Uuid, db: NexusStore = store): Promise<void> {
+    const pending = await db.accountRecoveryJobs.findByUser(userId);
+    if (pending !== null) {
+      throw conflict(
+        'Credentials are being revoked after an account recovery; try again once it completes',
+        { reason: 'account_recovery_pending' },
+      );
     }
   }
 

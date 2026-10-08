@@ -154,6 +154,8 @@ import type {
   EmailTemplateRepo,
   GatewayIdentityRecord,
   GatewayIdentityRepo,
+  AccountRecoveryJobRecord,
+  AccountRecoveryJobRepo,
   GatewayTeardownJobFilter,
   GatewayTeardownJobRecord,
   GatewayTeardownJobRepo,
@@ -231,6 +233,7 @@ const COLLECTIONS = {
   notificationPreferences: 'user_notification_preferences',
   emailOutbox: 'email_outbox',
   gatewayTeardownJobs: 'gateway_teardown_jobs',
+  accountRecoveryJobs: 'account_recovery_jobs',
   auditLogs: 'audit_logs',
   settings: 'app_settings',
   emailTemplates: 'email_templates',
@@ -801,6 +804,20 @@ function mapGatewayIdentity(row: Row): GatewayIdentityRecord {
   };
 }
 
+function mapAccountRecoveryJob(row: Row): AccountRecoveryJobRecord {
+  return {
+    id: str(row._id),
+    generation: str(row.generation ?? ''),
+    user_id: str(row.user_id),
+    status: str(row.status) as AccountRecoveryJobRecord['status'],
+    attempts: num(row.attempts),
+    next_attempt_at: strOrNull(row.next_attempt_at),
+    last_error: strOrNull(row.last_error),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
 function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
   return {
     id: str(row._id),
@@ -1301,6 +1318,24 @@ export const BASELINE_INDEXES: readonly IndexDefinition[] = [
   },
 ];
 
+/**
+ * Indexes for the durable account-recovery revocations (migration `013`), the
+ * MongoDB counterpart of the SQL table's unique user key and due scan.
+ */
+export const ACCOUNT_RECOVERY_JOB_INDEXES: readonly IndexDefinition[] = [
+  {
+    collection: 'account_recovery_jobs',
+    name: 'ux_account_recovery_jobs_user',
+    key: { user_id: 1 },
+    unique: true,
+  },
+  {
+    collection: 'account_recovery_jobs',
+    name: 'ix_account_recovery_jobs_due',
+    key: { status: 1, next_attempt_at: 1 },
+  },
+];
+
 /** Create one batch of {@link IndexDefinition}s. */
 async function createIndexes(db: Db, indexes: readonly IndexDefinition[]): Promise<void> {
   for (const index of indexes) {
@@ -1569,6 +1604,11 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
         .collection(COLLECTIONS.accessRequests)
         .updateMany({ grant_id: { $exists: false } }, { $set: { grant_id: null } });
     },
+  },
+  {
+    id: '013_account_recovery_jobs',
+    indexes: ACCOUNT_RECOVERY_JOB_INDEXES,
+    apply: (db: Db): Promise<void> => createIndexes(db, ACCOUNT_RECOVERY_JOB_INDEXES),
   },
 ];
 
@@ -4223,6 +4263,134 @@ class MongoStore implements NexusStore {
     deleteClaimed: async (job) => {
       const result = await this.col(COLLECTIONS.gatewayTeardownJobs).deleteOne(
         { _id: job.id, generation: job.generation, status: 'sending' } as Filter<NexusDoc>,
+        this.opts,
+      );
+      return result.deletedCount > 0;
+    },
+  };
+
+  /* ── accountRecoveryJobs ──────────────────────────────────────────────── */
+
+  readonly accountRecoveryJobs: AccountRecoveryJobRepo = {
+    upsertPending: async (userId, now) => {
+      // Keyed on `user_id` (unique), so a later reset resets the account's
+      // outstanding revocation instead of queueing another one. `_id` and
+      // `created_at` only land on the insert.
+      const doc = await this.col(COLLECTIONS.accountRecoveryJobs).findOneAndUpdate(
+        { user_id: userId } as Filter<NexusDoc>,
+        {
+          $set: {
+            generation: newId(),
+            status: 'pending',
+            attempts: 0,
+            next_attempt_at: now,
+            last_error: null,
+            updated_at: now,
+          },
+          $setOnInsert: { _id: newId(), user_id: userId, created_at: now },
+        } as UpdateFilter<NexusDoc>,
+        { ...this.opts, upsert: true, returnDocument: 'after' },
+      );
+      const row = asRow(doc);
+      if (!row) {
+        throw new Error('accountRecoveryJobs.upsertPending: row vanished immediately after upsert');
+      }
+      return mapAccountRecoveryJob(row);
+    },
+
+    findByUser: async (userId) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.accountRecoveryJobs).findOne({ user_id: userId }, this.opts),
+      );
+      return row ? mapAccountRecoveryJob(row) : null;
+    },
+
+    claimDue: async (now, limit) => {
+      // `findOneAndUpdate` is atomic on its own, so the claim needs no
+      // transaction — the same argument as the outbox claim.
+      const wanted = Math.max(1, Math.floor(limit));
+      const claimed: AccountRecoveryJobRecord[] = [];
+      for (let i = 0; i < wanted; i += 1) {
+        const doc = await this.col(COLLECTIONS.accountRecoveryJobs).findOneAndUpdate(
+          {
+            status: 'pending',
+            $or: [{ next_attempt_at: null }, { next_attempt_at: { $lte: now } }],
+          } as Filter<NexusDoc>,
+          [
+            {
+              $set: {
+                status: 'sending',
+                generation: newId(),
+                updated_at: nowIso(),
+                attempts: { $add: [{ $ifNull: ['$attempts', 0] }, 1] },
+              },
+            },
+          ],
+          { ...this.opts, sort: OUTBOX_CLAIM_ORDER, returnDocument: 'after' },
+        );
+        const row = asRow(doc);
+        if (!row) break;
+        claimed.push(mapAccountRecoveryJob(row));
+      }
+      return claimed;
+    },
+
+    claimPending: async (job) => {
+      const doc = await this.col(COLLECTIONS.accountRecoveryJobs).findOneAndUpdate(
+        { _id: job.id, generation: job.generation, status: 'pending' } as Filter<NexusDoc>,
+        [
+          {
+            $set: {
+              status: 'sending',
+              generation: newId(),
+              updated_at: nowIso(),
+              attempts: { $add: [{ $ifNull: ['$attempts', 0] }, 1] },
+            },
+          },
+        ],
+        { ...this.opts, returnDocument: 'after' },
+      );
+      const row = asRow(doc);
+      return row ? mapAccountRecoveryJob(row) : null;
+    },
+
+    deleteClaimed: async (job) => {
+      const result = await this.col(COLLECTIONS.accountRecoveryJobs).deleteOne(
+        { _id: job.id, generation: job.generation, status: 'sending' } as Filter<NexusDoc>,
+        this.opts,
+      );
+      return result.deletedCount > 0;
+    },
+
+    reschedule: async (job, nextAttemptAt, lastError) => {
+      const result = await this.col(COLLECTIONS.accountRecoveryJobs).updateOne(
+        { _id: job.id, generation: job.generation, status: 'sending' } as Filter<NexusDoc>,
+        {
+          $set: {
+            status: 'pending',
+            next_attempt_at: nextAttemptAt,
+            last_error: lastError,
+            updated_at: nowIso(),
+          },
+        },
+        this.opts,
+      );
+      return result.modifiedCount > 0;
+    },
+
+    releaseStale: async (olderThan) => {
+      const at = nowIso();
+      const result = await this.col(COLLECTIONS.accountRecoveryJobs).updateMany(
+        { status: 'sending', updated_at: { $lte: olderThan } } as Filter<NexusDoc>,
+        { $set: { status: 'pending', next_attempt_at: at, updated_at: at } },
+        this.opts,
+      );
+      return result.modifiedCount;
+    },
+
+    deleteByUser: async (userId) => {
+      const result = await this.col(COLLECTIONS.accountRecoveryJobs).deleteOne(
+        { user_id: userId } as Filter<NexusDoc>,
         this.opts,
       );
       return result.deletedCount > 0;

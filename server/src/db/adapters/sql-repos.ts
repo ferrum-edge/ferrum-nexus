@@ -89,6 +89,8 @@ import type {
   CredentialFilter,
   CredentialRecord,
   CredentialRepo,
+  AccountRecoveryJobRecord,
+  AccountRecoveryJobRepo,
   EmailOutboxRecord,
   EmailOutboxRepo,
   EmailProofMethod,
@@ -585,6 +587,20 @@ function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
   };
 }
 
+function mapAccountRecoveryJob(row: Row): AccountRecoveryJobRecord {
+  return {
+    id: text(row.id),
+    generation: text(row.generation),
+    user_id: text(row.user_id),
+    status: text(row.status) as AccountRecoveryJobRecord['status'],
+    attempts: int(row.attempts),
+    next_attempt_at: textOrNull(row.next_attempt_at),
+    last_error: textOrNull(row.last_error),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
 function mapAuditLog(row: Row): AuditLogRecord {
   return {
     id: text(row.id),
@@ -858,6 +874,7 @@ export interface SqlRepos {
   notificationPreferences: NotificationPreferenceRepo;
   emailOutbox: EmailOutboxRepo;
   gatewayTeardownJobs: GatewayTeardownJobRepo;
+  accountRecoveryJobs: AccountRecoveryJobRepo;
   auditLogs: AuditLogRepo;
   settings: SettingRepo;
   emailTemplates: EmailTemplateRepo;
@@ -3375,6 +3392,131 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       )) > 0,
   };
 
+  /* ── accountRecoveryJobs ────────────────────────────────────────────── */
+
+  const accountRecoveryJobs: AccountRecoveryJobRepo = {
+    upsertPending: async (userId, now) =>
+      inTransaction(async (tx) => {
+        // Keep the upsert and returned ownership token in one transaction.
+        // The affectedRows count of an upsert is never an ownership signal.
+        await execute(
+          tx,
+          upsertSql(
+            dialect,
+            'account_recovery_jobs',
+            [
+              'id',
+              'user_id',
+              'status',
+              'attempts',
+              'next_attempt_at',
+              'last_error',
+              'created_at',
+              'updated_at',
+              'generation',
+            ],
+            'user_id',
+            ['status', 'attempts', 'next_attempt_at', 'last_error', 'updated_at', 'generation'],
+          ),
+          [newId(), userId, 'pending', 0, now, null, now, now, newId()],
+        );
+        const row = await queryOne(tx, 'SELECT * FROM account_recovery_jobs WHERE user_id = ?', [
+          userId,
+        ]);
+        if (!row) {
+          throw new Error(
+            'accountRecoveryJobs.upsertPending: row vanished immediately after upsert',
+          );
+        }
+        return mapAccountRecoveryJob(row);
+      }),
+
+    findByUser: async (userId) => {
+      const row = await queryOne(exec, 'SELECT * FROM account_recovery_jobs WHERE user_id = ?', [
+        userId,
+      ]);
+      return row ? mapAccountRecoveryJob(row) : null;
+    },
+
+    claimDue: async (now, limit) =>
+      inTransaction(async (tx) => {
+        const ids = (
+          await queryAll(
+            tx,
+            `SELECT id FROM account_recovery_jobs
+             WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+             ORDER BY ${nullsFirstAsc('next_attempt_at')}, created_at ASC
+             LIMIT ?${FOR_UPDATE_SKIP_LOCKED}`,
+            [now, Math.max(1, Math.floor(limit))],
+          )
+        ).map((row) => text(row.id));
+        if (ids.length === 0) return [];
+        await execute(
+          tx,
+          `UPDATE account_recovery_jobs
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?
+           WHERE id IN (${placeholders(ids.length)}) AND status = 'pending'`,
+          [nowIso(), newId(), ...ids],
+        );
+        const rows = await queryAll(
+          tx,
+          `SELECT * FROM account_recovery_jobs WHERE id IN (${placeholders(ids.length)})`,
+          ids,
+        );
+        return rows.map(mapAccountRecoveryJob);
+      }),
+
+    claimPending: async (job) => {
+      const generation = newId();
+      const at = nowIso();
+      // A matching row always changes status and token, including with MySQL
+      // CLIENT_FOUND_ROWS. Upsert affectedRows is never an ownership signal.
+      const changed = await execute(
+        exec,
+        `UPDATE account_recovery_jobs
+         SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?
+         WHERE id = ? AND generation = ? AND status = 'pending'`,
+        [at, generation, job.id, job.generation],
+      );
+      return changed > 0
+        ? {
+            ...job,
+            generation,
+            status: 'sending',
+            attempts: job.attempts + 1,
+            updated_at: at,
+          }
+        : null;
+    },
+
+    deleteClaimed: async (job) =>
+      (await execute(
+        exec,
+        "DELETE FROM account_recovery_jobs WHERE id = ? AND generation = ? AND status = 'sending'",
+        [job.id, job.generation],
+      )) > 0,
+
+    reschedule: async (job, nextAttemptAt, lastError) =>
+      (await execute(
+        exec,
+        `UPDATE account_recovery_jobs
+         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ?
+         WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [nextAttemptAt, lastError, nowIso(), job.id, job.generation],
+      )) > 0,
+
+    releaseStale: async (olderThan) =>
+      execute(
+        exec,
+        `UPDATE account_recovery_jobs SET status = 'pending', next_attempt_at = ?, updated_at = ?
+         WHERE status = 'sending' AND updated_at <= ?`,
+        [nowIso(), nowIso(), olderThan],
+      ),
+
+    deleteByUser: async (userId) =>
+      (await execute(exec, 'DELETE FROM account_recovery_jobs WHERE user_id = ?', [userId])) > 0,
+  };
+
   /* ── auditLogs ──────────────────────────────────────────────────────── */
 
   const auditLogs: AuditLogRepo = {
@@ -3741,6 +3883,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     notificationPreferences,
     emailOutbox,
     gatewayTeardownJobs,
+    accountRecoveryJobs,
     auditLogs,
     settings,
     emailTemplates,
@@ -3837,6 +3980,7 @@ class SqlStore implements NexusStore {
   readonly notificationPreferences: NotificationPreferenceRepo;
   readonly emailOutbox: EmailOutboxRepo;
   readonly gatewayTeardownJobs: GatewayTeardownJobRepo;
+  readonly accountRecoveryJobs: AccountRecoveryJobRepo;
   readonly auditLogs: AuditLogRepo;
   readonly settings: SettingRepo;
   readonly emailTemplates: EmailTemplateRepo;
@@ -3886,6 +4030,7 @@ class SqlStore implements NexusStore {
     this.notificationPreferences = repos.notificationPreferences;
     this.emailOutbox = repos.emailOutbox;
     this.gatewayTeardownJobs = repos.gatewayTeardownJobs;
+    this.accountRecoveryJobs = repos.accountRecoveryJobs;
     this.auditLogs = repos.auditLogs;
     this.settings = repos.settings;
     this.emailTemplates = repos.emailTemplates;

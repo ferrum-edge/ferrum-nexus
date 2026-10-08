@@ -1187,7 +1187,7 @@ describe('upstream destination policy', () => {
     await expectSpecInvalidAsync(() =>
       assertUpstreamAllowed(named, {
         allowPrivate: true,
-        getGatewayPublicUrl: async () => 'https://gateway.example.test/',
+        getGatewayPublicUrls: async () => ['https://gateway.example.test/'],
         resolve: neverResolve,
       }),
     );
@@ -1197,7 +1197,7 @@ describe('upstream destination policy', () => {
     await expectSpecInvalidAsync(() =>
       assertUpstreamAllowed(alias, {
         allowPrivate: true,
-        getGatewayPublicUrl: async () => 'https://gateway.example.test/',
+        getGatewayPublicUrls: async () => ['https://gateway.example.test/'],
         resolve: (host) =>
           Promise.resolve([
             {
@@ -1207,6 +1207,47 @@ describe('upstream destination policy', () => {
           ]),
       }),
     );
+  });
+
+  it('refuses a mapped or NAT64 literal that embeds the gateway address', async () => {
+    // The gateway's public origin is the IPv4 93.184.216.34; an IPv4-mapped or
+    // NAT64 literal is textually different but delivers to the same address.
+    for (const url of ['http://[::ffff:5db8:d822]/', 'http://[64:ff9b::5db8:d822]/']) {
+      const upstream = parseUpstreamUrl(url);
+      assert.ok(upstream, url);
+      await expectSpecInvalidAsync(() =>
+        assertUpstreamAllowed(upstream, {
+          allowPrivate: true,
+          getGatewayPublicUrls: async () => ['http://93.184.216.34/'],
+          resolve: neverResolve,
+        }),
+      );
+    }
+  });
+
+  it('refuses an AAAA answer that embeds the gateway address', async () => {
+    const upstream = parseUpstreamUrl('https://alias.example.test');
+    assert.ok(upstream);
+    await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(upstream, {
+        allowPrivate: true,
+        getGatewayPublicUrls: async () => ['http://93.184.216.34/'],
+        resolve: () => Promise.resolve([{ address: '::ffff:5db8:d822', family: 6 as const }]),
+      }),
+    );
+  });
+
+  it('fails closed when a gateway origin cannot be resolved', async () => {
+    const upstream = parseUpstreamUrl('https://api.example.com');
+    assert.ok(upstream);
+    const error = await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(upstream, {
+        allowPrivate: true,
+        getGatewayPublicUrls: async () => ['https://gateway.example.test/'],
+        resolve: neverResolve,
+      }),
+    );
+    assert.equal((error.details as { reason?: string }).reason, 'gateway_unresolvable');
   });
 
   it('refuses a fully-qualified or mixed-case denylisted name before any lookup', async () => {

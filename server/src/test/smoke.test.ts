@@ -4221,6 +4221,77 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.ok(pending.total >= 1);
     });
 
+    /* ── account recovery jobs ────────────────────────────────────────── */
+
+    it('accountRecoveryJobs: one row per user, reset rather than duplicated', async () => {
+      const user = await makeUser();
+      const first = await store.accountRecoveryJobs.upsertPending(user.id, nowIso());
+      assert.equal(first.user_id, user.id);
+      assert.equal(first.status, 'pending');
+      assert.equal(first.attempts, 0);
+      assert.equal(first.last_error, null);
+      assert.deepEqual(await store.accountRecoveryJobs.findByUser(user.id), first);
+
+      const firstClaim = await store.accountRecoveryJobs.claimPending(first);
+      assert.ok(firstClaim);
+      await store.accountRecoveryJobs.reschedule(firstClaim, isoInSeconds(600), 'edge unreachable');
+      assert.equal(
+        (await store.accountRecoveryJobs.findByUser(user.id))?.last_error,
+        'edge unreachable',
+      );
+
+      const second = await store.accountRecoveryJobs.upsertPending(user.id, nowIso());
+      assert.equal(second.id, first.id, 'the same row is reused');
+      assert.notEqual(second.generation, first.generation);
+      assert.notEqual(second.generation, firstClaim.generation);
+      assert.equal(second.status, 'pending');
+      assert.equal(second.attempts, 0);
+      assert.equal(second.last_error, null);
+
+      assert.equal(await store.accountRecoveryJobs.deleteByUser(user.id), true);
+      assert.equal(await store.accountRecoveryJobs.findByUser(user.id), null);
+      assert.equal(await store.accountRecoveryJobs.deleteByUser(user.id), false);
+    });
+
+    it('accountRecoveryJobs: claims a due job exactly once, then deletes it', async () => {
+      const user = await makeUser();
+      const job = await store.accountRecoveryJobs.upsertPending(user.id, nowIso());
+
+      const claimed = await store.accountRecoveryJobs.claimDue(nowIso(), 50);
+      const mine = claimed.filter((row) => row.user_id === user.id);
+      assert.equal(mine.length, 1);
+      assert.equal(mine[0]?.status, 'sending');
+      assert.equal(mine[0]?.attempts, 1);
+      const again = await store.accountRecoveryJobs.claimDue(nowIso(), 50);
+      assert.equal(again.filter((row) => row.user_id === user.id).length, 0);
+
+      assert.ok(mine[0]);
+      await store.accountRecoveryJobs.reschedule(mine[0], isoInSeconds(-1), 'edge 500');
+      const retryable = await store.accountRecoveryJobs.findByUser(user.id);
+      assert.equal(retryable?.status, 'pending');
+      assert.equal(retryable?.last_error, 'edge 500');
+
+      const reclaimed = await store.accountRecoveryJobs.claimDue(nowIso(), 50);
+      const currentClaim = reclaimed.find((row) => row.id === job.id);
+      assert.ok(currentClaim);
+      assert.equal(currentClaim.attempts, 2);
+      assert.equal(await store.accountRecoveryJobs.deleteClaimed(mine[0]), false);
+      assert.equal(await store.accountRecoveryJobs.deleteClaimed(currentClaim), true);
+      assert.equal(await store.accountRecoveryJobs.deleteClaimed(currentClaim), false);
+      assert.equal(await store.accountRecoveryJobs.findByUser(user.id), null);
+    });
+
+    it('accountRecoveryJobs: releaseStale returns stuck claims to pending', async () => {
+      const user = await makeUser();
+      await store.accountRecoveryJobs.upsertPending(user.id, nowIso());
+      const claimed = await store.accountRecoveryJobs.claimDue(nowIso(), 50);
+      assert.equal(claimed.find((row) => row.user_id === user.id)?.status, 'sending');
+
+      assert.ok((await store.accountRecoveryJobs.releaseStale(isoInSeconds(60))) >= 1);
+      assert.equal((await store.accountRecoveryJobs.findByUser(user.id))?.status, 'pending');
+      await store.accountRecoveryJobs.deleteByUser(user.id);
+    });
+
     /* ── audit logs ───────────────────────────────────────────────────── */
 
     it('audit service: normalizes time bounds and decorates actors on every adapter', async () => {

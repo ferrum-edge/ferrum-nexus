@@ -10,11 +10,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 - **Tighten account linking and gateway write controls** (#544). Email verification
   alone no longer authorizes SSO linking; the first trusted password reset revokes
-  existing account and application credentials. Manual administrator promotions now
-  check linked identity trust at every privilege increase. Publishing refuses an
-  upstream that names or resolves to the configured gateway origin. Credential
-  mutations and notification reads are rate-limited per account, and unchanged
-  notification reads no longer add audit rows.
+  existing account and application credentials, canceling the account's pending
+  access requests and recording the revocation durably so an unreachable gateway is
+  retried rather than skipped. Manual administrator promotions now check linked
+  identity trust at every privilege increase. Publishing refuses an upstream that
+  names or resolves to any of the gateway's own origins (public URL, environment
+  URL, or Admin API host), canonicalizing IPv4-mapped, NAT64 and 6to4 addresses
+  first. Credential mutations and notification reads are rate-limited per account,
+  and unchanged notification reads no longer add audit rows.
 
 ## [0.5.0] - 2026-10-08
 

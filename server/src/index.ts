@@ -45,6 +45,11 @@ import { environmentWithEnvFile, type EnvOverride } from './config/env-file.js';
 import { loadConfig, type NexusConfig } from './config/index.js';
 import { createConsumerProvisioner } from './credentials/consumers.js';
 import { createCredentialsService, type CredentialsService } from './credentials/service.js';
+import {
+  createAccountRecoveryWorker,
+  runAccountRecovery,
+  type AccountRecoveryWorker,
+} from './credentials/account-recovery.js';
 import { createTeardownWorker, type TeardownWorker } from './credentials/teardown-worker.js';
 import { createStore } from './db/index.js';
 import type { NexusStore } from './db/store.js';
@@ -120,6 +125,11 @@ export interface NexusServices {
    * one cycle deterministically in tests.
    */
   teardown: TeardownWorker;
+  /**
+   * Background recovery-revocation retrier for trusted password resets;
+   * `tick()` runs one cycle deterministically in tests.
+   */
+  recovery: AccountRecoveryWorker;
   /**
    * Hourly purge of expired sessions and verification tokens; `tick()` runs one
    * pass deterministically in tests.
@@ -203,6 +213,12 @@ export interface BuildServerDeps {
    * `services.teardown.tick()` themselves.
    */
   startTeardownWorker?: boolean;
+  /**
+   * Start the account-recovery revocation poller. Same default as
+   * {@link BuildServerDeps.startOutboxWorker}: tests drive
+   * `services.recovery.tick()` themselves.
+   */
+  startAccountRecoveryWorker?: boolean;
   /**
    * Start the expired-session and expired-token sweep. Same default as
    * {@link BuildServerDeps.startOutboxWorker}: tests drive
@@ -477,7 +493,19 @@ export async function buildServer(
     locks,
     log: warn,
   });
-  revokeForAccountRecovery = (user, ip) => credentials.revokeForAccountRecovery(user, ip);
+  revokeForAccountRecovery = async (user, ip) => {
+    const job = await deps.store.accountRecoveryJobs.findByUser(user.id);
+    if (!job) return 0;
+    const attempt = await runAccountRecovery({
+      credentials,
+      store: deps.store,
+      userId: user.id,
+      ip,
+      job,
+      log: warn,
+    });
+    return attempt.revoked;
+  };
   // One-off upgrade scan for `basicauth` appends an earlier release left
   // without a row. It must not keep the portal down: a failure is logged, the
   // service reports the scan `failed`, and — since completion is recorded only
@@ -622,6 +650,15 @@ export async function buildServer(
     log: warn,
   });
 
+  // Retries the credential revocation a trusted password reset owes when Edge
+  // refused it; credential issuance stays blocked while a job is outstanding —
+  // see `credentials/account-recovery.ts`.
+  const recovery = createAccountRecoveryWorker({
+    store: deps.store,
+    credentials,
+    log: warn,
+  });
+
   // Deletes the sessions and single-use links that have outlived `expires_at`.
   // Every read already ignores them; without this nothing ever removed them and
   // both tables grew for good (issue #338).
@@ -647,6 +684,7 @@ export async function buildServer(
     email,
     outbox,
     teardown,
+    recovery,
     expirySweep,
     notifications,
     settings,
@@ -947,6 +985,7 @@ export async function buildServer(
     await specChanges.stop();
     await outbox.stop();
     await teardown.stop();
+    await recovery.stop();
     await expirySweep.stop();
     await reconciliation.stop();
     await deps.edge.close();
@@ -959,6 +998,7 @@ export async function buildServer(
   // so no timer ever fires mid-assert.
   if (deps.startOutboxWorker ?? config.env !== 'test') outbox.start();
   if (deps.startTeardownWorker ?? config.env !== 'test') teardown.start();
+  if (deps.startAccountRecoveryWorker ?? config.env !== 'test') recovery.start();
   if (deps.startExpirySweepWorker ?? config.env !== 'test') expirySweep.start();
   if (deps.startReconciliationWorker ?? config.env !== 'test') reconciliation.start();
 

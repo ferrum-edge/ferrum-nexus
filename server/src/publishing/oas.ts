@@ -294,8 +294,18 @@ export interface UpstreamPolicy {
    * `.localhost`/`.home.arpa` name suffixes are refused.
    */
   allowPrivate: boolean;
-  /** Current public gateway URL, including an operator override when present. */
-  getGatewayPublicUrl?: () => Promise<string | null>;
+  /**
+   * Every origin that may be the gateway's own proxy listener: the stored
+   * `gateway.public_url` override, `FERRUM_GATEWAY_PUBLIC_URL`, and the Admin
+   * API host — unioned, so none of them replaces another. An upstream that
+   * names or resolves to any of them is refused.
+   *
+   * The Admin API host is included because the gateway often shares a host
+   * between its control and data planes; when no public URL is configured it is
+   * the only origin Nexus knows. A gateway origin that cannot be resolved fails
+   * the publish closed rather than silently skipping the check.
+   */
+  getGatewayPublicUrls?: () => Promise<string[]>;
   /**
    * Resolves a DNS name to its A/AAAA answers.
    *
@@ -326,6 +336,21 @@ function gatewayLoopError(host: string): NexusError {
   return specInvalid(
     `The upstream host '${host}' resolves to the gateway's public origin and would loop requests`,
     { field: 'upstream_url', host, reason: 'gateway_origin' },
+  );
+}
+
+/**
+ * `SPEC_INVALID` when a gateway origin cannot be resolved to compare against.
+ *
+ * The check fails closed: an unknown gateway answer cannot show the upstream to
+ * be distinct from the gateway, so the publish is refused rather than allowed.
+ */
+function gatewayUnresolvableError(host: string): NexusError {
+  return specInvalid(
+    `The gateway's own host '${host}' could not be resolved, so the upstream cannot be shown ` +
+      'to avoid looping back to the gateway; publishing is refused until the gateway resolves ' +
+      '(check FERRUM_ADMIN_URL, FERRUM_GATEWAY_PUBLIC_URL and DNS)',
+    { field: 'upstream_url', host, reason: 'gateway_unresolvable' },
   );
 }
 
@@ -367,7 +392,8 @@ function unresolvableUpstreamError(host: string): NexusError {
  * [`docs/security.md`](../../../docs/security.md).
  *
  * Deployments that legitimately front internal services opt out with
- * `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which short-circuits before any lookup.
+ * `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which skips the destination privacy
+ * checks — but never the gateway-origin loop guard above.
  *
  * @throws NexusError `SPEC_INVALID` naming the host and the setting to change.
  */
@@ -375,23 +401,34 @@ export async function assertUpstreamAllowed(
   upstream: SpecUpstream,
   policy: UpstreamPolicy,
 ): Promise<void> {
-  const gatewayPublicUrl = (await policy.getGatewayPublicUrl?.()) ?? null;
-  if (gatewayPublicUrl !== null) {
-    const gatewayUrl = new URL(gatewayPublicUrl);
-    const gatewayHost = gatewayUrl.hostname.replace(/^\[|\]$/g, '');
-    const upstreamHost = normalizeHost(upstream.host).replace(/^\[|\]$/g, '');
-    if (upstreamHost === normalizeHost(gatewayHost)) throw gatewayLoopError(upstream.host);
+  const gatewayOrigins = (await policy.getGatewayPublicUrls?.()) ?? [];
+  if (gatewayOrigins.length > 0) {
+    const upstreamAddresses = await addressesForHost(upstream.host, policy, false);
+    const upstreamHost = canonicalHost(upstream.host);
+    for (const origin of gatewayOrigins) {
+      let gatewayHost: string;
+      try {
+        gatewayHost = new URL(origin).hostname.replace(/^\[|\]$/g, '');
+      } catch {
+        // A malformed stored origin is rejected on write; skip it rather than
+        // fail every publish over a value this guard cannot read.
+        continue;
+      }
+      // Canonicalize both sides so an IPv4-mapped, NAT64 or 6to4 literal that
+      // embeds the gateway's IPv4 address — or an AAAA answer that does — is
+      // caught even though it is textually different.
+      if (canonicalHost(gatewayHost) === upstreamHost) throw gatewayLoopError(upstream.host);
 
-    const gatewayAddresses = await addressesForHost(gatewayHost, policy);
-    const upstreamAddresses = await addressesForHost(upstream.host, policy);
-    if (gatewayAddresses.some((address) => upstreamAddresses.includes(address))) {
-      throw gatewayLoopError(upstream.host);
+      const gatewayAddresses = await addressesForHost(gatewayHost, policy, true);
+      if (gatewayAddresses.some((address) => upstreamAddresses.includes(address))) {
+        throw gatewayLoopError(upstream.host);
+      }
     }
   }
 
-  // Opting in short-circuits before the network: the answer cannot change the
-  // outcome, and the documented local-development upstream
-  // (`host.docker.internal`) does not resolve from most hosts at all.
+  // Destination privacy is opted out of here. The gateway-origin loop guard
+  // above always ran, so a backend that names or resolves to the gateway is
+  // still refused even in this mode.
   if (policy.allowPrivate) return;
 
   if (!isPublicUpstreamHost(upstream.host)) throw privateUpstreamError(upstream.host);
@@ -415,15 +452,52 @@ export async function assertUpstreamAllowed(
 }
 
 /** Resolve host names to comparable addresses without changing the egress policy. */
-async function addressesForHost(host: string, policy: UpstreamPolicy): Promise<string[]> {
+async function addressesForHost(
+  host: string,
+  policy: UpstreamPolicy,
+  required: boolean,
+): Promise<string[]> {
   const normalized = normalizeHost(host).replace(/^\[|\]$/g, '');
-  if (isIP(normalized) !== 0) return [normalized];
+  if (isIP(normalized) !== 0) return [canonicalAddress(normalized)];
+  let resolved: ResolvedAddress[];
   try {
-    const resolved = await policy.resolve(normalized);
-    return resolved.map((entry) => entry.address.toLowerCase());
+    resolved = await policy.resolve(normalized);
   } catch {
+    if (required) throw gatewayUnresolvableError(host);
     return [];
   }
+  if (required && resolved.length === 0) throw gatewayUnresolvableError(host);
+  return resolved.map((entry) => canonicalAddress(entry.address));
+}
+
+/**
+ * The comparable form of a host: a canonical address when it is an IP literal,
+ * otherwise the normalized name. Two spellings that name one destination —
+ * `API.INTERNAL.` and `api.internal`, or `93.184.216.34` and its IPv4-mapped
+ * `::ffff:5db8:d822` — produce the same value.
+ */
+function canonicalHost(host: string): string {
+  const bare = host.replace(/^\[|\]$/g, '');
+  return isIP(bare) === 0 ? normalizeHost(bare) : canonicalAddress(bare);
+}
+
+/**
+ * The comparable spelling of an IP literal.
+ *
+ * An IPv6 address that carries the IPv4 address the packet is really delivered
+ * to — IPv4-mapped (`::ffff:93.184.216.34`), NAT64 (`64:ff9b::5db8:d822`) or
+ * 6to4 (`2002:5db8:d822::`) — reads as that IPv4 address, so it compares equal
+ * to the bare literal. Any other IPv6 address is expanded to its eight groups,
+ * so the several textual forms of one address compare equal.
+ */
+function canonicalAddress(address: string): string {
+  const bare = address.replace(/^\[|\]$/g, '').toLowerCase();
+  const version = isIP(bare);
+  if (version === 4) return bare;
+  if (version !== 6) return bare;
+  const hextets = ipv6Hextets(bare);
+  if (hextets === null) return bare;
+  return embeddedIpv4(hextets) ?? hextets.map((group) => group.toString(16)).join(':');
 }
 
 /**

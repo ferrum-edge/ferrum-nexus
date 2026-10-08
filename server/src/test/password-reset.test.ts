@@ -144,8 +144,8 @@ describe('password reset', () => {
   });
 
   it('revokes existing account and application credentials when reset proves the address', async () => {
-    const squatted = await harness.registerUser({ email: 'reclaimed@example.test' });
-    const applicationResponse = await harness.authed(squatted, {
+    const account = await harness.registerUser({ email: 'reclaimed@example.test' });
+    const applicationResponse = await harness.authed(account, {
       method: 'POST',
       url: '/api/applications',
       payload: { name: 'Old application' },
@@ -154,14 +154,14 @@ describe('password reset', () => {
     const applicationId = applicationResponse.json<{ application: { id: string } }>().application
       .id;
 
-    const accountCredential = await harness.authed(squatted, {
+    const accountCredential = await harness.authed(account, {
       method: 'POST',
       url: '/api/credentials',
       payload: { credential_type: 'keyauth' },
     });
     assert.equal(accountCredential.statusCode, 201, accountCredential.body);
     const accountId = accountCredential.json<IssueCredentialResponse>().credential.id;
-    const appCredential = await harness.authed(squatted, {
+    const appCredential = await harness.authed(account, {
       method: 'POST',
       url: '/api/credentials',
       payload: { credential_type: 'keyauth', application_id: applicationId },
@@ -171,7 +171,7 @@ describe('password reset', () => {
 
     const token = newId();
     await harness.store.verificationTokens.create({
-      user_id: squatted.user.id,
+      user_id: account.user.id,
       token_hash: harness.app.nexus.crypto.hashToken(token),
       purpose: 'password_reset',
       expires_at: isoInSeconds(3600),
@@ -186,7 +186,7 @@ describe('password reset', () => {
     assert.equal((await harness.store.credentials.findById(accountId))?.status, 'revoked');
     assert.equal((await harness.store.credentials.findById(appCredentialId))?.status, 'revoked');
     assert.equal(
-      harness.edge.consumerByUsername(`nexus-user-${squatted.user.id}`)?.credentials.keyauth
+      harness.edge.consumerByUsername(`nexus-user-${account.user.id}`)?.credentials.keyauth
         ?.length,
       0,
     );
@@ -195,6 +195,51 @@ describe('password reset', () => {
         .keyauth?.length,
       0,
     );
+  });
+
+  it('retries the recovery revocation when Edge fails, then revokes once it recovers', async () => {
+    const account = await harness.registerUser({ email: 'delayed-recovery@example.test' });
+    const credential = await harness.authed(account, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(credential.statusCode, 201, credential.body);
+    const credentialId = credential.json<IssueCredentialResponse>().credential.id;
+
+    const token = newId();
+    await harness.store.verificationTokens.create({
+      user_id: account.user.id,
+      token_hash: harness.app.nexus.crypto.hashToken(token),
+      purpose: 'password_reset',
+      expires_at: isoInSeconds(3600),
+    });
+    // The gateway refuses the delete the recovery owes.
+    harness.edge.queueFailure(503, { error: 'down' }, '/credentials/keyauth/', 'DELETE');
+    const reset = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/reset-password',
+      payload: { token, new_password: NEW_PASSWORD },
+    });
+    assert.equal(reset.statusCode, 200, reset.body);
+
+    // The reset committed, the revocation did not: it is owed, and issuance is
+    // blocked until it lands.
+    assert.notEqual((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+    assert.notEqual(await harness.store.accountRecoveryJobs.findByUser(account.user.id), null);
+    const resignedIn = await harness.loginUser('delayed-recovery@example.test', NEW_PASSWORD);
+    const blocked = await harness.authed(resignedIn, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'basicauth' },
+    });
+    assert.equal(blocked.statusCode, 409, blocked.body);
+
+    // The worker retries against a recovered gateway and settles the debt.
+    const tick = await harness.services.recovery.tick();
+    assert.equal(tick.completed, 1);
+    assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+    assert.equal(await harness.store.accountRecoveryJobs.findByUser(account.user.id), null);
   });
 
   it('revokes an earlier link when a newer one is issued', async (t) => {

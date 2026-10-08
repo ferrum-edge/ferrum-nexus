@@ -450,6 +450,27 @@ export interface GatewayTeardownJobRecord extends GatewayTeardownState {
   created_at: IsoTimestamp;
 }
 
+/**
+ * An `account_recovery_jobs` row — one outstanding recovery revocation.
+ *
+ * At most one row exists per user (`user_id` is unique). The row is the durable
+ * marker that a trusted password reset owes a revocation, so credential
+ * issuance is refused while it exists and a worker retries until it is gone.
+ * There is no `done` state: success deletes the row.
+ */
+export interface AccountRecoveryJobRecord {
+  id: Uuid;
+  /** Opaque ownership token, replaced on every enqueue and every claim. Internal only. */
+  generation: string;
+  user_id: Uuid;
+  status: 'pending' | 'sending';
+  attempts: number;
+  next_attempt_at: IsoTimestamp | null;
+  last_error: string | null;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
 /** An `audit_logs` row (append-only; without the joined actor summary). */
 export type AuditLogRecord = Omit<AuditLog, 'actor'>;
 
@@ -1691,6 +1712,51 @@ export interface GatewayTeardownJobRepo {
   deleteByUser(userId: Uuid): Promise<boolean>;
 }
 
+/**
+ * Durable recovery revocations owed after a trusted password reset.
+ *
+ * The row is written in the same transaction as the reset, so a reset can never
+ * commit without the revocation it owes. A worker drains it with the same
+ * claim/backoff protocol as the email outbox; success deletes the row, and a
+ * pending row makes credential issuance refuse until the revocation lands.
+ */
+export interface AccountRecoveryJobRepo {
+  /**
+   * Queue (or re-queue) the recovery revocation owed for `userId`.
+   *
+   * `user_id` is unique, so an account already carrying a job has that row reset
+   * to `pending` with `attempts = 0` and `next_attempt_at = now` instead of
+   * gaining a second one. A fresh opaque generation invalidates every old
+   * pending snapshot and claim.
+   */
+  upsertPending(userId: Uuid, now: IsoTimestamp): Promise<AccountRecoveryJobRecord>;
+  findByUser(userId: Uuid): Promise<AccountRecoveryJobRecord | null>;
+  /**
+   * Atomically claim up to `limit` rows that are `pending` with
+   * `next_attempt_at <= now`, flipping them to `sending` and incrementing
+   * `attempts` and replacing `generation`. Concurrent workers cannot both win
+   * the same pending generation.
+   */
+  claimDue(now: IsoTimestamp, limit: number): Promise<AccountRecoveryJobRecord[]>;
+  /** Claim precisely this pending generation for an inline attempt, ignoring backoff. */
+  claimPending(job: AccountRecoveryJobRecord): Promise<AccountRecoveryJobRecord | null>;
+  /** Delete only the supplied sending generation; false means ownership was lost. */
+  deleteClaimed(job: AccountRecoveryJobRecord): Promise<boolean>;
+  /** Return only this sending generation to pending; false means ownership was lost. */
+  reschedule(
+    job: AccountRecoveryJobRecord,
+    nextAttemptAt: IsoTimestamp,
+    lastError: string,
+  ): Promise<boolean>;
+  /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
+  releaseStale(olderThan: IsoTimestamp): Promise<number>;
+  /**
+   * Drop the job for a user. Used when the account is gone: `false` when there
+   * was nothing queued.
+   */
+  deleteByUser(userId: Uuid): Promise<boolean>;
+}
+
 /** Append-only audit trail. */
 export interface AuditLogRepo {
   /** Append one record. There is no update or delete. */
@@ -1946,6 +2012,7 @@ export interface NexusStore {
   readonly notificationPreferences: NotificationPreferenceRepo;
   readonly emailOutbox: EmailOutboxRepo;
   readonly gatewayTeardownJobs: GatewayTeardownJobRepo;
+  readonly accountRecoveryJobs: AccountRecoveryJobRepo;
   readonly auditLogs: AuditLogRepo;
   readonly settings: SettingRepo;
   readonly emailTemplates: EmailTemplateRepo;

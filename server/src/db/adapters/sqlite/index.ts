@@ -145,6 +145,8 @@ import type {
   EmailTemplateRecord,
   EmailTemplateRepo,
   EnqueueEmailInput,
+  AccountRecoveryJobRecord,
+  AccountRecoveryJobRepo,
   GatewayIdentityRecord,
   GatewayIdentityRepo,
   GatewayTeardownJobFilter,
@@ -611,6 +613,20 @@ function mapOutbox(row: Row): EmailOutboxRecord {
   };
 }
 
+function mapAccountRecoveryJob(row: Row): AccountRecoveryJobRecord {
+  return {
+    id: text(row.id),
+    generation: text(row.generation),
+    user_id: text(row.user_id),
+    status: text(row.status) as AccountRecoveryJobRecord['status'],
+    attempts: int(row.attempts),
+    next_attempt_at: textOrNull(row.next_attempt_at),
+    last_error: textOrNull(row.last_error),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
 function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
   return {
     id: text(row.id),
@@ -875,6 +891,7 @@ class SqliteStore implements NexusStore {
     this.notificationPreferences = guardRepo(this.notificationPreferences, mediate);
     this.emailOutbox = guardRepo(this.emailOutbox, mediate, ['enqueue', 'claimDue']);
     this.gatewayTeardownJobs = guardRepo(this.gatewayTeardownJobs, mediate);
+    this.accountRecoveryJobs = guardRepo(this.accountRecoveryJobs, mediate);
     this.auditLogs = guardRepo(this.auditLogs, mediate);
     this.settings = guardRepo(this.settings, mediate);
     this.emailTemplates = guardRepo(this.emailTemplates, mediate);
@@ -3375,6 +3392,117 @@ class SqliteStore implements NexusStore {
         "DELETE FROM gateway_teardown_jobs WHERE id = ? AND generation = ? AND status = 'sending'",
         [job.id, job.generation],
       ) > 0,
+  };
+
+  /* ── accountRecoveryJobs ──────────────────────────────────────────────── */
+
+  readonly accountRecoveryJobs: AccountRecoveryJobRepo = {
+    upsertPending: async (userId, now) => {
+      // `user_id` is unique, so the conflict target is the account rather than
+      // the row id: a later reset resets the outstanding job instead of
+      // queueing a duplicate revocation.
+      execute(
+        this.db,
+        `INSERT INTO account_recovery_jobs
+           (id, user_id, status, attempts, next_attempt_at, last_error, created_at, updated_at,
+            generation)
+         VALUES (?, ?, 'pending', 0, ?, NULL, ?, ?, ?)
+         ON CONFLICT (user_id) DO UPDATE SET
+           generation = excluded.generation,
+           status = 'pending',
+           attempts = 0,
+           next_attempt_at = excluded.next_attempt_at,
+           last_error = NULL,
+           updated_at = excluded.updated_at`,
+        [newId(), userId, now, now, now, newId()],
+      );
+      const job = await this.accountRecoveryJobs.findByUser(userId);
+      if (!job) {
+        throw new Error('accountRecoveryJobs.upsertPending: row vanished immediately after upsert');
+      }
+      return job;
+    },
+
+    findByUser: async (userId) => {
+      const row = queryOne(this.db, 'SELECT * FROM account_recovery_jobs WHERE user_id = ?', [
+        userId,
+      ]);
+      return row ? mapAccountRecoveryJob(row) : null;
+    },
+
+    claimDue: async (now, limit) => {
+      const claim = this.db.transaction((): AccountRecoveryJobRecord[] => {
+        const ids = queryAll(
+          this.db,
+          `SELECT id FROM account_recovery_jobs
+           WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+           ORDER BY next_attempt_at ASC, created_at ASC LIMIT ?`,
+          [now, Math.max(1, Math.floor(limit))],
+        ).map((row) => text(row.id));
+        if (ids.length === 0) return [];
+        execute(
+          this.db,
+          `UPDATE account_recovery_jobs
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?
+           WHERE id IN (${ids.map(() => '?').join(', ')}) AND status = 'pending'`,
+          [nowIso(), newId(), ...ids],
+        );
+        return queryAll(
+          this.db,
+          `SELECT * FROM account_recovery_jobs WHERE id IN (${ids.map(() => '?').join(', ')})`,
+          ids,
+        ).map(mapAccountRecoveryJob);
+      });
+      return claim();
+    },
+
+    claimPending: async (job) => {
+      const generation = newId();
+      const at = nowIso();
+      const changed = execute(
+        this.db,
+        `UPDATE account_recovery_jobs
+         SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?
+         WHERE id = ? AND generation = ? AND status = 'pending'`,
+        [at, generation, job.id, job.generation],
+      );
+      return changed > 0
+        ? {
+            ...job,
+            generation,
+            status: 'sending',
+            attempts: job.attempts + 1,
+            updated_at: at,
+          }
+        : null;
+    },
+
+    deleteClaimed: async (job) =>
+      execute(
+        this.db,
+        "DELETE FROM account_recovery_jobs WHERE id = ? AND generation = ? AND status = 'sending'",
+        [job.id, job.generation],
+      ) > 0,
+
+    reschedule: async (job, nextAttemptAt, lastError) =>
+      execute(
+        this.db,
+        `UPDATE account_recovery_jobs
+         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ?
+         WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [nextAttemptAt, lastError, nowIso(), job.id, job.generation],
+      ) > 0,
+
+    releaseStale: async (olderThan) =>
+      execute(
+        this.db,
+        `UPDATE account_recovery_jobs SET status = 'pending', next_attempt_at = ?, updated_at = ?
+         WHERE status = 'sending' AND updated_at <= ?`,
+        [nowIso(), nowIso(), olderThan],
+      ),
+
+    deleteByUser: async (userId) =>
+      execute(this.db, 'DELETE FROM account_recovery_jobs WHERE user_id = ?', [userId]) > 0,
   };
 
   /* ── auditLogs ────────────────────────────────────────────────────────── */

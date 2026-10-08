@@ -193,4 +193,15 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
       mongodb: 'fec6a7b85aa729ba8b7d33c5c9d747d0fb1f2b016de7ed67e0b6ce5fd8980f69',
     },
   },
+  {
+    id: '013_account_recovery_jobs',
+    // Not yet shipped: the next release freezes these.
+    release: null,
+    sha256: {
+      sqlite: '16125001cdbde5fa250657142e5002550a71621d5a7822e231c082e3b2f0fcf5',
+      pg: '16125001cdbde5fa250657142e5002550a71621d5a7822e231c082e3b2f0fcf5',
+      mysql: '3c687ee6c378ae279429b6c820eb0176ad348501b5e86f043b19b20107fe7e42',
+      mongodb: '06dfd570f97f2247f41f2ce378d929e328ca21eac0f45aa4e910837aab079a02',
+    },
+  },
 ];

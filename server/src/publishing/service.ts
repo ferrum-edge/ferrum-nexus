@@ -1058,7 +1058,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   const upstreamPolicy: UpstreamPolicy = {
     allowPrivate: config.allowPrivateUpstreams,
     resolve: deps.upstreamResolver,
-    getGatewayPublicUrl: () => settings.getGatewayPublicUrl(),
+    getGatewayPublicUrls: () => settings.listGatewayPublicUrls(),
   };
 
   function assertCanAdminister(actor: UserRecord, api: ApiRecord): void {

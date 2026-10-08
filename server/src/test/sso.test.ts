@@ -566,7 +566,7 @@ describe('single sign-on', () => {
     });
     if (proven) {
       const at = new Date().toISOString();
-      await h.store.emailProofs.upsert(account.id, email, 'verification_link', at);
+      await h.store.emailProofs.upsert(account.id, email, 'password_reset', at);
     }
     return account;
   }
@@ -1100,7 +1100,7 @@ describe('single sign-on', () => {
     await h.store.emailProofs.upsert(
       local.user.id,
       local.user.email,
-      'verification_link',
+      'password_reset',
       new Date().toISOString(),
     );
     // corp leaves linked accounts their password.
@@ -1629,6 +1629,8 @@ describe('single sign-on', () => {
       payload: { role: 'super_admin' },
     });
     assert.equal(elevated.statusCode, 409, elevated.body);
+    // The refusal names the role actually being conferred.
+    assert.match(elevated.body, /promoting this account to super_admin/);
     assert.equal((await h.store.users.findById(target.id))?.role, 'client');
 
     const promotion = await h.authed(founder, {
