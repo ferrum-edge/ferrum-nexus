@@ -501,7 +501,9 @@ count, and when they fall short the verdict is `data_plane_clock_skew` and the
 guarantee is withheld. Keep Nexus and the control plane on synchronized time. When
 the gateway sends no `Date` header, Nexus cannot see a control-plane clock running
 behind its own, so it never reads stream age from `connected_at` alone: only data
-planes it has itself seen listed for 60 seconds count.
+planes it has itself seen listed for 60 seconds count. Slew the control plane's clock
+rather than stepping it forward: a clock that was behind when a stream connected and
+is corrected before Nexus reads it overstates that stream's age.
 
 **What the stream age does not cover.** Edge v0.9.14 reports no stream liveness, so a
 stale stream that has not yet been dropped is indistinguishable from a live one. If a
