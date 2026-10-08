@@ -5873,6 +5873,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // issued — which is why the issue is followed by a re-check of it.
         const current = await loadApi(apiId);
         assertCanAdminister(actor, current);
+        // Refused before the existing test consumer is deleted below, while an
+        // account recovery of the provider blocks the issue that would follow.
+        // The issue checks again inside the consumer's key.
+        await credentials.assertIssuanceAllowed(actor.id);
 
         // Ownership first, durably, before the gateway is touched. This is
         // what the account teardown enumerates, so an identity whose first
@@ -5991,6 +5995,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             credentialType: CREDENTIAL_TYPE_FOR_PLUGIN[current.auth_plugin],
             label: label ?? `Test consumer for ${current.slug}`,
             ip,
+            // Refused inside the consumer's key while an account recovery of
+            // the provider still blocks issuance, as the account's own issue is.
+            recoveryGate: true,
           });
 
           // The flavour again, now the credential exists. An `auth_plugin` swap

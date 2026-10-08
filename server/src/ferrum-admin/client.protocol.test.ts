@@ -248,6 +248,59 @@ describe('Edge response contracts over HTTP sockets', () => {
     }
   });
 
+  const confirmedAbsenceReads: [string, (client: FerrumAdminClient) => Promise<unknown>][] = [
+    ['a verified consumer', (client) => client.consumers.verification('consumer-1')],
+    [
+      'a confirmed consumer',
+      (client) => client.consumers.get('consumer-1', { confirmedAbsence: true }),
+    ],
+  ];
+
+  for (const [name, read] of confirmedAbsenceReads) {
+    it(`reads ${name} as absent only from the Edge not-found answer`, async (t) => {
+      const { client, reply, requests, logs } = await fixture(t);
+      for (const body of [
+        '',
+        ' ',
+        '<html>private-canary</html>',
+        '{',
+        'null',
+        '[]',
+        '{}',
+        '"Consumer not found"',
+        JSON.stringify({ error: 'Not found' }),
+        JSON.stringify({ error: 'consumer not found' }),
+        JSON.stringify({ error: 'Proxy not found' }),
+        JSON.stringify({ detail: 'Consumer not found' }),
+        JSON.stringify({
+          message: 'Route GET:/consumers/consumer-1 not found',
+          error: 'Not Found',
+          statusCode: 404,
+        }),
+      ]) {
+        Object.assign(reply, { status: 404, body });
+        const before = requests.length;
+        await assert.rejects(read(client), (error: unknown) => {
+          assert.ok(protocolFailure(error) && isNexusError(error));
+          assert.equal((error.details as { reason: string }).reason, 'unconfirmed_absence');
+          return true;
+        });
+        assert.equal(requests.length, before + 1, 'no automatic retry');
+      }
+      assert.ok(!JSON.stringify(logs).includes('private-canary'));
+
+      // The `error` value is the acknowledgement; a field Edge adds beside it
+      // does not make a genuine absence unconfirmed.
+      for (const body of [
+        JSON.stringify({ error: 'Consumer not found' }),
+        JSON.stringify({ error: 'Consumer not found', code: 'not_found' }),
+      ]) {
+        Object.assign(reply, { status: 404, body });
+        assert.equal(await read(client), null);
+      }
+    });
+  }
+
   const resourceReads: [string, (client: FerrumAdminClient) => Promise<unknown>, unknown][] = [
     ['consumer', (client) => client.consumers.get('consumer-1'), consumer],
     ['proxy', (client) => client.proxies.get('proxy-1'), proxy],

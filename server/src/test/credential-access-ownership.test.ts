@@ -730,6 +730,46 @@ describe('credential and access ownership (issue #341)', () => {
       assert.deepEqual(groupsOf(owner.user.id), [], 'a re-enable does not restore it');
     });
 
+    it('never counts an ambiguous consumer 404 as a completed ACL removal', async () => {
+      const requestId = await requestAccess();
+      const { grant } = await approve(requestId);
+      const consumer = harness.edge.consumerByUsername(
+        consumerUsernameForUser(owner.user.id),
+        NAMESPACE,
+      );
+      assert.ok(consumer);
+      // A router or proxy in front of Edge, not Edge's own `Consumer not found`:
+      // the consumer still exists, so nothing proves its group is gone.
+      harness.edge.queueFailure(
+        404,
+        {
+          message: `Route GET:/consumers/${consumer.id}/verification not found`,
+          error: 'Not Found',
+          statusCode: 404,
+        },
+        `/consumers/${consumer.id}/verification`,
+        'GET',
+      );
+
+      const disabled = await harness.authed(founder, {
+        method: 'POST',
+        url: '/api/admin/god/disable-user',
+        payload: { user_id: owner.user.id, reason: 'Account compromised.', revoke_grants: true },
+      });
+      assert.equal(disabled.statusCode, 502, disabled.body);
+      const outcome = await auditFor('god.disable_user_complete', owner.user.id);
+      assert.deepEqual(outcome.failed_steps, ['revoke_grants']);
+      assert.equal(outcome.revoked_grants, 0);
+      const failedGrants = outcome.failed_grants as { grant_id: string; stage: string }[];
+      assert.deepEqual(
+        failedGrants.map((entry) => [entry.grant_id, entry.stage]),
+        [[grant.id, 'gateway']],
+      );
+      assert.equal((await harness.store.grants.findById(grant.id))?.status, 'revoked');
+      // The teardown that followed reached the real consumer and took the group off.
+      assert.deepEqual(groupsOf(owner.user.id), []);
+    });
+
     it('drops a stray group on re-enable when the teardown failed as well', async () => {
       const issued = await harness.authed(owner, {
         method: 'POST',

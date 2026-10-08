@@ -15,16 +15,24 @@ import {
   consumerUsernameForUser,
   MAX_PAGE_SIZE,
   type ApiErrorBody,
+  type CreateTestConsumerResponse,
   type ForgotPasswordResponse,
   type IssueCredentialResponse,
+  type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
 import {
   ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS,
   runAccountRecovery,
 } from '../credentials/account-recovery.js';
-import { isoInSeconds, newId } from '../lib/ids.js';
-import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './helpers.js';
+import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
+import {
+  buildTestApp,
+  SAMPLE_SPEC_YAML,
+  TEST_PASSWORD,
+  type TestApp,
+  type TestSession,
+} from './helpers.js';
 
 /** The body every `forgot-password` call must produce, whatever it decided. */
 const OK_BODY = { ok: true };
@@ -86,6 +94,25 @@ describe('password reset', () => {
       payload: { token, new_password: NEW_PASSWORD },
     });
     assert.equal(reset.statusCode, 200, reset.body);
+  }
+
+  /** Publish a `key_auth` API owned by `provider`, returning its id. */
+  async function publishAs(provider: TestSession, slug: string): Promise<string> {
+    const response = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: {
+        name: `API ${slug}`,
+        slug,
+        version: '1.0.0',
+        spec: SAMPLE_SPEC_YAML,
+        auth_plugin: 'key_auth',
+        requestable: true,
+        visibility: 'public',
+      },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    return response.json<PublishApiResponse>().api.id;
   }
 
   before(async () => {
@@ -516,6 +543,121 @@ describe('password reset', () => {
       credentials.list = list;
     }
     const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.equal(consumer?.credentials.keyauth?.length ?? 0, 0);
+  });
+
+  it('refuses a provider test consumer while a recovery blocks issuance', async () => {
+    const provider = await harness.registerUser({
+      email: 'recovering-provider@example.test',
+      role: 'provider',
+    });
+    const apiId = await publishAs(provider, 'recovering-provider');
+    await harness.store.accountRecoveryJobs.upsertPending(provider.user.id, nowIso());
+    try {
+      const refused = await harness.authed(provider, {
+        method: 'POST',
+        url: `/api/apis/${apiId}/test-consumer`,
+        payload: {},
+      });
+      assert.equal(refused.statusCode, 409, refused.body);
+      assert.equal(errorCode(refused.body), 'CONFLICT');
+    } finally {
+      await harness.store.accountRecoveryJobs.deleteByUser(provider.user.id);
+    }
+    const live = await harness.store.credentials.list({
+      user_id: provider.user.id,
+      status: 'active',
+    });
+    assert.equal(live.total, 0);
+    const consumer = harness.edge.consumerByUsername(`nexus-test-${apiId}`);
+    assert.equal(consumer?.credentials.keyauth?.length ?? 0, 0);
+  });
+
+  it('refuses to recreate a test consumer before deleting it while a recovery blocks', async () => {
+    const provider = await harness.registerUser({
+      email: 'recreating-provider@example.test',
+      role: 'provider',
+    });
+    const apiId = await publishAs(provider, 'recreating-provider');
+    const created = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/apis/${apiId}/test-consumer`,
+      payload: {},
+    });
+    assert.equal(created.statusCode, 201, created.body);
+    const existing = harness.edge.consumerByUsername(`nexus-test-${apiId}`);
+    assert.ok(existing);
+    const deletes = harness.edge.callsTo('DELETE', `/consumers/${existing.id}`).length;
+    await harness.store.accountRecoveryJobs.upsertPending(provider.user.id, nowIso());
+    try {
+      const refused = await harness.authed(provider, {
+        method: 'POST',
+        url: `/api/apis/${apiId}/test-consumer`,
+        payload: {},
+      });
+      assert.equal(refused.statusCode, 409, refused.body);
+      assert.equal(errorCode(refused.body), 'CONFLICT');
+    } finally {
+      await harness.store.accountRecoveryJobs.deleteByUser(provider.user.id);
+    }
+    // The refusal came before the delete: the provider's test consumer and its
+    // key are still there, for the recovery to revoke.
+    assert.equal(harness.edge.callsTo('DELETE', `/consumers/${existing.id}`).length, deletes);
+    const kept = harness.edge.consumerByUsername(`nexus-test-${apiId}`);
+    assert.equal(kept?.id, existing.id);
+    assert.equal(kept?.credentials.keyauth?.length, 1);
+  });
+
+  it('revokes a test-consumer key an in-flight issue saves after the recovery has listed', async () => {
+    const provider = await harness.registerUser({
+      email: 'in-flight-test-consumer@example.test',
+      role: 'provider',
+    });
+    const apiId = await publishAs(provider, 'in-flight-test-consumer');
+    const user = await harness.store.users.findById(provider.user.id);
+    assert.ok(user);
+    const consumers = harness.edgeClient.consumers;
+    const credentials = harness.store.credentials;
+    const append = consumers.addCredential.bind(consumers);
+    const list = credentials.list.bind(credentials);
+    const appended = barrier();
+    const listed = barrier();
+    let armed = false;
+    // As for the account's own issue: the test consumer's key is on the
+    // gateway, and its row is saved only once the recovery has listed. Only the
+    // registered identity names that consumer to the recovery's barrier.
+    consumers.addCredential = async (...args) => {
+      consumers.addCredential = append;
+      const consumer = await append(...args);
+      appended.release();
+      await listed.promise;
+      return consumer;
+    };
+    credentials.list = async (filter, options) => {
+      const page = await list(filter, options);
+      if (armed && filter.user_id === provider.user.id) listed.release();
+      return page;
+    };
+    try {
+      const creating = harness.authed(provider, {
+        method: 'POST',
+        url: `/api/apis/${apiId}/test-consumer`,
+        payload: {},
+      });
+      await appended.promise;
+      armed = true;
+      const revoked = await harness.services.credentials.revokeForAccountRecovery(user);
+      const created = await creating;
+      assert.equal(created.statusCode, 201, created.body);
+      const credential = created.json<CreateTestConsumerResponse>().credential;
+
+      assert.equal(revoked, 1);
+      assert.equal((await harness.store.credentials.findById(credential.id))?.status, 'revoked');
+    } finally {
+      consumers.addCredential = append;
+      credentials.list = list;
+    }
+    const consumer = harness.edge.consumerByUsername(`nexus-test-${apiId}`);
     assert.equal(consumer?.credentials.keyauth?.length ?? 0, 0);
   });
 

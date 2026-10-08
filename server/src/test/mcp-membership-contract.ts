@@ -14,6 +14,7 @@ import {
   type IssueCredentialResponse,
   type PublishApiResponse,
   type RepairGatewayReferencesResponse,
+  type RequestGrantToolsResponse,
 } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
@@ -305,6 +306,28 @@ export function runMcpMembershipContract(
       });
     }
 
+    /** A grant to one of the API's two tools, with a pending tool request for the other. */
+    async function toolRequestFixture(application: boolean) {
+      const who = await identity(application);
+      const api = await publish();
+      const ids = toolIds(api);
+      const grant = await approve(who.client, who.applicationId, api, [ids[0]!]);
+      const row = await target.store.consumers.findByUserAndNamespace(
+        who.client.user.id,
+        'nexus',
+        who.applicationId,
+      );
+      assert.ok(row);
+      const asked = await harness.authed(who.client, {
+        method: 'POST',
+        url: `/api/grants/${grant.id}/tool-requests`,
+        payload: { requested_tools: [ids[1]!], justification: 'More tools' },
+      });
+      assert.equal(asked.statusCode, 201, asked.body);
+      const pending = asked.json<RequestGrantToolsResponse>().access_request;
+      return { who, grant, row, pending };
+    }
+
     /** Simulate takeover of only the proxy lease, leaving inner keys intact. */
     async function loseProxyLease(key: string): Promise<void> {
       const fence = heldLeaseFences().find((lease) => lease.key === key);
@@ -429,6 +452,41 @@ export function runMcpMembershipContract(
         );
       });
 
+      it(`${scope}: does not read an ambiguous consumer 404 as an absent group`, async () => {
+        const f = await fixture(application);
+        f.live.acl_groups = [mcpToolGroupForApi(f.api.id, f.ids[0]!)];
+        const consumers = harness.edgeClient.consumers;
+        const get = consumers.get.bind(consumers);
+        const reads: unknown[] = [];
+        beforeFailedRemoval(f.live.id, async () => {
+          consumers.get = async (id, options) => {
+            if (id !== f.live.id) return get(id, options);
+            consumers.get = get;
+            reads.push(options);
+            // A router or proxy in front of Edge, not Edge's own `Consumer not
+            // found`: the consumer, and its group, are still there.
+            harness.edge.queueFailure(
+              404,
+              { error: 'Not Found' },
+              `/consumers/${f.live.id}`,
+              'GET',
+            );
+            return get(id, options);
+          };
+        });
+        patches.push(() => {
+          consumers.get = get;
+        });
+
+        assert.equal((await revoke(f.grant.id)).statusCode, 502);
+        assert.deepEqual(reads, [{ confirmedAbsence: true }]);
+        assert.equal((await target.store.grants.findById(f.grant.id))?.status, 'active');
+        assert.equal(await requestStatus(f.grant), 'approved');
+        const rollback = await details(AuditAction.ACCESS_REVOKE_ROLLBACK, f.grant.id);
+        assert.equal(rollback?.grant_restored, true);
+        assert.equal(rollback?.restore_skipped_reason, undefined);
+      });
+
       it(`${scope}: retries an audit-failed restore`, async () => {
         const f = await fixture(application);
         f.live.acl_groups = [mcpToolGroupForApi(f.api.id, f.ids[0]!)];
@@ -442,6 +500,158 @@ export function runMcpMembershipContract(
           true,
         );
         assert.equal((await revoke(f.grant.id)).statusCode, 200);
+      });
+
+      for (const slot of ['free', 'taken'] as const) {
+        it(`${scope}: restores the tool request it cancelled (slot ${slot})`, async () => {
+          const who = await identity(application);
+          const api = await publish();
+          const ids = toolIds(api);
+          const grant = await approve(who.client, who.applicationId, api, [ids[0]!]);
+          const row = await target.store.consumers.findByUserAndNamespace(
+            who.client.user.id,
+            'nexus',
+            who.applicationId,
+          );
+          assert.ok(row);
+          const asked = await harness.authed(who.client, {
+            method: 'POST',
+            url: `/api/grants/${grant.id}/tool-requests`,
+            payload: { requested_tools: [ids[1]!], justification: 'More tools' },
+          });
+          assert.equal(asked.statusCode, 201, asked.body);
+          const pending = asked.json<RequestGrantToolsResponse>().access_request;
+          const before = await target.store.accessRequests.findById(pending.id);
+          assert.ok(before);
+          const taken: { request?: AccessRequestRecord } = {};
+          beforeFailedRemoval(row.ferrum_consumer_id, async () => {
+            const cancelled = await target.store.accessRequests.findById(pending.id);
+            assert.equal(cancelled?.status, 'cancelled');
+            // The claim freed the identity's one pending slot; a newer request
+            // that took it must not be displaced by the rollback.
+            if (slot === 'taken') {
+              taken.request = await target.store.accessRequests.create({
+                api_id: api.id,
+                user_id: who.client.user.id,
+                application_id: who.applicationId,
+                justification: 'Asked again',
+                requested_tools: [ids[0]!],
+                status: 'pending',
+              });
+            }
+          });
+
+          const failed = await revoke(grant.id);
+          assert.equal(failed.statusCode, 502, failed.body);
+          assert.equal((await target.store.grants.findById(grant.id))?.status, 'active');
+          assert.equal(await requestStatus(grant), 'approved');
+          assert.equal(await countAudit(AuditAction.ACCESS_CANCEL, pending.id), 1);
+          const rollback = await details(AuditAction.ACCESS_REVOKE_ROLLBACK, grant.id);
+          assert.equal(rollback?.grant_restored, true);
+          const after = await target.store.accessRequests.findById(pending.id);
+          if (slot === 'taken') {
+            assert.equal(rollback?.tool_request_restored, undefined);
+            assert.equal(after?.status, 'cancelled');
+            const held = await target.store.accessRequests.findPendingByApiAndUser(
+              api.id,
+              who.client.user.id,
+              who.applicationId,
+            );
+            assert.ok(taken.request);
+            assert.equal(held?.id, taken.request.id);
+            return;
+          }
+          assert.equal(rollback?.tool_request_restored, pending.id);
+          assert.equal(after?.status, 'pending');
+          assert.equal(after?.grant_id, grant.id);
+          assert.deepEqual(after?.requested_tools, before.requested_tools);
+          assert.equal(after?.justification, before.justification);
+          assert.equal(after?.decided_by, before.decided_by);
+          assert.equal(after?.decided_at, before.decided_at);
+          assert.equal(after?.decision_note, before.decision_note);
+
+          // The restored request is the provider's to decide, as it was before.
+          const approved = await harness.authed(provider, {
+            method: 'POST',
+            url: `/api/access-requests/${pending.id}/approve`,
+            payload: {},
+          });
+          assert.equal(approved.statusCode, 200, approved.body);
+          assert.deepEqual((await target.store.grants.findById(grant.id))?.approved_tools, ids);
+        });
+      }
+
+      it(`${scope}: leaves the tool request cancelled while a recovery is pending`, async () => {
+        const t = await toolRequestFixture(application);
+        const userId = t.who.client.user.id;
+        beforeFailedRemoval(t.row.ferrum_consumer_id, async () => {
+          const cancelled = await target.store.accessRequests.findById(t.pending.id);
+          assert.equal(cancelled?.status, 'cancelled');
+          // A first trusted password reset commits while the revocation holds
+          // the request cancelled, so it finds nothing pending to cancel.
+          await target.store.accountRecoveryJobs.upsertPending(userId, nowIso());
+        });
+        try {
+          const failed = await revoke(t.grant.id);
+          assert.equal(failed.statusCode, 502, failed.body);
+          assert.equal((await target.store.grants.findById(t.grant.id))?.status, 'active');
+          const rollback = await details(AuditAction.ACCESS_REVOKE_ROLLBACK, t.grant.id);
+          assert.equal(rollback?.grant_restored, true);
+          assert.equal(rollback?.tool_request_restored, undefined);
+          assert.equal(rollback?.tool_request_skipped, 'account_recovery');
+          const after = await target.store.accessRequests.findById(t.pending.id);
+          assert.equal(after?.status, 'cancelled');
+        } finally {
+          await target.store.accountRecoveryJobs.deleteByUser(userId);
+        }
+      });
+
+      it(`${scope}: names the restored tool request after a lost acknowledgement`, async () => {
+        const t = await toolRequestFixture(application);
+        const transaction = target.store.transaction.bind(target.store);
+        let dropped = false;
+        target.store.transaction = async <T>(
+          body: (tx: NexusStore) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> => {
+          const rows = await countAudit(AuditAction.ACCESS_REVOKE_ROLLBACK, t.grant.id);
+          const result = await transaction(body, options);
+          if (
+            !dropped &&
+            (await countAudit(AuditAction.ACCESS_REVOKE_ROLLBACK, t.grant.id)) > rows
+          ) {
+            dropped = true;
+            // Unreadable as well, so the rollback is tried again and records
+            // what the committed one left.
+            faults.failNext('auditLogs', 'list');
+            throw new Error('the rollback committed but its acknowledgement was lost');
+          }
+          return result;
+        };
+        patches.push(() => {
+          target.store.transaction = transaction;
+        });
+        harness.edge.queueFailure(
+          503,
+          { error: 'refused' },
+          `/consumers/${t.row.ferrum_consumer_id}`,
+          'PUT',
+        );
+
+        const failed = await revoke(t.grant.id);
+        assert.equal(failed.statusCode, 502, failed.body);
+        assert.ok(dropped);
+        assert.equal((await target.store.grants.findById(t.grant.id))?.status, 'active');
+        assert.equal((await target.store.accessRequests.findById(t.pending.id))?.status, 'pending');
+        const rows = await target.store.auditLogs.list({
+          action: AuditAction.ACCESS_REVOKE_ROLLBACK,
+          target_id: t.grant.id,
+        });
+        assert.equal(rows.total, 2);
+        for (const row of rows.items) {
+          assert.equal(row.details.grant_restored, true);
+          assert.equal(row.details.tool_request_restored, t.pending.id);
+        }
       });
 
       for (const unreadable of [false, true]) {

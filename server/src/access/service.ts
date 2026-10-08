@@ -337,6 +337,10 @@ interface RevocationRestore {
   restored: boolean;
   /** Set when the grant still carried the claim and was deliberately left `revoked`. */
   skipped: RevocationRestoreSkip | null;
+  /** The tool request the claim cancelled, when it went back to `pending` with the grant. */
+  toolRequestRestored?: Uuid;
+  /** Set when that tool request was deliberately left `cancelled`. */
+  toolRequestSkipped?: 'account_recovery';
 }
 
 /** Rolling window for the per-account access-request budget. */
@@ -615,6 +619,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * revocation's transaction. It can never be approved once the grant is
    * revoked, and it would otherwise hold the identity's one pending slot and
    * sit in the provider's inbox. Store-only, so safe in a re-run body.
+   *
+   * Returns the request as it was **before** the cancellation — what
+   * {@link restoreToolRequest} puts back should the gateway refuse the
+   * revocation — or `null` when there was none to cancel.
    */
   async function cancelPendingToolRequest(
     tx: NexusStore,
@@ -622,20 +630,20 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     actor: UserRecord,
     at: string,
     ip: string | null,
-  ): Promise<void> {
+  ): Promise<AccessRequestRecord | null> {
     const pending = await tx.accessRequests.findPendingByApiAndUser(
       grant.api_id,
       grant.user_id,
       grant.application_id,
     );
-    if (!pending || pending.grant_id !== grant.id) return;
+    if (!pending || pending.grant_id !== grant.id) return null;
     const closed = await tx.accessRequests.updateIfStatus(pending.id, 'pending', {
       status: 'cancelled',
       decided_by: actor.id,
       decided_at: at,
       decision_note: 'The grant this request would extend is no longer active',
     });
-    if (!closed) return;
+    if (!closed) return null;
     await audit
       .forStore(tx)
       .record(
@@ -645,6 +653,72 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         { api_id: grant.api_id, grant_id: grant.id, reason: 'grant_inactive' },
         ip,
       );
+    return pending;
+  }
+
+  /**
+   * Return the tool request a revocation's claim cancelled to `pending`, inside
+   * the transaction that puts its grant back (issue #539).
+   *
+   * Only that cancellation is undone: the row must still be `cancelled` with
+   * the claim's `revoked_by` and `revoked_at` as its decision, which no other
+   * transition writes. Nor is it put back over a request the identity has
+   * opened since, which holds the one pending slot, or while an account
+   * recovery of the grantee is outstanding: the reset that queued it cancels
+   * the account's pending requests, found this one already cancelled, and
+   * must not see it come back. Store-only, so safe in a re-run body. Returns
+   * `restored` when the request went back, `account_recovery` when a recovery
+   * kept it out, and `null` otherwise.
+   */
+  async function restoreToolRequest(
+    db: NexusStore,
+    claim: GrantRecord,
+    request: AccessRequestRecord,
+  ): Promise<'restored' | 'account_recovery' | null> {
+    const current = await db.accessRequests.findById(request.id);
+    if (
+      !current ||
+      current.status !== 'cancelled' ||
+      current.grant_id !== claim.id ||
+      current.decided_by !== claim.revoked_by ||
+      current.decided_at !== claim.revoked_at
+    ) {
+      return null;
+    }
+    if (await db.accountRecoveryJobs.findByUser(claim.user_id)) return 'account_recovery';
+    const occupied = await db.accessRequests.findPendingByApiAndUser(
+      claim.api_id,
+      claim.user_id,
+      claim.application_id,
+    );
+    if (occupied) return null;
+    const back = await db.accessRequests.updateIfStatus(request.id, 'cancelled', {
+      status: 'pending',
+      decided_by: request.decided_by,
+      decided_at: request.decided_at,
+      decision_note: request.decision_note,
+    });
+    return back ? 'restored' : null;
+  }
+
+  /**
+   * Whether `request`, the tool request a revocation's claim cancelled, is
+   * back as the claim's rollback leaves it: `pending` on the claim's grant
+   * with its decision from before the cancellation. Read when the rollback
+   * committed but its outcome was lost.
+   */
+  async function toolRequestBack(
+    claim: GrantRecord,
+    request: AccessRequestRecord,
+  ): Promise<boolean> {
+    const current = await store.accessRequests.findById(request.id).catch(() => null);
+    return (
+      current?.status === 'pending' &&
+      current.grant_id === claim.id &&
+      current.decided_by === request.decided_by &&
+      current.decided_at === request.decided_at &&
+      current.decision_note === request.decision_note
+    );
   }
 
   /**
@@ -674,8 +748,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   }
 
   /**
-   * Put a claimed grant — and the request the claim moved with it — back the
-   * way it was before the revocation, each under compare-and-set.
+   * Put a claimed grant — and the requests the claim moved with it: its
+   * originating request and any pending tool request it cancelled — back the
+   * way they were before the revocation, each under compare-and-set.
    *
    * `claim` is the row as this revocation's claim left it. Only that claim is
    * undone: a grant that has since been put back, or put back and revoked
@@ -696,6 +771,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     db: NexusStore,
     claim: GrantRecord,
     request: AccessRequestRecord | null,
+    toolRequest: AccessRequestRecord | null,
     groupPresent: boolean,
   ): Promise<RevocationRestore> {
     const current = await db.grants.findById(claim.id);
@@ -723,7 +799,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         decision_note: request.decision_note,
       });
     }
-    return { restored: back !== null, skipped: null };
+    // In the same transaction as the grant, so the request is pending again
+    // exactly when the grant it would extend is active again.
+    const tool = back && toolRequest ? await restoreToolRequest(db, claim, toolRequest) : null;
+    return {
+      restored: back !== null,
+      skipped: null,
+      ...(tool === 'restored' && toolRequest ? { toolRequestRestored: toolRequest.id } : {}),
+      ...(tool === 'account_recovery' ? { toolRequestSkipped: tool } : {}),
+    };
   }
 
   /**
@@ -742,7 +826,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     tools: string[],
   ): Promise<boolean> {
     try {
-      const live = await edge.consumers.get(consumerId);
+      // Only Edge's own `Consumer not found` proves the group gone; any other
+      // `404` throws and reads as unreadable below (issue #535).
+      const live = await edge.consumers.get(consumerId, { confirmedAbsence: true });
       // A partial removal still leaves access to withdraw. Requiring every
       // group would strand a live REST-only or MCP-only membership behind a
       // revoked grant, so the provider could never retry its cleanup.
@@ -884,6 +970,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     details.grant_restored = outcome.restored;
     if (outcome.skipped) details.restore_skipped_reason = outcome.skipped;
     else delete details.restore_skipped_reason;
+    if (outcome.toolRequestRestored) details.tool_request_restored = outcome.toolRequestRestored;
+    else delete details.tool_request_restored;
+    if (outcome.toolRequestSkipped) details.tool_request_skipped = outcome.toolRequestSkipped;
+    else delete details.tool_request_skipped;
   }
 
   /**
@@ -914,11 +1004,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     claim: GrantRecord;
     /** The originating request this revocation moved, or `null` if it moved none. */
     request: AccessRequestRecord | null;
+    /** The pending tool request this revocation cancelled, or `null` if it cancelled none. */
+    toolRequest: AccessRequestRecord | null;
     cause: unknown;
     ip: string | null;
     proxyId: string | null;
   }): Promise<(() => Promise<void>) | null> {
-    const { actor, claim, request, cause, ip } = input;
+    const { actor, claim, request, toolRequest, cause, ip } = input;
     const details: Record<string, unknown> = {
       api_id: claim.api_id,
       user_id: claim.user_id,
@@ -944,7 +1036,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     const restoreAlone = async (freshProxy: boolean): Promise<(() => Promise<void>) | null> => {
       let outcome: RevocationRestore = { restored: false, skipped: null };
       const restore = (tx: NexusStore, groupPresent: boolean): Promise<RevocationRestore> =>
-        restoreRevoked(tx, claim, request, groupPresent);
+        restoreRevoked(tx, claim, request, toolRequest, groupPresent);
       try {
         outcome = await (freshProxy
           ? restoreUnderFreshProxy(claim, since, restore)
@@ -963,7 +1055,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // rollback. Preserve that result without changing a newer claim.
       if (!outcome.restored && outcome.skipped === null) {
         const current = await store.grants.findById(claim.id).catch(() => null);
-        outcome = { restored: current?.status === 'active', skipped: null };
+        const restored = current?.status === 'active';
+        // The tool request went back in the same transaction, so the row
+        // names it as the committed transaction would have.
+        outcome =
+          restored && toolRequest && (await toolRequestBack(claim, toolRequest))
+            ? { restored, skipped: null, toolRequestRestored: toolRequest.id }
+            : { restored, skipped: null };
       }
       recordRestore(details, outcome);
       await audit
@@ -984,7 +1082,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       });
     try {
       await restoreUnderKeys(claim, since, input.proxyId, async (tx, groupPresent) => {
-        recordRestore(details, await restoreRevoked(tx, claim, request, groupPresent));
+        recordRestore(details, await restoreRevoked(tx, claim, request, toolRequest, groupPresent));
         await audit
           .forStore(tx)
           .record(
@@ -2265,11 +2363,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         // here with a CONFLICT.
         const revokedAt = nowIso();
         let movedRequest: AccessRequestRecord | null = null;
+        let cancelledToolRequest: AccessRequestRecord | null = null;
         const updated = await store.transaction(async (tx) => {
           // The body may be run again if the adapter retries it, so the only
-          // thing it writes outside the store starts each attempt cleared:
+          // things it writes outside the store start each attempt cleared:
           // a request moved by an attempt that rolled back was not moved.
           movedRequest = null;
+          cancelledToolRequest = null;
           const result = await tx.grants.updateIfStatus(grant.id, 'active', {
             status: 'revoked',
             revoked_by: actor.id,
@@ -2280,7 +2380,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           // history reads "approved, then revoked" rather than staying
           // approved.
           movedRequest = await moveRequestToRevoked(tx, grant, actor.id, revokedAt, reason);
-          await cancelPendingToolRequest(tx, grant, actor, revokedAt, ip);
+          cancelledToolRequest = await cancelPendingToolRequest(tx, grant, actor, revokedAt, ip);
           // The revocation is recorded with the claim that makes it. Written
           // after the gateway step, a failed insert left the grant revoked and
           // unaudited behind a `500`, and a repeat found it already revoked
@@ -2316,6 +2416,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             actor,
             claim: updated,
             request: movedRequest,
+            toolRequest: cancelledToolRequest,
             cause: error,
             ip,
             proxyId: initialApi.ferrum_proxy_id,

@@ -505,6 +505,12 @@ export interface CredentialsService {
     ip?: string | null,
     cutoff?: string | null,
   ): Promise<number>;
+  /**
+   * Throw `CONFLICT` while an account recovery of `userId` still blocks
+   * issuance. Read-only: a caller about to do something destructive on the
+   * way to an issue checks first, and the issue checks again in its key.
+   */
+  assertIssuanceAllowed(userId: Uuid): Promise<void>;
   /** The caller's credentials, or another user's when an admin asks. */
   list(
     actor: UserRecord,
@@ -2329,11 +2335,23 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       for (const consumer of await provisioner.listConsumers(user.id)) {
         consumerIds.add(consumer.ferrum_consumer_id);
       }
+      // And on every other identity the account registered: a provider's test
+      // consumer is issued to under the same in-key check. A registration not
+      // yet bound names the consumer its username derives to.
+      for (const identity of await store.gatewayIdentities.listByUser(user.id, namespace)) {
+        consumerIds.add(
+          identity.ferrum_consumer_id ?? edge.consumers.derivedId(identity.ferrum_username),
+        );
+      }
       for (const consumerId of consumerIds) {
         await edge.serializePerKey(consumerId, async () => {});
       }
       revoked += await sweepForAccountRecovery(user, ip, cutoff, consumerIds);
       return revoked;
+    },
+
+    async assertIssuanceAllowed(userId): Promise<void> {
+      await assertNoPendingRecovery(userId);
     },
 
     async teardownGatewayIdentity(

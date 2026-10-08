@@ -155,6 +155,13 @@ interface CallOptions {
   query?: Record<string, string | number | boolean | undefined>;
   /** Return `null` instead of throwing when Edge answers `404`. */
   allow404?: boolean;
+  /**
+   * With `allow404`, the exact `error` Edge answers a missing resource with. A
+   * `404` then reads as absence only when its body is that acknowledgement;
+   * any other `404` — an unknown route, a proxy in front of Edge, an HTML page —
+   * proves nothing about the resource and is a protocol error (issue #535).
+   */
+  absentError?: string;
   /** Additional statuses to treat as success (e.g. `409` for "already exists"). */
   tolerate?: number[];
   /** Override the JWT `sub` claim so Edge's audit log names the acting user. */
@@ -250,7 +257,12 @@ export interface FerrumAdminClient {
 
   readonly consumers: {
     list(query?: EdgeListQuery): Promise<EdgePage<EdgeConsumer>>;
-    get(id: string): Promise<EdgeConsumer | null>;
+    /**
+     * `null` for a `404`. With `confirmedAbsence`, only for Edge's own
+     * `Consumer not found` answer: any other `404` is a protocol error, for a
+     * caller that acts on the consumer being gone (issue #535).
+     */
+    get(id: string, options?: { confirmedAbsence?: boolean }): Promise<EdgeConsumer | null>;
     /** Credential-bearing snapshot. Keep it transient and inside the server boundary. */
     verification(
       id: string,
@@ -536,6 +548,25 @@ function isStringArray(value: unknown): boolean {
 
 function isCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** Edge's `404` body for a consumer that does not exist in the namespace. */
+const CONSUMER_NOT_FOUND = 'Consumer not found';
+
+/**
+ * Whether a `404` body is Edge's `{"error": <expected>}` answer for a missing
+ * resource. Anything else — empty, HTML, malformed, a router's generic
+ * `{"error": "Not Found"}` — is not evidence of absence. The `error` value is
+ * what tells them apart, so a field Edge adds beside it later is ignored.
+ */
+function isAbsenceAcknowledgement(bytes: Buffer, expected: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+  } catch {
+    return false;
+  }
+  return isRecord(parsed) && parsed.error === expected;
 }
 
 function isConsumerBody(value: unknown): boolean {
@@ -1184,7 +1215,11 @@ export function createFerrumAdminClient(
     }
     const bytes = attempt.bytes;
 
-    if (statusCode === 404 && options.allow404) return null;
+    if (statusCode === 404 && options.allow404) {
+      if (options.absentError === undefined) return null;
+      if (isAbsenceAcknowledgement(bytes, options.absentError)) return null;
+      throw protocolError(statusCode, 'unconfirmed_absence', method, path);
+    }
     // These are explicit best-effort namespace/version exceptions, never
     // resource reads. Health's 503 must still satisfy its full body contract.
     if ((options.tolerate ?? []).includes(statusCode) && !contract.statuses.includes(statusCode)) {
@@ -1953,9 +1988,10 @@ export function createFerrumAdminClient(
         return callRequired<EdgePage<EdgeConsumer>>('GET', '/consumers', { query: { ...query } });
       },
 
-      async get(id: string): Promise<EdgeConsumer | null> {
+      async get(id, options): Promise<EdgeConsumer | null> {
         return call<EdgeConsumer>('GET', `/consumers/${encodeURIComponent(id)}`, {
           allow404: true,
+          ...(options?.confirmedAbsence ? { absentError: CONSUMER_NOT_FOUND } : {}),
         });
       },
 
@@ -1969,6 +2005,9 @@ export function createFerrumAdminClient(
           `/consumers/${encodeURIComponent(id)}/verification`,
           {
             allow404: true,
+            // Callers act on absence: ACL cleanup counts a missing consumer
+            // as done. Only Edge's own answer for that consumer proves it.
+            absentError: CONSUMER_NOT_FOUND,
             subject,
             responseHeaders: (headers) => {
               if (typeof headers.etag === 'string') etag = headers.etag;
