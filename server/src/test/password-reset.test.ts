@@ -218,11 +218,10 @@ describe('password reset', () => {
     assert.equal((await harness.store.credentials.findById(appCredentialId))?.status, 'revoked');
     const accountConsumer = harness.edge.consumerByUsername(`nexus-user-${account.user.id}`);
     assert.equal(accountConsumer?.credentials.keyauth?.length ?? 0, 0);
-    assert.equal(
-      harness.edge.consumerByUsername(consumerUsernameForApplication(applicationId))?.credentials
-        .keyauth?.length,
-      0,
+    const appConsumer = harness.edge.consumerByUsername(
+      consumerUsernameForApplication(applicationId),
     );
+    assert.equal(appConsumer?.credentials.keyauth?.length ?? 0, 0);
   });
 
   it('retries the recovery revocation when Edge fails, then revokes once it recovers', async () => {
