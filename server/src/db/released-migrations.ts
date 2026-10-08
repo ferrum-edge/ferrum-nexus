@@ -183,8 +183,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
   },
   {
     id: '012_access_request_grant',
-    // Pending: ships in the next release, which sets `release`.
-    release: null,
+    // Frozen: shipped in v0.5.0. Never edit these checksums; a schema change
+    // is a new forward migration.
+    release: 'v0.5.0',
     sha256: {
       sqlite: 'a2166257dd4d654f51832965478b9bd1362c07218aecc334efe40be22daf6c5b',
       pg: 'a2166257dd4d654f51832965478b9bd1362c07218aecc334efe40be22daf6c5b',

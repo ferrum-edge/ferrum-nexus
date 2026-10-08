@@ -3,7 +3,7 @@
 This walkthrough takes you from an empty machine to a client calling a
 published API through the gateway, with a credential the portal issued.
 
-It targets Ferrum Nexus `v0.4.0` with Ferrum Edge `v0.9.13`, the supported pair
+It targets Ferrum Nexus `v0.5.0` with Ferrum Edge `v0.9.14`, the supported pair
 in the [release notes](release-notes.md). To upgrade a deployment that keeps
 its data, see [schema versioning and upgrades](operations.md#schema-versioning-and-upgrades).
 A development database created before `v0.1.0` needs the
@@ -56,7 +56,7 @@ exact Edge image this release was tested with, the same one the
 ```bash
 git clone https://github.com/ferrum-edge/ferrum-nexus.git
 cd ferrum-nexus
-git checkout --detach v0.4.0
+git checkout --detach v0.5.0
 set -a
 . ./release/compatibility.env
 set +a

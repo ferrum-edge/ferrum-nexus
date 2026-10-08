@@ -243,7 +243,7 @@ Example for an admin session:
 ```json
 {
   "status": "ok",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "uptime_seconds": 1284,
   "checked_at": "2026-08-31T09:12:44.117Z",
   "database": { "status": "ok", "latency_ms": 1, "error": null, "driver": "postgres" },
@@ -2516,8 +2516,8 @@ the API id, so their existing consumer groups match again. After a missing-proxy
 repair, direct gateway changes were deleted with the proxy and are not restored.
 A failed enforcement conversion instead retains an encrypted recovery snapshot of
 the original proxy and plugins, including operator fields.
-Recovery retains the original id and uses released Edge v0.9.13 selected
-conditional removal and spec replacement. Each operation durably records its
+Recovery retains the original id and uses the selected conditional removal and
+spec replacement of Edge v0.9.13 or later. Each operation durably records its
 complete original namespace snapshot and quoted `deployment-v1` token before HTTP;
 only the expected committed/applied result, explicit recovery-cleanup authorization
 and applicable covering cursor permit dependent work. Stale authority, changed
@@ -2569,16 +2569,18 @@ existence, or an incomplete original-id staging proxy, never counts as restored.
 Audit rows: `api.gateway_restore_start` (before the first gateway call; if it
 fails, nothing is built), `api.gateway_restore` with the new proxy id, and on
 failure `api.gateway_restore_failed` (with `stranded_proxy_id` when the cleanup
-is unconfirmed). Selected cleanup/replacement requires the released Edge v0.9.13
-original deployment authority and explicit committed/applied cleanup acknowledgement.
+is unconfirmed). Selected cleanup/replacement requires original deployment authority
+from Edge v0.9.13 or later and explicit committed/applied cleanup acknowledgement.
 A namespace past Edge's conditional snapshot bound answers `409 CONFLICT` with
 `details.kind` `namespace_snapshot_too_large` (Edge `507`: nothing issued or applied),
 and a journal holding Edge v0.9.12 authority answers `409 CONFLICT` with
 `details.kind` `legacy_deployment_authority` before any gateway write. An
-acknowledgement whose `durable` is `not_started` or `not_committed` (Edge v0.9.14
-also reports a `503` store failure this way) answers `502 EDGE_ERROR` with
-`details.kind` `deployment_not_committed`: nothing was committed, but the journal is
-kept. Any other unconfirmed result is `deployment_acknowledgement_uncertain`.
+acknowledgement whose `durable` is `not_started` or `not_committed` answers
+`502 EDGE_ERROR` with `details.kind` `deployment_not_committed` at any other HTTP
+status (Edge v0.9.14 reports a `503` store failure this way, and a `400` or `501`
+can carry one too): nothing was committed, but the journal is kept. Nexus `v0.4.0`
+reported these as `deployment_acknowledgement_uncertain`, which now covers only
+`durable: "unknown"` and any other unconfirmed result.
 Uncertain/refused results retain the attempted identity, security configs and
 encrypted journal with `withdrawn: false` and `repair_required`; no refreshed-token
 retry or unconditional fallback is performed. See the
@@ -2897,8 +2899,8 @@ Errors:
 Revoking a grant cancels its pending tool request in the revocation's
 transaction (`access.cancel` with `reason: "grant_inactive"`), so it holds no
 pending slot and leaves the provider's inbox. A revocation the gateway refuses
-puts the grant back but not the request. A tool request still pending on a
-revoked grant (one filed before this release) can only be cancelled or denied,
+puts the grant back but not the request. A tool request that is still pending on
+a revoked grant can only be cancelled or denied,
 and the identity's next `POST /api/access-requests` cancels it the same way in
 its own transaction, so it never blocks the new request.
 
