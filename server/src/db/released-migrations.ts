@@ -195,8 +195,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
   },
   {
     id: '013_account_recovery_jobs',
-    // Not yet shipped: the next release freezes these.
-    release: null,
+    // Frozen: shipped in v0.5.1. Never edit these checksums; a schema change
+    // is a new forward migration.
+    release: 'v0.5.1',
     sha256: {
       sqlite: 'dc3333e134335690ee907e1b3147760fc592da8f5cbd59eca4063edb1ca476ae',
       pg: 'dc3333e134335690ee907e1b3147760fc592da8f5cbd59eca4063edb1ca476ae',

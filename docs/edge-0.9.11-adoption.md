@@ -1,7 +1,7 @@
 # Edge v0.9.14 adoption
 
-Nexus `v0.5.0` pairs with published Edge v0.9.14 and `contracts-edge-0.9.14`; Nexus
-`v0.4.0` paired with Edge v0.9.13 and `contracts-edge-0.9.13`. The
+Nexus `v0.5.0` and `v0.5.1` pair with published Edge v0.9.14 and `contracts-edge-0.9.14`;
+Nexus `v0.4.0` paired with Edge v0.9.13 and `contracts-edge-0.9.13`. The
 filename preserves existing links from the Edge v0.9.11 adoption; Nexus PR #522
 adopted Edge v0.9.12, PR #529 advanced the pin to Edge v0.9.13, and this adoption
 advances it to Edge v0.9.14.
@@ -122,12 +122,13 @@ is sent. Settle conversions and restores before upgrading Edge; see the
 ## Release status
 
 [`release/compatibility.env`](../release/compatibility.env) pins the Edge v0.9.14 image
-above for Nexus `v0.5.0`, and the packaged acceptance suite runs against it. The record
-at the `v0.4.0` tag pins Edge v0.9.13. The
+above for Nexus `v0.5.1`, as it did for `v0.5.0`, and the packaged acceptance suite runs
+against it. The record at the `v0.4.0` tag pins Edge v0.9.13. The
 [controlled public-only fixture](../e2e/public-only/README.md) runs a packaged Nexus
 image against the same Edge release on demand, outside CI, and covers the local
 data-plane profile only.
 
 Nexus supports Node `^22.22.2 || ^24.15.0 || >=26.0.0` since `v0.4.0` (adopted through
-#521). `v0.4.0` froze migrations `007_outbox_recipient` to `011_mcp_tool_subsets`, and
-`v0.5.0` froze `012_access_request_grant`; neither Edge adoption adds a migration.
+#521). `v0.4.0` froze migrations `007_outbox_recipient` to `011_mcp_tool_subsets`,
+`v0.5.0` froze `012_access_request_grant`, and `v0.5.1` froze
+`013_account_recovery_jobs`; neither Edge adoption adds a migration.

@@ -6,6 +6,20 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-08
+
+Paired with Ferrum Edge `v0.9.14`, unchanged from `v0.5.0`. A security and bug-fix
+release: a trusted password reset now revokes the credentials an account already
+held, email verification alone no longer authorizes single sign-on linking,
+publishing refuses an upstream that loops back into the gateway, credential and
+notification writes are rate-limited per account, gateway access cleanup trusts only
+Edge's own "not found", and the data-plane attestation counts a restarted data plane
+once. Upgrades a `v0.5.0` database in place with the forward migration
+`013_account_recovery_jobs`; the gateway and its database are unchanged. Stop and
+drain every older Nexus writer before starting `v0.5.1`. See
+[`docs/release-notes.md`](docs/release-notes.md) for the supported combination and
+the upgrade steps.
+
 ### Fixed
 
 - **Data-plane attestation counts each data plane once across restarts** (#540). A
@@ -22,29 +36,6 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   carries the gateway's `Date` header; without one, only data planes Nexus itself has
   seen listed for a minute count. A data plane's routine reconnect keeps counting once
   Nexus has seen it.
-
-### Security
-
-- **Tighten account linking and gateway write controls** (#544). Email verification
-  alone no longer authorizes SSO linking; the first trusted password reset revokes
-  existing account and application credentials, canceling the account's pending
-  access requests and recording the revocation durably so an unreachable gateway is
-  retried rather than skipped. A revocation that keeps failing stops blocking new
-  credentials after 8 attempts and is audited as `credential.recovery_stalled`
-  while it is still retried; when it lands it spares credentials issued after that
-  point, and it never empties a credential type that holds another account's
-  keys. Manual administrator promotions now check linked
-  identity trust at every privilege increase. Publishing refuses an upstream that
-  names or resolves to any of the gateway's own origins (public URL, environment
-  URL, or Admin API host), canonicalizing IPv4-mapped, NAT64 and 6to4 addresses
-  first and treating every loopback address as one host; gateway origins resolve
-  through the system resolver, so `/etc/hosts` names such as `localhost` work,
-  bounded at 5 seconds and cached for 30.
-  Credential mutations and notification reads are rate-limited per account, and
-  unchanged notification reads no longer add audit rows.
-
-### Fixed
-
 - **Gateway access cleanup no longer trusts an ambiguous "not found"** (#535). A
   consumer is treated as already gone only when Ferrum Edge itself says so. Any
   other `404` (an unknown route, or a proxy in front of the gateway) now fails the
@@ -60,6 +51,49 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   credential is refused while a recovery revocation is pending, before an
   existing test consumer is replaced, and the recovery waits out an in-flight
   test-consumer issue before its final sweep.
+- **The image-pin checker scans workflow files** (#541). It classified files on
+  their absolute path, so nothing under `.github/workflows/` was discovered and the
+  workflow-level pins `v0.5.0` described were not enforced. Files are now classified
+  on their repository-relative name, and a quoted `(` or backtick in a Docker option
+  value no longer passes for a substitution that hides the image after it.
+- **The API reference documents `POST /api/auth/register` again** (#536). Its
+  request table had been replaced by the tool-request fields, which stay with
+  `POST /api/grants/:id/tool-requests`.
+
+### Security
+
+- **A trusted password reset revokes the credentials an account already held**
+  (#544). The first password reset that records a trusted proof of the account's
+  address (one that has none, or only an email-verification proof) revokes every
+  credential of the account and its applications and cancels the account's pending
+  access requests. The revocation is owed as a durable `account_recovery_jobs` row
+  written in the same transaction as the reset (forward migration
+  `013_account_recovery_jobs`), so an unreachable gateway is retried rather than
+  skipped. While it is outstanding, credential issuance for the account and its
+  applications, and a provider's test-consumer issue, answers `409 CONFLICT`. A
+  revocation that keeps failing stops refusing issuance after 8 attempts and is
+  audited as `credential.recovery_stalled` while it is still retried; when it lands it
+  spares credentials issued after that point, and it never empties a credential type
+  that holds another account's keys.
+- **Email verification alone no longer authorizes single sign-on linking** (#544).
+  Redeeming a verification link still marks the mailbox verified, but no longer
+  counts as the proof single sign-on needs to link an existing account; a completed
+  password reset, or an identity provider that provisioned or linked the account,
+  still does. Manual role changes now check linked identity trust at every privilege
+  increase, including `admin` to `super_admin`.
+- **Publishing refuses an upstream that loops back into the gateway** (#544). An
+  upstream that names or resolves to any of the gateway's own origins (the stored
+  public URL, `FERRUM_GATEWAY_PUBLIC_URL` and the Admin API host) answers
+  `400 SPEC_INVALID` with `details.reason` `gateway_origin`, or
+  `gateway_unresolvable` when a gateway origin cannot be resolved. Addresses are
+  canonicalized first (IPv4-mapped, NAT64 and 6to4), and every loopback or
+  unspecified address counts as one host. Gateway origins resolve through the system
+  resolver, so `/etc/hosts` names such as `localhost` work, bounded at 5 seconds and
+  cached for 30. The check runs even with `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`.
+- **Credential and notification writes are rate-limited per account** (#544).
+  Issue, rotate and revoke under `/api/credentials` allow 20 requests a minute per
+  route, and `POST /api/notifications/read` 60 a minute. A notification read that
+  changes nothing no longer adds an audit row.
 
 ## [0.5.0] - 2026-10-08
 

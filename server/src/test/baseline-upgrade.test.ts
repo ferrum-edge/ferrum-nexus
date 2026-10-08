@@ -23,17 +23,19 @@
  * and `v0.2.0`, `004_api_spec_changes`, `005_notification_preferences` and
  * `006_user_identities`; from every release before `v0.4.0`,
  * `007_outbox_recipient` to `011_mcp_tool_subsets`; from every release before
- * `v0.5.0`, `012_access_request_grant`) is applied here on top of a
+ * `v0.5.0`, `012_access_request_grant`; from every release before `v0.5.1`,
+ * `013_account_recovery_jobs`) is applied here on top of a
  * populated database with no change to the harness. `007_outbox_recipient`
  * adds a nullable account binding without changing retained message contents;
  * `008_email_lifecycle_fence` adds a private account fence without changing user DTOs;
  * `009_outbox_priority` classifies retained mail without changing its delivery state;
  * `010_api_agents` leaves retained APIs unexposed to agents;
  * `011_mcp_tool_subsets` keeps retained approvals covering every published tool;
- * and `012_access_request_grant` keeps every retained request a request for
- * access rather than for more tools on a grant. From the newest release
- * (`v0.5.0`) nothing is pending, so its run proves the current code opens that
- * database unchanged.
+ * `012_access_request_grant` keeps every retained request a request for
+ * access rather than for more tools on a grant; and `013_account_recovery_jobs`
+ * only adds an empty table, so no retained account owes a recovery revocation.
+ * From the newest release (`v0.5.1`) nothing is pending, so its run proves the
+ * current code opens that database unchanged.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
