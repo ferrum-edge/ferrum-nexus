@@ -2329,6 +2329,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       for (const consumer of await provisioner.listConsumers(user.id)) {
         consumerIds.add(consumer.ferrum_consumer_id);
       }
+      // And on every other identity the account registered: a provider's test
+      // consumer is issued to under the same in-key check. A registration not
+      // yet bound names the consumer its username derives to.
+      for (const identity of await store.gatewayIdentities.listByUser(user.id, namespace)) {
+        consumerIds.add(
+          identity.ferrum_consumer_id ?? edge.consumers.derivedId(identity.ferrum_username),
+        );
+      }
       for (const consumerId of consumerIds) {
         await edge.serializePerKey(consumerId, async () => {});
       }

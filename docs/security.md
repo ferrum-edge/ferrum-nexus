@@ -2127,7 +2127,11 @@ portal responses.
   application still exists when applicable, and the ACL group remains on the
   consumer. A skip records `grantee_disabled`, `grantee_missing`,
   `application_missing` or `group_absent`; a lock wait timeout is retried until
-  an attempt has also timed out beyond the lease TTL.
+  an attempt has also timed out beyond the lease TTL. A pending tool request the
+  revocation cancelled goes back to `pending` in the same transaction as the
+  grant, only while it still carries that cancellation and the identity has no
+  other pending request; `access.revoke_rollback` then names it in
+  `tool_request_restored`.
 
 | Action                          | Target type      | Description                                                                                                                                                                                                                                                                                                             |
 | ------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

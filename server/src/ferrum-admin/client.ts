@@ -155,6 +155,13 @@ interface CallOptions {
   query?: Record<string, string | number | boolean | undefined>;
   /** Return `null` instead of throwing when Edge answers `404`. */
   allow404?: boolean;
+  /**
+   * With `allow404`, the exact `error` Edge answers a missing resource with. A
+   * `404` then reads as absence only when its body is that acknowledgement;
+   * any other `404` — an unknown route, a proxy in front of Edge, an HTML page —
+   * proves nothing about the resource and is a protocol error (issue #535).
+   */
+  absentError?: string;
   /** Additional statuses to treat as success (e.g. `409` for "already exists"). */
   tolerate?: number[];
   /** Override the JWT `sub` claim so Edge's audit log names the acting user. */
@@ -536,6 +543,24 @@ function isStringArray(value: unknown): boolean {
 
 function isCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** Edge's `404` body for a consumer that does not exist in the namespace. */
+const CONSUMER_NOT_FOUND = 'Consumer not found';
+
+/**
+ * Whether a `404` body is exactly Edge's `{"error": <expected>}` answer for a
+ * missing resource. Anything else — empty, HTML, malformed, a router's generic
+ * not-found document — is not evidence of absence.
+ */
+function isAbsenceAcknowledgement(bytes: Buffer, expected: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+  } catch {
+    return false;
+  }
+  return isRecord(parsed) && Object.keys(parsed).length === 1 && parsed.error === expected;
 }
 
 function isConsumerBody(value: unknown): boolean {
@@ -1184,7 +1209,11 @@ export function createFerrumAdminClient(
     }
     const bytes = attempt.bytes;
 
-    if (statusCode === 404 && options.allow404) return null;
+    if (statusCode === 404 && options.allow404) {
+      if (options.absentError === undefined) return null;
+      if (isAbsenceAcknowledgement(bytes, options.absentError)) return null;
+      throw protocolError(statusCode, 'unconfirmed_absence', method, path);
+    }
     // These are explicit best-effort namespace/version exceptions, never
     // resource reads. Health's 503 must still satisfy its full body contract.
     if ((options.tolerate ?? []).includes(statusCode) && !contract.statuses.includes(statusCode)) {
@@ -1969,6 +1998,9 @@ export function createFerrumAdminClient(
           `/consumers/${encodeURIComponent(id)}/verification`,
           {
             allow404: true,
+            // Callers act on absence: ACL cleanup counts a missing consumer
+            // as done. Only Edge's own answer for that consumer proves it.
+            absentError: CONSUMER_NOT_FOUND,
             subject,
             responseHeaders: (headers) => {
               if (typeof headers.etag === 'string') etag = headers.etag;

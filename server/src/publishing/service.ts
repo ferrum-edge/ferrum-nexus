@@ -5991,6 +5991,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             credentialType: CREDENTIAL_TYPE_FOR_PLUGIN[current.auth_plugin],
             label: label ?? `Test consumer for ${current.slug}`,
             ip,
+            // Refused inside the consumer's key while an account recovery of
+            // the provider still blocks issuance, as the account's own issue is.
+            recoveryGate: true,
           });
 
           // The flavour again, now the credential exists. An `auth_plugin` swap

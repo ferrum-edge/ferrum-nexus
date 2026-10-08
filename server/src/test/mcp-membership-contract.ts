@@ -14,6 +14,7 @@ import {
   type IssueCredentialResponse,
   type PublishApiResponse,
   type RepairGatewayReferencesResponse,
+  type RequestGrantToolsResponse,
 } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
@@ -443,6 +444,85 @@ export function runMcpMembershipContract(
         );
         assert.equal((await revoke(f.grant.id)).statusCode, 200);
       });
+
+      for (const slot of ['free', 'taken'] as const) {
+        it(`${scope}: restores the tool request it cancelled (slot ${slot})`, async () => {
+          const who = await identity(application);
+          const api = await publish();
+          const ids = toolIds(api);
+          const grant = await approve(who.client, who.applicationId, api, [ids[0]!]);
+          const row = await target.store.consumers.findByUserAndNamespace(
+            who.client.user.id,
+            'nexus',
+            who.applicationId,
+          );
+          assert.ok(row);
+          const asked = await harness.authed(who.client, {
+            method: 'POST',
+            url: `/api/grants/${grant.id}/tool-requests`,
+            payload: { requested_tools: [ids[1]!], justification: 'More tools' },
+          });
+          assert.equal(asked.statusCode, 201, asked.body);
+          const pending = asked.json<RequestGrantToolsResponse>().access_request;
+          const before = await target.store.accessRequests.findById(pending.id);
+          assert.ok(before);
+          const taken: { request?: AccessRequestRecord } = {};
+          beforeFailedRemoval(row.ferrum_consumer_id, async () => {
+            const cancelled = await target.store.accessRequests.findById(pending.id);
+            assert.equal(cancelled?.status, 'cancelled');
+            // The claim freed the identity's one pending slot; a newer request
+            // that took it must not be displaced by the rollback.
+            if (slot === 'taken') {
+              taken.request = await target.store.accessRequests.create({
+                api_id: api.id,
+                user_id: who.client.user.id,
+                application_id: who.applicationId,
+                justification: 'Asked again',
+                requested_tools: [ids[0]!],
+                status: 'pending',
+              });
+            }
+          });
+
+          const failed = await revoke(grant.id);
+          assert.equal(failed.statusCode, 502, failed.body);
+          assert.equal((await target.store.grants.findById(grant.id))?.status, 'active');
+          assert.equal(await requestStatus(grant), 'approved');
+          assert.equal(await countAudit(AuditAction.ACCESS_CANCEL, pending.id), 1);
+          const rollback = await details(AuditAction.ACCESS_REVOKE_ROLLBACK, grant.id);
+          assert.equal(rollback?.grant_restored, true);
+          const after = await target.store.accessRequests.findById(pending.id);
+          if (slot === 'taken') {
+            assert.equal(rollback?.tool_request_restored, undefined);
+            assert.equal(after?.status, 'cancelled');
+            const held = await target.store.accessRequests.findPendingByApiAndUser(
+              api.id,
+              who.client.user.id,
+              who.applicationId,
+            );
+            assert.ok(taken.request);
+            assert.equal(held?.id, taken.request.id);
+            return;
+          }
+          assert.equal(rollback?.tool_request_restored, pending.id);
+          assert.equal(after?.status, 'pending');
+          assert.equal(after?.grant_id, grant.id);
+          assert.deepEqual(after?.requested_tools, before.requested_tools);
+          assert.equal(after?.justification, before.justification);
+          assert.equal(after?.decided_by, before.decided_by);
+          assert.equal(after?.decided_at, before.decided_at);
+          assert.equal(after?.decision_note, before.decision_note);
+
+          // The restored request is the provider's to decide, as it was before.
+          const approved = await harness.authed(provider, {
+            method: 'POST',
+            url: `/api/access-requests/${pending.id}/approve`,
+            payload: {},
+          });
+          assert.equal(approved.statusCode, 200, approved.body);
+          assert.deepEqual((await target.store.grants.findById(grant.id))?.approved_tools, ids);
+        });
+      }
 
       for (const unreadable of [false, true]) {
         it(`${scope}: preserves a committed rollback (unreadable=${unreadable})`, async () => {

@@ -26,6 +26,20 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   Credential mutations and notification reads are rate-limited per account, and
   unchanged notification reads no longer add audit rows.
 
+### Fixed
+
+- **Gateway access cleanup no longer trusts an ambiguous "not found"** (#535). A
+  consumer is treated as already gone only when Ferrum Edge itself says so. Any
+  other `404` (an unknown route, or a proxy in front of the gateway) now fails the
+  cleanup so it is reported and retried, instead of counting as removed access.
+- **A failed grant revocation keeps the grantee's pending tool request** (#539).
+  When the gateway refuses a revocation and the grant is restored, a pending
+  request for more tools that the revocation cancelled is restored with it, in the
+  same transaction, unless the identity has opened another request since.
+- **Account recovery covers provider test consumers.** Issuing a test-consumer
+  credential is refused while a recovery revocation is pending, and the recovery
+  waits out an in-flight test-consumer issue before its final sweep.
+
 ## [0.5.0] - 2026-10-08
 
 Paired with Ferrum Edge `v0.9.14`. Lets the holder of an explicit MCP tool subset
