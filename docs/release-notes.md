@@ -182,14 +182,12 @@ All are listed in the [changelog](../CHANGELOG.md#051---2026-10-08).
   `credentials_revocation_pending: true` and `cancelled_access_requests`. Tell
   users that a password reset can end their API keys, and that they re-issue them
   and re-request access afterwards.
-- **Password resets completed before the upgrade are not revisited.** A reset on
-  `v0.5.0` or earlier already recorded the account's trusted proof, and the
-  migration copies no data, so `v0.5.1` revokes nothing for an account whose
-  address was reclaimed through a password reset before the upgrade: the
-  credentials, applications and pending access requests it held before that reset
-  stay as they are. Review the accounts whose `auth.password_reset` audit rows
-  predate the upgrade, and revoke or deny anything among their credentials,
-  applications and pending requests that the rightful holder did not create.
+- **Password resets completed before the upgrade are not revisited.** `v0.5.1`
+  does not retroactively revoke credentials or cancel requests for accounts whose
+  password was reset on `v0.5.0` or earlier; the migration copies no data. Review
+  the accounts whose `auth.password_reset` audit rows predate the upgrade, and
+  revoke or deny anything among their credentials, applications and pending
+  requests that the account holder does not recognise.
 - **Issuance answers `409 CONFLICT` while a recovery is pending.** Issuing or
   rotating a credential for the account or its applications, and issuing a
   provider's test-consumer credential, is refused with `409 CONFLICT` until the
@@ -281,12 +279,15 @@ reset, the sessions the reset ended, the credentials it revoked and the access
 requests it cancelled, and `v0.5.0` does not hold back new issuance for it.
 
 Before restoring, list the accounts with an `auth.password_reset` audit row since
-the upgrade; the restore removes those rows. After the rollback, have an
+the upgrade, and note which of those rows recorded
+`credentials_revocation_pending: true`; the restore removes those rows. After the
+rollback, have an
 administrator disable each of those accounts, which ends its sessions and removes
-its gateway identity, and keep them disabled until `v0.5.1` is running again. Then
-re-enable them and have each holder complete a password reset under `v0.5.1`
-straight away. Where the post-upgrade reset recorded
-`credentials_revocation_pending: true`, the new reset revokes the account's earlier
+its gateway identity (disabling an administrator needs a `super_admin`), and keep
+them disabled until `v0.5.1` is running again. Re-enable an account only after its
+disable teardown has completed, and only when its holder is ready to complete a
+password reset under `v0.5.1` straight away. Where the noted post-upgrade reset
+recorded `credentials_revocation_pending: true`, the new reset revokes the account's earlier
 credentials and cancels its pending requests again; for the other accounts, have
 an administrator revoke the credentials and deny the requests their holders do not
 recognise. Treat the restored keys as possibly exposed.
