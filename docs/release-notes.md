@@ -303,12 +303,17 @@ linking, privilege changes, upstream admission and per-account write limits:
 
 - a trusted password reset revokes the credentials and cancels the access requests
   that a previous holder of the account left behind, durably, and blocks new
-  issuance until it lands;
+  issuance until it lands
+  ([GHSA-rp99-hqw5-q7f9](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-rp99-hqw5-q7f9));
 - an email-verification link no longer authorizes single sign-on linking, and every
-  manual privilege increase checks the trust of linked identities;
+  manual privilege increase checks the trust of linked identities
+  ([GHSA-v58f-cr96-fv8j](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-v58f-cr96-fv8j))
+  ([GHSA-924j-fm9c-wp9p](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-924j-fm9c-wp9p));
 - publishing refuses an upstream that would route a proxy back into the gateway,
-  whatever `NEXUS_ALLOW_PRIVATE_UPSTREAMS` says;
-- credential mutations and notification reads are rate-limited per account.
+  whatever `NEXUS_ALLOW_PRIVATE_UPSTREAMS` says
+  ([GHSA-37vj-qg3p-4fcc](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-37vj-qg3p-4fcc));
+- credential mutations and notification reads are rate-limited per account
+  ([GHSA-8jcf-wr8c-m28v](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-8jcf-wr8c-m28v)).
 
 Gateway-origin detection runs when Nexus writes a proxy: re-pointing DNS after a
 publish, or moving the gateway, is invisible to it, and is left to Edge's own
