@@ -339,6 +339,8 @@ interface RevocationRestore {
   skipped: RevocationRestoreSkip | null;
   /** The tool request the claim cancelled, when it went back to `pending` with the grant. */
   toolRequestRestored?: Uuid;
+  /** Set when that tool request was deliberately left `cancelled`. */
+  toolRequestSkipped?: 'account_recovery';
 }
 
 /** Rolling window for the per-account access-request budget. */
@@ -661,14 +663,18 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * Only that cancellation is undone: the row must still be `cancelled` with
    * the claim's `revoked_by` and `revoked_at` as its decision, which no other
    * transition writes. Nor is it put back over a request the identity has
-   * opened since, which holds the one pending slot. Store-only, so safe in a
-   * re-run body. Returns whether the request went back.
+   * opened since, which holds the one pending slot, or while an account
+   * recovery of the grantee is outstanding: the reset that queued it cancels
+   * the account's pending requests, found this one already cancelled, and
+   * must not see it come back. Store-only, so safe in a re-run body. Returns
+   * `restored` when the request went back, `account_recovery` when a recovery
+   * kept it out, and `null` otherwise.
    */
   async function restoreToolRequest(
     db: NexusStore,
     claim: GrantRecord,
     request: AccessRequestRecord,
-  ): Promise<boolean> {
+  ): Promise<'restored' | 'account_recovery' | null> {
     const current = await db.accessRequests.findById(request.id);
     if (
       !current ||
@@ -677,21 +683,42 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       current.decided_by !== claim.revoked_by ||
       current.decided_at !== claim.revoked_at
     ) {
-      return false;
+      return null;
     }
+    if (await db.accountRecoveryJobs.findByUser(claim.user_id)) return 'account_recovery';
     const occupied = await db.accessRequests.findPendingByApiAndUser(
       claim.api_id,
       claim.user_id,
       claim.application_id,
     );
-    if (occupied) return false;
+    if (occupied) return null;
     const back = await db.accessRequests.updateIfStatus(request.id, 'cancelled', {
       status: 'pending',
       decided_by: request.decided_by,
       decided_at: request.decided_at,
       decision_note: request.decision_note,
     });
-    return back !== null;
+    return back ? 'restored' : null;
+  }
+
+  /**
+   * Whether `request`, the tool request a revocation's claim cancelled, is
+   * back as the claim's rollback leaves it: `pending` on the claim's grant
+   * with its decision from before the cancellation. Read when the rollback
+   * committed but its outcome was lost.
+   */
+  async function toolRequestBack(
+    claim: GrantRecord,
+    request: AccessRequestRecord,
+  ): Promise<boolean> {
+    const current = await store.accessRequests.findById(request.id).catch(() => null);
+    return (
+      current?.status === 'pending' &&
+      current.grant_id === claim.id &&
+      current.decided_by === request.decided_by &&
+      current.decided_at === request.decided_at &&
+      current.decision_note === request.decision_note
+    );
   }
 
   /**
@@ -774,14 +801,12 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     }
     // In the same transaction as the grant, so the request is pending again
     // exactly when the grant it would extend is active again.
-    let toolRequestRestored: Uuid | null = null;
-    if (back && toolRequest && (await restoreToolRequest(db, claim, toolRequest))) {
-      toolRequestRestored = toolRequest.id;
-    }
+    const tool = back && toolRequest ? await restoreToolRequest(db, claim, toolRequest) : null;
     return {
       restored: back !== null,
       skipped: null,
-      ...(toolRequestRestored ? { toolRequestRestored } : {}),
+      ...(tool === 'restored' && toolRequest ? { toolRequestRestored: toolRequest.id } : {}),
+      ...(tool === 'account_recovery' ? { toolRequestSkipped: tool } : {}),
     };
   }
 
@@ -801,7 +826,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     tools: string[],
   ): Promise<boolean> {
     try {
-      const live = await edge.consumers.get(consumerId);
+      // Only Edge's own `Consumer not found` proves the group gone; any other
+      // `404` throws and reads as unreadable below (issue #535).
+      const live = await edge.consumers.get(consumerId, { confirmedAbsence: true });
       // A partial removal still leaves access to withdraw. Requiring every
       // group would strand a live REST-only or MCP-only membership behind a
       // revoked grant, so the provider could never retry its cleanup.
@@ -945,6 +972,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     else delete details.restore_skipped_reason;
     if (outcome.toolRequestRestored) details.tool_request_restored = outcome.toolRequestRestored;
     else delete details.tool_request_restored;
+    if (outcome.toolRequestSkipped) details.tool_request_skipped = outcome.toolRequestSkipped;
+    else delete details.tool_request_skipped;
   }
 
   /**
@@ -1026,7 +1055,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // rollback. Preserve that result without changing a newer claim.
       if (!outcome.restored && outcome.skipped === null) {
         const current = await store.grants.findById(claim.id).catch(() => null);
-        outcome = { restored: current?.status === 'active', skipped: null };
+        const restored = current?.status === 'active';
+        // The tool request went back in the same transaction, so the row
+        // names it as the committed transaction would have.
+        outcome =
+          restored && toolRequest && (await toolRequestBack(claim, toolRequest))
+            ? { restored, skipped: null, toolRequestRestored: toolRequest.id }
+            : { restored, skipped: null };
       }
       recordRestore(details, outcome);
       await audit

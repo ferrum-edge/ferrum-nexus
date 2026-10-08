@@ -573,6 +573,41 @@ describe('password reset', () => {
     assert.equal(consumer?.credentials.keyauth?.length ?? 0, 0);
   });
 
+  it('refuses to recreate a test consumer before deleting it while a recovery blocks', async () => {
+    const provider = await harness.registerUser({
+      email: 'recreating-provider@example.test',
+      role: 'provider',
+    });
+    const apiId = await publishAs(provider, 'recreating-provider');
+    const created = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/apis/${apiId}/test-consumer`,
+      payload: {},
+    });
+    assert.equal(created.statusCode, 201, created.body);
+    const existing = harness.edge.consumerByUsername(`nexus-test-${apiId}`);
+    assert.ok(existing);
+    const deletes = harness.edge.callsTo('DELETE', `/consumers/${existing.id}`).length;
+    await harness.store.accountRecoveryJobs.upsertPending(provider.user.id, nowIso());
+    try {
+      const refused = await harness.authed(provider, {
+        method: 'POST',
+        url: `/api/apis/${apiId}/test-consumer`,
+        payload: {},
+      });
+      assert.equal(refused.statusCode, 409, refused.body);
+      assert.equal(errorCode(refused.body), 'CONFLICT');
+    } finally {
+      await harness.store.accountRecoveryJobs.deleteByUser(provider.user.id);
+    }
+    // The refusal came before the delete: the provider's test consumer and its
+    // key are still there, for the recovery to revoke.
+    assert.equal(harness.edge.callsTo('DELETE', `/consumers/${existing.id}`).length, deletes);
+    const kept = harness.edge.consumerByUsername(`nexus-test-${apiId}`);
+    assert.equal(kept?.id, existing.id);
+    assert.equal(kept?.credentials.keyauth?.length, 1);
+  });
+
   it('revokes a test-consumer key an in-flight issue saves after the recovery has listed', async () => {
     const provider = await harness.registerUser({
       email: 'in-flight-test-consumer@example.test',

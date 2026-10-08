@@ -32,13 +32,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   consumer is treated as already gone only when Ferrum Edge itself says so. Any
   other `404` (an unknown route, or a proxy in front of the gateway) now fails the
   cleanup so it is reported and retried, instead of counting as removed access.
+  The rollback of a failed revocation likewise no longer reads such a `404` as
+  the access group being gone, which left the grant revoked over a live group.
 - **A failed grant revocation keeps the grantee's pending tool request** (#539).
   When the gateway refuses a revocation and the grant is restored, a pending
   request for more tools that the revocation cancelled is restored with it, in the
-  same transaction, unless the identity has opened another request since.
+  same transaction, unless the identity has opened another request since or an
+  account recovery of the grantee is pending.
 - **Account recovery covers provider test consumers.** Issuing a test-consumer
-  credential is refused while a recovery revocation is pending, and the recovery
-  waits out an in-flight test-consumer issue before its final sweep.
+  credential is refused while a recovery revocation is pending, before an
+  existing test consumer is replaced, and the recovery waits out an in-flight
+  test-consumer issue before its final sweep.
 
 ## [0.5.0] - 2026-10-08
 

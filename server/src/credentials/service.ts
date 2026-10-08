@@ -505,6 +505,12 @@ export interface CredentialsService {
     ip?: string | null,
     cutoff?: string | null,
   ): Promise<number>;
+  /**
+   * Throw `CONFLICT` while an account recovery of `userId` still blocks
+   * issuance. Read-only: a caller about to do something destructive on the
+   * way to an issue checks first, and the issue checks again in its key.
+   */
+  assertIssuanceAllowed(userId: Uuid): Promise<void>;
   /** The caller's credentials, or another user's when an admin asks. */
   list(
     actor: UserRecord,
@@ -2342,6 +2348,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       }
       revoked += await sweepForAccountRecovery(user, ip, cutoff, consumerIds);
       return revoked;
+    },
+
+    async assertIssuanceAllowed(userId): Promise<void> {
+      await assertNoPendingRecovery(userId);
     },
 
     async teardownGatewayIdentity(

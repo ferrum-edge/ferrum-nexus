@@ -257,7 +257,12 @@ export interface FerrumAdminClient {
 
   readonly consumers: {
     list(query?: EdgeListQuery): Promise<EdgePage<EdgeConsumer>>;
-    get(id: string): Promise<EdgeConsumer | null>;
+    /**
+     * `null` for a `404`. With `confirmedAbsence`, only for Edge's own
+     * `Consumer not found` answer: any other `404` is a protocol error, for a
+     * caller that acts on the consumer being gone (issue #535).
+     */
+    get(id: string, options?: { confirmedAbsence?: boolean }): Promise<EdgeConsumer | null>;
     /** Credential-bearing snapshot. Keep it transient and inside the server boundary. */
     verification(
       id: string,
@@ -549,9 +554,10 @@ function isCount(value: unknown): value is number {
 const CONSUMER_NOT_FOUND = 'Consumer not found';
 
 /**
- * Whether a `404` body is exactly Edge's `{"error": <expected>}` answer for a
- * missing resource. Anything else — empty, HTML, malformed, a router's generic
- * not-found document — is not evidence of absence.
+ * Whether a `404` body is Edge's `{"error": <expected>}` answer for a missing
+ * resource. Anything else — empty, HTML, malformed, a router's generic
+ * `{"error": "Not Found"}` — is not evidence of absence. The `error` value is
+ * what tells them apart, so a field Edge adds beside it later is ignored.
  */
 function isAbsenceAcknowledgement(bytes: Buffer, expected: string): boolean {
   let parsed: unknown;
@@ -560,7 +566,7 @@ function isAbsenceAcknowledgement(bytes: Buffer, expected: string): boolean {
   } catch {
     return false;
   }
-  return isRecord(parsed) && Object.keys(parsed).length === 1 && parsed.error === expected;
+  return isRecord(parsed) && parsed.error === expected;
 }
 
 function isConsumerBody(value: unknown): boolean {
@@ -1982,9 +1988,10 @@ export function createFerrumAdminClient(
         return callRequired<EdgePage<EdgeConsumer>>('GET', '/consumers', { query: { ...query } });
       },
 
-      async get(id: string): Promise<EdgeConsumer | null> {
+      async get(id, options): Promise<EdgeConsumer | null> {
         return call<EdgeConsumer>('GET', `/consumers/${encodeURIComponent(id)}`, {
           allow404: true,
+          ...(options?.confirmedAbsence ? { absentError: CONSUMER_NOT_FOUND } : {}),
         });
       },
 
