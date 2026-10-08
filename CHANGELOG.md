@@ -6,6 +6,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Data-plane attestation counts each data plane once across restarts** (#540). A
+  control plane's data-plane attestation now proves public-only egress only when the
+  number of distinct data planes equals `NEXUS_EXPECTED_DATA_PLANES` (more is refused
+  as an inventory mismatch) and every one has been listed long enough that a
+  restarted data plane cannot be counted twice. Until then, and when stream
+  timestamps contradict Nexus's or the gateway's clock, backend writes are refused
+  and health is `degraded` with a new bounded reason (`data_plane_recently_connected`,
+  `data_plane_clock_skew` or `more_data_planes_than_expected`). A data plane's
+  routine reconnect keeps the guarantee once Nexus has seen it.
+
 ### Security
 
 - **Tighten account linking and gateway write controls** (#544). Email verification

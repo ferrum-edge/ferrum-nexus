@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import { isDeepStrictEqual } from 'node:util';
 
 /**
@@ -118,7 +119,7 @@ function hasExactKeys(row: Record<string, unknown>, keys: readonly string[]): bo
 }
 
 const RFC3339_DATE_TIME =
-  /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[Zz]|[+-](\d{2}):(\d{2}))$/;
+  /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?(?:[Zz]|([+-])(\d{2}):(\d{2}))$/;
 
 /**
  * An RFC 3339 `date-time`, the format the owner schema asserts for
@@ -139,8 +140,24 @@ function isRfc3339DateTime(value: unknown): boolean {
     field(5) <= 59 &&
     // 60 is a leap second.
     field(6) <= 60 &&
-    (match[7] === undefined || (field(7) <= 23 && field(8) <= 59))
+    (match[8] === undefined || (field(9) <= 23 && field(10) <= 59))
   );
+}
+
+/**
+ * The instant of a date-time {@link isRfc3339DateTime} accepted, in epoch
+ * milliseconds, or `NaN`. A fraction is rounded up and a leap second reads as
+ * the next minute, so the instant is never earlier than the one written.
+ */
+function rfc3339Millis(value: string): number {
+  const match = RFC3339_DATE_TIME.exec(value);
+  if (!match) return Number.NaN;
+  const field = (index: number): number => Number(match[index] ?? 0);
+  const fraction = match[7] === undefined ? 0 : Math.ceil(Number(`0${match[7]}`) * 1000);
+  const sign = match[8] === '-' ? -1 : 1;
+  const offsetMinutes = match[8] === undefined ? 0 : sign * (field(9) * 60 + field(10));
+  const utc = Date.UTC(field(1), field(2) - 1, field(3), field(4), field(5), field(6));
+  return utc + fraction - offsetMinutes * 60_000;
 }
 
 function isEgressMode(value: unknown): value is EgressMode {
@@ -402,6 +419,12 @@ export function provesLocalPublicEgress(policy: BackendEgressPolicy): boolean {
  *   nothing says the connected set is the whole fleet.
  * - `fewer_data_planes_than_expected`: fewer distinct data planes are connected
  *   than it says.
+ * - `more_data_planes_than_expected`: more distinct data planes are connected
+ *   than it says, so the inventory is not the fleet.
+ * - `data_plane_recently_connected`: a data plane may have started too recently
+ *   for a stale stream of the process it replaced to be gone.
+ * - `data_plane_clock_skew`: a `connected_at` is implausible against Nexus's
+ *   clock or the gateway's, so stream age cannot be read from it.
  * - `not_control_plane`: the answer is not a control plane's.
  */
 export type DataPlaneAttestationVerdict =
@@ -411,7 +434,47 @@ export type DataPlaneAttestationVerdict =
   | 'data_planes_not_public_only'
   | 'expected_data_planes_unset'
   | 'fewer_data_planes_than_expected'
+  | 'more_data_planes_than_expected'
+  | 'data_plane_recently_connected'
+  | 'data_plane_clock_skew'
   | 'not_control_plane';
+
+/**
+ * How long a data-plane process must have been listed before it counts. Edge
+ * v0.9.14 drops the stream of a process that died without closing it once the
+ * ConfigSync HTTP/2 keepalive fails (a ping every 30 s, a 10 s timeout); this
+ * adds 20 s of slack. A process listed this long started after any process it
+ * replaced died, so that process's stale stream is gone.
+ */
+export const DATA_PLANE_SETTLE_MS = 60_000;
+
+/** The clock difference tolerated between Nexus and the control plane. */
+export const CLOCK_SKEW_ALLOWANCE_MS = 30_000;
+
+/**
+ * The oldest a live Subscribe stream can be: Edge v0.9.14 ends every stream
+ * within `FERRUM_CP_GRPC_MAX_STREAM_LIFETIME_SECONDS`, at most 86 400 s, and
+ * rounds the token deadline up by a second.
+ */
+export const STREAM_AGE_CEILING_MS = 86_401_000;
+
+/** `connected_at` age on one clock that settles a data plane, allowing for skew. */
+const SETTLED_AGE_MS = DATA_PLANE_SETTLE_MS + CLOCK_SKEW_ALLOWANCE_MS;
+/** `connected_at` age on one clock beyond which no live stream can be, allowing for skew. */
+const MAX_PLAUSIBLE_AGE_MS = STREAM_AGE_CEILING_MS + CLOCK_SKEW_ALLOWANCE_MS;
+
+/** When one answer was read, to tell how long each listed data plane has existed. */
+export interface DataPlaneFreshness {
+  /** Nexus's wall clock when the request was sent, in epoch milliseconds; now by default. */
+  readAt?: number;
+  /** The answer's HTTP `Date` (the gateway's clock), in epoch milliseconds, when it had one. */
+  gatewayDate?: number;
+  /**
+   * `node_id`s this process saw listed at least {@link DATA_PLANE_SETTLE_MS}
+   * before the request was sent, on its monotonic clock ({@link DataPlaneSightings}).
+   */
+  settledNodeIds?: ReadonlySet<string>;
+}
 
 /** Only a positive integer is an inventory; anything else counts as unset. */
 function isExpectedDataPlanes(value: number | undefined): value is number {
@@ -428,19 +491,29 @@ function isExpectedDataPlanes(value: number | undefined): value is number {
  *
  * A control plane sees only the data planes streaming from it, so the operator's
  * `expectedDataPlanes` (`NEXUS_EXPECTED_DATA_PLANES`) must also be set and the
- * number of distinct `node_id`s among the listed streams must reach it. Each
+ * number of distinct `node_id`s among the listed streams must equal it. Each
  * Edge data-plane process subscribes under its own random `node_id`, kept for
  * the process lifetime, so the value counts data-plane processes. Edge lists
  * one entry per Subscribe stream, so a reconnect overlap can list one process
- * twice; counting distinct ids collapses that duplicate. A process that
- * restarts without closing its stream comes back under a new `node_id`, so
- * until Edge drops the stale stream it counts twice and can briefly cover one
- * missing data plane. Unset, an attestation never grants the guarantee. It
- * covers the data planes connected at the moment of this read only.
+ * twice; counting distinct ids collapses that duplicate.
+ *
+ * A process that restarts without closing its stream comes back under a new
+ * `node_id`, and until Edge drops the stale stream that data plane counts twice
+ * (#540). So every listed `node_id` must also have existed for at least
+ * {@link DATA_PLANE_SETTLE_MS}: by then any process it replaced has been dead
+ * long enough for Edge to drop its stream. Either this process saw it listed
+ * that long ago (`settledNodeIds`, which no clock skew affects), or its earliest
+ * `connected_at` is that old, plus {@link CLOCK_SKEW_ALLOWANCE_MS}, on Nexus's
+ * clock and, when the answer carried one, on the gateway's `Date` too. A
+ * `connected_at` later than either clock or older than any live stream can be
+ * proves nothing, so a data plane that only it could settle fails closed. Unset,
+ * an attestation never grants the guarantee. It covers the data planes
+ * connected at the moment of this read only.
  */
 export function dataPlaneAttestationVerdict(
   policy: BackendEgressPolicy,
   expectedDataPlanes?: number,
+  freshness: DataPlaneFreshness = {},
 ): DataPlaneAttestationVerdict {
   if (policy.enforcement_scope !== 'admission-only') return 'not_control_plane';
   const attestation = policy.data_plane_attestation;
@@ -460,8 +533,30 @@ export function dataPlaneAttestationVerdict(
     );
   if (!allPublicOnly) return 'data_planes_not_public_only';
   if (!isExpectedDataPlanes(expectedDataPlanes)) return 'expected_data_planes_unset';
-  const distinctDataPlanes = new Set(attestation.data_planes.map((entry) => entry.node_id)).size;
-  if (distinctDataPlanes < expectedDataPlanes) return 'fewer_data_planes_than_expected';
+  const clocks = [freshness.readAt ?? Date.now()];
+  if (freshness.gatewayDate !== undefined) clocks.push(freshness.gatewayDate);
+  // Each node_id's earliest listed stream: its process connected no later.
+  const firstConnected = new Map<string, number>();
+  let plausible = true;
+  for (const entry of attestation.data_planes) {
+    const connectedAt = rfc3339Millis(entry.connected_at);
+    plausible &&= clocks.every((clock) => {
+      const age = clock - connectedAt;
+      return age >= -CLOCK_SKEW_ALLOWANCE_MS && age <= MAX_PLAUSIBLE_AGE_MS;
+    });
+    const known = firstConnected.get(entry.node_id) ?? connectedAt;
+    firstConnected.set(entry.node_id, Math.min(known, connectedAt));
+  }
+  if (firstConnected.size < expectedDataPlanes) return 'fewer_data_planes_than_expected';
+  if (firstConnected.size > expectedDataPlanes) return 'more_data_planes_than_expected';
+  const settled = freshness.settledNodeIds;
+  for (const [nodeId, connectedAt] of firstConnected) {
+    if (settled?.has(nodeId) === true) continue;
+    if (!plausible) return 'data_plane_clock_skew';
+    if (!clocks.every((clock) => clock - connectedAt >= SETTLED_AGE_MS)) {
+      return 'data_plane_recently_connected';
+    }
+  }
   return 'guaranteed';
 }
 
@@ -469,8 +564,9 @@ export function dataPlaneAttestationVerdict(
 export function provesDataPlanePublicEgress(
   policy: BackendEgressPolicy,
   expectedDataPlanes?: number,
+  freshness?: DataPlaneFreshness,
 ): boolean {
-  return dataPlaneAttestationVerdict(policy, expectedDataPlanes) === 'guaranteed';
+  return dataPlaneAttestationVerdict(policy, expectedDataPlanes, freshness) === 'guaranteed';
 }
 
 /**
@@ -480,8 +576,12 @@ export function provesDataPlanePublicEgress(
 export function provesPublicEgress(
   policy: BackendEgressPolicy,
   expectedDataPlanes?: number,
+  freshness?: DataPlaneFreshness,
 ): boolean {
-  return provesLocalPublicEgress(policy) || provesDataPlanePublicEgress(policy, expectedDataPlanes);
+  return (
+    provesLocalPublicEgress(policy) ||
+    provesDataPlanePublicEgress(policy, expectedDataPlanes, freshness)
+  );
 }
 
 /**
@@ -501,9 +601,69 @@ export function describeDataPlaneAttestation(verdict: DataPlaneAttestationVerdic
       return 'NEXUS_EXPECTED_DATA_PLANES is not set, so the data-plane attestation cannot grant it';
     case 'fewer_data_planes_than_expected':
       return 'fewer distinct data planes (node_id) are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES';
+    case 'more_data_planes_than_expected':
+      return 'more distinct data planes (node_id) are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES';
+    case 'data_plane_recently_connected':
+      return 'a data plane connected too recently to rule out a restarted data plane still being counted twice; retry shortly';
+    case 'data_plane_clock_skew':
+      return "a data plane's connected_at is implausible against Nexus's or the gateway's clock; check clock synchronization";
     default:
       return null;
   }
+}
+
+/** How long a `node_id` no longer listed is remembered, across a reconnect gap. */
+const SIGHTING_RETENTION_MS = 15 * 60_000;
+/** Bound on remembered `node_id`s; past it, those not listed in the latest read go first. */
+const MAX_SIGHTINGS = 20_000;
+
+/**
+ * This process's own record of when it first saw each data-plane `node_id`
+ * listed, on its monotonic clock. A data plane reconnects under the same
+ * `node_id` (Edge v0.9.14 renews each stream within the hour), so this keeps a
+ * routine reconnect from withholding the guarantee the way a new process does.
+ * Losing a record only withholds the guarantee, never grants it.
+ */
+export interface DataPlaneSightings {
+  /**
+   * Record the `node_id`s one answer lists, and return those first seen at
+   * least {@link DATA_PLANE_SETTLE_MS} before `startedAt`, the monotonic time
+   * the request was sent. A first sighting is stamped after the answer
+   * arrived, so neither end of the interval overstates it.
+   */
+  observe(policy: BackendEgressPolicy, startedAt: number): ReadonlySet<string>;
+}
+
+/** {@link DataPlaneSightings} on `now`, a monotonic millisecond clock. */
+export function createDataPlaneSightings(
+  now: () => number = () => performance.now(),
+): DataPlaneSightings {
+  const sightings = new Map<string, { first: number; last: number }>();
+  return {
+    observe(policy, startedAt) {
+      const seenAt = now();
+      const attestation =
+        policy.enforcement_scope === 'admission-only' ? policy.data_plane_attestation : undefined;
+      const listed = new Set((attestation?.data_planes ?? []).map((entry) => entry.node_id));
+      const settled = new Set<string>();
+      for (const nodeId of listed) {
+        const sighting = sightings.get(nodeId);
+        if (sighting === undefined) {
+          sightings.set(nodeId, { first: seenAt, last: seenAt });
+          continue;
+        }
+        sighting.last = Math.max(sighting.last, seenAt);
+        if (startedAt - sighting.first >= DATA_PLANE_SETTLE_MS) settled.add(nodeId);
+      }
+      for (const [nodeId, sighting] of sightings) {
+        if (listed.has(nodeId)) continue;
+        if (seenAt - sighting.last > SIGHTING_RETENTION_MS || sightings.size > MAX_SIGHTINGS) {
+          sightings.delete(nodeId);
+        }
+      }
+      return settled;
+    },
+  };
 }
 
 /**
@@ -555,18 +715,21 @@ export interface BackendEgressAssessment {
 }
 
 /**
- * Assess one reading. A set-aside attestation proves nothing, whatever the rest
- * of the answer says, but it never refuses what an opt-out admits.
+ * Assess one reading, taken as `freshness` describes. A set-aside attestation
+ * proves nothing, whatever the rest of the answer says, but it never refuses
+ * what an opt-out admits.
  */
 export function assessBackendEgress(
   reading: BackendEgressPolicyReading,
   options: EgressAdmissionOptions,
+  freshness?: DataPlaneFreshness,
 ): BackendEgressAssessment {
   const { policy } = reading;
   const usable = reading.attestationProblem === null;
-  const publicEgressGuaranteed = usable && provesPublicEgress(policy, options.expectedDataPlanes);
+  const publicEgressGuaranteed =
+    usable && provesPublicEgress(policy, options.expectedDataPlanes, freshness);
   const dataPlaneAttestation = usable
-    ? dataPlaneAttestationVerdict(policy, options.expectedDataPlanes)
+    ? dataPlaneAttestationVerdict(policy, options.expectedDataPlanes, freshness)
     : 'attestation_unreadable';
   const enforcement_scope = policy.enforcement_scope;
   let admission: BackendEgressAdmission | null = null;
@@ -589,6 +752,7 @@ export function assessBackendEgress(
 export function admitBackendEgress(
   policy: BackendEgressPolicy,
   options: EgressAdmissionOptions,
+  freshness?: DataPlaneFreshness,
 ): BackendEgressAdmission | null {
-  return assessBackendEgress({ policy, attestationProblem: null }, options).admission;
+  return assessBackendEgress({ policy, attestationProblem: null }, options, freshness).admission;
 }

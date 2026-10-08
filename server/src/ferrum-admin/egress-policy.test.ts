@@ -11,11 +11,15 @@ import {
 import type { NexusError } from '../lib/errors.js';
 import { buildTestApp, SAMPLE_SPEC_YAML } from '../test/helpers.js';
 import { publicEgressPolicy } from '../test/mock-ferrum-edge.js';
-import { EGRESS_POLICY_MAX_BYTES } from './client.js';
+import { EGRESS_POLICY_MAX_BYTES, gatewayDateMillis } from './client.js';
 import {
   admitBackendEgress,
   assessBackendEgress,
+  CLOCK_SKEW_ALLOWANCE_MS,
+  createDataPlaneSightings,
+  DATA_PLANE_SETTLE_MS,
   dataPlaneAttestationVerdict,
+  describeDataPlaneAttestation,
   isUnsupportedEgressPolicySchema,
   parseBackendEgressPolicy,
   provesDataPlanePublicEgress,
@@ -27,6 +31,7 @@ import {
   type DataPlaneAttestationVerdict,
   type DataPlaneEgressAttestation,
   type DataPlaneEgressPolicy,
+  type DataPlaneFreshness,
 } from './egress-policy.js';
 
 /** The vendored canonical `backend-egress-policy` v2 fixtures (contracts-edge-0.9.14). */
@@ -34,6 +39,9 @@ const EGRESS_FIXTURES = new URL(
   '../../../contracts/ferrum-contracts/fixtures/backend-egress-policy/v2/',
   import.meta.url,
 );
+
+/** A read an hour after the canonical fixtures' streams connected: every one has settled. */
+const FIXTURE_READ: DataPlaneFreshness = { readAt: Date.parse('2026-10-06T13:00:00Z') };
 
 /** One canonical fixture, e.g. `valid/public-serving.json`. */
 function egressFixture(path: string): Record<string, unknown> {
@@ -498,18 +506,24 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
       assert.equal(provesLocalPublicEgress(parsed), false);
     }
     const empty = parseBackendEgressPolicy(emptyExample, 'ferrum')!;
-    assert.equal(provesPublicEgress(empty, 1), false);
-    assert.equal(dataPlaneAttestationVerdict(empty, 1), 'data_planes_not_public_only');
+    assert.equal(provesPublicEgress(empty, 1, FIXTURE_READ), false);
+    assert.equal(
+      dataPlaneAttestationVerdict(empty, 1, FIXTURE_READ),
+      'data_planes_not_public_only',
+    );
     const attested = parseBackendEgressPolicy(attestedExample, 'ferrum')!;
     // Without the operator's inventory, the connected set is not known to be the fleet.
-    assert.equal(provesDataPlanePublicEgress(attested), false);
-    assert.equal(dataPlaneAttestationVerdict(attested), 'expected_data_planes_unset');
-    assert.equal(admitBackendEgress(attested, {}), null);
-    assert.equal(provesDataPlanePublicEgress(attested, 2), true);
-    assert.equal(provesPublicEgress(attested, 2), true);
+    assert.equal(provesDataPlanePublicEgress(attested, undefined, FIXTURE_READ), false);
+    assert.equal(
+      dataPlaneAttestationVerdict(attested, undefined, FIXTURE_READ),
+      'expected_data_planes_unset',
+    );
+    assert.equal(admitBackendEgress(attested, {}, FIXTURE_READ), null);
+    assert.equal(provesDataPlanePublicEgress(attested, 2, FIXTURE_READ), true);
+    assert.equal(provesPublicEgress(attested, 2, FIXTURE_READ), true);
     // The CP's own policy is `both` and not guaranteed; only the data planes count.
     assert.equal(attested.public_only_guaranteed, false);
-    assert.deepEqual(admitBackendEgress(attested, { expectedDataPlanes: 2 }), {
+    assert.deepEqual(admitBackendEgress(attested, { expectedDataPlanes: 2 }, FIXTURE_READ), {
       egress_profile: 'public-guaranteed',
       enforcement_scope: 'admission-only',
     });
@@ -526,7 +540,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
       // Two public-only data planes with distinct node_ids.
       'control-plane-attestation-reported.json': [
         'expected_data_planes_unset',
-        'guaranteed',
+        'more_data_planes_than_expected',
         'guaranteed',
         'fewer_data_planes_than_expected',
       ],
@@ -557,11 +571,11 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
       [undefined, 1, 2, 3].forEach((expectedDataPlanes, index) => {
         const verdict = expectations[name]![index];
         assert.equal(
-          dataPlaneAttestationVerdict(reading.policy, expectedDataPlanes),
+          dataPlaneAttestationVerdict(reading.policy, expectedDataPlanes, FIXTURE_READ),
           verdict,
           name,
         );
-        const assessment = assessBackendEgress(reading, { expectedDataPlanes });
+        const assessment = assessBackendEgress(reading, { expectedDataPlanes }, FIXTURE_READ);
         const guaranteed = local || verdict === 'guaranteed';
         assert.equal(assessment.publicEgressGuaranteed, guaranteed, name);
         assert.equal(assessment.dataPlaneAttestation, verdict, name);
@@ -755,7 +769,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
     assert.equal(admitBackendEgress(policy, { expectedDataPlanes: 1 }), null);
   });
 
-  it('grants the guarantee only when the distinct data planes reach the expected count', () => {
+  it('grants the guarantee only when the distinct data planes equal the expected count', () => {
     const policy = parseBackendEgressPolicy(
       attestedControlPlanePolicy([PUBLIC, PUBLIC, PUBLIC]),
       'nexus',
@@ -764,7 +778,8 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
       ['unset', undefined, 'expected_data_planes_unset'],
       ['above the connected count', 4, 'fewer_data_planes_than_expected'],
       ['equal to the connected count', 3, 'guaranteed'],
-      ['below the connected count', 2, 'guaranteed'],
+      // More data planes than the inventory: it is not the fleet, so it proves nothing.
+      ['below the connected count', 2, 'more_data_planes_than_expected'],
       // Anything but a positive integer is no inventory at all.
       ['zero', 0, 'expected_data_planes_unset'],
       ['negative', -3, 'expected_data_planes_unset'],
@@ -813,6 +828,221 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
       egress_profile: 'public-guaranteed',
       enforcement_scope: 'admission-only',
     });
+  });
+
+  describe('stream age: a restarted data plane never stands in for a missing one (#540)', () => {
+    const READ_AT = Date.parse('2026-10-08T12:00:00Z');
+    /** Nexus's read and the gateway's `Date`, on agreeing clocks. */
+    const AGREED: DataPlaneFreshness = { readAt: READ_AT, gatewayDate: READ_AT };
+    const SETTLED_S = (DATA_PLANE_SETTLE_MS + CLOCK_SKEW_ALLOWANCE_MS) / 1000;
+
+    /** Public-only streams, each a node_id and how many seconds before READ_AT it connected. */
+    function streams(connected: [string, number][]): BackendEgressPolicy {
+      const answer = attestedControlPlanePolicy(connected.map(() => PUBLIC));
+      const planes = (answer.data_plane_attestation as DataPlaneEgressAttestation).data_planes;
+      connected.forEach(([nodeId, secondsAgo], index) => {
+        planes[index]!.node_id = nodeId;
+        planes[index]!.connected_at = new Date(READ_AT - secondsAgo * 1000).toISOString();
+      });
+      const policy = parseBackendEgressPolicy(answer, 'nexus');
+      assert.ok(policy);
+      return policy;
+    }
+
+    it('withholds the guarantee while a restarted data plane may still count twice', () => {
+      // The fleet is A and B; B streams from another control plane. A crashed
+      // and restarted under a new node_id while its stale stream is still listed.
+      const restart = streams([
+        ['dp-a-old', 3_600],
+        ['dp-a-new', 5],
+      ]);
+      assert.equal(
+        dataPlaneAttestationVerdict(restart, 2, AGREED),
+        'data_plane_recently_connected',
+      );
+      assert.equal(provesPublicEgress(restart, 2, AGREED), false);
+      assert.equal(admitBackendEgress(restart, { expectedDataPlanes: 2 }, AGREED), null);
+      const reading = { policy: restart, attestationProblem: null };
+      assert.deepEqual(assessBackendEgress(reading, { expectedDataPlanes: 2 }, AGREED), {
+        publicEgressGuaranteed: false,
+        admission: null,
+        dataPlaneAttestation: 'data_plane_recently_connected',
+      });
+      // Right up to the bound, and on Nexus's clock alone.
+      const late = streams([
+        ['dp-a-old', 3_600],
+        ['dp-a-new', SETTLED_S - 1],
+      ]);
+      assert.equal(dataPlaneAttestationVerdict(late, 2, AGREED), 'data_plane_recently_connected');
+      assert.equal(
+        dataPlaneAttestationVerdict(restart, 2, { readAt: READ_AT }),
+        'data_plane_recently_connected',
+      );
+      // Once Edge drops the stale stream the count is short, so it stays refused.
+      const reaped = streams([['dp-a-new', SETTLED_S]]);
+      assert.equal(
+        dataPlaneAttestationVerdict(reaped, 2, AGREED),
+        'fewer_data_planes_than_expected',
+      );
+      // An opt-out still admits it, never as guaranteed.
+      const optedOut = { expectedDataPlanes: 2, allowPrivateUpstreams: true };
+      assert.equal(
+        admitBackendEgress(restart, optedOut, AGREED)?.egress_profile,
+        'private-upstreams-opt-in',
+      );
+      assert.match(
+        describeDataPlaneAttestation('data_plane_recently_connected') ?? '',
+        /connected too recently/,
+      );
+    });
+
+    it('withholds it while any listed data plane is new, even with the count met', () => {
+      // A new node_id may be the replacement of any other listed one, whose
+      // stream would then be stale: none of the older entries can be trusted.
+      const surge = streams([
+        ['dp-a', 3_600],
+        ['dp-b', 3_600],
+        ['dp-c', 10],
+      ]);
+      assert.equal(dataPlaneAttestationVerdict(surge, 3, AGREED), 'data_plane_recently_connected');
+      assert.equal(dataPlaneAttestationVerdict(surge, 2, AGREED), 'more_data_planes_than_expected');
+    });
+
+    it('grants a genuine fleet of N data planes once every one has settled', () => {
+      for (const size of [1, 2, 5]) {
+        const nodeIds = Array.from({ length: size }, (_, index) => `dp-${index}`);
+        const fleet = streams(nodeIds.map((nodeId): [string, number] => [nodeId, 600]));
+        assert.equal(dataPlaneAttestationVerdict(fleet, size, AGREED), 'guaranteed', String(size));
+        assert.equal(dataPlaneAttestationVerdict(fleet, size, { readAt: READ_AT }), 'guaranteed');
+        assert.deepEqual(admitBackendEgress(fleet, { expectedDataPlanes: size }, AGREED), {
+          egress_profile: 'public-guaranteed',
+          enforcement_scope: 'admission-only',
+        });
+        assert.equal(
+          dataPlaneAttestationVerdict(fleet, size + 1, AGREED),
+          'fewer_data_planes_than_expected',
+        );
+      }
+      // Exactly at the bound it counts.
+      const bound = streams([
+        ['dp-a', SETTLED_S],
+        ['dp-b', 3_600],
+      ]);
+      assert.equal(dataPlaneAttestationVerdict(bound, 2, AGREED), 'guaranteed');
+      // A reconnect overlap keeps the process's first stream, so it stays settled.
+      const overlap = streams([
+        ['dp-a', 3_600],
+        ['dp-a', 2],
+        ['dp-b', 3_600],
+      ]);
+      assert.equal(dataPlaneAttestationVerdict(overlap, 2, AGREED), 'guaranteed');
+    });
+
+    it('keeps a routine reconnect settled through node_ids this process already saw', () => {
+      // Edge renews every stream within the hour; afterwards only the new one is listed.
+      const reconnected = streams([
+        ['dp-a', 3_600],
+        ['dp-b', 3],
+      ]);
+      assert.equal(
+        dataPlaneAttestationVerdict(reconnected, 2, AGREED),
+        'data_plane_recently_connected',
+      );
+      const seen = { ...AGREED, settledNodeIds: new Set(['dp-b']) };
+      assert.equal(dataPlaneAttestationVerdict(reconnected, 2, seen), 'guaranteed');
+      // A sighting covers only its own node_id.
+      const other = { ...AGREED, settledNodeIds: new Set(['dp-a']) };
+      assert.equal(
+        dataPlaneAttestationVerdict(reconnected, 2, other),
+        'data_plane_recently_connected',
+      );
+    });
+
+    it('fails closed on clock skew it can see, and tolerates what it allows', () => {
+      const fleet = streams([
+        ['dp-a', 3_600],
+        ['dp-b', 600],
+      ]);
+      const skewed = (freshness: DataPlaneFreshness): DataPlaneAttestationVerdict =>
+        dataPlaneAttestationVerdict(fleet, 2, freshness);
+      const allowance = CLOCK_SKEW_ALLOWANCE_MS;
+      // Nexus's clock behind the control plane's: dp-b connected "in the future".
+      assert.equal(skewed({ readAt: READ_AT - 600_000 - allowance - 1 }), 'data_plane_clock_skew');
+      // Within the allowance, a stream is merely too new.
+      assert.equal(
+        skewed({ readAt: READ_AT - 600_000 - allowance }),
+        'data_plane_recently_connected',
+      );
+      // Nexus's clock ahead: the gateway's own Date still shows dp-b too new.
+      const ahead = { readAt: READ_AT + 3_600_000, gatewayDate: READ_AT - 600_000 + 10_000 };
+      assert.equal(skewed(ahead), 'data_plane_recently_connected');
+      // Either clock seeing a stream older than Edge lets one live is skew too.
+      assert.equal(skewed({ readAt: READ_AT + 2 * 86_400_000 }), 'data_plane_clock_skew');
+      assert.equal(
+        skewed({ readAt: READ_AT, gatewayDate: READ_AT - 3_600_000 }),
+        'data_plane_clock_skew',
+      );
+      assert.equal(skewed({ readAt: Number.NaN }), 'data_plane_clock_skew');
+      // Sightings are on this process's monotonic clock, which no skew moves.
+      const sighted = new Set(['dp-a', 'dp-b']);
+      assert.equal(skewed({ readAt: READ_AT - 3_600_000, settledNodeIds: sighted }), 'guaranteed');
+      // But a skewed clock never settles an unsighted data plane.
+      assert.equal(
+        skewed({ readAt: READ_AT - 3_600_000, settledNodeIds: new Set(['dp-a']) }),
+        'data_plane_clock_skew',
+      );
+      assert.match(describeDataPlaneAttestation('data_plane_clock_skew') ?? '', /clock/);
+    });
+  });
+
+  it('remembers when this process first saw each node_id, on its own clock', () => {
+    let now = 1_000;
+    const sightings = createDataPlaneSightings(() => now);
+    const fleet = (nodeIds: string[]): BackendEgressPolicy => {
+      const answer = attestedControlPlanePolicy(nodeIds.map(() => PUBLIC));
+      const planes = (answer.data_plane_attestation as DataPlaneEgressAttestation).data_planes;
+      nodeIds.forEach((nodeId, index) => (planes[index]!.node_id = nodeId));
+      return parseBackendEgressPolicy(answer, 'nexus')!;
+    };
+    // A request sent at `startedAt` whose answer arrives 50 ms later.
+    const read = (nodeIds: string[], startedAt: number): string[] => {
+      now = startedAt + 50;
+      return [...sightings.observe(fleet(nodeIds), startedAt)].sort();
+    };
+    assert.deepEqual(read(['dp-a', 'dp-b'], 1_000), []);
+    // First seen when the answer arrived (1 050), measured from when the next was sent.
+    assert.deepEqual(read(['dp-a', 'dp-b'], 1_050 + DATA_PLANE_SETTLE_MS - 1), []);
+    assert.deepEqual(read(['dp-a', 'dp-b', 'dp-c'], 1_050 + DATA_PLANE_SETTLE_MS), [
+      'dp-a',
+      'dp-b',
+    ]);
+    // dp-b reconnects after a short gap and is still known.
+    assert.deepEqual(read(['dp-a'], 200_000), ['dp-a']);
+    assert.deepEqual(read(['dp-a', 'dp-b'], 210_000), ['dp-a', 'dp-b']);
+    // A node_id unlisted for longer than the retention is forgotten.
+    assert.deepEqual(read(['dp-a'], 3_000_000), ['dp-a']);
+    assert.deepEqual(read(['dp-a', 'dp-b'], 3_010_000), ['dp-a']);
+    // A local data plane's answer lists nothing.
+    now = 4_000_000;
+    const local = parseBackendEgressPolicy(publicEgressPolicy(), 'nexus')!;
+    assert.deepEqual([...sightings.observe(local, now)], []);
+  });
+
+  it('reads the gateway clock only from a well-formed Date header', () => {
+    assert.equal(
+      gatewayDateMillis('Thu, 08 Oct 2026 12:00:00 GMT'),
+      Date.parse('2026-10-08T12:00:00Z'),
+    );
+    for (const value of [
+      undefined,
+      '',
+      ['Thu, 08 Oct 2026 12:00:00 GMT'],
+      '2026-10-08T12:00:00Z',
+      'Thursday, 08-Oct-26 12:00:00 GMT',
+      'Thu, 08 Oct 2026 12:00:00 +0000',
+    ]) {
+      assert.equal(gatewayDateMillis(value), undefined, String(value));
+    }
   });
 
   it('re-checks every stream rather than trusting the summary flags', () => {
@@ -1077,7 +1307,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
   });
 
   it('re-reads the attestation for every write and health probe, with no grace', async (t) => {
-    const harness = await buildTestApp({ env: { NEXUS_EXPECTED_DATA_PLANES: '1' } });
+    const harness = await buildTestApp({ env: { NEXUS_EXPECTED_DATA_PLANES: '2' } });
     t.after(() => harness.close());
     const edge = harness.edgeClient;
     harness.edge.setBackendEgressPolicy(attestedControlPlanePolicy([PUBLIC, PUBLIC]));
@@ -1100,7 +1330,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
       assert.equal(degraded.backendEgressVerified, false);
     }
     // And it is restored as soon as every connected data plane attests again.
-    harness.edge.setBackendEgressPolicy(attestedControlPlanePolicy([PUBLIC]));
+    harness.edge.setBackendEgressPolicy(attestedControlPlanePolicy([PUBLIC, PUBLIC]));
     await edge.assertBackendEgress();
     assert.equal((await edge.probe()).publicEgressGuaranteed, true);
   });

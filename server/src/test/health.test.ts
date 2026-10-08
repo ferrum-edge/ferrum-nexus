@@ -9,6 +9,7 @@ import type { ApiErrorBody, AppHealth, EdgeHealth } from '@ferrum-nexus/shared';
 
 import { attestedControlPlanePolicy } from './edge-egress-attestation-fixtures.js';
 import { publicEgressPolicy } from './mock-ferrum-edge.js';
+import type { DataPlaneEgressAttestation } from '../ferrum-admin/egress-policy.js';
 import type { NexusError } from '../lib/errors.js';
 import { OPAQUE_ERROR } from '../routes/health.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
@@ -311,6 +312,24 @@ describe('health endpoints', () => {
     }
   });
 
+  it('withholds the guarantee while a restarted data plane may count twice', async (t) => {
+    const portal = await buildTestApp({ env: { NEXUS_EXPECTED_DATA_PLANES: '2' } });
+    t.after(() => portal.close());
+    const admin = await portal.registerUser();
+    // One data plane's stale stream, and its restarted process under a new node_id.
+    const restart = attestedControlPlanePolicy([{ mode: 'public' }, { mode: 'public' }]);
+    const attestation = restart.data_plane_attestation as DataPlaneEgressAttestation;
+    attestation.data_planes[1]!.connected_at = new Date().toISOString();
+    portal.edge.setBackendEgressPolicy(restart);
+    const response = await portal.authed(admin, { method: 'GET', url: '/api/health/edge' });
+    const health = response.json<EdgeHealth>();
+    assert.equal(health.status, 'degraded');
+    assert.equal(health.reason, 'backend_egress_unverified');
+    assert.equal(health.public_egress_guaranteed, false);
+    assert.match(health.error ?? '', /connected too recently/);
+    await assert.rejects(portal.edgeClient.assertBackendEgress(), /connected too recently/);
+  });
+
   it('tells an admin why the expected data-plane count withholds the guarantee', async (t) => {
     const fleet = attestedControlPlanePolicy([{ mode: 'public' }, { mode: 'public' }]);
     const cases: [string | undefined, RegExp | null][] = [
@@ -320,7 +339,10 @@ describe('health endpoints', () => {
         /fewer distinct data planes \(node_id\) are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES/,
       ],
       ['2', null],
-      ['1', null],
+      [
+        '1',
+        /more distinct data planes \(node_id\) are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES/,
+      ],
     ];
     for (const [expected, why] of cases) {
       const portal = await buildTestApp({
