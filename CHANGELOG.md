@@ -6,6 +6,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **Tighten account linking and gateway write controls** (#544). Email verification
+  alone no longer authorizes SSO linking; the first trusted password reset revokes
+  existing account and application credentials. Manual administrator promotions now
+  check linked identity trust at every privilege increase. Publishing refuses an
+  upstream that names or resolves to the configured gateway origin. Credential
+  mutations and notification reads are rate-limited per account, and unchanged
+  notification reads no longer add audit rows.
+
 ## [0.5.0] - 2026-10-08
 
 Paired with Ferrum Edge `v0.9.14`. Lets the holder of an explicit MCP tool subset
