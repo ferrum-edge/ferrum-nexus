@@ -2527,9 +2527,11 @@ export function runEdgeSecurityAdoptionContract(
         'PUT',
       );
       const replayOffset = harness.edge.requests.length;
+      // durable: not_started is a definite non-commit (Edge v0.9.14), not an
+      // uncertain acknowledgement.
       await assert.rejects(
         harness.services.publishing.restoreGateway(actor, apiId),
-        /deployment mutation was not confirmed/,
+        /did not commit the deployment mutation; nothing was applied/,
       );
       assert.equal(proxyCreates, 0, 'routes reconstruction uses the real spec importer');
       assert.equal(specCreates, 1, 'exactly one original reconstruction was attempted');
@@ -2626,7 +2628,7 @@ export function runEdgeSecurityAdoptionContract(
         assert.equal(failure.details.proxy_id, proxyId);
         assert.match(
           String(failure.details.error),
-          /deployment-v1 replacement authority|deployment mutation was not confirmed/,
+          /deployment-v1 replacement authority|did not commit the deployment mutation/,
         );
       }
     });
