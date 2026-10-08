@@ -3,7 +3,7 @@
 This fixture runs against published Edge `v0.9.14`, source
 `9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d`, through the multi-architecture image
 `ferrumedge/ferrum-edge:v0.9.14@sha256:15442f1b1d1758023fe871fe57be50f19caf34bbe6c499a6812f4ffd0da5e3f8`
-that the compatibility record pins for the next Nexus release. Canonical
+that the compatibility record pins for Nexus `v0.5.0`. Canonical
 `contracts-edge-0.9.14` at `ddbdd845733b7046c4393ac951011dafb774db33` is adopted
 byte-for-byte. See [adoption facts](../../docs/edge-0.9.11-adoption.md). It needs a
 packaged Nexus image and runs on demand; it is not part of the required CI checks. The

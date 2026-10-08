@@ -1,57 +1,59 @@
-# Ferrum Nexus v0.4.0 — release notes
+# Ferrum Nexus v0.5.0 — release notes
 
-**Released 2026-10-06.** Paired with Ferrum Edge `v0.9.13`. The pair is recorded
+**Released 2026-10-08.** Paired with Ferrum Edge `v0.9.14`. The pair is recorded
 in [`release/compatibility.env`](../release/compatibility.env), which the
 README quickstart, the Compose example, the getting-started walkthrough and the
 real-stack `acceptance` CI job all read, so every one of them runs the same
-gateway build. `v0.4.0` lets providers expose API operations as MCP tools and
-grant consumers a subset of them, admits a backend write only when the gateway
-attests public-only egress, recovers enforcement conversions through Edge's
-conditional deployment API, and fixes twelve security advisories that affect
-`v0.3.0`. It upgrades a `v0.3.0` database in place with five forward migrations,
-and the gateway's database carries over unchanged. **Read the
-[upgrade](#upgrading-from-v030) before starting:** it raises the Node floor,
-requires every older Nexus writer to be stopped and drained, refuses backend
-writes to a gateway that does not enforce public-only egress, and needs Nexus
-and Edge upgraded in one window. The full list of changes is in the
-[changelog](../CHANGELOG.md#040---2026-10-06).
+gateway build. `v0.5.0` lets the holder of an explicit MCP tool subset request
+more tools on its existing grant without losing access, announces renamed agent
+tools, completes the hardening of the public-only egress guarantee for
+control-plane/data-plane topologies, and reports a deployment mutation Edge proves
+it did not commit under its own error kind. It upgrades a `v0.4.0` database in
+place with one forward migration, and the gateway's database carries over
+unchanged. **Read the [upgrade](#upgrading-from-v040) before starting:** it
+requires every older Nexus writer to be stopped and drained, needs Nexus and Edge
+upgraded in one window, and changes an error kind that clients and alerts may key
+on. The full list of changes is in the
+[changelog](../CHANGELOG.md#050---2026-10-08).
 
 ## Supported combination
 
 | Component      | Version                                | Pinned as                                                                                                |
 | -------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Ferrum Nexus   | `v0.4.0`                               | Git tag `v0.4.0`; build `docker/Dockerfile` from that checkout                                           |
-| Ferrum Edge    | `v0.9.13`                              | `ferrumedge/ferrum-edge:v0.9.13@sha256:6caa0987adb4c0a3a368fcd800bb0459cff3d3e219522e2e9c56280205862e50` |
+| Ferrum Nexus   | `v0.5.0`                               | Git tag `v0.5.0`; build `docker/Dockerfile` from that checkout                                           |
+| Ferrum Edge    | `v0.9.14`                              | `ferrumedge/ferrum-edge:v0.9.14@sha256:15442f1b1d1758023fe871fe57be50f19caf34bbe6c499a6812f4ffd0da5e3f8` |
 | Node.js        | `^22.22.2 \|\| ^24.15.0 \|\| >=26.0.0` | Source installs; the image uses a digest-pinned Node 22 base (22.23.3)                                   |
 | Nexus database | PostgreSQL 17 (Compose sample)         | Also supported: SQLite, MySQL, MongoDB replica set — see [schema and upgrades](#schema-and-upgrades)     |
 
-- **Ferrum Edge `v0.9.13`** is the
-  [published release](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.13)
-  (tag commit `9b83115de7ec23ab51ec4feae6bed65e596db425`). The digest above is
+- **Ferrum Edge `v0.9.14`** is the
+  [published release](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.14)
+  (tag commit `9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d`). The digest above is
   the multi-architecture image index; it resolves to
-  `sha256:03822d924b7919d07a840baf757d016f2f05c8df8a8d0455a2eebae917aae2cc` on
+  `sha256:12a8cd56090c0d4511bb3015b240e606b1b87989c644157566b8f6b6f635b3c2` on
   `linux/amd64` and
-  `sha256:a628f8fc12c916793b96ba111c2bf4360ea84981b8bf766254b47c6140c02a80` on
+  `sha256:19d2886ed8c192cb0daba48ef0a27a0cd0526449dac74bf9438502322aabd9f2` on
   `linux/arm64`. Both were checked against the Docker Hub registry on
-  2026-10-06. Nexus vendors the matching contracts, `contracts-edge-0.9.13`
-  (`9626821eb089c71f5d4d71268c7b8276a8a5ab50`).
-- **What changed on the Edge side.** Edge `v0.9.13` reports its backend egress
-  policy as `schema_version: 2`, serves deployment snapshot v2 (stored spec
-  documents as digests plus a separate `api_spec_contents` array), signs
-  deployment tokens in a new domain so every earlier token answers `412`, and can
-  answer `507` for a namespace past its conditional size bound. Nexus `v0.4.0`
-  reads only these forms, so it pairs with Edge `v0.9.13` only, and Edge
-  `v0.9.12` or earlier is refused rather than guessed. Edge's schema
-  migrations are unchanged from `v0.9.9` to `v0.9.13`, so a gateway database
-  `v0.9.9` created opens in place, unlike the `v0.3.0` upgrade. Read Edge's
-  [upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.13/docs/upgrade_guide.md#upgrading-to-0913)
-  from `0.9.10` to `0.9.13` and its
-  [changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.13/CHANGELOG.md)
-  for the data-plane changes your clients may notice, such as TLS source
-  selectors that must match their field, buffered HTTP/3 uploads taking
-  request-buffer admission and route deadlines bounding early body collection.
-- **Other Edge versions are unverified.** Nexus `v0.4.0` has not been tested
-  against any other Edge release; upgrade the gateway together with the portal.
+  2026-10-08. Nexus vendors the matching contracts, `contracts-edge-0.9.14`
+  (`ddbdd845733b7046c4393ac951011dafb774db33`).
+- **What changed on the Edge side.** Edge `v0.9.14` keeps every contract Nexus
+  depends on: egress policy schema 2, deployment snapshot v2 and its
+  `deployment_snapshot.v2` tokens, and the acknowledgement shape. A control
+  plane's egress policy answer gains the optional `data_plane_attestation`
+  object, a conditional mutation whose store fails before commit answers `503`
+  with `durable` `not_started` or `not_committed` instead of `unknown`, and the
+  ConfigSync protocol revision is now `3`, so a control plane and its data
+  planes must run the same build. Edge `v0.9.14` adds no core schema change, so
+  the gateway database opens in place. Read Edge's
+  [upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.14/docs/upgrade_guide.md#upgrading-to-0914)
+  and its
+  [changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.14/CHANGELOG.md)
+  for the data-plane changes your clients may notice, such as backend HTTP/2
+  resets now classified as `protocol_error` and charged to the target's circuit
+  breaker, and a buffered response read timeout answering `504` instead of `502`.
+- **Other Edge versions are unverified.** Nexus `v0.5.0` is tested only against
+  Edge `v0.9.14`. It still reads Edge `v0.9.13`'s answers, which keeps an
+  Edge-only rollback possible (see [rollback](#rollback)), but run the pinned pair.
+  Edge `v0.9.12` or earlier is refused, as in `v0.4.0`.
 - **No prebuilt Nexus image.** The release is a tagged source build: the
   Dockerfile uses a digest-pinned Node 22 base in both stages and `npm ci`
   against the committed lockfile. The tag, the base digest and the lockfile are
@@ -60,33 +62,29 @@ and Edge upgraded in one window. The full list of changes is in the
 
 ## Highlights
 
-- **Agent-ready API listings with tool subsets.** A provider can expose
-  selected OpenAPI operations of a requestable `routes` API as MCP tools (off by
-  default). Existing approvals gate every tool, and normal credentials
-  authenticate discovery and calls. A consumer can request, and a provider
-  approve, a subset of the published tools; an explicit approval never follows a
-  changed tool definition, so a revision that rewrites a tool's schema or prompt
-  text drops it from every subset until it is approved again. See the
-  [agent marketplace](agent-marketplace.md) and the
+- **Request more MCP tools on an existing grant.** A holder of an explicit tool
+  subset loses a tool when its provider redefines or renames it. It can now ask
+  for that tool, or any other uncovered one, on the grant it already holds
+  (`POST /api/grants/:id/tool-requests`), and the provider decides it like any
+  access request. REST access and the tools already approved stay in place
+  throughout. See the [API reference](api.md) and the
   [subset rollout](mcp-subsets-migration-draft.md).
-- **Verified public-only gateway egress.** Before every backend write Nexus
-  reads the gateway's egress policy and admits the write only when a local data
-  plane attests public-only egress. `GET /api/health/edge` reports the verdict to
-  administrators as `public_egress_guaranteed`. See
-  [backend egress admission](operations.md#backend-egress-admission-and-the-public-only-guarantee).
-- **Conditional recovery of gateway conversions.** Enforcement conversions and
-  gateway restores keep an encrypted recovery journal and use Edge's conditional
-  deployment API with the original snapshot authority; an unconfirmed result is
-  kept for an operator instead of being retried with fresh authority. See the
-  [operator runbook](operations.md#resolving-an-unconfirmed-gateway-deployment-mutation).
-- **Security mail is never stuck behind a campaign.** The outbox claims
-  verification and password-recovery mail ahead of routine notifications and
-  mass email, and mass-email campaigns are bounded in aggregate and queued in
-  chunks.
-- **A read-only service-manifest preview** validates a Ferrum service manifest
-  against the published shared v1 contract without publishing anything. See the
-  [preview](service-manifest-preview.md).
-- **Twelve security fixes**, listed under [security](#security).
+- **Renamed tools are announced.** An agents edit that renames a tool drops it
+  from explicit subsets, as before, and its holders now get an in-app notice
+  naming the old and new name, as for a redefined tool.
+- **Attested public-only egress for control-plane/data-plane pairings.** With
+  Edge `v0.9.14` and `NEXUS_EXPECTED_DATA_PLANES` set, a control plane whose
+  connected data planes all attest public-only egress publishes under the
+  default public profile, with no opt-out. See
+  [CP/DP pairings and data-plane attestation](operations.md#cpdp-pairings-and-data-plane-attestation).
+- **A deployment mutation Edge did not commit is named.** It reports
+  `details.kind` `deployment_not_committed` instead of
+  `deployment_acknowledgement_uncertain`; see
+  [behaviour changes](#behaviour-changes-to-plan-for).
+- **Fewer gateway reads per spec build.** A revision, rollback, agents edit,
+  restore or conversion of an agent API no longer reads every all-tools
+  grantee's consumer from the gateway; enrollment runs only when agents are
+  turned on or a retained selection is given its exposure IDs.
 
 ## Install
 
@@ -95,7 +93,7 @@ From a clean shell, with Docker Compose v2 and `openssl`:
 ```bash
 git clone https://github.com/ferrum-edge/ferrum-nexus.git
 cd ferrum-nexus
-git checkout --detach v0.4.0
+git checkout --detach v0.5.0
 cp docker/docker-compose.example.yml docker-compose.yml
 set -a
 . ./release/compatibility.env
@@ -113,71 +111,64 @@ restore needs the same values. The portal is at <http://127.0.0.1:8787> and
 [getting-started walkthrough](getting-started.md) continues from there to a
 published API and an authenticated request through the gateway.
 
-## Upgrading from v0.3.0
+## Upgrading from v0.4.0
 
-`v0.3.0` is the supported upgrade source. A `v0.2.0` or `v0.1.0` database also
-upgrades in one run (CI covers every release), but those releases ran Edge
-`v0.9.8`, whose SQL gateway database Edge `v0.9.9` and later refuse: first follow
-the [`v0.3.0` notes](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.3.0/docs/release-notes.md#upgrading-from-v020)
-to export and re-import the gateway's configuration. Upgrade Nexus and Edge
-together, in one maintenance window, following the
+`v0.4.0` is the supported upgrade source. A `v0.3.0`, `v0.2.0` or `v0.1.0`
+database also upgrades in one run (CI covers every release), but read the
+[`v0.4.0` notes](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.4.0/docs/release-notes.md#upgrading-from-v030)
+first: those releases ran an older Edge, and their upgrade has its own
+prerequisites (Node floor, public-only egress, settling recovery journals). Upgrade
+Nexus and Edge together, in one maintenance window, following the
 [production upgrade procedure](operations.md#production-upgrade-procedure):
 
 1. **Check the prerequisites.**
-   - **Node.** A source install needs Node `^22.22.2 || ^24.15.0 || >=26.0.0`;
-     Node 22.14 to 22.22.1, Node 24 before 24.15.0, and Node 23 and 25 are no
-     longer supported. The container image already carries Node 22.23.3.
-   - **Gateway egress.** By default Nexus writes to the gateway only when a
-     single Edge process that answers the Admin API and serves the traffic runs
-     `FERRUM_BACKEND_ALLOW_IPS=public` with no `FERRUM_BACKEND_ALLOW_CIDRS`
-     overlay. Edge's production default (`both`), an allow-CIDR overlay and a
-     control plane with remote data planes all get every backend write refused
-     and health `degraded`. Configure the gateway accordingly, or choose an
-     opt-out (see [egress admission](#egress-admission-and-its-opt-outs)). The
-     `v0.3.0` Compose example did not set the variable: add
-     `FERRUM_BACKEND_ALLOW_IPS: public` to the `ferrum-edge` service's
-     `environment` in your `docker-compose.yml`, or copy the new example over
-     it.
-   - **Agent APIs.** Inventory the APIs whose providers will want tool subsets:
-     each needs one authenticated save of its agent settings, or a republish,
-     after the upgrade before it accepts an explicit subset.
-2. **Settle gateway recovery work on the old pairing.** Edge `v0.9.13` refuses
-   every deployment token an earlier Edge issued, so a conversion or restore in
-   flight across the upgrade cannot finish on its own. `v0.3.0` writes no
-   recovery journals, so for a `v0.3.0` deployment this is a check: no
-   `app_settings` row whose key starts with `gateway_recovery:` or
-   `gateway_restore_cleanup:` should exist. Run
+   - **Node.** Unchanged since `v0.4.0`: a source install needs Node
+     `^22.22.2 || ^24.15.0 || >=26.0.0`. The container image carries Node
+     22.23.3.
+   - **Gateway egress.** Unchanged for a single Edge process that answers the
+     Admin API and serves the traffic: it still needs
+     `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs. A control plane with
+     remote data planes can now be admitted on its data planes' attestation, but
+     only with `NEXUS_EXPECTED_DATA_PLANES` set; see
+     [data-plane attestation](#data-plane-attestation-and-nexus_expected_data_planes).
+     A pairing that publishes today under `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`
+     keeps doing so.
+   - **Clients and alerts.** Update anything keyed on
+     `deployment_acknowledgement_uncertain` or on the gateway's `502` rate; see
+     [behaviour changes](#behaviour-changes-to-plan-for).
+2. **Settle gateway recovery work on the old pairing.** Tokens Edge `v0.9.13`
+   issued keep verifying on Edge `v0.9.14`, so this is not required, but it keeps
+   the upgrade window free of conversions in flight. Run
    `POST /api/apis/:id/restore-gateway` for every API whose `gateway_state` is
    `repair_required` until it completes, and ask providers not to change
-   `spec_enforcement` or restore gateways until the upgrade is done. A
-   deployment that ran an interim build from `main` follows
-   [Upgrading to Edge v0.9.13](operations.md#upgrading-to-edge-v0913) step 2.
+   `spec_enforcement` or restore gateways until the upgrade is done. See
+   [Upgrading to Edge v0.9.14](operations.md#upgrading-to-edge-v0914).
 3. **Stop and drain every Nexus instance**, request handlers and background
-   workers alike. Older and newer writers must never run together: an older
-   publisher overwrites tool policy with the REST approval group, an older
-   consumer-group rebuild does not understand subset membership, and an older
-   mail producer or worker does not take part in the new recipient fence.
+   workers alike. Older and newer writers must never run together:
+   `012_access_request_grant` adds the field that marks a request for more tools
+   on a grant, and a `v0.4.0` instance, which does not read it, would list and
+   decide such a request as a request for access. `v0.4.0` also reads the
+   egress policy answer as a closed key set, so it refuses every backend write
+   once a control plane answers with Edge `v0.9.14`'s attestation.
 4. **Back up Nexus and Edge together**, as one point in time, following the
    [backup and restore runbook](operations.md#5-backup-and-restore). This backup
    is your rollback.
-5. **Upgrade Edge to `v0.9.13`** on its existing database. A control plane and
-   its data planes must run the same build. Keep Nexus stopped until step 7:
-   Nexus `v0.3.0` is not tested against Edge `v0.9.13`, and Nexus `v0.4.0`
-   refuses an older gateway's egress policy.
-6. **Run the migrations once from the new Nexus image**
-   (`node server/dist/db/migrate-cli.js`). It applies `007_outbox_recipient`,
-   `008_email_lifecycle_fence`, `009_outbox_priority`, `010_api_agents` and
-   `011_mcp_tool_subsets`; re-running it is safe. Nexus also migrates at
+5. **Upgrade Edge to `v0.9.14`** on its existing database. The control plane
+   and every data plane must run the same build: upgrade them together. A data
+   plane on an older build cannot connect, and the control plane cannot list it
+   in its attestation. Keep Nexus stopped until step 7.
+6. **Run the migration once from the new Nexus image**
+   (`node server/dist/db/migrate-cli.js`). It applies
+   `012_access_request_grant`; re-running it is safe. Nexus also migrates at
    startup, so a single-instance deployment may skip this step.
-7. **Start `v0.4.0`** on every instance and verify it as the procedure says:
-   `schema_migrations` lists `001_initial` through `011_mcp_tool_subsets`;
-   `GET /api/health/edge`, read as an administrator, reports `status: "ok"` and,
-   for a local public-only data plane, `public_egress_guaranteed: true`; and a
-   known client still calls an API through the gateway with its existing
-   credential.
-8. **Enable tool subsets per API.** After the providers from step 1 save their
-   agent settings or republish, check discovery and calls for those APIs before
-   approving explicit subsets.
+7. **Start `v0.5.0`** on every instance, with `NEXUS_EXPECTED_DATA_PLANES` set
+   first on a control-plane/data-plane pairing that should have the attested
+   guarantee. Verify it as the procedure says: `schema_migrations` lists
+   `001_initial` through `012_access_request_grant`; `GET /api/health/edge`,
+   read as an administrator, reports `status: "ok"` and
+   `public_egress_guaranteed: true` for a local public-only data plane or a
+   fully attested control plane; and a known client still calls an API through
+   the gateway with its existing credential.
 
 On the Compose stack, from the checkout you installed from, with the four
 secrets you saved at install time exported again (never newly generated
@@ -186,168 +177,136 @@ values):
 ```bash
 docker compose stop nexus
 git fetch --tags origin
-git checkout --detach v0.4.0
+git checkout --detach v0.5.0
 set -a
 . ./release/compatibility.env
 set +a
-# Add FERRUM_BACKEND_ALLOW_IPS: public to the ferrum-edge service first (step 1).
 docker compose up -d ferrum-edge
 docker compose up -d --build
 ```
 
 Take the paired backup (step 4) after `docker compose stop nexus` and before
-`docker compose up -d ferrum-edge`. The gateway keeps the `ferrumdata` volume as
-it is, and Nexus migrates the retained `pgdata` database when it starts.
+`docker compose up -d ferrum-edge`. The Compose stack runs a single local Edge
+process, so `NEXUS_EXPECTED_DATA_PLANES` does not apply to it. The gateway keeps
+the `ferrumdata` volume as it is, and Nexus migrates the retained `pgdata`
+database when it starts.
 
-What the migrations do, on every backend:
+What the migration does, on every backend:
 
-- **`007_outbox_recipient`** adds a nullable account binding to each outbox
-  row. Existing messages and delivery state are kept; new account mail is
-  bound to the account it was written for.
-- **`008_email_lifecycle_fence`** adds an internal fence to each account,
-  initialized empty, that orders account mail with address release. It changes
-  no account data and does not appear in any API response.
-- **`009_outbox_priority`** adds a delivery priority to every outbox row.
-  Retained rows become normal priority, except rows whose idempotency key starts
-  with `verify:` or `reset:`, which become high. Building its index on a large
-  outbox can delay startup.
-- **`010_api_agents`** adds the agent settings of each API. Every retained API
-  starts with agents off.
-- **`011_mcp_tool_subsets`** adds the requested and approved tools of access
-  requests and grants. Every retained request and grant keeps covering all
-  published tools.
-- **MySQL** replays an interrupted upgrade: the runner checks each added
-  column's live definition and each added index under an advisory lock before
-  replaying it, and `009`'s priority assignment is idempotent.
+- **`012_access_request_grant`** adds a nullable `grant_id` to each access
+  request on SQL backends, and sets `grant_id: null` on retained MongoDB
+  documents. A set value marks a request for more tools on that grant; every
+  retained request keeps `null` and stays a request for access. It changes no
+  other data. On MySQL it is an additive nullable column, which the runner checks
+  before replaying an interrupted upgrade.
 
-### Egress admission and its opt-outs
+### Data-plane attestation and `NEXUS_EXPECTED_DATA_PLANES`
 
-Nexus admits a backend write only when the gateway's
-`GET /backend-egress-policy` reports schema 2 with
-`enforcement_scope=local-data-plane` and `public_only_guaranteed=true`. Two
-opt-outs each relax only their own check; under either, startup logs
-`BACKEND EGRESS NOT GUARANTEED`, the pairing is never reported as public-only,
-and each publish, update and restore audit row records `egress_profile` and
-`enforcement_scope`.
+Nexus grants a control plane the public-only guarantee only from the
+`data_plane_attestation` object Edge `v0.9.14` adds to its egress policy
+answer, and only when all of these hold: `NEXUS_EXPECTED_DATA_PLANES` is set,
+at least that many distinct data planes (`node_id`) are connected, every
+connected data plane sent a report, every report is `public` mode without allow
+CIDRs, and Edge's aggregate matches the listed reports, which Nexus recomputes.
+Anything else reads "not guaranteed": backend writes are refused unless an
+opt-out admits them, and health reads `degraded`.
 
-- **`NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`** keeps its meaning (Nexus skips its own
-  upstream screening) and now also admits a gateway that reports weaker,
-  well-formed metadata, such as a control plane with remote data planes,
-  `both` mode or an allow-CIDR overlay. Against Edge `v0.9.13` it is the only way
-  a control-plane/data-plane pairing publishes; enforce
-  `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs on every data plane
-  yourself.
-- **`NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`** (new) waives only the gateway
-  attestation and keeps Nexus's own upstream screening. It still requires
-  `public_only_guaranteed=true`, which Edge `v0.9.13` reports only for a local
-  data plane, so against this Edge it admits nothing the default refuses.
+- **Unset (the default) or blank, an attestation never grants the guarantee.**
+  A control plane then behaves as it did with `v0.4.0`.
+- **Set it to the namespace's whole data-plane inventory**: the number of
+  running data-plane processes (replicas or pods) across every control plane,
+  not only those connected to the control plane at `FERRUM_ADMIN_URL`. Each
+  process reports its own random `node_id`, even when replicas share one CP/DP
+  secret. Never set it lower than the real inventory, and raise it before new
+  data planes connect.
+- **It must be a positive integer** (up to 1,000,000); anything else refuses
+  startup.
+- **Several control plane replicas, a load balancer in front of them, or data
+  planes that fail over between control planes** leave the control plane Nexus
+  reads with a short count, so the guarantee is withheld. Nexus cannot combine
+  answers from several control planes.
 
-Missing, malformed or unsupported-schema metadata is refused under every
-profile. The [topology table](operations.md#backend-egress-admission-and-the-public-only-guarantee)
-lists the outcome for each pairing.
+Writes admitted on an attestation record `egress_profile: public-guaranteed`
+with `enforcement_scope: admission-only`. The verdict is re-read for every
+backend write and health probe, with no caching or grace period. The
+[operations guide](operations.md#cpdp-pairings-and-data-plane-attestation)
+covers restarts, stale streams and what the attestation does not prove.
 
 ### Behaviour changes to plan for
 
-All are listed in the [changelog](../CHANGELOG.md#040---2026-10-06).
+All are listed in the [changelog](../CHANGELOG.md#050---2026-10-08).
 
-- **Gateway writes need public-only egress** unless an opt-out is set (see
-  above). A refused write answers before any gateway change, and health reads
-  `degraded`.
-- **Rollback discards subsets.** Rollback restores the pre-upgrade backup (see
-  below), so explicit tool-subset grants made after the upgrade are lost with
-  every other post-upgrade change. To keep an audit trail, remove subset grants
-  and restore all-tools grants through the normal audited workflow first.
-- **A changed tool definition drops its approval.** A spec revision, rollback
-  or agents edit that changes a selected tool's definition, a description-only
-  edit included, gives it a new exposure ID and removes the old one from every
-  explicit subset (`access.tools_prune`). Holders keep REST access and their
-  other tools.
-- **An agent API's document is bounded.** A publish, revision, rollback,
-  restore, or a `PATCH` of `agents` or `spec_enforcement` whose built document
-  would exceed 8 MiB answers `400 SPEC_INVALID`
-  (`reason: "agent_document_too_large"`). An API already published with a
-  larger document keeps serving; turn its agents off to revise it.
-- **Mass email is bounded.** `NEXUS_MAX_MASS_EMAIL_BYTES` (default 64 MiB)
-  caps one campaign's rendered size, and `NEXUS_MAX_MASS_EMAILS_PER_DAY`
-  (default **5**) caps campaigns per administrator per rolling 24 hours; both
-  answer `429 QUOTA_EXCEEDED`. Set the second explicitly to keep a higher
-  ceiling. `admin.mass_email_complete` now carries the enqueued count.
-- **The SMTP test is bounded and recorded first.** An `admin` may send it only
-  to their own address (`403 FORBIDDEN` otherwise), every administrator may send
-  ten an hour, and `admin.smtp_test` commits before the send, with the result in
-  a new `admin.smtp_test_complete` row.
-- **Only a credential's owner can rotate it.** Rotating another identity's
-  credential is `403 FORBIDDEN` for every role; administrators revoke instead.
-- **Single sign-on links and promotions are stricter.** Automatic linking
-  refuses an account that is, or whose claims would make it, an administrator;
-  claims do not promote an account that holds an identity at a lower-trust
-  provider; a manual or claims promotion ends the account's other sessions; and
-  a callback in flight when its provider was disabled or removed is refused.
-- **OpenID Connect requests ignore proxy settings.** Discovery, key-set and
-  token requests always connect directly and dial only vetted addresses; a
-  deployment whose only egress is a proxy must allow direct egress to the
-  identity provider.
-- **Password-reset links are revoked** when a newer one is issued and when the
-  account is disabled.
-- **Edge response text no longer appears in credential-write errors**:
-  non-GET `/consumers` failures omit `details.gateway_message`.
-- **New audit actions**: `access.mcp_enroll`, `access.tools_prune`,
-  `api.agents_update_start`, `api.gateway_conversion_start`,
-  `api.gateway_conversion_rollback`, `user.address_release`,
-  `admin.smtp_test_complete` and `admin.mass_email_complete`; update any tooling
-  that reads the audit log.
+- **A deployment mutation Edge did not commit has a new error kind.** An
+  acknowledgement whose `durable` is `not_started` or `not_committed` now answers
+  `502 EDGE_ERROR` with `details.kind` `deployment_not_committed` instead of
+  `deployment_acknowledgement_uncertain` at every status other than a
+  `409`/`412` precondition refusal or a `507` size refusal, which keep their
+  kinds: Edge `v0.9.14`'s `503` store failure, and equally an Edge `400` or
+  `501` that carries such an acknowledgement. Its message becomes "The gateway did not
+  commit the deployment mutation; nothing was applied. Retain recovery state",
+  and so does the `error` text of the failure audit rows. Only
+  `durable: "unknown"` and any other unconfirmed answer stay
+  `deployment_acknowledgement_uncertain`. The recovery journal is kept and never
+  resent under either kind. Update any client, alert or audit query keyed on the
+  old kind or message; the
+  [operator runbook](operations.md#resolving-an-unconfirmed-gateway-deployment-mutation)
+  covers both.
+- **Some backend failures move from `502` to `504`.** Edge `v0.9.14` answers a
+  buffered response read timeout with `504`. Nexus's per-API metrics count by
+  status code only, so adjust any alert keyed on the `502` bucket.
+- **Agent selections are bounded after Path Item references resolve.**
+  Publishing, revising, rolling back or restoring an agent API, a `PATCH` of
+  `agents` or `spec_enforcement`, and the provider's operation picker refuse a
+  document with more than 3,000 operations once Path Item references resolve
+  (`400 SPEC_INVALID`). The upload limit counts only the method keys each path
+  declares, so a document can pass the upload and still be refused for agents.
+  Routes APIs without agents are unaffected.
+- **A renamed tool is pruned as `tool_renamed`.** `access.tools_prune` records
+  `reason: "tool_renamed"` instead of `tool_removed` when an agents edit renames
+  a tool.
+- **Attestation entries need an RFC 3339 `connected_at`.** An attestation with
+  any other `connected_at` is set aside as malformed and grants nothing.
+- **Access requests carry `grant_id`.** Request DTOs gain a nullable `grant_id`,
+  set on a request for more tools on that grant.
+- **New audit actions**: `access.tools_request`, `access.tools_approve` and
+  `access.tools_approve_rollback`; update any tooling that reads the audit log.
 
-**Rollback** is a restore of the backup taken in step 4, Nexus and Edge
-together: restore the Edge database and run Edge `v0.9.9` on it, and restore
-the Nexus database. Never run `v0.3.0` over a database `v0.4.0` migrated, and
-never run Edge `v0.9.9` against a running Nexus `v0.4.0`. Settle recovery
-journals again before rolling back: tokens Edge `v0.9.13` issued do not verify
-on an earlier Edge.
+### Rollback
+
+Rollback is a restore of the backup taken in step 4, Nexus and Edge together:
+restore the Edge database and run Edge `v0.9.13` on it, and restore the Nexus
+database and run `v0.4.0` on it. Never run `v0.4.0` over a database `v0.5.0`
+migrated. Tool requests filed or approved after the upgrade are lost with every
+other post-upgrade change. Rolling back Edge alone to `v0.9.13`
+keeps Nexus `v0.5.0` working: the attestation disappears, so a pairing that
+relied on it reads "not guaranteed" again and its writes are refused unless an
+opt-out admits them. Settle recovery journals before either rollback.
 
 ## Security
 
-`v0.4.0` fixes these published advisories, each of which affects `v0.3.0`:
+`v0.5.0` completes the hardening of the public-only egress guarantee for
+control-plane/data-plane topologies. A control plane is reported public-only,
+and its backend writes admitted under the default public profile, only from a
+complete and self-consistent data-plane attestation that covers at least
+`NEXUS_EXPECTED_DATA_PLANES` distinct data planes, every one of them public-only
+without allow CIDRs. An attestation that is malformed, inconsistent, out of scope
+or carries an entry whose `connected_at` is not an RFC 3339 date-time is set
+aside and grants nothing.
 
-- **GHSA-8w4q-fv8h-jv73** (medium): automatic OpenID Connect account linking
-  could give a lower-trust provider's identity administrator rights.
-- **GHSA-mr69-2744-f78w** (medium): an administrator could rotate another
-  identity's gateway credential and receive its plaintext.
-- **GHSA-fgq6-8q7j-qmww** (medium): issuing a new password-reset link left
-  earlier reset links valid.
-- **GHSA-rqrj-7g3f-c6ww** (medium): mass-email limits multiplied into unbounded
-  database work and delayed account-recovery mail.
-- **GHSA-p9qg-f2w6-c4qj** (low): an in-flight OpenID Connect callback could
-  commit after its provider was disabled or removed.
-- **GHSA-cq2h-g4g3-rw3p** (low): OpenID Connect provider requests validated one
-  DNS answer but connected using another, permitting DNS rebinding.
-- **GHSA-whpj-2fr3-jjrw** (low): SMTP test delivery happened before its audit
-  record was durable.
-- **GHSA-xx68-cpwv-x264** (low): the admin SMTP test endpoint could send
-  unlimited mail to arbitrary recipients.
-- **GHSA-qc7r-4j9m-pm44** (low): credential-write errors from Ferrum Edge could
-  copy show-once secrets into Nexus logs.
-- **GHSA-99p3-8fmh-3pfc** (low): quickstart and required CI containers were
-  selected by mutable image tags.
-- **GHSA-hf6x-q9cp-9g6f** (low): the acceptance test runner executed
-  `e2e/.env` as shell code.
-- **GHSA-gwhq-6vwf-9mmq** (low): generated acceptance test secrets could be
-  written world-readable.
-
-Upgrade any deployment running `v0.3.0`.
+Upgrade any deployment running `v0.4.0`.
 
 ## Schema and upgrades
 
-- **`v0.4.0` freezes `007_outbox_recipient`, `008_email_lifecycle_fence`,
-  `009_outbox_priority`, `010_api_agents` and `011_mcp_tool_subsets`** on every
-  backend. `server/src/db/released-migrations.ts` lists them with
-  `release: 'v0.4.0'` beside `001_initial` (`v0.1.0`), `002`/`003` (`v0.2.0`)
-  and `004` to `006` (`v0.3.0`), each with a SHA-256 checksum per backend, and
-  CI fails on any edit to them. Later releases change the schema only with
-  forward migrations that upgrade a `v0.4.0` database in place; see
+- **`v0.5.0` freezes `012_access_request_grant`** on every backend.
+  `server/src/db/released-migrations.ts` lists it with `release: 'v0.5.0'`
+  beside `001_initial` (`v0.1.0`), `002`/`003` (`v0.2.0`), `004` to `006`
+  (`v0.3.0`) and `007` to `011` (`v0.4.0`), each with a SHA-256 checksum per
+  backend, and CI fails on any edit to them. Later releases change the schema
+  only with forward migrations that upgrade a `v0.5.0` database in place; see
   [schema versioning and upgrades](operations.md#schema-versioning-and-upgrades).
 - **Every release is an upgrade source.** The released-baseline upgrade test
-  builds a database as `v0.1.0`, `v0.2.0`, `v0.3.0` and `v0.4.0` each left it,
-  migrates it with the current code and reads every value back.
+  builds a database as `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0` and `v0.5.0` each
+  left it, migrates it with the current code and reads every value back.
 - **No upgrade from pre-release checkouts.** Databases created by buildout
   checkouts before `v0.1.0` are not supported; recreate them
   ([development reset](operations.md#buildout-schema-policy)).
@@ -388,14 +347,21 @@ Upgrade any deployment running `v0.3.0`.
 
 - Edge serves one data-plane namespace per process: keep `FERRUM_NAMESPACE`
   equal on both sides.
-- A control plane with remote data planes is never reported as public-only.
-  Against Edge `v0.9.13` it publishes only with
-  `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which also skips Nexus's own upstream
-  screening; public-only egress on each data plane is then the operator's to
-  enforce.
+- A control plane with remote data planes is reported public-only only from
+  Edge `v0.9.14`'s data-plane attestation with `NEXUS_EXPECTED_DATA_PLANES`
+  set. Nexus reads one control plane, so several control plane replicas, a load
+  balancer in front of them or data-plane failover withhold the guarantee; such
+  a fleet publishes only with `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which also
+  skips Nexus's own upstream screening.
+- The attestation is self-reported by authenticated data planes, not a
+  cryptographic attestation of the data-plane host. A data plane that restarts
+  without closing its stream counts twice until Edge drops the stale stream, so
+  the count can briefly cover one missing data plane. A disconnected data plane
+  that keeps serving cached configuration is not listed.
 - The public-only DNS-rebinding fixture
   ([`e2e/public-only/`](../e2e/public-only/README.md)) runs on demand with a
-  packaged image; it is not part of the required CI checks.
+  packaged image and covers the local data-plane profile only; it is not part
+  of the required CI checks.
 - A namespace past Edge's conditional bound (64 MiB of canonical
   representation, or 256 MiB of base64 spec content) answers `507`, so
   enforcement conversions, restores, and credential and access changes are
@@ -415,8 +381,9 @@ Upgrade any deployment running `v0.3.0`.
 
 ## Release step
 
-This file is published as the GitHub release notes for tag `v0.4.0`. Earlier
+This file is published as the GitHub release notes for tag `v0.5.0`. Earlier
 notes are kept at their tags:
+[`v0.4.0`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.4.0/docs/release-notes.md),
 [`v0.3.0`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.3.0/docs/release-notes.md),
 [`v0.2.0`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.2.0/docs/release-notes.md)
 and
@@ -424,7 +391,7 @@ and
 
 1. Merge the release change and require every check, `acceptance` included,
    to pass on the merge commit.
-2. Create tag `v0.4.0` at that commit and publish a GitHub release for it with
+2. Create tag `v0.5.0` at that commit and publish a GitHub release for it with
    these notes.
 3. Require a green run of the **verbatim quickstart gate** for the tag
    (`.github/workflows/quickstart-gate.yml`, run by the tag push). In a clean

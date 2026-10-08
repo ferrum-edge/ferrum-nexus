@@ -6,6 +6,20 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-08
+
+Paired with Ferrum Edge `v0.9.14`. Lets the holder of an explicit MCP tool subset
+request more tools on its existing grant without losing access, announces renamed
+agent tools, completes the hardening of the public-only egress guarantee for
+control-plane/data-plane topologies, and adopts Edge `v0.9.14` and
+`contracts-edge-0.9.14`. A conditional deployment mutation Edge proves it did not
+commit now reports `details.kind` `deployment_not_committed` instead of
+`deployment_acknowledgement_uncertain`. Upgrades a `v0.4.0` database in place with the
+forward migration `012_access_request_grant`; the gateway database carries over
+unchanged. Stop and drain every older Nexus writer and upgrade Nexus and Edge in one
+window. See [`docs/release-notes.md`](docs/release-notes.md) for the supported
+combination and the upgrade steps.
+
 ### Added
 
 - **Request more MCP tools on an existing grant** (Refs #525). A holder of an
@@ -32,30 +46,37 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
-- **Adopt published Edge `v0.9.14` and `contracts-edge-0.9.14`.** The compatibility
-  record pins `ferrumedge/ferrum-edge:v0.9.14@sha256:15442f1b1d1758023fe871fe57be50f19caf34bbe6c499a6812f4ffd0da5e3f8`
+- **Ferrum Edge `v0.9.14` is the supported gateway.** The compatibility record pins
+  `ferrumedge/ferrum-edge:v0.9.14@sha256:15442f1b1d1758023fe871fe57be50f19caf34bbe6c499a6812f4ffd0da5e3f8`
   (tag source `9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d`), and Nexus vendors
   `contracts-edge-0.9.14` (`ddbdd845733b7046c4393ac951011dafb774db33`) byte for byte,
   including the `backend-egress-policy` v2 attestation fixtures and the
   `store-failure-not-committed` acknowledgement fixture. The local Edge-shape
   attestation examples are replaced by the canonical fixtures, and every canonical
   egress fixture is tested for the verdict Nexus intends. Edge `v0.9.14` keeps egress
-  policy schema 2, deployment snapshot v2 and its tokens, so no journal or token
-  migration is needed; the ConfigSync protocol revision is `3`, so a control plane
-  and its data planes must run the same build. Edge now classifies backend HTTP/2
-  resets as `protocol_error` and a buffered read timeout as `504`; Nexus counts
-  per-API metrics by status code only, so some backend failures move from `502` to
-  `504`. See
+  policy schema 2, deployment snapshot v2 and its tokens, and adds no gateway schema
+  change, so no journal, token or gateway database migration is needed; the
+  ConfigSync protocol revision is `3`, so a control plane and its data planes must
+  run the same build. Edge now classifies backend HTTP/2 resets as `protocol_error`
+  and a buffered read timeout as `504`; Nexus counts per-API metrics by status code
+  only, so some backend failures move from `502` to `504`. See
   [Upgrading to Edge v0.9.14](docs/operations.md#upgrading-to-edge-v0914).
-- **Deployment acknowledgements that prove nothing was committed are named** (Edge
-  `v0.9.14`). Edge now answers a store failure before or inside a rolled-back
-  conditional removal or replacement with `503` and `durable` `not_started` or
-  `not_committed` instead of `unknown`. Nexus reports any such acknowledgement as
-  `502 EDGE_ERROR` with `details.kind` `deployment_not_committed`; only
-  `durable: "unknown"` stays `deployment_acknowledgement_uncertain`. Neither
-  authorizes cleanup or replay, so the recovery journal and its pending operation are
-  kept and never resent, as before.
-- Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE`, `NOTICE` and the README Required Notice (previously "Ferrum Nexus"), and in `LICENSE-COMMERCIAL.md`.
+- **A deployment mutation Edge did not commit reports `deployment_not_committed`**
+  (Edge `v0.9.14`). Nexus `v0.4.0` answered every conditional removal or spec
+  replacement it could not confirm, other than a `409`/`412` precondition refusal or
+  a `507` size refusal, with `502 EDGE_ERROR` and `details.kind`
+  `deployment_acknowledgement_uncertain`. An acknowledgement whose `durable` is
+  `not_started` or `not_committed` now answers `502 EDGE_ERROR` with `details.kind`
+  `deployment_not_committed` at every one of those statuses: Edge `v0.9.14`'s `503`
+  for a store failure before or inside a rolled-back transaction, and equally an Edge
+  `400` or `501` that carries such an acknowledgement. The error message changes to "The
+  gateway did not commit the deployment mutation; nothing was applied. Retain
+  recovery state", and so does the `error` text that failure audit rows record. Only
+  `durable: "unknown"` and any other unconfirmed answer stay
+  `deployment_acknowledgement_uncertain`. Clients, alerts and audit queries keyed on
+  the old kind or message must also match the new ones. Neither kind authorizes
+  cleanup or replay, so the recovery journal and its pending operation are kept and
+  never resent, as before.
 - **Spec builds no longer read every all-tools grantee from the gateway** (Refs #525).
   Each spec revision, rollback, agents edit, restore or conversion of an agent API did
   one consumer `GET` per all-tools grantee under the proxy lease to enroll it in the
@@ -63,11 +84,31 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   phase-1 selection is given its exposure IDs; grantees approved while agents are on
   already receive the group, and account re-enable and consumer repair rebuild it. A
   conversion that turns agents on enrolls before it captures its deployment token.
+- Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE`, `NOTICE` and the README Required Notice (previously "Ferrum Nexus"), and in `LICENSE-COMMERCIAL.md`.
+- **The image-pin checker covers workflow environments and substituted option
+  values.** Workflow-, job- and step-level `FERRUM_EDGE_IMAGE` and `NEXUS_IMAGE`
+  values must be digest-pinned literals or local build images, and an expression
+  fails closed. A `$(…)` or backtick substitution inside a Docker option value is
+  read as part of that value, so the image after it is still checked, and any
+  tracked YAML file with a top-level `services:` key is scanned as Compose.
+
+### Fixed
+
+- **Agent selections are bounded after Path Item references resolve** (Refs #525).
+  Admitting an agent selection now also requires that the document has at most 3,000
+  operations once Path Item references resolve. That covers publish, revision, rollback
+  and restore of an agent API, a `PATCH` of `agents` or `spec_enforcement`, and the
+  provider's operation picker. The upload limit uses the same number but counts only the
+  method keys each path declares, so a document can pass the upload and still be refused
+  for agents with `400 SPEC_INVALID`. Matching a live deployment's routes is not
+  capped, so routes APIs without agents are unaffected, and a `PATCH` that changes
+  neither `agents` nor `spec_enforcement` still succeeds on an agent API over the
+  bound.
 
 ### Security
 
-- **Harden the public-only egress guarantee for control-plane/data-plane topologies**
-  (Refs #525). When a control plane reports data-plane egress attestation (the
+- **Complete the hardening of the public-only egress guarantee for
+  control-plane/data-plane topologies** (Refs #525). When a control plane reports data-plane egress attestation (the
   additive `data_plane_attestation` object Edge `v0.9.14` adds within egress policy
   schema 2), Nexus grants the verified public-only guarantee only if the new
   `NEXUS_EXPECTED_DATA_PLANES` setting is set and at least that many distinct
@@ -337,13 +378,6 @@ for the supported combination and the upgrade steps.
   gateway holds. Upgrade note: an agent API already published with a larger
   document keeps serving, and any other `PATCH` (visibility, status, metadata)
   still succeeds; turn its agents off (`agents: null`) to revise it again.
-  Admitting an agent selection now also requires that the document has at most 3,000
-  operations once Path Item references resolve. That covers publish, revision, rollback
-  and restore of an agent API, a `PATCH` of `agents` or `spec_enforcement`, and the
-  provider's operation picker. The upload limit uses the same number but counts only the
-  method keys each path declares, so a document can pass the upload and still be refused
-  for agents with `400 SPEC_INVALID`. Matching a live deployment's routes is not
-  capped, so routes APIs without agents are unaffected.
 - **The dependency-lock producer no longer hard-codes jsdom and Undici** (Refs #525).
   It checked their exact versions and integrity hashes, so the next reviewed bump
   would have failed it. It now requires both packages, a registry `resolved` URL and

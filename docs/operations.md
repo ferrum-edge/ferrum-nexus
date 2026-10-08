@@ -1,6 +1,6 @@
 # Operations
 
-Deployment reference for Ferrum Nexus (current release: `v0.4.0`; first
+Deployment reference for Ferrum Nexus (current release: `v0.5.0`; first
 supported release: `v0.1.0`): configuration, databases and upgrades, containers,
 TLS, backup and restore, key rotation, the email outbox, scaling limits, health
 checks, metrics and gateway recovery.
@@ -499,7 +499,7 @@ it, health reads `degraded`, and an admin's `edge.error` names the unsupported s
 Every backend write is then refused in every profile. The same holds for any newer
 schema. Nexus also requires the v0.9.13 deployment snapshot (`api_spec_contents`), so
 Nexus `v0.4.0` pairs with Edge `v0.9.13` only: upgrade Edge and Nexus together, as
-described in [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913). The next release
+described in [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913). Nexus `v0.5.0`
 pairs with Edge `v0.9.14`, the version its acceptance suite tests: it reads the
 control-plane attestation within schema 2 and Edge's narrower `durable` outcomes, and
 the snapshot and token formats are unchanged (see
@@ -622,8 +622,8 @@ upgrade both sides in one maintenance window:
 3. **Drain writers and take a paired backup**: stop every Nexus instance and follow
    [Ordering and consistency](#ordering-and-consistency).
 4. **Upgrade Edge to v0.9.13.** Control plane and data planes must run the same build.
-5. **Start this Nexus release** with the pinned image from
-   [`release/compatibility.env`](../release/compatibility.env). Check
+5. **Start Nexus `v0.4.0`** with the Edge image its
+   [`release/compatibility.env`](../release/compatibility.env) pins. Check
    `GET /api/health/edge` as an admin: `status: "ok"`, and
    `public_egress_guaranteed: true` for a local public-only data plane. A CP/DP
    pairing reads `degraded`; see
@@ -654,7 +654,7 @@ cannot read egress policy schema 2 or the v0.9.13 snapshot.
 
 ### Upgrading to Edge v0.9.14
 
-The next Nexus release pairs with Edge v0.9.14 (see the
+Nexus `v0.5.0` pairs with Edge v0.9.14 (see the
 [Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.14/docs/upgrade_guide.md#upgrading-to-0914)).
 Unlike v0.9.13, this upgrade keeps every contract Nexus depends on: egress policy
 schema 2, deployment snapshot v2 and its `deployment_snapshot.v2` tokens, and the
@@ -686,12 +686,19 @@ Procedure:
    control plane and every data plane must run the same build: upgrade them together.
    A data plane on an older build cannot connect, and the control plane cannot list
    it in its attestation.
-3. **Upgrade Nexus** to the release that pins Edge v0.9.14 in
+3. **Upgrade Nexus** to `v0.5.0`, which pins Edge v0.9.14 in
    [`release/compatibility.env`](../release/compatibility.env), and check
    `GET /api/health/edge` as an admin. On a CP/DP pairing, set
    `NEXUS_EXPECTED_DATA_PLANES` first if you want the attested guarantee.
 
-**Rolling back** Edge to v0.9.13 keeps Nexus working: the attestation disappears, so
+Nexus `v0.4.0` reads the egress policy answer as a closed key set, so it treats a
+v0.9.14 control plane's answer, which carries `data_plane_attestation`, as unreadable
+and refuses every backend write in every profile. A local data plane's answer carries
+no attestation. On a CP/DP pairing, keep Nexus stopped from step 2 until it runs
+`v0.5.0`; the [`v0.5.0` release notes](release-notes.md#upgrading-from-v040) combine
+both upgrades in one window.
+
+**Rolling back** Edge to v0.9.13 keeps Nexus `v0.5.0` working: the attestation disappears, so
 a pairing that relied on it reads "not guaranteed" again and its writes are refused
 unless an opt-out admits them.
 
@@ -1033,8 +1040,7 @@ checksums and `release: 'v0.1.0'`, the forward migrations
 `005_notification_preferences` and `006_user_identities` with
 `release: 'v0.3.0'`, and `007_outbox_recipient`, `008_email_lifecycle_fence`,
 `009_outbox_priority`, `010_api_agents` and `011_mcp_tool_subsets` with
-`release: 'v0.4.0'`. The pending forward migration `012_access_request_grant`
-is listed with `release: null` until the release that ships it.
+`release: 'v0.4.0'`, and `012_access_request_grant` with `release: 'v0.5.0'`.
 
 **A released migration never changes.** A database only applies migrations its
 ledger lacks, so editing an applied one would make fresh and upgraded installs
@@ -1149,12 +1155,15 @@ older consumer-group rebuild does not understand subset membership. Do not roll 
 while explicit subset grants exist. See the
 [MCP subset rollout](mcp-subsets-migration-draft.md).
 
-`012_access_request_grant` (unreleased) adds a nullable `grant_id` column to
+`012_access_request_grant` (shipped in `v0.5.0`) adds a nullable `grant_id` column to
 `access_requests` on SQL backends and backfills `grant_id: null` on retained
 MongoDB documents. A set `grant_id` marks a request for more MCP tools on that
 existing grant; `null` keeps every retained request a request for access. The
 column has no foreign key: a grant row is only deleted with its API or
-application, which removes the request too. It changes no other data.
+application, which removes the request too. It changes no other data. Before
+deploying it, stop and drain every older Nexus request handler and background
+writer: an older instance does not read `grant_id`, so it would list and decide a
+request for more tools as a request for access.
 
 `003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
 `ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,
@@ -1175,7 +1184,7 @@ step's indexes drift. Never update a released checksum to make it pass.
 
 **Upgrade coverage.** `server/src/test/baseline-upgrade.test.ts` builds a
 database as each release in the manifest left it (`v0.1.0`, `v0.2.0`, `v0.3.0`,
-then `v0.4.0`; every release is a supported upgrade source), seeds it with
+`v0.4.0`, then `v0.5.0`; every release is a supported upgrade source), seeds it with
 baseline-shaped rows, migrates with the current code, reads every value back,
 and migrates again to prove the re-run is a no-op. SQLite runs in every CI job;
 PostgreSQL, MySQL and MongoDB run in the `store-contracts` job. Per backend:
@@ -1459,8 +1468,8 @@ docker compose up -d
 
 The four secrets and `FERRUM_EDGE_IMAGE` are required (`${VAR:?…}`); keep the
 secrets stable across restarts. [`release/compatibility.env`](../release/compatibility.env)
-pins the Edge image by digest: Ferrum Edge `v0.9.13` for Nexus `v0.4.0`, and Edge
-`v0.9.14` for the next release on `main`. That is the release the acceptance suite ([`e2e/`](../e2e/README.md)) tests against;
+pins the Edge image by digest: Ferrum Edge `v0.9.14` for Nexus `v0.5.0`. That is the
+release the acceptance suite ([`e2e/`](../e2e/README.md)) tests against;
 other Edge versions are unverified.
 
 The quickstart pins its PostgreSQL and Alpine images by multi-architecture
@@ -1653,9 +1662,9 @@ never accepted by verification; an invalid hidden Basic shape reports
 Nexus has no namespace Admin restore caller. Its API gateway restore rebuilds
 individual resources and repeats egress admission. Conditional Edge backup does not
 make Nexus and Edge backups jointly atomic; keep the writer-drain and paired-backup
-procedure below. Nexus `v0.4.0` pairs with Edge `v0.9.13` and vendors
-`contracts-edge-0.9.13`; `main` pairs with Edge `v0.9.14` and vendors
-`contracts-edge-0.9.14`. See [the adoption facts](edge-0.9.11-adoption.md).
+procedure below. Nexus `v0.5.0` pairs with Edge `v0.9.14` and vendors
+`contracts-edge-0.9.14`; Nexus `v0.4.0` paired with Edge `v0.9.13` and vendored
+`contracts-edge-0.9.13`. See [the adoption facts](edge-0.9.11-adoption.md).
 
 ### Ordering and consistency
 
