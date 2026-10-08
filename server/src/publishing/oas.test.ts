@@ -1367,24 +1367,31 @@ describe('upstream destination policy', () => {
   });
 
   it('refuses the publish when a gateway-origin lookup times out', async () => {
-    // A resolver that never answers, as a blackholed nameserver behaves.
-    const resolveGateway = createGatewayResolver({
-      timeoutMs: 20,
-      lookup: () => new Promise<ResolvedAddress[]>(() => {}),
-    });
-    await assert.rejects(resolveGateway('gateway.blackholed.test'), { code: 'ETIMEOUT' });
+    // The resolver's timeout timer is unref'd and the fake lookup never settles,
+    // so hold the event loop open until the timeout has fired.
+    const keepAlive = setInterval(() => {}, 1_000);
+    try {
+      // A resolver that never answers, as a blackholed nameserver behaves.
+      const resolveGateway = createGatewayResolver({
+        timeoutMs: 20,
+        lookup: () => new Promise<ResolvedAddress[]>(() => {}),
+      });
+      await assert.rejects(resolveGateway('gateway.blackholed.test'), { code: 'ETIMEOUT' });
 
-    const upstream = parseUpstreamUrl('https://api.example.com');
-    assert.ok(upstream);
-    const error = await expectSpecInvalidAsync(() =>
-      assertUpstreamAllowed(upstream, {
-        allowPrivate: true,
-        getGatewayPublicUrls: async () => ['https://gateway.blackholed.test/'],
-        resolve: resolvesTo([{ address: '93.184.216.34', family: 4 }]),
-        resolveGateway,
-      }),
-    );
-    assert.equal((error.details as { reason?: string }).reason, 'gateway_unresolvable');
+      const upstream = parseUpstreamUrl('https://api.example.com');
+      assert.ok(upstream);
+      const error = await expectSpecInvalidAsync(() =>
+        assertUpstreamAllowed(upstream, {
+          allowPrivate: true,
+          getGatewayPublicUrls: async () => ['https://gateway.blackholed.test/'],
+          resolve: resolvesTo([{ address: '93.184.216.34', family: 4 }]),
+          resolveGateway,
+        }),
+      );
+      assert.equal((error.details as { reason?: string }).reason, 'gateway_unresolvable');
+    } finally {
+      clearInterval(keepAlive);
+    }
   });
 
   it('reuses a gateway-origin answer briefly, and never a failure', async () => {
