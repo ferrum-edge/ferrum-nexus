@@ -6,8 +6,6 @@ import type { ApiErrorBody, PublishApiResponse } from '@ferrum-nexus/shared';
 
 import {
   attestedControlPlanePolicy,
-  EDGE_CP_ATTESTING_PUBLIC_ONLY,
-  EDGE_CP_NO_DATA_PLANES,
   type DataPlaneReport,
 } from '../test/edge-egress-attestation-fixtures.js';
 import type { NexusError } from '../lib/errors.js';
@@ -26,8 +24,22 @@ import {
   readBackendEgressPolicy,
   type BackendEgressPolicy,
   type DataPlaneAttestationProblem,
+  type DataPlaneAttestationVerdict,
+  type DataPlaneEgressAttestation,
   type DataPlaneEgressPolicy,
 } from './egress-policy.js';
+
+/** The vendored canonical `backend-egress-policy` v2 fixtures (contracts-edge-0.9.14). */
+const EGRESS_FIXTURES = new URL(
+  '../../../contracts/ferrum-contracts/fixtures/backend-egress-policy/v2/',
+  import.meta.url,
+);
+
+/** One canonical fixture, e.g. `valid/public-serving.json`. */
+function egressFixture(path: string): Record<string, unknown> {
+  const bytes = readFileSync(new URL(path, EGRESS_FIXTURES), 'utf8');
+  return JSON.parse(bytes) as Record<string, unknown>;
+}
 
 /** A public-mode control plane: schema 2 never reports it as guaranteed. */
 function controlPlanePolicy(): Record<string, unknown> {
@@ -48,7 +60,11 @@ describe('closed owner egress contract', () => {
     ) as { required: string[]; properties: Record<string, unknown>; additionalProperties: boolean };
     assert.equal(schema.additionalProperties, false);
     assert.deepEqual(schema.required.sort(), Object.keys(publicEgressPolicy()).sort());
-    assert.deepEqual(Object.keys(schema.properties).sort(), schema.required);
+    // Edge v0.9.14's control-plane attestation is the only optional member.
+    assert.deepEqual(
+      Object.keys(schema.properties).sort(),
+      [...schema.required, 'data_plane_attestation'].sort(),
+    );
     for (const kind of ['valid', 'invalid']) {
       const base = `fixtures/backend-egress-policy/v2/${kind}/`;
       for (const name of readdirSync(new URL(base, root))) {
@@ -472,16 +488,19 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
   }
 
   it('reads the owner examples without omitting or inferring a field', () => {
-    for (const example of [EDGE_CP_NO_DATA_PLANES, EDGE_CP_ATTESTING_PUBLIC_ONLY]) {
+    // contracts-edge-0.9.14 transcribes the owner's two control-plane examples.
+    const emptyExample = egressFixture('valid/control-plane-attestation-empty.json');
+    const attestedExample = egressFixture('valid/control-plane-attestation-reported.json');
+    for (const example of [emptyExample, attestedExample]) {
       const parsed = parseBackendEgressPolicy(example, 'ferrum');
       assert.ok(parsed);
       assert.deepEqual(parsed, example);
       assert.equal(provesLocalPublicEgress(parsed), false);
     }
-    const empty = parseBackendEgressPolicy(EDGE_CP_NO_DATA_PLANES, 'ferrum')!;
+    const empty = parseBackendEgressPolicy(emptyExample, 'ferrum')!;
     assert.equal(provesPublicEgress(empty, 1), false);
     assert.equal(dataPlaneAttestationVerdict(empty, 1), 'data_planes_not_public_only');
-    const attested = parseBackendEgressPolicy(EDGE_CP_ATTESTING_PUBLIC_ONLY, 'ferrum')!;
+    const attested = parseBackendEgressPolicy(attestedExample, 'ferrum')!;
     // Without the operator's inventory, the connected set is not known to be the fleet.
     assert.equal(provesDataPlanePublicEgress(attested), false);
     assert.equal(dataPlaneAttestationVerdict(attested), 'expected_data_planes_unset');
@@ -495,7 +514,184 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
       enforcement_scope: 'admission-only',
     });
     // Another namespace's answer is never read, attestation or not.
-    assert.equal(parseBackendEgressPolicy(EDGE_CP_ATTESTING_PUBLIC_ONLY, 'nexus'), null);
+    assert.equal(parseBackendEgressPolicy(attestedExample, 'nexus'), null);
+  });
+
+  it('gives every canonical valid fixture the verdict Nexus intends', () => {
+    const every = (verdict: DataPlaneAttestationVerdict): DataPlaneAttestationVerdict[] =>
+      Array.from({ length: 4 }, () => verdict);
+    const notPublicOnly = every('data_planes_not_public_only');
+    // The verdict with NEXUS_EXPECTED_DATA_PLANES unset, then set to 1, 2 and 3.
+    const expectations: Record<string, DataPlaneAttestationVerdict[]> = {
+      // Two public-only data planes with distinct node_ids.
+      'control-plane-attestation-reported.json': [
+        'expected_data_planes_unset',
+        'guaranteed',
+        'guaranteed',
+        'fewer_data_planes_than_expected',
+      ],
+      'control-plane-attestation-empty.json': notPublicOnly,
+      // An unknown data plane, an allow overlay, and two streams of one node_id
+      // of which one is `both`: each leaves the set short of public-only.
+      'control-plane-attestation-unknown.json': notPublicOnly,
+      'control-plane-attestation-allow-overlay.json': notPublicOnly,
+      'control-plane-attestation-shared-node-id.json': notPublicOnly,
+      // Control planes without the object, as Edge v0.9.13 answers.
+      'default-control-plane.json': every('attestation_absent'),
+      'private-control-plane.json': every('attestation_absent'),
+      'public-control-plane.json': every('attestation_absent'),
+      'public-no-data-plane.json': every('not_control_plane'),
+      'public-serving.json': every('not_control_plane'),
+      'public-unserved-namespace.json': every('not_control_plane'),
+      'public-with-allow-overrides.json': every('not_control_plane'),
+    };
+    const names = readdirSync(new URL('valid/', EGRESS_FIXTURES)).sort();
+    assert.deepEqual(names, Object.keys(expectations).sort(), 'every valid fixture has a verdict');
+    for (const name of names) {
+      const value = egressFixture(`valid/${name}`);
+      const reading = readBackendEgressPolicy(value, String(value.namespace));
+      assert.ok(reading, name);
+      assert.equal(reading.attestationProblem, null, name);
+      assert.deepEqual(reading.policy, value, name);
+      const local = provesLocalPublicEgress(reading.policy);
+      [undefined, 1, 2, 3].forEach((expectedDataPlanes, index) => {
+        const verdict = expectations[name]![index];
+        assert.equal(
+          dataPlaneAttestationVerdict(reading.policy, expectedDataPlanes),
+          verdict,
+          name,
+        );
+        const assessment = assessBackendEgress(reading, { expectedDataPlanes });
+        const guaranteed = local || verdict === 'guaranteed';
+        assert.equal(assessment.publicEgressGuaranteed, guaranteed, name);
+        assert.equal(assessment.dataPlaneAttestation, verdict, name);
+        assert.deepEqual(
+          assessment.admission,
+          guaranteed
+            ? { egress_profile: 'public-guaranteed', enforcement_scope: value.enforcement_scope }
+            : null,
+          name,
+        );
+      });
+    }
+  });
+
+  it('sets aside or refuses every canonical invalid fixture, and never grants on one', () => {
+    // How each attestation case is set aside; every other invalid fixture is a
+    // top-level refusal.
+    const problems: Record<string, DataPlaneAttestationProblem> = {
+      'attestation-on-local-data-plane.json': 'out_of_scope',
+      'attestation-unknown-source.json': 'malformed',
+      'attestation-leaked-cidr-field.json': 'malformed',
+      'attestation-negative-count.json': 'malformed',
+      'attestation-missing-data-planes.json': 'malformed',
+      'weakest-policy-unknown-mode.json': 'malformed',
+      'entry-build-version.json': 'malformed',
+      'entry-unknown-attestation.json': 'malformed',
+      'entry-reported-without-policy.json': 'malformed',
+      'entry-unknown-with-policy.json': 'malformed',
+      'entry-connected-at-without-offset.json': 'malformed',
+      'entry-policy-leaked-cidr-field.json': 'malformed',
+      'entry-policy-mode-class-mismatch.json': 'malformed',
+      'entry-policy-false-public-guarantee.json': 'malformed',
+      'entry-policy-allow-overlay-guarantee.json': 'malformed',
+      'weakest-policy-without-reports.json': 'inconsistent',
+      'reports-without-weakest-policy.json': 'inconsistent',
+      'empty-set-complete.json': 'inconsistent',
+      'guarantee-with-unknown-data-plane.json': 'inconsistent',
+      'guarantee-with-allow-overlay.json': 'inconsistent',
+      'public-only-not-aggregated.json': 'inconsistent',
+    };
+    let attestationCases = 0;
+    for (const name of readdirSync(new URL('invalid/', EGRESS_FIXTURES))) {
+      const value = egressFixture(`invalid/${name}`);
+      const namespace = String(value.namespace);
+      assert.equal(parseBackendEgressPolicy(value, namespace), null, name);
+      const reading = readBackendEgressPolicy(value, namespace);
+      if (!Object.hasOwn(value, 'data_plane_attestation')) {
+        assert.equal(reading, null, name);
+        assert.equal(problems[name], undefined, name);
+        continue;
+      }
+      attestationCases += 1;
+      assert.ok(reading, name);
+      assert.equal(reading.attestationProblem, problems[name], name);
+      assert.equal(Object.hasOwn(reading.policy, 'data_plane_attestation'), false, name);
+      for (const expectedDataPlanes of [undefined, 1, 2]) {
+        const strict = assessBackendEgress(reading, { expectedDataPlanes });
+        assert.equal(strict.publicEgressGuaranteed, false, name);
+        assert.equal(strict.admission, null, name);
+        assert.equal(strict.dataPlaneAttestation, 'attestation_unreadable', name);
+      }
+      const optedOut = assessBackendEgress(reading, {
+        expectedDataPlanes: 2,
+        allowPrivateUpstreams: true,
+      });
+      assert.equal(optedOut.admission?.egress_profile, 'private-upstreams-opt-in', name);
+    }
+    assert.equal(attestationCases, Object.keys(problems).length, 'every case is exercised');
+  });
+
+  it('builds the canonical control-plane answers exactly as Edge aggregates them', () => {
+    const reportOf = (policy: DataPlaneEgressPolicy | null): DataPlaneReport | null =>
+      policy === null
+        ? null
+        : {
+            mode: policy.mode,
+            dangerous_ranges_blocked: policy.dangerous_ranges_blocked,
+            allow_cidr_overrides_present: policy.allow_cidr_overrides_present,
+            deny_cidr_overrides_present: policy.deny_cidr_overrides_present,
+          };
+    let built = 0;
+    for (const name of readdirSync(new URL('valid/', EGRESS_FIXTURES))) {
+      const value = egressFixture(`valid/${name}`);
+      const attestation = (value as unknown as BackendEgressPolicy).data_plane_attestation;
+      if (attestation === undefined) continue;
+      const reports = attestation.data_planes.map(({ policy }) => reportOf(policy));
+      const answer = attestedControlPlanePolicy(reports, String(value.namespace));
+      const generated = answer.data_plane_attestation as DataPlaneEgressAttestation;
+      // Stream identities and times are illustrative in both; take the fixture's.
+      generated.data_planes.forEach((plane, index) => {
+        plane.node_id = attestation.data_planes[index]!.node_id;
+        plane.connected_at = attestation.data_planes[index]!.connected_at;
+      });
+      assert.deepEqual(answer, value, name);
+      built += 1;
+    }
+    assert.equal(built, 5, 'every canonical attestation fixture is rebuilt');
+  });
+
+  it('requires connected_at to be an RFC 3339 date-time', () => {
+    const attested = attestedControlPlanePolicy([PUBLIC]);
+    const problemFor = (connectedAt: unknown): DataPlaneAttestationProblem | null | undefined =>
+      readBackendEgressPolicy(
+        withAttestation(attested, (a) => {
+          (a.data_planes as Record<string, unknown>[])[0]!.connected_at = connectedAt;
+        }),
+        'nexus',
+      )?.attestationProblem;
+    for (const accepted of [
+      '2026-10-06T12:00:00+00:00',
+      '2026-10-06T12:00:00.123456789+00:00',
+      '2026-10-06T12:00:00Z',
+      '2024-02-29T23:59:60-05:30',
+    ]) {
+      assert.equal(problemFor(accepted), null, accepted);
+    }
+    for (const refused of [
+      '2026-10-06T12:00:00',
+      '2026-10-06 12:00:00+00:00',
+      '2026-10-06',
+      '2025-02-29T12:00:00Z',
+      '2026-13-01T12:00:00Z',
+      '2026-10-06T24:00:00Z',
+      '2026-10-06T12:00:00+24:00',
+      '',
+      1_791_288_000,
+      null,
+    ]) {
+      assert.equal(problemFor(refused), 'malformed', String(refused));
+    }
   });
 
   it('grants the guarantee when every connected data plane reports public-only', () => {

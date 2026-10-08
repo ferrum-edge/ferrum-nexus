@@ -1,12 +1,12 @@
 /**
- * Edge v0.9.14 control-plane `GET /backend-egress-policy` answers, which add the
- * optional `data_plane_attestation` object within schema 2. The two `EDGE_*`
- * constants are transcribed from the owner's `openapi.yaml` examples
- * (`getBackendEgressPolicy`: `defaultControlPlane` and
- * `controlPlaneAttestingPublicOnlyDataPlanes`) on Edge `release/v0.9.14`; the
- * builder follows `DataPlaneEgressSummary::from_reports` in
- * `src/grpc/backend_egress_attestation.rs`. Local test fixtures only: the vendored
- * canonical contracts stay at contracts-edge-0.9.13 until 0.9.14 is adopted.
+ * A builder for Edge v0.9.14 control-plane `GET /backend-egress-policy` answers,
+ * which add the optional `data_plane_attestation` object within schema 2. It
+ * follows `DataPlaneEgressSummary::from_reports` in
+ * `src/grpc/backend_egress_attestation.rs` and generates fleets of any size and
+ * mix for parametrized tests. The owner examples and the conformance cases are
+ * the vendored canonical fixtures (`contracts/ferrum-contracts/fixtures/
+ * backend-egress-policy/v2/`, contracts-edge-0.9.14), which the tests read
+ * directly; this builder's output must agree with them (`egress-policy.test.ts`).
  */
 import { publicEgressPolicy } from './mock-ferrum-edge.js';
 
@@ -100,94 +100,3 @@ export function attestedControlPlanePolicy(
     },
   };
 }
-
-/** Owner example `defaultControlPlane`: no data plane connected. */
-export const EDGE_CP_NO_DATA_PLANES: Readonly<Record<string, unknown>> = {
-  schema_version: 2,
-  ip_classification: 'ferrum-private-reserved-v1',
-  namespace: 'ferrum',
-  policy_scope: 'process',
-  enforcement_scope: 'admission-only',
-  mode: 'both',
-  mode_allowed_ip_classes: ['public', 'private-reserved'],
-  mode_blocked_ip_classes: [],
-  dangerous_ranges_blocked: true,
-  allow_cidr_overrides_present: false,
-  deny_cidr_overrides_present: false,
-  evaluation_order: ['allow-cidrs', 'deny-cidrs', 'dangerous-ranges', 'ip-mode'],
-  public_only_guaranteed: false,
-  data_plane_attestation: {
-    source: 'configsync-subscribe',
-    connected_data_planes: 0,
-    reporting_data_planes: 0,
-    unknown_data_planes: 0,
-    weakest_policy: null,
-    weakest_policy_complete: false,
-    all_connected_public_only_guaranteed: false,
-    data_planes: [],
-  },
-};
-
-/** Owner example `controlPlaneAttestingPublicOnlyDataPlanes`: two public-only data planes. */
-export const EDGE_CP_ATTESTING_PUBLIC_ONLY: Readonly<Record<string, unknown>> = {
-  schema_version: 2,
-  ip_classification: 'ferrum-private-reserved-v1',
-  namespace: 'ferrum',
-  policy_scope: 'process',
-  enforcement_scope: 'admission-only',
-  mode: 'both',
-  mode_allowed_ip_classes: ['public', 'private-reserved'],
-  mode_blocked_ip_classes: [],
-  dangerous_ranges_blocked: true,
-  allow_cidr_overrides_present: false,
-  deny_cidr_overrides_present: false,
-  evaluation_order: ['allow-cidrs', 'deny-cidrs', 'dangerous-ranges', 'ip-mode'],
-  public_only_guaranteed: false,
-  data_plane_attestation: {
-    source: 'configsync-subscribe',
-    connected_data_planes: 2,
-    reporting_data_planes: 2,
-    unknown_data_planes: 0,
-    weakest_policy: {
-      mode: 'public',
-      mode_allowed_ip_classes: ['public'],
-      mode_blocked_ip_classes: ['private-reserved'],
-      dangerous_ranges_blocked: true,
-      allow_cidr_overrides_present: false,
-      deny_cidr_overrides_present: false,
-      public_only_guaranteed: true,
-    },
-    weakest_policy_complete: true,
-    all_connected_public_only_guaranteed: true,
-    data_planes: [
-      {
-        node_id: 'dp-a',
-        connected_at: '2026-10-06T12:00:00+00:00',
-        attestation: 'reported',
-        policy: {
-          mode: 'public',
-          mode_allowed_ip_classes: ['public'],
-          mode_blocked_ip_classes: ['private-reserved'],
-          dangerous_ranges_blocked: true,
-          allow_cidr_overrides_present: false,
-          deny_cidr_overrides_present: true,
-          public_only_guaranteed: true,
-        },
-      },
-      {
-        node_id: 'dp-b',
-        connected_at: '2026-10-06T12:00:05+00:00',
-        attestation: 'reported',
-        policy: {
-          mode: 'public',
-          mode_allowed_ip_classes: ['public'],
-          mode_blocked_ip_classes: ['private-reserved'],
-          dangerous_ranges_blocked: true,
-          allow_cidr_overrides_present: false,
-          deny_cidr_overrides_present: false,
-          public_only_guaranteed: true,
-        },
-      },
-    ],
-  },
-};

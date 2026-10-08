@@ -10,6 +10,7 @@ import {
   assertDeploymentEvidence,
   deploymentSpecDocument,
   isDeploymentAcknowledgement,
+  isDeploymentNonCommit,
   isDeploymentSnapshot,
   isLegacyDeploymentSnapshot,
   isSnapshotTooLargeRefusal,
@@ -59,7 +60,7 @@ function oneSpecSnapshot(document: Record<string, unknown>): EdgeDeploymentSnaps
   return snapshot;
 }
 
-describe('published contracts-edge-0.9.13 deployment fixtures', () => {
+describe('published contracts-edge-0.9.14 deployment fixtures', () => {
   for (const contract of [
     { name: 'admin-deployment-snapshot/v2', accepts: isDeploymentSnapshot },
     { name: 'admin-deployment-mutation-acknowledgement', accepts: isDeploymentAcknowledgement },
@@ -116,6 +117,44 @@ describe('published contracts-edge-0.9.13 deployment fixtures', () => {
       null,
     ]) {
       assert.equal(isSnapshotTooLargeRefusal(uncertain), false);
+    }
+  });
+
+  it('reads not_started and not_committed as definite non-commits, and only those', () => {
+    // Edge v0.9.14 reports a 503 store failure before or inside the rolled-back
+    // transaction as not_started or not_committed; only unknown stays uncertain.
+    const nonCommits = [
+      'not-started.json',
+      'snapshot-too-large-not-committed.json',
+      'snapshot-too-large-not-started.json',
+      'stale.json',
+      'store-failure-not-committed.json',
+    ];
+    const directory = 'fixtures/admin-deployment-mutation-acknowledgement/';
+    for (const validity of ['valid', 'invalid']) {
+      for (const file of readdirSync(new URL(`${directory}${validity}/`, contracts))) {
+        const value = fixture<Record<string, unknown>>(`${directory}${validity}/${file}`);
+        assert.equal(
+          isDeploymentNonCommit(value),
+          validity === 'valid' && nonCommits.includes(file),
+          `${validity}/${file}`,
+        );
+      }
+    }
+    const storeFailure = fixture<Record<string, unknown>>(
+      `${directory}valid/store-failure-not-committed.json`,
+    );
+    for (const durable of ['not_started', 'not_committed']) {
+      assert.equal(isDeploymentNonCommit({ ...storeFailure, durable }), true, durable);
+    }
+    for (const uncertain of [
+      { ...storeFailure, durable: 'unknown' },
+      { ...storeFailure, durable: 'committed' },
+      { ...storeFailure, live: 'applied' },
+      { ...storeFailure, recovery_cleanup_authorized: true },
+      { ...storeFailure, durable: undefined },
+    ]) {
+      assert.equal(isDeploymentNonCommit(uncertain), false, JSON.stringify(uncertain));
     }
   });
 

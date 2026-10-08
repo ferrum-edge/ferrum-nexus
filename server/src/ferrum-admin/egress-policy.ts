@@ -1,11 +1,12 @@
 import { isDeepStrictEqual } from 'node:util';
 
 /**
- * Owner contract: Edge v0.9.13 (9b83115de7ec23ab51ec4feae6bed65e596db425), schema v2
- * (`backend-egress-policy` v2 in contracts-edge-0.9.13). Schema 2 keeps v1's shape but
+ * Owner contract: Edge v0.9.14 (9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d), schema v2
+ * (`backend-egress-policy` v2 in contracts-edge-0.9.14). Schema 2 keeps v1's shape but
  * narrows `public_only_guaranteed`: it is true only for `local-data-plane`. Edge v0.9.14
  * adds the optional control-plane `data_plane_attestation` object within schema 2
- * (`openapi.yaml` `DataPlaneEgressAttestation`, `src/admin/backend_egress_policy.rs`).
+ * (`openapi.yaml` `DataPlaneEgressAttestation`, `src/admin/backend_egress_policy.rs`);
+ * Edge v0.9.13 answers the same schema without it.
  */
 export interface BackendEgressPolicy {
   schema_version: 2;
@@ -114,6 +115,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function hasExactKeys(row: Record<string, unknown>, keys: readonly string[]): boolean {
   return Object.keys(row).length === keys.length && keys.every((key) => Object.hasOwn(row, key));
+}
+
+const RFC3339_DATE_TIME =
+  /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[Zz]|[+-](\d{2}):(\d{2}))$/;
+
+/**
+ * An RFC 3339 `date-time`, the format the owner schema asserts for
+ * `connected_at`: a full date and time with a `Z` or numeric UTC offset, in
+ * range. Edge writes `to_rfc3339` (`+00:00`, optional fractional seconds).
+ */
+function isRfc3339DateTime(value: unknown): boolean {
+  const match = typeof value === 'string' ? RFC3339_DATE_TIME.exec(value) : null;
+  if (!match) return false;
+  const field = (index: number): number => Number(match[index]);
+  const year = field(1);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][field(2) - 1] ?? 0;
+  return (
+    field(3) >= 1 &&
+    field(3) <= days &&
+    field(4) <= 23 &&
+    field(5) <= 59 &&
+    // 60 is a leap second.
+    field(6) <= 60 &&
+    (match[7] === undefined || (field(7) <= 23 && field(8) <= 59))
+  );
 }
 
 function isEgressMode(value: unknown): value is EgressMode {
@@ -274,8 +301,7 @@ function parseDataPlaneEntry(value: unknown): DataPlaneEgressEntry | null {
   if (
     typeof value.node_id !== 'string' ||
     value.node_id === '' ||
-    typeof value.connected_at !== 'string' ||
-    value.connected_at === ''
+    !isRfc3339DateTime(value.connected_at)
   ) {
     return null;
   }

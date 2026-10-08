@@ -32,6 +32,29 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- **Adopt published Edge `v0.9.14` and `contracts-edge-0.9.14`.** The compatibility
+  record pins `ferrumedge/ferrum-edge:v0.9.14@sha256:15442f1b1d1758023fe871fe57be50f19caf34bbe6c499a6812f4ffd0da5e3f8`
+  (tag source `9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d`), and Nexus vendors
+  `contracts-edge-0.9.14` (`ddbdd845733b7046c4393ac951011dafb774db33`) byte for byte,
+  including the `backend-egress-policy` v2 attestation fixtures and the
+  `store-failure-not-committed` acknowledgement fixture. The local Edge-shape
+  attestation examples are replaced by the canonical fixtures, and every canonical
+  egress fixture is tested for the verdict Nexus intends. Edge `v0.9.14` keeps egress
+  policy schema 2, deployment snapshot v2 and its tokens, so no journal or token
+  migration is needed; the ConfigSync protocol revision is `3`, so a control plane
+  and its data planes must run the same build. Edge now classifies backend HTTP/2
+  resets as `protocol_error` and a buffered read timeout as `504`; Nexus counts
+  per-API metrics by status code only, so some backend failures move from `502` to
+  `504`. See
+  [Upgrading to Edge v0.9.14](docs/operations.md#upgrading-to-edge-v0914).
+- **Deployment acknowledgements that prove nothing was committed are named** (Edge
+  `v0.9.14`). Edge now answers a store failure before or inside a rolled-back
+  conditional removal or replacement with `503` and `durable` `not_started` or
+  `not_committed` instead of `unknown`. Nexus reports any such acknowledgement as
+  `502 EDGE_ERROR` with `details.kind` `deployment_not_committed`; only
+  `durable: "unknown"` stays `deployment_acknowledgement_uncertain`. Neither
+  authorizes cleanup or replay, so the recovery journal and its pending operation are
+  kept and never resent, as before.
 - Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE`, `NOTICE` and the README Required Notice (previously "Ferrum Nexus"), and in `LICENSE-COMMERCIAL.md`.
 - **Spec builds no longer read every all-tools grantee from the gateway** (Refs #525).
   Each spec revision, rollback, agents edit, restore or conversion of an agent API did
@@ -72,6 +95,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   streams per namespace. Writes admitted this way record
   `egress_profile: public-guaranteed` with `enforcement_scope: admission-only`. See
   [CP/DP pairings and data-plane attestation](docs/operations.md#cpdp-pairings-and-data-plane-attestation).
+- **Data-plane attestation entries require an RFC 3339 `connected_at`.** The
+  canonical `contracts-edge-0.9.14` fixtures showed that Nexus accepted any non-empty
+  `connected_at`, which the owner schema asserts as a `date-time`
+  (`entry-connected-at-without-offset`). Such an attestation is now set aside as
+  malformed and grants nothing, like any other malformed attestation.
 
 ## [0.4.0] - 2026-10-06
 

@@ -2,43 +2,58 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ferrum-edge/ferrum-contracts/schemas/admin-deployment-mutation-acknowledgement/v1.schema.json",
   "title": "Edge deployment mutation acknowledgement v1",
-  "description": "Conditional proxy DELETE or API-spec PUT result. Consumers require HTTP 200, the expected deployment-v1 profile/target, durable=committed, live=applied and recovery_cleanup_authorized=true before automatic journal removal or dependent cleanup. Missing fields, refusal, cancellation and uncertain transport never authorize replay. Local application does not attest every remote DP.",
+  "description": "Conditional proxy DELETE or API-spec PUT result. Consumers require HTTP 200, the expected deployment-v1 profile/target, durable=committed, live=applied and recovery_cleanup_authorized=true before automatic journal removal or dependent cleanup. From Edge v0.9.14, durable=unknown means only that the commit or its acknowledgement failed (or the settlement task was lost); pre-commit store failures report not_started or not_committed. Missing fields, refusal, cancellation and uncertain transport never authorize replay. Local application does not attest every remote DP.",
   "x-contract": {
     "name": "admin-deployment-mutation-acknowledgement",
     "version": 1,
     "status": "implemented",
     "owner": "ferrum-edge/ferrum-edge",
-    "edge_availability": "Released since Ferrum Edge v0.9.12; unchanged shape re-read at v0.9.13 source 9b83115de7ec23ab51ec4feae6bed65e596db425, where a 507 NamespaceSnapshotTooLarge body reports durable not_started (snapshot read or pre-transaction check) or not_committed (rolled-back mutation transaction).",
+    "edge_availability": "Released since Ferrum Edge v0.9.12; unchanged shape re-read at v0.9.13 source 9b83115de7ec23ab51ec4feae6bed65e596db425, where a 507 NamespaceSnapshotTooLarge body reports durable not_started (snapshot read or pre-transaction check) or not_committed (rolled-back mutation transaction). Unchanged shape and durable enum re-read at v0.9.14 source 9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d (ferrum-edge#6027, issue #6021): a 503 store failure before the mutation transaction opens reports not_started, one inside the rolled-back transaction reports not_committed, and only a failed commit or commit acknowledgement, or a lost settlement task, reports unknown. Edge v0.9.12 and v0.9.13 reported unknown for every 503 store failure.",
     "provenance": [
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "openapi.yaml",
         "symbols": [
           "components.schemas.DeploymentMutationAcknowledgement",
           "components.responses.DeploymentMutationUnavailable",
           "components.responses.NamespaceSnapshotTooLarge"
         ],
-        "note": "Transcribed required members, optional profile/id/error and open object shape. The additional implication for cleanup authorization copies finish: true is emitted only after confirmed commit and applicable local application, final audit admission and lease release. HTTP status and profile/target matching remain consumer runtime checks."
+        "note": "Transcribed required members, optional profile/id/error and open object shape. The additional implication for cleanup authorization copies finish: true is emitted only after confirmed commit and applicable local application, final audit admission and lease release. HTTP status and profile/target matching remain consumer runtime checks. The durable meanings in the property description transcribe DeploymentMutationUnavailable."
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "src/admin/deployment_mutations.rs",
         "symbols": [
           "refusal",
           "unavailable",
           "snapshot_too_large",
           "store_error",
+          "read_error",
           "finish"
         ]
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+        "path": "src/config/deployment_mutation.rs",
+        "symbols": [
+          "DeploymentMutationNotStarted",
+          "deployment_not_started",
+          "is_deployment_mutation_not_started",
+          "DeploymentCommitOutcomeUnknown",
+          "deployment_commit_unknown",
+          "is_deployment_commit_outcome_unknown"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "docs/deployment_mutations.md"
       }
     ]
@@ -70,7 +85,8 @@
         "not_committed",
         "committed",
         "unknown"
-      ]
+      ],
+      "description": "not_started: refused before the mutation transaction opened (mode, evidence or admission failure; from Edge v0.9.14 also a store read, transaction start or MongoDB mTLS admission refusal ahead of it; a 507 before the transaction). not_committed: raised inside the mutation transaction, which rolled back (stale evidence 412, graph or ownership refusal 409, a 507 inside the transaction; from Edge v0.9.14 also a lost namespace admission lease or a statement, admission or validation failure). committed: commit confirmed. unknown: from Edge v0.9.14 only a failed commit or commit acknowledgement, or a settlement task that never reports; Edge v0.9.12 and v0.9.13 also reported unknown for pre-commit store failures. No value authorizes cleanup or replay unless recovery_cleanup_authorized is true."
     },
     "live": {
       "type": "string",

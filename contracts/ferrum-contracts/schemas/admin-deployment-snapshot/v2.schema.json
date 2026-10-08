@@ -2,18 +2,18 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ferrum-edge/ferrum-contracts/schemas/admin-deployment-snapshot/v2.schema.json",
   "title": "Edge deployment snapshot v2",
-  "description": "Body of admin-only GET /deployment-snapshot from Edge v0.9.13. Stored spec documents, external-reference snapshots and other binary values appear in evidence and api_specs only as SHA-256 and length; api_spec_contents carries one base64 copy of the stored spec bytes outside the evidence. Retain the complete secret-bearing original response and its matching HTTP ETag in encrypted recovery storage. JSON conformance checks the owner OpenAPI envelope, not evidence completeness, token authenticity, freshness, authorization, snapshot coherence or that base64 content matches its digest.",
+  "description": "Body of admin-only GET /deployment-snapshot from Edge v0.9.13 and v0.9.14. Stored spec documents, external-reference snapshots and other binary values appear in evidence and api_specs only as SHA-256 and length; api_spec_contents carries one base64 copy of the stored spec bytes outside the evidence. Retain the complete secret-bearing original response and its matching HTTP ETag in encrypted recovery storage. JSON conformance checks the owner OpenAPI envelope, not evidence completeness, token authenticity, freshness, authorization, snapshot coherence or that base64 content matches its digest.",
   "x-contract": {
     "name": "admin-deployment-snapshot",
     "version": 2,
     "status": "implemented",
     "owner": "ferrum-edge/ferrum-edge",
-    "edge_availability": "Released in Ferrum Edge v0.9.13 at 9b83115de7ec23ab51ec4feae6bed65e596db425 (ferrum-edge#6017; see PRs #5999 and #6012). Replaces v1: api_spec_contents is required, spec bytes are digests, and the deployment_snapshot.v2 MAC domain rejects earlier tokens with 412.",
+    "edge_availability": "Released in Ferrum Edge v0.9.13 at 9b83115de7ec23ab51ec4feae6bed65e596db425 (ferrum-edge#6017; see PRs #5999 and #6012). Replaces v1: api_spec_contents is required, spec bytes are digests, and the deployment_snapshot.v2 MAC domain rejects earlier tokens with 412. Unchanged wire shape re-read at Edge v0.9.14 source 9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d, which documents that the token fences the whole namespace and the api_spec_contents peak server memory (ferrum-edge#6027).",
     "provenance": [
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "openapi.yaml",
         "symbols": [
           "components.schemas.DeploymentSnapshot",
@@ -25,8 +25,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "src/admin/deployment_mutations.rs",
         "symbols": [
           "snapshot",
@@ -40,19 +40,20 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "src/config/deployment_mutation.rs",
         "symbols": [
           "DeploymentSnapshot::representation",
           "DeploymentSnapshot::digest",
+          "DeploymentSnapshot::snapshot",
           "StoredEvidence"
         ]
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "src/config/db_backend.rs",
         "symbols": [
           "ConditionalNamespaceSnapshot::representation",
@@ -63,8 +64,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "src/config/types.rs",
         "symbols": [
           "ApiSpec"
@@ -73,8 +74,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "src/config/db_loader.rs",
         "symbols": [
           "deployment_snapshot_tx",
@@ -83,8 +84,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "src/config/mongo_store.rs",
         "symbols": [
           "deployment_snapshot_in_session"
@@ -93,10 +94,10 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.13",
-        "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+        "ref": "v0.9.14",
+        "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "path": "docs/deployment_mutations.md",
-        "note": "HTTP/runtime protocol, the 64 MiB evidence bound, the 256 MiB api_spec_contents bound and complete evidence retention are documented in docs/deployment-contracts.md."
+        "note": "HTTP/runtime protocol, the namespace-wide token fence, the 64 MiB evidence bound, the 256 MiB api_spec_contents bound and its peak memory, and complete evidence retention are documented in docs/deployment-contracts.md."
       }
     ]
   },
@@ -126,7 +127,7 @@
     "namespace_etag": {
       "type": "string",
       "pattern": "^\"deployment-v1-[0-9a-f]{32}\"(?![\\s\\S])",
-      "description": "Exactly one original strong quoted deployment token, equal to the response ETag. Distinct from backup namespace and row tokens. From v0.9.13 the token MACs a bounded digest under the deployment_snapshot.v2 domain; tokens issued by v0.9.12 keep this syntax but fail closed with 412. Preserve verbatim; never refresh authority to retry a refused or uncertain mutation."
+      "description": "Exactly one original strong quoted deployment token, equal to the response ETag. Distinct from backup namespace and row tokens. From v0.9.13 the token MACs a bounded digest under the deployment_snapshot.v2 domain; tokens issued by v0.9.12 keep this syntax but fail closed with 412. The token fences the whole namespace: any other write in the namespace makes it stale (412). Preserve verbatim; never refresh authority to retry a refused or uncertain mutation."
     },
     "evidence": {
       "type": "object",

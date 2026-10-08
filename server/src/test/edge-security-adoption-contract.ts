@@ -1198,6 +1198,70 @@ export function runEdgeSecurityAdoptionContract(
       assert.deepEqual(await harness.store.settings.get(key), sealed);
     });
 
+    for (const durable of ['not_started', 'not_committed', 'unknown'] as const) {
+      it(`keeps the journal when a removal's store failure reports durable ${durable}`, async () => {
+        const published = await publish('routes');
+        const key = `gateway_recovery:nexus:${published.api.id}`;
+        const remove = harness.edgeClient.deployments.remove;
+        let state: unknown;
+        harness.edgeClient.deployments.remove = async (...args) => {
+          // Edge v0.9.14's `503` store-failure body: `not_started` before the
+          // mutation transaction, `not_committed` inside it, `unknown` at commit.
+          harness.edge.queueFailure(
+            503,
+            {
+              error: 'Deployment mutation acknowledgement unavailable',
+              durable,
+              live: 'unconfirmed',
+              recovery_cleanup_authorized: false,
+            },
+            '/proxies/',
+            'DELETE',
+          );
+          state = gatewayState();
+          return remove(...args);
+        };
+        restoreMethods.push(() => {
+          harness.edgeClient.deployments.remove = remove;
+        });
+        const offset = harness.edge.requests.length;
+        await assert.rejects(
+          harness.services.publishing.update(actor, published.api.id, {
+            spec_enforcement: 'docs_only',
+          }),
+          (error: unknown) => {
+            assert.ok(isNexusError(error));
+            assert.equal(error.code, 'EDGE_ERROR');
+            assert.deepEqual(error.details, {
+              status: 503,
+              kind:
+                durable === 'unknown'
+                  ? 'deployment_acknowledgement_uncertain'
+                  : 'deployment_not_committed',
+            });
+            return true;
+          },
+        );
+        assert.deepEqual(gatewayState(), state, 'nothing was applied');
+        assert.equal(
+          harness.edge.requests.slice(offset).filter((call) => call.method === 'DELETE').length,
+          1,
+        );
+        const journal = await readJournal<{ mutations: { acknowledged: boolean }[] }>(key);
+        assert.equal(journal.mutations.length, 1);
+        assert.equal(journal.mutations[0]!.acknowledged, false);
+        // Even a definite non-commit authorizes neither cleanup nor replay.
+        const sealed = await harness.store.settings.get(key);
+        const retryOffset = harness.edge.requests.length;
+        await assert.rejects(
+          harness.services.publishing.restoreGateway(actor, published.api.id),
+          /mutation is unconfirmed/,
+        );
+        assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
+        assert.deepEqual(await harness.store.settings.get(key), sealed);
+      });
+    }
+
     /**
      * Journal a conversion of `apiId` as a release paired with Edge v0.9.12 wrote it:
      * unmarked, with v0.9.12 authority (spec bytes inline, no api_spec_contents, a

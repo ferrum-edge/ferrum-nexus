@@ -1,4 +1,4 @@
-# Published Edge v0.9.13 baseline; load its digest from release/compatibility.env.
+# Published Edge v0.9.14 baseline; load its digest from release/compatibility.env.
 # Supply the packaged Nexus image as NEXUS_IMAGE; this fixture runs on demand, outside CI.
 # Separate from ../docker-compose.yml, which deliberately permits private upstreams.
 name: ferrum-nexus-public-only
@@ -21,7 +21,7 @@ services:
     networks: [private]
 
   ferrum-edge:
-    image: ${FERRUM_EDGE_IMAGE:?supply a qualified Edge v0.9.13 image index digest}
+    image: ${FERRUM_EDGE_IMAGE:?supply a qualified Edge v0.9.14 image index digest}
     command: ['run', '-m', 'database']
     environment:
       FERRUM_MODE: database

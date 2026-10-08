@@ -354,7 +354,7 @@ pairing. Egress policy schema 1 (Edge v0.9.12 and earlier) is refused as
 `unsupported_egress_policy_schema`.
 See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee).
-Published v0.9.13 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
+Published Edge v0.9.14 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
 
 Whole-consumer metadata replacements pair complete server-only verification with
 the original strong row `If-Match`, using Edge's masked projection and hidden-type
@@ -2574,7 +2574,11 @@ original deployment authority and explicit committed/applied cleanup acknowledge
 A namespace past Edge's conditional snapshot bound answers `409 CONFLICT` with
 `details.kind` `namespace_snapshot_too_large` (Edge `507`: nothing issued or applied),
 and a journal holding Edge v0.9.12 authority answers `409 CONFLICT` with
-`details.kind` `legacy_deployment_authority` before any gateway write.
+`details.kind` `legacy_deployment_authority` before any gateway write. An
+acknowledgement whose `durable` is `not_started` or `not_committed` (Edge v0.9.14
+also reports a `503` store failure this way) answers `502 EDGE_ERROR` with
+`details.kind` `deployment_not_committed`: nothing was committed, but the journal is
+kept. Any other unconfirmed result is `deployment_acknowledgement_uncertain`.
 Uncertain/refused results retain the attempted identity, security configs and
 encrypted journal with `withdrawn: false` and `repair_required`; no refreshed-token
 retry or unconditional fallback is performed. See the

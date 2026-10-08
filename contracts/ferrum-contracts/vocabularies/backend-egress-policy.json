@@ -2,32 +2,48 @@
   "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-backend-egress-policy/v2.schema.json",
   "vocabulary": "backend-egress-policy",
   "version": 2,
-  "edge_release": "v0.9.13",
-  "description": "Labels for process-scoped, immutable loaded backend policy metadata, response schema_version 2 (Edge v0.9.13). Mode lists describe the final evaluation stage, not unconditional effective allows. Classifier meaning changes require versioned coordination.",
+  "edge_release": "v0.9.14",
+  "description": "Labels for process-scoped, immutable loaded backend policy metadata, response schema_version 2 (Edge v0.9.13 and v0.9.14), and for the CP-only data_plane_attestation object Edge v0.9.14 adds within schema_version 2. Mode lists describe the final evaluation stage, not unconditional effective allows. Classifier meaning changes require versioned coordination.",
   "provenance": [
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.13",
-      "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+      "ref": "v0.9.14",
+      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
       "path": "openapi.yaml",
       "symbols": [
-        "components.schemas.BackendEgressPolicyResponse"
+        "components.schemas.BackendEgressPolicyResponse",
+        "components.schemas.DataPlaneEgressAttestation",
+        "components.schemas.DataPlaneEgressAttestationStatus"
       ]
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.13",
-      "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+      "ref": "v0.9.14",
+      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
       "path": "src/admin/backend_egress_policy.rs",
       "symbols": [
         "BackendEgressPolicyResponse",
-        "handle_get"
+        "handle_get",
+        "ATTESTATION_SOURCE",
+        "connected_data_planes"
       ]
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.13",
-      "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+      "ref": "v0.9.14",
+      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+      "path": "src/grpc/backend_egress_attestation.rs",
+      "symbols": [
+        "ATTESTATION_REPORTED",
+        "ATTESTATION_UNKNOWN",
+        "ReportedEgressPolicy::public_only_guaranteed",
+        "DataPlaneEgressSummary::from_reports"
+      ]
+    },
+    {
+      "repo": "ferrum-edge/ferrum-edge",
+      "ref": "v0.9.14",
+      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
       "path": "src/config/env_config.rs",
       "symbols": [
         "BackendEgressPolicy",
@@ -38,10 +54,10 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.13",
-      "commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
+      "ref": "v0.9.14",
+      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
       "path": "docs/admin_api.md",
-      "note": "Transcribed GET /backend-egress-policy labels, scope limits, v1 classifier, schema_version 2 and its local-enforcement guarantee rule; no raw CIDRs or credentials."
+      "note": "Transcribed GET /backend-egress-policy labels, scope limits, v1 classifier, schema_version 2 and its local-enforcement guarantee rule, and the \"Data-plane attestation on a control plane\" rules; no raw CIDRs or credentials."
     }
   ],
   "schema_version": 2,
@@ -69,5 +85,11 @@
     "ip-mode"
   ],
   "public_only_guaranteed_rule": "True exactly when enforcement_scope=local-data-plane, mode=public and allow_cidr_overrides_present=false; always false for admission-only, unserved-namespace and no-data-plane. Deny overrides only restrict. Even a wholly public undisclosed allow list yields false. The dangerous-range flag alone does not certify public-only egress. schema_version 1 reported the policy-only value, including true on a public-mode CP.",
-  "consumer_rule": "For public-only publication, recognize schema_version 2 and the complete classification/vocabulary, match the requested namespace, require local-data-plane and public_only_guaranteed=true, and check every serving DP after replacement/restart. Missing/unknown values, schema_version 1 or authorization failure block publication. CP admission-only metadata never attests its DPs."
+  "consumer_rule": "For public-only publication, recognize schema_version 2 and the complete classification/vocabulary, match the requested namespace, require local-data-plane and public_only_guaranteed=true, and check every serving DP after replacement/restart. Missing/unknown values, schema_version 1 or authorization failure block publication. The CP's own admission-only fields never attest its DPs. A consumer that cannot reach every DP may instead read a CP's data_plane_attestation for the namespace and require all_connected_public_only_guaranteed=true together with a count of distinct node_id values in data_planes that reaches the number of data-plane processes it expects for the namespace (each Edge DP process reports its own random node_id; connected_data_planes counts streams, so a reconnect overlap can double-count one process); an absent object, an unknown status or an empty set blocks publication.",
+  "data_plane_attestation_source": "configsync-subscribe",
+  "data_plane_attestation_statuses": [
+    "reported",
+    "unknown"
+  ],
+  "data_plane_attestation_rule": "CP-only (enforcement_scope=admission-only), absent on every other response. One entry per live ConfigSync Subscribe stream for the selected namespace, sorted by node_id then connected_at, without build versions. reported carries the policy the DP self-reported (mode and three presence flags; public_only_guaranteed exactly for mode=public without allow overrides); unknown means no recognised report and policy null, and never counts as public-only. weakest_policy is the field-wise least restrictive policy over reporting DPs, null when none reported. weakest_policy_complete requires at least one connected DP and no unknown DP; all_connected_public_only_guaranteed requires it and a public-only weakest_policy. Reports come from JWT-authenticated DPs running the CP's exact build; they are self-descriptions, not cryptographic host attestation, and partitioned DPs still serving cached config are not listed."
 }

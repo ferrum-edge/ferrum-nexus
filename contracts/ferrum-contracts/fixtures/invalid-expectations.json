@@ -336,6 +336,95 @@
     "instance_path": "/evaluation_order/0",
     "keyword": "const"
   },
+  "backend-egress-policy/v2/invalid/attestation-on-local-data-plane.json": {
+    "instance_path": "/enforcement_scope",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/attestation-unknown-source.json": {
+    "instance_path": "/data_plane_attestation/source",
+    "keyword": "enum"
+  },
+  "backend-egress-policy/v2/invalid/attestation-leaked-cidr-field.json": {
+    "instance_path": "/data_plane_attestation",
+    "keyword": "additionalProperties"
+  },
+  "backend-egress-policy/v2/invalid/attestation-negative-count.json": {
+    "instance_path": "/data_plane_attestation/connected_data_planes",
+    "keyword": "minimum"
+  },
+  "backend-egress-policy/v2/invalid/attestation-missing-data-planes.json": {
+    "instance_path": "/data_plane_attestation",
+    "keyword": "required"
+  },
+  "backend-egress-policy/v2/invalid/weakest-policy-without-reports.json": {
+    "instance_path": "/data_plane_attestation/reporting_data_planes",
+    "keyword": "minimum"
+  },
+  "backend-egress-policy/v2/invalid/reports-without-weakest-policy.json": {
+    "instance_path": "/data_plane_attestation/reporting_data_planes",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/empty-set-complete.json": {
+    "instance_path": "/data_plane_attestation/connected_data_planes",
+    "keyword": "minimum"
+  },
+  "backend-egress-policy/v2/invalid/guarantee-with-unknown-data-plane.json": {
+    "instance_path": "/data_plane_attestation/weakest_policy_complete",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/guarantee-with-allow-overlay.json": {
+    "instance_path": "/data_plane_attestation/weakest_policy/public_only_guaranteed",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/public-only-not-aggregated.json": {
+    "instance_path": "/data_plane_attestation/all_connected_public_only_guaranteed",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/weakest-policy-unknown-mode.json": {
+    "instance_path": "/data_plane_attestation/weakest_policy/mode",
+    "keyword": "enum",
+    "top_keyword": "oneOf"
+  },
+  "backend-egress-policy/v2/invalid/entry-build-version.json": {
+    "instance_path": "/data_plane_attestation/data_planes/0",
+    "keyword": "additionalProperties"
+  },
+  "backend-egress-policy/v2/invalid/entry-unknown-attestation.json": {
+    "instance_path": "/data_plane_attestation/data_planes/0/attestation",
+    "keyword": "enum"
+  },
+  "backend-egress-policy/v2/invalid/entry-reported-without-policy.json": {
+    "instance_path": "/data_plane_attestation/data_planes/1/policy",
+    "keyword": "type"
+  },
+  "backend-egress-policy/v2/invalid/entry-unknown-with-policy.json": {
+    "instance_path": "/data_plane_attestation/data_planes/2/policy",
+    "keyword": "type"
+  },
+  "backend-egress-policy/v2/invalid/entry-connected-at-without-offset.json": {
+    "instance_path": "/data_plane_attestation/data_planes/0/connected_at",
+    "keyword": "format"
+  },
+  "backend-egress-policy/v2/invalid/entry-policy-leaked-cidr-field.json": {
+    "instance_path": "/data_plane_attestation/data_planes/0/policy",
+    "keyword": "additionalProperties",
+    "top_keyword": "oneOf"
+  },
+  "backend-egress-policy/v2/invalid/entry-policy-mode-class-mismatch.json": {
+    "instance_path": "/data_plane_attestation/data_planes/1/policy/mode_blocked_ip_classes",
+    "keyword": "const",
+    "top_keyword": "oneOf"
+  },
+  "backend-egress-policy/v2/invalid/entry-policy-false-public-guarantee.json": {
+    "instance_path": "/data_plane_attestation/data_planes/1/policy/public_only_guaranteed",
+    "keyword": "const",
+    "top_keyword": "oneOf"
+  },
+  "backend-egress-policy/v2/invalid/entry-policy-allow-overlay-guarantee.json": {
+    "instance_path": "/data_plane_attestation/data_planes/2/policy/public_only_guaranteed",
+    "keyword": "const",
+    "top_keyword": "oneOf"
+  },
   "vocabulary-backend-egress-policy/v2/invalid/previous-schema-version.json": {
     "instance_path": "/schema_version",
     "keyword": "enum"
@@ -343,6 +432,14 @@
   "vocabulary-backend-egress-policy/v2/invalid/unknown-mode.json": {
     "instance_path": "/modes/0",
     "keyword": "enum"
+  },
+  "vocabulary-backend-egress-policy/v2/invalid/unknown-attestation-status.json": {
+    "instance_path": "/data_plane_attestation_statuses/1",
+    "keyword": "enum"
+  },
+  "vocabulary-backend-egress-policy/v2/invalid/attestation-rule-missing.json": {
+    "instance_path": "",
+    "keyword": "dependentRequired"
   },
   "admin-deployment-snapshot/v2/invalid/weak-token.json": {
     "instance_path": "/namespace_etag",

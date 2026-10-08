@@ -577,7 +577,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     };
   }
 
-  // The default at the immutable v0.9.13 pin; this client supports that version.
+  // The default at the immutable v0.9.14 pin; this client supports that version.
   const MCP_PROTOCOL_VERSION = '2025-11-25';
 
   async function rpc(
