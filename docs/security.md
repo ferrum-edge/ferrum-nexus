@@ -272,7 +272,14 @@ does not reinterpret that), so it publishes only under
   row is audited for an administrator; the worker keeps retrying on a backoff
   capped at 5 minutes. When a stalled job finally lands, it revokes only the
   credentials created before it stopped refusing issuance, so keys the owner
-  issued after that survive.
+  issued after that survive. Before it completes, the revocation waits for any
+  credential write already in progress on the account's and its applications'
+  consumers and sweeps again, so a key an issue appended while the reset
+  committed is revoked too. The refusal covers the account's own and its
+  applications' credentials, not a provider's API test-consumer credential:
+  one created while the row still refuses issuance is attributed to the
+  account and is revoked with the rest when the job lands, so create it again
+  afterwards.
 - **Sign-in does not reveal which addresses exist.** A missing account still
   costs a scrypt derivation against a decoy hash, and both failures return the
   same `401 UNAUTHORIZED`.

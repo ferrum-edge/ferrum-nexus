@@ -13,6 +13,7 @@ import { after, before, describe, it } from 'node:test';
 import {
   consumerUsernameForApplication,
   consumerUsernameForUser,
+  MAX_PAGE_SIZE,
   type ApiErrorBody,
   type ForgotPasswordResponse,
   type IssueCredentialResponse,
@@ -32,6 +33,14 @@ const NEW_PASSWORD = 'a-brand-new-passphrase-entirely';
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
+}
+
+function barrier(): { promise: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
 }
 
 describe('password reset', () => {
@@ -466,6 +475,123 @@ describe('password reset', () => {
       ids.includes(String(row.target_id)),
     );
     assert.ok(revoked.some((row) => row.details.placement === 'whole-type-fallback'));
+  });
+
+  it('revokes a key an in-flight issue saves after the recovery has listed', async () => {
+    const account = await harness.registerUser({ email: 'in-flight-issue@example.test' });
+    const user = await harness.store.users.findById(account.user.id);
+    assert.ok(user);
+    const consumers = harness.edgeClient.consumers;
+    const credentials = harness.store.credentials;
+    const append = consumers.addCredential.bind(consumers);
+    const list = credentials.list.bind(credentials);
+    const appended = barrier();
+    const listed = barrier();
+    let armed = false;
+    // The issue has passed its in-key recovery check, as one that started just
+    // before the reset committed has, and its entry is on the gateway. It
+    // saves its row only once the recovery has listed the account's keys.
+    consumers.addCredential = async (...args) => {
+      consumers.addCredential = append;
+      const consumer = await append(...args);
+      appended.release();
+      await listed.promise;
+      return consumer;
+    };
+    credentials.list = async (filter, options) => {
+      const page = await list(filter, options);
+      if (armed && filter.user_id === account.user.id) listed.release();
+      return page;
+    };
+    try {
+      const issuing = harness.services.credentials.issue(user, { credential_type: 'keyauth' });
+      await appended.promise;
+      armed = true;
+      const revoked = await harness.services.credentials.revokeForAccountRecovery(user);
+      const issued = await issuing;
+
+      assert.equal(revoked, 1);
+      assert.equal(
+        (await harness.store.credentials.findById(issued.credential.id))?.status,
+        'revoked',
+      );
+    } finally {
+      consumers.addCredential = append;
+      credentials.list = list;
+    }
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.equal(consumer?.credentials.keyauth?.length ?? 0, 0);
+  });
+
+  it('revokes an older key when a newer one it skipped is revoked under it', async () => {
+    const account = await harness.registerUser({ email: 'shifted-recovery@example.test' });
+    const user = await harness.store.users.findById(account.user.id);
+    assert.ok(user);
+    const issued = await harness.authed(account, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(issued.statusCode, 201, issued.body);
+    const older = issued.json<IssueCredentialResponse>().credential;
+    // A full page of keys issued after the cutoff, listed ahead of the older
+    // one. They sit on a consumer of their own, so the older key's position on
+    // the account's consumer is untouched.
+    const cutoff = '2900-01-01T00:00:00.000Z';
+    const parked = `post-cutoff-${account.user.id}`;
+    const newer: string[] = [];
+    for (let index = 0; index < MAX_PAGE_SIZE; index += 1) {
+      const row = await harness.store.credentials.create({
+        user_id: account.user.id,
+        application_id: null,
+        ferrum_consumer_id: parked,
+        credential_type: 'keyauth',
+        ferrum_credential_id: `${parked}/credentials/keyauth`,
+        fingerprint: `test-post-cutoff-${account.user.id}-${index}`,
+        last4: 'newr',
+        label: null,
+        status: 'active',
+        rotated_from_id: null,
+        created_at: '2950-01-01T00:00:00.000Z',
+      });
+      newer.push(row.id);
+    }
+    // The owner revokes one of the newer keys each time a sweep pages past
+    // them, the first two times: a shift in the first pass, and again in the
+    // re-list a single second pass would make.
+    const credentials = harness.store.credentials;
+    const list = credentials.list.bind(credentials);
+    let raced = 0;
+    credentials.list = async (filter, options) => {
+      if (
+        filter.user_id === account.user.id &&
+        filter.status === 'active' &&
+        (options?.offset ?? 0) > 0 &&
+        raced < 2
+      ) {
+        const victim = newer[raced];
+        raced += 1;
+        assert.ok(victim);
+        await credentials.update(victim, { status: 'revoked' });
+      }
+      return list(filter, options);
+    };
+    try {
+      const revoked = await harness.services.credentials.revokeForAccountRecovery(
+        user,
+        null,
+        cutoff,
+      );
+
+      assert.equal(raced, 2);
+      assert.equal(revoked, 1);
+    } finally {
+      credentials.list = list;
+    }
+    assert.equal((await harness.store.credentials.findById(older.id))?.status, 'revoked');
+    assert.equal((await harness.store.credentials.findById(newer[2] ?? ''))?.status, 'active');
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.equal(consumer?.credentials.keyauth?.length ?? 0, 0);
   });
 
   it('revokes an earlier link when a newer one is issued', async (t) => {

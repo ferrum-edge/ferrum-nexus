@@ -284,6 +284,11 @@ const LIVE_STATUSES = new Set<string>(LIVE_CREDENTIAL_STATUSES);
 const LEGACY_BASICAUTH_SCAN_SETTING = 'credentials.legacy_basicauth_scan_v1';
 /** What the owner sees on a placeholder the upgrade scan wrote. Never read back. */
 const LEGACY_PLACEHOLDER_LABEL = 'Unconfirmed HTTP Basic credential from an earlier release';
+/**
+ * How many times one recovery sweep lists a status again because a key it
+ * skipped changed under it, before it gives up and leaves the job to retry.
+ */
+const RECOVERY_SWEEP_ROUNDS = 5;
 
 /** What Edge substitutes for credential material on every ordinary read. */
 const REDACTED_MATERIAL = '[REDACTED]';
@@ -490,6 +495,10 @@ export interface CredentialsService {
    * `cutoff` is the moment a stalled recovery job stopped refusing issuance:
    * only rows created before it are revoked, so a key the owner issued after
    * the unblock survives. `null` (the default) revokes every live row.
+   *
+   * It then waits out any credential write still queued on the account's
+   * consumers and sweeps again, so a key an issue appended while the reset
+   * committed is revoked too.
    */
   revokeForAccountRecovery(
     user: UserRecord,
@@ -2310,38 +2319,20 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     },
 
     async revokeForAccountRecovery(user, ip = null, cutoff = null): Promise<number> {
-      let revoked = 0;
-      for (const status of LIVE_CREDENTIAL_STATUSES) {
-        // Every row this pass settles leaves the filter, so the page does not
-        // move for them; a row it skips stays, so the offset steps past it.
-        let offset = 0;
-        for (;;) {
-          const page = await store.credentials.list(
-            { user_id: user.id, status },
-            { limit: MAX_PAGE_SIZE, offset },
-          );
-          if (page.items.length === 0) break;
-          for (const row of page.items) {
-            // Issued after the job stopped blocking: only the rightful owner
-            // held a session by then, so the key is theirs to keep.
-            if (cutoff !== null && row.created_at >= cutoff) {
-              offset += 1;
-              continue;
-            }
-            if (
-              await revokeCredentialRow(
-                row,
-                { id: user.id, role: user.role },
-                ip,
-                { reason: 'account_recovery' },
-                { recovery: true, recoveryCutoff: cutoff },
-              )
-            ) {
-              revoked += 1;
-            }
-          }
-        }
+      const consumerIds = new Set<string>();
+      let revoked = await sweepForAccountRecovery(user, ip, cutoff, consumerIds);
+      // An issue or rotate that passed its in-key recovery check just before
+      // the reset committed may still be appending, and saves its row only
+      // after the sweep above has listed. Wait out every such write on each of
+      // the account's consumers, then sweep again. Each wait is its own empty
+      // section, never nested in a revoke: the queue is not re-entrant.
+      for (const consumer of await provisioner.listConsumers(user.id)) {
+        consumerIds.add(consumer.ferrum_consumer_id);
       }
+      for (const consumerId of consumerIds) {
+        await edge.serializePerKey(consumerId, async () => {});
+      }
+      revoked += await sweepForAccountRecovery(user, ip, cutoff, consumerIds);
       return revoked;
     },
 
@@ -3376,6 +3367,78 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         { reason: 'account_recovery_pending' },
       );
     }
+  }
+
+  /**
+   * One sweep of {@link CredentialsService.revokeForAccountRecovery}: revoke
+   * every live row of `user`'s created before `cutoff`, and add the consumer of
+   * every row it lists to `consumerIds`.
+   *
+   * The listing is newest first, and the offset steps past only the rows the
+   * sweep skips: a row it settles leaves the filter, so the page does not move
+   * for it. A skipped row that leaves the filter while the sweep runs — the
+   * owner revoking or rotating a key issued after the cutoff — shifts every
+   * older row one place forward, so the next page would start past one the
+   * sweep has not seen. A status whose skipped rows did not all stay exactly
+   * as they were listed is therefore listed again from the start; one that
+   * keeps changing throws, and the job retries.
+   */
+  async function sweepForAccountRecovery(
+    user: UserRecord,
+    ip: string | null,
+    cutoff: string | null,
+    consumerIds: Set<string>,
+  ): Promise<number> {
+    let revoked = 0;
+    for (const status of LIVE_CREDENTIAL_STATUSES) {
+      for (let round = 0; ; round += 1) {
+        if (round === RECOVERY_SWEEP_ROUNDS) {
+          throw conflict('Credentials kept changing while an account recovery revoked them', {
+            reason: 'account_recovery_pending',
+          });
+        }
+        const skipped: CredentialRecord[] = [];
+        let offset = 0;
+        for (;;) {
+          const page = await store.credentials.list(
+            { user_id: user.id, status },
+            { limit: MAX_PAGE_SIZE, offset },
+          );
+          if (page.items.length === 0) break;
+          for (const row of page.items) {
+            consumerIds.add(row.ferrum_consumer_id);
+            // Issued after the job stopped blocking: only the rightful owner
+            // held a session by then, so the key is theirs to keep.
+            if (cutoff !== null && row.created_at >= cutoff) {
+              skipped.push(row);
+              offset += 1;
+              continue;
+            }
+            if (
+              await revokeCredentialRow(
+                row,
+                { id: user.id, role: user.role },
+                ip,
+                { reason: 'account_recovery' },
+                { recovery: true, recoveryCutoff: cutoff },
+              )
+            ) {
+              revoked += 1;
+            }
+          }
+        }
+        let unmoved = true;
+        for (const row of skipped) {
+          const current = await store.credentials.findById(row.id);
+          if (!current || current.status !== status || current.updated_at !== row.updated_at) {
+            unmoved = false;
+            break;
+          }
+        }
+        if (unmoved) break;
+      }
+    }
+    return revoked;
   }
 
   /**
