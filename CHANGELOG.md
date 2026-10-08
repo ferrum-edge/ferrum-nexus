@@ -93,7 +93,9 @@ the upgrade steps.
 ### Security
 
 - **A trusted password reset revokes the credentials an account already held**
-  (#544). The first password reset that records a trusted proof of the account's
+  (#544)
+  ([GHSA-rp99-hqw5-q7f9](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-rp99-hqw5-q7f9)).
+  The first password reset that records a trusted proof of the account's
   address (one with no proof of its current address, or only an email-verification
   proof) revokes every credential of the account and its applications and cancels
   the account's pending access requests. The revocation is owed as a durable
@@ -105,14 +107,17 @@ the upgrade steps.
   audited as `credential.recovery_stalled` while it is still retried; when it lands it
   spares credentials issued after that point, and it never empties a credential type
   that holds another account's keys.
-- **Email verification alone no longer authorizes single sign-on linking** (#544).
+- **Email verification alone no longer authorizes single sign-on linking** (#544)
+  ([GHSA-v58f-cr96-fv8j](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-v58f-cr96-fv8j))
+  ([GHSA-924j-fm9c-wp9p](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-924j-fm9c-wp9p)).
   Redeeming a verification link still marks the mailbox verified, but no longer
   counts as the proof single sign-on needs to link an existing account; a completed
   password reset, or an identity provider that provisioned or linked the account,
   still does. Manual role changes now check linked identity trust at every privilege
   increase, including `admin` to `super_admin`.
-- **Publishing refuses an upstream that loops back into the gateway** (#544). An
-  upstream that names or resolves to any of the gateway's own origins (the stored
+- **Publishing refuses an upstream that loops back into the gateway** (#544)
+  ([GHSA-37vj-qg3p-4fcc](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-37vj-qg3p-4fcc)).
+  An upstream that names or resolves to any of the gateway's own origins (the stored
   public URL, `FERRUM_GATEWAY_PUBLIC_URL` and the Admin API host) answers
   `400 SPEC_INVALID` with `details.reason` `gateway_origin`, or
   `gateway_unresolvable` when a gateway origin cannot be resolved. Addresses are
@@ -120,7 +125,8 @@ the upgrade steps.
   unspecified address counts as one host. Gateway origins resolve through the system
   resolver, so `/etc/hosts` names such as `localhost` work, bounded at 5 seconds and
   cached for 30. The check runs even with `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`.
-- **Credential and notification writes are rate-limited per account** (#544).
+- **Credential and notification writes are rate-limited per account** (#544)
+  ([GHSA-8jcf-wr8c-m28v](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-8jcf-wr8c-m28v)).
   Issue, rotate and revoke under `/api/credentials` allow 20 requests a minute per
   route, and `POST /api/notifications/read` 60 a minute, with
   `NEXUS_RATE_LIMIT_ENABLED` (the default), per process. A notification read that
@@ -228,7 +234,9 @@ combination and the upgrade steps.
 ### Security
 
 - **Complete the hardening of the public-only egress guarantee for
-  control-plane/data-plane topologies** (Refs #525). When a control plane reports data-plane egress attestation (the
+  control-plane/data-plane topologies** (Refs #525)
+  ([GHSA-93rq-89vr-38pc](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-93rq-89vr-38pc)).
+  When a control plane reports data-plane egress attestation (the
   additive `data_plane_attestation` object Edge `v0.9.14` adds within egress policy
   schema 2), Nexus grants the verified public-only guarantee only if the new
   `NEXUS_EXPECTED_DATA_PLANES` setting is set and at least that many distinct
