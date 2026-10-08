@@ -1,6 +1,6 @@
 # Operations
 
-Deployment reference for Ferrum Nexus (current release: `v0.5.1`; first
+Deployment reference for Ferrum Nexus (current release: `v0.5.2`; first
 supported release: `v0.1.0`): configuration, databases and upgrades, containers,
 TLS, backup and restore, key rotation, the email outbox, scaling limits, health
 checks, metrics and gateway recovery.
@@ -557,7 +557,7 @@ described in [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913). Nexus `v0.5.
 and `v0.5.1` pair with Edge `v0.9.14`, the version their acceptance suite tests: they read the
 control-plane attestation within schema 2 and Edge's narrower `durable` outcomes, and
 the snapshot and token formats are unchanged (see
-[Upgrading to Edge v0.9.14](#upgrading-to-edge-v0914)). The next release pairs with
+[Upgrading to Edge v0.9.14](#upgrading-to-edge-v0914)). Nexus `v0.5.2` pairs with
 Edge `v0.9.15`, a security release that keeps every one of these contracts (see
 [Upgrading to Edge v0.9.15](#upgrading-to-edge-v0915)). The guarantee
 still requires `enforcement_scope=local-data-plane` explicitly, not schema 2's
@@ -742,16 +742,17 @@ Procedure:
    control plane and every data plane must run the same build: upgrade them together.
    A data plane on an older build cannot connect, and the control plane cannot list
    it in its attestation.
-3. **Upgrade Nexus** to `v0.5.1`, which pins Edge v0.9.14 in
-   [`release/compatibility.env`](../release/compatibility.env), and check
-   `GET /api/health/edge` as an admin. On a CP/DP pairing, set
-   `NEXUS_EXPECTED_DATA_PLANES` first if you want the attested guarantee.
+3. **Upgrade Nexus** to `v0.5.1`, which pins Edge v0.9.14 in its
+   [`release/compatibility.env`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.1/release/compatibility.env),
+   and check `GET /api/health/edge` as an admin. On a CP/DP pairing, set
+   `NEXUS_EXPECTED_DATA_PLANES` first if you want the attested guarantee. Then
+   continue with [Upgrading to Edge v0.9.15](#upgrading-to-edge-v0915).
 
 Nexus `v0.4.0` reads the egress policy answer as a closed key set, so it treats a
 v0.9.14 control plane's answer, which carries `data_plane_attestation`, as unreadable
 and refuses every backend write in every profile. A local data plane's answer carries
 no attestation. On a CP/DP pairing, keep Nexus stopped from step 2 until it runs
-`v0.5.1`; the
+`v0.5.0` or later; the
 [`v0.5.0` release notes](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.0/docs/release-notes.md#upgrading-from-v040)
 combine both upgrades in one window.
 
@@ -761,9 +762,8 @@ unless an opt-out admits them.
 
 ### Upgrading to Edge v0.9.15
 
-The next Nexus release pairs with Edge v0.9.15 and requires it: v0.9.15 is a
-security release, and it is the only Edge version that release's acceptance suite
-tests. Read the
+Nexus `v0.5.2` pairs with Edge v0.9.15 and requires it: v0.9.15 is a security
+release, and it is the only Edge version the `v0.5.2` acceptance suite tests. Read the
 [Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.15/docs/upgrade_guide.md#upgrading-to-0915)
 for the gateway-wide changes. Every contract Nexus depends on is unchanged: egress
 policy schema 2 and its data-plane attestation, deployment snapshot v2 and its
@@ -781,10 +781,11 @@ or journal change is needed. What changes for Nexus:
   so does Nexus: a `correlation_id` or `request_deduplication` `header_name` of that
   name (any case, `_` or `-`) is `400 VALIDATION_FAILED`. Rename any existing one
   before upgrading.
-- **gRPC and WebSocket admission.** Edge now refuses a native gRPC or WebSocket
-  request with `403` (trailers-only `PERMISSION_DENIED` for gRPC, rejection phase
-  `route_protocol_admission`) when the route runs an authentication or admission
-  plugin on HTTP that cannot run on that flavor. On Nexus proxies that is the
+- **gRPC and WebSocket admission.** Edge now refuses a native WebSocket request with
+  `403` and a native gRPC request with a trailers-only `PERMISSION_DENIED` (gRPC
+  status 7), both with rejection phase `route_protocol_admission`, when the route
+  runs an authentication or admission plugin on HTTP that cannot run on that
+  flavor. On Nexus proxies that is the
   `routes` [enforcement level](guides/provider-guide.md#enforcement-level)
   (a blocking `openapi_validator`), every API available to AI agents (`mcp_gateway`,
   `openapi_validator`, `ai_tool_governor`, `ai_prompt_shield` and the tool-call
@@ -798,7 +799,10 @@ or journal change is needed. What changes for Nexus:
   clients by `/64`, and `rate_limiting` gains `ipv6_prefix`. Nexus quotas count by
   Consumer (`limit_by: consumer`) and Nexus never sets `ipv6_prefix`, so portal
   quotas are unaffected. Aggregate MCP sessions keep Edge's new default cap of 128
-  per authenticated principal; Nexus sets no `sessions` options.
+  per authenticated principal; Nexus sets no `sessions` options. At the cap a
+  principal's oldest session is replaced, and when the gateway-wide session store is
+  full, a caller with no session to replace is refused rather than evicting another
+  caller's session.
 - **Plugin-secret environment references.** Plugin configs may name only
   `FERRUM_PLUGIN_SECRET_<NAME>` variables. No config Nexus writes names an
   environment variable, so only an operator's own configs need renaming (see the
@@ -820,13 +824,14 @@ Procedure:
 2. **Settle journals** as in step 2 of the v0.9.13 procedure. Tokens a v0.9.14
    gateway issued keep verifying on v0.9.15.
 3. **Upgrade Edge to v0.9.15**, the control plane and every data plane together.
-4. **Upgrade Nexus** to the release that pins Edge v0.9.15 in
+4. **Upgrade Nexus** to `v0.5.2`, which pins Edge v0.9.15 in
    [`release/compatibility.env`](../release/compatibility.env), and check
    `GET /api/health/edge` as an admin.
 
-Nexus `v0.5.1` reads Edge v0.9.15 unchanged, so the order of steps 3 and 4 does not
-matter for compatibility. **Rolling back** Edge to v0.9.14 keeps Nexus working, but
-reopens the vulnerabilities v0.9.15 fixes; do it only to restore service.
+Nexus `v0.5.1` reads Edge v0.9.15 unchanged, and `v0.5.2` still reads v0.9.14, so the
+order of steps 3 and 4 does not matter for compatibility. **Rolling back** Edge to
+v0.9.14 keeps Nexus working, but reopens the vulnerabilities v0.9.15 fixes; do it only
+to restore service.
 
 ### Email
 
@@ -1167,7 +1172,7 @@ checksums and `release: 'v0.1.0'`, the forward migrations
 `release: 'v0.3.0'`, and `007_outbox_recipient`, `008_email_lifecycle_fence`,
 `009_outbox_priority`, `010_api_agents` and `011_mcp_tool_subsets` with
 `release: 'v0.4.0'`, `012_access_request_grant` with `release: 'v0.5.0'`, and
-`013_account_recovery_jobs` with `release: 'v0.5.1'`.
+`013_account_recovery_jobs` with `release: 'v0.5.1'`. `v0.5.2` adds no migration.
 
 **A released migration never changes.** A database only applies migrations its
 ledger lacks, so editing an applied one would make fresh and upgraded installs
@@ -1322,7 +1327,8 @@ step's indexes drift. Never update a released checksum to make it pass.
 
 **Upgrade coverage.** `server/src/test/baseline-upgrade.test.ts` builds a
 database as each release in the manifest left it (`v0.1.0`, `v0.2.0`, `v0.3.0`,
-`v0.4.0`, `v0.5.0`, then `v0.5.1`; every release is a supported upgrade source), seeds it with
+`v0.4.0`, `v0.5.0`, then `v0.5.1`; every release is a supported upgrade source, and a
+`v0.5.2` database is a `v0.5.1` one), seeds it with
 baseline-shaped rows, migrates with the current code, reads every value back,
 and migrates again to prove the re-run is a no-op. SQLite runs in every CI job;
 PostgreSQL, MySQL and MongoDB run in the `store-contracts` job. Per backend:
@@ -1606,8 +1612,7 @@ docker compose up -d
 
 The four secrets and `FERRUM_EDGE_IMAGE` are required (`${VAR:?…}`); keep the
 secrets stable across restarts. [`release/compatibility.env`](../release/compatibility.env)
-pins the Edge image by digest: Ferrum Edge `v0.9.14` for Nexus `v0.5.1`, and Edge
-`v0.9.15` for the next release on `main`. That is the
+pins the Edge image by digest: Ferrum Edge `v0.9.15` for Nexus `v0.5.2`. That is the
 release the acceptance suite ([`e2e/`](../e2e/README.md)) tests against;
 other Edge versions are unverified.
 
@@ -1801,10 +1806,10 @@ never accepted by verification; an invalid hidden Basic shape reports
 Nexus has no namespace Admin restore caller. Its API gateway restore rebuilds
 individual resources and repeats egress admission. Conditional Edge backup does not
 make Nexus and Edge backups jointly atomic; keep the writer-drain and paired-backup
-procedure below. Nexus `v0.5.0` and `v0.5.1` pair with Edge `v0.9.14` and vendor
-`contracts-edge-0.9.14`; Nexus `v0.4.0` paired with Edge `v0.9.13` and vendored
-`contracts-edge-0.9.13`. `main` pairs with Edge `v0.9.15` and vendors
-`contracts-edge-0.9.15`. See [the adoption facts](edge-0.9.11-adoption.md).
+procedure below. Nexus `v0.5.2` pairs with Edge `v0.9.15` and vendors
+`contracts-edge-0.9.15`; Nexus `v0.5.0` and `v0.5.1` paired with Edge `v0.9.14` and
+vendored `contracts-edge-0.9.14`, and Nexus `v0.4.0` paired with Edge `v0.9.13` and
+vendored `contracts-edge-0.9.13`. See [the adoption facts](edge-0.9.11-adoption.md).
 
 ### Ordering and consistency
 

@@ -1,7 +1,7 @@
 # Edge v0.9.15 adoption
 
-`main` pairs with published Edge v0.9.15 and `contracts-edge-0.9.15` for the next Nexus
-release. Nexus `v0.5.0` and `v0.5.1` pair with Edge v0.9.14 and `contracts-edge-0.9.14`,
+Nexus `v0.5.2` pairs with published Edge v0.9.15 and `contracts-edge-0.9.15`. Nexus
+`v0.5.0` and `v0.5.1` paired with Edge v0.9.14 and `contracts-edge-0.9.14`,
 and Nexus `v0.4.0` paired with Edge v0.9.13 and `contracts-edge-0.9.13`. The
 filename preserves existing links from the Edge v0.9.11 adoption; Nexus PR #522
 adopted Edge v0.9.12, PR #529 advanced the pin to Edge v0.9.13, PR #542 to Edge
@@ -46,7 +46,7 @@ whose data-plane attestation proves every expected data plane public-only (see t
   `contracts-edge-0.9.14` at `ddbdd845733b7046c4393ac951011dafb774db33` (owner
   OpenAPI SHA-256 `6d286649ae744691e2eeb7d16607c538ca02e31bdeaafe98ab07fc861e7b9da4`).
 
-## What changed for Nexus in Edge v0.9.15
+## What changed for Nexus in Edge v0.9.15 (adopted by Nexus `v0.5.2`)
 
 Edge v0.9.15 is a security release. It keeps every contract Nexus depends on: egress
 policy schema 2 and its data-plane attestation, deployment snapshot v2 and its
@@ -63,9 +63,10 @@ The full review is in
   `request_deduplication` `header_name`, as Edge does, and the mock gateway models
   the same refusal. Nexus writes no LDAP config, so the removed `consumer_mapping`
   does not affect it.
-- **Protocol flavor admission** (Edge #6090). A native gRPC or WebSocket request is
-  refused with `403` (`route_protocol_admission`) when the route's HTTP view runs an
-  authentication or admission plugin its flavor view omits. On Nexus proxies that is
+- **Protocol flavor admission** (Edge #6090). A native WebSocket request is refused
+  with `403`, and a native gRPC request with a trailers-only `PERMISSION_DENIED`
+  (gRPC status 7), both as `route_protocol_admission`, when the route's HTTP view
+  runs an authentication or admission plugin its flavor view omits. On Nexus proxies that is
   `routes` spec enforcement, agent APIs and idempotency keys with
   `enforce_required`; the palette help and provider guide say so.
 - **Plugin-config limits** (Edge #6079). `rate_limiting` adds `ipv6_prefix`, which
@@ -159,9 +160,9 @@ is sent. Settle conversions and restores before upgrading Edge; see the
 
 ## Release status
 
-[`release/compatibility.env`](../release/compatibility.env) on `main` pins the Edge
-v0.9.15 image above for the next Nexus release, and the packaged acceptance suite runs
-against it. The record at the `v0.5.1` and `v0.5.0` tags pins Edge v0.9.14, and at the
+[`release/compatibility.env`](../release/compatibility.env) pins the Edge v0.9.15 image
+above for Nexus `v0.5.2`, and the packaged acceptance suite runs against it. The record
+at the `v0.5.1` and `v0.5.0` tags pins Edge v0.9.14, and at the
 `v0.4.0` tag Edge v0.9.13. The
 [controlled public-only fixture](../e2e/public-only/README.md) runs a packaged Nexus
 image against the same Edge release on demand, outside CI, and covers the local
@@ -170,4 +171,4 @@ data-plane profile only.
 Nexus supports Node `^22.22.2 || ^24.15.0 || >=26.0.0` since `v0.4.0` (adopted through
 #521). `v0.4.0` froze migrations `007_outbox_recipient` to `011_mcp_tool_subsets`,
 `v0.5.0` froze `012_access_request_grant`, and `v0.5.1` froze
-`013_account_recovery_jobs`; no Edge adoption adds a migration.
+`013_account_recovery_jobs`; `v0.5.2` adds none, and no Edge adoption adds a migration.

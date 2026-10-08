@@ -253,7 +253,7 @@ Example for an admin session:
 ```json
 {
   "status": "ok",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "uptime_seconds": 1284,
   "checked_at": "2026-08-31T09:12:44.117Z",
   "database": { "status": "ok", "latency_ms": 1, "error": null, "driver": "postgres" },
@@ -2663,8 +2663,9 @@ The palette itself — which plugins exist and what each accepts — is the stat
   incompatible pair is `400 VALIDATION_FAILED` naming both plugins.
 - `request_deduplication` with `enforce_required: true` is admission policy, and it
   runs on HTTP requests only. From Edge v0.9.15 the gateway therefore refuses a
-  native gRPC or WebSocket request to that API with `403` (rejection phase
-  `route_protocol_admission`) instead of serving it without the check.
+  native WebSocket request to that API with `403` and a native gRPC request with a
+  trailers-only `PERMISSION_DENIED` (gRPC status 7), both with rejection phase
+  `route_protocol_admission`, instead of serving it without the check.
 - `response_caching` is **retired**: Edge only caches an authenticated
   response when the backend opts in with `Cache-Control: public`,
   `must-revalidate` or `s-maxage`, which consumer settings cannot provide.

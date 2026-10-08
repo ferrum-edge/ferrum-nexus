@@ -674,7 +674,8 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
         label: 'Reject a call that omits the header',
         help:
           'Answers 400 when one of the methods above arrives without a key. The gateway also ' +
-          'refuses native gRPC and WebSocket calls (403), which this check cannot inspect.',
+          'refuses native WebSocket (403) and gRPC (PERMISSION_DENIED) calls, which this ' +
+          'check cannot inspect.',
         default: false,
       },
     ],
