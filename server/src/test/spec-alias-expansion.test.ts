@@ -412,7 +412,10 @@ describe('publishing and serving an alias-expanded document', () => {
     });
     catalog = createCatalogService({
       store: harness.store,
-      settings: { getGatewayPublicUrl: async () => 'https://gateway.example.test' },
+      settings: {
+        getGatewayPublicUrl: async () => 'https://gateway.example.test',
+        listGatewayPublicUrls: async () => ['https://gateway.example.test'],
+      },
       specCache: cache,
     });
   }
