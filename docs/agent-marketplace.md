@@ -22,7 +22,9 @@ HTTP requests only, so Edge refuses a native gRPC or WebSocket request to that p
 with `403` (rejection phase `route_protocol_admission`) instead of serving it without
 that governance. Aggregate MCP sessions keep Edge's default cap of 128 per
 authenticated principal (`sessions.max_sessions_per_principal`, which Nexus does not
-set); at the cap the principal's oldest session is replaced.
+set); at the cap the principal's oldest session is replaced. When the gateway-wide
+session store is full, a caller with no session to replace is refused instead of
+evicting another caller's session.
 
 Primary source contracts (Edge v0.9.10):
 

@@ -17,6 +17,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { request as httpRequest } from 'node:http';
 import { after, before, describe, it } from 'node:test';
 import { promisify } from 'node:util';
 
@@ -31,6 +32,7 @@ import {
 } from './fixtures.js';
 import {
   ADMIN_PASSWORD,
+  GATEWAY_URL,
   adminSession,
   callGateway,
   clearMail,
@@ -45,6 +47,42 @@ import {
 } from './harness.js';
 
 const run = promisify(execFile);
+
+function callGatewayUpgrade(
+  path: string,
+  headers: Record<string, string>,
+): Promise<{ statusCode: number | undefined; body: string }> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      new URL(path, GATEWAY_URL),
+      {
+        method: 'GET',
+        headers: {
+          ...headers,
+          Connection: 'Upgrade',
+          Upgrade: 'websocket',
+          'Sec-WebSocket-Version': '13',
+          'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+        },
+      },
+      (response) => {
+        let body = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk: string) => {
+          body += chunk;
+        });
+        response.on('end', () => resolve({ statusCode: response.statusCode, body }));
+        response.on('error', reject);
+      },
+    );
+    request.on('upgrade', (_response, socket) => {
+      socket.destroy();
+      reject(new Error('Expected the gateway to refuse the WebSocket upgrade'));
+    });
+    request.on('error', reject);
+    request.end();
+  });
+}
 
 /** Unique per run, so a re-run against a warm stack does not collide. */
 const RUN = Date.now().toString(36);
@@ -493,6 +531,10 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     const undeclared = await callGateway(`${api.listen_path}/not-in-the-document`, { headers });
     assert.ok(undeclared.status >= 400, `expected a refusal, got ${undeclared.status}`);
     assert.equal(reachedUpstream(undeclared), false, 'an undeclared path never reaches upstream');
+
+    const websocket = await callGatewayUpgrade(`${api.listen_path}/invoices`, headers);
+    assert.equal(websocket.statusCode, 403);
+    assert.equal(websocket.body, '{"error":"Request protocol not permitted on this route"}');
   });
 
   it('forwards an undeclared path on a `docs_only` API', async () => {

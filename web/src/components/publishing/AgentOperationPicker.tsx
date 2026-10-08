@@ -13,6 +13,11 @@ import { parseSpecText } from '../openapi/parse';
 import { Checkbox, LabeledInput, LabeledTextarea } from '../ui/Input';
 import { Badge } from '../ui/Badge';
 
+const AGENT_OPERATION_DESCRIPTION =
+  'Requires routes enforcement and approved access. GET operations are preselected; mutations ' +
+  'require an explicit tick. With Edge v0.9.15, native gRPC and WebSocket requests to this API ' +
+  'are refused (403).';
+
 export interface AgentOperationPickerProps {
   spec: string;
   value: ApiAgents | null;
@@ -56,7 +61,7 @@ export function AgentOperationPicker({
     <div className="flex flex-col gap-4">
       <Checkbox
         label="Available to AI agents"
-        description="Requires routes enforcement and approved access. GET operations are preselected; mutations require an explicit tick."
+        description={AGENT_OPERATION_DESCRIPTION}
         checked={value !== null}
         disabled={value === null && !ready}
         onChange={(event) =>

@@ -162,6 +162,8 @@ HEAD is read-only but unavailable in the published Edge bridge, as are OPTIONS
 and TRACE. Choose a unique tool name and a plain-text description for each
 selected operation. Destructive annotations describe risk; a client must still
 decide when to ask its user for confirmation.
+Edge v0.9.15 refuses native gRPC and WebSocket requests to an agent-enabled API
+with `403`.
 
 The MCP endpoint is `/<namespace>/<slug>/mcp`, and public tool names are
 `<slug>.<tool-name>`. REST calls continue to use the same upstream, authentication
@@ -302,7 +304,9 @@ origins outside your list. Edge accepts upgrades on API paths and its CORS
 plugin does not check them, so keep this on for browser WebSocket clients. It
 needs exact origins (no wildcards) and also rejects clients that send **no**
 `Origin` header, so turn it off if non-browser clients omit it. Authentication
-and access control apply either way.
+and access control apply either way. Edge v0.9.15 also refuses WebSocket
+upgrades with `403` when `routes` enforcement is enabled or the API is available
+to AI agents.
 
 ### Enforcement level
 
