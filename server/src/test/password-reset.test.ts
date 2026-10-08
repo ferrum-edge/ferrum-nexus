@@ -216,11 +216,8 @@ describe('password reset', () => {
 
     assert.equal((await harness.store.credentials.findById(accountId))?.status, 'revoked');
     assert.equal((await harness.store.credentials.findById(appCredentialId))?.status, 'revoked');
-    assert.equal(
-      harness.edge.consumerByUsername(`nexus-user-${account.user.id}`)?.credentials.keyauth
-        ?.length,
-      0,
-    );
+    const accountConsumer = harness.edge.consumerByUsername(`nexus-user-${account.user.id}`);
+    assert.equal(accountConsumer?.credentials.keyauth?.length ?? 0, 0);
     assert.equal(
       harness.edge.consumerByUsername(consumerUsernameForApplication(applicationId))?.credentials
         .keyauth?.length,
