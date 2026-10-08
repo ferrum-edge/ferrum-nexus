@@ -107,9 +107,15 @@ trust, not from an untrusted forwarded header.
 | `POST /api/access-requests`                                                    | 10               | account  |
 | `POST /api/access-requests/:id/cancel`                                         | 30               | account  |
 | `POST`, `PATCH`, `DELETE` on `/api/applications`, per route                    | 30               | account  |
+| `POST /api/credentials`, `POST …/:id/rotate`, `DELETE …/:id`, per route        | 20               | account  |
+| `POST /api/notifications/read`                                                 | 60               | account  |
+| `POST /api/grants/:id/tool-requests`                                           | 10               | account  |
+| `POST /api/admin/settings/smtp-test`                                           | 3                | account  |
+| `POST /api/admin/mass-email`                                                   | 10               | account  |
+| `POST /api/service-manifests/preview`                                          | 10               | account  |
 
-"Account" falls back to the IP for a request without a session. Every other
-route is unlimited.
+"Account" falls back to the IP for a request without a session. A route not
+listed above is unlimited.
 
 ### Other conventions
 
@@ -188,7 +194,11 @@ repeated per endpoint:
   `gateway_code`, each capped at 500 characters. The full response is logged,
   not reflected.
 - `EDGE_PROTOCOL_ERROR` carries `details` with `status`,
-  `kind: "protocol_error"` and a fixed `reason` such as `invalid_utf8`.
+  `kind: "protocol_error"` and a fixed `reason` such as `invalid_utf8`. A `404`
+  read as a consumer's absence (gateway access cleanup, the rollback of a failed
+  revocation) counts only when its body is Edge's own `Consumer not found`
+  answer; any other `404` is this error with `reason: "unconfirmed_absence"`, and
+  the cleanup is reported and retried.
   Response bytes and parser exceptions are never included. See
   [Edge response contracts](edge-response-contracts.md).
 - `EDGE_NAMESPACE_UNSERVED` carries `details` with `configured_namespace`,
@@ -1031,7 +1041,9 @@ rewrite by a revision that broke nothing.
 ### `POST /api/notifications/read`
 
 _session_ — body **either** `ids` (≤ 500 ids) **or** `all: true`; neither is
-`400 VALIDATION_FAILED`. Ids belonging to another user are ignored.
+`400 VALIDATION_FAILED`. Ids belonging to another user are ignored. With
+`NEXUS_RATE_LIMIT_ENABLED`, 60 requests a minute per account
+(`429 RATE_LIMITED`). A read that changes nothing writes no audit row.
 
 ```json
 { "updated": 3, "unread_count": 0 }
@@ -2141,6 +2153,11 @@ Errors:
   (`details.reason: "private_upstream"`). The host is also resolved: private
   A/AAAA answers are refused the same way (answers in `details.resolved`), and a
   name that does not resolve is `details.reason: "unresolvable_upstream"`.
+  Whatever `NEXUS_ALLOW_PRIVATE_UPSTREAMS` says, an upstream that names or
+  resolves to one of the gateway's own origins (the stored `gateway.public_url`,
+  `FERRUM_GATEWAY_PUBLIC_URL` and the Admin API host from `FERRUM_ADMIN_URL`,
+  compared by host) is `details.reason: "gateway_origin"`, and a gateway origin
+  that cannot be resolved is `details.reason: "gateway_unresolvable"`.
 - `409 CONFLICT` — slug taken. `409 EDGE_NAMESPACE_UNSERVED`.
 - `429 QUOTA_EXCEEDED`, `429 RATE_LIMITED`.
 - `502 EDGE_ERROR` / `EDGE_UNAVAILABLE` — a failed gateway step is rolled back
@@ -2619,7 +2636,9 @@ Deleting the API deletes it.
 
 Errors: `403 USER_DISABLED` (caller disabled mid-request; nothing created),
 `404 NOT_FOUND` (including an API deleted concurrently), `409 CONFLICT`
-(`auth_plugin` changed while the credential was issued — retry),
+(`auth_plugin` changed while the credential was issued — retry — or
+`details.reason: "account_recovery_pending"` while a password reset of the
+caller's account is still revoking its earlier credentials; nothing is replaced),
 `502 EDGE_ERROR` (nothing is left behind; the compensation finds and deletes
 the consumer by its id).
 
@@ -2974,12 +2993,24 @@ applications; absent or `null` issues for the account).
 
 Errors: `409 CONFLICT` when this identity already holds
 `FERRUM_MAX_CREDENTIALS_PER_TYPE` (default 2) live credentials of that type
-(revoke or rotate one first), the application is disabled, or an earlier
+(revoke or rotate one first), the application is disabled, an earlier
 `basicauth` change on this identity was never confirmed by the gateway
 (`details.unconfirmed_credentials`; see
-[`DELETE /api/credentials/:id`](#delete-apicredentialsid));
+[`DELETE /api/credentials/:id`](#delete-apicredentialsid)), or a password reset
+of the account is still revoking its earlier credentials
+(`details.reason: "account_recovery_pending"`; retry once it completes);
 `403 FORBIDDEN` (someone else's application); `404 NOT_FOUND` (unknown
-application); `502 EDGE_ERROR` / `EDGE_UNAVAILABLE`.
+application); `429 RATE_LIMITED`; `502 EDGE_ERROR` / `EDGE_UNAVAILABLE`.
+
+The first password reset that records a trusted proof of the account's current
+address revokes every credential of the account and its applications. Until
+that revocation lands, issuing or rotating a credential for any of those
+identities answers `409 CONFLICT` with `details.reason: "account_recovery_pending"`.
+After 8 failed attempts the account may issue again while the revocation is
+still retried, and it spares credentials issued from then on.
+
+With `NEXUS_RATE_LIMIT_ENABLED`, issue, rotate and revoke each allow 20 requests
+a minute per account (see [rate limits](#rate-limits)).
 
 A `basicauth` row is written as `retiring` before the gateway append and
 becomes `active` once Edge acknowledges it. If the append's outcome cannot be
@@ -3053,11 +3084,13 @@ optional; defaults to the previous label.
 - The owner is notified and emailed (`credential_rotated`).
 
 Errors: `403 FORBIDDEN` (someone else's credential, including for an
-administrator), `403 USER_DISABLED` (the owner is disabled), `409 CONFLICT` (already revoked, the credential's
-application is disabled — revoking stays allowed — or, for `basicauth`, an
-unconfirmed change on the same identity), `502 EDGE_ERROR` (including a gateway
-credential list that no longer matches the portal's, which is refused rather
-than guessed at).
+administrator), `403 USER_DISABLED` (the owner is disabled), `409 CONFLICT`
+(already revoked; the credential's application is disabled, though revoking
+stays allowed; for `basicauth`, an unconfirmed change on the same identity; or
+`details.reason: "account_recovery_pending"` while a password reset's
+revocation is pending, see [`POST /api/credentials`](#post-apicredentials)),
+`429 RATE_LIMITED`, `502 EDGE_ERROR` (including a gateway credential list that
+no longer matches the portal's, which is refused rather than guessed at).
 
 ### `DELETE /api/credentials/:id`
 

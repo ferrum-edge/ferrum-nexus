@@ -131,8 +131,10 @@ and has its own prerequisites. From `v0.5.0`, only Nexus changes. Follow the
    `public_egress_guaranteed: true` for a local public-only data plane or a fully
    attested control plane; and a known client still calls an API through the
    gateway with its existing credential. On a control-plane/data-plane pairing,
-   health can read `degraded` with `data_plane_recently_connected` for up to a
-   minute after Nexus starts; see
+   health can read `degraded` (an administrator reads
+   `backend_egress_unverified`) for up to a minute after Nexus starts, and a
+   backend write refused meanwhile carries `details.data_plane_attestation`
+   `data_plane_recently_connected`; see
    [behaviour changes](#behaviour-changes-to-plan-for).
 
 On the Compose stack, from the checkout you installed from, with the four
@@ -180,6 +182,14 @@ All are listed in the [changelog](../CHANGELOG.md#051---2026-10-08).
   `credentials_revocation_pending: true` and `cancelled_access_requests`. Tell
   users that a password reset can end their API keys, and that they re-issue them
   and re-request access afterwards.
+- **Password resets completed before the upgrade are not revisited.** A reset on
+  `v0.5.0` or earlier already recorded the account's trusted proof, and the
+  migration copies no data, so `v0.5.1` revokes nothing for an account whose
+  address was reclaimed through a password reset before the upgrade: the
+  credentials, applications and pending access requests it held before that reset
+  stay as they are. Review the accounts whose `auth.password_reset` audit rows
+  predate the upgrade, and revoke or deny anything among their credentials,
+  applications and pending requests that the rightful holder did not create.
 - **Issuance answers `409 CONFLICT` while a recovery is pending.** Issuing or
   rotating a credential for the account or its applications, and issuing a
   provider's test-consumer credential, is refused with `409 CONFLICT` until the
@@ -219,8 +229,9 @@ All are listed in the [changelog](../CHANGELOG.md#051---2026-10-08).
   dropped the stale stream of a process it replaced: either this Nexus process saw
   its `node_id` listed that long ago, or the answer carries the gateway's `Date`
   header and the `node_id`'s earliest `connected_at` is 90 seconds old on both
-  Nexus's clock and that header. Until enough data planes count, backend writes are
-  refused and health is `degraded`, with `details.data_plane_attestation`
+  Nexus's clock and that header. Until enough data planes count, health is
+  `degraded` (an administrator reads `backend_egress_unverified`) and backend
+  writes are refused with `details.data_plane_attestation`
   `data_plane_recently_connected`, or `data_plane_clock_skew` when a
   `connected_at` contradicts the clocks. Expect that for about a minute and a half
   after a data plane restarts, unless enough others already count, and after Nexus
@@ -245,8 +256,9 @@ All are listed in the [changelog](../CHANGELOG.md#051---2026-10-08).
   grantee is outstanding.
 - **New rate limits.** Issue, rotate and revoke under `/api/credentials` allow 20
   requests a minute per route and account, and `POST /api/notifications/read` 60 a
-  minute per account; past them, `429`. A notification read that changes nothing
-  no longer writes an audit row.
+  minute per account; past them, `429`. Like every Nexus rate limit, they apply
+  only with `NEXUS_RATE_LIMIT_ENABLED` (the default) and count per process. A
+  notification read that changes nothing no longer writes an audit row.
 - **New audit action and details**: `credential.recovery_stalled`;
   `credential.revoke` with `reason: "account_recovery"` and, where a delete could
   not be placed, `placement: "whole-type-fallback"`; the `auth.password_reset`
@@ -255,16 +267,33 @@ All are listed in the [changelog](../CHANGELOG.md#051---2026-10-08).
 
 ### Rollback
 
+Rolling back to `v0.5.0` re-opens the weaknesses this release closes (see
+[security](#security)), so prefer fixing forward. Settle recovery journals before
+rolling back.
+
 Rollback is a restore of the backup taken in step 3, Nexus and Edge together:
 restore the Edge database and keep running Edge `v0.9.14` on it, and restore the
 Nexus database and run `v0.5.0` on it. Never run `v0.5.0` over a database `v0.5.1`
 migrated: it would ignore owed revocations and issue credentials while one is owed.
-Every post-upgrade change is lost with the restore, including the revocations and
-cancellations that password resets triggered, so those accounts' earlier keys
-work again. Before restoring, list the `auth.password_reset` rows since the upgrade
-with `credentials_revocation_pending: true`. After the rollback, have an
-administrator revoke those accounts' credentials and deny their restored pending
-access requests again, and treat their keys as possibly exposed.
+Every post-upgrade change is lost with the restore. For an account that completed
+a password reset after the upgrade, that brings back its password from before the
+reset, the sessions the reset ended, the credentials it revoked and the access
+requests it cancelled, and `v0.5.0` does not hold back new issuance for it.
+
+Before restoring, list the accounts with an `auth.password_reset` audit row since
+the upgrade; the restore removes those rows. After the rollback, have an
+administrator disable each of those accounts, which ends its sessions and removes
+its gateway identity, and keep them disabled until `v0.5.1` is running again. Then
+re-enable them and have each holder complete a password reset under `v0.5.1`
+straight away. Where the post-upgrade reset recorded
+`credentials_revocation_pending: true`, the new reset revokes the account's earlier
+credentials and cancels its pending requests again; for the other accounts, have
+an administrator revoke the credentials and deny the requests their holders do not
+recognise. Treat the restored keys as possibly exposed.
+
+A password reset completed on `v0.5.0` during the rollback is not revisited after
+the re-upgrade; review those accounts as for
+[resets completed before the upgrade](#behaviour-changes-to-plan-for).
 
 ## Security
 
@@ -356,8 +385,10 @@ Upgrade any deployment running `v0.5.0` or earlier.
   cached configuration is not listed.
 - Gateway-origin detection runs at write time only; see [security](#security).
 - A password reset revokes credentials only on the account's first trusted proof
-  of its current address. A revocation that cannot be placed without emptying a
-  credential type shared with another account stalls for an administrator.
+  of its current address, and a reset completed before the upgrade is not
+  revisited; see [behaviour changes](#behaviour-changes-to-plan-for). A revocation
+  that cannot be placed without emptying a credential type shared with another
+  account stalls for an administrator.
 - The public-only DNS-rebinding fixture
   ([`e2e/public-only/`](../e2e/public-only/README.md)) runs on demand with a
   packaged image and covers the local data-plane profile only; it is not part

@@ -554,7 +554,7 @@ Every backend write is then refused in every profile. The same holds for any new
 schema. Nexus also requires the v0.9.13 deployment snapshot (`api_spec_contents`), so
 Nexus `v0.4.0` pairs with Edge `v0.9.13` only: upgrade Edge and Nexus together, as
 described in [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913). Nexus `v0.5.0`
-and `v0.5.1` pair with Edge `v0.9.14`, the version their acceptance suite tests: it reads the
+and `v0.5.1` pair with Edge `v0.9.14`, the version their acceptance suite tests: they read the
 control-plane attestation within schema 2 and Edge's narrower `durable` outcomes, and
 the snapshot and token formats are unchanged (see
 [Upgrading to Edge v0.9.14](#upgrading-to-edge-v0914)). The guarantee
@@ -708,7 +708,7 @@ cannot read egress policy schema 2 or the v0.9.13 snapshot.
 
 ### Upgrading to Edge v0.9.14
 
-Nexus `v0.5.0` and later pair with Edge v0.9.14 (see the
+Nexus `v0.5.0` and `v0.5.1` pair with Edge v0.9.14 (see the
 [Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.14/docs/upgrade_guide.md#upgrading-to-0914)).
 Unlike v0.9.13, this upgrade keeps every contract Nexus depends on: egress policy
 schema 2, deployment snapshot v2 and its `deployment_snapshot.v2` tokens, and the

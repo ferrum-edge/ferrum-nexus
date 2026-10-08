@@ -47,7 +47,7 @@ the upgrade steps.
   request for more tools that the revocation cancelled is restored with it, in the
   same transaction, unless the identity has opened another request since or an
   account recovery of the grantee is pending.
-- **Account recovery covers provider test consumers.** Issuing a test-consumer
+- **Account recovery covers provider test consumers** (#547). Issuing a test-consumer
   credential is refused while a recovery revocation is pending, before an
   existing test consumer is replaced, and the recovery waits out an in-flight
   test-consumer issue before its final sweep.
@@ -64,11 +64,11 @@ the upgrade steps.
 
 - **A trusted password reset revokes the credentials an account already held**
   (#544). The first password reset that records a trusted proof of the account's
-  address (one that has none, or only an email-verification proof) revokes every
-  credential of the account and its applications and cancels the account's pending
-  access requests. The revocation is owed as a durable `account_recovery_jobs` row
-  written in the same transaction as the reset (forward migration
-  `013_account_recovery_jobs`), so an unreachable gateway is retried rather than
+  address (one with no proof of its current address, or only an email-verification
+  proof) revokes every credential of the account and its applications and cancels
+  the account's pending access requests. The revocation is owed as a durable
+  `account_recovery_jobs` row written in the same transaction as the reset (forward
+  migration `013_account_recovery_jobs`), so an unreachable gateway is retried rather than
   skipped. While it is outstanding, credential issuance for the account and its
   applications, and a provider's test-consumer issue, answers `409 CONFLICT`. A
   revocation that keeps failing stops refusing issuance after 8 attempts and is
@@ -92,7 +92,8 @@ the upgrade steps.
   cached for 30. The check runs even with `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`.
 - **Credential and notification writes are rate-limited per account** (#544).
   Issue, rotate and revoke under `/api/credentials` allow 20 requests a minute per
-  route, and `POST /api/notifications/read` 60 a minute. A notification read that
+  route, and `POST /api/notifications/read` 60 a minute, with
+  `NEXUS_RATE_LIMIT_ENABLED` (the default), per process. A notification read that
   changes nothing no longer adds an audit row.
 
 ## [0.5.0] - 2026-10-08
