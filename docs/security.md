@@ -82,9 +82,13 @@ refuses an upstream that names or resolves to any of the gateway's own origins �
 the stored `gateway.public_url`, `FERRUM_GATEWAY_PUBLIC_URL`, and the Admin API
 host, unioned rather than one replacing another. Addresses are canonicalized
 before comparison, so an IPv4-mapped, NAT64 or 6to4 literal — or a matching AAAA
-answer — that embeds the gateway's IPv4 address is refused too. A gateway origin
-that cannot be resolved fails the publish closed. This runs even when private
-upstreams are enabled. A refusal is `400 SPEC_INVALID` with `details.reason`
+answer — that embeds the gateway's IPv4 address is refused too, and every
+loopback or unspecified address (`127.0.0.0/8`, `0.0.0.0`, `::1`, `::`) counts as
+one host. The gateway origins are operator configuration, so they are resolved
+through the system resolver, which honours `/etc/hosts`; `localhost` and
+`*.localhost` always read as loopback. A gateway origin that still cannot be
+resolved fails the publish closed. This runs after the privacy checks, and even
+when private upstreams are enabled. A refusal is `400 SPEC_INVALID` with `details.reason`
 `private_upstream` (plus the `resolved` addresses when DNS decided),
 `unresolvable_upstream`, `gateway_origin`, or `gateway_unresolvable`.
 
@@ -256,9 +260,15 @@ does not reinterpret that), so it publishes only under
   account's pending access requests and revokes all credentials held by the
   account and its applications. The revocation is owed as a durable
   `account_recovery_jobs` row written in the same transaction as the proof, so a
-  gateway that is unreachable cannot leave a squatter's key live with no record
-  that it is owed; a worker retries until it lands, and credential issuance is
-  refused (`409 CONFLICT`) while the row is outstanding.
+  gateway that is unreachable cannot leave the previous holder's key live with
+  no record that it is owed; a worker retries until it lands, and credential
+  issuance is refused (`409 CONFLICT`) while the row is outstanding. The
+  revocation is the portal's own: it is not refused for credentials on a shared
+  consumer, and a delete it cannot place empties that credential type instead
+  (`placement: "whole-type-fallback"` on its `credential.revoke` row). After 8
+  failed attempts the row stops refusing issuance and a
+  `credential.recovery_stalled` row is audited for an administrator; the worker
+  keeps retrying on a backoff capped at 5 minutes.
 - **Sign-in does not reveal which addresses exist.** A missing account still
   costs a scrypt derivation against a decoy hash, and both failures return the
   same `401 UNAUTHORIZED`.
@@ -2143,6 +2153,7 @@ gateway write; a malformed id is `400 VALIDATION_FAILED`.
 | `credential.append_rollback`    | `consumer`   | An appended entry had to be taken back after an issue or rotation failed. `details`: `credential_type`, `consumer_id`, `operation` (`issue` \| `rotate`), `withdrawn`, `last4`, `append_index`, `owner_user_id`, `cause`, and `stranded_credential_id`, `retired_credential_id`, `suspected` where they apply.                                                                                                                              |
 | `credential.reconcile`          | `consumer`   | An admin emptied one credential type on a consumer and revoked its rows. `details`: `credential_type`, `consumer_id`, `gateway_cleared`, `revoked_credentials`, `revoked_credential_ids`, `owner_user_ids`, optional `reason`.                                                                                                                                                                                                              |
 | `credential.legacy_placeholder` | `credential` | The upgrade scan found a `basicauth` append an earlier release recorded as not taken back (`credential.append_rollback`, `withdrawn: false`) that no live row accounts for, and wrote a `retiring` placeholder row that holds the consumer's positions closed until the type is cleared. `details`: `credential_type`, `consumer_id`, `last4`, `owner_user_id`, `source_event_id`. No actor.                                                |
+| `credential.recovery_stalled`   | `user`       | The revocation a trusted password reset owes has failed often enough (8 attempts) that it no longer blocks the account from issuing credentials. Written once per queued reset by the recovery worker, which keeps retrying. `details`: `attempts`, `last_error`, `next_attempt_at`. No actor.                                                                                                                                              |
 
 A `credential.revoke_start` with no completion row means one of:
 

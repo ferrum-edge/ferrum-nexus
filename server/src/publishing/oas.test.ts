@@ -20,6 +20,7 @@ import { isNexusError } from '../lib/errors.js';
 import {
   assertRenderCost,
   assertUpstreamAllowed,
+  createGatewayResolver,
   isPublicUpstreamHost,
   parseOpenApiSpec,
   parseUpstreamUrl,
@@ -1248,6 +1249,121 @@ describe('upstream destination policy', () => {
       }),
     );
     assert.equal((error.details as { reason?: string }).reason, 'gateway_unresolvable');
+  });
+
+  it('resolves gateway origins through the gateway resolver, still failing closed', async () => {
+    // A hosts-file-only name: the upstream resolver (which skips the hosts
+    // file) cannot answer it, and the gateway resolver can.
+    const gatewayOnly: UpstreamResolver = async (host) => {
+      if (host === 'gateway.hosts-only.test') return [{ address: '10.9.8.7', family: 4 }];
+      throw Object.assign(new Error(`no record for ${host}`), { code: 'ENOTFOUND' });
+    };
+    const distinct = parseUpstreamUrl('https://api.example.com');
+    assert.ok(distinct);
+    await assertUpstreamAllowed(distinct, {
+      allowPrivate: true,
+      getGatewayPublicUrls: async () => ['http://gateway.hosts-only.test:9000'],
+      resolve: resolvesTo([{ address: '93.184.216.34', family: 4 }]),
+      resolveGateway: gatewayOnly,
+    });
+
+    const looping = parseUpstreamUrl('http://10.9.8.7:8000');
+    assert.ok(looping);
+    const loop = await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(looping, {
+        allowPrivate: true,
+        getGatewayPublicUrls: async () => ['http://gateway.hosts-only.test:9000'],
+        resolve: neverResolve,
+        resolveGateway: gatewayOnly,
+      }),
+    );
+    assert.equal((loop.details as { reason?: string }).reason, 'gateway_origin');
+
+    const unknown = await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(distinct, {
+        allowPrivate: true,
+        getGatewayPublicUrls: async () => ['http://gateway.missing.test:9000'],
+        resolve: resolvesTo([{ address: '93.184.216.34', family: 4 }]),
+        resolveGateway: gatewayOnly,
+      }),
+    );
+    assert.equal((unknown.details as { reason?: string }).reason, 'gateway_unresolvable');
+  });
+
+  it('reads a localhost gateway origin as loopback without a lookup', async () => {
+    const upstream = parseUpstreamUrl('https://api.example.com');
+    assert.ok(upstream);
+    for (const origin of [
+      'http://localhost:9000',
+      'http://LOCALHOST.:9000',
+      'http://edge.localhost',
+    ]) {
+      await assertUpstreamAllowed(upstream, {
+        allowPrivate: false,
+        getGatewayPublicUrls: async () => [origin],
+        resolve: async (host) => {
+          assert.equal(host, 'api.example.com', 'only the upstream is looked up');
+          return [{ address: '93.184.216.34', family: 4 }];
+        },
+        resolveGateway: neverResolve,
+      });
+    }
+  });
+
+  it('treats every loopback and unspecified address as the gateway host', async () => {
+    for (const origin of ['http://127.0.0.1:9000', 'http://localhost:9000', 'http://[::1]:9000']) {
+      for (const url of [
+        'http://127.0.0.2:8080',
+        'http://0.0.0.0:8080',
+        'http://[::1]:8080',
+        'http://[::]:8080',
+        'http://[::ffff:127.0.0.1]:8080',
+        'http://localhost:8080',
+      ]) {
+        const upstream = parseUpstreamUrl(url);
+        assert.ok(upstream, url);
+        const error = await expectSpecInvalidAsync(() =>
+          assertUpstreamAllowed(upstream, {
+            allowPrivate: true,
+            getGatewayPublicUrls: async () => [origin],
+            resolve: neverResolve,
+          }),
+        );
+        assert.equal((error.details as { reason?: string }).reason, 'gateway_origin', url);
+      }
+    }
+
+    // A private destination that is not the local host is still allowed.
+    const lan = parseUpstreamUrl('http://10.20.30.40:8080');
+    assert.ok(lan);
+    await assertUpstreamAllowed(lan, {
+      allowPrivate: true,
+      getGatewayPublicUrls: async () => ['http://127.0.0.1:9000'],
+      resolve: neverResolve,
+    });
+  });
+
+  it('refuses a private upstream as private before the gateway-origin check', async () => {
+    const upstream = parseUpstreamUrl('http://[::1]:8080');
+    assert.ok(upstream);
+    const error = await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(upstream, {
+        allowPrivate: false,
+        getGatewayPublicUrls: async () => ['http://127.0.0.1:9000'],
+        resolve: neverResolve,
+      }),
+    );
+    assert.equal((error.details as { reason?: string }).reason, 'private_upstream');
+  });
+
+  it('builds a gateway resolver that answers from the hosts file', async () => {
+    // `localhost` is in every hosts file, and a hosts-file answer needs no
+    // nameserver, so this holds in a sandbox with no network.
+    const answers = await createGatewayResolver()('localhost');
+    assert.ok(answers.length > 0);
+    for (const { address, family } of answers) {
+      assert.ok(family === 4 ? address.startsWith('127.') : address === '::1', address);
+    }
   });
 
   it('refuses a fully-qualified or mixed-case denylisted name before any lookup', async () => {

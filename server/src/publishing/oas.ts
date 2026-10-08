@@ -67,7 +67,7 @@
  * above it — parsing, limits, `servers[0]` — still runs without a network.
  */
 
-import { Resolver } from 'node:dns/promises';
+import { lookup, Resolver } from 'node:dns/promises';
 import { isIP, type LookupFunction } from 'node:net';
 
 import {
@@ -285,6 +285,26 @@ export function createUpstreamResolver(
   };
 }
 
+/**
+ * The resolver for the gateway's own origins: the system resolver, every answer.
+ *
+ * Unlike {@link createUpstreamResolver} this goes through `dns.lookup`
+ * (`getaddrinfo`), so `/etc/hosts` is honoured — `localhost`, a Compose
+ * `extra_hosts` entry, a Kubernetes `hostAliases` name. Those origins are
+ * operator configuration naming how Nexus itself reaches the gateway, so the
+ * host's own answer is the one to compare against. A lookup that fails still
+ * rejects, and the guard refuses the publish.
+ */
+export function createGatewayResolver(): UpstreamResolver {
+  return async function resolveGatewayHost(host: string): Promise<ResolvedAddress[]> {
+    const answers = await lookup(host, { all: true });
+    return answers.map((entry): ResolvedAddress => ({
+      address: entry.address,
+      family: entry.family === 6 ? 6 : 4,
+    }));
+  };
+}
+
 /** How the publishing service decides which upstream destinations are acceptable. */
 export interface UpstreamPolicy {
   /**
@@ -306,6 +326,11 @@ export interface UpstreamPolicy {
    * the publish closed rather than silently skipping the check.
    */
   getGatewayPublicUrls?: () => Promise<string[]>;
+  /**
+   * Resolves the gateway origins above; defaults to {@link resolve}. The
+   * server passes {@link createGatewayResolver}, which honours `/etc/hosts`.
+   */
+  resolveGateway?: UpstreamResolver;
   /**
    * Resolves a DNS name to its A/AAAA answers.
    *
@@ -393,7 +418,7 @@ function unresolvableUpstreamError(host: string): NexusError {
  *
  * Deployments that legitimately front internal services opt out with
  * `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which skips the destination privacy
- * checks — but never the gateway-origin loop guard above.
+ * checks — but never the gateway-origin loop guard that runs after them.
  *
  * @throws NexusError `SPEC_INVALID` naming the host and the setting to change.
  */
@@ -401,36 +426,19 @@ export async function assertUpstreamAllowed(
   upstream: SpecUpstream,
   policy: UpstreamPolicy,
 ): Promise<void> {
-  const gatewayOrigins = (await policy.getGatewayPublicUrls?.()) ?? [];
-  if (gatewayOrigins.length > 0) {
-    const upstreamAddresses = await addressesForHost(upstream.host, policy, false);
-    const upstreamHost = canonicalHost(upstream.host);
-    for (const origin of gatewayOrigins) {
-      let gatewayHost: string;
-      try {
-        gatewayHost = new URL(origin).hostname.replace(/^\[|\]$/g, '');
-      } catch {
-        // A malformed stored origin is rejected on write; skip it rather than
-        // fail every publish over a value this guard cannot read.
-        continue;
-      }
-      // Canonicalize both sides so an IPv4-mapped, NAT64 or 6to4 literal that
-      // embeds the gateway's IPv4 address — or an AAAA answer that does — is
-      // caught even though it is textually different.
-      if (canonicalHost(gatewayHost) === upstreamHost) throw gatewayLoopError(upstream.host);
+  // Destination privacy first, so a private upstream is refused as one. The
+  // deployment may opt out of it; it never opts out of the gateway-origin loop
+  // guard that follows, which refuses a backend naming or resolving to the
+  // gateway in every mode.
+  if (!policy.allowPrivate) await assertPublicDestination(upstream, policy.resolve);
+  await assertNotGatewayOrigin(upstream, policy);
+}
 
-      const gatewayAddresses = await addressesForHost(gatewayHost, policy, true);
-      if (gatewayAddresses.some((address) => upstreamAddresses.includes(address))) {
-        throw gatewayLoopError(upstream.host);
-      }
-    }
-  }
-
-  // Destination privacy is opted out of here. The gateway-origin loop guard
-  // above always ran, so a backend that names or resolves to the gateway is
-  // still refused even in this mode.
-  if (policy.allowPrivate) return;
-
+/** The destination privacy lines of {@link assertUpstreamAllowed}. */
+async function assertPublicDestination(
+  upstream: SpecUpstream,
+  resolve: UpstreamResolver,
+): Promise<void> {
   if (!isPublicUpstreamHost(upstream.host)) throw privateUpstreamError(upstream.host);
 
   // An IP literal *is* the destination; the check above already decided it.
@@ -438,7 +446,7 @@ export async function assertUpstreamAllowed(
 
   let resolved: ResolvedAddress[];
   try {
-    resolved = await policy.resolve(upstream.host);
+    resolved = await resolve(upstream.host);
   } catch {
     throw unresolvableUpstreamError(upstream.host);
   }
@@ -451,17 +459,78 @@ export async function assertUpstreamAllowed(
   }
 }
 
+/** Refuse an upstream that names or resolves to any of the gateway's own origins. */
+async function assertNotGatewayOrigin(
+  upstream: SpecUpstream,
+  policy: UpstreamPolicy,
+): Promise<void> {
+  const gatewayOrigins = (await policy.getGatewayPublicUrls?.()) ?? [];
+  if (gatewayOrigins.length === 0) return;
+  const upstreamAddresses = await addressesForHost(upstream.host, policy.resolve, false);
+  const upstreamHost = canonicalHost(upstream.host);
+  const resolveGateway = policy.resolveGateway ?? policy.resolve;
+  for (const origin of gatewayOrigins) {
+    let gatewayHost: string;
+    try {
+      gatewayHost = new URL(origin).hostname.replace(/^\[|\]$/g, '');
+    } catch {
+      // A malformed stored origin is rejected on write; skip it rather than
+      // fail every publish over a value this guard cannot read.
+      continue;
+    }
+    // Canonicalize both sides so an IPv4-mapped, NAT64 or 6to4 literal that
+    // embeds the gateway's IPv4 address — or an AAAA answer that does — is
+    // caught even though it is textually different.
+    if (canonicalHost(gatewayHost) === upstreamHost) throw gatewayLoopError(upstream.host);
+
+    const gatewayAddresses = await addressesForHost(gatewayHost, resolveGateway, true);
+    const loops = gatewayAddresses.some((gateway) =>
+      upstreamAddresses.some((address) => sameDestination(gateway, address)),
+    );
+    if (loops) throw gatewayLoopError(upstream.host);
+  }
+}
+
+/** Canonical IPv6 loopback, as {@link canonicalAddress} spells it. */
+const IPV6_LOOPBACK = '0:0:0:0:0:0:0:1';
+
+/** Canonical IPv6 unspecified address, as {@link canonicalAddress} spells it. */
+const IPV6_UNSPECIFIED = '0:0:0:0:0:0:0:0';
+
+/**
+ * Whether a canonical address reaches the local host: `127.0.0.0/8`, `::1`, or
+ * the unspecified `0.0.0.0`/`::`, which a connect delivers to loopback.
+ */
+function isLocalHostAddress(address: string): boolean {
+  if (isIP(address) === 4) return address.startsWith('127.') || address === '0.0.0.0';
+  return address === IPV6_LOOPBACK || address === IPV6_UNSPECIFIED;
+}
+
+/**
+ * Whether two canonical addresses are one destination. Every loopback and
+ * unspecified spelling is the same host, so a gateway on `127.0.0.1` is also
+ * reached through `127.0.0.2`, `0.0.0.0` or `[::1]`.
+ */
+function sameDestination(a: string, b: string): boolean {
+  return a === b || (isLocalHostAddress(a) && isLocalHostAddress(b));
+}
+
 /** Resolve host names to comparable addresses without changing the egress policy. */
 async function addressesForHost(
   host: string,
-  policy: UpstreamPolicy,
+  resolve: UpstreamResolver,
   required: boolean,
 ): Promise<string[]> {
   const normalized = normalizeHost(host).replace(/^\[|\]$/g, '');
   if (isIP(normalized) !== 0) return [canonicalAddress(normalized)];
+  // `localhost` and its subdomains are loopback by definition (RFC 6761),
+  // whatever a resolver that skips the hosts file says about them.
+  if (normalized === 'localhost' || normalized.endsWith('.localhost')) {
+    return ['127.0.0.1', IPV6_LOOPBACK];
+  }
   let resolved: ResolvedAddress[];
   try {
-    resolved = await policy.resolve(normalized);
+    resolved = await resolve(normalized);
   } catch {
     if (required) throw gatewayUnresolvableError(host);
     return [];

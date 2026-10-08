@@ -12,12 +12,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   alone no longer authorizes SSO linking; the first trusted password reset revokes
   existing account and application credentials, canceling the account's pending
   access requests and recording the revocation durably so an unreachable gateway is
-  retried rather than skipped. Manual administrator promotions now check linked
+  retried rather than skipped. A revocation that keeps failing stops blocking new
+  credentials after 8 attempts and is audited as `credential.recovery_stalled`
+  while it is still retried. Manual administrator promotions now check linked
   identity trust at every privilege increase. Publishing refuses an upstream that
   names or resolves to any of the gateway's own origins (public URL, environment
   URL, or Admin API host), canonicalizing IPv4-mapped, NAT64 and 6to4 addresses
-  first. Credential mutations and notification reads are rate-limited per account,
-  and unchanged notification reads no longer add audit rows.
+  first and treating every loopback address as one host; gateway origins resolve
+  through the system resolver, so `/etc/hosts` names such as `localhost` work.
+  Credential mutations and notification reads are rate-limited per account, and
+  unchanged notification reads no longer add audit rows.
 
 ## [0.5.0] - 2026-10-08
 

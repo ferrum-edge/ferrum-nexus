@@ -88,7 +88,11 @@ import { createNotificationsService, type NotificationsService } from './notific
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
 import { createApiViewersService, type ApiViewersService } from './publishing/viewers.js';
 import { createApplicationsService, type ApplicationsService } from './applications/service.js';
-import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
+import {
+  createGatewayResolver,
+  createUpstreamResolver,
+  type UpstreamResolver,
+} from './publishing/oas.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
 import { createServiceManifestService } from './service-manifest/service.js';
 import { createSsoService, type SsoService } from './sso/service.js';
@@ -202,6 +206,13 @@ export interface BuildServerDeps {
    * publishing never depends on a real DNS answer.
    */
   upstreamResolver?: UpstreamResolver;
+  /**
+   * Resolve the gateway's own origins for the publishing loop guard. Defaults to
+   * an injected `upstreamResolver` when there is one, so a test that fakes DNS
+   * fakes it for both, and otherwise to {@link createGatewayResolver}, which
+   * honours `/etc/hosts`.
+   */
+  gatewayResolver?: UpstreamResolver;
   /**
    * Start the outbox poller. Defaults to `false` under `NEXUS_ENV=test`, where
    * tests drive `services.outbox.tick()` themselves, and `true` elsewhere.
@@ -499,6 +510,7 @@ export async function buildServer(
     const attempt = await runAccountRecovery({
       credentials,
       store: deps.store,
+      audit,
       userId: user.id,
       ip,
       job,
@@ -565,6 +577,7 @@ export async function buildServer(
     settings,
     log: (obj, message) => app.log.error(obj, message),
     upstreamResolver: deps.upstreamResolver ?? createUpstreamResolver(),
+    gatewayResolver: deps.gatewayResolver ?? deps.upstreamResolver ?? createGatewayResolver(),
     specChangeNotifier: specChanges,
   });
   const usage = createUsageService({ store: deps.store, edge: deps.edge, publishing });
@@ -651,11 +664,13 @@ export async function buildServer(
   });
 
   // Retries the credential revocation a trusted password reset owes when Edge
-  // refused it; credential issuance stays blocked while a job is outstanding —
-  // see `credentials/account-recovery.ts`.
+  // refused it; credential issuance stays blocked while a job is outstanding,
+  // up to a bounded number of failed attempts — see
+  // `credentials/account-recovery.ts`.
   const recovery = createAccountRecoveryWorker({
     store: deps.store,
     credentials,
+    audit,
     log: warn,
   });
 

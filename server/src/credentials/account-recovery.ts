@@ -21,9 +21,16 @@
  *   later attempt succeeds.
  *
  * There is deliberately no `failed` state: a credential that still
- * authenticates is not something to give up on.
+ * authenticates is not something to give up on. The issuance block is
+ * bounded, though. Once {@link ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS} attempts
+ * have failed, the job stops refusing new credentials, a
+ * `credential.recovery_stalled` audit row tells an administrator, and the
+ * worker keeps retrying on the capped backoff. A job that can never land
+ * would otherwise lock the account out of credentials for good, and the reset
+ * has already ended every session and replaced the password.
  */
 
+import { AuditAction, SYSTEM_ACTOR, type AuditService } from '../audit/service.js';
 import type { AccountRecoveryJobRecord, NexusStore } from '../db/store.js';
 import type { CredentialsService } from './service.js';
 
@@ -41,6 +48,19 @@ export const ACCOUNT_RECOVERY_MAX_BACKOFF_MS = 5 * 60_000;
 
 /** A `sending` job untouched for this long is assumed to be a crashed worker's. */
 export const ACCOUNT_RECOVERY_STALE_AFTER_MS = 5 * 60_000;
+
+/** Failed attempts after which an outstanding job stops blocking credential issuance. */
+export const ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS = 8;
+
+/**
+ * Whether an outstanding job still refuses credential issuance: until
+ * {@link ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS} attempts have failed. A `sending`
+ * claim's own attempt is still running, so it has not failed yet.
+ */
+export function recoveryBlocksIssuance(job: AccountRecoveryJobRecord): boolean {
+  const failed = job.status === 'sending' ? job.attempts - 1 : job.attempts;
+  return failed < ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS;
+}
 
 /** Delay before the next attempt: `10s · 2^attempts`, capped, plus up to 10% jitter. */
 export function accountRecoveryBackoffMs(
@@ -68,6 +88,7 @@ export interface AccountRecoveryAttempt {
 export interface RunAccountRecoveryInput {
   credentials: Pick<CredentialsService, 'revokeForAccountRecovery'>;
   store: NexusStore;
+  audit: AuditService;
   userId: AccountRecoveryJobRecord['user_id'];
   ip?: string | null;
   /** Exact queued generation or worker claim. Never look up a replacement after Edge work. */
@@ -83,13 +104,16 @@ export interface RunAccountRecoveryInput {
  * Run one recovery revocation and settle the durable job behind it.
  *
  * Success deletes the row; failure returns it to `pending` on a backoff so the
- * next tick retries. A job that is no longer the current generation — a later
- * reset re-queued it, or another worker claimed it — is left alone.
+ * next tick retries. The failure that crosses
+ * {@link ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS} commits a
+ * `credential.recovery_stalled` row with the reschedule. A job that is no
+ * longer the current generation — a later reset re-queued it, or another
+ * worker claimed it — is left alone.
  */
 export async function runAccountRecovery(
   input: RunAccountRecoveryInput,
 ): Promise<AccountRecoveryAttempt> {
-  const { credentials, store, userId, ip = null, log } = input;
+  const { credentials, store, audit, userId, ip = null, log } = input;
   const now = input.now ?? ((): Date => new Date());
   const random = input.random ?? Math.random;
   let claimed: AccountRecoveryJobRecord | null = null;
@@ -138,16 +162,37 @@ export async function runAccountRecovery(
           ? 0
           : accountRecoveryBackoffMs(claimed.attempts, random);
       const nextAt = new Date(now().getTime() + delay).toISOString();
+      const job = claimed;
+      // Exactly the attempt that crosses the threshold, so a job that keeps
+      // failing records one row rather than one per retry.
+      const stalled = job.attempts === ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS;
       try {
-        await store.accountRecoveryJobs.reschedule(claimed, nextAt, message);
+        await store.transaction(async (tx) => {
+          const rescheduled = await tx.accountRecoveryJobs.reschedule(job, nextAt, message);
+          if (!rescheduled || !stalled) return;
+          await audit.forStore(tx).record(
+            SYSTEM_ACTOR,
+            AuditAction.CREDENTIAL_RECOVERY_STALLED,
+            { type: 'user', id: userId },
+            {
+              attempts: job.attempts,
+              last_error: message,
+              next_attempt_at: nextAt,
+            },
+            ip,
+          );
+        });
       } catch {
         // A failed store write leaves SENDING for the stale sweep, which
         // recovers it on a later tick.
       }
     }
+    const blocking = claimed === null || recoveryBlocksIssuance({ ...claimed, status: 'pending' });
     log?.(
       { user_id: userId, error: message },
-      'Account recovery revocation failed; credential issuance stays blocked',
+      blocking
+        ? 'Account recovery revocation failed; credential issuance stays blocked'
+        : 'Account recovery revocation failed again; it is retried, but no longer blocks issuance',
     );
     return { outcome: 'pending', revoked: 0, error: message };
   }
@@ -185,6 +230,7 @@ export interface AccountRecoveryWorker {
 export interface AccountRecoveryWorkerDeps {
   store: NexusStore;
   credentials: Pick<CredentialsService, 'revokeForAccountRecovery'>;
+  audit: AuditService;
   log?: (obj: Record<string, unknown>, message: string) => void;
   /** Poll interval; defaults to {@link ACCOUNT_RECOVERY_POLL_INTERVAL_MS}. */
   pollIntervalMs?: number;
@@ -199,7 +245,7 @@ export interface AccountRecoveryWorkerDeps {
 export function createAccountRecoveryWorker(
   deps: AccountRecoveryWorkerDeps,
 ): AccountRecoveryWorker {
-  const { store, credentials } = deps;
+  const { store, credentials, audit } = deps;
   const log = deps.log ?? ((): void => {});
   const pollIntervalMs = deps.pollIntervalMs ?? ACCOUNT_RECOVERY_POLL_INTERVAL_MS;
   const batchSize = deps.batchSize ?? ACCOUNT_RECOVERY_BATCH_SIZE;
@@ -216,6 +262,7 @@ export function createAccountRecoveryWorker(
     const attempt = await runAccountRecovery({
       credentials,
       store,
+      audit,
       userId: job.user_id,
       job,
       log: (obj, message) => log({ ...obj, attempts: job.attempts }, message),
