@@ -339,10 +339,7 @@ describe('health endpoints', () => {
         /fewer distinct data planes \(node_id\) are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES/,
       ],
       ['2', null],
-      [
-        '1',
-        /more distinct data planes \(node_id\) are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES/,
-      ],
+      ['1', null],
     ];
     for (const [expected, why] of cases) {
       const portal = await buildTestApp({

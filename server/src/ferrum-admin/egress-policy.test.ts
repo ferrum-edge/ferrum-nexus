@@ -540,7 +540,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
       // Two public-only data planes with distinct node_ids.
       'control-plane-attestation-reported.json': [
         'expected_data_planes_unset',
-        'more_data_planes_than_expected',
+        'guaranteed',
         'guaranteed',
         'fewer_data_planes_than_expected',
       ],
@@ -769,7 +769,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
     assert.equal(admitBackendEgress(policy, { expectedDataPlanes: 1 }), null);
   });
 
-  it('grants the guarantee only when the distinct data planes equal the expected count', () => {
+  it('grants the guarantee only when the distinct data planes reach the expected count', () => {
     const policy = parseBackendEgressPolicy(
       attestedControlPlanePolicy([PUBLIC, PUBLIC, PUBLIC]),
       'nexus',
@@ -778,8 +778,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
       ['unset', undefined, 'expected_data_planes_unset'],
       ['above the connected count', 4, 'fewer_data_planes_than_expected'],
       ['equal to the connected count', 3, 'guaranteed'],
-      // More data planes than the inventory: it is not the fleet, so it proves nothing.
-      ['below the connected count', 2, 'more_data_planes_than_expected'],
+      ['below the connected count', 2, 'guaranteed'],
       // Anything but a positive integer is no inventory at all.
       ['zero', 0, 'expected_data_planes_unset'],
       ['negative', -3, 'expected_data_planes_unset'],
@@ -896,16 +895,46 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
       );
     });
 
-    it('withholds it while any listed data plane is new, even with the count met', () => {
-      // A new node_id may be the replacement of any other listed one, whose
-      // stream would then be stale: none of the older entries can be trusted.
+    it('counts only settled data planes, so a new one never covers a missing one', () => {
+      // A new node_id may be the replacement of another listed one, whose stream
+      // would then be stale; it counts only once that stream must be gone.
       const surge = streams([
         ['dp-a', 3_600],
         ['dp-b', 3_600],
         ['dp-c', 10],
       ]);
       assert.equal(dataPlaneAttestationVerdict(surge, 3, AGREED), 'data_plane_recently_connected');
-      assert.equal(dataPlaneAttestationVerdict(surge, 2, AGREED), 'more_data_planes_than_expected');
+      // The settled data planes alone reach a smaller inventory; dp-c still attests.
+      assert.equal(dataPlaneAttestationVerdict(surge, 2, AGREED), 'guaranteed');
+    });
+
+    it('grants a scale-up beyond the expected count once the data planes settle', () => {
+      // The operator has not raised NEXUS_EXPECTED_DATA_PLANES yet: more connected
+      // data planes than the inventory still prove every expected one attests.
+      const scaledUp = streams([
+        ['dp-a', 3_600],
+        ['dp-b', 3_600],
+        ['dp-c', SETTLED_S],
+      ]);
+      assert.equal(dataPlaneAttestationVerdict(scaledUp, 2, AGREED), 'guaranteed');
+      assert.equal(dataPlaneAttestationVerdict(scaledUp, 3, AGREED), 'guaranteed');
+      assert.deepEqual(admitBackendEgress(scaledUp, { expectedDataPlanes: 2 }, AGREED), {
+        egress_profile: 'public-guaranteed',
+        enforcement_scope: 'admission-only',
+      });
+      // A rolling update that starts replacements first keeps the guarantee while
+      // the old data planes alone reach the count, before the new ones settle.
+      const surge = streams([
+        ['dp-a-old', 3_600],
+        ['dp-b-old', 3_600],
+        ['dp-a-new', 5],
+        ['dp-b-new', 5],
+      ]);
+      assert.equal(dataPlaneAttestationVerdict(surge, 2, AGREED), 'guaranteed');
+      // Every listed stream must still attest public-only, settled or not.
+      const answer = attestedControlPlanePolicy([PUBLIC, PUBLIC, { mode: 'both' }]);
+      const weaker = parseBackendEgressPolicy(answer, 'nexus')!;
+      assert.equal(dataPlaneAttestationVerdict(weaker, 2, AGREED), 'data_planes_not_public_only');
     });
 
     it('grants a genuine fleet of N data planes once every one has settled', () => {
@@ -1307,7 +1336,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
   });
 
   it('re-reads the attestation for every write and health probe, with no grace', async (t) => {
-    const harness = await buildTestApp({ env: { NEXUS_EXPECTED_DATA_PLANES: '2' } });
+    const harness = await buildTestApp({ env: { NEXUS_EXPECTED_DATA_PLANES: '1' } });
     t.after(() => harness.close());
     const edge = harness.edgeClient;
     harness.edge.setBackendEgressPolicy(attestedControlPlanePolicy([PUBLIC, PUBLIC]));
@@ -1330,7 +1359,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
       assert.equal(degraded.backendEgressVerified, false);
     }
     // And it is restored as soon as every connected data plane attests again.
-    harness.edge.setBackendEgressPolicy(attestedControlPlanePolicy([PUBLIC, PUBLIC]));
+    harness.edge.setBackendEgressPolicy(attestedControlPlanePolicy([PUBLIC]));
     await edge.assertBackendEgress();
     assert.equal((await edge.probe()).publicEgressGuaranteed, true);
   });

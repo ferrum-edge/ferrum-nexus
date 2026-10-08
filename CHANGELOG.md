@@ -9,14 +9,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 ### Fixed
 
 - **Data-plane attestation counts each data plane once across restarts** (#540). A
-  control plane's data-plane attestation now proves public-only egress only when the
-  number of distinct data planes equals `NEXUS_EXPECTED_DATA_PLANES` (more is refused
-  as an inventory mismatch) and every one has been listed long enough that a
-  restarted data plane cannot be counted twice. Until then, and when stream
-  timestamps contradict Nexus's or the gateway's clock, backend writes are refused
-  and health is `degraded` with a new bounded reason (`data_plane_recently_connected`,
-  `data_plane_clock_skew` or `more_data_planes_than_expected`). A data plane's
-  routine reconnect keeps the guarantee once Nexus has seen it.
+  control plane's data-plane attestation now counts a data plane toward
+  `NEXUS_EXPECTED_DATA_PLANES` only once it has been listed long enough that a
+  restarted data plane cannot be counted twice, by which time Edge has dropped the
+  stale stream of the process it replaced. The guarantee still needs at least that
+  many such data planes, so a scale-up or a rolling update keeps it while the settled
+  ones reach the value. Until they do, and when stream timestamps contradict Nexus's
+  or the gateway's clock, backend writes are refused and health is `degraded` with a
+  new bounded reason (`data_plane_recently_connected` or `data_plane_clock_skew`). A
+  data plane's routine reconnect keeps counting once Nexus has seen it.
 
 ### Security
 

@@ -115,8 +115,8 @@ preflight runs before destructive conversion and spec ACL enrollment. Schema 2
 (Edge v0.9.13) must be complete and closed, with exact class arrays and evaluation order; only
 `enforcement_scope=local-data-plane` and `public_only_guaranteed=true`, or a control plane
 whose data-plane attestation (Edge v0.9.14) proves every connected data plane public-only
-with exactly `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`) connected, none
-of them just started, authorize public-profile writes.
+with at least `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`) connected,
+counting only those that did not just start, authorize public-profile writes.
 Missing capability, timeouts, authentication failures,
 unknown/inconsistent responses, cache evidence, a control plane without that attestation,
 unserved/no local plane, default `both` and any allow-CIDR override refuse the mutation.
@@ -151,8 +151,8 @@ secure future fleet traffic.
 **Topology decision.** Nexus grants the verified public-only guarantee only to
 `enforcement_scope=local-data-plane` with `public_only_guaranteed=true`, or to a control
 plane whose data-plane attestation proves every connected data plane public-only with
-exactly `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`) connected, none of
-them just started, and health reports it to admins as
+at least `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`) connected,
+counting only those that did not just start, and health reports it to admins as
 `edge.public_egress_guaranteed`. Edge source authority is
 `9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d` (`v0.9.14`); the Edge and canonical
 releases are published and pinned. Nexus reads egress policy schema 2 only. Schema 1
@@ -165,12 +165,12 @@ policy describes admission, not the remote data planes that connect to backends,
 on its own it never proves public-only egress. From Edge v0.9.14 the control plane
 also relays the egress policy each connected data plane reported when it subscribed.
 Nexus grants the guarantee from that attestation only when `NEXUS_EXPECTED_DATA_PLANES`
-is set and exactly that many distinct data-plane processes (`node_id`) are connected,
-each listed long enough that a restarted one cannot count twice,
-at least one data plane is connected for the namespace, every connected data plane reported, every
+is set and at least that many distinct data-plane processes (`node_id`) are connected,
+counting each only once it has been listed long enough that a restarted one cannot
+count twice, at least one data plane is connected for the namespace, every connected data plane reported, every
 report is `public` mode without allow CIDRs, and the aggregate matches the listed
-reports. Anything else, including the count unset, short or over, a data plane that
-started too recently, a `connected_at` that contradicts the clocks, no connected data
+reports. Anything else, including the count unset or short, too few data planes
+connected long enough to count, a `connected_at` that contradicts the clocks, no connected data
 plane, an unknown or weaker data plane, or Edge v0.9.13 (which sends no attestation),
 reads "not guaranteed". A malformed or inconsistent attestation, or one on anything
 but a control plane, is set aside with a logged warning: that answer reads "not
@@ -197,10 +197,14 @@ streams, so a reconnect overlap of one process counts once. A process that resta
 without closing its stream returns under a new `node_id`, and until Edge's stream
 liveness detection drops the stale stream that data plane would count twice (#540).
 Nexus therefore counts a `node_id` only once it has existed for 60 seconds, longer
-than Edge v0.9.14 takes to drop a dead stream: this Nexus process saw it listed that
-long ago on its monotonic clock, or its earliest `connected_at` is 90 seconds old on
-Nexus's clock and on the gateway's `Date` header. Until then, and when a
-`connected_at` contradicts those clocks, the guarantee is withheld. Edge reports no
+than Edge v0.9.14 takes to drop a dead stream, so a stale stream and its replacement
+never count together: this Nexus process saw it listed that long ago on its monotonic
+clock, or its earliest `connected_at` is 90 seconds old on Nexus's clock and on the
+gateway's `Date` header. While fewer than `NEXUS_EXPECTED_DATA_PLANES` count, and when
+a `connected_at` contradicts those clocks, the guarantee is withheld. A newer data
+plane must still attest public-only, but more connected data planes than the value
+never withhold it, so a scale-up or a rolling update keeps the guarantee while the
+settled ones reach the value. Edge reports no
 stream liveness, so a data plane whose restarted process subscribes to another
 control plane can still be covered by its stale stream for that window; alert on
 health transitions.
@@ -2274,7 +2278,7 @@ Before going live:
 - [ ] `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS` is `false`. It admits no pairing the
       public profile refuses. A control plane with remote data planes publishes
       under the public profile only when its data-plane attestation (Edge v0.9.14)
-      proves every connected data plane public-only with exactly
+      proves every connected data plane public-only with at least
       `NEXUS_EXPECTED_DATA_PLANES` (the number of running data-plane
       processes, `node_id`, across every control plane) connected, and otherwise only under the
       private opt-in; either way every data plane enforces

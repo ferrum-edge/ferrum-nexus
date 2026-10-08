@@ -416,7 +416,7 @@ Health caches observations only.
 The public profile requires namespace-matched local serving/public-only metadata and
 operator-established Admin/traffic singleton identity, or a control plane whose Edge
 data-plane attestation (Edge v0.9.14) proves every data plane connected to it
-public-only while exactly `NEXUS_EXPECTED_DATA_PLANES` distinct data planes
+public-only while at least `NEXUS_EXPECTED_DATA_PLANES` distinct data planes
 (`node_id`) are connected. Each Edge data-plane process reports its own random
 `node_id` for its lifetime, so the count is of running data-plane processes. Nexus
 counts distinct `node_id`s, not streams, so a reconnect overlap of one process counts

@@ -419,12 +419,10 @@ export function provesLocalPublicEgress(policy: BackendEgressPolicy): boolean {
  *   nothing says the connected set is the whole fleet.
  * - `fewer_data_planes_than_expected`: fewer distinct data planes are connected
  *   than it says.
- * - `more_data_planes_than_expected`: more distinct data planes are connected
- *   than it says, so the inventory is not the fleet.
- * - `data_plane_recently_connected`: a data plane may have started too recently
- *   for a stale stream of the process it replaced to be gone.
- * - `data_plane_clock_skew`: a `connected_at` is implausible against Nexus's
- *   clock or the gateway's, so stream age cannot be read from it.
+ * - `data_plane_recently_connected`: enough are connected, but too few have
+ *   existed long enough for a stale stream of a process they replaced to be gone.
+ * - `data_plane_clock_skew`: the same, and a `connected_at` is implausible
+ *   against Nexus's clock or the gateway's, so stream age cannot be read from it.
  * - `not_control_plane`: the answer is not a control plane's.
  */
 export type DataPlaneAttestationVerdict =
@@ -434,7 +432,6 @@ export type DataPlaneAttestationVerdict =
   | 'data_planes_not_public_only'
   | 'expected_data_planes_unset'
   | 'fewer_data_planes_than_expected'
-  | 'more_data_planes_than_expected'
   | 'data_plane_recently_connected'
   | 'data_plane_clock_skew'
   | 'not_control_plane';
@@ -491,24 +488,27 @@ function isExpectedDataPlanes(value: number | undefined): value is number {
  *
  * A control plane sees only the data planes streaming from it, so the operator's
  * `expectedDataPlanes` (`NEXUS_EXPECTED_DATA_PLANES`) must also be set and the
- * number of distinct `node_id`s among the listed streams must equal it. Each
- * Edge data-plane process subscribes under its own random `node_id`, kept for
- * the process lifetime, so the value counts data-plane processes. Edge lists
- * one entry per Subscribe stream, so a reconnect overlap can list one process
- * twice; counting distinct ids collapses that duplicate.
+ * number of distinct, settled `node_id`s among the listed streams must reach
+ * it. Each Edge data-plane process subscribes under its own random `node_id`,
+ * kept for the process lifetime, so the value counts data-plane processes. Edge
+ * lists one entry per Subscribe stream, so a reconnect overlap can list one
+ * process twice; counting distinct ids collapses that duplicate.
  *
  * A process that restarts without closing its stream comes back under a new
- * `node_id`, and until Edge drops the stale stream that data plane counts twice
- * (#540). So every listed `node_id` must also have existed for at least
+ * `node_id`, and until Edge drops the stale stream that data plane would count
+ * twice (#540). So a `node_id` counts only once it has existed for at least
  * {@link DATA_PLANE_SETTLE_MS}: by then any process it replaced has been dead
- * long enough for Edge to drop its stream. Either this process saw it listed
- * that long ago (`settledNodeIds`, which no clock skew affects), or its earliest
+ * long enough for Edge to drop its stream, so a stale stream and its
+ * replacement never both count. Either this process saw it listed that long ago
+ * (`settledNodeIds`, which no clock skew affects), or its earliest
  * `connected_at` is that old, plus {@link CLOCK_SKEW_ALLOWANCE_MS}, on Nexus's
  * clock and, when the answer carried one, on the gateway's `Date` too. A
  * `connected_at` later than either clock or older than any live stream can be
- * proves nothing, so a data plane that only it could settle fails closed. Unset,
- * an attestation never grants the guarantee. It covers the data planes
- * connected at the moment of this read only.
+ * proves nothing, so then only sightings settle a data plane. A newer data
+ * plane still has to attest public-only; it just does not count yet, so a
+ * scale-up or a rolling update keeps the guarantee while the settled ones reach
+ * the value. Unset, an attestation never grants the guarantee. It covers the
+ * data planes connected at the moment of this read only.
  */
 export function dataPlaneAttestationVerdict(
   policy: BackendEgressPolicy,
@@ -548,16 +548,16 @@ export function dataPlaneAttestationVerdict(
     firstConnected.set(entry.node_id, Math.min(known, connectedAt));
   }
   if (firstConnected.size < expectedDataPlanes) return 'fewer_data_planes_than_expected';
-  if (firstConnected.size > expectedDataPlanes) return 'more_data_planes_than_expected';
-  const settled = freshness.settledNodeIds;
+  const sighted = freshness.settledNodeIds;
+  let settled = 0;
   for (const [nodeId, connectedAt] of firstConnected) {
-    if (settled?.has(nodeId) === true) continue;
-    if (!plausible) return 'data_plane_clock_skew';
-    if (!clocks.every((clock) => clock - connectedAt >= SETTLED_AGE_MS)) {
-      return 'data_plane_recently_connected';
-    }
+    const isSettled =
+      sighted?.has(nodeId) === true ||
+      (plausible && clocks.every((clock) => clock - connectedAt >= SETTLED_AGE_MS));
+    if (isSettled) settled += 1;
   }
-  return 'guaranteed';
+  if (settled >= expectedDataPlanes) return 'guaranteed';
+  return plausible ? 'data_plane_recently_connected' : 'data_plane_clock_skew';
 }
 
 /** {@link dataPlaneAttestationVerdict} is `guaranteed`. */
@@ -601,8 +601,6 @@ export function describeDataPlaneAttestation(verdict: DataPlaneAttestationVerdic
       return 'NEXUS_EXPECTED_DATA_PLANES is not set, so the data-plane attestation cannot grant it';
     case 'fewer_data_planes_than_expected':
       return 'fewer distinct data planes (node_id) are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES';
-    case 'more_data_planes_than_expected':
-      return 'more distinct data planes (node_id) are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES';
     case 'data_plane_recently_connected':
       return 'a data plane connected too recently to rule out a restarted data plane still being counted twice; retry shortly';
     case 'data_plane_clock_skew':
@@ -621,7 +619,7 @@ const MAX_SIGHTINGS = 20_000;
  * This process's own record of when it first saw each data-plane `node_id`
  * listed, on its monotonic clock. A data plane reconnects under the same
  * `node_id` (Edge v0.9.14 renews each stream within the hour), so this keeps a
- * routine reconnect from withholding the guarantee the way a new process does.
+ * routine reconnect counted, where a new process waits to settle.
  * Losing a record only withholds the guarantee, never grants it.
  */
 export interface DataPlaneSightings {
