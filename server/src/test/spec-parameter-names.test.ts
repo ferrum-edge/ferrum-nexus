@@ -81,7 +81,10 @@ describe('parameter name length', () => {
   function catalog(): CatalogService {
     return createCatalogService({
       store: harness.store,
-      settings: { getGatewayPublicUrl: async () => 'https://gateway.example.test' },
+      settings: {
+        getGatewayPublicUrl: async () => 'https://gateway.example.test',
+        listGatewayPublicUrls: async () => ['https://gateway.example.test'],
+      },
       specCache: new LruCache<CatalogSpecRendering>({ maxEntries: 16, maxBytes: 1024 * 1024 }),
     });
   }

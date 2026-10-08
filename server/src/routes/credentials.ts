@@ -59,6 +59,7 @@ const issueBody = z.object({
 });
 
 const rotateBody = z.object({ label: z.string().trim().max(120).nullish() });
+const CREDENTIAL_MUTATION_RATE_LIMIT = { max: 20, timeWindow: '1 minute' } as const;
 
 /** `/api/credentials` route plugin. */
 export const credentialsRoutes: FastifyPluginAsync<CredentialsRoutesOptions> = async (
@@ -86,42 +87,54 @@ export const credentialsRoutes: FastifyPluginAsync<CredentialsRoutesOptions> = a
     );
   });
 
-  app.post('/', async (request, reply): Promise<IssueCredentialResponse> => {
-    const { user } = requireAuth(request);
-    const input = parseOrThrow(issueBody, request.body);
-    // Resolved before the gateway is touched: this is what checks the caller
-    // owns the application and that it is active. `null` is the account's own
-    // identity, which is what an omitted field means and what every credential
-    // issued before applications existed uses.
-    const application = await applications.resolveForActor(user, input.application_id ?? null);
-    const result = await credentials.issue(
-      user,
-      {
-        credential_type: input.credential_type,
-        label: input.label ?? null,
-        application_id: application?.id ?? null,
-      },
-      clientIp(request),
-    );
-    reply.status(201);
-    return result;
-  });
+  app.post(
+    '/',
+    { config: { rateLimit: { ...CREDENTIAL_MUTATION_RATE_LIMIT } } },
+    async (request, reply): Promise<IssueCredentialResponse> => {
+      const { user } = requireAuth(request);
+      const input = parseOrThrow(issueBody, request.body);
+      // Resolved before the gateway is touched: this is what checks the caller
+      // owns the application and that it is active. `null` is the account's own
+      // identity, which is what an omitted field means and what every credential
+      // issued before applications existed uses.
+      const application = await applications.resolveForActor(user, input.application_id ?? null);
+      const result = await credentials.issue(
+        user,
+        {
+          credential_type: input.credential_type,
+          label: input.label ?? null,
+          application_id: application?.id ?? null,
+        },
+        clientIp(request),
+      );
+      reply.status(201);
+      return result;
+    },
+  );
 
-  app.post('/:id/rotate', async (request): Promise<RotateCredentialResponse> => {
-    const { user } = requireAuth(request);
-    const { id } = parseOrThrow(idParamSchema, request.params);
-    const body = parseOrThrow(rotateBody, request.body ?? {});
-    return credentials.rotate(user, id, body.label ?? null, clientIp(request));
-  });
+  app.post(
+    '/:id/rotate',
+    { config: { rateLimit: { ...CREDENTIAL_MUTATION_RATE_LIMIT } } },
+    async (request): Promise<RotateCredentialResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const body = parseOrThrow(rotateBody, request.body ?? {});
+      return credentials.rotate(user, id, body.label ?? null, clientIp(request));
+    },
+  );
 
-  app.delete('/:id', async (request): Promise<DeleteCredentialResponse> => {
-    const { user } = requireAuth(request);
-    const { id } = parseOrThrow(idParamSchema, request.params);
-    const query = parseOrThrow(
-      z.object({ clear_type: z.enum(['true']).optional() }),
-      request.query,
-    );
-    await credentials.revoke(user, id, clientIp(request), query.clear_type === 'true');
-    return { ok: true };
-  });
+  app.delete(
+    '/:id',
+    { config: { rateLimit: { ...CREDENTIAL_MUTATION_RATE_LIMIT } } },
+    async (request): Promise<DeleteCredentialResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const query = parseOrThrow(
+        z.object({ clear_type: z.enum(['true']).optional() }),
+        request.query,
+      );
+      await credentials.revoke(user, id, clientIp(request), query.clear_type === 'true');
+      return { ok: true };
+    },
+  );
 };

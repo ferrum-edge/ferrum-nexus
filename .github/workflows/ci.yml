@@ -282,7 +282,7 @@ jobs:
           };
           for (const dialect of ['sqlite', 'pg', 'mysql']) {
             const files = loadMigrations(dialect);
-            assert.deepEqual(files.map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest', '004_api_spec_changes', '005_notification_preferences', '006_user_identities', '007_outbox_recipient', '008_email_lifecycle_fence', '009_outbox_priority', '010_api_agents', '011_mcp_tool_subsets', '012_access_request_grant']);
+            assert.deepEqual(files.map((file) => file.id), ['001_initial', '002_api_gateway_plugins', '003_messages_thread_latest', '004_api_spec_changes', '005_notification_preferences', '006_user_identities', '007_outbox_recipient', '008_email_lifecycle_fence', '009_outbox_priority', '010_api_agents', '011_mcp_tool_subsets', '012_access_request_grant', '013_account_recovery_jobs']);
             const priority = files.find((file) => file.id === '009_outbox_priority');
             assert.ok(priority);
             assert.equal(createHash('sha256').update(priority.sql).digest('hex'), priorityHashes[dialect]);
@@ -298,6 +298,7 @@ jobs:
           assert.deepEqual(db.prepare('SELECT spec_id FROM api_spec_changes').all(), []);
           assert.deepEqual(db.prepare('SELECT user_id FROM user_notification_preferences').all(), []);
           assert.deepEqual(db.prepare('SELECT id FROM user_identities').all(), []);
+          assert.deepEqual(db.prepare('SELECT generation, unblocked_at FROM account_recovery_jobs').all(), []);
           assert.deepEqual(db.prepare('SELECT user_id FROM user_email_proofs').all(), []);
           assert.deepEqual(db.prepare('SELECT user_id FROM user_password_locks').all(), []);
           assert.deepEqual(db.prepare('SELECT name FROM sqlite_master WHERE type = ? AND name LIKE ? ORDER BY name').all('index', 'ix_messages_thread%'), [{ name: 'ix_messages_thread_latest' }]);

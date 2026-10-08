@@ -1282,6 +1282,7 @@ describe('sqlite store', () => {
         notificationPreferences: true,
         emailOutbox: true,
         gatewayTeardownJobs: true,
+        accountRecoveryJobs: true,
         auditLogs: true,
         settings: true,
         emailTemplates: true,

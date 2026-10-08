@@ -10,9 +10,20 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
-import { type ApiErrorBody, type ForgotPasswordResponse } from '@ferrum-nexus/shared';
+import {
+  consumerUsernameForApplication,
+  consumerUsernameForUser,
+  MAX_PAGE_SIZE,
+  type ApiErrorBody,
+  type ForgotPasswordResponse,
+  type IssueCredentialResponse,
+} from '@ferrum-nexus/shared';
 
-import { isoInSeconds } from '../lib/ids.js';
+import {
+  ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS,
+  runAccountRecovery,
+} from '../credentials/account-recovery.js';
+import { isoInSeconds, newId } from '../lib/ids.js';
 import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './helpers.js';
 
 /** The body every `forgot-password` call must produce, whatever it decided. */
@@ -22,6 +33,14 @@ const NEW_PASSWORD = 'a-brand-new-passphrase-entirely';
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
+}
+
+function barrier(): { promise: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
 }
 
 describe('password reset', () => {
@@ -50,6 +69,23 @@ describe('password reset', () => {
     const match = /\/reset-password\?token=([A-Za-z0-9_-]+)/.exec(text);
     assert.ok(match, `no reset link in message: ${text}`);
     return match[1] ?? '';
+  }
+
+  /** Reset `userId`'s password through a fresh link, as a trusted reset does. */
+  async function trustedReset(userId: string): Promise<void> {
+    const token = newId();
+    await harness.store.verificationTokens.create({
+      user_id: userId,
+      token_hash: harness.app.nexus.crypto.hashToken(token),
+      purpose: 'password_reset',
+      expires_at: isoInSeconds(3600),
+    });
+    const reset = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/reset-password',
+      payload: { token, new_password: NEW_PASSWORD },
+    });
+    assert.equal(reset.statusCode, 200, reset.body);
   }
 
   before(async () => {
@@ -136,6 +172,422 @@ describe('password reset', () => {
     );
     const performed = await harness.auditRows('auth.password_reset');
     assert.ok(performed.some((row) => row.target_id === owner.user.id));
+  });
+
+  it('revokes existing account and application credentials when reset proves the address', async () => {
+    const account = await harness.registerUser({ email: 'reclaimed@example.test' });
+    const applicationResponse = await harness.authed(account, {
+      method: 'POST',
+      url: '/api/applications',
+      payload: { name: 'Old application' },
+    });
+    assert.equal(applicationResponse.statusCode, 201, applicationResponse.body);
+    const applicationId = applicationResponse.json<{ application: { id: string } }>().application
+      .id;
+
+    const accountCredential = await harness.authed(account, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(accountCredential.statusCode, 201, accountCredential.body);
+    const accountId = accountCredential.json<IssueCredentialResponse>().credential.id;
+    const appCredential = await harness.authed(account, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth', application_id: applicationId },
+    });
+    assert.equal(appCredential.statusCode, 201, appCredential.body);
+    const appCredentialId = appCredential.json<IssueCredentialResponse>().credential.id;
+
+    const token = newId();
+    await harness.store.verificationTokens.create({
+      user_id: account.user.id,
+      token_hash: harness.app.nexus.crypto.hashToken(token),
+      purpose: 'password_reset',
+      expires_at: isoInSeconds(3600),
+    });
+    const reset = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/reset-password',
+      payload: { token, new_password: NEW_PASSWORD },
+    });
+    assert.equal(reset.statusCode, 200, reset.body);
+
+    assert.equal((await harness.store.credentials.findById(accountId))?.status, 'revoked');
+    assert.equal((await harness.store.credentials.findById(appCredentialId))?.status, 'revoked');
+    const accountConsumer = harness.edge.consumerByUsername(`nexus-user-${account.user.id}`);
+    assert.equal(accountConsumer?.credentials.keyauth?.length ?? 0, 0);
+    const appConsumer = harness.edge.consumerByUsername(
+      consumerUsernameForApplication(applicationId),
+    );
+    assert.equal(appConsumer?.credentials.keyauth?.length ?? 0, 0);
+  });
+
+  it('retries the recovery revocation when Edge fails, then revokes once it recovers', async () => {
+    const account = await harness.registerUser({ email: 'delayed-recovery@example.test' });
+    const credential = await harness.authed(account, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(credential.statusCode, 201, credential.body);
+    const credentialId = credential.json<IssueCredentialResponse>().credential.id;
+
+    const token = newId();
+    await harness.store.verificationTokens.create({
+      user_id: account.user.id,
+      token_hash: harness.app.nexus.crypto.hashToken(token),
+      purpose: 'password_reset',
+      expires_at: isoInSeconds(3600),
+    });
+    // The gateway refuses the delete the recovery owes.
+    harness.edge.queueFailure(503, { error: 'down' }, '/credentials/keyauth/', 'DELETE');
+    const reset = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/reset-password',
+      payload: { token, new_password: NEW_PASSWORD },
+    });
+    assert.equal(reset.statusCode, 200, reset.body);
+
+    // The reset committed, the revocation did not: it is owed, and issuance is
+    // blocked until it lands.
+    assert.notEqual((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+    assert.notEqual(await harness.store.accountRecoveryJobs.findByUser(account.user.id), null);
+    const resignedIn = await harness.loginUser('delayed-recovery@example.test', NEW_PASSWORD);
+    const blocked = await harness.authed(resignedIn, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'basicauth' },
+    });
+    assert.equal(blocked.statusCode, 409, blocked.body);
+
+    // The worker retries against a recovered gateway and settles the debt.
+    const tick = await harness.services.recovery.tick();
+    assert.equal(tick.completed, 1);
+    assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+    assert.equal(await harness.store.accountRecoveryJobs.findByUser(account.user.id), null);
+  });
+
+  it('stops blocking issuance after repeated recovery failures, and audits it', async () => {
+    const email = 'stuck-recovery@example.test';
+    const account = await harness.registerUser({ email });
+    const credential = await harness.authed(account, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(credential.statusCode, 201, credential.body);
+    const credentialId = credential.json<IssueCredentialResponse>().credential.id;
+
+    // The inline attempt fails: the gateway refuses the delete.
+    harness.edge.queueFailure(503, { error: 'down' }, '/credentials/keyauth/', 'DELETE');
+    await trustedReset(account.user.id);
+    const session = await harness.loginUser(email, NEW_PASSWORD);
+    const issue = () =>
+      harness.authed(session, {
+        method: 'POST',
+        url: '/api/credentials',
+        payload: { credential_type: 'keyauth' },
+      });
+    const stalledRows = async () =>
+      (await harness.auditRows('credential.recovery_stalled')).filter(
+        (row) => row.target_id === account.user.id,
+      );
+
+    // Every later attempt fails the same way, as a refusal that no retry can
+    // change would.
+    const failing = {
+      revokeForAccountRecovery: async (): Promise<number> => {
+        throw new Error('refused deterministically');
+      },
+    };
+    const attempt = async () =>
+      runAccountRecovery({
+        credentials: failing,
+        store: harness.store,
+        audit: harness.services.audit,
+        userId: account.user.id,
+        job: await harness.store.accountRecoveryJobs.findByUser(account.user.id),
+      });
+    for (let attempts = 2; attempts <= ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS; attempts += 1) {
+      if (attempts === ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS) {
+        // One failure short of the threshold, issuance is still refused.
+        const blocked = await issue();
+        assert.equal(blocked.statusCode, 409, blocked.body);
+      }
+      assert.equal((await attempt()).outcome, 'pending');
+      const expected = attempts === ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS ? 1 : 0;
+      assert.equal((await stalledRows()).length, expected);
+    }
+
+    const job = await harness.store.accountRecoveryJobs.findByUser(account.user.id);
+    assert.equal(job?.attempts, ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS);
+    assert.ok(job?.unblocked_at, 'the unblock is stamped with the stalled row');
+    const [stalled] = await stalledRows();
+    assert.ok(stalled);
+    assert.equal(stalled.actor_user_id, null);
+    assert.equal(stalled.target_type, 'user');
+    assert.equal(stalled.details.attempts, ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS);
+    assert.equal(stalled.details.last_error, 'refused deterministically');
+
+    // Past the threshold the account may issue again, while the job is still
+    // owed and a further failure writes no second row.
+    const issued = await issue();
+    assert.equal(issued.statusCode, 201, issued.body);
+    const issuedId = issued.json<IssueCredentialResponse>().credential.id;
+    assert.equal((await attempt()).outcome, 'pending');
+    assert.equal((await stalledRows()).length, 1);
+    assert.notEqual(await harness.store.accountRecoveryJobs.findByUser(account.user.id), null);
+
+    // The worker keeps retrying, and lands it once the refusal clears. It
+    // revokes what predates the unblock, and spares the key the owner issued
+    // after it.
+    await harness.services.recovery.tick();
+    assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+    assert.equal((await harness.store.credentials.findById(issuedId))?.status, 'active');
+    assert.equal(await harness.store.accountRecoveryJobs.findByUser(account.user.id), null);
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.equal(consumer?.credentials.keyauth?.length, 1);
+  });
+
+  it('never revokes another account’s live credential on a shared consumer', async () => {
+    const account = await harness.registerUser({ email: 'shared-drift@example.test' });
+    const other = await harness.registerUser({ email: 'shared-drift-other@example.test' });
+    const issued = await harness.authed(account, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(issued.statusCode, 201, issued.body);
+    const own = issued.json<IssueCredentialResponse>().credential;
+    // A live key on this consumer the portal attributes to somebody else, and
+    // an entry added by hand, so no positional delete can be placed. Emptying
+    // the type would take the other account's key with it.
+    const foreign = await harness.store.credentials.create({
+      user_id: other.user.id,
+      application_id: null,
+      ferrum_consumer_id: own.ferrum_consumer_id,
+      credential_type: 'keyauth',
+      ferrum_credential_id: `${own.ferrum_consumer_id}/credentials/keyauth`,
+      fingerprint: 'test-foreign-active-recovery-row',
+      last4: 'frgn',
+      label: null,
+      status: 'active',
+      rotated_from_id: null,
+    });
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.ok(consumer);
+    consumer.credentials.keyauth = [
+      ...(consumer.credentials.keyauth ?? []),
+      { key: 'foreign-key' },
+      { key: 'hand-added' },
+    ];
+
+    await trustedReset(account.user.id);
+    // The worker retries, and the refusal stands every time.
+    await harness.services.recovery.tick();
+
+    assert.equal((await harness.store.credentials.findById(foreign.id))?.status, 'active');
+    assert.equal((await harness.store.credentials.findById(own.id))?.status, 'active');
+    assert.notEqual(await harness.store.accountRecoveryJobs.findByUser(account.user.id), null);
+    const untouched = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.equal(untouched?.credentials.keyauth?.length, 3);
+    const revoked = (await harness.auditRows('credential.revoke')).filter(
+      (row) => row.target_id === own.id || row.target_id === foreign.id,
+    );
+    assert.deepEqual(revoked, []);
+    // Left for an administrator in production; dropped so later tests start clean.
+    await harness.store.accountRecoveryJobs.deleteByUser(account.user.id);
+  });
+
+  it('sweeps another account’s retiring basicauth row with the recovered one', async () => {
+    const account = await harness.registerUser({ email: 'shared-basic@example.test' });
+    const other = await harness.registerUser({ email: 'shared-basic-other@example.test' });
+    const issued = await harness.authed(account, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'basicauth' },
+    });
+    assert.equal(issued.statusCode, 201, issued.body);
+    const own = issued.json<IssueCredentialResponse>().credential;
+    // A row on this consumer the portal attributes to somebody else, whose
+    // gateway outcome was never confirmed. The account's own revoke refuses to
+    // sweep it; the recovery must not, or it would fail the same way forever.
+    const foreign = await harness.store.credentials.create({
+      user_id: other.user.id,
+      application_id: null,
+      ferrum_consumer_id: own.ferrum_consumer_id,
+      credential_type: 'basicauth',
+      ferrum_credential_id: `${own.ferrum_consumer_id}/credentials/basicauth`,
+      fingerprint: 'test-foreign-retiring-recovery-row',
+      last4: 'frgn',
+      label: null,
+      status: 'retiring',
+      rotated_from_id: null,
+    });
+
+    await trustedReset(account.user.id);
+
+    assert.equal(await harness.store.accountRecoveryJobs.findByUser(account.user.id), null);
+    assert.equal((await harness.store.credentials.findById(own.id))?.status, 'revoked');
+    assert.equal((await harness.store.credentials.findById(foreign.id))?.status, 'revoked');
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.equal(consumer?.credentials.basicauth?.length ?? 0, 0);
+    const revoked = (await harness.auditRows('credential.revoke')).find(
+      (row) => row.target_id === own.id,
+    );
+    assert.equal(revoked?.details.reason, 'account_recovery');
+    assert.deepEqual(revoked?.details.swept_credential_ids, [foreign.id]);
+  });
+
+  it('empties a drifted credential type rather than failing the recovery', async () => {
+    const account = await harness.registerUser({ email: 'drifted-recovery@example.test' });
+    const ids: string[] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const issued = await harness.authed(account, {
+        method: 'POST',
+        url: '/api/credentials',
+        payload: { credential_type: 'keyauth' },
+      });
+      assert.equal(issued.statusCode, 201, issued.body);
+      ids.push(issued.json<IssueCredentialResponse>().credential.id);
+    }
+    // An entry added to the consumer by hand: the portal's rows no longer say
+    // where either key sits, so no positional delete can be placed.
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.ok(consumer);
+    consumer.credentials.keyauth = [...(consumer.credentials.keyauth ?? []), { key: 'hand-added' }];
+
+    await trustedReset(account.user.id);
+
+    assert.equal(await harness.store.accountRecoveryJobs.findByUser(account.user.id), null);
+    for (const id of ids) {
+      assert.equal((await harness.store.credentials.findById(id))?.status, 'revoked');
+    }
+    const drained = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.equal(drained?.credentials.keyauth?.length ?? 0, 0);
+    const revoked = (await harness.auditRows('credential.revoke')).filter((row) =>
+      ids.includes(String(row.target_id)),
+    );
+    assert.ok(revoked.some((row) => row.details.placement === 'whole-type-fallback'));
+  });
+
+  it('revokes a key an in-flight issue saves after the recovery has listed', async () => {
+    const account = await harness.registerUser({ email: 'in-flight-issue@example.test' });
+    const user = await harness.store.users.findById(account.user.id);
+    assert.ok(user);
+    const consumers = harness.edgeClient.consumers;
+    const credentials = harness.store.credentials;
+    const append = consumers.addCredential.bind(consumers);
+    const list = credentials.list.bind(credentials);
+    const appended = barrier();
+    const listed = barrier();
+    let armed = false;
+    // The issue has passed its in-key recovery check, as one that started just
+    // before the reset committed has, and its entry is on the gateway. It
+    // saves its row only once the recovery has listed the account's keys.
+    consumers.addCredential = async (...args) => {
+      consumers.addCredential = append;
+      const consumer = await append(...args);
+      appended.release();
+      await listed.promise;
+      return consumer;
+    };
+    credentials.list = async (filter, options) => {
+      const page = await list(filter, options);
+      if (armed && filter.user_id === account.user.id) listed.release();
+      return page;
+    };
+    try {
+      const issuing = harness.services.credentials.issue(user, { credential_type: 'keyauth' });
+      await appended.promise;
+      armed = true;
+      const revoked = await harness.services.credentials.revokeForAccountRecovery(user);
+      const issued = await issuing;
+
+      assert.equal(revoked, 1);
+      assert.equal(
+        (await harness.store.credentials.findById(issued.credential.id))?.status,
+        'revoked',
+      );
+    } finally {
+      consumers.addCredential = append;
+      credentials.list = list;
+    }
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.equal(consumer?.credentials.keyauth?.length ?? 0, 0);
+  });
+
+  it('revokes an older key when a newer one it skipped is revoked under it', async () => {
+    const account = await harness.registerUser({ email: 'shifted-recovery@example.test' });
+    const user = await harness.store.users.findById(account.user.id);
+    assert.ok(user);
+    const issued = await harness.authed(account, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(issued.statusCode, 201, issued.body);
+    const older = issued.json<IssueCredentialResponse>().credential;
+    // A full page of keys issued after the cutoff, listed ahead of the older
+    // one. They sit on a consumer of their own, so the older key's position on
+    // the account's consumer is untouched.
+    const cutoff = '2900-01-01T00:00:00.000Z';
+    const parked = `post-cutoff-${account.user.id}`;
+    const newer: string[] = [];
+    for (let index = 0; index < MAX_PAGE_SIZE; index += 1) {
+      const row = await harness.store.credentials.create({
+        user_id: account.user.id,
+        application_id: null,
+        ferrum_consumer_id: parked,
+        credential_type: 'keyauth',
+        ferrum_credential_id: `${parked}/credentials/keyauth`,
+        fingerprint: `test-post-cutoff-${account.user.id}-${index}`,
+        last4: 'newr',
+        label: null,
+        status: 'active',
+        rotated_from_id: null,
+        created_at: '2950-01-01T00:00:00.000Z',
+      });
+      newer.push(row.id);
+    }
+    // The owner revokes one of the newer keys each time a sweep pages past
+    // them, the first two times: a shift in the first pass, and again in the
+    // re-list a single second pass would make.
+    const credentials = harness.store.credentials;
+    const list = credentials.list.bind(credentials);
+    let raced = 0;
+    credentials.list = async (filter, options) => {
+      if (
+        filter.user_id === account.user.id &&
+        filter.status === 'active' &&
+        (options?.offset ?? 0) > 0 &&
+        raced < 2
+      ) {
+        const victim = newer[raced];
+        raced += 1;
+        assert.ok(victim);
+        await credentials.update(victim, { status: 'revoked' });
+      }
+      return list(filter, options);
+    };
+    try {
+      const revoked = await harness.services.credentials.revokeForAccountRecovery(
+        user,
+        null,
+        cutoff,
+      );
+
+      assert.equal(raced, 2);
+      assert.equal(revoked, 1);
+    } finally {
+      credentials.list = list;
+    }
+    assert.equal((await harness.store.credentials.findById(older.id))?.status, 'revoked');
+    assert.equal((await harness.store.credentials.findById(newer[2] ?? ''))?.status, 'active');
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.equal(consumer?.credentials.keyauth?.length ?? 0, 0);
   });
 
   it('revokes an earlier link when a newer one is issued', async (t) => {

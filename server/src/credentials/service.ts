@@ -258,6 +258,7 @@ import { newId, nowIso } from '../lib/ids.js';
 import { isLeaseLost } from '../lib/lease-fence.js';
 import { userLifecycleLockKey, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
+import { recoveryBlocksIssuance } from './account-recovery.js';
 import type { ConsumerProvisioner } from './consumers.js';
 
 /** Every credential type a Nexus user may hold, in UI order. */
@@ -283,6 +284,11 @@ const LIVE_STATUSES = new Set<string>(LIVE_CREDENTIAL_STATUSES);
 const LEGACY_BASICAUTH_SCAN_SETTING = 'credentials.legacy_basicauth_scan_v1';
 /** What the owner sees on a placeholder the upgrade scan wrote. Never read back. */
 const LEGACY_PLACEHOLDER_LABEL = 'Unconfirmed HTTP Basic credential from an earlier release';
+/**
+ * How many times one recovery sweep lists a status again because a key it
+ * skipped changed under it, before it gives up and leaves the job to retry.
+ */
+const RECOVERY_SWEEP_ROUNDS = 5;
 
 /** What Edge substitutes for credential material on every ordinary read. */
 const REDACTED_MATERIAL = '[REDACTED]';
@@ -457,6 +463,12 @@ export interface IssueForConsumerInput {
    * left behind would be a credential nobody holds and nothing records.
    */
   recordWithRow?: (tx: NexusStore, credential: CredentialRecord) => Promise<void>;
+  /**
+   * Refuse, inside the consumer's key and just before the append, while a
+   * recovery revocation `user` owes still blocks issuance. Set by the
+   * account's own issue, which also checks before it provisions anything.
+   */
+  recoveryGate?: boolean;
 }
 
 /** The key {@link CredentialsService.restoreGatewayAccess} uses for the account's own identity. */
@@ -477,6 +489,22 @@ export interface CredentialsService {
   initializeLegacyBasicAuthPositions(): Promise<void>;
   /** Whether that scan has completed, failed, or not yet run in this process. */
   legacyBasicAuthScanState(): LegacyBasicAuthScanState;
+  /**
+   * Revoke every live credential after a reset proves the account's address.
+   *
+   * `cutoff` is the moment a stalled recovery job stopped refusing issuance:
+   * only rows created before it are revoked, so a key the owner issued after
+   * the unblock survives. `null` (the default) revokes every live row.
+   *
+   * It then waits out any credential write still queued on the account's
+   * consumers and sweeps again, so a key an issue appended while the reset
+   * committed is revoked too.
+   */
+  revokeForAccountRecovery(
+    user: UserRecord,
+    ip?: string | null,
+    cutoff?: string | null,
+  ): Promise<number>;
   /** The caller's credentials, or another user's when an admin asks. */
   list(
     actor: UserRecord,
@@ -1589,6 +1617,16 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * the target and names them in `swept_credential_ids`; one that cannot be
    * placed is refused before anything is written.
    *
+   * `recovery` is the revocation a trusted password reset owes. It is the
+   * portal's own security action rather than the account's request, so the
+   * ownership refusals do not apply, and a delete that cannot be placed —
+   * drift, or a `basicauth` pair with unconfirmed positions — empties the
+   * type instead of being refused, but only when every live row of the type
+   * on that consumer is the account's own. A refusal there is deterministic,
+   * so a retry would only ever repeat it while the credential stays live; on
+   * a consumer shared with another account, or holding a row created after
+   * `recoveryCutoff`, it stands, and the job stalls for an administrator.
+   *
    * Returns `false` when the row was already retired by the time the consumer's
    * queue reached it — a no-op that wrote nothing and audits nothing.
    */
@@ -1597,10 +1635,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     actor: { id: Uuid; role: Role },
     ip: string | null,
     details: Record<string, unknown> = {},
-    clearType = false,
+    options: { clearType?: boolean; recovery?: boolean; recoveryCutoff?: string | null } = {},
   ): Promise<boolean> {
     const type = target.credential_type;
     const consumerId = target.ferrum_consumer_id;
+    const recovery = options.recovery === true;
+    const recoveryCutoff = options.recoveryCutoff ?? null;
+    const clearType = options.clearType === true;
+    const bypassOwnership = recovery || roleAtLeast(actor.role, 'admin');
 
     const removed = await edge.serializePerKey(consumerId, async () => {
       // Re-read inside the queue: an earlier queued operation on the same row
@@ -1614,11 +1656,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // A whole-type clear affects every row on this consumer. Check ownership
       // only after taking the same key as the delete, so a concurrent issue
       // cannot add another user's row between the check and the write.
-      if (
-        clearType &&
-        !roleAtLeast(actor.role, 'admin') &&
-        live.some((row) => row.user_id !== actor.id)
-      ) {
+      if (clearType && !bypassOwnership && live.some((row) => row.user_id !== actor.id)) {
         throw forbidden(
           'This consumer holds HTTP Basic credentials that belong to another account; an administrator must clear them',
         );
@@ -1628,6 +1666,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // nothing else of it is `active`.
       let swept: CredentialRecord[] = [];
       let wholeType = false;
+      let placementFallback = false;
       // A consumer deleted out from under us means the entry is already gone;
       // the row still has to be marked so the UI stops offering it.
       if (consumer) {
@@ -1643,13 +1682,30 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           actor: { id: actor.id, role: actor.role },
           ip,
         });
-        const position = revokePosition(rows, current, length, clearType);
+        let position: number | 'whole-type' | 'not-live';
+        try {
+          position = revokePosition(rows, current, length, clearType);
+        } catch (error) {
+          // The refusal would repeat on every retry. Emptying the type needs
+          // no position, so it removes the target's entry wherever it sits,
+          // and every live row of the type settles with it below — which is
+          // only the recovery's to do when nothing of the type belongs to
+          // another account, or was issued after the recovery's cutoff.
+          // Otherwise the job keeps failing until it stalls, and an
+          // administrator reconciles the consumer.
+          const notOursToEmpty = (row: CredentialRecord): boolean =>
+            row.user_id !== current.user_id ||
+            (recoveryCutoff !== null && row.created_at >= recoveryCutoff);
+          if (!recovery || rows.some(notOursToEmpty)) throw error;
+          position = 'whole-type';
+          placementFallback = true;
+        }
         wholeType = position === 'whole-type';
         if (position === 'whole-type') swept = rows.filter((row) => row.id !== current.id);
         if (
           wholeType &&
           !clearType &&
-          !roleAtLeast(actor.role, 'admin') &&
+          !bypassOwnership &&
           swept.some((row) => row.user_id !== actor.id)
         ) {
           throw forbidden(
@@ -1729,6 +1785,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             consumer_id: consumerId,
             last4: target.last4,
             ...(wholeType ? { scope: 'whole-type' } : {}),
+            ...(placementFallback ? { placement: 'whole-type-fallback' } : {}),
             ...(sweptIds.length > 0 ? { swept_credential_ids: sweptIds } : {}),
             ...details,
           },
@@ -2093,6 +2150,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           { credential_type: input.credentialType, limit: cap },
         );
       }
+      // Again inside the key, right before the append: an issue that passed
+      // the route's check before a reset committed would otherwise append a
+      // key the recovery's listing has already missed.
+      if (input.recoveryGate === true) await assertNoPendingRecovery(input.user.id);
       return appendCredential({
         ownerId: input.user.id,
         applicationId: input.applicationId ?? null,
@@ -2255,6 +2316,24 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
 
     legacyBasicAuthScanState(): LegacyBasicAuthScanState {
       return legacyScanState;
+    },
+
+    async revokeForAccountRecovery(user, ip = null, cutoff = null): Promise<number> {
+      const consumerIds = new Set<string>();
+      let revoked = await sweepForAccountRecovery(user, ip, cutoff, consumerIds);
+      // An issue or rotate that passed its in-key recovery check just before
+      // the reset committed may still be appending, and saves its row only
+      // after the sweep above has listed. Wait out every such write on each of
+      // the account's consumers, then sweep again. Each wait is its own empty
+      // section, never nested in a revoke: the queue is not re-entrant.
+      for (const consumer of await provisioner.listConsumers(user.id)) {
+        consumerIds.add(consumer.ferrum_consumer_id);
+      }
+      for (const consumerId of consumerIds) {
+        await edge.serializePerKey(consumerId, async () => {});
+      }
+      revoked += await sweepForAccountRecovery(user, ip, cutoff, consumerIds);
+      return revoked;
     },
 
     async teardownGatewayIdentity(
@@ -2640,6 +2719,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     },
 
     async issue(user, input, ip = null): Promise<IssueCredentialResponse> {
+      await assertNoPendingRecovery(user.id);
       if (!(CREDENTIAL_TYPES as readonly string[]).includes(input.credential_type)) {
         throw validationFailed(`Unsupported credential type '${input.credential_type}'`);
       }
@@ -2663,6 +2743,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         credentialType: input.credential_type,
         label: input.label ?? null,
         ip,
+        recoveryGate: true,
         recordWithRow: async (tx, created) => {
           await audit.forStore(tx).record(
             { id: user.id, role: user.role },
@@ -2683,6 +2764,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     },
 
     async rotate(user, credentialId, label, ip = null): Promise<RotateCredentialResponse> {
+      await assertNoPendingRecovery(user.id);
       // Owner only: the response carries the replacement's plaintext.
       const target = await loadForRotate(user, credentialId);
       if (target.status === 'revoked') {
@@ -2762,6 +2844,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // a show-once secret that authenticates nothing.
           throw edgeError(RECONCILE_MESSAGE, { expected: rows.length, actual: length });
         }
+        // Again inside the key, right before anything is written: a rotation
+        // that passed the route's check before a reset committed would
+        // otherwise mint a key the recovery's listing has already missed.
+        await assertNoPendingRecovery(user.id);
 
         // Append-then-delete keeps both secrets briefly live during this
         // operation, then deletes the old entry before the response returns.
@@ -3070,7 +3156,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         });
       }
       if (target.status === 'revoked') return;
-      await revokeCredentialRow(target, { id: user.id, role: user.role }, ip, {}, clearType);
+      await revokeCredentialRow(target, { id: user.id, role: user.role }, ip, {}, { clearType });
     },
 
     async revokeInvalidated(actor, credentialId, details, ip = null): Promise<boolean> {
@@ -3251,6 +3337,108 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     if (owner.status !== 'active') {
       throw userDisabled('This account has been disabled; its gateway access cannot be extended');
     }
+  }
+
+  /**
+   * Refuse to mint new credential material while a recovery revocation is owed.
+   *
+   * A trusted password reset writes a durable `account_recovery_jobs` row that
+   * blocks issuance until the revocation lands, so the previous holder cannot
+   * race the reset by minting a replacement key before Edge is reached.
+   *
+   * The block is bounded ({@link recoveryBlocksIssuance}): a job that keeps
+   * failing stops gating issuance after a fixed number of attempts. The reset
+   * already ended every session and replaced the password, so the block
+   * protects little by then, while the worker keeps retrying and an
+   * administrator has the `credential.recovery_stalled` row to act on. The
+   * moment it stops gating is the job's `unblocked_at`, and its eventual
+   * revocation spares every credential created from then on.
+   *
+   * `issue` and `rotate` check before they start and again inside the
+   * consumer's key, just before the gateway write: while the job blocks, no
+   * row can be created at all, so `created_at < unblocked_at` covers every
+   * credential a previous holder could have minted.
+   */
+  async function assertNoPendingRecovery(userId: Uuid, db: NexusStore = store): Promise<void> {
+    const pending = await db.accountRecoveryJobs.findByUser(userId);
+    if (pending !== null && recoveryBlocksIssuance(pending)) {
+      throw conflict(
+        'Credentials are being revoked after an account recovery; try again once it completes',
+        { reason: 'account_recovery_pending' },
+      );
+    }
+  }
+
+  /**
+   * One sweep of {@link CredentialsService.revokeForAccountRecovery}: revoke
+   * every live row of `user`'s created before `cutoff`, and add the consumer of
+   * every row it lists to `consumerIds`.
+   *
+   * The listing is newest first, and the offset steps past only the rows the
+   * sweep skips: a row it settles leaves the filter, so the page does not move
+   * for it. A skipped row that leaves the filter while the sweep runs — the
+   * owner revoking or rotating a key issued after the cutoff — shifts every
+   * older row one place forward, so the next page would start past one the
+   * sweep has not seen. A status whose skipped rows did not all stay exactly
+   * as they were listed is therefore listed again from the start; one that
+   * keeps changing throws, and the job retries.
+   */
+  async function sweepForAccountRecovery(
+    user: UserRecord,
+    ip: string | null,
+    cutoff: string | null,
+    consumerIds: Set<string>,
+  ): Promise<number> {
+    let revoked = 0;
+    for (const status of LIVE_CREDENTIAL_STATUSES) {
+      for (let round = 0; ; round += 1) {
+        if (round === RECOVERY_SWEEP_ROUNDS) {
+          throw conflict('Credentials kept changing while an account recovery revoked them', {
+            reason: 'account_recovery_pending',
+          });
+        }
+        const skipped: CredentialRecord[] = [];
+        let offset = 0;
+        for (;;) {
+          const page = await store.credentials.list(
+            { user_id: user.id, status },
+            { limit: MAX_PAGE_SIZE, offset },
+          );
+          if (page.items.length === 0) break;
+          for (const row of page.items) {
+            consumerIds.add(row.ferrum_consumer_id);
+            // Issued after the job stopped blocking: only the rightful owner
+            // held a session by then, so the key is theirs to keep.
+            if (cutoff !== null && row.created_at >= cutoff) {
+              skipped.push(row);
+              offset += 1;
+              continue;
+            }
+            if (
+              await revokeCredentialRow(
+                row,
+                { id: user.id, role: user.role },
+                ip,
+                { reason: 'account_recovery' },
+                { recovery: true, recoveryCutoff: cutoff },
+              )
+            ) {
+              revoked += 1;
+            }
+          }
+        }
+        let unmoved = true;
+        for (const row of skipped) {
+          const current = await store.credentials.findById(row.id);
+          if (!current || current.status !== status || current.updated_at !== row.updated_at) {
+            unmoved = false;
+            break;
+          }
+        }
+        if (unmoved) break;
+      }
+    }
+    return revoked;
   }
 
   /**

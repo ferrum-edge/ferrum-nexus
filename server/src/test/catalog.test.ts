@@ -439,7 +439,7 @@ describe('catalog visibility', () => {
     it('uses only the listen path when the public gateway origin is unset', async () => {
       const catalog = createCatalogService({
         store: harness.store,
-        settings: { getGatewayPublicUrl: async () => null },
+        settings: { getGatewayPublicUrl: async () => null, listGatewayPublicUrls: async () => [] },
       });
       const viewer = await harness.store.users.findById(client.user.id);
       assert.ok(viewer);

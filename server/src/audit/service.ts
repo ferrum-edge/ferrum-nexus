@@ -402,6 +402,15 @@ export const AuditAction = {
    * came from.
    */
   CREDENTIAL_LEGACY_PLACEHOLDER: 'credential.legacy_placeholder',
+  /**
+   * The revocation a trusted password reset owes has failed often enough that
+   * it no longer blocks the account from issuing credentials. Written by the
+   * recovery worker as the system ({@link SYSTEM_ACTOR}), once per queued
+   * reset, with the reschedule that crosses the threshold; the worker keeps
+   * retrying, and `credential.revoke` rows with `reason: "account_recovery"`
+   * follow when it lands.
+   */
+  CREDENTIAL_RECOVERY_STALLED: 'credential.recovery_stalled',
 
   /* messaging & notifications */
   MESSAGE_THREAD_CREATE: 'message.thread_create',
@@ -634,6 +643,7 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.CREDENTIAL_APPEND_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.CREDENTIAL_RECONCILE]: TRANSACTIONAL,
   [AuditAction.CREDENTIAL_LEGACY_PLACEHOLDER]: TRANSACTIONAL,
+  [AuditAction.CREDENTIAL_RECOVERY_STALLED]: TRANSACTIONAL,
   [AuditAction.MESSAGE_THREAD_CREATE]: TRANSACTIONAL,
   [AuditAction.MESSAGE_SEND]: TRANSACTIONAL,
   [AuditAction.NOTIFICATION_READ]: postCommit(

@@ -73,6 +73,7 @@ import {
   roleAtLeast,
   SSO_TRANSACTION_TTL_SECONDS,
   type LoginPolicy,
+  type Role,
   type SsoAdminSettingsResponse,
   type SsoErrorReason,
   type SsoProviderSettings,
@@ -210,7 +211,7 @@ export interface SsoService {
     ip: string | null,
   ): Promise<SsoAdminSettingsResponse>;
   /** Refuse a manual admin promotion while lower-trust provider identities remain linked. */
-  assertManualAdminPromotionAllowed(tx: NexusStore, userId: Uuid): Promise<void>;
+  assertManualAdminPromotionAllowed(tx: NexusStore, userId: Uuid, role: Role): Promise<void>;
   listIdentities(userId: Uuid): Promise<UserIdentity[]>;
   /** Remove one link. Unlinking an administrator's identity needs a `super_admin`. */
   unlinkIdentity(
@@ -665,7 +666,11 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
    */
   async function addressProven(account: UserRecord): Promise<boolean> {
     const proof = await store.emailProofs.findByUser(account.id);
-    return proof !== null && proof.email === account.email.trim().toLowerCase();
+    return (
+      proof !== null &&
+      proof.method !== 'verification_link' &&
+      proof.email === account.email.trim().toLowerCase()
+    );
   }
 
   /**
@@ -1462,7 +1467,7 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       return (await store.userIdentities.listByUser(userId)).map(toUserIdentity);
     },
 
-    async assertManualAdminPromotionAllowed(tx, userId): Promise<void> {
+    async assertManualAdminPromotionAllowed(tx, userId, role): Promise<void> {
       const lowerTrustProviders = await lowerTrustProvidersForManualPromotion(
         tx,
         userId,
@@ -1470,8 +1475,8 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       );
       if (lowerTrustProviders.length > 0) {
         throw conflict(
-          'Remove or raise the trust of linked single sign-on identities before promoting ' +
-            'this account to admin',
+          `Remove or raise the trust of linked single sign-on identities before promoting ` +
+            `this account to ${role}`,
           { lower_trust_provider_ids: lowerTrustProviders },
         );
       }

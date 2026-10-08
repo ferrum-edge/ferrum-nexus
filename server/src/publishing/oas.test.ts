@@ -20,6 +20,7 @@ import { isNexusError } from '../lib/errors.js';
 import {
   assertRenderCost,
   assertUpstreamAllowed,
+  createGatewayResolver,
   isPublicUpstreamHost,
   parseOpenApiSpec,
   parseUpstreamUrl,
@@ -1179,6 +1180,246 @@ describe('upstream destination policy', () => {
       allowPrivate: false,
       resolve: resolvesTo([{ address: '93.184.216.34', family: 4 }]),
     });
+  });
+
+  it('refuses an upstream that names or resolves to the public gateway origin', async () => {
+    const named = parseUpstreamUrl('https://GATEWAY.EXAMPLE.TEST./api');
+    assert.ok(named);
+    await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(named, {
+        allowPrivate: true,
+        getGatewayPublicUrls: async () => ['https://gateway.example.test/'],
+        resolve: neverResolve,
+      }),
+    );
+
+    const alias = parseUpstreamUrl('https://gateway-alias.example.test');
+    assert.ok(alias);
+    await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(alias, {
+        allowPrivate: true,
+        getGatewayPublicUrls: async () => ['https://gateway.example.test/'],
+        resolve: (host) =>
+          Promise.resolve([
+            {
+              address: host.startsWith('gateway') ? '93.184.216.34' : '1.1.1.1',
+              family: 4 as const,
+            },
+          ]),
+      }),
+    );
+  });
+
+  it('refuses a mapped or NAT64 literal that embeds the gateway address', async () => {
+    // The gateway's public origin is the IPv4 93.184.216.34; an IPv4-mapped or
+    // NAT64 literal is textually different but delivers to the same address.
+    for (const url of ['http://[::ffff:5db8:d822]/', 'http://[64:ff9b::5db8:d822]/']) {
+      const upstream = parseUpstreamUrl(url);
+      assert.ok(upstream, url);
+      await expectSpecInvalidAsync(() =>
+        assertUpstreamAllowed(upstream, {
+          allowPrivate: true,
+          getGatewayPublicUrls: async () => ['http://93.184.216.34/'],
+          resolve: neverResolve,
+        }),
+      );
+    }
+  });
+
+  it('refuses an AAAA answer that embeds the gateway address', async () => {
+    const upstream = parseUpstreamUrl('https://alias.example.test');
+    assert.ok(upstream);
+    await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(upstream, {
+        allowPrivate: true,
+        getGatewayPublicUrls: async () => ['http://93.184.216.34/'],
+        resolve: () => Promise.resolve([{ address: '::ffff:5db8:d822', family: 6 as const }]),
+      }),
+    );
+  });
+
+  it('fails closed when a gateway origin cannot be resolved', async () => {
+    const upstream = parseUpstreamUrl('https://api.example.com');
+    assert.ok(upstream);
+    const error = await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(upstream, {
+        allowPrivate: true,
+        getGatewayPublicUrls: async () => ['https://gateway.example.test/'],
+        resolve: neverResolve,
+      }),
+    );
+    assert.equal((error.details as { reason?: string }).reason, 'gateway_unresolvable');
+  });
+
+  it('resolves gateway origins through the gateway resolver, still failing closed', async () => {
+    // A hosts-file-only name: the upstream resolver (which skips the hosts
+    // file) cannot answer it, and the gateway resolver can.
+    const gatewayOnly: UpstreamResolver = async (host) => {
+      if (host === 'gateway.hosts-only.test') return [{ address: '10.9.8.7', family: 4 }];
+      throw Object.assign(new Error(`no record for ${host}`), { code: 'ENOTFOUND' });
+    };
+    const distinct = parseUpstreamUrl('https://api.example.com');
+    assert.ok(distinct);
+    await assertUpstreamAllowed(distinct, {
+      allowPrivate: true,
+      getGatewayPublicUrls: async () => ['http://gateway.hosts-only.test:9000'],
+      resolve: resolvesTo([{ address: '93.184.216.34', family: 4 }]),
+      resolveGateway: gatewayOnly,
+    });
+
+    const looping = parseUpstreamUrl('http://10.9.8.7:8000');
+    assert.ok(looping);
+    const loop = await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(looping, {
+        allowPrivate: true,
+        getGatewayPublicUrls: async () => ['http://gateway.hosts-only.test:9000'],
+        resolve: neverResolve,
+        resolveGateway: gatewayOnly,
+      }),
+    );
+    assert.equal((loop.details as { reason?: string }).reason, 'gateway_origin');
+
+    const unknown = await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(distinct, {
+        allowPrivate: true,
+        getGatewayPublicUrls: async () => ['http://gateway.missing.test:9000'],
+        resolve: resolvesTo([{ address: '93.184.216.34', family: 4 }]),
+        resolveGateway: gatewayOnly,
+      }),
+    );
+    assert.equal((unknown.details as { reason?: string }).reason, 'gateway_unresolvable');
+  });
+
+  it('reads a localhost gateway origin as loopback without a lookup', async () => {
+    const upstream = parseUpstreamUrl('https://api.example.com');
+    assert.ok(upstream);
+    for (const origin of [
+      'http://localhost:9000',
+      'http://LOCALHOST.:9000',
+      'http://edge.localhost',
+    ]) {
+      await assertUpstreamAllowed(upstream, {
+        allowPrivate: false,
+        getGatewayPublicUrls: async () => [origin],
+        resolve: async (host) => {
+          assert.equal(host, 'api.example.com', 'only the upstream is looked up');
+          return [{ address: '93.184.216.34', family: 4 }];
+        },
+        resolveGateway: neverResolve,
+      });
+    }
+  });
+
+  it('treats every loopback and unspecified address as the gateway host', async () => {
+    for (const origin of ['http://127.0.0.1:9000', 'http://localhost:9000', 'http://[::1]:9000']) {
+      for (const url of [
+        'http://127.0.0.2:8080',
+        'http://0.0.0.0:8080',
+        'http://[::1]:8080',
+        'http://[::]:8080',
+        'http://[::ffff:127.0.0.1]:8080',
+        'http://localhost:8080',
+      ]) {
+        const upstream = parseUpstreamUrl(url);
+        assert.ok(upstream, url);
+        const error = await expectSpecInvalidAsync(() =>
+          assertUpstreamAllowed(upstream, {
+            allowPrivate: true,
+            getGatewayPublicUrls: async () => [origin],
+            resolve: neverResolve,
+          }),
+        );
+        assert.equal((error.details as { reason?: string }).reason, 'gateway_origin', url);
+      }
+    }
+
+    // A private destination that is not the local host is still allowed.
+    const lan = parseUpstreamUrl('http://10.20.30.40:8080');
+    assert.ok(lan);
+    await assertUpstreamAllowed(lan, {
+      allowPrivate: true,
+      getGatewayPublicUrls: async () => ['http://127.0.0.1:9000'],
+      resolve: neverResolve,
+    });
+  });
+
+  it('refuses a private upstream as private before the gateway-origin check', async () => {
+    const upstream = parseUpstreamUrl('http://[::1]:8080');
+    assert.ok(upstream);
+    const error = await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(upstream, {
+        allowPrivate: false,
+        getGatewayPublicUrls: async () => ['http://127.0.0.1:9000'],
+        resolve: neverResolve,
+      }),
+    );
+    assert.equal((error.details as { reason?: string }).reason, 'private_upstream');
+  });
+
+  it('builds a gateway resolver that answers from the hosts file', async () => {
+    // `localhost` is in every hosts file, and a hosts-file answer needs no
+    // nameserver, so this holds in a sandbox with no network.
+    const answers = await createGatewayResolver()('localhost');
+    assert.ok(answers.length > 0);
+    for (const { address, family } of answers) {
+      assert.ok(family === 4 ? address.startsWith('127.') : address === '::1', address);
+    }
+  });
+
+  it('refuses the publish when a gateway-origin lookup times out', async () => {
+    // The resolver's timeout timer is unref'd and the fake lookup never settles,
+    // so hold the event loop open until the timeout has fired.
+    const keepAlive = setInterval(() => {}, 1_000);
+    try {
+      // A resolver that never answers, as a blackholed nameserver behaves.
+      const resolveGateway = createGatewayResolver({
+        timeoutMs: 20,
+        lookup: () => new Promise<ResolvedAddress[]>(() => {}),
+      });
+      await assert.rejects(resolveGateway('gateway.blackholed.test'), { code: 'ETIMEOUT' });
+
+      const upstream = parseUpstreamUrl('https://api.example.com');
+      assert.ok(upstream);
+      const error = await expectSpecInvalidAsync(() =>
+        assertUpstreamAllowed(upstream, {
+          allowPrivate: true,
+          getGatewayPublicUrls: async () => ['https://gateway.blackholed.test/'],
+          resolve: resolvesTo([{ address: '93.184.216.34', family: 4 }]),
+          resolveGateway,
+        }),
+      );
+      assert.equal((error.details as { reason?: string }).reason, 'gateway_unresolvable');
+    } finally {
+      clearInterval(keepAlive);
+    }
+  });
+
+  it('reuses a gateway-origin answer briefly, and never a failure', async () => {
+    let clock = 0;
+    let calls = 0;
+    let fail = true;
+    const resolveGateway = createGatewayResolver({
+      cacheTtlMs: 1_000,
+      now: () => clock,
+      lookup: async () => {
+        calls += 1;
+        if (fail) throw Object.assign(new Error('SERVFAIL'), { code: 'ESERVFAIL' });
+        return [{ address: '10.9.8.7', family: 4 }];
+      },
+    });
+
+    await assert.rejects(resolveGateway('gateway.cached.test'));
+    fail = false;
+    assert.deepEqual(await resolveGateway('gateway.cached.test'), [
+      { address: '10.9.8.7', family: 4 },
+    ]);
+    assert.equal(calls, 2, 'the failure was not cached');
+    clock = 999;
+    await resolveGateway('gateway.cached.test');
+    assert.equal(calls, 2, 'the answer was reused inside the TTL');
+    clock = 1_000;
+    await resolveGateway('gateway.cached.test');
+    assert.equal(calls, 3, 'an expired answer is looked up again');
   });
 
   it('refuses a fully-qualified or mixed-case denylisted name before any lookup', async () => {

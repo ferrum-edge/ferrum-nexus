@@ -45,6 +45,11 @@ import { environmentWithEnvFile, type EnvOverride } from './config/env-file.js';
 import { loadConfig, type NexusConfig } from './config/index.js';
 import { createConsumerProvisioner } from './credentials/consumers.js';
 import { createCredentialsService, type CredentialsService } from './credentials/service.js';
+import {
+  createAccountRecoveryWorker,
+  runAccountRecovery,
+  type AccountRecoveryWorker,
+} from './credentials/account-recovery.js';
 import { createTeardownWorker, type TeardownWorker } from './credentials/teardown-worker.js';
 import { createStore } from './db/index.js';
 import type { NexusStore } from './db/store.js';
@@ -83,7 +88,11 @@ import { createNotificationsService, type NotificationsService } from './notific
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
 import { createApiViewersService, type ApiViewersService } from './publishing/viewers.js';
 import { createApplicationsService, type ApplicationsService } from './applications/service.js';
-import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
+import {
+  createGatewayResolver,
+  createUpstreamResolver,
+  type UpstreamResolver,
+} from './publishing/oas.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
 import { createServiceManifestService } from './service-manifest/service.js';
 import { createSsoService, type SsoService } from './sso/service.js';
@@ -120,6 +129,11 @@ export interface NexusServices {
    * one cycle deterministically in tests.
    */
   teardown: TeardownWorker;
+  /**
+   * Background recovery-revocation retrier for trusted password resets;
+   * `tick()` runs one cycle deterministically in tests.
+   */
+  recovery: AccountRecoveryWorker;
   /**
    * Hourly purge of expired sessions and verification tokens; `tick()` runs one
    * pass deterministically in tests.
@@ -193,6 +207,13 @@ export interface BuildServerDeps {
    */
   upstreamResolver?: UpstreamResolver;
   /**
+   * Resolve the gateway's own origins for the publishing loop guard. Defaults to
+   * an injected `upstreamResolver` when there is one, so a test that fakes DNS
+   * fakes it for both, and otherwise to {@link createGatewayResolver}, which
+   * honours `/etc/hosts`.
+   */
+  gatewayResolver?: UpstreamResolver;
+  /**
    * Start the outbox poller. Defaults to `false` under `NEXUS_ENV=test`, where
    * tests drive `services.outbox.tick()` themselves, and `true` elsewhere.
    */
@@ -203,6 +224,12 @@ export interface BuildServerDeps {
    * `services.teardown.tick()` themselves.
    */
   startTeardownWorker?: boolean;
+  /**
+   * Start the account-recovery revocation poller. Same default as
+   * {@link BuildServerDeps.startOutboxWorker}: tests drive
+   * `services.recovery.tick()` themselves.
+   */
+  startAccountRecoveryWorker?: boolean;
   /**
    * Start the expired-session and expired-token sweep. Same default as
    * {@link BuildServerDeps.startOutboxWorker}: tests drive
@@ -397,6 +424,7 @@ export async function buildServer(
     ...(deps.mailTransportFactory ? { transportFactory: deps.mailTransportFactory } : {}),
   });
   const notifications = createNotificationsService({ store: deps.store });
+  let revokeForAccountRecovery: CredentialsService['revokeForAccountRecovery'] | undefined;
   const auth = createAuthService({
     config,
     store: deps.store,
@@ -408,6 +436,9 @@ export async function buildServer(
     onRegistered: deps.onRegistered ?? defaultOnRegistered(config, email, notifications, warn),
     prepareVerificationResend: emailTokenPreparer(config, email, crypto, VERIFICATION_RESEND),
     preparePasswordReset: emailTokenPreparer(config, email, crypto, PASSWORD_RESET),
+    onFirstEmailProof: async (user, ip) => {
+      await revokeForAccountRecovery?.(user, ip);
+    },
   });
   const settings = createSettingsService({
     config,
@@ -473,6 +504,20 @@ export async function buildServer(
     locks,
     log: warn,
   });
+  revokeForAccountRecovery = async (user, ip) => {
+    const job = await deps.store.accountRecoveryJobs.findByUser(user.id);
+    if (!job) return 0;
+    const attempt = await runAccountRecovery({
+      credentials,
+      store: deps.store,
+      audit,
+      userId: user.id,
+      ip,
+      job,
+      log: warn,
+    });
+    return attempt.revoked;
+  };
   // One-off upgrade scan for `basicauth` appends an earlier release left
   // without a row. It must not keep the portal down: a failure is logged, the
   // service reports the scan `failed`, and — since completion is recorded only
@@ -532,6 +577,7 @@ export async function buildServer(
     settings,
     log: (obj, message) => app.log.error(obj, message),
     upstreamResolver: deps.upstreamResolver ?? createUpstreamResolver(),
+    gatewayResolver: deps.gatewayResolver ?? deps.upstreamResolver ?? createGatewayResolver(),
     specChangeNotifier: specChanges,
   });
   const usage = createUsageService({ store: deps.store, edge: deps.edge, publishing });
@@ -617,6 +663,17 @@ export async function buildServer(
     log: warn,
   });
 
+  // Retries the credential revocation a trusted password reset owes when Edge
+  // refused it; credential issuance stays blocked while a job is outstanding,
+  // up to a bounded number of failed attempts — see
+  // `credentials/account-recovery.ts`.
+  const recovery = createAccountRecoveryWorker({
+    store: deps.store,
+    credentials,
+    audit,
+    log: warn,
+  });
+
   // Deletes the sessions and single-use links that have outlived `expires_at`.
   // Every read already ignores them; without this nothing ever removed them and
   // both tables grew for good (issue #338).
@@ -642,6 +699,7 @@ export async function buildServer(
     email,
     outbox,
     teardown,
+    recovery,
     expirySweep,
     notifications,
     settings,
@@ -819,7 +877,12 @@ export async function buildServer(
   );
 
   await app.register(
-    async (scope) => scope.register(notificationsRoutes, { notifications, audit }),
+    async (scope) => {
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(notificationsRoutes, { notifications, audit });
+    },
     { prefix: '/api/notifications' },
   );
 
@@ -892,7 +955,12 @@ export async function buildServer(
   );
 
   await app.register(
-    async (scope) => scope.register(credentialsRoutes, { credentials, applications }),
+    async (scope) => {
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(credentialsRoutes, { credentials, applications });
+    },
     { prefix: '/api/credentials' },
   );
 
@@ -932,6 +1000,7 @@ export async function buildServer(
     await specChanges.stop();
     await outbox.stop();
     await teardown.stop();
+    await recovery.stop();
     await expirySweep.stop();
     await reconciliation.stop();
     await deps.edge.close();
@@ -944,6 +1013,7 @@ export async function buildServer(
   // so no timer ever fires mid-assert.
   if (deps.startOutboxWorker ?? config.env !== 'test') outbox.start();
   if (deps.startTeardownWorker ?? config.env !== 'test') teardown.start();
+  if (deps.startAccountRecoveryWorker ?? config.env !== 'test') recovery.start();
   if (deps.startExpirySweepWorker ?? config.env !== 'test') expirySweep.start();
   if (deps.startReconciliationWorker ?? config.env !== 'test') reconciliation.start();
 

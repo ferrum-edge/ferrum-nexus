@@ -67,7 +67,7 @@
  * above it — parsing, limits, `servers[0]` — still runs without a network.
  */
 
-import { Resolver } from 'node:dns/promises';
+import { lookup, Resolver } from 'node:dns/promises';
 import { isIP, type LookupFunction } from 'node:net';
 
 import {
@@ -285,6 +285,99 @@ export function createUpstreamResolver(
   };
 }
 
+/** How long one gateway-origin lookup may take before the publish is refused. */
+export const GATEWAY_DNS_TIMEOUT_MS = 5_000;
+
+/** How long a gateway origin's successful answer is reused. */
+export const GATEWAY_DNS_CACHE_TTL_MS = 30_000;
+
+/** Gateway origins whose answers are kept at once; the oldest is dropped first. */
+export const GATEWAY_DNS_CACHE_MAX_ENTRIES = 32;
+
+/** Every `dns.lookup` answer for `host`, through the system resolver. */
+async function systemLookup(host: string): Promise<ResolvedAddress[]> {
+  const answers = await lookup(host, { all: true });
+  return answers.map((entry): ResolvedAddress => ({
+    address: entry.address,
+    family: entry.family === 6 ? 6 : 4,
+  }));
+}
+
+/** Reject with `ETIMEOUT` once `ms` passes without `work` settling. */
+function withLookupTimeout<T>(work: Promise<T>, ms: number, host: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`Looking up ${host} took longer than ${ms} ms`);
+      reject(Object.assign(error, { code: 'ETIMEOUT' }));
+    }, ms);
+    timer.unref?.();
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * The resolver for the gateway's own origins: the system resolver, every answer.
+ *
+ * Unlike {@link createUpstreamResolver} this goes through `dns.lookup`
+ * (`getaddrinfo`), so `/etc/hosts` is honoured — `localhost`, a Compose
+ * `extra_hosts` entry, a Kubernetes `hostAliases` name. Those origins are
+ * operator configuration naming how Nexus itself reaches the gateway, so the
+ * host's own answer is the one to compare against. A lookup that fails still
+ * rejects, and the guard refuses the publish.
+ *
+ * `getaddrinfo` runs on the libuv threadpool, which scrypt shares, and has no
+ * timeout of its own. So a lookup is bounded at {@link GATEWAY_DNS_TIMEOUT_MS}
+ * and rejects when it runs over (the publish is refused, as for any other
+ * failure); concurrent lookups of one host share a single call; and a
+ * non-empty answer is reused for {@link GATEWAY_DNS_CACHE_TTL_MS}, for at most
+ * {@link GATEWAY_DNS_CACHE_MAX_ENTRIES} hosts. Failures are never cached.
+ */
+export function createGatewayResolver(
+  options: {
+    timeoutMs?: number;
+    cacheTtlMs?: number;
+    maxEntries?: number;
+    /** The underlying lookup; defaults to `dns.lookup` with `all: true`. */
+    lookup?: UpstreamResolver;
+    /** Injectable clock for the cache, in milliseconds. */
+    now?: () => number;
+  } = {},
+): UpstreamResolver {
+  const timeoutMs = options.timeoutMs ?? GATEWAY_DNS_TIMEOUT_MS;
+  const cacheTtlMs = options.cacheTtlMs ?? GATEWAY_DNS_CACHE_TTL_MS;
+  const maxEntries = Math.max(1, options.maxEntries ?? GATEWAY_DNS_CACHE_MAX_ENTRIES);
+  const resolveHost = options.lookup ?? systemLookup;
+  const now = options.now ?? Date.now;
+  const cache = new Map<string, { addresses: ResolvedAddress[]; expiresAt: number }>();
+  const inFlight = new Map<string, Promise<ResolvedAddress[]>>();
+
+  async function resolveFresh(host: string): Promise<ResolvedAddress[]> {
+    const addresses = await withLookupTimeout(resolveHost(host), timeoutMs, host);
+    if (addresses.length > 0) {
+      cache.delete(host);
+      if (cache.size >= maxEntries) {
+        const oldest = cache.keys().next();
+        if (!oldest.done) cache.delete(oldest.value);
+      }
+      cache.set(host, { addresses, expiresAt: now() + cacheTtlMs });
+    }
+    return addresses;
+  }
+
+  return async function resolveGatewayHost(host: string): Promise<ResolvedAddress[]> {
+    const cached = cache.get(host);
+    if (cached && cached.expiresAt > now()) return [...cached.addresses];
+    if (cached) cache.delete(host);
+    let pending = inFlight.get(host);
+    if (!pending) {
+      pending = resolveFresh(host).finally(() => inFlight.delete(host));
+      inFlight.set(host, pending);
+    }
+    return [...(await pending)];
+  };
+}
+
 /** How the publishing service decides which upstream destinations are acceptable. */
 export interface UpstreamPolicy {
   /**
@@ -294,6 +387,23 @@ export interface UpstreamPolicy {
    * `.localhost`/`.home.arpa` name suffixes are refused.
    */
   allowPrivate: boolean;
+  /**
+   * Every origin that may be the gateway's own proxy listener: the stored
+   * `gateway.public_url` override, `FERRUM_GATEWAY_PUBLIC_URL`, and the Admin
+   * API host — unioned, so none of them replaces another. An upstream that
+   * names or resolves to any of them is refused.
+   *
+   * The Admin API host is included because the gateway often shares a host
+   * between its control and data planes; when no public URL is configured it is
+   * the only origin Nexus knows. A gateway origin that cannot be resolved fails
+   * the publish closed rather than silently skipping the check.
+   */
+  getGatewayPublicUrls?: () => Promise<string[]>;
+  /**
+   * Resolves the gateway origins above; defaults to {@link resolve}. The
+   * server passes {@link createGatewayResolver}, which honours `/etc/hosts`.
+   */
+  resolveGateway?: UpstreamResolver;
   /**
    * Resolves a DNS name to its A/AAAA answers.
    *
@@ -316,6 +426,29 @@ function privateUpstreamError(host: string, resolved?: string[]): NexusError {
       reason: 'private_upstream',
       ...(resolved === undefined ? {} : { resolved }),
     },
+  );
+}
+
+/** Refuse a backend that would route a proxy back into the same public gateway. */
+function gatewayLoopError(host: string): NexusError {
+  return specInvalid(
+    `The upstream host '${host}' resolves to the gateway's public origin and would loop requests`,
+    { field: 'upstream_url', host, reason: 'gateway_origin' },
+  );
+}
+
+/**
+ * `SPEC_INVALID` when a gateway origin cannot be resolved to compare against.
+ *
+ * The check fails closed: an unknown gateway answer cannot show the upstream to
+ * be distinct from the gateway, so the publish is refused rather than allowed.
+ */
+function gatewayUnresolvableError(host: string): NexusError {
+  return specInvalid(
+    `The gateway's own host '${host}' could not be resolved, so the upstream cannot be shown ` +
+      'to avoid looping back to the gateway; publishing is refused until the gateway resolves ' +
+      '(check FERRUM_ADMIN_URL, FERRUM_GATEWAY_PUBLIC_URL and DNS)',
+    { field: 'upstream_url', host, reason: 'gateway_unresolvable' },
   );
 }
 
@@ -357,7 +490,8 @@ function unresolvableUpstreamError(host: string): NexusError {
  * [`docs/security.md`](../../../docs/security.md).
  *
  * Deployments that legitimately front internal services opt out with
- * `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which short-circuits before any lookup.
+ * `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which skips the destination privacy
+ * checks — but never the gateway-origin loop guard that runs after them.
  *
  * @throws NexusError `SPEC_INVALID` naming the host and the setting to change.
  */
@@ -365,11 +499,19 @@ export async function assertUpstreamAllowed(
   upstream: SpecUpstream,
   policy: UpstreamPolicy,
 ): Promise<void> {
-  // Opting in short-circuits before the network: the answer cannot change the
-  // outcome, and the documented local-development upstream
-  // (`host.docker.internal`) does not resolve from most hosts at all.
-  if (policy.allowPrivate) return;
+  // Destination privacy first, so a private upstream is refused as one. The
+  // deployment may opt out of it; it never opts out of the gateway-origin loop
+  // guard that follows, which refuses a backend naming or resolving to the
+  // gateway in every mode.
+  if (!policy.allowPrivate) await assertPublicDestination(upstream, policy.resolve);
+  await assertNotGatewayOrigin(upstream, policy);
+}
 
+/** The destination privacy lines of {@link assertUpstreamAllowed}. */
+async function assertPublicDestination(
+  upstream: SpecUpstream,
+  resolve: UpstreamResolver,
+): Promise<void> {
   if (!isPublicUpstreamHost(upstream.host)) throw privateUpstreamError(upstream.host);
 
   // An IP literal *is* the destination; the check above already decided it.
@@ -377,7 +519,7 @@ export async function assertUpstreamAllowed(
 
   let resolved: ResolvedAddress[];
   try {
-    resolved = await policy.resolve(upstream.host);
+    resolved = await resolve(upstream.host);
   } catch {
     throw unresolvableUpstreamError(upstream.host);
   }
@@ -388,6 +530,116 @@ export async function assertUpstreamAllowed(
       resolved.map((entry) => entry.address),
     );
   }
+}
+
+/** Refuse an upstream that names or resolves to any of the gateway's own origins. */
+async function assertNotGatewayOrigin(
+  upstream: SpecUpstream,
+  policy: UpstreamPolicy,
+): Promise<void> {
+  const gatewayOrigins = (await policy.getGatewayPublicUrls?.()) ?? [];
+  if (gatewayOrigins.length === 0) return;
+  const upstreamAddresses = await addressesForHost(upstream.host, policy.resolve, false);
+  const upstreamHost = canonicalHost(upstream.host);
+  const resolveGateway = policy.resolveGateway ?? policy.resolve;
+  for (const origin of gatewayOrigins) {
+    let gatewayHost: string;
+    try {
+      gatewayHost = new URL(origin).hostname.replace(/^\[|\]$/g, '');
+    } catch {
+      // A malformed stored origin is rejected on write; skip it rather than
+      // fail every publish over a value this guard cannot read.
+      continue;
+    }
+    // Canonicalize both sides so an IPv4-mapped, NAT64 or 6to4 literal that
+    // embeds the gateway's IPv4 address — or an AAAA answer that does — is
+    // caught even though it is textually different.
+    if (canonicalHost(gatewayHost) === upstreamHost) throw gatewayLoopError(upstream.host);
+
+    const gatewayAddresses = await addressesForHost(gatewayHost, resolveGateway, true);
+    const loops = gatewayAddresses.some((gateway) =>
+      upstreamAddresses.some((address) => sameDestination(gateway, address)),
+    );
+    if (loops) throw gatewayLoopError(upstream.host);
+  }
+}
+
+/** Canonical IPv6 loopback, as {@link canonicalAddress} spells it. */
+const IPV6_LOOPBACK = '0:0:0:0:0:0:0:1';
+
+/** Canonical IPv6 unspecified address, as {@link canonicalAddress} spells it. */
+const IPV6_UNSPECIFIED = '0:0:0:0:0:0:0:0';
+
+/**
+ * Whether a canonical address reaches the local host: `127.0.0.0/8`, `::1`, or
+ * the unspecified `0.0.0.0`/`::`, which a connect delivers to loopback.
+ */
+function isLocalHostAddress(address: string): boolean {
+  if (isIP(address) === 4) return address.startsWith('127.') || address === '0.0.0.0';
+  return address === IPV6_LOOPBACK || address === IPV6_UNSPECIFIED;
+}
+
+/**
+ * Whether two canonical addresses are one destination. Every loopback and
+ * unspecified spelling is the same host, so a gateway on `127.0.0.1` is also
+ * reached through `127.0.0.2`, `0.0.0.0` or `[::1]`.
+ */
+function sameDestination(a: string, b: string): boolean {
+  return a === b || (isLocalHostAddress(a) && isLocalHostAddress(b));
+}
+
+/** Resolve host names to comparable addresses without changing the egress policy. */
+async function addressesForHost(
+  host: string,
+  resolve: UpstreamResolver,
+  required: boolean,
+): Promise<string[]> {
+  const normalized = normalizeHost(host).replace(/^\[|\]$/g, '');
+  if (isIP(normalized) !== 0) return [canonicalAddress(normalized)];
+  // `localhost` and its subdomains are loopback by definition (RFC 6761),
+  // whatever a resolver that skips the hosts file says about them.
+  if (normalized === 'localhost' || normalized.endsWith('.localhost')) {
+    return ['127.0.0.1', IPV6_LOOPBACK];
+  }
+  let resolved: ResolvedAddress[];
+  try {
+    resolved = await resolve(normalized);
+  } catch {
+    if (required) throw gatewayUnresolvableError(host);
+    return [];
+  }
+  if (required && resolved.length === 0) throw gatewayUnresolvableError(host);
+  return resolved.map((entry) => canonicalAddress(entry.address));
+}
+
+/**
+ * The comparable form of a host: a canonical address when it is an IP literal,
+ * otherwise the normalized name. Two spellings that name one destination —
+ * `API.INTERNAL.` and `api.internal`, or `93.184.216.34` and its IPv4-mapped
+ * `::ffff:5db8:d822` — produce the same value.
+ */
+function canonicalHost(host: string): string {
+  const bare = host.replace(/^\[|\]$/g, '');
+  return isIP(bare) === 0 ? normalizeHost(bare) : canonicalAddress(bare);
+}
+
+/**
+ * The comparable spelling of an IP literal.
+ *
+ * An IPv6 address that carries the IPv4 address the packet is really delivered
+ * to — IPv4-mapped (`::ffff:93.184.216.34`), NAT64 (`64:ff9b::5db8:d822`) or
+ * 6to4 (`2002:5db8:d822::`) — reads as that IPv4 address, so it compares equal
+ * to the bare literal. Any other IPv6 address is expanded to its eight groups,
+ * so the several textual forms of one address compare equal.
+ */
+function canonicalAddress(address: string): string {
+  const bare = address.replace(/^\[|\]$/g, '').toLowerCase();
+  const version = isIP(bare);
+  if (version === 4) return bare;
+  if (version !== 6) return bare;
+  const hextets = ipv6Hextets(bare);
+  if (hextets === null) return bare;
+  return embeddedIpv4(hextets) ?? hextets.map((group) => group.toString(16)).join(':');
 }
 
 /**

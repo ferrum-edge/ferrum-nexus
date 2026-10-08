@@ -387,6 +387,8 @@ export interface AuthServiceDeps {
   prepareVerificationResend?: PrepareEmailToken;
   /** Optional hook that renders and queues a password-reset link. */
   preparePasswordReset?: PrepareEmailToken;
+  /** Revoke credentials when a reset establishes the account's first trusted proof. */
+  onFirstEmailProof?: (user: UserRecord, ip: string | null) => Promise<void>;
 }
 
 /** Strip the password hash: the wire shape of a user. */
@@ -866,9 +868,14 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 
         const user = await tx.users.update(row.user_id, { email_verified: true });
         if (!user) throw validationFailed('That verification link is not valid');
-        // The one proof of the address that single sign-on accepts for linking;
-        // `email_verified` alone can be true without any.
-        await tx.emailProofs.upsert(user.id, user.email, 'verification_link', nowIso());
+        // Record the (weaker) verification proof only when it does not replace a
+        // stronger one for the same address: a reset already proved control of
+        // the mailbox, and overwriting that with `verification_link` would
+        // re-block single sign-on linking and make the next reset revoke again.
+        const priorProof = await tx.emailProofs.findByUser(user.id);
+        if (priorProof === null || priorProof.email !== user.email.trim().toLowerCase()) {
+          await tx.emailProofs.upsert(user.id, user.email, 'verification_link', nowIso());
+        }
 
         await audit
           .forStore(tx)
@@ -1082,7 +1089,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       const passwordHash = await crypto.hashPassword(newPassword);
 
       await serializePasswordChange(record.id, async () => {
-        await store.transaction(async (tx) => {
+        const reset = await store.transaction(async (tx) => {
           // Recheck after taking the lease: an earlier change may have deleted
           // the link, or it may have expired while hashing or waiting.
           const live = await tx.verificationTokens.findByTokenHash(
@@ -1113,24 +1120,67 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
           );
           if (!updated) throw invalidResetLink();
 
+          const priorProof = await tx.emailProofs.findByUser(updated.id);
+          const firstTrustedProof =
+            priorProof === null ||
+            priorProof.method === 'verification_link' ||
+            priorProof.email !== updated.email.trim().toLowerCase();
+
           // Redeeming a mailed link proves the mailbox.
           await tx.emailProofs.upsert(updated.id, updated.email, 'password_reset', nowIso());
+
+          // The revocation a first trusted proof owes is a durable job written
+          // here, so it commits with the proof: Edge being unreachable cannot
+          // leave the squatter's key live with no record that it is owed. The
+          // squatter's outstanding access requests are cancelled with the reset.
+          let cancelledRequests = 0;
+          if (firstTrustedProof) {
+            await tx.accountRecoveryJobs.upsertPending(updated.id, nowIso());
+            for (;;) {
+              const pending = await tx.accessRequests.list({
+                user_id: updated.id,
+                status: 'pending',
+              });
+              if (pending.items.length === 0) break;
+              let cancelledThisPage = 0;
+              for (const request of pending.items) {
+                const cancelled = await tx.accessRequests.updateIfStatus(request.id, 'pending', {
+                  status: 'cancelled',
+                });
+                if (cancelled) {
+                  cancelledThisPage += 1;
+                  cancelledRequests += 1;
+                }
+              }
+              if (cancelledThisPage === 0) break;
+            }
+          }
 
           // Any other reset link for this account dies with this one, and every
           // session goes: whoever prompted the reset must not keep a live one.
           await tx.verificationTokens.deleteForUser(record.id, 'password_reset');
           await tx.sessions.deleteForUser(record.id);
 
-          await audit
-            .forStore(tx)
-            .record(
-              { id: updated.id, role: updated.role },
-              AuditAction.AUTH_PASSWORD_RESET,
-              { type: 'user', id: updated.id },
-              { email: updated.email },
-              context.ip,
-            );
+          await audit.forStore(tx).record(
+            { id: updated.id, role: updated.role },
+            AuditAction.AUTH_PASSWORD_RESET,
+            { type: 'user', id: updated.id },
+            {
+              email: updated.email,
+              ...(firstTrustedProof
+                ? {
+                    credentials_revocation_pending: true,
+                    cancelled_access_requests: cancelledRequests,
+                  }
+                : {}),
+            },
+            context.ip,
+          );
+          return { user: updated, firstTrustedProof };
         });
+        if (reset.firstTrustedProof) {
+          await deps.onFirstEmailProof?.(reset.user, context.ip);
+        }
       });
     },
   };

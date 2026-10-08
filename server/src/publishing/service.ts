@@ -593,6 +593,12 @@ export interface PublishingServiceDeps {
    */
   upstreamResolver: UpstreamResolver;
   /**
+   * Resolves the gateway's own origins for the upstream loop guard. Defaults to
+   * `upstreamResolver`; the server passes one that honours `/etc/hosts`,
+   * because those origins are operator configuration.
+   */
+  gatewayResolver?: UpstreamResolver;
+  /**
    * Tells an API's grantees what a published revision changed (issue #447).
    * Started after the revision has committed and not awaited, so it can
    * neither slow the publish down nor fail it. Absent, nobody is told.
@@ -1058,6 +1064,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   const upstreamPolicy: UpstreamPolicy = {
     allowPrivate: config.allowPrivateUpstreams,
     resolve: deps.upstreamResolver,
+    resolveGateway: deps.gatewayResolver,
+    getGatewayPublicUrls: () => settings.listGatewayPublicUrls(),
   };
 
   function assertCanAdminister(actor: UserRecord, api: ApiRecord): void {

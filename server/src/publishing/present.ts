@@ -29,6 +29,11 @@ import type { ApiRecord } from '../db/store.js';
 export interface GatewayUrlSource {
   /** The configured proxy-listener origin, or `null` when there is none. */
   getGatewayPublicUrl(): Promise<string | null>;
+  /**
+   * Every origin the upstream guard treats as the gateway itself: the stored
+   * override, the environment URL and the Admin API origin, unioned.
+   */
+  listGatewayPublicUrls(): Promise<string[]>;
 }
 
 /** `<origin><listen path>`, or `null` when no origin is configured. */

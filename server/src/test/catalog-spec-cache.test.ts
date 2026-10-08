@@ -96,7 +96,10 @@ describe('catalog spec cache', () => {
     cache = new LruCache<CatalogSpecRendering>({ maxEntries: 16, maxBytes: 1024 * 1024 });
     catalog = createCatalogService({
       store: harness.store,
-      settings: { getGatewayPublicUrl: async () => gatewayUrl },
+      settings: {
+        getGatewayPublicUrl: async () => gatewayUrl,
+        listGatewayPublicUrls: async () => (gatewayUrl ? [gatewayUrl] : []),
+      },
       specCache: cache,
     });
   }
@@ -219,7 +222,10 @@ describe('catalog spec cache', () => {
     cache = new LruCache<CatalogSpecRendering>({ maxEntries: 1, maxBytes: 1024 * 1024 });
     catalog = createCatalogService({
       store: harness.store,
-      settings: { getGatewayPublicUrl: async () => gatewayUrl },
+      settings: {
+        getGatewayPublicUrl: async () => gatewayUrl,
+        listGatewayPublicUrls: async () => (gatewayUrl ? [gatewayUrl] : []),
+      },
       specCache: cache,
     });
     await catalog.spec(owner, 'spec-cache-public');

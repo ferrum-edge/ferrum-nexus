@@ -21,6 +21,8 @@ import { parseOrThrow } from '../middleware/error-handler.js';
 import type { NotificationsService } from '../notifications/service.js';
 import { booleanQuerySchema, listOptions, listQuerySchema, toBoolean } from './common.js';
 
+const NOTIFICATION_READ_RATE_LIMIT = { max: 60, timeWindow: '1 minute' } as const;
+
 /** Services this route plugin needs. */
 export interface NotificationsRoutesOptions {
   notifications: NotificationsService;
@@ -75,22 +77,28 @@ export const notificationsRoutes: FastifyPluginAsync<NotificationsRoutesOptions>
     );
   });
 
-  app.post('/read', async (request): Promise<MarkNotificationsReadResponse> => {
-    const { user } = requireAuth(request);
-    const input = parseOrThrow(markReadBody, request.body);
-    const updated =
-      input.all === true
-        ? await notifications.markAllRead(user.id)
-        : await notifications.markRead(user.id, input.ids ?? []);
+  app.post(
+    '/read',
+    { config: { rateLimit: { ...NOTIFICATION_READ_RATE_LIMIT } } },
+    async (request): Promise<MarkNotificationsReadResponse> => {
+      const { user } = requireAuth(request);
+      const input = parseOrThrow(markReadBody, request.body);
+      const updated =
+        input.all === true
+          ? await notifications.markAllRead(user.id)
+          : await notifications.markRead(user.id, input.ids ?? []);
 
-    await audit.record(
-      { id: user.id, role: user.role },
-      AuditAction.NOTIFICATION_READ,
-      { type: 'notification', id: null },
-      { updated, all: input.all === true },
-      clientIp(request),
-    );
+      if (updated > 0) {
+        await audit.record(
+          { id: user.id, role: user.role },
+          AuditAction.NOTIFICATION_READ,
+          { type: 'notification', id: null },
+          { updated, all: input.all === true },
+          clientIp(request),
+        );
+      }
 
-    return { updated, unread_count: await notifications.countUnread(user.id) };
-  });
+      return { updated, unread_count: await notifications.countUnread(user.id) };
+    },
+  );
 };

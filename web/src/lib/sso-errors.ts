@@ -19,7 +19,7 @@ export const SSO_ERROR_MESSAGES: Readonly<Record<SsoErrorReason, string>> = {
   account_exists:
     'An account with this email address already exists and could not be linked automatically. Sign in with your password and link single sign-on from your profile, or ask an administrator.',
   address_unproven:
-    'Single sign-on can only be linked once this portal has confirmed your email address. Use Forgot password to reset your password, which confirms your address, then link again.',
+    'Single sign-on can only be linked once this portal has confirmed your email address. Use Forgot password to reset your password, which confirms your address, then link again. Resetting the password of an account that has never confirmed its address also revokes any API keys it already holds.',
   privileged_account:
     'An account that is, or that this provider would make, an administrator is never linked automatically. Sign in the way you usually do, then link single sign-on from your profile. If you cannot sign in to the account holding your address, ask a super admin to review it and use Admin → Users → Release address after disabling it, removing its sign-in links and completing gateway revocation.',
   link_session_mismatch:
