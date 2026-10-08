@@ -37,6 +37,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
 import { TextDecoder } from 'node:util';
 
 import { Agent, request, type Dispatcher } from 'undici';
@@ -63,12 +64,14 @@ import {
 import { parsePrometheusText, type PrometheusSample } from './prometheus.js';
 import {
   assessBackendEgress,
+  createDataPlaneSightings,
   describeDataPlaneAttestation,
   isUnsupportedEgressPolicySchema,
   readBackendEgressPolicy,
   type BackendEgressAdmission,
   type BackendEgressPolicy,
   type BackendEgressPolicyReading,
+  type DataPlaneFreshness,
 } from './egress-policy.js';
 import type {
   EdgeApiSpecDocument,
@@ -1036,6 +1039,27 @@ const UNSUPPORTED_SCHEMA_REASON = 'unsupported_egress_policy_schema';
  */
 export const EGRESS_POLICY_MAX_BYTES = 4 * 1024 * 1024;
 
+/** The shape of an RFC 9110 IMF-fixdate, the only `Date` form a server may generate. */
+const IMF_FIXDATE = /^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+
+/**
+ * The gateway's clock from a response `Date` header, in epoch milliseconds, or
+ * `undefined` when it sent none Nexus can read. The header has whole seconds
+ * and is stamped no earlier than the answer was built. Without it, stream age
+ * is never read from `connected_at`; only this process's sightings settle.
+ */
+export function gatewayDateMillis(value: string | string[] | undefined): number | undefined {
+  if (typeof value !== 'string' || !IMF_FIXDATE.test(value)) return undefined;
+  const millis = Date.parse(value);
+  return Number.isFinite(millis) ? millis : undefined;
+}
+
+/** One policy reading, with what tells how long its listed data planes have existed. */
+interface EgressPolicyObservation {
+  reading: BackendEgressPolicyReading;
+  freshness: DataPlaneFreshness;
+}
+
 function isUnsupportedSchemaRefusal(error: unknown): boolean {
   if (!(error instanceof NexusError)) return false;
   const details = error.details as { reason?: unknown } | undefined;
@@ -1085,6 +1109,9 @@ export function createFerrumAdminClient(
   );
   const namespace = config.namespace;
   const namespaceMonitor = createNamespaceMonitor(namespace);
+  // Every policy read feeds it, so a data plane's routine reconnect keeps the
+  // guarantee once this process has seen its node_id long enough (#540).
+  const dataPlaneSightings = createDataPlaneSightings();
 
   function urlFor(path: string, query?: CallOptions['query']): string {
     const url = new URL(config.adminUrl + path);
@@ -1502,10 +1529,18 @@ export function createFerrumAdminClient(
     return edgeError('The gateway rejected the request', { status });
   }
 
-  async function readEgressPolicy(signal?: AbortSignal): Promise<BackendEgressPolicyReading> {
+  async function readEgressPolicy(signal?: AbortSignal): Promise<EgressPolicyObservation> {
+    // Taken before the request: the answer describes a later moment, so stream
+    // ages measured from here never overstate it.
+    const readAt = Date.now();
+    const startedAt = performance.now();
+    let gatewayDate: number | undefined;
     const value = await callRequired<unknown>('GET', '/backend-egress-policy', {
       signal,
       maxResponseBytes: EGRESS_POLICY_MAX_BYTES,
+      responseHeaders: (headers) => {
+        gatewayDate = gatewayDateMillis(headers.date);
+      },
     });
     // Another schema (schema 1 from Edge v0.9.12 or earlier, or a newer one) is
     // still refused, under its own reason: the operator needs to tell a version
@@ -1525,18 +1560,22 @@ export function createFerrumAdminClient(
         'Ferrum Edge data-plane egress attestation set aside; public-only egress not guaranteed',
       );
     }
-    return reading;
+    const settledNodeIds =
+      reading.attestationProblem === null
+        ? dataPlaneSightings.observe(reading.policy, startedAt)
+        : new Set<string>();
+    return { reading, freshness: { readAt, gatewayDate, settledNodeIds } };
   }
 
   async function backendEgressPolicy(signal?: AbortSignal): Promise<BackendEgressPolicy> {
-    return (await readEgressPolicy(signal)).policy;
+    return (await readEgressPolicy(signal)).reading.policy;
   }
 
   async function assertBackendEgress(): Promise<BackendEgressAdmission> {
-    const reading = await readEgressPolicy();
+    const { reading, freshness } = await readEgressPolicy();
     // Either opt-out admits a recognized weaker process policy, but neither
     // describes it as public-only, and neither skips the parse above.
-    const assessment = assessBackendEgress(reading, deps);
+    const assessment = assessBackendEgress(reading, deps, freshness);
     if (assessment.admission === null) {
       const message = 'The gateway cannot establish the required local public egress policy';
       // A control plane's refusal also says why its attestation did not count.
@@ -1864,7 +1903,8 @@ export function createFerrumAdminClient(
         let backendEgressSchemaUnsupported = false;
         let backendEgressDetail: string | null = null;
         try {
-          const assessment = assessBackendEgress(await readEgressPolicy(signal), deps);
+          const { reading, freshness } = await readEgressPolicy(signal);
+          const assessment = assessBackendEgress(reading, deps, freshness);
           // The guarantee is the gateway's alone: an opt-out accepts a weaker
           // policy for writes, but never turns it into public-only egress.
           publicEgressGuaranteed = assessment.publicEgressGuaranteed;

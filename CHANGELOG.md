@@ -6,6 +6,23 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Data-plane attestation counts each data plane once across restarts** (#540). A
+  control plane's data-plane attestation now counts a data plane toward
+  `NEXUS_EXPECTED_DATA_PLANES` only once it has been listed long enough that a
+  restarted data plane cannot be counted twice, by which time Edge has dropped the
+  stale stream of the process it replaced. The guarantee still needs at least that
+  many such data planes, so a scale-up or a rolling update keeps it while the settled
+  ones reach the value. Until they do, and when stream timestamps contradict Nexus's
+  or the gateway's clock, backend writes are refused and health is `degraded`
+  (`backend_egress_unverified`); an admin's `edge.error` says why, and a refused
+  write's `details.data_plane_attestation` is `data_plane_recently_connected` or
+  `data_plane_clock_skew`. Stream age is read from `connected_at` only when the answer
+  carries the gateway's `Date` header; without one, only data planes Nexus itself has
+  seen listed for a minute count. A data plane's routine reconnect keeps counting once
+  Nexus has seen it.
+
 ### Security
 
 - **Tighten account linking and gateway write controls** (#544). Email verification

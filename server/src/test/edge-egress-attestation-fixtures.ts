@@ -68,11 +68,14 @@ function weaken(a: DataPlaneReport, b: DataPlaneReport): DataPlaneReport {
 
 /**
  * A control plane's answer with one live stream per report, computed the way
- * Edge computes it. Tests patch the result to build inconsistent answers.
+ * Edge computes it. Every stream connected `connectedAt`, by default ten
+ * minutes before the call, so each has settled (#540) yet none is older than
+ * Edge lets a stream live. Tests patch the result to build inconsistent answers.
  */
 export function attestedControlPlanePolicy(
   reports: (DataPlaneReport | null)[],
   namespace = 'nexus',
+  connectedAt = new Date(Date.now() - 10 * 60_000).toISOString(),
 ): Record<string, unknown> {
   let weakest: DataPlaneReport | null = null;
   for (const report of reports) {
@@ -93,7 +96,7 @@ export function attestedControlPlanePolicy(
         complete && weakest !== null && dataPlanePolicy(weakest).public_only_guaranteed === true,
       data_planes: reports.map((report, index) => ({
         node_id: `dp-${index}`,
-        connected_at: '2026-10-06T12:00:00+00:00',
+        connected_at: connectedAt,
         attestation: report === null ? 'unknown' : 'reported',
         policy: report === null ? null : dataPlanePolicy(report),
       })),

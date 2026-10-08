@@ -490,7 +490,10 @@ export interface NexusConfig {
    *
    * A control plane attests only the data planes streaming from it, so this is
    * the operator's whole inventory for the namespace, across every control
-   * plane. `undefined` (the default) means an attestation never proves it.
+   * plane. A `node_id` counts only once it has been listed long enough that no
+   * restarted data plane can count twice, and at least this many must have; more
+   * never withhold the guarantee. `undefined` (the default) means an attestation
+   * never proves it.
    */
   expectedDataPlanes: number | undefined;
   /**

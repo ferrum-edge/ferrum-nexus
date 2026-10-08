@@ -9,6 +9,7 @@ import type { ApiErrorBody, AppHealth, EdgeHealth } from '@ferrum-nexus/shared';
 
 import { attestedControlPlanePolicy } from './edge-egress-attestation-fixtures.js';
 import { publicEgressPolicy } from './mock-ferrum-edge.js';
+import type { DataPlaneEgressAttestation } from '../ferrum-admin/egress-policy.js';
 import type { NexusError } from '../lib/errors.js';
 import { OPAQUE_ERROR } from '../routes/health.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
@@ -308,6 +309,48 @@ describe('health endpoints', () => {
         unproven.json<EdgeHealth>().error ?? '',
         /not every connected data plane attests public-only egress/,
       );
+    }
+  });
+
+  it('withholds the guarantee while a restarted data plane may count twice', async (t) => {
+    const portal = await buildTestApp({ env: { NEXUS_EXPECTED_DATA_PLANES: '2' } });
+    t.after(() => portal.close());
+    const admin = await portal.registerUser();
+    // One data plane's stale stream, and its restarted process under a new node_id.
+    const restart = attestedControlPlanePolicy([{ mode: 'public' }, { mode: 'public' }]);
+    const attestation = restart.data_plane_attestation as DataPlaneEgressAttestation;
+    attestation.data_planes[1]!.connected_at = new Date().toISOString();
+    portal.edge.setBackendEgressPolicy(restart);
+    const response = await portal.authed(admin, { method: 'GET', url: '/api/health/edge' });
+    const health = response.json<EdgeHealth>();
+    assert.equal(health.status, 'degraded');
+    assert.equal(health.reason, 'backend_egress_unverified');
+    assert.equal(health.public_egress_guaranteed, false);
+    assert.match(health.error ?? '', /connected too recently/);
+    await assert.rejects(portal.edgeClient.assertBackendEgress(), /connected too recently/);
+  });
+
+  it('reads stream age against the control plane Date header, and waits without one', async (t) => {
+    const fleet = attestedControlPlanePolicy([{ mode: 'public' }, { mode: 'public' }]);
+    const cases: [string | null, RegExp][] = [
+      // The gateway's clock an hour behind: streams ten minutes old are in its future.
+      [new Date(Date.now() - 3_600_000).toUTCString(), /connected_at is implausible/],
+      // Without a Date, only this process's own sightings can settle a data plane.
+      [null, /connected too recently/],
+    ];
+    for (const [date, why] of cases) {
+      const portal = await buildTestApp({ env: { NEXUS_EXPECTED_DATA_PLANES: '2' } });
+      t.after(() => portal.close());
+      const admin = await portal.registerUser();
+      portal.edge.setBackendEgressPolicy(fleet);
+      portal.edge.setBackendEgressPolicyDate(date);
+      const response = await portal.authed(admin, { method: 'GET', url: '/api/health/edge' });
+      const health = response.json<EdgeHealth>();
+      assert.equal(health.status, 'degraded', String(date));
+      assert.equal(health.reason, 'backend_egress_unverified', String(date));
+      assert.equal(health.public_egress_guaranteed, false, String(date));
+      assert.match(health.error ?? '', why, String(date));
+      await assert.rejects(portal.edgeClient.assertBackendEgress(), why);
     }
   });
 

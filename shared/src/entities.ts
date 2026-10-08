@@ -942,10 +942,12 @@ export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
    * `data_plane_attestation` (Edge v0.9.14) shows every connected data plane
    * reporting public-only without allow overrides, with at least
    * `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`, and at least
-   * one) connected. Nexus grants this
+   * one) connected, counting each only once it has been listed long enough that
+   * no restarted one can count twice. Nexus grants this
    * guarantee to nothing else. `false` for a control plane without that
-   * attestation (Edge v0.9.13), with the expected count unset or not reached,
-   * with no, an unknown or a weaker data plane, or whose attestation Nexus set
+   * attestation (Edge v0.9.13), with the expected count unset or not reached by
+   * data planes listed that long, with a `connected_at` that contradicts the
+   * clocks, with no, an unknown or a weaker data plane, or whose attestation Nexus set
    * aside as malformed or inconsistent; for any weaker or unreadable policy; and
    * for an unreachable gateway.
    * Neither `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` nor

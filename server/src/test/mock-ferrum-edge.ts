@@ -250,6 +250,11 @@ export interface MockFerrumEdge {
   /** Exact owner-contract response; null models the missing capability. */
   setBackendEgressPolicy(payload: Record<string, unknown> | null): void;
   /**
+   * The `Date` header of `GET /backend-egress-policy`: this value instead of the
+   * mock's own clock, or none at all for `null`. `reset()` restores the clock.
+   */
+  setBackendEgressPolicyDate(date: string | null): void;
+  /**
    * Model a namespace past Edge v0.9.13's conditional snapshot bound: `GET
    * /deployment-snapshot` answers `507` (`durable: "not_started"`) and each
    * conditional deployment mutation answers `507` from inside its rolled-back
@@ -1757,6 +1762,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const lostAcks: QueuedFailure[] = [];
   const delays: QueuedDelay[] = [];
   let egressPolicy: Record<string, unknown> | null | undefined;
+  let egressPolicyDate: string | null | undefined;
   let deploymentSnapshotTooLarge = false;
   /**
    * Responses whose acknowledgement is being dropped, keyed by the response
@@ -3722,6 +3728,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           public_only_guaranteed: scope === 'local-data-plane',
         };
         res.setHeader('cache-control', 'no-store');
+        if (egressPolicyDate === null) res.sendDate = false;
+        else if (egressPolicyDate !== undefined) res.setHeader('date', egressPolicyDate);
         return send(res, 200, payload);
       }
       case 'health':
@@ -3830,6 +3838,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     setBackendEgressPolicy(payload): void {
       egressPolicy = payload;
     },
+    setBackendEgressPolicyDate(date): void {
+      egressPolicyDate = date;
+    },
     setDeploymentSnapshotTooLarge(tooLarge): void {
       deploymentSnapshotTooLarge = tooLarge;
     },
@@ -3863,6 +3874,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     reset(): void {
       egressPolicy = undefined;
+      egressPolicyDate = undefined;
       deploymentSnapshotTooLarge = false;
       consumers.clear();
       proxies.clear();
