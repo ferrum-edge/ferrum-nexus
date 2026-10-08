@@ -7,8 +7,7 @@
  * account and its applications hold. The reset itself is a database write, but
  * the revocation is an HTTP call to Ferrum Edge; a failed call cannot roll the
  * reset back, and — because the proof has already been upgraded — every later
- * reset would treat the revocation as done and never retry. That is the fail
- * open `GHSA-rp99-hqw5-q7f9` describes.
+ * reset would treat the revocation as done and never retry.
  *
  * So the reset writes an `account_recovery_jobs` row in the **same
  * transaction**, making the debt commit with the account state. This worker
