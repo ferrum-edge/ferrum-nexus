@@ -671,9 +671,10 @@ export interface EdgeProbe {
    * Whether the sampled policy proves public-only egress: on the local data
    * plane (`enforcement_scope=local-data-plane`, `public_only_guaranteed`), or
    * on a control plane whose data-plane attestation (Edge v0.9.14) shows every
-   * connected data plane public-only, exactly `NEXUS_EXPECTED_DATA_PLANES`
-   * distinct data planes (`node_id`) connected, and each of them listed long
-   * enough that no restarted one can count twice. Independent of either opt-out.
+   * connected data plane public-only and at least `NEXUS_EXPECTED_DATA_PLANES`
+   * distinct data planes (`node_id`) connected, counting each only once it has
+   * been listed long enough that no restarted one can count twice. Independent
+   * of either opt-out.
    * Observational only.
    */
   publicEgressGuaranteed?: boolean;
