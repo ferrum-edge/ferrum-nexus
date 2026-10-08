@@ -596,6 +596,7 @@ function mapAccountRecoveryJob(row: Row): AccountRecoveryJobRecord {
     attempts: int(row.attempts),
     next_attempt_at: textOrNull(row.next_attempt_at),
     last_error: textOrNull(row.last_error),
+    unblocked_at: textOrNull(row.unblocked_at),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -3411,14 +3412,23 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
               'attempts',
               'next_attempt_at',
               'last_error',
+              'unblocked_at',
               'created_at',
               'updated_at',
               'generation',
             ],
             'user_id',
-            ['status', 'attempts', 'next_attempt_at', 'last_error', 'updated_at', 'generation'],
+            [
+              'status',
+              'attempts',
+              'next_attempt_at',
+              'last_error',
+              'unblocked_at',
+              'updated_at',
+              'generation',
+            ],
           ),
-          [newId(), userId, 'pending', 0, now, null, now, now, newId()],
+          [newId(), userId, 'pending', 0, now, null, null, now, now, newId()],
         );
         const row = await queryOne(tx, 'SELECT * FROM account_recovery_jobs WHERE user_id = ?', [
           userId,
@@ -3503,6 +3513,14 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
          SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ?
          WHERE id = ? AND generation = ? AND status = 'sending'`,
         [nextAttemptAt, lastError, nowIso(), job.id, job.generation],
+      )) > 0,
+
+    markUnblocked: async (job, at) =>
+      (await execute(
+        exec,
+        `UPDATE account_recovery_jobs SET unblocked_at = ?, updated_at = ?
+         WHERE id = ? AND generation = ? AND unblocked_at IS NULL`,
+        [at, nowIso(), job.id, job.generation],
       )) > 0,
 
     releaseStale: async (olderThan) =>

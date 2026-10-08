@@ -1366,6 +1366,55 @@ describe('upstream destination policy', () => {
     }
   });
 
+  it('refuses the publish when a gateway-origin lookup times out', async () => {
+    // A resolver that never answers, as a blackholed nameserver behaves.
+    const resolveGateway = createGatewayResolver({
+      timeoutMs: 20,
+      lookup: () => new Promise<ResolvedAddress[]>(() => {}),
+    });
+    await assert.rejects(resolveGateway('gateway.blackholed.test'), { code: 'ETIMEOUT' });
+
+    const upstream = parseUpstreamUrl('https://api.example.com');
+    assert.ok(upstream);
+    const error = await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(upstream, {
+        allowPrivate: true,
+        getGatewayPublicUrls: async () => ['https://gateway.blackholed.test/'],
+        resolve: resolvesTo([{ address: '93.184.216.34', family: 4 }]),
+        resolveGateway,
+      }),
+    );
+    assert.equal((error.details as { reason?: string }).reason, 'gateway_unresolvable');
+  });
+
+  it('reuses a gateway-origin answer briefly, and never a failure', async () => {
+    let clock = 0;
+    let calls = 0;
+    let fail = true;
+    const resolveGateway = createGatewayResolver({
+      cacheTtlMs: 1_000,
+      now: () => clock,
+      lookup: async () => {
+        calls += 1;
+        if (fail) throw Object.assign(new Error('SERVFAIL'), { code: 'ESERVFAIL' });
+        return [{ address: '10.9.8.7', family: 4 }];
+      },
+    });
+
+    await assert.rejects(resolveGateway('gateway.cached.test'));
+    fail = false;
+    assert.deepEqual(await resolveGateway('gateway.cached.test'), [
+      { address: '10.9.8.7', family: 4 },
+    ]);
+    assert.equal(calls, 2, 'the failure was not cached');
+    clock = 999;
+    await resolveGateway('gateway.cached.test');
+    assert.equal(calls, 2, 'the answer was reused inside the TTL');
+    clock = 1_000;
+    await resolveGateway('gateway.cached.test');
+    assert.equal(calls, 3, 'an expired answer is looked up again');
+  });
+
   it('refuses a fully-qualified or mixed-case denylisted name before any lookup', async () => {
     for (const [url, host] of [
       ['https://x.internal./v1', 'x.internal.'],

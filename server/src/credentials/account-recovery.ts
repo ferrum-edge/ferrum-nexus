@@ -28,10 +28,16 @@
  * worker keeps retrying on the capped backoff. A job that can never land
  * would otherwise lock the account out of credentials for good, and the reset
  * has already ended every session and replaced the password.
+ *
+ * The moment the job stops blocking is stamped as `unblocked_at`, in the same
+ * transaction as that audit row. When the job finally lands it revokes only
+ * the credentials created before it: anything issued afterwards was issued by
+ * the rightful owner, the only one left holding a session.
  */
 
 import { AuditAction, SYSTEM_ACTOR, type AuditService } from '../audit/service.js';
 import type { AccountRecoveryJobRecord, NexusStore } from '../db/store.js';
+import { nowIso } from '../lib/ids.js';
 import type { CredentialsService } from './service.js';
 
 /** Poll interval, matching the teardown worker's. */
@@ -53,13 +59,13 @@ export const ACCOUNT_RECOVERY_STALE_AFTER_MS = 5 * 60_000;
 export const ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS = 8;
 
 /**
- * Whether an outstanding job still refuses credential issuance: until
- * {@link ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS} attempts have failed. A `sending`
- * claim's own attempt is still running, so it has not failed yet.
+ * Whether an outstanding job still refuses credential issuance: until the
+ * failure that reaches {@link ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS} stamps
+ * `unblocked_at`. Keyed on the stamp rather than the count, so issuance never
+ * reopens without the cutoff that spares what is issued afterwards.
  */
 export function recoveryBlocksIssuance(job: AccountRecoveryJobRecord): boolean {
-  const failed = job.status === 'sending' ? job.attempts - 1 : job.attempts;
-  return failed < ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS;
+  return job.unblocked_at === null;
 }
 
 /** Delay before the next attempt: `10s · 2^attempts`, capped, plus up to 10% jitter. */
@@ -105,7 +111,7 @@ export interface RunAccountRecoveryInput {
  *
  * Success deletes the row; failure returns it to `pending` on a backoff so the
  * next tick retries. The failure that crosses
- * {@link ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS} commits a
+ * {@link ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS} commits `unblocked_at` and a
  * `credential.recovery_stalled` row with the reschedule. A job that is no
  * longer the current generation — a later reset re-queued it, or another
  * worker claimed it — is left alone.
@@ -117,6 +123,8 @@ export async function runAccountRecovery(
   const now = input.now ?? ((): Date => new Date());
   const random = input.random ?? Math.random;
   let claimed: AccountRecoveryJobRecord | null = null;
+  // Whether this attempt's reschedule committed the unblock.
+  let unblocked = false;
   try {
     if (!input.job || input.job.user_id !== userId) {
       throw new Error('Account recovery has no matching queued generation');
@@ -146,7 +154,7 @@ export async function runAccountRecovery(
       return { outcome: 'ok', revoked: 0, error: null };
     }
 
-    const revoked = await credentials.revokeForAccountRecovery(user, ip);
+    const revoked = await credentials.revokeForAccountRecovery(user, ip, claimed.unblocked_at);
     if (!(await store.accountRecoveryJobs.deleteClaimed(claimed))) {
       throw new Error('Account recovery attempt was superseded');
     }
@@ -163,13 +171,20 @@ export async function runAccountRecovery(
           : accountRecoveryBackoffMs(claimed.attempts, random);
       const nextAt = new Date(now().getTime() + delay).toISOString();
       const job = claimed;
-      // Exactly the attempt that crosses the threshold, so a job that keeps
-      // failing records one row rather than one per retry.
-      const stalled = job.attempts === ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS;
+      // The first failure at or past the threshold stops the job blocking.
+      // `markUnblocked` stamps a generation once, so a job that keeps failing
+      // records one row rather than one per retry, and a threshold attempt
+      // whose write was lost is caught up by the next failure.
+      const stalls =
+        job.unblocked_at === null && job.attempts >= ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS;
+      // Real time, not the injectable clock: it is compared with the
+      // credentials' own `created_at` stamps.
+      const unblockedAt = nowIso();
       try {
-        await store.transaction(async (tx) => {
+        unblocked = await store.transaction(async (tx): Promise<boolean> => {
           const rescheduled = await tx.accountRecoveryJobs.reschedule(job, nextAt, message);
-          if (!rescheduled || !stalled) return;
+          if (!rescheduled || !stalls) return false;
+          if (!(await tx.accountRecoveryJobs.markUnblocked(job, unblockedAt))) return false;
           await audit.forStore(tx).record(
             SYSTEM_ACTOR,
             AuditAction.CREDENTIAL_RECOVERY_STALLED,
@@ -181,13 +196,14 @@ export async function runAccountRecovery(
             },
             ip,
           );
+          return true;
         });
       } catch {
         // A failed store write leaves SENDING for the stale sweep, which
         // recovers it on a later tick.
       }
     }
-    const blocking = claimed === null || recoveryBlocksIssuance({ ...claimed, status: 'pending' });
+    const blocking = claimed === null || (recoveryBlocksIssuance(claimed) && !unblocked);
     log?.(
       { user_id: userId, error: message },
       blocking

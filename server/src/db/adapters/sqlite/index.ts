@@ -622,6 +622,7 @@ function mapAccountRecoveryJob(row: Row): AccountRecoveryJobRecord {
     attempts: int(row.attempts),
     next_attempt_at: textOrNull(row.next_attempt_at),
     last_error: textOrNull(row.last_error),
+    unblocked_at: textOrNull(row.unblocked_at),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -3413,6 +3414,7 @@ class SqliteStore implements NexusStore {
            attempts = 0,
            next_attempt_at = excluded.next_attempt_at,
            last_error = NULL,
+           unblocked_at = NULL,
            updated_at = excluded.updated_at`,
         [newId(), userId, now, now, now, newId()],
       );
@@ -3491,6 +3493,14 @@ class SqliteStore implements NexusStore {
          SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ?
          WHERE id = ? AND generation = ? AND status = 'sending'`,
         [nextAttemptAt, lastError, nowIso(), job.id, job.generation],
+      ) > 0,
+
+    markUnblocked: async (job, at) =>
+      execute(
+        this.db,
+        `UPDATE account_recovery_jobs SET unblocked_at = ?, updated_at = ?
+         WHERE id = ? AND generation = ? AND unblocked_at IS NULL`,
+        [at, nowIso(), job.id, job.generation],
       ) > 0,
 
     releaseStale: async (olderThan) =>

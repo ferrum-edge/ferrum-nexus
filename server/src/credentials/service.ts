@@ -458,6 +458,12 @@ export interface IssueForConsumerInput {
    * left behind would be a credential nobody holds and nothing records.
    */
   recordWithRow?: (tx: NexusStore, credential: CredentialRecord) => Promise<void>;
+  /**
+   * Refuse, inside the consumer's key and just before the append, while a
+   * recovery revocation `user` owes still blocks issuance. Set by the
+   * account's own issue, which also checks before it provisions anything.
+   */
+  recoveryGate?: boolean;
 }
 
 /** The key {@link CredentialsService.restoreGatewayAccess} uses for the account's own identity. */
@@ -478,8 +484,18 @@ export interface CredentialsService {
   initializeLegacyBasicAuthPositions(): Promise<void>;
   /** Whether that scan has completed, failed, or not yet run in this process. */
   legacyBasicAuthScanState(): LegacyBasicAuthScanState;
-  /** Revoke every live credential after a reset proves the account's address. */
-  revokeForAccountRecovery(user: UserRecord, ip?: string | null): Promise<number>;
+  /**
+   * Revoke every live credential after a reset proves the account's address.
+   *
+   * `cutoff` is the moment a stalled recovery job stopped refusing issuance:
+   * only rows created before it are revoked, so a key the owner issued after
+   * the unblock survives. `null` (the default) revokes every live row.
+   */
+  revokeForAccountRecovery(
+    user: UserRecord,
+    ip?: string | null,
+    cutoff?: string | null,
+  ): Promise<number>;
   /** The caller's credentials, or another user's when an admin asks. */
   list(
     actor: UserRecord,
@@ -1596,8 +1612,11 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * portal's own security action rather than the account's request, so the
    * ownership refusals do not apply, and a delete that cannot be placed —
    * drift, or a `basicauth` pair with unconfirmed positions — empties the
-   * type instead of being refused. A refusal there is deterministic, so a
-   * retry would only ever repeat it while the credential stays live.
+   * type instead of being refused, but only when every live row of the type
+   * on that consumer is the account's own. A refusal there is deterministic,
+   * so a retry would only ever repeat it while the credential stays live; on
+   * a consumer shared with another account, or holding a row created after
+   * `recoveryCutoff`, it stands, and the job stalls for an administrator.
    *
    * Returns `false` when the row was already retired by the time the consumer's
    * queue reached it — a no-op that wrote nothing and audits nothing.
@@ -1607,11 +1626,12 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     actor: { id: Uuid; role: Role },
     ip: string | null,
     details: Record<string, unknown> = {},
-    options: { clearType?: boolean; recovery?: boolean } = {},
+    options: { clearType?: boolean; recovery?: boolean; recoveryCutoff?: string | null } = {},
   ): Promise<boolean> {
     const type = target.credential_type;
     const consumerId = target.ferrum_consumer_id;
     const recovery = options.recovery === true;
+    const recoveryCutoff = options.recoveryCutoff ?? null;
     const clearType = options.clearType === true;
     const bypassOwnership = recovery || roleAtLeast(actor.role, 'admin');
 
@@ -1657,10 +1677,17 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         try {
           position = revokePosition(rows, current, length, clearType);
         } catch (error) {
-          if (!recovery) throw error;
           // The refusal would repeat on every retry. Emptying the type needs
           // no position, so it removes the target's entry wherever it sits,
-          // and every live row of the type settles with it below.
+          // and every live row of the type settles with it below — which is
+          // only the recovery's to do when nothing of the type belongs to
+          // another account, or was issued after the recovery's cutoff.
+          // Otherwise the job keeps failing until it stalls, and an
+          // administrator reconciles the consumer.
+          const notOursToEmpty = (row: CredentialRecord): boolean =>
+            row.user_id !== current.user_id ||
+            (recoveryCutoff !== null && row.created_at >= recoveryCutoff);
+          if (!recovery || rows.some(notOursToEmpty)) throw error;
           position = 'whole-type';
           placementFallback = true;
         }
@@ -2114,6 +2141,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           { credential_type: input.credentialType, limit: cap },
         );
       }
+      // Again inside the key, right before the append: an issue that passed
+      // the route's check before a reset committed would otherwise append a
+      // key the recovery's listing has already missed.
+      if (input.recoveryGate === true) await assertNoPendingRecovery(input.user.id);
       return appendCredential({
         ownerId: input.user.id,
         applicationId: input.applicationId ?? null,
@@ -2278,23 +2309,32 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       return legacyScanState;
     },
 
-    async revokeForAccountRecovery(user, ip = null): Promise<number> {
+    async revokeForAccountRecovery(user, ip = null, cutoff = null): Promise<number> {
       let revoked = 0;
       for (const status of LIVE_CREDENTIAL_STATUSES) {
+        // Every row this pass settles leaves the filter, so the page does not
+        // move for them; a row it skips stays, so the offset steps past it.
+        let offset = 0;
         for (;;) {
           const page = await store.credentials.list(
             { user_id: user.id, status },
-            { limit: MAX_PAGE_SIZE, offset: 0 },
+            { limit: MAX_PAGE_SIZE, offset },
           );
           if (page.items.length === 0) break;
           for (const row of page.items) {
+            // Issued after the job stopped blocking: only the rightful owner
+            // held a session by then, so the key is theirs to keep.
+            if (cutoff !== null && row.created_at >= cutoff) {
+              offset += 1;
+              continue;
+            }
             if (
               await revokeCredentialRow(
                 row,
                 { id: user.id, role: user.role },
                 ip,
                 { reason: 'account_recovery' },
-                { recovery: true },
+                { recovery: true, recoveryCutoff: cutoff },
               )
             ) {
               revoked += 1;
@@ -2712,6 +2752,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         credentialType: input.credential_type,
         label: input.label ?? null,
         ip,
+        recoveryGate: true,
         recordWithRow: async (tx, created) => {
           await audit.forStore(tx).record(
             { id: user.id, role: user.role },
@@ -2812,6 +2853,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // a show-once secret that authenticates nothing.
           throw edgeError(RECONCILE_MESSAGE, { expected: rows.length, actual: length });
         }
+        // Again inside the key, right before anything is written: a rotation
+        // that passed the route's check before a reset committed would
+        // otherwise mint a key the recovery's listing has already missed.
+        await assertNoPendingRecovery(user.id);
 
         // Append-then-delete keeps both secrets briefly live during this
         // operation, then deletes the old entry before the response returns.
@@ -3314,7 +3359,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * failing stops gating issuance after a fixed number of attempts. The reset
    * already ended every session and replaced the password, so the block
    * protects little by then, while the worker keeps retrying and an
-   * administrator has the `credential.recovery_stalled` row to act on.
+   * administrator has the `credential.recovery_stalled` row to act on. The
+   * moment it stops gating is the job's `unblocked_at`, and its eventual
+   * revocation spares every credential created from then on.
+   *
+   * `issue` and `rotate` check before they start and again inside the
+   * consumer's key, just before the gateway write: while the job blocks, no
+   * row can be created at all, so `created_at < unblocked_at` covers every
+   * credential a previous holder could have minted.
    */
   async function assertNoPendingRecovery(userId: Uuid, db: NexusStore = store): Promise<void> {
     const pending = await db.accountRecoveryJobs.findByUser(userId);

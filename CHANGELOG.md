@@ -14,12 +14,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   access requests and recording the revocation durably so an unreachable gateway is
   retried rather than skipped. A revocation that keeps failing stops blocking new
   credentials after 8 attempts and is audited as `credential.recovery_stalled`
-  while it is still retried. Manual administrator promotions now check linked
+  while it is still retried; when it lands it spares credentials issued after that
+  point, and it never empties a credential type that holds another account's
+  keys. Manual administrator promotions now check linked
   identity trust at every privilege increase. Publishing refuses an upstream that
   names or resolves to any of the gateway's own origins (public URL, environment
   URL, or Admin API host), canonicalizing IPv4-mapped, NAT64 and 6to4 addresses
   first and treating every loopback address as one host; gateway origins resolve
-  through the system resolver, so `/etc/hosts` names such as `localhost` work.
+  through the system resolver, so `/etc/hosts` names such as `localhost` work,
+  bounded at 5 seconds and cached for 30.
   Credential mutations and notification reads are rate-limited per account, and
   unchanged notification reads no longer add audit rows.
 

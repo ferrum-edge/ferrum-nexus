@@ -2,6 +2,8 @@
 -- The row is written in the same transaction as the reset, so a reset can
 -- never commit without its revocation; a worker drains it with retry until it
 -- succeeds, and credential issuance is refused while a row is outstanding.
+-- unblocked_at records when a job that kept failing stopped refusing
+-- issuance; its eventual success revokes only credentials created before it.
 CREATE TABLE IF NOT EXISTS account_recovery_jobs (
   id              TEXT PRIMARY KEY,
   generation      TEXT NOT NULL DEFAULT '',
@@ -11,6 +13,7 @@ CREATE TABLE IF NOT EXISTS account_recovery_jobs (
   attempts        INTEGER NOT NULL DEFAULT 0,
   next_attempt_at TEXT,
   last_error      TEXT,
+  unblocked_at    TEXT,
   created_at      TEXT NOT NULL,
   updated_at      TEXT NOT NULL
 );

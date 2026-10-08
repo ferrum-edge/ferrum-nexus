@@ -318,6 +318,7 @@ describe('password reset', () => {
 
     const job = await harness.store.accountRecoveryJobs.findByUser(account.user.id);
     assert.equal(job?.attempts, ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS);
+    assert.ok(job?.unblocked_at, 'the unblock is stamped with the stalled row');
     const [stalled] = await stalledRows();
     assert.ok(stalled);
     assert.equal(stalled.actor_user_id, null);
@@ -329,14 +330,70 @@ describe('password reset', () => {
     // owed and a further failure writes no second row.
     const issued = await issue();
     assert.equal(issued.statusCode, 201, issued.body);
+    const issuedId = issued.json<IssueCredentialResponse>().credential.id;
     assert.equal((await attempt()).outcome, 'pending');
     assert.equal((await stalledRows()).length, 1);
     assert.notEqual(await harness.store.accountRecoveryJobs.findByUser(account.user.id), null);
 
-    // The worker keeps retrying, and lands it once the refusal clears.
+    // The worker keeps retrying, and lands it once the refusal clears. It
+    // revokes what predates the unblock, and spares the key the owner issued
+    // after it.
     await harness.services.recovery.tick();
     assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+    assert.equal((await harness.store.credentials.findById(issuedId))?.status, 'active');
     assert.equal(await harness.store.accountRecoveryJobs.findByUser(account.user.id), null);
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.equal(consumer?.credentials.keyauth?.length, 1);
+  });
+
+  it('never revokes another account’s live credential on a shared consumer', async () => {
+    const account = await harness.registerUser({ email: 'shared-drift@example.test' });
+    const other = await harness.registerUser({ email: 'shared-drift-other@example.test' });
+    const issued = await harness.authed(account, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(issued.statusCode, 201, issued.body);
+    const own = issued.json<IssueCredentialResponse>().credential;
+    // A live key on this consumer the portal attributes to somebody else, and
+    // an entry added by hand, so no positional delete can be placed. Emptying
+    // the type would take the other account's key with it.
+    const foreign = await harness.store.credentials.create({
+      user_id: other.user.id,
+      application_id: null,
+      ferrum_consumer_id: own.ferrum_consumer_id,
+      credential_type: 'keyauth',
+      ferrum_credential_id: `${own.ferrum_consumer_id}/credentials/keyauth`,
+      fingerprint: 'test-foreign-active-recovery-row',
+      last4: 'frgn',
+      label: null,
+      status: 'active',
+      rotated_from_id: null,
+    });
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.ok(consumer);
+    consumer.credentials.keyauth = [
+      ...(consumer.credentials.keyauth ?? []),
+      { key: 'foreign-key' },
+      { key: 'hand-added' },
+    ];
+
+    await trustedReset(account.user.id);
+    // The worker retries, and the refusal stands every time.
+    await harness.services.recovery.tick();
+
+    assert.equal((await harness.store.credentials.findById(foreign.id))?.status, 'active');
+    assert.equal((await harness.store.credentials.findById(own.id))?.status, 'active');
+    assert.notEqual(await harness.store.accountRecoveryJobs.findByUser(account.user.id), null);
+    const untouched = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
+    assert.equal(untouched?.credentials.keyauth?.length, 3);
+    const revoked = (await harness.auditRows('credential.revoke')).filter(
+      (row) => row.target_id === own.id || row.target_id === foreign.id,
+    );
+    assert.deepEqual(revoked, []);
+    // Left for an administrator in production; dropped so later tests start clean.
+    await harness.store.accountRecoveryJobs.deleteByUser(account.user.id);
   });
 
   it('sweeps another account’s retiring basicauth row with the recovered one', async () => {

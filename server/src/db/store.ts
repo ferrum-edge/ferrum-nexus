@@ -467,6 +467,12 @@ export interface AccountRecoveryJobRecord {
   attempts: number;
   next_attempt_at: IsoTimestamp | null;
   last_error: string | null;
+  /**
+   * When a job that kept failing stopped refusing credential issuance, or
+   * `null` while it still refuses. Its eventual success revokes only the
+   * credentials created before this moment.
+   */
+  unblocked_at: IsoTimestamp | null;
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
 }
@@ -1725,9 +1731,9 @@ export interface AccountRecoveryJobRepo {
    * Queue (or re-queue) the recovery revocation owed for `userId`.
    *
    * `user_id` is unique, so an account already carrying a job has that row reset
-   * to `pending` with `attempts = 0` and `next_attempt_at = now` instead of
-   * gaining a second one. A fresh opaque generation invalidates every old
-   * pending snapshot and claim.
+   * to `pending` with `attempts = 0`, `next_attempt_at = now` and
+   * `unblocked_at = null` instead of gaining a second one. A fresh opaque
+   * generation invalidates every old pending snapshot and claim.
    */
   upsertPending(userId: Uuid, now: IsoTimestamp): Promise<AccountRecoveryJobRecord>;
   findByUser(userId: Uuid): Promise<AccountRecoveryJobRecord | null>;
@@ -1748,6 +1754,11 @@ export interface AccountRecoveryJobRepo {
     nextAttemptAt: IsoTimestamp,
     lastError: string,
   ): Promise<boolean>;
+  /**
+   * Stamp `unblocked_at` on exactly this generation, once: false when it was
+   * superseded or already stamped.
+   */
+  markUnblocked(job: AccountRecoveryJobRecord, at: IsoTimestamp): Promise<boolean>;
   /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
   releaseStale(olderThan: IsoTimestamp): Promise<number>;
   /**

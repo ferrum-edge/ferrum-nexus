@@ -813,6 +813,7 @@ function mapAccountRecoveryJob(row: Row): AccountRecoveryJobRecord {
     attempts: num(row.attempts),
     next_attempt_at: strOrNull(row.next_attempt_at),
     last_error: strOrNull(row.last_error),
+    unblocked_at: strOrNull(row.unblocked_at),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -4285,6 +4286,7 @@ class MongoStore implements NexusStore {
             attempts: 0,
             next_attempt_at: now,
             last_error: null,
+            unblocked_at: null,
             updated_at: now,
           },
           $setOnInsert: { _id: newId(), user_id: userId, created_at: now },
@@ -4373,6 +4375,16 @@ class MongoStore implements NexusStore {
             updated_at: nowIso(),
           },
         },
+        this.opts,
+      );
+      return result.modifiedCount > 0;
+    },
+
+    markUnblocked: async (job, at) => {
+      // `unblocked_at: null` also matches a document written without the field.
+      const result = await this.col(COLLECTIONS.accountRecoveryJobs).updateOne(
+        { _id: job.id, generation: job.generation, unblocked_at: null } as Filter<NexusDoc>,
+        { $set: { unblocked_at: at, updated_at: nowIso() } },
         this.opts,
       );
       return result.modifiedCount > 0;

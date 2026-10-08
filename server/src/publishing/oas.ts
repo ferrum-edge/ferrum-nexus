@@ -285,6 +285,37 @@ export function createUpstreamResolver(
   };
 }
 
+/** How long one gateway-origin lookup may take before the publish is refused. */
+export const GATEWAY_DNS_TIMEOUT_MS = 5_000;
+
+/** How long a gateway origin's successful answer is reused. */
+export const GATEWAY_DNS_CACHE_TTL_MS = 30_000;
+
+/** Gateway origins whose answers are kept at once; the oldest is dropped first. */
+export const GATEWAY_DNS_CACHE_MAX_ENTRIES = 32;
+
+/** Every `dns.lookup` answer for `host`, through the system resolver. */
+async function systemLookup(host: string): Promise<ResolvedAddress[]> {
+  const answers = await lookup(host, { all: true });
+  return answers.map((entry): ResolvedAddress => ({
+    address: entry.address,
+    family: entry.family === 6 ? 6 : 4,
+  }));
+}
+
+/** Reject with `ETIMEOUT` once `ms` passes without `work` settling. */
+function withLookupTimeout<T>(work: Promise<T>, ms: number, host: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`Looking up ${host} took longer than ${ms} ms`);
+      reject(Object.assign(error, { code: 'ETIMEOUT' }));
+    }, ms);
+    timer.unref?.();
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * The resolver for the gateway's own origins: the system resolver, every answer.
  *
@@ -294,14 +325,56 @@ export function createUpstreamResolver(
  * operator configuration naming how Nexus itself reaches the gateway, so the
  * host's own answer is the one to compare against. A lookup that fails still
  * rejects, and the guard refuses the publish.
+ *
+ * `getaddrinfo` runs on the libuv threadpool, which scrypt shares, and has no
+ * timeout of its own. So a lookup is bounded at {@link GATEWAY_DNS_TIMEOUT_MS}
+ * and rejects when it runs over (the publish is refused, as for any other
+ * failure); concurrent lookups of one host share a single call; and a
+ * non-empty answer is reused for {@link GATEWAY_DNS_CACHE_TTL_MS}, for at most
+ * {@link GATEWAY_DNS_CACHE_MAX_ENTRIES} hosts. Failures are never cached.
  */
-export function createGatewayResolver(): UpstreamResolver {
+export function createGatewayResolver(
+  options: {
+    timeoutMs?: number;
+    cacheTtlMs?: number;
+    maxEntries?: number;
+    /** The underlying lookup; defaults to `dns.lookup` with `all: true`. */
+    lookup?: UpstreamResolver;
+    /** Injectable clock for the cache, in milliseconds. */
+    now?: () => number;
+  } = {},
+): UpstreamResolver {
+  const timeoutMs = options.timeoutMs ?? GATEWAY_DNS_TIMEOUT_MS;
+  const cacheTtlMs = options.cacheTtlMs ?? GATEWAY_DNS_CACHE_TTL_MS;
+  const maxEntries = Math.max(1, options.maxEntries ?? GATEWAY_DNS_CACHE_MAX_ENTRIES);
+  const resolveHost = options.lookup ?? systemLookup;
+  const now = options.now ?? Date.now;
+  const cache = new Map<string, { addresses: ResolvedAddress[]; expiresAt: number }>();
+  const inFlight = new Map<string, Promise<ResolvedAddress[]>>();
+
+  async function resolveFresh(host: string): Promise<ResolvedAddress[]> {
+    const addresses = await withLookupTimeout(resolveHost(host), timeoutMs, host);
+    if (addresses.length > 0) {
+      cache.delete(host);
+      if (cache.size >= maxEntries) {
+        const oldest = cache.keys().next();
+        if (!oldest.done) cache.delete(oldest.value);
+      }
+      cache.set(host, { addresses, expiresAt: now() + cacheTtlMs });
+    }
+    return addresses;
+  }
+
   return async function resolveGatewayHost(host: string): Promise<ResolvedAddress[]> {
-    const answers = await lookup(host, { all: true });
-    return answers.map((entry): ResolvedAddress => ({
-      address: entry.address,
-      family: entry.family === 6 ? 6 : 4,
-    }));
+    const cached = cache.get(host);
+    if (cached && cached.expiresAt > now()) return [...cached.addresses];
+    if (cached) cache.delete(host);
+    let pending = inFlight.get(host);
+    if (!pending) {
+      pending = resolveFresh(host).finally(() => inFlight.delete(host));
+      inFlight.set(host, pending);
+    }
+    return [...(await pending)];
   };
 }
 

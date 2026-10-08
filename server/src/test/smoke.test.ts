@@ -4230,6 +4230,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(first.status, 'pending');
       assert.equal(first.attempts, 0);
       assert.equal(first.last_error, null);
+      assert.equal(first.unblocked_at, null);
       assert.deepEqual(await store.accountRecoveryJobs.findByUser(user.id), first);
 
       const firstClaim = await store.accountRecoveryJobs.claimPending(first);
@@ -4240,6 +4241,16 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         'edge unreachable',
       );
 
+      // The unblock stamps exactly the current generation, once.
+      const unblockedAt = nowIso();
+      assert.equal(await store.accountRecoveryJobs.markUnblocked(first, unblockedAt), false);
+      assert.equal(await store.accountRecoveryJobs.markUnblocked(firstClaim, unblockedAt), true);
+      assert.equal(await store.accountRecoveryJobs.markUnblocked(firstClaim, nowIso()), false);
+      assert.equal(
+        (await store.accountRecoveryJobs.findByUser(user.id))?.unblocked_at,
+        unblockedAt,
+      );
+
       const second = await store.accountRecoveryJobs.upsertPending(user.id, nowIso());
       assert.equal(second.id, first.id, 'the same row is reused');
       assert.notEqual(second.generation, first.generation);
@@ -4247,6 +4258,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(second.status, 'pending');
       assert.equal(second.attempts, 0);
       assert.equal(second.last_error, null);
+      assert.equal(second.unblocked_at, null, 'a fresh reset blocks issuance again');
 
       assert.equal(await store.accountRecoveryJobs.deleteByUser(user.id), true);
       assert.equal(await store.accountRecoveryJobs.findByUser(user.id), null);

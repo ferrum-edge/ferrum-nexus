@@ -263,12 +263,16 @@ does not reinterpret that), so it publishes only under
   gateway that is unreachable cannot leave the previous holder's key live with
   no record that it is owed; a worker retries until it lands, and credential
   issuance is refused (`409 CONFLICT`) while the row is outstanding. The
-  revocation is the portal's own: it is not refused for credentials on a shared
-  consumer, and a delete it cannot place empties that credential type instead
-  (`placement: "whole-type-fallback"` on its `credential.revoke` row). After 8
-  failed attempts the row stops refusing issuance and a
-  `credential.recovery_stalled` row is audited for an administrator; the worker
-  keeps retrying on a backoff capped at 5 minutes.
+  revocation is the portal's own, so the account-ownership refusals do not
+  apply to it. A delete it cannot place empties that credential type only when
+  every credential of the type on that consumer is the account's own
+  (`placement: "whole-type-fallback"` on its `credential.revoke` row);
+  otherwise the job stalls for an administrator to reconcile. After 8 failed
+  attempts the row stops refusing issuance and a `credential.recovery_stalled`
+  row is audited for an administrator; the worker keeps retrying on a backoff
+  capped at 5 minutes. When a stalled job finally lands, it revokes only the
+  credentials created before it stopped refusing issuance, so keys the owner
+  issued after that survive.
 - **Sign-in does not reveal which addresses exist.** A missing account still
   costs a scrypt derivation against a decoy hash, and both failures return the
   same `401 UNAUTHORIZED`.
