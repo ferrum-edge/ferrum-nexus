@@ -253,7 +253,7 @@ Example for an admin session:
 ```json
 {
   "status": "ok",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "uptime_seconds": 1284,
   "checked_at": "2026-08-31T09:12:44.117Z",
   "database": { "status": "ok", "latency_ms": 1, "error": null, "driver": "postgres" },

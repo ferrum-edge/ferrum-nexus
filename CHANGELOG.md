@@ -6,15 +6,29 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-08
+
+Paired with Ferrum Edge `v0.9.15`, a security release that fixes 26 published Ferrum
+Edge advisories (see the
+[Edge `v0.9.15` release](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.15)).
+Upgrade Edge to `v0.9.15` for its security fixes: `v0.5.2` exists to ship that pairing,
+and it is the only Edge version its acceptance suite tests. Nexus adds no migration,
+so a `v0.5.1` database opens unchanged, and the gateway's database opens in place. On
+Nexus proxies Edge `v0.9.15` reserves `X-Authenticated-Identity`, and refuses native
+gRPC and WebSocket requests with `403` at the `routes` enforcement level, on APIs
+available to AI agents and with required idempotency keys. See
+[`docs/release-notes.md`](docs/release-notes.md) for the supported combination and
+the upgrade steps.
+
 ### Security
 
-- **Adopt published Edge `v0.9.15`, a security release, and `contracts-edge-0.9.15`.**
-  The compatibility record pins
+- **Adopt published Edge `v0.9.15`, a security release, and `contracts-edge-0.9.15`**
+  (#552). The compatibility record pins
   `ferrumedge/ferrum-edge:v0.9.15@sha256:29b468dfeea13b1ecaac8dfbc7e019f310e71e647611d43800a1dc64436eaca3`
   (tag source `25b37395ff61bfea0f3ffd189d9011c4984fa755`), and Nexus vendors
   `contracts-edge-0.9.15` (`6fb64c5dc2e014204c17609fc717d976f3b4589e`) byte for byte.
-  The next release requires Edge `v0.9.15` for its security fixes, and it is the only
-  version its acceptance suite tests. Edge `v0.9.15` keeps egress policy schema 2,
+  `v0.5.2` requires Edge `v0.9.15` for its security fixes, and it is the only version
+  its acceptance suite tests. Edge `v0.9.15` keeps egress policy schema 2,
   deployment snapshot v2 and its tokens, and the acknowledgement shape, so no journal,
   token or schema migration is needed. On Nexus proxies, Edge now refuses a native
   gRPC or WebSocket request with `403` (`route_protocol_admission`) at the `routes`
@@ -25,14 +39,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
-- **`X-Authenticated-Identity` is refused as a palette header name** (Edge
+- **`X-Authenticated-Identity` is refused as a palette header name** (#552, Edge
   `v0.9.15`). Edge adds its new external identity header to the gateway-owned
   `x-consumer-*` check and refuses it as a configured header. A `correlation_id` or
   `request_deduplication` `header_name` of that name (any case, `_` or `-`) is now
   `400 VALIDATION_FAILED` in the portal and in the plugin form, before any gateway
   write. The mock gateway models the refusal and Edge's new `rate_limiting`
   `ipv6_prefix` (`1` to `128`).
-- **The idempotency-key help names the gRPC and WebSocket refusal.** With
+- **The idempotency-key help names the gRPC and WebSocket refusal** (#552). With
   `enforce_required` on, Edge `v0.9.15` refuses native gRPC and WebSocket requests to
   the API; the palette help, the provider guide and the API reference say so.
 
