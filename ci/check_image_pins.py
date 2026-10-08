@@ -149,51 +149,69 @@ DOCKER_SWITCH_OPTIONS = {
 }
 
 
-def _open_substitutions(state, token):
-    """Track `$(...)` and backtick nesting across punctuation-only tokens."""
+def _open_substitutions(state, token, quoted, follows_dollar):
+    """Track `$(...)` and backtick nesting across punctuation-only tokens.
+
+    Only unquoted punctuation counts: a quoted `'('` is an ordinary argument
+    value, not a substitution opener. A `(` opens only when it immediately
+    follows an unquoted `$`; `)` still closes, and backticks toggle.
+    """
     parens, in_tick = state
-    if token and set(token) <= set(';&|()`'):
-        parens = max(0, parens + token.count('(') - token.count(')'))
-        if token.count('`') % 2:
-            in_tick = not in_tick
+    if quoted or not token or not set(token) <= set(';&|()`'):
+        return state
+    if follows_dollar:
+        parens += token.count('(')
+    parens = max(0, parens - token.count(')'))
+    if token.count('`') % 2:
+        in_tick = not in_tick
     return parens, in_tick
 
 
-def _consume_word_rest(words, glued, value):
+def _consume_word_rest(words, glued, quoted, value, value_quoted=False):
     # A shell word may continue past punctuation the tokenizer split:
     # `-v $(pwd):/src` becomes `-v`, `$`, `(`, `pwd`, `)`, `:/src`, and a
     # substitution may contain spaces (`-e F=$(cat foo)`).
-    state = _open_substitutions((0, False), value)
+    state = _open_substitutions((0, False), value, value_quoted, False)
+    previous = value
     while words and glued and (glued[0] or state[0] or state[1]):
-        state = _open_substitutions(state, words.pop(0))
-        glued.pop(0)
+        token = words.pop(0)
+        is_glued = glued.pop(0)
+        token_quoted = quoted.pop(0)
+        follows_dollar = is_glued and previous.endswith('$')
+        state = _open_substitutions(state, token, token_quoted, follows_dollar)
+        previous = token
 
 
-def _skip_options(words, glued, value_options, switch_options):
+def _skip_options(words, glued, quoted, value_options, switch_options):
     while words and words[0].startswith('-') and words[0] != '-':
         option = words.pop(0)
         glued.pop(0)
+        option_quoted = quoted.pop(0)
         if option == '--':
             return
         if '=' in option:
             name = option.split('=', 1)[0]
             if name in value_options:
-                _consume_word_rest(words, glued, option)
+                _consume_word_rest(words, glued, quoted, option, option_quoted)
                 continue
             words.insert(0, '<unsupported docker option>')
             glued.insert(0, False)
+            quoted.insert(0, False)
             return
         if option in value_options:
             if not words:
                 words.append('<missing docker option value>')
                 glued.append(False)
+                quoted.append(False)
                 return
             value = words.pop(0)
             glued.pop(0)
-            _consume_word_rest(words, glued, value)
+            value_quoted = quoted.pop(0)
+            _consume_word_rest(words, glued, quoted, value, value_quoted)
         elif option not in switch_options:
             words.insert(0, '<unsupported docker option>')
             glued.insert(0, False)
+            quoted.insert(0, False)
             return
 
 
@@ -239,32 +257,49 @@ def _shell_words(text):
     return list(lexer)
 
 
-def _lex(text):
-    """Tokenize `text` and flag tokens joined to the previous one without a space.
+def _inside_quotes(text, position):
+    """Whether `position` falls inside a single- or double-quoted span."""
+    single = double = False
+    for char in text[:position]:
+        if char == "'" and not double:
+            single = not single
+        elif char == '"' and not single:
+            double = not double
+    return single or double
 
-    shlex splits shell punctuation (`$(...)`, backticks) into separate tokens, so
-    the flag lets an option value reclaim the rest of its shell word.
+
+def _lex(text):
+    """Tokenize `text` and flag glued and quoted tokens.
+
+    shlex splits shell punctuation (`$(...)`, backticks) into separate tokens,
+    so the glued flag lets an option value reclaim the rest of its shell word.
+    The quoted flag keeps a quoted `'('` from faking a substitution opener.
     """
     words = _shell_words(text)
     glued = [False] * len(words)
+    quoted = [False] * len(words)
     cursor = 0
     for index, word in enumerate(words):
         position = text.find(word, cursor)
         if position == -1:
             continue
         glued[index] = index > 0 and position == cursor
+        if word and set(word) <= set(';&|()`'):
+            quoted[index] = _inside_quotes(text, position)
         cursor = position + len(word)
-    return words, glued
+    return words, glued, quoted
 
 
-def _docker_images_in_words(words, glued, depth=0):
+def _docker_images_in_words(words, glued, quoted, depth=0):
     images = []
     for index, word in enumerate(words):
         if depth < 2 and 'docker' in word and len(word.split()) > 1:
             # A quoted command string (`bash -c "docker run ..."`, `"$(docker ...)"`).
             try:
-                inner_words, inner_glued = _lex(word)
-                images.extend(_docker_images_in_words(inner_words, inner_glued, depth + 1))
+                inner_words, inner_glued, inner_quoted = _lex(word)
+                images.extend(
+                    _docker_images_in_words(inner_words, inner_glued, inner_quoted, depth + 1)
+                )
             except ValueError:
                 pass
             continue
@@ -272,9 +307,13 @@ def _docker_images_in_words(words, glued, depth=0):
             continue
         command_words = words[index + 1:].copy()
         command_glued = glued[index + 1:]
+        command_quoted = quoted[index + 1:]
         if not command_words:
             continue
-        _skip_options(command_words, command_glued, DOCKER_GLOBAL_VALUES, DOCKER_GLOBAL_SWITCHES)
+        _skip_options(
+            command_words, command_glued, command_quoted,
+            DOCKER_GLOBAL_VALUES, DOCKER_GLOBAL_SWITCHES,
+        )
         if command_words and command_words[0] == '<unsupported docker option>':
             images.append(command_words[0])
             continue
@@ -282,12 +321,17 @@ def _docker_images_in_words(words, glued, depth=0):
             continue
         command = command_words.pop(0)
         command_glued.pop(0)
+        command_quoted.pop(0)
         if command in {'container', 'image'} and command_words:
             command = command_words.pop(0)
             command_glued.pop(0)
+            command_quoted.pop(0)
         if command not in {'run', 'create', 'pull'}:
             continue
-        _skip_options(command_words, command_glued, DOCKER_VALUE_OPTIONS, DOCKER_SWITCH_OPTIONS)
+        _skip_options(
+            command_words, command_glued, command_quoted,
+            DOCKER_VALUE_OPTIONS, DOCKER_SWITCH_OPTIONS,
+        )
         images.append(command_words[0] if command_words else '<missing docker image>')
     return images
 
@@ -296,8 +340,8 @@ def workflow_docker_images(line):
     line = _workflow_run_text(line)
     expected = len(DOCKER_COMMAND.findall(re.sub(r'(?:^|\s)#.*$', '', line)))
     try:
-        words, glued = _lex(line)
-        images = _docker_images_in_words(words, glued)
+        words, glued, quoted = _lex(line)
+        images = _docker_images_in_words(words, glued, quoted)
     except ValueError:
         images = []
     if len(images) < expected:
@@ -317,13 +361,14 @@ def files(root):
     names = subprocess.check_output(['git', '-C', str(root), 'ls-files', '-z']).decode().split('\0')
     for name in filter(None, names):
         path = root / name
+        relative = Path(name)
         basename = path.name.lower()
         yaml = basename.endswith(('.yml', '.yaml'))
         dockerfile = (
             basename == 'dockerfile' or basename.startswith('dockerfile.')
             or basename.endswith('.dockerfile')
         )
-        workflow = path.parts[:2] == ('.github', 'workflows') and yaml
+        workflow = relative.parts[:2] == ('.github', 'workflows') and yaml
         compose = yaml and path.is_file() and is_compose(path, path.read_text())
         env_file = basename == '.env' or basename.startswith('.env.') or basename.endswith('.env')
         if path.is_file() and (dockerfile or workflow or compose or env_file):
