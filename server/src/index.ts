@@ -397,6 +397,7 @@ export async function buildServer(
     ...(deps.mailTransportFactory ? { transportFactory: deps.mailTransportFactory } : {}),
   });
   const notifications = createNotificationsService({ store: deps.store });
+  let revokeForAccountRecovery: CredentialsService['revokeForAccountRecovery'] | undefined;
   const auth = createAuthService({
     config,
     store: deps.store,
@@ -408,6 +409,9 @@ export async function buildServer(
     onRegistered: deps.onRegistered ?? defaultOnRegistered(config, email, notifications, warn),
     prepareVerificationResend: emailTokenPreparer(config, email, crypto, VERIFICATION_RESEND),
     preparePasswordReset: emailTokenPreparer(config, email, crypto, PASSWORD_RESET),
+    onFirstEmailProof: async (user, ip) => {
+      await revokeForAccountRecovery?.(user, ip);
+    },
   });
   const settings = createSettingsService({
     config,
@@ -473,6 +477,9 @@ export async function buildServer(
     locks,
     log: warn,
   });
+  revokeForAccountRecovery = async (user, ip) => {
+    await credentials.revokeForAccountRecovery(user, ip);
+  };
   // One-off upgrade scan for `basicauth` appends an earlier release left
   // without a row. It must not keep the portal down: a failure is logged, the
   // service reports the scan `failed`, and — since completion is recorded only
@@ -819,7 +826,12 @@ export async function buildServer(
   );
 
   await app.register(
-    async (scope) => scope.register(notificationsRoutes, { notifications, audit }),
+    async (scope) => {
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(notificationsRoutes, { notifications, audit });
+    },
     { prefix: '/api/notifications' },
   );
 
@@ -892,7 +904,12 @@ export async function buildServer(
   );
 
   await app.register(
-    async (scope) => scope.register(credentialsRoutes, { credentials, applications }),
+    async (scope) => {
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(credentialsRoutes, { credentials, applications });
+    },
     { prefix: '/api/credentials' },
   );
 

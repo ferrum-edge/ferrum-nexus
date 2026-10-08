@@ -1181,6 +1181,34 @@ describe('upstream destination policy', () => {
     });
   });
 
+  it('refuses an upstream that names or resolves to the public gateway origin', async () => {
+    const named = parseUpstreamUrl('https://GATEWAY.EXAMPLE.TEST./api');
+    assert.ok(named);
+    await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(named, {
+        allowPrivate: true,
+        getGatewayPublicUrl: async () => 'https://gateway.example.test/',
+        resolve: neverResolve,
+      }),
+    );
+
+    const alias = parseUpstreamUrl('https://gateway-alias.example.test');
+    assert.ok(alias);
+    await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(alias, {
+        allowPrivate: true,
+        getGatewayPublicUrl: async () => 'https://gateway.example.test/',
+        resolve: (host) =>
+          Promise.resolve([
+            {
+              address: host.startsWith('gateway') ? '93.184.216.34' : '1.1.1.1',
+              family: 4 as const,
+            },
+          ]),
+      }),
+    );
+  });
+
   it('refuses a fully-qualified or mixed-case denylisted name before any lookup', async () => {
     for (const [url, host] of [
       ['https://x.internal./v1', 'x.internal.'],

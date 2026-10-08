@@ -109,6 +109,16 @@ describe('notifications', () => {
 
     const audit = await harness.store.auditLogs.list({ action: 'notification.read' });
     assert.ok(audit.total >= 1);
+
+    const repeated = await harness.authed(owner, {
+      method: 'POST',
+      url: '/api/notifications/read',
+      payload: { all: true },
+    });
+    assert.equal(repeated.statusCode, 200, repeated.body);
+    assert.equal(repeated.json<MarkNotificationsReadResponse>().updated, 0);
+    const afterRepeat = await harness.store.auditLogs.list({ action: 'notification.read' });
+    assert.equal(afterRepeat.total, audit.total, 'a no-op read adds no audit row');
   });
 
   it('rejects a read request that names neither ids nor all', async () => {

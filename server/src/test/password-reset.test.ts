@@ -10,9 +10,14 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
-import { type ApiErrorBody, type ForgotPasswordResponse } from '@ferrum-nexus/shared';
+import {
+  consumerUsernameForApplication,
+  type ApiErrorBody,
+  type ForgotPasswordResponse,
+  type IssueCredentialResponse,
+} from '@ferrum-nexus/shared';
 
-import { isoInSeconds } from '../lib/ids.js';
+import { isoInSeconds, newId } from '../lib/ids.js';
 import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './helpers.js';
 
 /** The body every `forgot-password` call must produce, whatever it decided. */
@@ -136,6 +141,60 @@ describe('password reset', () => {
     );
     const performed = await harness.auditRows('auth.password_reset');
     assert.ok(performed.some((row) => row.target_id === owner.user.id));
+  });
+
+  it('revokes existing account and application credentials when reset proves the address', async () => {
+    const squatted = await harness.registerUser({ email: 'reclaimed@example.test' });
+    const applicationResponse = await harness.authed(squatted, {
+      method: 'POST',
+      url: '/api/applications',
+      payload: { name: 'Old application' },
+    });
+    assert.equal(applicationResponse.statusCode, 201, applicationResponse.body);
+    const applicationId = applicationResponse.json<{ application: { id: string } }>().application
+      .id;
+
+    const accountCredential = await harness.authed(squatted, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(accountCredential.statusCode, 201, accountCredential.body);
+    const accountId = accountCredential.json<IssueCredentialResponse>().credential.id;
+    const appCredential = await harness.authed(squatted, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth', application_id: applicationId },
+    });
+    assert.equal(appCredential.statusCode, 201, appCredential.body);
+    const appCredentialId = appCredential.json<IssueCredentialResponse>().credential.id;
+
+    const token = newId();
+    await harness.store.verificationTokens.create({
+      user_id: squatted.user.id,
+      token_hash: harness.app.nexus.crypto.hashToken(token),
+      purpose: 'password_reset',
+      expires_at: isoInSeconds(3600),
+    });
+    const reset = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/reset-password',
+      payload: { token, new_password: NEW_PASSWORD },
+    });
+    assert.equal(reset.statusCode, 200, reset.body);
+
+    assert.equal((await harness.store.credentials.findById(accountId))?.status, 'revoked');
+    assert.equal((await harness.store.credentials.findById(appCredentialId))?.status, 'revoked');
+    assert.equal(
+      harness.edge.consumerByUsername(`nexus-user-${squatted.user.id}`)?.credentials.keyauth
+        ?.length,
+      0,
+    );
+    assert.equal(
+      harness.edge.consumerByUsername(consumerUsernameForApplication(applicationId))?.credentials
+        .keyauth?.length,
+      0,
+    );
   });
 
   it('revokes an earlier link when a newer one is issued', async (t) => {

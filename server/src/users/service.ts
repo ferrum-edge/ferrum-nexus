@@ -732,9 +732,9 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
           }
           if (
             roleChanged &&
-            !roleAtLeast(target.role, 'admin') &&
             update.role !== undefined &&
-            roleAtLeast(update.role, 'admin')
+            roleAtLeast(update.role, 'admin') &&
+            !roleAtLeast(target.role, update.role)
           ) {
             await deps.assertManualAdminPromotionAllowed?.(tx, target.id);
           }

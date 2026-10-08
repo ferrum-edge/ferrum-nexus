@@ -665,7 +665,11 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
    */
   async function addressProven(account: UserRecord): Promise<boolean> {
     const proof = await store.emailProofs.findByUser(account.id);
-    return proof !== null && proof.email === account.email.trim().toLowerCase();
+    return (
+      proof !== null &&
+      proof.method !== 'verification_link' &&
+      proof.email === account.email.trim().toLowerCase()
+    );
   }
 
   /**

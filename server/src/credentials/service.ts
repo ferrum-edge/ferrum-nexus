@@ -477,6 +477,8 @@ export interface CredentialsService {
   initializeLegacyBasicAuthPositions(): Promise<void>;
   /** Whether that scan has completed, failed, or not yet run in this process. */
   legacyBasicAuthScanState(): LegacyBasicAuthScanState;
+  /** Revoke every live credential after a reset proves the account's address. */
+  revokeForAccountRecovery(user: UserRecord, ip?: string | null): Promise<number>;
   /** The caller's credentials, or another user's when an admin asks. */
   list(
     actor: UserRecord,
@@ -2255,6 +2257,29 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
 
     legacyBasicAuthScanState(): LegacyBasicAuthScanState {
       return legacyScanState;
+    },
+
+    async revokeForAccountRecovery(user, ip = null): Promise<number> {
+      let revoked = 0;
+      for (const status of LIVE_CREDENTIAL_STATUSES) {
+        for (;;) {
+          const page = await store.credentials.list(
+            { user_id: user.id, status },
+            { limit: MAX_PAGE_SIZE, offset: 0 },
+          );
+          if (page.items.length === 0) break;
+          for (const row of page.items) {
+            if (
+              await revokeCredentialRow(row, { id: user.id, role: user.role }, ip, {
+                reason: 'account_recovery',
+              })
+            ) {
+              revoked += 1;
+            }
+          }
+        }
+      }
+      return revoked;
     },
 
     async teardownGatewayIdentity(

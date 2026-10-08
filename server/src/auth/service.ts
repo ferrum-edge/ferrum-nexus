@@ -387,6 +387,8 @@ export interface AuthServiceDeps {
   prepareVerificationResend?: PrepareEmailToken;
   /** Optional hook that renders and queues a password-reset link. */
   preparePasswordReset?: PrepareEmailToken;
+  /** Revoke credentials when a reset establishes the account's first trusted proof. */
+  onFirstEmailProof?: (user: UserRecord, ip: string | null) => Promise<void>;
 }
 
 /** Strip the password hash: the wire shape of a user. */
@@ -1082,7 +1084,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       const passwordHash = await crypto.hashPassword(newPassword);
 
       await serializePasswordChange(record.id, async () => {
-        await store.transaction(async (tx) => {
+        const reset = await store.transaction(async (tx) => {
           // Recheck after taking the lease: an earlier change may have deleted
           // the link, or it may have expired while hashing or waiting.
           const live = await tx.verificationTokens.findByTokenHash(
@@ -1113,6 +1115,12 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
           );
           if (!updated) throw invalidResetLink();
 
+          const priorProof = await tx.emailProofs.findByUser(updated.id);
+          const firstTrustedProof =
+            priorProof === null ||
+            priorProof.method === 'verification_link' ||
+            priorProof.email !== updated.email.trim().toLowerCase();
+
           // Redeeming a mailed link proves the mailbox.
           await tx.emailProofs.upsert(updated.id, updated.email, 'password_reset', nowIso());
 
@@ -1130,7 +1138,11 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
               { email: updated.email },
               context.ip,
             );
+          return { user: updated, firstTrustedProof };
         });
+        if (reset.firstTrustedProof) {
+          await deps.onFirstEmailProof?.(reset.user, context.ip);
+        }
       });
     },
   };

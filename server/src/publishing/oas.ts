@@ -294,6 +294,8 @@ export interface UpstreamPolicy {
    * `.localhost`/`.home.arpa` name suffixes are refused.
    */
   allowPrivate: boolean;
+  /** Current public gateway URL, including an operator override when present. */
+  getGatewayPublicUrl?: () => Promise<string | null>;
   /**
    * Resolves a DNS name to its A/AAAA answers.
    *
@@ -316,6 +318,14 @@ function privateUpstreamError(host: string, resolved?: string[]): NexusError {
       reason: 'private_upstream',
       ...(resolved === undefined ? {} : { resolved }),
     },
+  );
+}
+
+/** Refuse a backend that would route a proxy back into the same public gateway. */
+function gatewayLoopError(host: string): NexusError {
+  return specInvalid(
+    `The upstream host '${host}' resolves to the gateway's public origin and would loop requests`,
+    { field: 'upstream_url', host, reason: 'gateway_origin' },
   );
 }
 
@@ -365,6 +375,20 @@ export async function assertUpstreamAllowed(
   upstream: SpecUpstream,
   policy: UpstreamPolicy,
 ): Promise<void> {
+  const gatewayPublicUrl = (await policy.getGatewayPublicUrl?.()) ?? null;
+  if (gatewayPublicUrl !== null) {
+    const gatewayUrl = new URL(gatewayPublicUrl);
+    const gatewayHost = gatewayUrl.hostname.replace(/^\[|\]$/g, '');
+    const upstreamHost = normalizeHost(upstream.host).replace(/^\[|\]$/g, '');
+    if (upstreamHost === normalizeHost(gatewayHost)) throw gatewayLoopError(upstream.host);
+
+    const gatewayAddresses = await addressesForHost(gatewayHost, policy);
+    const upstreamAddresses = await addressesForHost(upstream.host, policy);
+    if (gatewayAddresses.some((address) => upstreamAddresses.includes(address))) {
+      throw gatewayLoopError(upstream.host);
+    }
+  }
+
   // Opting in short-circuits before the network: the answer cannot change the
   // outcome, and the documented local-development upstream
   // (`host.docker.internal`) does not resolve from most hosts at all.
@@ -387,6 +411,18 @@ export async function assertUpstreamAllowed(
       upstream.host,
       resolved.map((entry) => entry.address),
     );
+  }
+}
+
+/** Resolve host names to comparable addresses without changing the egress policy. */
+async function addressesForHost(host: string, policy: UpstreamPolicy): Promise<string[]> {
+  const normalized = normalizeHost(host).replace(/^\[|\]$/g, '');
+  if (isIP(normalized) !== 0) return [normalized];
+  try {
+    const resolved = await policy.resolve(normalized);
+    return resolved.map((entry) => entry.address.toLowerCase());
+  } catch {
+    return [];
   }
 }
 

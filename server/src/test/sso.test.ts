@@ -898,9 +898,18 @@ describe('single sign-on', () => {
       'verification_link',
       new Date().toISOString(),
     );
+    const claims = { sub: 'explicit-subject', email: 'someone-else@corp.example.test' };
+    const untrustedProof = await link(h, corp, 'corp', holder, claims);
+    assert.equal(ssoError(untrustedProof), 'address_unproven');
+
+    await h.store.emailProofs.upsert(
+      holder.user.id,
+      'Explicit@Corp.example.test',
+      'password_reset',
+      new Date().toISOString(),
+    );
     // The identity's address differs from the account's: an explicit link
     // attaches it anyway, because the holder of the proven account started it.
-    const claims = { sub: 'explicit-subject', email: 'someone-else@corp.example.test' };
 
     // Back to no session, or another one: nothing is attached.
     const stray = await beginLink(h, corp, 'corp', holder, claims);
@@ -924,7 +933,7 @@ describe('single sign-on', () => {
     // The portal's proof stands as it was: the link recorded none of its own.
     const proof = await h.store.emailProofs.findByUser(holder.user.id);
     assert.equal(proof?.email, 'explicit@corp.example.test');
-    assert.equal(proof?.method, 'verification_link');
+    assert.equal(proof?.method, 'password_reset');
 
     // The same subject cannot then be attached to another account.
     const again = await link(h, corp, 'corp', other, claims);
@@ -1613,6 +1622,14 @@ describe('single sign-on', () => {
     });
     const oldSession = await sessionOf(h, linked);
     assert.equal(oldSession.user.id, target.id);
+
+    const elevated = await h.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${target.id}`,
+      payload: { role: 'super_admin' },
+    });
+    assert.equal(elevated.statusCode, 409, elevated.body);
+    assert.equal((await h.store.users.findById(target.id))?.role, 'client');
 
     const promotion = await h.authed(founder, {
       method: 'PATCH',

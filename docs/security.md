@@ -77,12 +77,16 @@ only lets a proxy point at a public destination
    entries are not consulted.
 
 The check runs at publish, on a `PATCH` of `upstream_url`, when a spec revision
-moves a proxy that follows its document, and on a gateway restore. A refusal is
-`400 SPEC_INVALID` with `details.reason` `private_upstream` (plus the
-`resolved` addresses when DNS decided) or `unresolvable_upstream`.
+moves a proxy that follows its document, and on a gateway restore. Nexus also
+refuses an upstream that names the configured public gateway host or resolves
+to any of its current addresses, including when private upstreams are enabled.
+A refusal is `400 SPEC_INVALID` with `details.reason` `private_upstream` (plus
+the `resolved` addresses when DNS decided), `unresolvable_upstream`, or
+`gateway_origin`.
 
-`NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` skips all three checks, including the
-lookup. `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` skips none of them. Use the private
+`NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` skips the destination privacy checks,
+including their lookup, but does not skip gateway-origin loop detection.
+`NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` skips none of them. Use the private
 opt-in only for a portal that fronts internal services, and configure
 Edge with `FERRUM_BACKEND_ALLOW_CIDRS` for the intended private destinations
 while keeping `FERRUM_BACKEND_ALLOW_IPS=public`. The latter selects a filtering
@@ -238,7 +242,9 @@ does not reinterpret that), so it publishes only under
   `new_password` deletes all of the account's sessions and issues one
   replacement for the calling tab.
 - **A password reset ends every session.** `POST /api/auth/reset-password`
-  deletes them all and clears the calling browser's cookies.
+  deletes them all and clears the calling browser's cookies. When the reset
+  records the account's first trusted proof of its address, it also revokes all
+  credentials held by the account and its applications before returning.
 - **Sign-in does not reveal which addresses exist.** A missing account still
   costs a scrypt derivation against a decoy hash, and both failures return the
   same `401 UNAUTHORIZED`.
@@ -439,11 +445,15 @@ or `ES256`, is refused.
      the string `"true"` or an absent claim counts as "not verified".
    - The portal holds a **recorded proof** of the account's current address,
      in `user_email_proofs`. A proof is written only by an event that proves
-     control of the mailbox:
-     - redeeming a verification link;
-     - completing a password reset;
+     control of the address and the local account:
+     - completing a password reset, which replaces the local password and
+       terminates every session;
      - an identity provider asserting the verified address when it provisioned
        the account or linked it automatically. An explicit link records none.
+
+   Redeeming an email-verification link marks the mailbox verified, but does
+   not prove who controls the account's password. That proof cannot authorize
+   automatic or explicit SSO linking.
 
    Nothing else counts. The policy in force does not, and `users.email_verified`
    does not. With `require_email_verification` off, a registration is marked
@@ -1477,6 +1487,8 @@ share counters. Every group answers `429 RATE_LIMITED`.
 | `GET /api/apis/:id/usage`                                                                                      | 30/min          | IP       |
 | `POST /api/access-requests` / `POST /api/access-requests/:id/cancel`                                           | 10/min / 30/min | account  |
 | `/api/applications` create, update, delete                                                                     | 30/min          | account  |
+| `/api/credentials` issue, rotate, revoke                                                                        | 20/min per route | account  |
+| `POST /api/notifications/read`                                                                                  | 60/min          | account  |
 
 "Account" means `userOrIpKey`: the signed-in user, falling back to the IP
 without a session. Per-account keys are the thing an attacker cannot cheaply
@@ -2111,7 +2123,7 @@ gateway write; a malformed id is `400 VALIDATION_FAILED`.
 | `credential.issue`              | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                                                                                                                                           |
 | `credential.rotate`             | `credential` | Rotation by the credential's owner (an administrator is refused); target is the **new** credential. `details`: type, consumer id, `rotated_from`, `previous_last4`. Rows written before GHSA-mr69-2744-f78w may carry `owner_user_id`, naming the owner an administrator rotated for.                                                                                                        |
 | `credential.revoke_start`       | `credential` | Intent, committed with the row's move to `retiring`, before the gateway delete. `details` as `credential.revoke`; a rotation at the per-type cap writes one with `operation: "rotate"`. Completed by `credential.revoke`, `credential.rotate` or `credential.revoke_rollback`.                                                                                                               |
-| `credential.revoke`             | `credential` | Deleted from Edge and marked `revoked`. `details`: type, consumer id, `last4`, optional `scope: "whole-type"`, and — when caused by an `auth_plugin` change on the API's own test consumer — `reason`, `api_id` and the `auth_plugin` pair. The target row lists settled rows in `swept_credential_ids`; each swept row also gets its own event with `swept_by` and `owner_user_id`.         |
+| `credential.revoke`             | `credential` | Deleted from Edge and marked `revoked`. `details`: type, consumer id, `last4`, optional `scope: "whole-type"`, and — when caused by an `auth_plugin` change on the API's own test consumer — `reason`, `api_id` and the `auth_plugin` pair. Account recovery may set `reason: "account_recovery"`. The target row lists settled rows in `swept_credential_ids`; each swept row also gets its own event with `swept_by` and `owner_user_id`. |
 | `credential.revoke_rollback`    | `credential` | A retirement whose gateway delete provably never applied; the row went back to `active`. `details`: `credential_type`, `consumer_id`, `last4`, `operation` (`revoke` \| `rotate`), `cause`, `owner_user_id`.                                                                                                                                                                                 |
 | `credential.settle`             | `credential` | A retirement Edge applied but the portal never recorded, settled by a later call. `details`: `credential_type`, `consumer_id`, `last4`, `owner_user_id`, `mirror_rows`, `gateway_entries`.                                                                                                                                                                                                   |
 | `credential.append_rollback`    | `consumer`   | An appended entry had to be taken back after an issue or rotation failed. `details`: `credential_type`, `consumer_id`, `operation` (`issue` \| `rotate`), `withdrawn`, `last4`, `append_index`, `owner_user_id`, `cause`, and `stranded_credential_id`, `retired_credential_id`, `suspected` where they apply.                                                                               |
