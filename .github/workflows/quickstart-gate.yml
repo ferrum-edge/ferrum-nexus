@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   quickstart:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - name: Resolve the release to install
