@@ -2153,7 +2153,11 @@ portal responses.
   other pending request; `access.revoke_rollback` then names it in
   `tool_request_restored`. While an account recovery of the grantee is
   outstanding it stays cancelled, as the reset would have cancelled it, and the
-  row records `tool_request_skipped: "account_recovery"`.
+  row records `tool_request_skipped: "account_recovery"`. The restore commits
+  under the grantee's `users:recovery:<user_id>` key, which a password reset
+  holds around the transaction that queues the recovery and cancels the
+  account's pending requests, so one of the two always sees the other's
+  commit.
 
 | Action                          | Target type      | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

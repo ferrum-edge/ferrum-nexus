@@ -150,6 +150,7 @@ import {
 import {
   LEASE_TTL_MS,
   accessRequestBudgetLockKey,
+  accountRecoveryLockKey,
   isLockTimeout,
   userLifecycleLockKey,
   type KeyedSerializer,
@@ -666,9 +667,12 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * opened since, which holds the one pending slot, or while an account
    * recovery of the grantee is outstanding: the reset that queued it cancels
    * the account's pending requests, found this one already cancelled, and
-   * must not see it come back. Store-only, so safe in a re-run body. Returns
-   * `restored` when the request went back, `account_recovery` when a recovery
-   * kept it out, and `null` otherwise.
+   * must not see it come back. The caller holds the grantee's recovery key,
+   * which that reset's transaction runs under too, so the job is never read
+   * while a reset that queues it is still uncommitted (issue #548).
+   * Store-only, so safe in a re-run body. Returns `restored` when the request
+   * went back, `account_recovery` when a recovery kept it out, and `null`
+   * otherwise.
    */
   async function restoreToolRequest(
     db: NexusStore,
@@ -858,10 +862,14 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * inside it, under the grantee's lifecycle key — the key every account
    * status flip commits under — so no disable can land between the grantee
    * check and the restore on any instance. Consumer key first, as the lock
-   * order requires. An identity with no consumer row has no group to restore
-   * over. The transaction is fenced by both keys and by whatever lease the
-   * caller holds. `proxyId` names the proxy lease protecting MCP eligibility;
-   * without one, only REST membership can justify restoration.
+   * order requires. Innermost, the grantee's {@link accountRecoveryLockKey},
+   * which a password reset holds around the transaction that cancels the
+   * account's pending requests and queues its recovery: a restore of a
+   * cancelled tool request reads that job, so the two commit one after the
+   * other. An identity with no consumer row has no group to restore over. The
+   * transaction is fenced by every key and by whatever lease the caller holds.
+   * `proxyId` names the proxy lease protecting MCP eligibility; without one,
+   * only REST membership can justify restoration.
    */
   async function restoreOnce<T>(
     claim: GrantRecord,
@@ -870,7 +878,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   ): Promise<T> {
     const underLifecycle = (groupPresent: boolean): Promise<T> =>
       lifecycleLocks(userLifecycleLockKey(claim.user_id), () =>
-        store.transaction((tx) => body(tx, groupPresent)),
+        lifecycleLocks(accountRecoveryLockKey(claim.user_id), () =>
+          store.transaction((tx) => body(tx, groupPresent)),
+        ),
       );
     const consumer = await store.consumers.findByUserAndNamespace(
       claim.user_id,

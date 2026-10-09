@@ -16,6 +16,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   the resource was still live. The same rule now applies to gateway
   reconciliation and its repair, to restoring a missing deployment (which could
   build a second proxy beside a live one) and to the undo of a plugin removal.
+- **A failed grant revocation no longer restores a tool request a concurrent
+  password reset cancelled** (#548). On PostgreSQL or MySQL, the rollback could
+  find no account recovery just before a reset committed one, then put the
+  cancelled tool request back to `pending` after the reset had cleared the
+  account's pending requests. The rollback and the reset now commit under one
+  per-account lock, so one of them always sees the other.
 
 ## [0.5.2] - 2026-10-08
 

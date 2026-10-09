@@ -129,6 +129,29 @@ export function userMailHandoffLockKey(userId: string): string {
 }
 
 /**
+ * The per-account **recovery** key: the transaction of a password reset that
+ * queues an account recovery, and the transaction of a failed grant
+ * revocation's rollback that decides whether to restore the tool request the
+ * revocation cancelled, are each taken under it.
+ *
+ * The reset cancels the account's pending requests and writes the recovery
+ * job; the rollback restores a cancelled request only while no job exists.
+ * Each reads what the other writes, and under PostgreSQL or MySQL isolation
+ * both could commit: the rollback reads "no job" just before the reset
+ * commits, and puts the request back after the reset found nothing to cancel.
+ * With the key, whichever commits second sees the other.
+ *
+ * Always the **innermost** key, taken immediately around one transaction: the
+ * reset takes it inside the password-change lease, the rollback inside
+ * {@link userLifecycleLockKey}, and nothing is taken inside it. The reset does
+ * not take the lifecycle key itself, so a disable that holds it never queues
+ * a reset's redemption.
+ */
+export function accountRecoveryLockKey(userId: string): string {
+  return `users:recovery:${userId}`;
+}
+
+/**
  * The per-provider **single sign-on** key: every OIDC callback that writes one
  * of the provider's links (a first-time link, a provisioned account), every
  * deprovisioning, and every save of the single sign-on settings are taken

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, before, describe, it } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import {
   aclGroupForApi,
@@ -602,6 +603,106 @@ export function runMcpMembershipContract(
           const after = await target.store.accessRequests.findById(t.pending.id);
           assert.equal(after?.status, 'cancelled');
         } finally {
+          await target.store.accountRecoveryJobs.deleteByUser(userId);
+        }
+      });
+
+      it(`${scope}: orders the tool request restore with a concurrent reset`, async () => {
+        const t = await toolRequestFixture(application);
+        const userId = t.who.client.user.id;
+        // Minted before the rollback opens its transaction: on SQLite a write
+        // from outside it would queue behind the paused body.
+        const token = newId();
+        await target.store.verificationTokens.create({
+          user_id: userId,
+          token_hash: harness.app.nexus.crypto.hashToken(token),
+          purpose: 'password_reset',
+          expires_at: isoInSeconds(3600),
+        });
+        let reached = false;
+        let checking!: () => void;
+        const checked = new Promise<void>((resolve) => {
+          checking = resolve;
+        });
+        let resume!: () => void;
+        const resumed = new Promise<void>((resolve) => {
+          resume = resolve;
+        });
+        // Park the rollback at its recovery check, inside its transaction and
+        // under every key it holds.
+        const parkAtRecoveryCheck = (tx: NexusStore): NexusStore =>
+          new Proxy(tx, {
+            get(base, property, receiver): unknown {
+              const value: unknown = Reflect.get(base, property, receiver);
+              if (property !== 'accountRecoveryJobs') return value;
+              const jobs = value as NexusStore['accountRecoveryJobs'];
+              return new Proxy(jobs, {
+                get(repo, name, inner): unknown {
+                  if (name !== 'findByUser') return Reflect.get(repo, name, inner);
+                  return async (id: string) => {
+                    if (!reached && id === userId) {
+                      reached = true;
+                      checking();
+                      await resumed;
+                    }
+                    return repo.findByUser(id);
+                  };
+                },
+              });
+            },
+          });
+        const transaction = target.store.transaction.bind(target.store);
+        target.store.transaction = <T>(
+          body: (tx: NexusStore) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> => transaction((tx) => body(parkAtRecoveryCheck(tx)), options);
+        patches.push(() => {
+          target.store.transaction = transaction;
+        });
+        harness.edge.queueFailure(
+          503,
+          { error: 'refused' },
+          `/consumers/${t.row.ferrum_consumer_id}`,
+          'PUT',
+        );
+        try {
+          const revoking = revoke(t.grant.id);
+          await Promise.race([
+            checked,
+            revoking.then(() => {
+              throw new Error('the rollback never reached its recovery check');
+            }),
+          ]);
+          // A first trusted reset of the grantee, from outside the rollback.
+          // Unordered, it read no pending request, committed its recovery job,
+          // and the rollback then put the cancelled request back beside it.
+          const resetting = harness.app.inject({
+            method: 'POST',
+            url: '/api/auth/reset-password',
+            payload: { token, new_password: 'a-reset-racing-the-rollback' },
+          });
+          const early = await Promise.race([
+            resetting.then(() => 'committed'),
+            delay(300).then(() => 'waiting'),
+          ]);
+          resume();
+          assert.equal(early, 'waiting', 'the reset waits for the rollback to commit');
+
+          const failed = await revoking;
+          assert.equal(failed.statusCode, 502, failed.body);
+          const reset = await resetting;
+          assert.equal(reset.statusCode, 200, reset.body);
+          // The rollback committed first and put the request back; the reset
+          // that followed found it pending and cancelled it.
+          const rollback = await details(AuditAction.ACCESS_REVOKE_ROLLBACK, t.grant.id);
+          assert.equal(rollback?.grant_restored, true);
+          assert.equal(rollback?.tool_request_restored, t.pending.id);
+          const after = await target.store.accessRequests.findById(t.pending.id);
+          assert.equal(after?.status, 'cancelled');
+          const recovered = await details(AuditAction.AUTH_PASSWORD_RESET, userId);
+          assert.equal(recovered?.cancelled_access_requests, 1);
+        } finally {
+          resume();
           await target.store.accountRecoveryJobs.deleteByUser(userId);
         }
       });
