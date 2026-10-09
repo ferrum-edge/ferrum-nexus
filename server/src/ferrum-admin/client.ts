@@ -905,8 +905,7 @@ interface TextResponse {
 
 /** One `GET /admin/metrics` read: the payload, or why there is none. */
 type BackendRead =
-  | { payload: Record<string, unknown> }
-  | { payload: null; failure: MetricsReadFailure };
+  { payload: Record<string, unknown> } | { payload: null; failure: MetricsReadFailure };
 
 /** What a metrics read's failure log carries, or `null` for a read that worked. */
 type FailureLogFields = Record<string, unknown> | null;
