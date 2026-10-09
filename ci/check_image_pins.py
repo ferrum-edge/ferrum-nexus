@@ -38,7 +38,7 @@ WORKFLOW_IMAGE_VARIABLE = re.compile(
     r'^\s*(?:export\s+)?["\']?(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)["\']?\s*:\s*(.*?)\s*$'
 )
 FLOW_WORKFLOW_IMAGE_VARIABLE = re.compile(
-    r'(?:\{|,)\s*["\']?(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)["\']?\s*:\s*'
+    r'(?:(?<!\$)\{|,)\s*["\']?(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)["\']?\s*:\s*'
     r'(["\']?\$\{\{.*?\}\}["\']?|[^,}]+)'
 )
 TOP_LEVEL_SERVICES = re.compile(r'^services\s*:', re.M)
@@ -75,6 +75,7 @@ def workflow_env_image_fields(path, source):
         match = WORKFLOW_IMAGE_VARIABLE.match(line)
         if match:
             yield line_no, _unquote(match.group(2).strip())
+            continue
         for match in FLOW_WORKFLOW_IMAGE_VARIABLE.finditer(line):
             yield line_no, _unquote(match.group(2).strip())
 
