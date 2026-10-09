@@ -350,13 +350,14 @@ function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
  * The card next to it is the one that explains the `/<namespace>/<slug>` listen
  * path, and an admin is the only person who can fix this, so it belongs here
  * rather than behind a status page nobody opens. `active` is `null` for a
- * non-admin and for the header-only signal, where the gateway said which
+ * non-admin, for the header-only signal, and for a gateway that withholds its
+ * namespace from the portal's namespace-scoped token: each says which
  * namespace is wrong without saying which one is right.
  */
 function NamespaceUnservedNotice({ routing }: { routing: EdgeNamespaceRouting }): ReactElement {
   const gateway =
     routing.active === null
-      ? "read the gateway's own active namespace from its authenticated GET /health, field namespace.active"
+      ? "read the gateway's own active namespace from its GET /health, field namespace.active, with a fleet admin token (one without an ns claim)"
       : `the gateway's data plane serves '${routing.active}'`;
   return (
     <FormNotice tone="danger">

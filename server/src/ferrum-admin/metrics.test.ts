@@ -5,8 +5,10 @@ import type { EdgeConfig } from '../config/index.js';
 import { createMockFerrumEdge, type MockFerrumEdge } from '../test/mock-ferrum-edge.js';
 import {
   createFerrumAdminClient,
+  METRICS_CACHE_TTL_MS,
   METRICS_RESPONSE_MAX_BYTES,
   silentEdgeLogger,
+  type EdgeLogger,
   type FerrumAdminClient,
 } from './client.js';
 
@@ -40,6 +42,29 @@ function configFor(url: string, overrides: Partial<EdgeConfig> = {}): EdgeConfig
  */
 function freshClient(): FerrumAdminClient {
   return createFerrumAdminClient(configFor(edge.url));
+}
+
+interface LoggedLine {
+  fields: Record<string, unknown>;
+  message: string;
+}
+
+/** An {@link EdgeLogger} that keeps its warnings and errors: what an operator sees. */
+function recordingLogger(): EdgeLogger & { warnings: LoggedLine[]; errors: LoggedLine[] } {
+  const warnings: LoggedLine[] = [];
+  const errors: LoggedLine[] = [];
+  return {
+    warnings,
+    errors,
+    debug: () => undefined,
+    warn: (fields, message) => warnings.push({ fields, message: message ?? '' }),
+    error: (fields, message) => errors.push({ fields, message: message ?? '' }),
+  };
+}
+
+/** The operator hint logged for a failed read of `path`. */
+function hintFor(log: { warnings: LoggedLine[] }, path: string): string {
+  return String(log.warnings.find((line) => line.fields.path === path)?.fields.hint);
 }
 
 describe('ferrum admin metrics', () => {
@@ -171,19 +196,18 @@ describe('ferrum admin metrics', () => {
 
     for (const status of [403, 404, 200]) {
       it(`logs the documented warning for a ${status} unusable scrape`, async () => {
-        const warnings: string[] = [];
-        const logged = createFerrumAdminClient(configFor(edge.url), {
-          ...silentEdgeLogger,
-          warn: (_fields, message) => warnings.push(message ?? ''),
-        });
+        const log = recordingLogger();
+        const logged = createFerrumAdminClient(configFor(edge.url), log);
         try {
           edge.queueFailure(status, '# TYPE ferrum_requests_total counter\n', '/metrics');
           assert.equal((await logged.metrics.scrapeProxy('proxy-a')).available, false);
-          assert.deepEqual(warnings, [
-            status === 200
-              ? 'Ferrum Edge metrics scrape produced no parseable samples'
-              : 'Ferrum Edge metrics scrape returned a non-2xx status',
-          ]);
+          const messages = log.warnings.map((line) => line.message);
+          assert.deepEqual(messages, ['Ferrum Edge request metrics could not be read']);
+          assert.equal(log.warnings[0]?.fields.status, status);
+          assert.equal(
+            log.warnings[0]?.fields.detail,
+            status === 200 ? 'no_parseable_samples' : null,
+          );
         } finally {
           await logged.close();
         }
@@ -227,6 +251,9 @@ describe('ferrum admin metrics', () => {
       const metrics = await freshClient().metrics.scrapeProxy('proxy-a');
 
       assert.equal(metrics.available, false);
+      // The gateway answered: an unusable body, not an unreachable gateway.
+      assert.equal(metrics.unavailableCode, 'gateway_error');
+      assert.doesNotMatch(metrics.reason ?? '', /reached/);
     });
   });
 
@@ -318,8 +345,17 @@ describe('ferrum admin metrics against a gateway that bounds ns-claim tokens', (
   const VIEWER = 'ferrum-admin-viewer-key-secret-0123456789abc';
   let bounded: MockFerrumEdge;
 
-  function boundedClient(overrides: Partial<EdgeConfig> = {}): FerrumAdminClient {
-    return createFerrumAdminClient(configFor(bounded.url, overrides));
+  function boundedClient(
+    overrides: Partial<EdgeConfig> = {},
+    logger: EdgeLogger = silentEdgeLogger,
+  ): FerrumAdminClient {
+    return createFerrumAdminClient(configFor(bounded.url, overrides), logger);
+  }
+
+  /** A provider reads the reason: no setting names, no gateway versions. */
+  function assertGeneric(reason: string | undefined): void {
+    assert.match(reason ?? '', /did not allow this portal/);
+    assert.doesNotMatch(reason ?? '', /FERRUM_|v0\.9|namespace-scoped/);
   }
 
   before(async () => {
@@ -351,14 +387,17 @@ describe('ferrum admin metrics against a gateway that bounds ns-claim tokens', (
   });
 
   it('says the scrape was refused, and why, when no metrics credential is configured', async () => {
-    const client = boundedClient();
+    const log = recordingLogger();
+    const client = boundedClient({}, log);
     try {
       const metrics = await client.metrics.scrapeProxy('proxy-a');
 
       assert.equal(metrics.available, false);
       assert.equal(metrics.unavailableCode, 'refused');
-      assert.match(metrics.reason ?? '', /namespace-scoped admin token/);
-      assert.match(metrics.reason ?? '', /FERRUM_METRICS_BEARER_TOKEN/);
+      assertGeneric(metrics.reason);
+      // The operator's detail goes to the log.
+      assert.match(hintFor(log, '/metrics'), /namespace-scoped admin token/);
+      assert.match(hintFor(log, '/metrics'), /FERRUM_METRICS_BEARER_TOKEN/);
       assert.equal(metrics.requests.total, 0);
       const [call] = bounded.callsTo('GET', '/metrics');
       assert.equal(call?.claims?.ns, 'nexus');
@@ -384,25 +423,30 @@ describe('ferrum admin metrics against a gateway that bounds ns-claim tokens', (
   });
 
   it('names a metrics bearer token the gateway does not accept', async () => {
-    const client = boundedClient({ metricsBearerToken: 'x'.repeat(48) });
+    const log = recordingLogger();
+    const client = boundedClient({ metricsBearerToken: 'x'.repeat(48) }, log);
     try {
       const metrics = await client.metrics.scrapeProxy('proxy-a');
 
       assert.equal(metrics.available, false);
       assert.equal(metrics.unavailableCode, 'refused');
-      assert.match(metrics.reason ?? '', /must match the gateway/);
+      assertGeneric(metrics.reason);
+      assert.match(hintFor(log, '/metrics'), /FERRUM_METRICS_BEARER_TOKEN must equal/);
+      assert.equal(log.warnings[0]?.fields.credential, 'metrics_bearer');
     } finally {
       await client.close();
     }
   });
 
   it('reads backend state as unavailable, not as no breakers, without a fleet key', async () => {
-    const client = boundedClient();
+    const log = recordingLogger();
+    const client = boundedClient({}, log);
     try {
       const state = await client.metrics.backendState('proxy-a');
 
       assert.equal(state.available, false);
-      assert.match(state.reason ?? '', /namespace-scoped admin token/);
+      assertGeneric(state.reason);
+      assert.match(hintFor(log, '/admin/metrics'), /namespace-scoped admin token/);
       assert.deepEqual(state.breakers, []);
       assert.equal(state.uptimeSeconds, null);
     } finally {
@@ -427,12 +471,37 @@ describe('ferrum admin metrics against a gateway that bounds ns-claim tokens', (
   });
 
   it('names a fleet-read key the gateway does not accept', async () => {
-    const client = boundedClient({ fleetReadJwtSecret: 'y'.repeat(48) });
+    const log = recordingLogger();
+    const client = boundedClient({ fleetReadJwtSecret: 'y'.repeat(48) }, log);
     try {
       const state = await client.metrics.backendState('proxy-a');
 
       assert.equal(state.available, false);
-      assert.match(state.reason ?? '', /FERRUM_ADMIN_FLEET_READ_JWT_SECRET/);
+      assertGeneric(state.reason);
+      assert.match(hintFor(log, '/admin/metrics'), /FERRUM_ADMIN_FLEET_READ_JWT_SECRET/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('logs a refused read once per change, not on every cache miss', async (t) => {
+    const log = recordingLogger();
+    const client = boundedClient({}, log);
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    try {
+      for (let read = 0; read < 3; read += 1) {
+        await client.metrics.scrapeProxy('proxy-a');
+        await client.metrics.backendState('proxy-a');
+        t.mock.timers.tick(METRICS_CACHE_TTL_MS + 1);
+      }
+
+      const scrapes = bounded.requests.filter((request) => request.path === '/metrics');
+      assert.equal(scrapes.length, 3, 'every read missed the cache');
+      const logged = (path: string): number =>
+        log.warnings.filter((line) => line.fields.path === path).length;
+      assert.equal(logged('/metrics'), 1);
+      assert.equal(logged('/admin/metrics'), 1);
+      assert.deepEqual(log.errors, [], 'a refused read is not also logged as an error');
     } finally {
       await client.close();
     }

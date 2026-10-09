@@ -170,7 +170,9 @@ works with both releases, with no new opt-in:
 - Every write, and every namespace-scoped read, is unchanged.
 - `/api/health` reads `mode`, `admin_writes_enabled` and the `namespace` block
   from the detailed `/health` tier on v0.9.15 and from the bounded tenant tier
-  on v0.9.16. A minimal tier reads as unknown.
+  on v0.9.16. A minimal tier reads as unknown. The tenant tier sends
+  `namespace.active: null` when the token's claim does not cover the gateway's
+  namespace, which reads as unserved and blocks publishing.
 - The Usage card's two fleet-global reads have optional credentials:
   `FERRUM_METRICS_BEARER_TOKEN` for `GET /metrics`, and
   `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` (a privilege trade-off) for

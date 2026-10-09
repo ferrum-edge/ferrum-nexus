@@ -546,9 +546,9 @@ gateway.
   all. The card says why. It says nothing about your backend.
 
 If the card says gateway metrics are unavailable, the counters are missing, not
-zero; the API may be serving normally. If the reason says the gateway refuses
-the portal's token, your administrator has to configure a metrics credential;
-see the operations guide.
+zero; the API may be serving normally. If the reason says the gateway did not
+allow the portal to read its metrics, your administrator has to configure a
+metrics credential; see the operations guide.
 
 ### "Gateway deployment missing"
 

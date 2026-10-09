@@ -1007,11 +1007,7 @@ export interface ApiUsageResponse {
  * - `gateway_error` — any other status, or a body with no readable samples.
  */
 export type ApiUsageUnavailableCode =
-  | 'no_proxy'
-  | 'no_series'
-  | 'unreachable'
-  | 'refused'
-  | 'gateway_error';
+  'no_proxy' | 'no_series' | 'unreachable' | 'refused' | 'gateway_error';
 
 /** Cumulative request counters for one API's proxy. */
 export interface ApiUsageRequests {
@@ -1071,11 +1067,7 @@ export interface ApiUsageBackend {
 
 /** @see {@link ApiUsageBackend} */
 export type ApiUsageBackendStatus =
-  | 'healthy'
-  | 'failing'
-  | 'recovering'
-  | 'unknown'
-  | 'unavailable';
+  'healthy' | 'failing' | 'recovering' | 'unknown' | 'unavailable';
 
 /* ── Access requests & grants ───────────────────────────────────────────── */
 

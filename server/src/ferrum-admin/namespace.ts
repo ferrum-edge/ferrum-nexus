@@ -32,10 +32,12 @@
  *
  * **Health tiers.** Edge v0.9.15 gives the portal's admin token its detailed
  * `/health` tier, block included. Edge v0.9.16 bounds a token with an `ns`
- * claim to a tenant tier that carries the block only when the claim covers the
- * gateway's active namespace. A tier with no block at all is unknown, as
- * above; a block that says the data plane is single-namespace but withholds
- * its name is read as serving a namespace this portal's claim does not cover.
+ * claim to a tenant tier that keeps the block but withholds `active` (sends
+ * `null`, naming no other namespace) when the claim does not cover the
+ * gateway's active namespace. A block that says the data plane is
+ * single-namespace but withholds its name is therefore read as serving a
+ * namespace this portal's claim does not cover. A tier with no block at all
+ * (the minimal tier) is unknown, as above.
  */
 
 import {
@@ -73,6 +75,13 @@ export interface EdgeNamespaceServing {
  * whose `data_plane_single_namespace` is not a boolean is treated as `false`,
  * because a gateway that cannot state the branch condition must not be turned
  * into a degradation. Anything that is not an object at all is `null`.
+ *
+ * The converse is deliberate too. Once the gateway *does* state
+ * `data_plane_single_namespace: true`, an `active` that is missing, `null`,
+ * empty or not a string reads as `null` — a name withheld from this portal's
+ * token — and {@link namespaceUnserved} then degrades the portal and blocks
+ * publishing. A gateway that says its data plane serves one namespace but not
+ * which has not shown that it serves this one.
  */
 export function parseNamespaceServing(raw: unknown): EdgeNamespaceServing | null {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
@@ -187,8 +196,10 @@ export function createNamespaceMonitor(configured: string): NamespaceMonitor {
  *
  * Names both namespaces and both ways out, because only an operator can fix
  * this and they need to choose which side moves. When the verdict came from
- * the response header alone the gateway's own namespace is unknown, so the
- * message points at the call that reveals it instead of inventing a name.
+ * the response header alone, or the gateway withheld the name from this
+ * portal's token, the gateway's own namespace is unknown, so the message points
+ * at the call that reveals it — with a credential that can see it — instead of
+ * inventing a name.
  */
 export function namespaceUnservedMessage(routing: EdgeNamespaceRouting): string {
   const head =
@@ -204,8 +215,9 @@ export function namespaceUnservedMessage(routing: EdgeNamespaceRouting): string 
     );
   }
   return (
-    `${head} Read the gateway's active namespace from the authenticated GET /health ` +
-    '(field `namespace.active`) and set FERRUM_NAMESPACE to it on the portal, or restart ' +
+    `${head} The gateway does not name its namespace to this portal's namespace-scoped ` +
+    'token. Read it from GET /health (field `namespace.active`) with a fleet admin token, ' +
+    'one without an `ns` claim, and set FERRUM_NAMESPACE to it on the portal, or restart ' +
     `the gateway with FERRUM_NAMESPACE=${routing.configured}, then retry.`
   );
 }

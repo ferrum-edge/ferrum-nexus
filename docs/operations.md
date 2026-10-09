@@ -206,22 +206,33 @@ claim-less token signed with `FERRUM_ADMIN_JWT_SECRET` has authority over the
 whole fleet. Everything the portal writes is namespace-scoped and keeps working.
 The fleet-global reads are affected like this:
 
-| Read                         | Used for                                     | On Edge v0.9.16, with no extra setting                                                                                         | To restore it                                                    |
-| ---------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
-| `GET /metrics`               | Usage card request counts and latency        | `403`. The card shows "Gateway metrics are unavailable" with the reason; `unavailable_code` is `refused`.                      | `FERRUM_METRICS_BEARER_TOKEN`, equal to the gateway's own value. |
-| `GET /admin/metrics`         | Usage card circuit breakers, ejected targets | `403`. `backend.status` is `unavailable` with the reason; it never reads as "no circuit breaker".                              | Optional `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` (see below).       |
-| `GET /health`                | `/api/health`, namespace routability         | The bounded tenant tier: `mode`, `admin_writes_enabled`, and the `namespace` block when the claim covers the active namespace. | Nothing to set.                                                  |
-| `GET /namespaces`            | Not used by the portal                       | Lists only `FERRUM_NAMESPACE`.                                                                                                 | Nothing to set.                                                  |
-| `GET /version` (not on Edge) | Best-effort version probe                    | `403` instead of `404`; still reads as no version.                                                                             | Nothing to set.                                                  |
+| Read                         | Used for                                     | On Edge v0.9.16, with no extra setting                                                                                                                     | To restore it                                                                                                        |
+| ---------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `GET /metrics`               | Usage card request counts and latency        | `403`. The card shows "Gateway metrics are unavailable" with the reason; `unavailable_code` is `refused`.                                                  | `FERRUM_METRICS_BEARER_TOKEN`, equal to the gateway's own value. Allowlisting the portal's IP does not help (below). |
+| `GET /admin/metrics`         | Usage card circuit breakers, ejected targets | `403`. `backend.status` is `unavailable` with the reason; it never reads as "no circuit breaker".                                                          | Optional `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` (see below).                                                           |
+| `GET /health`                | `/api/health`, namespace routability         | The bounded tenant tier: `mode`, `admin_writes_enabled` and the `namespace` block, with `active: null` when the claim does not cover the active namespace. | Nothing to set.                                                                                                      |
+| `GET /namespaces`            | Not used by the portal                       | Lists only `FERRUM_NAMESPACE`.                                                                                                                             | Nothing to set.                                                                                                      |
+| `GET /version` (not on Edge) | Best-effort version probe                    | `403` instead of `404`; still reads as no version.                                                                                                         | Nothing to set.                                                                                                      |
 
 Neither setting is needed against Ferrum Edge v0.9.15, where the admin JWT
 still reads both metrics endpoints; each is used as soon as it is set.
 
-**The metrics bearer token** is the gateway's own `FERRUM_METRICS_BEARER_TOKEN`
-(at least 32 characters, distinct from `FERRUM_ADMIN_JWT_SECRET`). Nexus sends
-it as `Authorization: Bearer <token>` on `GET /metrics` and on nothing else. On
-Edge it unlocks the Prometheus scrape and the detailed probe tier, the same
-access a Prometheus scraper already has, and no Admin API route.
+Adding the portal's IP to the gateway's `FERRUM_METRICS_ALLOWED_CIDRS` does not
+restore `GET /metrics`. Nexus always presents a credential on the scrape, its
+namespace-scoped admin JWT when no bearer token is set, and Edge v0.9.16 refuses
+that JWT from an allowlisted address too. Set the bearer token instead.
+
+**The metrics bearer token is a fleet-wide observability credential; treat it
+as one.** It is the gateway's own `FERRUM_METRICS_BEARER_TOKEN` (at least 32
+characters, distinct from `FERRUM_ADMIN_JWT_SECRET`). Nexus sends it as
+`Authorization: Bearer <token>` on `GET /metrics` and on nothing else. On Edge
+it reaches no Admin API route and cannot write, but it is not bounded by the
+portal's namespace: it reads **every namespace's** metric series, and the
+detailed `/health` and `/overload` tiers, which describe the whole gateway. That
+is the access any Prometheus scraper holding the token has. Once it is set,
+anyone who obtains the portal's environment gets that read access too, so store
+it with the portal's other secrets and rotate it on the gateway and the portal
+together.
 
 **The fleet-read key is a privilege trade-off; leave it unset unless you need
 backend state on the Usage card.** Nexus signs `GET /admin/metrics`, and
@@ -238,7 +249,10 @@ whose viewer key is fleet-wide. Nexus refuses to start if the value equals
 that can mint `admin`.
 
 **Health tiers.** The tenant tier keeps everything `/api/health` reads, so no
-fleet-privileged token is needed for it. A gateway that answers only the
+fleet-privileged token is needed for it. When the token's claim does not cover
+the gateway's active namespace, the tier still sends the `namespace` block but
+with `active: null`, naming no other namespace; Nexus reads that as unserved
+(see [Namespace routability](#namespace-routability)). A gateway that answers only the
 minimal tier (`status` and `ready`) leaves the gateway mode, the write state
 and the namespace routing unknown (`null`). Nexus logs
 `Ferrum Edge answered GET /health with its minimal tier` once, and never
@@ -267,7 +281,9 @@ route. While the namespace is unrouted:
   `PATCH`es and deletes still work, so you can clean up.
 - The startup check logs `MISCONFIGURED NAMESPACE: …` at `error`.
 
-To see the gateway's side:
+To see the gateway's side (on Ferrum Edge v0.9.16, with an admin JWT that
+carries no `ns` claim; the portal's own token sees `active: null` whenever its
+claim does not cover the active namespace):
 
 ```bash
 curl -s "$FERRUM_ADMIN_URL/health" -H "Authorization: Bearer $ADMIN_JWT" | jq .namespace
@@ -286,11 +302,12 @@ The released namespace-routing policy accepts a control plane with
 block is unknown, not a mismatch. A block that stops appearing ends an earlier
 "served" verdict; it becomes unknown. An earlier "unserved" verdict stays until
 the gateway reports the namespace as served. On Ferrum Edge v0.9.16 the
-portal's namespace-scoped token gets the block only when its claim covers the
-gateway's active namespace (see
+portal's namespace-scoped token gets the block with `active` withheld (`null`)
+whenever its claim does not cover the gateway's active namespace (see
 [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0916)).
 A single-namespace data plane that withholds its `active` name serves a
-namespace the claim does not cover, which is `unserved`. **Backend egress admission below narrows that
+namespace the claim does not cover, which is `unserved`: health degrades and
+publishing is refused, exactly as for a named mismatch. **Backend egress admission below narrows that
 accepted CP pairing; see its topology decision.**
 
 ### Backend egress admission and the public-only guarantee
@@ -2693,9 +2710,14 @@ Do not bill from it.
 
 - **Load:** at most one scrape per Nexus process per 10 s.
 - **Gateway problems never return 5xx.** The route answers `200` with
-  `available: false` and logs at `warn` (`Ferrum Edge metrics scrape could not
-reach the gateway`, `… returned a non-2xx status`, `… produced no parseable
-samples`). Watch the log, not the status.
+  `available: false` and a generic reason a provider can read; it never names a
+  setting or a gateway version. The operator's detail goes to the log at `warn`:
+  `Ferrum Edge request metrics could not be read` and
+  `Ferrum Edge runtime metrics could not be read`, each with the `status`, the
+  `credential` presented and a `hint` naming what to check or set, logged once
+  per change of cause rather than on every cache miss; and
+  `Ferrum Edge metrics scrape could not reach the gateway` for each scrape that
+  reached nothing. Watch the log, not the status.
 - **Counters reset when the gateway restarts.** `gateway_uptime_seconds` shows
   how far back they go.
 - **There is no per-consumer breakdown**: `ferrum_requests_total` has no consumer

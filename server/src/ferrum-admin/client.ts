@@ -177,6 +177,12 @@ interface CallOptions {
   subject?: string;
   /** Sign with this minter instead of the admin one (the fleet-read token). */
   minter?: AdminTokenMinter;
+  /**
+   * Skip the per-call log of a gateway error status, every one (`true`) or
+   * those listed: the caller logs the failure itself, once per change rather
+   * than once per call.
+   */
+  quiet?: true | readonly number[];
   /** Refuse to buffer a response larger than this many bytes. */
   maxResponseBytes?: number;
   ifMatch?: string;
@@ -221,7 +227,8 @@ export interface FerrumAdminClient {
    * `docs/admin_api.md`), so this returns `null` on a 404 rather than
    * failing; take the real version from your deployment metadata. Edge v0.9.16
    * answers an unknown global path `403` to a token with an `ns` claim, which is
-   * the same "no endpoint" and also reads `null`.
+   * the same "no endpoint" and also reads `null`; because a `403` can also be a
+   * refused credential, it is logged distinctly (once per transition).
    */
   version(): Promise<string | null>;
   /** Combined reachability probe for `GET /api/health`; never throws. */
@@ -868,89 +875,146 @@ function emptyBackendState(reason: string): EdgeBackendState {
   return { available: false, reason, breakers: [], unhealthyTargets: [], uptimeSeconds: null };
 }
 
-/** Why a `GET /metrics` scrape yielded nothing; cached like a successful one. */
-export interface ScrapeFailure {
-  code: ApiUsageUnavailableCode;
+/**
+ * Why a metrics read yielded nothing, said twice: once for whoever reads the
+ * usage card and once for the operator's log.
+ *
+ * Providers see `reason`, so it stays generic: it never names a portal or
+ * gateway setting or a gateway version. `hint` carries that detail, and only
+ * ever reaches the server log.
+ */
+export interface MetricsReadFailure {
+  /** Provider-safe explanation, shown on the usage card. */
   reason: string;
+  /** What an operator should check or set; logged, never shown. `null` when `reason` suffices. */
+  hint: string | null;
+}
+
+/** Why a `GET /metrics` scrape yielded nothing; cached like a successful one. */
+export interface ScrapeFailure extends MetricsReadFailure {
+  code: ApiUsageUnavailableCode;
+}
+
+/** A `GET` of a non-JSON body: its status, and its text unless that could not be read. */
+interface TextResponse {
+  statusCode: number;
+  body: string | null;
+  /** Why `body` is `null`. */
+  bodyError?: 'response_too_large' | 'body_read_failed';
 }
 
 /** One `GET /admin/metrics` read: the payload, or why there is none. */
-type BackendRead = { payload: Record<string, unknown> } | { payload: null; reason: string };
+type BackendRead =
+  | { payload: Record<string, unknown> }
+  | { payload: null; failure: MetricsReadFailure };
+
+/** What a metrics read's failure log carries, or `null` for a read that worked. */
+type FailureLogFields = Record<string, unknown> | null;
 
 const METRICS_UNREACHABLE: ScrapeFailure = {
   code: 'unreachable',
   reason: 'The gateway could not be reached for its request metrics.',
+  hint: null,
 };
 
 const METRICS_UNREADABLE: ScrapeFailure = {
   code: 'gateway_error',
   reason: 'The gateway sent no readable request metrics.',
+  hint: null,
 };
+
+/** The provider-facing sentence for a refused read; the operator's detail is in the log. */
+function refusedReason(what: string): string {
+  return (
+    `The gateway did not allow this portal to read its ${what}. ` +
+    'A portal operator can enable this.'
+  );
+}
 
 /**
  * Why a non-2xx `GET /metrics` answer yielded nothing.
  *
  * A `403` to the admin JWT is Edge v0.9.16 refusing a token with an `ns` claim
- * on a fleet-global route, and it is said so, because the fix is a setting on
- * the portal: the gateway's metrics bearer token. With that token configured,
- * a `401`/`403` means the two sides disagree about it.
+ * on a fleet-global route, and the log says so, because the fix is a setting
+ * on the portal: the gateway's metrics bearer token. With that token
+ * configured, a `401`/`403` means the two sides disagree about it.
  */
 export function metricsScrapeFailure(status: number, bearerConfigured: boolean): ScrapeFailure {
   if ((status === 401 || status === 403) && bearerConfigured) {
     return {
       code: 'refused',
-      reason:
-        'The gateway refused the metrics bearer token this portal presents ' +
-        '(FERRUM_METRICS_BEARER_TOKEN must match the gateway).',
+      reason: refusedReason('request metrics'),
+      hint:
+        'The gateway refused the metrics bearer token this portal presents; ' +
+        "FERRUM_METRICS_BEARER_TOKEN must equal the gateway's.",
     };
   }
   if (status === 403) {
     return {
       code: 'refused',
-      reason:
-        "The gateway refuses this portal's namespace-scoped admin token on its metrics " +
-        'endpoint (Ferrum Edge v0.9.16 and later), and no metrics credential is configured. ' +
-        "An operator can set FERRUM_METRICS_BEARER_TOKEN on the portal to the gateway's.",
+      reason: refusedReason('request metrics'),
+      hint:
+        "Ferrum Edge v0.9.16 and later refuse the portal's namespace-scoped admin token on " +
+        "GET /metrics. Set FERRUM_METRICS_BEARER_TOKEN on the portal to the gateway's.",
     };
   }
   if (status === 401) {
     return {
       code: 'refused',
-      reason: "The gateway rejected this portal's admin credentials for its request metrics.",
+      reason: refusedReason('request metrics'),
+      hint:
+        "The gateway rejected the portal's admin JWT; check FERRUM_ADMIN_JWT_SECRET and " +
+        'FERRUM_ADMIN_JWT_ISSUER.',
     };
   }
   return {
     code: 'gateway_error',
     reason: `The gateway answered its request metrics with HTTP ${status}.`,
+    hint: null,
   };
 }
 
 /**
- * Why `GET /admin/metrics` yielded nothing, from the failed call's status
- * (`undefined` when nothing answered or the body was unusable).
+ * Why `GET /admin/metrics` yielded nothing, from the failed call's status:
+ * an error status, the (successful) status of an unusable body, or `undefined`
+ * when nothing answered.
  */
-export function backendStateFailure(status: unknown, fleetReadConfigured: boolean): string {
+export function backendStateFailure(
+  status: unknown,
+  fleetReadConfigured: boolean,
+): MetricsReadFailure {
   if ((status === 401 || status === 403) && fleetReadConfigured) {
-    return (
-      'The gateway refused the fleet-read token this portal signs with ' +
-      "FERRUM_ADMIN_FLEET_READ_JWT_SECRET (it must equal the gateway's " +
-      'FERRUM_ADMIN_JWT_VIEWER_SECRET, with no FERRUM_ADMIN_JWT_VIEWER_NAMESPACES ceiling).'
-    );
+    return {
+      reason: refusedReason('runtime metrics'),
+      hint:
+        'The gateway refused the fleet-read token this portal signs with ' +
+        "FERRUM_ADMIN_FLEET_READ_JWT_SECRET; it must equal the gateway's " +
+        'FERRUM_ADMIN_JWT_VIEWER_SECRET, with no FERRUM_ADMIN_JWT_VIEWER_NAMESPACES ceiling.',
+    };
   }
   if (status === 403) {
-    return (
-      "The gateway refuses this portal's namespace-scoped admin token on its runtime " +
-      'metrics (Ferrum Edge v0.9.16 and later), so circuit breakers and ejected targets ' +
-      'cannot be read.'
-    );
+    return {
+      reason: refusedReason('runtime metrics'),
+      hint:
+        "Ferrum Edge v0.9.16 and later refuse the portal's namespace-scoped admin token on " +
+        'GET /admin/metrics. FERRUM_ADMIN_FLEET_READ_JWT_SECRET restores the read; see the ' +
+        'operations guide for what that key can read.',
+    };
   }
   if (status === 401) {
-    return "The gateway rejected this portal's admin credentials for its runtime metrics.";
+    return {
+      reason: refusedReason('runtime metrics'),
+      hint:
+        "The gateway rejected the portal's admin JWT; check FERRUM_ADMIN_JWT_SECRET and " +
+        'FERRUM_ADMIN_JWT_ISSUER.',
+    };
   }
-  // A protocol error carries the (successful) status of an unusable body.
-  return typeof status === 'number' && status >= 400
-    ? `The gateway answered its runtime metrics with HTTP ${status}.`
-    : 'The gateway could not be reached or read for its runtime metrics.';
+  if (typeof status !== 'number') {
+    return { reason: 'The gateway could not be reached for its runtime metrics.', hint: null };
+  }
+  return status >= 400
+    ? { reason: `The gateway answered its runtime metrics with HTTP ${status}.`, hint: null }
+    : { reason: 'The gateway sent no readable runtime metrics.', hint: null };
 }
 
 /** A finite, non-negative sample value, or `null`. */
@@ -1316,6 +1380,71 @@ export function createFerrumAdminClient(
     minimalHealthTier = minimal;
   }
 
+  /** Whether the last `GET /version` was refused with `403`; logged once per transition. */
+  let versionRefused = false;
+
+  /**
+   * `GET /version`, best effort. Edge has no such endpoint and answers `404`
+   * (or `405`), which reads `null`. Edge v0.9.16 answers an unknown global path
+   * `403` to a token with an `ns` claim, so a `403` reads `null` too. But a
+   * `403` is also what a refused admin credential looks like on an earlier
+   * gateway, so it is logged on its own, once per transition, rather than
+   * folded in silently.
+   */
+  async function readVersion(signal?: AbortSignal): Promise<string | null> {
+    let result: { version?: unknown } | null;
+    try {
+      result = await call<{ version?: unknown }>('GET', '/version', {
+        ...(signal === undefined ? {} : { signal }),
+        allow404: true,
+        tolerate: [404, 405],
+        quiet: [403],
+      });
+    } catch (error) {
+      const details = error instanceof NexusError ? error.details : undefined;
+      if (!isRecord(details) || details.status !== 403) throw error;
+      if (!versionRefused) {
+        logger.warn(
+          { path: '/version', status: 403 },
+          'Ferrum Edge refused GET /version. Edge v0.9.16 and later refuse it to the ' +
+            "portal's namespace-scoped admin token, which is expected; on an earlier gateway " +
+            'it means the admin credential itself was refused',
+        );
+      }
+      versionRefused = true;
+      return null;
+    }
+    versionRefused = false;
+    const version = result?.version;
+    return typeof version === 'string' ? version : null;
+  }
+
+  /**
+   * Log a metrics read's failures once per change of cause rather than on
+   * every cache miss, which is one per {@link METRICS_CACHE_TTL_MS} per page
+   * view: a gateway that refuses the portal's token refuses it on every read,
+   * and that is one fact. A recovery resets it, so a later failure logs again.
+   */
+  function createFailureLog(path: string, message: string): (fields: FailureLogFields) => void {
+    let last: string | null = null;
+    return (fields) => {
+      const key = fields === null ? null : JSON.stringify(fields);
+      if (key === last) return;
+      last = key;
+      if (fields === null) {
+        logger.debug({ path }, `${message}: readable again`);
+      } else {
+        logger.warn({ path, ...fields }, message);
+      }
+    };
+  }
+
+  const noteScrape = createFailureLog('/metrics', 'Ferrum Edge request metrics could not be read');
+  const noteBackendRead = createFailureLog(
+    '/admin/metrics',
+    'Ferrum Edge runtime metrics could not be read',
+  );
+
   async function call<T>(
     method: 'GET' | 'POST' | 'PUT' | 'DELETE',
     path: string,
@@ -1442,7 +1571,8 @@ export function createFerrumAdminClient(
       // Only error-status classification may inspect an absent JSON body.
     }
     if (statusCode >= 400 && !contract.statuses.includes(statusCode)) {
-      throw classify(statusCode, parsed, method, path, options.deployment);
+      const quiet = options.quiet === true || (options.quiet ?? []).includes(statusCode);
+      throw classify(statusCode, parsed, method, path, options.deployment, quiet);
     }
     if (!contract.statuses.includes(statusCode)) {
       throw protocolError(statusCode, 'unexpected_status', method, path);
@@ -1524,6 +1654,7 @@ export function createFerrumAdminClient(
     method: string,
     path: string,
     deployment = false,
+    quiet = false,
   ): Error {
     const body = (parsed ?? {}) as {
       error?: unknown;
@@ -1542,7 +1673,9 @@ export function createFerrumAdminClient(
       deployment;
     const isApiSpecWrite =
       (method === 'POST' || method === 'PUT') && /^\/api-specs(?:\/[^/]+)?$/.test(path);
-    if (sensitive) {
+    if (quiet) {
+      // The caller logs this failure itself, once per change.
+    } else if (sensitive) {
       logger.error(
         { method, path, status },
         'Ferrum Edge Admin API returned an error; response content was omitted',
@@ -1839,13 +1972,11 @@ export function createFerrumAdminClient(
    * the bearer token is the one that still works once the admin JWT's `ns`
    * claim bounds it to namespace routes (Edge v0.9.16).
    *
-   * Returns `null` rather than throwing when nothing reached the gateway; the
+   * Returns `null` rather than throwing when nothing reached the gateway, and
+   * `body: null` when the gateway answered but its body could not be read; the
    * only caller is the metrics scrape, which must never fail a page render.
    */
-  async function callText(
-    path: string,
-    accept: string,
-  ): Promise<{ statusCode: number; body: string } | null> {
+  async function callText(path: string, accept: string): Promise<TextResponse | null> {
     const token = metricsBearerToken ?? (await minter.getToken(DEFAULT_ADMIN_SUBJECT));
     const signal = AbortSignal.timeout(config.timeoutMs);
     const send = () =>
@@ -1860,24 +1991,34 @@ export function createFerrumAdminClient(
         dispatcher,
         signal,
       });
+    let response: Awaited<ReturnType<typeof send>>;
     try {
       // The same stale-pooled-socket recovery as `call`, on the one other read
       // this client makes. Nothing has been read yet, so no response byte can
       // have arrived.
-      const response = await send().catch((error: unknown) => {
+      response = await send().catch((error: unknown) => {
         if (!shouldRetryOnFreshConnection('GET', error, false, signal)) throw error;
         return send();
       });
-      return {
-        statusCode: response.statusCode,
-        body: (await readBoundedBody(response.body, METRICS_RESPONSE_MAX_BYTES)).toString('utf8'),
-      };
     } catch (cause) {
       logger.warn(
         { path, code: (cause as NodeJS.ErrnoException).code ?? null },
         'Ferrum Edge metrics scrape could not reach the gateway',
       );
       return null;
+    }
+    try {
+      const bytes = await readBoundedBody(response.body, METRICS_RESPONSE_MAX_BYTES);
+      return { statusCode: response.statusCode, body: bytes.toString('utf8') };
+    } catch (cause) {
+      // The gateway answered; its body was too large or broke off mid-read.
+      // That is an unusable answer, not an unreachable gateway.
+      return {
+        statusCode: response.statusCode,
+        body: null,
+        bodyError:
+          cause instanceof ResponseTooLargeError ? 'response_too_large' : 'body_read_failed',
+      };
     }
   }
 
@@ -2053,12 +2194,7 @@ export function createFerrumAdminClient(
     },
 
     async version(): Promise<string | null> {
-      const result = await call<{ version?: unknown }>('GET', '/version', {
-        allow404: true,
-        tolerate: [403, 404, 405],
-      });
-      const version = (result ?? {}).version;
-      return typeof version === 'string' ? version : null;
+      return readVersion();
     },
 
     async probe(timeoutMs = config.timeoutMs): Promise<EdgeProbe> {
@@ -2084,12 +2220,7 @@ export function createFerrumAdminClient(
         }
         let version: string | null = null;
         try {
-          const result = await call<{ version?: unknown }>('GET', '/version', {
-            signal,
-            allow404: true,
-            tolerate: [403, 404, 405],
-          });
-          version = typeof result?.version === 'string' ? result.version : null;
+          version = await readVersion(signal);
         } catch {
           version = null;
         }
@@ -2544,23 +2675,29 @@ export function createFerrumAdminClient(
           scrapePending ??= (async (): Promise<PrometheusSample[] | ScrapeFailure> => {
             const response = await callText('/metrics', 'text/plain;version=0.0.4');
             let result: PrometheusSample[] | ScrapeFailure;
+            let detail: string | null = null;
             if (response === null) {
               result = METRICS_UNREACHABLE;
             } else if (response.statusCode >= 200 && response.statusCode < 300) {
-              result = parsePrometheusText(response.body);
+              result = response.body === null ? [] : parsePrometheusText(response.body);
               if (result.length === 0) {
-                logger.warn({}, 'Ferrum Edge metrics scrape produced no parseable samples');
+                detail = response.bodyError ?? 'no_parseable_samples';
                 result = METRICS_UNREADABLE;
               }
             } else {
               result = metricsScrapeFailure(response.statusCode, metricsBearerToken !== undefined);
-              logger.warn(
-                {
-                  status: response.statusCode,
-                  credential: metricsBearerToken === undefined ? 'admin_jwt' : 'metrics_bearer',
-                },
-                'Ferrum Edge metrics scrape returned a non-2xx status',
-              );
+            }
+            // An unreachable gateway is logged where it happens, in `callText`.
+            if (Array.isArray(result)) {
+              noteScrape(null);
+            } else if (result !== METRICS_UNREACHABLE) {
+              noteScrape({
+                code: result.code,
+                status: response?.statusCode ?? null,
+                credential: metricsBearerToken === undefined ? 'admin_jwt' : 'metrics_bearer',
+                detail,
+                hint: result.hint,
+              });
             }
             scrapeCache = { value: result, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
             return result;
@@ -2579,31 +2716,28 @@ export function createFerrumAdminClient(
         if (read === undefined) {
           backendPending ??= call<unknown>('GET', '/admin/metrics', {
             maxResponseBytes: METRICS_RESPONSE_MAX_BYTES,
+            quiet: true,
             ...(fleetReadMinter === null ? {} : { minter: fleetReadMinter }),
           })
             .then((value): BackendRead => {
               const result: BackendRead = isRecord(value)
                 ? { payload: value }
-                : { payload: null, reason: backendStateFailure(undefined, false) };
+                : { payload: null, failure: backendStateFailure(200, false) };
+              noteBackendRead(result.payload === null ? { status: 200, hint: null } : null);
               backendCache = { value: result, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
               return result;
             })
             .catch((error: unknown): BackendRead => {
               const details = error instanceof NexusError ? error.details : undefined;
               const status = isRecord(details) ? details.status : undefined;
-              logger.warn(
-                {
-                  path: '/admin/metrics',
-                  status: typeof status === 'number' ? status : null,
-                  credential: fleetReadMinter === null ? 'admin_jwt' : 'fleet_read_jwt',
-                  error: error instanceof Error ? error.message : 'unknown',
-                },
-                'Ferrum Edge runtime metrics could not be read',
-              );
-              const result: BackendRead = {
-                payload: null,
-                reason: backendStateFailure(status, fleetReadMinter !== null),
-              };
+              const failure = backendStateFailure(status, fleetReadMinter !== null);
+              noteBackendRead({
+                status: typeof status === 'number' ? status : null,
+                credential: fleetReadMinter === null ? 'admin_jwt' : 'fleet_read_jwt',
+                error: error instanceof Error ? error.message : 'unknown',
+                hint: failure.hint,
+              });
+              const result: BackendRead = { payload: null, failure };
               backendCache = { value: result, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
               return result;
             })
@@ -2613,7 +2747,7 @@ export function createFerrumAdminClient(
           read = await backendPending;
         }
         if (read.payload === null) {
-          return emptyBackendState(read.reason);
+          return emptyBackendState(read.failure.reason);
         }
 
         const body = read.payload;

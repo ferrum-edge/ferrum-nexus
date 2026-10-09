@@ -1910,9 +1910,13 @@ credentials. Neither is needed against Ferrum Edge v0.9.15. See
 [`operations.md`](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0916).
 
 - **`FERRUM_METRICS_BEARER_TOKEN`** is the gateway's own metrics bearer token,
-  sent only on `GET /metrics`. On Edge it grants the Prometheus scrape and the
-  detailed probe tier and no Admin API route. Config validation requires at
-  least 32 characters and refuses a value equal to `FERRUM_ADMIN_JWT_SECRET`.
+  sent only on `GET /metrics`. It is a **fleet-wide observability credential**:
+  on Edge it reads every namespace's metric series and the detailed `/health`
+  and `/overload` tiers, though no Admin API route and nothing writable. It is
+  not bounded by `FERRUM_NAMESPACE`, so once it is set a leak of the portal's
+  environment exposes the whole gateway's metrics; treat it like the other
+  secrets there. Config validation requires at least 32 characters and refuses
+  a value equal to `FERRUM_ADMIN_JWT_SECRET`.
 - **`FERRUM_ADMIN_FLEET_READ_JWT_SECRET`** is a separate HS256 key, used only
   for `GET /admin/metrics`. `jwt.ts` signs it with `role: viewer` and **no**
   `ns` claim, whatever role the caller asks for, and `signAdminJwt` refuses any
@@ -1923,9 +1927,12 @@ credentials. Neither is needed against Ferrum Edge v0.9.15. See
   exposes, from one namespace to the whole gateway. It is off by default.
   Config validation refuses a value equal to `FERRUM_ADMIN_JWT_SECRET` or to
   the metrics bearer token.
-- Without them, a refused read is reported as unavailable with its cause
+- Without them, a refused read is reported as unavailable
   (`unavailable_code: "refused"`, `backend.status: "unavailable"`), never as
-  zero traffic or as a proxy with no circuit breaker.
+  zero traffic or as a proxy with no circuit breaker. Providers see that reason,
+  so it is generic: it names no setting and no gateway version. The operator's
+  detail (which credential was refused and what to set) goes to the server log,
+  once per change of cause.
 
 Handling the secret:
 

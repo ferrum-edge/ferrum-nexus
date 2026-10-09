@@ -162,14 +162,20 @@ export interface MockFerrumEdgeOptions {
    *   `/overload`, `GET /plugins`, the namespace registry, the diagnostic
    *   reference lookup) answers `403`: `/metrics`, `/admin/metrics`,
    *   `/version` and any unknown path among them;
-   * - `/health` and `/status` answer `'tenant'`: `status`, `ready`, `mode`,
-   *   `admin_writes_enabled`, and the `namespace` block only when the claim
-   *   covers its `active`; or `'minimal'`: `status` and `ready` only, which is
-   *   #6093 without the tenant tier.
+   * - `/health` and `/status` answer one of three tiers:
+   *   - `'tenant'`, the shape v0.9.16 ships: `status`, `ready`, `mode`,
+   *     `admin_writes_enabled` and the `namespace` block. When the claim does
+   *     not cover the block's `active`, the block stays with `active: null`
+   *     (`serving_scope` and `data_plane_single_namespace` unchanged) and
+   *     names no other namespace;
+   *   - `'tenant-without-block'`: the same tier, but an uncovered block is
+   *     dropped whole rather than sent with `active` withheld;
+   *   - `'minimal'`: `status` and `ready` only, which is #6093 without the
+   *     tenant tier.
    *
    * Unset models Edge v0.9.15: the claim has no effect outside namespace routes.
    */
-  nsClaimBound?: 'tenant' | 'minimal';
+  nsClaimBound?: 'tenant' | 'tenant-without-block' | 'minimal';
   /**
    * The gateway's `FERRUM_METRICS_BEARER_TOKEN`. Presented as
    * `Authorization: Bearer <token>`, it is accepted on `GET /metrics` and
@@ -2198,20 +2204,24 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   /**
    * What Edge v0.9.16 answers a token with an `ns` claim on `/health` and
    * `/status`: the bounded tenant tier, or only `status` and `ready`. The
-   * `namespace` block survives only when the claim covers its `active`.
+   * `namespace` block names `active` only when the claim covers it; otherwise
+   * it is sent with `active: null`, or dropped under `'tenant-without-block'`.
    */
   function boundedHealth(claimed: string[]): Record<string, unknown> {
     const minimal = { status: health.status, ready: health.ready };
     if (nsClaimBound === 'minimal') return minimal;
-    const block = health.namespace;
-    const covered =
-      isRecord(block) && typeof block.active === 'string' && claimed.includes(block.active);
-    return {
+    const tier = {
       ...minimal,
       mode: health.mode,
       admin_writes_enabled: health.admin_writes_enabled,
-      ...(covered ? { namespace: block } : {}),
     };
+    const block = health.namespace;
+    if (!isRecord(block)) return tier;
+    if (typeof block.active === 'string' && claimed.includes(block.active)) {
+      return { ...tier, namespace: block };
+    }
+    if (nsClaimBound === 'tenant-without-block') return tier;
+    return { ...tier, namespace: { ...block, active: null } };
   }
 
   async function readBody(req: IncomingMessage): Promise<unknown> {

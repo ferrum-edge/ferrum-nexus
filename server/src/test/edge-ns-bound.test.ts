@@ -6,8 +6,10 @@
  * a gateway that enforces that bound:
  *
  * - `/health` answers the bounded tenant tier (`mode`, `admin_writes_enabled`
- *   and the `namespace` block when the claim covers it), or only the minimal
- *   tier. Whatever it omits reads unknown, never healthy-served.
+ *   and the `namespace` block, its `active` withheld when the claim does not
+ *   cover it), or only the minimal tier. A withheld `active` on a
+ *   single-namespace data plane reads unserved; a block that is missing
+ *   altogether reads unknown. Neither reads healthy-served.
  * - The usage card reads `GET /metrics` and `GET /admin/metrics`, both
  *   fleet-global. A refusal reads as unavailable with its cause; the optional
  *   credentials make both readable again.
@@ -19,7 +21,12 @@
 import assert from 'node:assert/strict';
 import { describe, it, type TestContext } from 'node:test';
 
-import type { ApiUsageResponse, AppHealth, PublishApiResponse } from '@ferrum-nexus/shared';
+import type {
+  ApiErrorBody,
+  ApiUsageResponse,
+  AppHealth,
+  PublishApiResponse,
+} from '@ferrum-nexus/shared';
 
 import { reconcileGateway } from '../ferrum-admin/reconcile.js';
 import {
@@ -35,7 +42,9 @@ const METRICS_BEARER = 'nexus-test-metrics-bearer-token-0123456789';
 const VIEWER_SECRET = 'nexus-test-admin-viewer-key-0123456789abcd';
 
 /** A started gateway that bounds `ns`-claim tokens, with the given health tier. */
-async function boundedEdge(tier: 'tenant' | 'minimal'): Promise<MockFerrumEdge> {
+async function boundedEdge(
+  tier: 'tenant' | 'tenant-without-block' | 'minimal',
+): Promise<MockFerrumEdge> {
   const edge = createMockFerrumEdge({
     jwtSecret: TEST_EDGE_JWT_SECRET,
     issuer: 'ferrum-edge',
@@ -87,20 +96,63 @@ describe('a gateway that bounds ns-claim admin tokens', () => {
       assert.equal(probe?.claims?.ns, 'nexus', 'no fleet-privileged token is needed');
     });
 
-    it('reads a block it withholds as unknown, not as still served', async (t) => {
+    it('reads a namespace it withholds as unserved and refuses to publish', async (t) => {
       const edge = await boundedEdge('tenant');
+      const { harness, admin } = await portal(t, edge);
+      const provider = await harness.registerUser({ role: 'provider' });
+      edge.setServedNamespace('nexus');
+      assert.equal((await edgeHealth(harness, admin)).namespace_routing.unserved, false);
+
+      // Restarted into a namespace the portal's claim does not cover
+      // (ferrum-nexus#230): the tenant tier keeps the block and withholds the
+      // name rather than naming another tenant.
+      edge.setServedNamespace('ferrum');
+      const health = await edgeHealth(harness, admin);
+
+      assert.equal(health.mode, 'database');
+      assert.equal(health.namespace_routing.active, null);
+      assert.equal(health.namespace_routing.serving_scope, 'single-namespace-data-plane');
+      assert.equal(health.namespace_routing.data_plane_single_namespace, true);
+      assert.equal(health.namespace_routing.unserved, true);
+      assert.equal(health.namespace_routing.unserved_mutation_observed, false);
+      assert.equal(health.reason, 'namespace_unserved');
+
+      const before = edge.requests.length;
+      const refused = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: {
+          name: 'Withheld API',
+          slug: 'withheld-namespace',
+          version: '1.0.0',
+          spec: SAMPLE_SPEC_YAML,
+          auth_plugin: 'key_auth',
+          requestable: true,
+          visibility: 'public',
+        },
+      });
+      assert.equal(refused.statusCode, 409, refused.body);
+      assert.equal(refused.json<ApiErrorBody>().error.code, 'EDGE_NAMESPACE_UNSERVED');
+      assert.doesNotMatch(refused.body, /'ferrum'/, 'a withheld name is not invented');
+      assert.equal(edge.requests.length, before, 'refused before any gateway write');
+      assert.equal(edge.proxies.size, 0);
+    });
+
+    it('reads a block it drops whole as unknown, not as still served', async (t) => {
+      const edge = await boundedEdge('tenant-without-block');
       const { harness, admin } = await portal(t, edge);
       edge.setServedNamespace('nexus');
       assert.equal((await edgeHealth(harness, admin)).namespace_routing.active, 'nexus');
 
-      // Restarted into a namespace the portal's claim does not cover: the
-      // tenant tier drops the block rather than naming another tenant.
+      // The same restart against a tier that omits an uncovered block rather
+      // than withholding its name: nothing to judge by, so unknown.
       edge.setServedNamespace('ferrum');
       const health = await edgeHealth(harness, admin);
 
       assert.equal(health.mode, 'database');
       assert.equal(health.namespace_routing.active, null);
       assert.equal(health.namespace_routing.data_plane_single_namespace, null);
+      assert.equal(health.namespace_routing.unserved, false);
     });
   });
 
@@ -198,10 +250,13 @@ describe('a gateway that bounds ns-claim admin tokens', () => {
 
       assert.equal(usage.available, false);
       assert.equal(usage.unavailable_code, 'refused');
-      assert.match(usage.unavailable_reason ?? '', /FERRUM_METRICS_BEARER_TOKEN/);
+      // A provider reads both: generic, with the operator detail in the log.
+      assert.match(usage.unavailable_reason ?? '', /did not allow this portal/);
+      assert.doesNotMatch(usage.unavailable_reason ?? '', /FERRUM_|v0\.9/);
       assert.equal(usage.requests.total, 0);
       assert.equal(usage.backend.status, 'unavailable');
-      assert.match(String(usage.backend.detail), /namespace-scoped admin token/);
+      assert.match(String(usage.backend.detail), /did not allow this portal/);
+      assert.doesNotMatch(String(usage.backend.detail), /FERRUM_|v0\.9/);
       assert.doesNotMatch(String(usage.backend.detail), /No circuit breaker/);
     });
 

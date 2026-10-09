@@ -27,10 +27,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **A refused metrics read is reported, not shown as zero**
   (ferrum-edge/ferrum-edge#6095). When the gateway refuses the portal's
   credential on `GET /metrics`, `GET /api/apis/:id/usage` now answers
-  `unavailable_code: "refused"` and a reason that names the missing setting.
-  Every unavailable answer now carries an `unavailable_code`. A backend state
-  that could not be read now reports `backend.status: "unavailable"` with its
-  cause, instead of `unknown` (which reads as "no circuit breaker configured").
+  `unavailable_code: "refused"` and a generic reason a provider can read. The
+  setting to check goes to the server log, once per change of cause rather than
+  on every cache miss. Every unavailable answer now carries an
+  `unavailable_code`. A backend state that could not be read now reports
+  `backend.status: "unavailable"` with its cause, instead of `unknown` (which
+  reads as "no circuit breaker configured"). An oversized or truncated metrics
+  body reads as `gateway_error`, not `unreachable`.
 - **Gateway health without its details is reported as unknown**
   (ferrum-edge/ferrum-edge#6095). Nexus reads `mode`, `admin_writes_enabled`
   and the namespace block from Edge's detailed `/health` tier (v0.9.15) and
@@ -39,8 +42,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   served" verdict is dropped. The portal no longer keeps reporting the
   namespace as served without evidence, and logs the minimal tier once.
   When a single-namespace data plane withholds its namespace name from the
-  portal's token, the portal treats its namespace as unserved. `version()`
-  reads a `403` as "no version endpoint", as it already did for a `404`.
+  portal's token (Edge v0.9.16 sends `active: null` when the token's claim does
+  not cover it), the portal treats its namespace as unserved: health degrades
+  and publishing is refused with `409 EDGE_NAMESPACE_UNSERVED`. `version()`
+  reads a `403` as "no version endpoint", as it already did for a `404`, and
+  logs it once, since on an earlier gateway it means a refused credential.
 
 - **Gateway cleanup trusts only Ferrum Edge's own "not found"** (#548). Deleting
   a proxy, plugin config or API spec counts as already done only when Edge

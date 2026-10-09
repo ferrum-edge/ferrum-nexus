@@ -45,16 +45,19 @@ describe('API usage measurements', () => {
           ...usage,
           unavailable_code: 'refused',
           unavailable_reason:
-            "The gateway refuses this portal's namespace-scoped admin token on /metrics.",
+            'The gateway did not allow this portal to read its request metrics. A portal ' +
+            'operator can enable this.',
           backend: {
             status: 'unavailable',
-            detail: "The gateway refuses this portal's namespace-scoped admin token.",
+            detail:
+              'The gateway did not allow this portal to read its runtime metrics. A portal ' +
+              'operator can enable this.',
           },
         }}
       />,
     );
     expect(screen.getByText(/Gateway metrics are unavailable/)).toHaveTextContent(
-      /namespace-scoped admin token on \/metrics/,
+      /read its request metrics/,
     );
     expect(screen.getByText('Unavailable')).toBeInTheDocument();
     expect(screen.queryByText('Unknown')).not.toBeInTheDocument();

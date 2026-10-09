@@ -666,8 +666,9 @@ export interface EdgeNamespaceBlock {
  *
  * - **detailed** (Edge v0.9.15 and earlier): every field below.
  * - **tenant** (Edge v0.9.16, for a token with an `ns` claim): `status`,
- *   `ready`, `mode`, `admin_writes_enabled`, and `namespace` when the claim
- *   covers the gateway's active namespace.
+ *   `ready`, `mode`, `admin_writes_enabled` and `namespace`, whose `active` is
+ *   withheld (`null`) when the claim does not cover the gateway's active
+ *   namespace.
  * - **minimal** (no usable credential): `status` and `ready` only.
  *
  * Every field but `status` is therefore optional, and a missing one is
