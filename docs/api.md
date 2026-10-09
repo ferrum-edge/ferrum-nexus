@@ -2220,20 +2220,28 @@ proxy for 10 seconds. 30 requests per minute per IP.
 }
 ```
 
-| Field                    | Meaning                                                                                                                                                                                  |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `available`              | `false` when the request metrics could not be read, the API has no proxy, or no series belongs to it. Counters are then zeros that mean "unmeasured" — hide them; `latency_ms` is `null` |
-| `unavailable_reason`     | optional, display-ready explanation                                                                                                                                                      |
-| `requests.*`             | **cumulative since the gateway process started**; a restart resets them. There is no time window                                                                                         |
-| `gateway_uptime_seconds` | how far back the counters reach; omitted when not reported                                                                                                                               |
-| `latency_ms`             | percentiles interpolated from histogram buckets (like `histogram_quantile`); a quantile in the top bucket reports the highest finite bound; `null` when empty                            |
-| `backend.status`         | `healthy` (closed breaker), `failing` (open breaker or ejected target), `recovering` (half-open), `unknown`                                                                              |
-| `backend.since`          | present only for an ejected target                                                                                                                                                       |
+| Field                    | Meaning                                                                                                                                                                                                           |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `available`              | `false` when the request metrics could not be read, the API has no proxy, or no series belongs to it. Counters are then zeros that mean "unmeasured" — hide them; `latency_ms` is `null`                          |
+| `unavailable_reason`     | optional, display-ready explanation                                                                                                                                                                               |
+| `unavailable_code`       | present exactly when `available` is `false`: `no_proxy`, `no_series` (no series for this proxy yet), `unreachable`, `refused` (the gateway refused the portal's credential on `GET /metrics`), or `gateway_error` |
+| `requests.*`             | **cumulative since the gateway process started**; a restart resets them. There is no time window                                                                                                                  |
+| `gateway_uptime_seconds` | how far back the counters reach; omitted when not reported                                                                                                                                                        |
+| `latency_ms`             | percentiles interpolated from histogram buckets (like `histogram_quantile`); a quantile in the top bucket reports the highest finite bound; `null` when empty                                                     |
+| `backend.status`         | `healthy` (closed breaker), `failing` (open breaker or ejected target), `recovering` (half-open), `unknown` (read, nothing reported), `unavailable` (could not be read; `detail` says why)                        |
+| `backend.since`          | present only for an ejected target                                                                                                                                                                                |
 
 `unknown` does not mean the backend is down: Edge lists a breaker only for a
 proxy that has one and has been called; `detail` says which. Backend state is
 read independently — it may be filled while `available` is `false`, and
-`unknown` when only it failed. There is no per-consumer breakdown, because
+`unavailable` when only it failed.
+
+On Ferrum Edge v0.9.16 both reads are refused to the portal's namespace-scoped
+admin token unless the operator configures `FERRUM_METRICS_BEARER_TOKEN` (for
+the counts) and `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` (for backend state). The
+refusal reads `unavailable_code: "refused"` and
+`backend.status: "unavailable"`, each with the reason; see
+[`operations.md`](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0916). There is no per-consumer breakdown, because
 `ferrum_requests_total` has no consumer label.
 
 A gateway that is unreachable or unparseable is **not** an error here: the route

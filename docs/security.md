@@ -1896,9 +1896,36 @@ only code that mints it.
   `nbf` equals `iat`.
 - **`aud`** is stamped only when `FERRUM_ADMIN_JWT_AUDIENCE` is set, because
   Edge rejects an `aud` claim it was not configured for.
-- **`ns`** is always `FERRUM_NAMESPACE` (a single string). A gateway with
-  `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true` requires it; others ignore it. An
-  empty namespace is refused at signing.
+- **`ns`** is always `FERRUM_NAMESPACE` (a single string). An empty namespace
+  is refused at signing. It always bounds namespace-scoped routes to that
+  namespace, and a gateway with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`
+  refuses a token without it. From Ferrum Edge v0.9.16 the claim also makes the
+  token a tenant credential: every fleet-global route except a short allowlist
+  answers `403`, including `GET /metrics` and `GET /admin/metrics`. Nexus keeps
+  the claim rather than minting claim-less admin tokens, which would hold
+  authority over the whole fleet.
+
+The two fleet-global reads the Usage card needs have their own optional
+credentials. Neither is needed against Ferrum Edge v0.9.15. See
+[`operations.md`](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0916).
+
+- **`FERRUM_METRICS_BEARER_TOKEN`** is the gateway's own metrics bearer token,
+  sent only on `GET /metrics`. On Edge it grants the Prometheus scrape and the
+  detailed probe tier and no Admin API route. Config validation requires at
+  least 32 characters and refuses a value equal to `FERRUM_ADMIN_JWT_SECRET`.
+- **`FERRUM_ADMIN_FLEET_READ_JWT_SECRET`** is a separate HS256 key, used only
+  for `GET /admin/metrics`. `jwt.ts` signs it with `role: viewer` and **no**
+  `ns` claim, whatever role the caller asks for, and `signAdminJwt` refuses any
+  claim-less token that is not `viewer`. It is meant to equal the gateway's
+  `FERRUM_ADMIN_JWT_VIEWER_SECRET`, which Edge caps at `viewer`, so it cannot
+  write. **Without a `FERRUM_ADMIN_JWT_VIEWER_NAMESPACES` ceiling it reads every
+  namespace**, so setting it widens what a leak of the portal's environment
+  exposes, from one namespace to the whole gateway. It is off by default.
+  Config validation refuses a value equal to `FERRUM_ADMIN_JWT_SECRET` or to
+  the metrics bearer token.
+- Without them, a refused read is reported as unavailable with its cause
+  (`unavailable_code: "refused"`, `backend.status: "unavailable"`), never as
+  zero traffic or as a proxy with no circuit breaker.
 
 Handling the secret:
 

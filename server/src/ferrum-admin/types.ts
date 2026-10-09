@@ -15,7 +15,12 @@
  * repository at the release `e2e/.env.example` pins, cited by section title.
  */
 
-import type { AuthPluginType, EdgeCredentialType, HttpMethod } from '@ferrum-nexus/shared';
+import type {
+  ApiUsageUnavailableCode,
+  AuthPluginType,
+  EdgeCredentialType,
+  HttpMethod,
+} from '@ferrum-nexus/shared';
 
 import type { EdgeNamespaceServing } from './namespace.js';
 
@@ -655,6 +660,18 @@ export interface EdgeNamespaceBlock {
 /**
  * Authenticated `GET /health`. Nexus watches `mode`, `ready`,
  * `admin_writes_enabled` and `namespace`; the rest is diagnostic.
+ *
+ * Edge answers it in one of three tiers, and the portal's namespace-scoped
+ * token decides which:
+ *
+ * - **detailed** (Edge v0.9.15 and earlier): every field below.
+ * - **tenant** (Edge v0.9.16, for a token with an `ns` claim): `status`,
+ *   `ready`, `mode`, `admin_writes_enabled`, and `namespace` when the claim
+ *   covers the gateway's active namespace.
+ * - **minimal** (no usable credential): `status` and `ready` only.
+ *
+ * Every field but `status` is therefore optional, and a missing one is
+ * unknown, never a default.
  */
 export interface EdgeHealth {
   status: string;
@@ -773,9 +790,11 @@ export interface EdgeLatencyHistogram {
 export interface EdgeProxyMetrics {
   /** Safe explanation when this proxy has no usable request measurements. */
   reason?: string;
+  /** Why measurements are missing; set exactly when `available` is `false`. */
+  unavailableCode?: ApiUsageUnavailableCode;
   /**
    * `false` when the scrape could not be completed or produced nothing usable
-   * (gateway unreachable, non-2xx, or no valid request series for this proxy). The
+   * (gateway unreachable, refused, non-2xx, or no valid request series for this proxy). The
    * counters are then zeroed rather than absent, so callers never branch on
    * `undefined`.
    */
@@ -819,8 +838,10 @@ export interface EdgeUnhealthyTarget {
 
 /** What one `GET /admin/metrics` read yielded for a single proxy. */
 export interface EdgeBackendState {
-  /** `false` when the gateway was unreachable or answered unusably. */
+  /** `false` when the gateway was unreachable, refused the read, or answered unusably. */
   available: boolean;
+  /** Safe explanation when `available` is `false`. */
+  reason?: string;
   /** Breakers scoped to this proxy, per-proxy and per-target alike. */
   breakers: EdgeCircuitBreaker[];
   /** Unhealthy targets attributed to this proxy. */

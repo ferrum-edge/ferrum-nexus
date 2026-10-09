@@ -962,13 +962,16 @@ export type DeleteApiPluginResponse = OkResponse;
  * - **There are no per-consumer counts.** Edge's request counter is not labelled
  *   by consumer, so "who is using this API" cannot be answered from here.
  * - `available: false` means the request-metrics scrape failed (unreachable,
- *   error status, unparseable body, or no request series for this proxy), or the
- *   API has no proxy yet. Independent backend state may still be present.
- *   The route still answers `200`.
+ *   refused, error status, unparseable body, or no request series for this
+ *   proxy), or the API has no proxy yet. `unavailable_code` says which and
+ *   `unavailable_reason` explains it. Independent backend state may still be
+ *   present. The route still answers `200`.
  */
 export interface ApiUsageResponse {
   /** Safe explanation when request measurements are unavailable. */
   unavailable_reason?: string;
+  /** Why request measurements are unavailable; present exactly when `available` is false. */
+  unavailable_code?: ApiUsageUnavailableCode;
   /** Whether request counters came from a successful gateway metrics scrape. */
   available: boolean;
   /** When Nexus produced this answer (a cached read may be up to 10s older). */
@@ -990,6 +993,25 @@ export interface ApiUsageResponse {
   latency_ms: ApiUsageLatency | null;
   backend: ApiUsageBackend;
 }
+
+/**
+ * Why {@link ApiUsageResponse.available} is `false`.
+ *
+ * - `no_proxy` — the API has no proxy on the gateway.
+ * - `no_series` — the scrape succeeded and holds no request series for this
+ *   API's proxy yet.
+ * - `unreachable` — the gateway did not answer.
+ * - `refused` — the gateway refused the portal's credential on `GET /metrics`.
+ *   Ferrum Edge v0.9.16 refuses the portal's namespace-scoped admin token
+ *   there; the operator sets `FERRUM_METRICS_BEARER_TOKEN`.
+ * - `gateway_error` — any other status, or a body with no readable samples.
+ */
+export type ApiUsageUnavailableCode =
+  | 'no_proxy'
+  | 'no_series'
+  | 'unreachable'
+  | 'refused'
+  | 'gateway_error';
 
 /** Cumulative request counters for one API's proxy. */
 export interface ApiUsageRequests {
@@ -1034,6 +1056,10 @@ export interface ApiUsageLatency {
  * - `unknown` — the gateway reports nothing about this proxy. That is the
  *   normal state for a proxy with no `circuit_breaker` configured, and for one
  *   that has never been called; it is **not** a claim that the backend is down.
+ * - `unavailable` — the portal could not read the gateway's backend state at
+ *   all: unreachable, refused, or unreadable. It says nothing about breakers.
+ *   Ferrum Edge v0.9.16 refuses the portal's namespace-scoped admin token on
+ *   `GET /admin/metrics`; `detail` names the cause.
  */
 export interface ApiUsageBackend {
   status: ApiUsageBackendStatus;
@@ -1044,7 +1070,12 @@ export interface ApiUsageBackend {
 }
 
 /** @see {@link ApiUsageBackend} */
-export type ApiUsageBackendStatus = 'healthy' | 'failing' | 'recovering' | 'unknown';
+export type ApiUsageBackendStatus =
+  | 'healthy'
+  | 'failing'
+  | 'recovering'
+  | 'unknown'
+  | 'unavailable';
 
 /* ── Access requests & grants ───────────────────────────────────────────── */
 

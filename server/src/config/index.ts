@@ -181,6 +181,27 @@ export interface EdgeConfig {
   jwtIssuer: string;
   /** `aud` claim — only stamped when the gateway configures an audience. */
   jwtAudience: string | undefined;
+  /**
+   * The gateway's `FERRUM_METRICS_BEARER_TOKEN`, presented on `GET /metrics`
+   * instead of the admin JWT (`FERRUM_METRICS_BEARER_TOKEN` on the portal).
+   *
+   * Edge v0.9.16 refuses an admin JWT that carries an `ns` claim on every
+   * fleet-global route, `/metrics` included, and every token Nexus mints
+   * carries one. Unset, the scrape keeps using the admin JWT, which an older
+   * gateway accepts; a refusal then reads "metrics unavailable" with the
+   * reason, never as zero traffic. Optional so that hand-built test configs
+   * need not name it.
+   */
+  metricsBearerToken?: string | undefined;
+  /**
+   * Optional separate HS256 key for one fleet-wide read: `GET /admin/metrics`
+   * (`FERRUM_ADMIN_FLEET_READ_JWT_SECRET`). Tokens signed with it carry
+   * `role: viewer` and **no** `ns` claim. Meant to equal the gateway's
+   * `FERRUM_ADMIN_JWT_VIEWER_SECRET`; never `FERRUM_ADMIN_JWT_SECRET`, which
+   * config validation refuses. Unset, backend state reads "unavailable" on a
+   * gateway that refuses the namespace-scoped token there.
+   */
+  fleetReadJwtSecret?: string | undefined;
   /** Namespace sent in `X-Ferrum-Namespace` on every call. */
   namespace: string;
   /**
@@ -699,6 +720,8 @@ const envSchema = z.object({
   FERRUM_ADMIN_JWT_TTL: intish(60, 5, 3_600),
   FERRUM_ADMIN_JWT_ISSUER: stringish('ferrum-edge'),
   FERRUM_ADMIN_JWT_AUDIENCE: optionalString(),
+  FERRUM_METRICS_BEARER_TOKEN: optionalString(),
+  FERRUM_ADMIN_FLEET_READ_JWT_SECRET: optionalString(),
   FERRUM_NAMESPACE: stringish(DEFAULT_FERRUM_NAMESPACE),
   FERRUM_GATEWAY_PUBLIC_URL: optionalString(),
   FERRUM_ADMIN_CA_FILE: optionalString(),
@@ -876,6 +899,41 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     );
   }
 
+  // ── Gateway observability credentials ────────────────────────────────────
+  // Both are optional and neither value ever appears in a problem message.
+  // Edge itself refuses a metrics bearer token shorter than 32 characters
+  // after trimming. The fleet-read key must not be the admin key: Nexus never
+  // signs a token without an `ns` claim using the key that can mint `admin`.
+  const metricsBearerToken = raw.FERRUM_METRICS_BEARER_TOKEN;
+  if (metricsBearerToken !== undefined && metricsBearerToken.length < 32) {
+    problems.push(
+      'FERRUM_METRICS_BEARER_TOKEN must be at least 32 characters and match the gateway',
+    );
+  }
+  if (
+    metricsBearerToken !== undefined &&
+    metricsBearerToken === raw.FERRUM_ADMIN_JWT_SECRET.trim()
+  ) {
+    problems.push('FERRUM_METRICS_BEARER_TOKEN must not equal FERRUM_ADMIN_JWT_SECRET');
+  }
+  const fleetReadJwtSecret = raw.FERRUM_ADMIN_FLEET_READ_JWT_SECRET;
+  if (fleetReadJwtSecret !== undefined && fleetReadJwtSecret.length < 32) {
+    problems.push(
+      'FERRUM_ADMIN_FLEET_READ_JWT_SECRET must be at least 32 characters and match the ' +
+        "gateway's FERRUM_ADMIN_JWT_VIEWER_SECRET",
+    );
+  }
+  if (
+    fleetReadJwtSecret !== undefined &&
+    (fleetReadJwtSecret === raw.FERRUM_ADMIN_JWT_SECRET.trim() ||
+      fleetReadJwtSecret === metricsBearerToken)
+  ) {
+    problems.push(
+      'FERRUM_ADMIN_FLEET_READ_JWT_SECRET must differ from FERRUM_ADMIN_JWT_SECRET and ' +
+        'FERRUM_METRICS_BEARER_TOKEN',
+    );
+  }
+
   // ── Bootstrap token ──────────────────────────────────────────────────────
   // Optional, but a short one is worse than none: it looks configured while
   // being guessable, and what it guards is the founding super_admin.
@@ -951,6 +1009,8 @@ export function loadConfig(env: EnvRecord): NexusConfig {
       jwtTtlSeconds: raw.FERRUM_ADMIN_JWT_TTL,
       jwtIssuer: raw.FERRUM_ADMIN_JWT_ISSUER,
       jwtAudience: raw.FERRUM_ADMIN_JWT_AUDIENCE,
+      metricsBearerToken,
+      fleetReadJwtSecret,
       namespace: raw.FERRUM_NAMESPACE,
       gatewayPublicUrl,
       caFile: raw.FERRUM_ADMIN_CA_FILE,

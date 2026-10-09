@@ -542,9 +542,13 @@ gateway.
 - **Failing**: the circuit breaker has opened, or health checks removed a
   target. The card says since when.
 - **Recovering**: the breaker is letting probe requests through.
+- **Unavailable**: the portal could not read the gateway's backend state at
+  all. The card says why. It says nothing about your backend.
 
 If the card says gateway metrics are unavailable, the counters are missing, not
-zero; the API may be serving normally.
+zero; the API may be serving normally. If the reason says the gateway refuses
+the portal's token, your administrator has to configure a metrics credential;
+see the operations guide.
 
 ### "Gateway deployment missing"
 

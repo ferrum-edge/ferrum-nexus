@@ -121,21 +121,23 @@ See the README for a two-stack example.
 
 ### Ferrum Edge integration
 
-| Variable                           | Default                 | Notes                                                                                                                                                                                                                                                                     |
-| ---------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `FERRUM_ADMIN_URL`                 | `http://127.0.0.1:9000` | Base URL of the gateway's **Admin** API. `http://` to a non-loopback host is refused unless `FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true`.                                                                                                                                      |
-| `FERRUM_ADMIN_JWT_TTL`             | `60`                    | Admin JWT lifetime in seconds, 5–3600.                                                                                                                                                                                                                                    |
-| `FERRUM_ADMIN_JWT_ISSUER`          | `ferrum-edge`           | The `iss` claim. Must equal the gateway's configured issuer.                                                                                                                                                                                                              |
-| `FERRUM_ADMIN_JWT_AUDIENCE`        | _(unset)_               | Set only if the gateway configures an audience; otherwise `aud` is omitted.                                                                                                                                                                                               |
-| `FERRUM_NAMESPACE`                 | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` and as the `ns` claim. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, at most 128 characters. Also the first segment of every listen path (`/<namespace>/<slug>`). See [Namespace routability](#namespace-routability). |
-| `FERRUM_GATEWAY_PUBLIC_URL`        | _(unset)_               | Public origin of the gateway's **proxy listener**, used for each API's `invoke_url`. The `gateway.public_url` admin setting overrides it; with neither, `invoke_url` is `null`.                                                                                           |
-| `FERRUM_ADMIN_CA_FILE`             | _(unset)_               | PEM CA bundle for a TLS Admin API. An unreadable file fails startup.                                                                                                                                                                                                      |
-| `FERRUM_ADMIN_ALLOW_INSECURE_HTTP` | `false`                 | Allows plaintext `http://` to a non-loopback Admin API. For container-network-only traffic.                                                                                                                                                                               |
-| `FERRUM_ADMIN_TIMEOUT_MS`          | `5000`                  | Per-request deadline for Admin API calls, 250–60000.                                                                                                                                                                                                                      |
-| `FERRUM_MAX_CREDENTIALS_PER_TYPE`  | `2`                     | 1–10. Set it to the gateway's own value. Above 1, rotation appends the new credential before deleting the old one, so there is no gap.                                                                                                                                    |
-| `FERRUM_RATE_LIMIT_SYNC_MODE`      | `local`                 | `local` \| `redis`. Where Edge keeps consumer-quota counters (see below).                                                                                                                                                                                                 |
-| `FERRUM_RATE_LIMIT_REDIS_URL`      | _(unset)_               | Required when the mode is `redis`; must be `redis://` or `rediss://`. Ignored in `local` mode.                                                                                                                                                                            |
-| `FERRUM_RATE_LIMIT_REDIS_TLS`      | `false`                 | Use TLS for a `redis://` endpoint (`rediss://` already implies it). Edge verifies it with its own `FERRUM_TLS_CA_BUNDLE_PATH`.                                                                                                                                            |
+| Variable                             | Default                 | Notes                                                                                                                                                                                                                                                                     |
+| ------------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FERRUM_ADMIN_URL`                   | `http://127.0.0.1:9000` | Base URL of the gateway's **Admin** API. `http://` to a non-loopback host is refused unless `FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true`.                                                                                                                                      |
+| `FERRUM_ADMIN_JWT_TTL`               | `60`                    | Admin JWT lifetime in seconds, 5–3600.                                                                                                                                                                                                                                    |
+| `FERRUM_ADMIN_JWT_ISSUER`            | `ferrum-edge`           | The `iss` claim. Must equal the gateway's configured issuer.                                                                                                                                                                                                              |
+| `FERRUM_ADMIN_JWT_AUDIENCE`          | _(unset)_               | Set only if the gateway configures an audience; otherwise `aud` is omitted.                                                                                                                                                                                               |
+| `FERRUM_METRICS_BEARER_TOKEN`        | _(unset)_               | The gateway's own `FERRUM_METRICS_BEARER_TOKEN` (at least 32 characters). Presented on `GET /metrics` instead of the admin JWT, which Ferrum Edge v0.9.16 refuses there. See [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0916).         |
+| `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` | _(unset)_               | Optional separate key for `GET /admin/metrics` only: `viewer` tokens without an `ns` claim. Set it to the gateway's `FERRUM_ADMIN_JWT_VIEWER_SECRET`; never `FERRUM_ADMIN_JWT_SECRET` (refused). **A fleet-wide read credential**; see the trade-off below.               |
+| `FERRUM_NAMESPACE`                   | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` and as the `ns` claim. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, at most 128 characters. Also the first segment of every listen path (`/<namespace>/<slug>`). See [Namespace routability](#namespace-routability). |
+| `FERRUM_GATEWAY_PUBLIC_URL`          | _(unset)_               | Public origin of the gateway's **proxy listener**, used for each API's `invoke_url`. The `gateway.public_url` admin setting overrides it; with neither, `invoke_url` is `null`.                                                                                           |
+| `FERRUM_ADMIN_CA_FILE`               | _(unset)_               | PEM CA bundle for a TLS Admin API. An unreadable file fails startup.                                                                                                                                                                                                      |
+| `FERRUM_ADMIN_ALLOW_INSECURE_HTTP`   | `false`                 | Allows plaintext `http://` to a non-loopback Admin API. For container-network-only traffic.                                                                                                                                                                               |
+| `FERRUM_ADMIN_TIMEOUT_MS`            | `5000`                  | Per-request deadline for Admin API calls, 250–60000.                                                                                                                                                                                                                      |
+| `FERRUM_MAX_CREDENTIALS_PER_TYPE`    | `2`                     | 1–10. Set it to the gateway's own value. Above 1, rotation appends the new credential before deleting the old one, so there is no gap.                                                                                                                                    |
+| `FERRUM_RATE_LIMIT_SYNC_MODE`        | `local`                 | `local` \| `redis`. Where Edge keeps consumer-quota counters (see below).                                                                                                                                                                                                 |
+| `FERRUM_RATE_LIMIT_REDIS_URL`        | _(unset)_               | Required when the mode is `redis`; must be `redis://` or `rediss://`. Ignored in `local` mode.                                                                                                                                                                            |
+| `FERRUM_RATE_LIMIT_REDIS_TLS`        | `false`                 | Use TLS for a `redis://` endpoint (`rediss://` already implies it). Edge verifies it with its own `FERRUM_TLS_CA_BUNDLE_PATH`.                                                                                                                                            |
 
 > **Consumer quotas are enforced per gateway process by default.** Edge's
 > `rate_limiting` plugin keeps counters in process memory unless its config
@@ -191,6 +193,58 @@ control plane shared by several tenants) only accepts tokens whose `ns` covers
 the requested namespace. Nexus works with or without the flag; make sure the
 gateway grants this portal its `FERRUM_NAMESPACE`.
 
+#### Namespace-bounded admin tokens (Ferrum Edge v0.9.16)
+
+From Ferrum Edge v0.9.16
+([ferrum-edge#6095](https://github.com/ferrum-edge/ferrum-edge/issues/6095)),
+an admin JWT that carries an `ns` claim is a tenant credential whether or not
+`FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM` is set. It reaches the namespace-scoped
+routes and a short allowlist: `/health`, `/status`, `/live`, `/overload`,
+`GET /plugins`, the namespace registry and the diagnostic reference lookup.
+Every other global route answers `403`. Nexus keeps the claim, because a
+claim-less token signed with `FERRUM_ADMIN_JWT_SECRET` has authority over the
+whole fleet. Everything the portal writes is namespace-scoped and keeps working.
+The fleet-global reads are affected like this:
+
+| Read                         | Used for                                     | On Edge v0.9.16, with no extra setting                                                                                         | To restore it                                                    |
+| ---------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `GET /metrics`               | Usage card request counts and latency        | `403`. The card shows "Gateway metrics are unavailable" with the reason; `unavailable_code` is `refused`.                      | `FERRUM_METRICS_BEARER_TOKEN`, equal to the gateway's own value. |
+| `GET /admin/metrics`         | Usage card circuit breakers, ejected targets | `403`. `backend.status` is `unavailable` with the reason; it never reads as "no circuit breaker".                              | Optional `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` (see below).       |
+| `GET /health`                | `/api/health`, namespace routability         | The bounded tenant tier: `mode`, `admin_writes_enabled`, and the `namespace` block when the claim covers the active namespace. | Nothing to set.                                                  |
+| `GET /namespaces`            | Not used by the portal                       | Lists only `FERRUM_NAMESPACE`.                                                                                                 | Nothing to set.                                                  |
+| `GET /version` (not on Edge) | Best-effort version probe                    | `403` instead of `404`; still reads as no version.                                                                             | Nothing to set.                                                  |
+
+Neither setting is needed against Ferrum Edge v0.9.15, where the admin JWT
+still reads both metrics endpoints; each is used as soon as it is set.
+
+**The metrics bearer token** is the gateway's own `FERRUM_METRICS_BEARER_TOKEN`
+(at least 32 characters, distinct from `FERRUM_ADMIN_JWT_SECRET`). Nexus sends
+it as `Authorization: Bearer <token>` on `GET /metrics` and on nothing else. On
+Edge it unlocks the Prometheus scrape and the detailed probe tier, the same
+access a Prometheus scraper already has, and no Admin API route.
+
+**The fleet-read key is a privilege trade-off; leave it unset unless you need
+backend state on the Usage card.** Nexus signs `GET /admin/metrics`, and
+nothing else, with it: `role: viewer`, no `ns` claim. Set it to the gateway's
+`FERRUM_ADMIN_JWT_VIEWER_SECRET`. Edge caps a token verified by that key at
+`viewer`, so it cannot write, but without
+`FERRUM_ADMIN_JWT_VIEWER_NAMESPACES` the key **reads every namespace on the
+gateway**: consumers, proxies and plugin configs of every tenant, as well as
+the runtime metrics. Anyone who obtains the portal's environment gets that read
+access. With a `FERRUM_ADMIN_JWT_VIEWER_NAMESPACES` ceiling, Edge refuses
+`/admin/metrics` to the key anyway, so the setting is useful only on a gateway
+whose viewer key is fleet-wide. Nexus refuses to start if the value equals
+`FERRUM_ADMIN_JWT_SECRET`, so it never signs a claim-less token with the key
+that can mint `admin`.
+
+**Health tiers.** The tenant tier keeps everything `/api/health` reads, so no
+fleet-privileged token is needed for it. A gateway that answers only the
+minimal tier (`status` and `ready`) leaves the gateway mode, the write state
+and the namespace routing unknown (`null`). Nexus logs
+`Ferrum Edge answered GET /health with its minimal tier` once, and never
+reports the namespace as served on that evidence. The per-write `X-Ferrum-Namespace-Unserved` header
+still degrades the portal.
+
 ### Namespace routability
 
 **`FERRUM_NAMESPACE` on the portal must equal the active namespace of the
@@ -229,7 +283,14 @@ curl -s "$FERRUM_ADMIN_URL/health" -H "Authorization: Bearer $ADMIN_JWT" | jq .n
 
 The released namespace-routing policy accepts a control plane with
 `data_plane_single_namespace: false` and `active: null`; a missing namespace
-block is unknown, not a mismatch. **Backend egress admission below narrows that
+block is unknown, not a mismatch. A block that stops appearing ends an earlier
+"served" verdict; it becomes unknown. An earlier "unserved" verdict stays until
+the gateway reports the namespace as served. On Ferrum Edge v0.9.16 the
+portal's namespace-scoped token gets the block only when its claim covers the
+gateway's active namespace (see
+[Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0916)).
+A single-namespace data plane that withholds its `active` name serves a
+namespace the claim does not cover, which is `unserved`. **Backend egress admission below narrows that
 accepted CP pairing; see its topology decision.**
 
 ### Backend egress admission and the public-only guarantee
@@ -2582,8 +2643,9 @@ Scrape Ferrum Edge directly:
   connection pools, caches and rate limiters.
 
 Both require an admin JWT, the `FERRUM_METRICS_BEARER_TOKEN`, or a source
-address in `FERRUM_METRICS_ALLOWED_CIDRS`. Prefer the token or CIDR list for
-Prometheus:
+address in `FERRUM_METRICS_ALLOWED_CIDRS`; from Ferrum Edge v0.9.16 an admin
+JWT with an `ns` claim, like the portal's, is refused on both. Prefer the
+token or CIDR list for Prometheus:
 
 ```yaml
 scrape_configs:
@@ -2605,7 +2667,10 @@ row. Failure is logged and does not block startup; restart Nexus to retry. Only
 traffic after the plugin is enabled is counted.
 
 An API with no `ferrum_requests_total` series for its own `proxy_id` shows
-`available: false` with an `unavailable_reason` instead of zero counters.
+`available: false` with an `unavailable_reason` instead of zero counters. The
+portal's own reads of both endpoints need extra credentials on Ferrum Edge
+v0.9.16; see
+[Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0916).
 
 To match a dashboard to a portal API, use the `proxy_id` label: it is the
 `ferrum_proxy_id` on the `apis` row, shown as **Edge proxy id** on the API page.

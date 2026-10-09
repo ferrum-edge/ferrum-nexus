@@ -24,10 +24,18 @@
  *    ever sees.
  *
  * **Feature detection is the whole contract.** A gateway older than the
- * `namespace` block simply has no opinion, so an absent block leaves the
- * verdict `unserved: false` and changes nothing. The header's only value is
- * the literal string `true`; its absence is never a positive assertion that
- * the namespace *is* served.
+ * `namespace` block simply has no opinion, so an absent block never degrades
+ * the portal. Nor does it keep vouching for an earlier "served" reading: that
+ * becomes unknown, while an earlier "unserved" one stands until the gateway
+ * says otherwise. The header's only value is the literal string `true`; its
+ * absence is never a positive assertion that the namespace *is* served.
+ *
+ * **Health tiers.** Edge v0.9.15 gives the portal's admin token its detailed
+ * `/health` tier, block included. Edge v0.9.16 bounds a token with an `ns`
+ * claim to a tenant tier that carries the block only when the claim covers the
+ * gateway's active namespace. A tier with no block at all is unknown, as
+ * above; a block that says the data plane is single-namespace but withholds
+ * its name is read as serving a namespace this portal's claim does not cover.
  */
 
 import {
@@ -81,11 +89,15 @@ export function parseNamespaceServing(raw: unknown): EdgeNamespaceServing | null
  * `serving`.
  *
  * Every clause has to hold: the gateway must publish the block, must say its
- * data plane is single-namespace, must name the namespace it serves, and that
- * name must differ. A control plane (`active: null`,
- * `data_plane_single_namespace: false`) serves no traffic at all and is not a
- * misconfiguration — it is the topology where multi-namespace writes are the
- * point.
+ * data plane is single-namespace, and the namespace it serves must differ. A
+ * control plane (`active: null`, `data_plane_single_namespace: false`) serves
+ * no traffic at all and is not a misconfiguration — it is the topology where
+ * multi-namespace writes are the point.
+ *
+ * A single-namespace data plane always names its namespace in the detailed
+ * tier. One that does not has withheld the name from this portal's
+ * namespace-scoped token, which Edge does only when the token's claim — the
+ * configured namespace — does not cover it.
  */
 export function namespaceUnserved(
   configured: string,
@@ -93,7 +105,7 @@ export function namespaceUnserved(
 ): boolean {
   if (serving === null) return false;
   if (!serving.dataPlaneSingleNamespace) return false;
-  if (serving.active === null) return false;
+  if (serving.active === null) return true;
   return serving.active !== configured;
 }
 
@@ -105,7 +117,9 @@ export interface NamespaceMonitor {
   routing(): EdgeNamespaceRouting;
   /**
    * Fold in the `namespace` block of a health payload. `null` means the
-   * gateway published none, which clears nothing and asserts nothing.
+   * gateway published none: that clears no "unserved" verdict and asserts
+   * nothing, and an earlier "served" reading becomes unknown rather than
+   * standing without fresh evidence.
    *
    * @param at epoch milliseconds the payload was read; defaults to now
    */
@@ -150,6 +164,11 @@ export function createNamespaceMonitor(configured: string): NamespaceMonitor {
         // serves this namespace supersedes a header seen before it was fixed;
         // without this the portal would stay degraded until it restarted.
         if (!namespaceUnserved(configured, next)) mutationObserved = false;
+      } else if (serving !== null && !namespaceUnserved(configured, serving)) {
+        // A gateway that stopped publishing the block (a token now held to the
+        // minimal tier, say) no longer vouches for routing. Forget the served
+        // reading; a degradation stays until positive evidence clears it.
+        serving = null;
       }
       return routing();
     },

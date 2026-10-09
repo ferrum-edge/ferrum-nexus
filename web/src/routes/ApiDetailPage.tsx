@@ -1355,13 +1355,15 @@ function TestConsumerTab({ api }: { api: Api }): ReactElement {
  * `unknown` is deliberately neutral rather than a warning: the gateway lists a
  * circuit breaker only for a proxy that has one configured *and* has been
  * called, so "nothing reported" is the ordinary state for a quiet API, not a
- * problem to draw attention to.
+ * problem to draw attention to. `unavailable` is a warning: the portal could
+ * not read the gateway's backend state at all, and `detail` says why.
  */
 const BACKEND_TONES: Readonly<Record<ApiUsageBackendStatus, BadgeTone>> = {
   healthy: 'success',
   failing: 'danger',
   recovering: 'warning',
   unknown: 'neutral',
+  unavailable: 'warning',
 };
 
 const BACKEND_LABELS: Readonly<Record<ApiUsageBackendStatus, string>> = {
@@ -1369,6 +1371,7 @@ const BACKEND_LABELS: Readonly<Record<ApiUsageBackendStatus, string>> = {
   failing: 'Failing',
   recovering: 'Recovering',
   unknown: 'Unknown',
+  unavailable: 'Unavailable',
 };
 
 function count(value: number): string {

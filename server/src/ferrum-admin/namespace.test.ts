@@ -78,6 +78,20 @@ describe('edge namespace routability', () => {
       });
       assert.equal(namespaceUnserved('nexusiso', controlPlane), false);
     });
+
+    it('reads a single-namespace data plane that withholds its name as not ours', () => {
+      // Edge always names the namespace a single-namespace data plane serves,
+      // so one it withholds from the portal's namespace-scoped token is one
+      // that token's claim (the configured namespace) does not cover.
+      for (const active of [undefined, null]) {
+        const withheld = parseNamespaceServing({
+          active,
+          serving_scope: 'single-namespace-data-plane',
+          data_plane_single_namespace: true,
+        });
+        assert.equal(namespaceUnserved('nexusiso', withheld), true, String(active));
+      }
+    });
   });
 
   describe('the monitor', () => {
@@ -111,6 +125,20 @@ describe('edge namespace routability', () => {
       monitor.observeHealth(null);
       assert.equal(monitor.routing().unserved, true);
       assert.equal(monitor.routing().active, 'ferrum');
+    });
+
+    it('stops vouching for a served namespace once the block disappears', () => {
+      // A gateway that bounds the portal's token to its minimal health tier
+      // (or withholds the block) proves nothing about routing any more.
+      const monitor = createNamespaceMonitor('ferrum');
+      monitor.observeHealth(parseNamespaceServing(SERVING_FERRUM));
+      assert.equal(monitor.routing().active, 'ferrum');
+      monitor.observeHealth(null);
+      const routing = monitor.routing();
+      assert.equal(routing.unserved, false);
+      assert.equal(routing.active, null);
+      assert.equal(routing.serving_scope, null);
+      assert.equal(routing.data_plane_single_namespace, null);
     });
 
     it('degrades on the response header alone, and logs the transition once', () => {

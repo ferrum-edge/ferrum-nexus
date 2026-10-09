@@ -7,12 +7,26 @@
  * `FERRUM_ADMIN_JWT_AUDIENCE` configured, so `aud` is stamped **only** when
  * Nexus is explicitly configured with one.
  *
- * Every token also carries `ns` — the namespace Nexus operates in. A gateway
- * started with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true` requires the claim
- * to authorize the `X-Ferrum-Namespace` of every namespace-scoped route and
- * answers `403` without it; a gateway without the flag ignores it. Stamping it
- * unconditionally is therefore free on a permissive control plane and is what
- * makes a locked-down one work at all.
+ * Every admin token also carries `ns` — the namespace Nexus operates in — and
+ * the claim is never free:
+ *
+ * - On namespace-scoped routes it must authorize the `X-Ferrum-Namespace` of
+ *   the request. A gateway started with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`
+ *   also refuses a token without it, so stamping it is what makes a
+ *   locked-down control plane work at all.
+ * - From Ferrum Edge v0.9.16 (ferrum-edge#6093) a token carrying `ns` is a
+ *   **tenant credential whatever that flag says**: it reaches only
+ *   namespace-scoped routes plus a short allowlist (`/health`, `/status`,
+ *   `/live`, `/overload`, `GET /plugins`, the namespace registry). Every
+ *   fleet-global route answers `403`: `GET /metrics`, `GET /admin/metrics`,
+ *   `/cluster`, and `/version` too. `GET /namespaces` lists only the claimed
+ *   namespace, and `/health` returns at most the bounded tenant tier.
+ *
+ * Nexus keeps the claim rather than shedding it, because a claim-less token
+ * signed with this key is full fleet authority. The two fleet-global reads
+ * use their own credentials instead: the gateway's metrics bearer token for
+ * `/metrics`, and an optional viewer-key token minted by
+ * {@link createFleetReadTokenMinter} for `/admin/metrics`.
  *
  * Tokens are cached in a small LRU keyed by every signing input (the secret is
  * hashed into the key, never stored in it) and re-minted once the remaining
@@ -48,12 +62,16 @@ export interface SignAdminJwtOptions {
   subject: string;
   role: EdgeRole;
   /**
-   * Namespace stamped as the `ns` claim. Required: a gateway running with
+   * Namespace stamped as the `ns` claim. A gateway running with
    * `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true` rejects a namespace-scoped
    * call whose token has no `ns`, and a claim that disagrees with
-   * `X-Ferrum-Namespace` is a `403`, so it always equals `EdgeConfig.namespace`.
+   * `X-Ferrum-Namespace` is a `403`, so an admin token's always equals
+   * `EdgeConfig.namespace`.
+   *
+   * `null` omits the claim. Only a `viewer` token may do that — the fleet-read
+   * token, signed with a key that is never the admin key.
    */
-  namespace: string;
+  namespace: string | null;
   /** Only set when the gateway configures an audience. */
   audience?: string | undefined;
   ttlSeconds: number;
@@ -66,8 +84,8 @@ export interface SignAdminJwtOptions {
 /**
  * Sign one HS256 admin token with the exact claim set Edge requires.
  *
- * `nbf` equals `iat`, `ns` is always the configured namespace, and no `aud` is
- * emitted unless `audience` is supplied.
+ * `nbf` equals `iat`, `ns` is the given namespace (omitted only for a `viewer`
+ * token given `null`), and no `aud` is emitted unless `audience` is supplied.
  */
 export async function signAdminJwt(options: SignAdminJwtOptions): Promise<string> {
   const { secret, issuer, subject, role, namespace } = options;
@@ -78,7 +96,13 @@ export async function signAdminJwt(options: SignAdminJwtOptions): Promise<string
   if (subject.trim() === '') throw internal('Ferrum admin JWT subject must not be empty');
   // Edge rejects a malformed `ns` claim (empty string) at authentication time
   // whether or not namespace enforcement is on, so never mint one.
-  if (namespace.trim() === '') throw internal('Ferrum admin JWT namespace must not be empty');
+  if (namespace !== null && namespace.trim() === '') {
+    throw internal('Ferrum admin JWT namespace must not be empty');
+  }
+  // A claim-less token is fleet-wide. Never let one carry more than `viewer`.
+  if (namespace === null && role !== 'viewer') {
+    throw internal('A Ferrum admin JWT without a namespace claim must have the viewer role');
+  }
   const ttl = options.ttlSeconds;
   if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > MAX_TTL_SECONDS) {
     throw internal(`Ferrum admin JWT TTL must be an integer between 1 and ${MAX_TTL_SECONDS}`);
@@ -87,7 +111,7 @@ export async function signAdminJwt(options: SignAdminJwtOptions): Promise<string
   const now = options.now ?? Math.floor(Date.now() / 1000);
   // `ns` is a plain string; Edge also accepts an array, but Nexus only ever
   // operates in the single namespace it is configured with.
-  let signer = new SignJWT({ role, ns: namespace })
+  let signer = new SignJWT(namespace === null ? { role } : { role, ns: namespace })
     .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
     .setIssuer(issuer)
     .setSubject(subject)
@@ -124,16 +148,29 @@ export interface AdminTokenMinter {
   size(): number;
 }
 
-function fingerprintFor(config: EdgeConfig, subject: string, role: EdgeRole): string {
+/** The key and `ns` claim one minter signs with. */
+interface SigningKey {
+  secret: string;
+  namespace: string | null;
+  /** Forces every token's role, whatever the caller asks for. */
+  role?: EdgeRole;
+}
+
+function fingerprintFor(
+  config: EdgeConfig,
+  key: SigningKey,
+  subject: string,
+  role: EdgeRole,
+): string {
   return createHash('sha256')
-    .update(config.jwtSecret)
+    .update(key.secret)
     .update('\0')
     .update(
       JSON.stringify({
         adminUrl: config.adminUrl,
         issuer: config.jwtIssuer,
         audience: config.jwtAudience ?? null,
-        namespace: config.namespace,
+        namespace: key.namespace,
         ttl: config.jwtTtlSeconds,
         subject,
         role,
@@ -144,6 +181,26 @@ function fingerprintFor(config: EdgeConfig, subject: string, role: EdgeRole): st
 
 /** Build a token minter bound to one Edge configuration. */
 export function createAdminTokenMinter(config: EdgeConfig): AdminTokenMinter {
+  return createMinter(config, { secret: config.jwtSecret, namespace: config.namespace });
+}
+
+/**
+ * The minter for the one fleet-global read Nexus makes, `GET /admin/metrics`,
+ * or `null` when `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` is unset.
+ *
+ * Its tokens carry no `ns` claim and always `role: viewer`, and they are
+ * signed with that separate key. Edge caps a token verified by its
+ * `FERRUM_ADMIN_JWT_VIEWER_SECRET` at `viewer`, so the key cannot mint a
+ * write. Without `FERRUM_ADMIN_JWT_VIEWER_NAMESPACES` it reads every
+ * namespace: that is the trade-off an operator accepts by setting it.
+ */
+export function createFleetReadTokenMinter(config: EdgeConfig): AdminTokenMinter | null {
+  const secret = config.fleetReadJwtSecret;
+  if (secret === undefined) return null;
+  return createMinter(config, { secret, namespace: null, role: 'viewer' });
+}
+
+function createMinter(config: EdgeConfig, key: SigningKey): AdminTokenMinter {
   const cache = new Map<string, CachedToken>();
   const refreshBuffer = Math.min(60, Math.max(1, Math.floor(config.jwtTtlSeconds / 4)));
 
@@ -159,29 +216,30 @@ export function createAdminTokenMinter(config: EdgeConfig): AdminTokenMinter {
   }
 
   return {
-    async getToken(subject = DEFAULT_ADMIN_SUBJECT, role: EdgeRole = 'admin'): Promise<string> {
+    async getToken(subject = DEFAULT_ADMIN_SUBJECT, asked: EdgeRole = 'admin'): Promise<string> {
+      const role = key.role ?? asked;
       const now = Math.floor(Date.now() / 1000);
-      const key = fingerprintFor(config, subject, role);
-      const cached = cache.get(key);
+      const fingerprint = fingerprintFor(config, key, subject, role);
+      const cached = cache.get(fingerprint);
       if (cached && now < cached.expiresAt - refreshBuffer) {
         // Refresh insertion order so hot subjects survive eviction.
-        cache.delete(key);
-        cache.set(key, cached);
+        cache.delete(fingerprint);
+        cache.set(fingerprint, cached);
         return cached.token;
       }
 
       prune(now);
       const token = await signAdminJwt({
-        secret: config.jwtSecret,
+        secret: key.secret,
         issuer: config.jwtIssuer,
         subject,
         role,
-        namespace: config.namespace,
+        namespace: key.namespace,
         audience: config.jwtAudience,
         ttlSeconds: config.jwtTtlSeconds,
         now,
       });
-      cache.set(key, { token, expiresAt: now + config.jwtTtlSeconds });
+      cache.set(fingerprint, { token, expiresAt: now + config.jwtTtlSeconds });
       return token;
     },
 

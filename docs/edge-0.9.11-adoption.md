@@ -158,6 +158,29 @@ mutation, a stored-document comparison or deletion custody) is refused with
 is sent. Settle conversions and restores before upgrading Edge; see the
 [upgrade procedure](operations.md#upgrading-to-edge-v0913).
 
+## Ahead of Edge v0.9.16: namespace-bounded admin tokens
+
+Edge v0.9.16 is planned to ship
+[ferrum-edge#6093](https://github.com/ferrum-edge/ferrum-edge/pull/6093),
+tracked as [ferrum-edge#6095](https://github.com/ferrum-edge/ferrum-edge/issues/6095).
+In it, an admin JWT with an `ns` claim reaches only namespace-scoped routes and
+a short allowlist, and every token Nexus mints carries the claim. Nexus already
+works with both releases, with no new opt-in:
+
+- Every write, and every namespace-scoped read, is unchanged.
+- `/api/health` reads `mode`, `admin_writes_enabled` and the `namespace` block
+  from the detailed `/health` tier on v0.9.15 and from the bounded tenant tier
+  on v0.9.16. A minimal tier reads as unknown.
+- The Usage card's two fleet-global reads have optional credentials:
+  `FERRUM_METRICS_BEARER_TOKEN` for `GET /metrics`, and
+  `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` (a privilege trade-off) for
+  `GET /admin/metrics`. Without them, v0.9.16 refuses both reads and the card
+  says why.
+
+See
+[Namespace-bounded admin tokens](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0916).
+The pin stays at v0.9.15 until v0.9.16 is published.
+
 ## Release status
 
 [`release/compatibility.env`](../release/compatibility.env) pins the Edge v0.9.15 image

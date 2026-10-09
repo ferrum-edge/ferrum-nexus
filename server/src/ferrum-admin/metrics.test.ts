@@ -305,3 +305,156 @@ describe('ferrum admin metrics', () => {
     });
   });
 });
+
+/**
+ * Ferrum Edge v0.9.16 (ferrum-edge#6093) refuses an admin JWT carrying an `ns`
+ * claim on every fleet-global route, `/metrics` and `/admin/metrics` among
+ * them, and every token Nexus mints carries one. Each read has its own
+ * optional credential; without it the refusal must read as unavailable with
+ * its cause, never as zero traffic or "no circuit breakers".
+ */
+describe('ferrum admin metrics against a gateway that bounds ns-claim tokens', () => {
+  const BEARER = 'ferrum-metrics-bearer-token-0123456789abcdef';
+  const VIEWER = 'ferrum-admin-viewer-key-secret-0123456789abc';
+  let bounded: MockFerrumEdge;
+
+  function boundedClient(overrides: Partial<EdgeConfig> = {}): FerrumAdminClient {
+    return createFerrumAdminClient(configFor(bounded.url, overrides));
+  }
+
+  before(async () => {
+    bounded = createMockFerrumEdge({
+      jwtSecret: SECRET,
+      issuer: 'ferrum-edge',
+      nsClaimBound: 'tenant',
+      metricsBearerToken: BEARER,
+      viewerSecret: VIEWER,
+    });
+    await bounded.start();
+  });
+
+  after(async () => {
+    await bounded.stop();
+  });
+
+  beforeEach(async () => {
+    bounded.reset();
+    const setup = boundedClient();
+    try {
+      // A namespace-scoped write: the bound leaves it alone.
+      await setup.ensureMetricsConfig();
+    } finally {
+      await setup.close();
+    }
+    bounded.recordRequests('proxy-a', { method: 'GET', status: 200, count: 7 });
+    bounded.setBackendState('proxy-a', { breaker: 'open' });
+  });
+
+  it('says the scrape was refused, and why, when no metrics credential is configured', async () => {
+    const client = boundedClient();
+    try {
+      const metrics = await client.metrics.scrapeProxy('proxy-a');
+
+      assert.equal(metrics.available, false);
+      assert.equal(metrics.unavailableCode, 'refused');
+      assert.match(metrics.reason ?? '', /namespace-scoped admin token/);
+      assert.match(metrics.reason ?? '', /FERRUM_METRICS_BEARER_TOKEN/);
+      assert.equal(metrics.requests.total, 0);
+      const [call] = bounded.callsTo('GET', '/metrics');
+      assert.equal(call?.claims?.ns, 'nexus');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('scrapes with the gateway metrics bearer token instead of the admin JWT', async () => {
+    const client = boundedClient({ metricsBearerToken: BEARER });
+    try {
+      const metrics = await client.metrics.scrapeProxy('proxy-a');
+
+      assert.equal(metrics.available, true);
+      assert.equal(metrics.requests.total, 7);
+      const calls = bounded.requests.filter((request) => request.path === '/metrics');
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0]?.credential, 'metrics_bearer');
+      assert.equal(calls[0]?.claims, null, 'no admin JWT is sent alongside it');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('names a metrics bearer token the gateway does not accept', async () => {
+    const client = boundedClient({ metricsBearerToken: 'x'.repeat(48) });
+    try {
+      const metrics = await client.metrics.scrapeProxy('proxy-a');
+
+      assert.equal(metrics.available, false);
+      assert.equal(metrics.unavailableCode, 'refused');
+      assert.match(metrics.reason ?? '', /must match the gateway/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('reads backend state as unavailable, not as no breakers, without a fleet key', async () => {
+    const client = boundedClient();
+    try {
+      const state = await client.metrics.backendState('proxy-a');
+
+      assert.equal(state.available, false);
+      assert.match(state.reason ?? '', /namespace-scoped admin token/);
+      assert.deepEqual(state.breakers, []);
+      assert.equal(state.uptimeSeconds, null);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('reads backend state with a claim-less viewer token from the fleet-read key', async () => {
+    const client = boundedClient({ fleetReadJwtSecret: VIEWER });
+    try {
+      const state = await client.metrics.backendState('proxy-a');
+
+      assert.equal(state.available, true);
+      assert.equal(state.breakers[0]?.state, 'open');
+      const [call] = bounded.callsTo('GET', '/admin/metrics');
+      assert.equal(call?.credential, 'viewer_key');
+      assert.equal(call?.claims?.role, 'viewer');
+      assert.equal(call?.claims?.ns, undefined, 'the fleet-read token carries no ns claim');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('names a fleet-read key the gateway does not accept', async () => {
+    const client = boundedClient({ fleetReadJwtSecret: 'y'.repeat(48) });
+    try {
+      const state = await client.metrics.backendState('proxy-a');
+
+      assert.equal(state.available, false);
+      assert.match(state.reason ?? '', /FERRUM_ADMIN_FLEET_READ_JWT_SECRET/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('keeps every other call on the namespace-scoped admin token', async () => {
+    const client = boundedClient({ metricsBearerToken: BEARER, fleetReadJwtSecret: VIEWER });
+    try {
+      // No `/version` on Edge; a bounded token gets `403` for the unknown path.
+      assert.equal(await client.version(), null);
+      // `GET /namespaces` is filtered to the claim; the registry write is allowed.
+      await client.ensureNamespace();
+      bounded.seedConsumer({ username: 'someone-else', namespace: 'other-tenant' });
+      assert.deepEqual(await client.listNamespaces(), ['nexus']);
+      for (const call of bounded.requests.filter(
+        (request) => request.path === '/version' || request.path === '/namespaces',
+      )) {
+        assert.equal(call.claims?.ns, 'nexus');
+        assert.equal(call.claims?.role, 'admin');
+      }
+    } finally {
+      await client.close();
+    }
+  });
+});

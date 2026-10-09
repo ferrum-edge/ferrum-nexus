@@ -78,6 +78,11 @@ export interface RecordedRequest {
   body: unknown;
   /** JWT claims the mock accepted, or `null` when the call was unauthenticated. */
   claims: Record<string, unknown> | null;
+  /**
+   * The credential that is not a primary-key admin JWT: the metrics bearer
+   * token, or a JWT verified by the viewer key (its `role` capped at `viewer`).
+   */
+  credential?: 'metrics_bearer' | 'viewer_key';
 }
 
 /** A consumer as the mock stores it (unredacted). */
@@ -147,6 +152,35 @@ export interface MockFerrumEdgeOptions {
    * — tenancy intent must be explicit.
    */
   requireNamespaceClaim?: boolean;
+  /**
+   * Stand in for Ferrum Edge v0.9.16 (ferrum-edge#6093), where a token carrying
+   * an `ns` claim is a tenant credential whatever `requireNamespaceClaim` says:
+   *
+   * - the claim bounds every namespace-scoped route and `GET /namespaces`
+   *   lists only the claimed namespaces;
+   * - every global route outside the allowlist (`/health`, `/status`, `/live`,
+   *   `/overload`, `GET /plugins`, the namespace registry, the diagnostic
+   *   reference lookup) answers `403`: `/metrics`, `/admin/metrics`,
+   *   `/version` and any unknown path among them;
+   * - `/health` and `/status` answer `'tenant'`: `status`, `ready`, `mode`,
+   *   `admin_writes_enabled`, and the `namespace` block only when the claim
+   *   covers its `active`; or `'minimal'`: `status` and `ready` only, which is
+   *   #6093 without the tenant tier.
+   *
+   * Unset models Edge v0.9.15: the claim has no effect outside namespace routes.
+   */
+  nsClaimBound?: 'tenant' | 'minimal';
+  /**
+   * The gateway's `FERRUM_METRICS_BEARER_TOKEN`. Presented as
+   * `Authorization: Bearer <token>`, it is accepted on `GET /metrics` and
+   * unlocks the detailed `/health` tier; anything else it is sent to is `401`.
+   */
+  metricsBearerToken?: string;
+  /**
+   * The gateway's `FERRUM_ADMIN_JWT_VIEWER_SECRET`: a token it verifies has
+   * its `role` capped at `viewer`. No namespace ceiling is modelled.
+   */
+  viewerSecret?: string;
 }
 
 /** Native direct-plugin CORS defaults; omission is observably different from Nexus policy. */
@@ -447,6 +481,28 @@ export interface MockFerrumEdge {
 }
 
 const DEFAULT_NAMESPACE = 'ferrum';
+
+/**
+ * Edge v0.9.16's `ns_claim_global_route_is_allowed`: the global routes a token
+ * with an `ns` claim may still reach. Everything else global is `403`.
+ */
+function nsClaimGlobalRouteAllowed(method: string, segments: string[]): boolean {
+  const route = segments.join('/');
+  if (method === 'GET' && ['health', 'status', 'live', 'overload', 'plugins'].includes(route)) {
+    return true;
+  }
+  if (segments[0] === 'namespaces') {
+    if (segments.length === 1) return method === 'GET' || method === 'POST';
+    if (segments.length === 2) return ['GET', 'PUT', 'DELETE'].includes(method);
+  }
+  return (
+    method === 'GET' &&
+    segments.length === 4 &&
+    segments[0] === 'diagnostics' &&
+    segments[1] === 'v1' &&
+    segments[2] === 'refs'
+  );
+}
 
 /**
  * Marker Edge stamps on a `2xx` mutation its data plane will not route.
@@ -1761,6 +1817,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const audience = options.audience;
   const maxCredentials = options.maxCredentialsPerType ?? 2;
   const requireNamespaceClaim = options.requireNamespaceClaim ?? false;
+  const nsClaimBound = options.nsClaimBound;
+  const viewerSecret =
+    options.viewerSecret === undefined ? undefined : new TextEncoder().encode(options.viewerSecret);
 
   const consumers = new Map<string, StoredConsumer>();
   const proxies = new Map<string, Record<string, unknown>>();
@@ -1772,6 +1831,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const writeScopes = new WeakMap<ServerResponse, string>();
   const deploymentAcks = new WeakMap<ServerResponse, { id: string; namespace: string }>();
   const requests: RecordedRequest[] = [];
+  /** Claims objects of tokens the viewer key verified. */
+  const viewerKeyTokens = new WeakSet<object>();
   const failures: QueuedFailure[] = [];
   const lostAcks: QueuedFailure[] = [];
   const delays: QueuedDelay[] = [];
@@ -2061,8 +2122,22 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     }
     const token = header.slice(7).trim();
     try {
-      const { payload } = await jwtVerify(token, secret, { issuer, algorithms: ['HS256'] });
-      const claims = payload as unknown as Record<string, unknown>;
+      let payload: Record<string, unknown>;
+      let viewerKey = false;
+      try {
+        ({ payload } = await jwtVerify(token, secret, { issuer, algorithms: ['HS256'] }));
+      } catch (error) {
+        // Edge tries the viewer key only after the primary key reports a
+        // signature mismatch, and caps whatever it verifies at `viewer`.
+        if (viewerSecret === undefined) throw error;
+        ({ payload } = await jwtVerify(token, viewerSecret, { issuer, algorithms: ['HS256'] }));
+        viewerKey = true;
+      }
+      const claims = payload;
+      if (viewerKey) {
+        claims.role = 'viewer';
+        viewerKeyTokens.add(claims);
+      }
       for (const claim of ['sub', 'iat', 'nbf', 'exp', 'jti']) {
         if (claims[claim] === undefined) return new Error(`Missing required claim '${claim}'`);
       }
@@ -2113,9 +2188,30 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     claims: Record<string, unknown> | null,
     namespace: string,
   ): boolean {
-    if (!requireNamespaceClaim) return true;
+    // From Edge v0.9.16 a present claim bounds the token whatever the flag says.
+    const bounded = nsClaimBound !== undefined && claims?.ns !== undefined;
+    if (!requireNamespaceClaim && !bounded) return true;
     const allowed = namespacesInClaim(claims?.ns);
     return allowed !== null && allowed.includes(namespace);
+  }
+
+  /**
+   * What Edge v0.9.16 answers a token with an `ns` claim on `/health` and
+   * `/status`: the bounded tenant tier, or only `status` and `ready`. The
+   * `namespace` block survives only when the claim covers its `active`.
+   */
+  function boundedHealth(claimed: string[]): Record<string, unknown> {
+    const minimal = { status: health.status, ready: health.ready };
+    if (nsClaimBound === 'minimal') return minimal;
+    const block = health.namespace;
+    const covered =
+      isRecord(block) && typeof block.active === 'string' && claimed.includes(block.active);
+    return {
+      ...minimal,
+      mode: health.mode,
+      admin_writes_enabled: health.admin_writes_enabled,
+      ...(covered ? { namespace: block } : {}),
+    };
   }
 
   async function readBody(req: IncomingMessage): Promise<unknown> {
@@ -3371,6 +3467,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     segments: string[],
     body: unknown,
     query: URLSearchParams,
+    claims: Record<string, unknown> | null,
   ): void {
     const name = segments[1];
     if (name === undefined) {
@@ -3378,7 +3475,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         const derived = new Set<string>(namespaces.keys());
         for (const consumer of consumers.values()) derived.add(consumer.namespace);
         for (const proxy of proxies.values()) derived.add(String(proxy.namespace));
-        return send(res, 200, paginate([...derived].sort(), query));
+        // Edge v0.9.16 lists only what a present `ns` claim names.
+        const claimed = nsClaimBound === undefined ? null : namespacesInClaim(claims?.ns);
+        const listed = [...derived].filter((entry) => claimed === null || claimed.includes(entry));
+        return send(res, 200, paginate(listed.sort(), query));
       }
       if (method === 'POST') {
         if (!isRecord(body) || typeof body.name !== 'string') {
@@ -3596,6 +3696,29 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       return send(res, 200, { status: 'ok' });
     }
 
+    // Edge's observability credential is not a JWT: it authenticates the
+    // scrape and the detailed probe tier, and nothing else.
+    if (
+      options.metricsBearerToken !== undefined &&
+      req.headers.authorization === `Bearer ${options.metricsBearerToken}`
+    ) {
+      requests.push({
+        method,
+        path: url.pathname,
+        query: Object.fromEntries(url.searchParams),
+        namespace,
+        body: body === undefined ? null : body,
+        claims: null,
+        credential: 'metrics_bearer',
+      });
+      const route = method === 'GET' ? segments.join('/') : '';
+      if (route === 'metrics') return sendText(res, 200, renderMetrics());
+      if (route === 'health' || route === 'status') {
+        return send(res, health.ready === false ? 503 : 200, health);
+      }
+      return fail(res, 401, 'Missing or malformed Authorization header');
+    }
+
     const verified = await verifyToken(req);
     const claims = verified instanceof Error ? null : verified;
     const provisionedBy = req.headers[FERRUM_PROVISIONED_BY_HEADER.toLowerCase()];
@@ -3608,6 +3731,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       namespace,
       body: body === undefined ? null : body,
       claims,
+      ...(claims !== null && viewerKeyTokens.has(claims)
+        ? { credential: 'viewer_key' as const }
+        : {}),
     });
 
     if (verified instanceof Error) return fail(res, 401, verified.message);
@@ -3637,6 +3763,21 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             : null;
     if (scopedNamespace !== null && !claimAuthorizesNamespace(claims, scopedNamespace)) {
       return fail(res, 403, `Token is not authorized for namespace '${scopedNamespace}'`);
+    }
+    // Edge v0.9.16: a token with an `ns` claim reaches no global route outside
+    // its allowlist, unknown paths included.
+    if (
+      nsClaimBound !== undefined &&
+      claims?.ns !== undefined &&
+      scopedNamespace === null &&
+      !nsClaimGlobalRouteAllowed(method, segments)
+    ) {
+      return fail(
+        res,
+        403,
+        `global route '${url.pathname}' is unavailable to admin JWTs with an \`ns\` claim; ` +
+          'fleet-global routes require a token without one',
+      );
     }
 
     // Namespace-scoped mutations only, and never the `/namespaces` registry,
@@ -3750,7 +3891,13 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       case 'status':
         // Edge serves the *complete* payload with a 503 while it is
         // `starting`, `draining` or `unavailable` — not an error body.
-        return send(res, health.ready === false ? 503 : 200, health);
+        return send(
+          res,
+          health.ready === false ? 503 : 200,
+          nsClaimBound !== undefined && claims?.ns !== undefined
+            ? boundedHealth(namespacesInClaim(claims.ns) ?? [])
+            : health,
+        );
       case 'version':
         // Real Edge has no /version; the mock answers 404 so the client's
         // tolerant probe is exercised.
@@ -3766,7 +3913,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         if (method !== 'GET') return fail(res, 405, 'Method not allowed');
         return send(res, 200, renderAdminMetrics());
       case 'namespaces':
-        return handleNamespaces(res, method, segments, body, url.searchParams);
+        return handleNamespaces(res, method, segments, body, url.searchParams, claims);
       case 'consumers':
         return handleConsumers(
           res,

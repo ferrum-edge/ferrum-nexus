@@ -5,7 +5,12 @@ import { decodeJwt, decodeProtectedHeader, jwtVerify } from 'jose';
 
 import type { EdgeConfig } from '../config/index.js';
 import { isNexusError } from '../lib/errors.js';
-import { createAdminTokenMinter, signAdminJwt, DEFAULT_ADMIN_SUBJECT } from './jwt.js';
+import {
+  createAdminTokenMinter,
+  createFleetReadTokenMinter,
+  signAdminJwt,
+  DEFAULT_ADMIN_SUBJECT,
+} from './jwt.js';
 
 const SECRET = 'ferrum-admin-jwt-secret-0123456789abcdef';
 
@@ -108,6 +113,56 @@ describe('signAdminJwt', () => {
     await assert.rejects(() => signAdminJwt({ ...base, ttlSeconds: 7_200 }), isConfigError);
     // Edge treats an empty `ns` entry as a malformed claim and 401s on it.
     await assert.rejects(() => signAdminJwt({ ...base, namespace: '  ' }), isConfigError);
+    // A token without `ns` is fleet-wide; it may never claim more than `viewer`.
+    await assert.rejects(() => signAdminJwt({ ...base, namespace: null }), isConfigError);
+    await assert.rejects(
+      () => signAdminJwt({ ...base, role: 'operator', namespace: null }),
+      isConfigError,
+    );
+  });
+
+  it('omits ns only for a viewer token given no namespace', async () => {
+    const token = await signAdminJwt({
+      secret: SECRET,
+      issuer: 'ferrum-edge',
+      subject: DEFAULT_ADMIN_SUBJECT,
+      role: 'viewer',
+      namespace: null,
+      ttlSeconds: 60,
+    });
+    const claims = decodeJwt(token);
+    assert.equal(claims.role, 'viewer');
+    assert.ok(!('ns' in claims));
+  });
+});
+
+describe('createFleetReadTokenMinter', () => {
+  const FLEET_SECRET = 'ferrum-admin-viewer-key-0123456789abcdef';
+
+  it('is absent unless a fleet-read key is configured', () => {
+    assert.equal(createFleetReadTokenMinter(edgeConfig()), null);
+  });
+
+  it('mints claim-less viewer tokens with the fleet-read key, whatever role is asked', async () => {
+    const minter = createFleetReadTokenMinter(edgeConfig({ fleetReadJwtSecret: FLEET_SECRET }));
+    assert.ok(minter);
+    const token = await minter.getToken(DEFAULT_ADMIN_SUBJECT, 'admin');
+    const claims = decodeJwt(token);
+    assert.equal(claims.role, 'viewer');
+    assert.ok(!('ns' in claims), 'the token reaches fleet-global reads only without a claim');
+
+    await jwtVerify(token, new TextEncoder().encode(FLEET_SECRET), { algorithms: ['HS256'] });
+    await assert.rejects(() =>
+      jwtVerify(token, new TextEncoder().encode(SECRET), { algorithms: ['HS256'] }),
+    );
+  });
+
+  it('never shares a cache entry with the admin minter', async () => {
+    const config = edgeConfig({ jwtTtlSeconds: 600, fleetReadJwtSecret: FLEET_SECRET });
+    const admin = await createAdminTokenMinter(config).getToken();
+    const fleet = await createFleetReadTokenMinter(config)?.getToken();
+    assert.notEqual(admin, fleet);
+    assert.equal(decodeJwt(admin).ns, 'nexus');
   });
 });
 

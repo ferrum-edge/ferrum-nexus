@@ -312,22 +312,36 @@ Above it, code deals in domain objects and `NexusError`s.
 Edge verifies HS256 tokens and rejects one missing any required claim.
 `jwt.ts` mints exactly:
 
-| Claim          | Value                                                                                                 |
-| -------------- | ----------------------------------------------------------------------------------------------------- |
-| `alg` (header) | `HS256`                                                                                               |
-| `iss`          | `FERRUM_ADMIN_JWT_ISSUER` (default `ferrum-edge`) — **must equal the gateway's issuer**               |
-| `sub`          | `ferrum-nexus` by default; per call, the acting Nexus user id, so Edge's own audit log names a person |
-| `iat`, `nbf`   | now (identical)                                                                                       |
-| `exp`          | `iat + FERRUM_ADMIN_JWT_TTL` (default 60 s, range 5–3600)                                             |
-| `jti`          | fresh UUID                                                                                            |
-| `role`         | `admin`                                                                                               |
-| `ns`           | `FERRUM_NAMESPACE`, always — required by a gateway with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`   |
-| `aud`          | **omitted unless** `FERRUM_ADMIN_JWT_AUDIENCE` is set; Edge rejects an unexpected `aud`               |
+| Claim          | Value                                                                                                                                                               |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `alg` (header) | `HS256`                                                                                                                                                             |
+| `iss`          | `FERRUM_ADMIN_JWT_ISSUER` (default `ferrum-edge`) — **must equal the gateway's issuer**                                                                             |
+| `sub`          | `ferrum-nexus` by default; per call, the acting Nexus user id, so Edge's own audit log names a person                                                               |
+| `iat`, `nbf`   | now (identical)                                                                                                                                                     |
+| `exp`          | `iat + FERRUM_ADMIN_JWT_TTL` (default 60 s, range 5–3600)                                                                                                           |
+| `jti`          | fresh UUID                                                                                                                                                          |
+| `role`         | `admin`                                                                                                                                                             |
+| `ns`           | `FERRUM_NAMESPACE`, always — required by a gateway with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`; from Edge v0.9.16 it also bars fleet-global routes (see below) |
+| `aud`          | **omitted unless** `FERRUM_ADMIN_JWT_AUDIENCE` is set; Edge rejects an unexpected `aud`                                                                             |
 
 Tokens are cached in a 256-entry LRU keyed by a hash of every signing input
 (including the secret) and re-minted when less than `min(60, ttl / 4)` seconds
 remain. Every call also sends `X-Ferrum-Namespace`, which overrides any
 `namespace` in the body.
+
+**Fleet-global reads.** From Ferrum Edge v0.9.16 a token with an `ns` claim
+gets `403` on every fleet-global route outside a short allowlist, and the
+bounded tenant tier on `/health`. The client therefore sends two reads with
+other credentials, each optional, and reports a refusal as unavailable with
+its cause:
+
+- `GET /metrics` with the gateway's `FERRUM_METRICS_BEARER_TOKEN`, when set.
+- `GET /admin/metrics` with a `viewer` token that has no `ns` claim, signed by
+  `createFleetReadTokenMinter` with `FERRUM_ADMIN_FLEET_READ_JWT_SECRET`, when
+  set.
+
+Every other call keeps the namespace-scoped admin token. See
+[`operations.md`](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0916).
 
 **Connection pooling.** Calls use pooled keep-alive connections. The client's
 idle lifetime (4 s, raised to at most 8 s by a `Keep-Alive: timeout=N` hint,
