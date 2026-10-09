@@ -301,6 +301,72 @@ describe('Edge response contracts over HTTP sockets', () => {
     });
   }
 
+  // Each cleanup that counts a `404` as already done, with the `error` Edge's
+  // admin handler answers that route with when the resource is missing.
+  const confirmedAbsences: [string, string, (client: FerrumAdminClient) => Promise<unknown>][] = [
+    ['proxy delete', 'Proxy not found', (client) => client.proxies.delete('proxy-1')],
+    [
+      'plugin config delete',
+      'Plugin config not found',
+      (client) => client.pluginConfigs.delete('plugin-1'),
+    ],
+    ['API spec delete', 'API spec not found', (client) => client.apiSpecs.delete('spec-1')],
+    [
+      'confirmed proxy read',
+      'Proxy not found',
+      (client) => client.proxies.get('proxy-1', { confirmedAbsence: true }),
+    ],
+    [
+      'confirmed plugin config read',
+      'Plugin config not found',
+      (client) => client.pluginConfigs.get('plugin-1', { confirmedAbsence: true }),
+    ],
+  ];
+
+  for (const [name, expected, settle] of confirmedAbsences) {
+    it(`counts a ${name} as absent only from the Edge not-found answer`, async (t) => {
+      const { client, reply, requests, logs } = await fixture(t);
+      for (const body of [
+        '',
+        ' ',
+        '<html>private-canary</html>',
+        '{',
+        'null',
+        '[]',
+        '{}',
+        JSON.stringify(expected),
+        // Edge's own answer for a route it does not have.
+        JSON.stringify({ error: 'Not Found' }),
+        JSON.stringify({ error: expected.toLowerCase() }),
+        JSON.stringify({ error: 'Consumer not found' }),
+        JSON.stringify({ detail: expected }),
+        JSON.stringify({
+          message: 'Route DELETE:/proxies/proxy-1 not found',
+          error: 'Not Found',
+          statusCode: 404,
+        }),
+      ]) {
+        Object.assign(reply, { status: 404, body });
+        const before = requests.length;
+        await assert.rejects(settle(client), (error: unknown) => {
+          assert.ok(protocolFailure(error) && isNexusError(error));
+          assert.equal((error.details as { reason: string }).reason, 'unconfirmed_absence');
+          return true;
+        });
+        assert.equal(requests.length, before + 1, 'no automatic retry');
+      }
+      assert.ok(!JSON.stringify(logs).includes('private-canary'));
+
+      for (const body of [
+        JSON.stringify({ error: expected }),
+        JSON.stringify({ error: expected, code: 'not_found' }),
+      ]) {
+        Object.assign(reply, { status: 404, body });
+        assert.equal((await settle(client)) ?? null, null);
+      }
+    });
+  }
+
   const resourceReads: [string, (client: FerrumAdminClient) => Promise<unknown>, unknown][] = [
     ['consumer', (client) => client.consumers.get('consumer-1'), consumer],
     ['proxy', (client) => client.proxies.get('proxy-1'), proxy],
@@ -534,10 +600,16 @@ describe('Edge response contracts over HTTP sockets', () => {
       await client.consumers.deleteCredentialAt('consumer-1', 'keyauth', 0),
       consumer,
     );
+    // Already gone is a completed delete, but only on Edge's own answer.
+    for (const [remove, error] of [
+      [() => client.proxies.delete('proxy-1'), 'Proxy not found'],
+      [() => client.pluginConfigs.delete('plugin-1'), 'Plugin config not found'],
+      [() => client.apiSpecs.delete('spec-1'), 'API spec not found'],
+    ] as const) {
+      Object.assign(reply, { status: 404, body: JSON.stringify({ error }) });
+      await remove();
+    }
     Object.assign(reply, { status: 404, body: '' });
-    await client.proxies.delete('proxy-1');
-    await client.pluginConfigs.delete('plugin-1');
-    await client.apiSpecs.delete('spec-1');
     await assert.rejects(
       () => client.consumers.delete('consumer-1'),
       (error: unknown) => {
@@ -662,7 +734,8 @@ describe('Edge response contracts over HTTP sockets', () => {
     reply.status = 404;
     assert.equal(await client.consumers.get('consumer-1'), null);
     assert.equal(await client.live(), false);
-    await client.pluginConfigs.delete('plugin-1');
+    // Not Edge's own `Plugin config not found`, so not a completed delete.
+    await assert.rejects(() => client.pluginConfigs.delete('plugin-1'), protocolFailure);
     reply.status = 405;
     assert.equal(await client.version(), null);
 

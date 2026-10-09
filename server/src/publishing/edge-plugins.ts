@@ -516,7 +516,8 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
     undoRemovalLocked(proxyId, config, subject) {
       return async () => {
         await edge.assertBackendEgress();
-        const survivor = await edge.pluginConfigs.get(config.id);
+        // Recreated only on Edge's own `Plugin config not found` (issue #548).
+        const survivor = await edge.pluginConfigs.get(config.id, { confirmedAbsence: true });
         const id = survivor
           ? config.id
           : (

@@ -6,6 +6,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gateway cleanup trusts only Ferrum Edge's own "not found"** (#548). Deleting
+  a proxy, plugin config or API spec counts as already done only when Edge
+  answers with its not-found error for that resource. Any other `404`, for
+  example from a misrouted proxy in front of the gateway, now fails the step so
+  it is reported and retried. Before, Nexus recorded the cleanup as done while
+  the resource was still live. The same rule now applies to gateway
+  reconciliation and its repair, to restoring a missing deployment (which could
+  build a second proxy beside a live one) and to the undo of a plugin removal.
+
 ## [0.5.2] - 2026-10-08
 
 Paired with Ferrum Edge `v0.9.15`, a security release that fixes 26 published Ferrum

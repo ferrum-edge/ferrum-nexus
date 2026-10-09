@@ -333,7 +333,12 @@ export interface FerrumAdminClient {
 
   readonly proxies: {
     list(query?: EdgeListQuery): Promise<EdgePage<EdgeProxy>>;
-    get(id: string): Promise<EdgeProxy | null>;
+    /**
+     * `null` for a `404`. With `confirmedAbsence`, only for Edge's own
+     * `Proxy not found` answer: any other `404` is a protocol error, for a
+     * caller that acts on the proxy being gone (issue #548).
+     */
+    get(id: string, options?: { confirmedAbsence?: boolean }): Promise<EdgeProxy | null>;
     create(
       body: EdgeProxyWrite,
       subject?: string,
@@ -344,6 +349,10 @@ export interface FerrumAdminClient {
      * changed fields overwritten — see {@link EdgeProxyReplace}.
      */
     replace(id: string, body: EdgeProxyReplace, subject?: string): Promise<EdgeProxy>;
+    /**
+     * Already gone counts as deleted only on Edge's own `Proxy not found`
+     * answer; any other `404` is a protocol error (issue #548).
+     */
     delete(
       id: string,
       subject?: string,
@@ -363,13 +372,22 @@ export interface FerrumAdminClient {
      * carrying more than 1000 configs.
      */
     listByProxy(proxyId: string): Promise<EdgePluginConfig[]>;
-    get(id: string): Promise<EdgePluginConfig | null>;
+    /**
+     * `null` for a `404`. With `confirmedAbsence`, only for Edge's own
+     * `Plugin config not found` answer: any other `404` is a protocol error,
+     * for a caller that acts on the config being gone (issue #548).
+     */
+    get(id: string, options?: { confirmedAbsence?: boolean }): Promise<EdgePluginConfig | null>;
     create(
       body: EdgePluginConfigWrite,
       subject?: string,
       options?: { preserveLabels: true },
     ): Promise<EdgePluginConfig>;
     replace(id: string, body: EdgePluginConfigWrite, subject?: string): Promise<EdgePluginConfig>;
+    /**
+     * Already gone counts as deleted only on Edge's own `Plugin config not
+     * found` answer; any other `404` is a protocol error (issue #548).
+     */
     delete(id: string, subject?: string): Promise<void>;
   };
 
@@ -421,7 +439,11 @@ export interface FerrumAdminClient {
     findByProxy(proxyId: string): Promise<EdgeApiSpecSummary | null>;
     /** Stored document, used to verify deployment configuration and spec ownership. */
     documentByProxy(proxyId: string): Promise<Record<string, unknown> | null>;
-    /** Delete the spec — and, by cascade, its proxy and every plugin on it. */
+    /**
+     * Delete the spec — and, by cascade, its proxy and every plugin on it.
+     * Already gone counts as deleted only on Edge's own `API spec not found`
+     * answer; any other `404` is a protocol error (issue #548).
+     */
     delete(id: string, subject?: string): Promise<void>;
   };
 
@@ -553,8 +575,16 @@ function isCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
-/** Edge's `404` body for a consumer that does not exist in the namespace. */
+/**
+ * Edge's `404` `error` for each resource that does not exist in the namespace:
+ * `NOT_FOUND_MESSAGE` of its `AdminResource` (`src/admin/crud.rs`), and
+ * `ApiSpecError::NotFound` (`src/admin/api_specs/handlers.rs`). Edge answers an
+ * unknown route with `{"error": "Not Found"}`, which none of these match.
+ */
 const CONSUMER_NOT_FOUND = 'Consumer not found';
+const PROXY_NOT_FOUND = 'Proxy not found';
+const PLUGIN_CONFIG_NOT_FOUND = 'Plugin config not found';
+const API_SPEC_NOT_FOUND = 'API spec not found';
 
 /**
  * Whether a `404` body is Edge's `{"error": <expected>}` answer for a missing
@@ -2209,8 +2239,11 @@ export function createFerrumAdminClient(
       async list(query?: EdgeListQuery): Promise<EdgePage<EdgeProxy>> {
         return callRequired<EdgePage<EdgeProxy>>('GET', '/proxies', { query: { ...query } });
       },
-      async get(id: string): Promise<EdgeProxy | null> {
-        return call<EdgeProxy>('GET', `/proxies/${encodeURIComponent(id)}`, { allow404: true });
+      async get(id, options): Promise<EdgeProxy | null> {
+        return call<EdgeProxy>('GET', `/proxies/${encodeURIComponent(id)}`, {
+          allow404: true,
+          ...(options?.confirmedAbsence ? { absentError: PROXY_NOT_FOUND } : {}),
+        });
       },
       async create(
         body: EdgeProxyWrite,
@@ -2234,7 +2267,10 @@ export function createFerrumAdminClient(
       ): Promise<void> {
         await call('DELETE', `/proxies/${encodeURIComponent(id)}`, {
           subject,
+          // Callers record the proxy as removed. Only Edge's own answer for
+          // that proxy proves it; a router's `404` does not.
           allow404: true,
+          absentError: PROXY_NOT_FOUND,
           query: { cleanup_orphaned_upstream: options?.cleanupOrphanedUpstream },
         });
       },
@@ -2275,9 +2311,10 @@ export function createFerrumAdminClient(
         }
         return attached;
       },
-      async get(id: string): Promise<EdgePluginConfig | null> {
+      async get(id, options): Promise<EdgePluginConfig | null> {
         return call<EdgePluginConfig>('GET', `/plugins/config/${encodeURIComponent(id)}`, {
           allow404: true,
+          ...(options?.confirmedAbsence ? { absentError: PLUGIN_CONFIG_NOT_FOUND } : {}),
         });
       },
       async create(
@@ -2305,6 +2342,7 @@ export function createFerrumAdminClient(
         await call('DELETE', `/plugins/config/${encodeURIComponent(id)}`, {
           subject,
           allow404: true,
+          absentError: PLUGIN_CONFIG_NOT_FOUND,
         });
       },
     },
@@ -2349,7 +2387,11 @@ export function createFerrumAdminClient(
         );
       },
       async delete(id: string, subject?: string): Promise<void> {
-        await call('DELETE', `/api-specs/${encodeURIComponent(id)}`, { subject, allow404: true });
+        await call('DELETE', `/api-specs/${encodeURIComponent(id)}`, {
+          subject,
+          allow404: true,
+          absentError: API_SPEC_NOT_FOUND,
+        });
       },
     },
 
