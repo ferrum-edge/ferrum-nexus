@@ -22,6 +22,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   cancelled tool request back to `pending` after the reset had cleared the
   account's pending requests. The rollback and the reset now commit under one
   per-account lock, so one of them always sees the other.
+- **Fail closed on ambiguous workflow image syntax** (#546). The image-pin checker now
+  checks block-form workflow containers and flow-style workflow environment values,
+  and rejects Docker commands with escaped quotes that its shell-word scanner cannot
+  safely resolve. The image-pin policy documents the local image exceptions.
 
 ## [0.5.2] - 2026-10-08
 
