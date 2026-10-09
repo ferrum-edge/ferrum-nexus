@@ -12,7 +12,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   a proxy, plugin config or API spec counts as already done only when Edge
   answers with its not-found error for that resource. Any other `404`, for
   example from a misrouted proxy in front of the gateway, now fails the step so
-  it is reported and retried. Before, Nexus recorded the cleanup as done while
+  it is reported and can be retried. Before, Nexus recorded the cleanup as done while
   the resource was still live. The same rule now applies to gateway
   reconciliation and its repair, to restoring a missing deployment (which could
   build a second proxy beside a live one) and to the undo of a plugin removal.
