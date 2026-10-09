@@ -6,10 +6,11 @@ tracked Dockerfiles (`FROM`, external `COPY --from`, syntax frontends and extern
 actions and Docker `run`, `create`, and `pull` commands (including backslash
 continuations), plus `FERRUM_EDGE_IMAGE` and `NEXUS_IMAGE` assignments in
 `.env`, `.env.*` and `*.env` files. The same two variables in a workflow `env:`
-block, at workflow, job or step level, are checked too: a literal value must be
-digest-pinned, the locally built images are allowed, and a `${{ … }}` or other
-expression fails closed rather than being treated as pinned. Docker options before
-the command, `docker container` commands and `docker image pull` are recognized.
+block or flow map, at workflow, job or step level, are checked too: a literal value
+must be digest-pinned, the locally built images are allowed, and a `${{ … }}` or
+other expression fails closed rather than being treated as pinned. A workflow
+block-form `container:` with an `image:` child is checked as well. Docker options
+before the command, `docker container` commands and `docker image pull` are recognized.
 Known options that take image-independent values (including `--label`, `-e` and
 `--name`) are skipped; unsupported options fail closed. An unquoted `$(…)` or
 backtick substitution inside an option value (as in `-v $(pwd):/src`) stays with
@@ -31,6 +32,12 @@ The acceptance fallback
 may use the locally built `ferrum-nexus:ci` image, and `e2e/.env.example` may name
 the local `ferrum-nexus:e2e` image.
 
+For consistency with those local build inputs, both `ferrum-nexus:ci` and
+`ferrum-nexus:e2e` are accepted when written directly in a tracked Compose or
+workflow `image:`/`container:` field or as a workflow `FERRUM_EDGE_IMAGE` or
+`NEXUS_IMAGE` value. In env files, local images remain limited to
+`NEXUS_IMAGE=ferrum-nexus:e2e` in `e2e/.env.example`.
+
 This is a bounded static scan, not a full YAML or shell interpreter. It does not
 execute files, scan shell scripts, expand variables, or resolve computed command
 names, shell aliases, sourced files or values assembled indirectly. Workflow
@@ -45,4 +52,6 @@ its name contains `compose` or it has a top-level `services:` key, so a file suc
 as `deploy/stack.yml` is scanned too. Commands assembled from
 variables or invoked through aliases are outside the check. Arbitrary YAML flow collections
 that do not expose an `image` or `container` key in a recognizable key position
-are outside the scan.
+are outside the scan. If a workflow Docker command contains a backslash-escaped
+single or double quote, the checker fails closed for that command because the
+shell-word scanner does not resolve escaped-quote boundaries.

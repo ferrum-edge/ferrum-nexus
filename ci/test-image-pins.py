@@ -57,6 +57,15 @@ FROM build AS runtime
         self.assertEqual(len(list(image_fields(Path('compose.yml'), compose))), 1)
         self.assertEqual(len(list(image_fields(Path('.github/workflows/ci.yml'), workflow))), 2)
 
+    def test_workflow_block_container_image_is_checked(self):
+        workflow = (
+            'jobs:\n  build:\n    container:\n'
+            '      image: registry.example/ci:latest\n'
+        )
+        refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
+        self.assertEqual([ref for _, ref in refs], ['registry.example/ci:latest'])
+        self.assertIsNotNone(error_for(refs[0][1]))
+
     def test_workflow_direct_docker_command(self):
         workflow = f'''steps:\n  - run: docker run --rm registry.example/job:1.2.3@sha256:{DIGEST}\n'''
         self.assertEqual(len(list(image_fields(Path('.github/workflows/ci.yml'), workflow))), 1)
@@ -121,6 +130,14 @@ FROM build AS runtime
                 refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
                 self.assertEqual([ref for _, ref in refs], ['nginx:latest'])
                 self.assertIsNotNone(error_for(refs[0][1]))
+
+    def test_workflow_escaped_quote_fails_closed(self):
+        workflow = '''steps:
+  - run: docker run --label "decoy=\\\" alpine:3@sha256:''' + DIGEST + '''" nginx:latest
+'''
+        refs = list(image_fields(Path('.github/workflows/ci.yml'), workflow))
+        self.assertEqual([ref for _, ref in refs], ['<escaped quote in docker command>'])
+        self.assertIsNotNone(error_for(refs[0][1]))
 
     def test_workflow_quoted_backtick_option_value_is_not_a_substitution(self):
         workflow = "steps:\n  - run: docker run --label '`' nginx:latest\n"
@@ -297,6 +314,24 @@ FROM build AS runtime
         refs = list(workflow_env_image_fields(Path('.github/workflows/ci.yml'), source))
         self.assertEqual([ref for _, ref in refs], ['registry.example/nexus:latest'])
         self.assertIsNotNone(workflow_env_error(refs[0][1]))
+
+    def test_workflow_env_flow_map_values_are_checked(self):
+        source = (
+            '    env: { FERRUM_EDGE_IMAGE: registry.example/edge:latest, '
+            'NEXUS_IMAGE: "${{ needs.build.outputs.image }}" }\n'
+        )
+        refs = list(workflow_env_image_fields(Path('.github/workflows/ci.yml'), source))
+        self.assertEqual([ref for _, ref in refs], [
+            'registry.example/edge:latest', '${{ needs.build.outputs.image }}'
+        ])
+        self.assertTrue(all(workflow_env_error(ref) is not None for _, ref in refs))
+
+    def test_local_images_are_allowed_in_workflow_and_compose_image_fields(self):
+        for path in (Path('docker-compose.yml'), Path('.github/workflows/ci.yml')):
+            with self.subTest(path=path):
+                refs = list(image_fields(path, 'image: ferrum-nexus:ci\n'))
+                self.assertEqual([ref for _, ref in refs], ['ferrum-nexus:ci'])
+                self.assertIsNone(error_for(refs[0][1]))
 
     def test_workflow_option_value_with_substitution_is_consumed(self):
         for command in (
