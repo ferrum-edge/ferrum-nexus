@@ -67,6 +67,7 @@ import {
 } from '../lib/errors.js';
 import { isoInSeconds, nowIso } from '../lib/ids.js';
 import {
+  accountRecoveryLockKey,
   SUPER_ADMIN_LOCK_KEY,
   userLifecycleLockKey,
   type KeyedSerializer,
@@ -1089,95 +1090,100 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       const passwordHash = await crypto.hashPassword(newPassword);
 
       await serializePasswordChange(record.id, async () => {
-        const reset = await store.transaction(async (tx) => {
-          // Recheck after taking the lease: an earlier change may have deleted
-          // the link, or it may have expired while hashing or waiting.
-          const live = await tx.verificationTokens.findByTokenHash(
-            crypto.hashToken(token),
-            'password_reset',
-          );
-          if (!live || live.used_at !== null || Date.parse(live.expires_at) <= Date.now()) {
-            throw invalidResetLink();
-          }
-          const current = await tx.users.findById(record.id);
-          if (!current) throw invalidResetLink();
-          if (current.status !== 'active') throw userDisabled();
-          const burned = await tx.verificationTokens.markUsed(live.id, nowIso());
-          if (!burned) throw invalidResetLink();
-
-          // A lifecycle transition uses a different lease. Under PostgreSQL
-          // READ COMMITTED it can disable the account after the active read
-          // above; guard the write itself and refuse a zero-row match.
-          const updated = await tx.users.updateIfMatches(
-            record.id,
-            { status: 'active' },
-            {
-              password_hash: passwordHash,
-              // Redeeming a link mailed to the address proves the mailbox, which is
-              // all verification ever claimed.
-              email_verified: true,
-            },
-          );
-          if (!updated) throw invalidResetLink();
-
-          const priorProof = await tx.emailProofs.findByUser(updated.id);
-          const firstTrustedProof =
-            priorProof === null ||
-            priorProof.method === 'verification_link' ||
-            priorProof.email !== updated.email.trim().toLowerCase();
-
-          // Redeeming a mailed link proves the mailbox.
-          await tx.emailProofs.upsert(updated.id, updated.email, 'password_reset', nowIso());
-
-          // The revocation a first trusted proof owes is a durable job written
-          // here, so it commits with the proof: Edge being unreachable cannot
-          // leave the squatter's key live with no record that it is owed. The
-          // squatter's outstanding access requests are cancelled with the reset.
-          let cancelledRequests = 0;
-          if (firstTrustedProof) {
-            await tx.accountRecoveryJobs.upsertPending(updated.id, nowIso());
-            for (;;) {
-              const pending = await tx.accessRequests.list({
-                user_id: updated.id,
-                status: 'pending',
-              });
-              if (pending.items.length === 0) break;
-              let cancelledThisPage = 0;
-              for (const request of pending.items) {
-                const cancelled = await tx.accessRequests.updateIfStatus(request.id, 'pending', {
-                  status: 'cancelled',
-                });
-                if (cancelled) {
-                  cancelledThisPage += 1;
-                  cancelledRequests += 1;
-                }
-              }
-              if (cancelledThisPage === 0) break;
+        // Under the account's recovery key, as a failed revocation's rollback
+        // takes it around its decision to restore a cancelled tool request: the
+        // jobs and cancellations below and that decision each see the other.
+        const reset = await locks(accountRecoveryLockKey(record.id), () =>
+          store.transaction(async (tx) => {
+            // Recheck after taking the lease: an earlier change may have deleted
+            // the link, or it may have expired while hashing or waiting.
+            const live = await tx.verificationTokens.findByTokenHash(
+              crypto.hashToken(token),
+              'password_reset',
+            );
+            if (!live || live.used_at !== null || Date.parse(live.expires_at) <= Date.now()) {
+              throw invalidResetLink();
             }
-          }
+            const current = await tx.users.findById(record.id);
+            if (!current) throw invalidResetLink();
+            if (current.status !== 'active') throw userDisabled();
+            const burned = await tx.verificationTokens.markUsed(live.id, nowIso());
+            if (!burned) throw invalidResetLink();
 
-          // Any other reset link for this account dies with this one, and every
-          // session goes: whoever prompted the reset must not keep a live one.
-          await tx.verificationTokens.deleteForUser(record.id, 'password_reset');
-          await tx.sessions.deleteForUser(record.id);
+            // A lifecycle transition uses a different lease. Under PostgreSQL
+            // READ COMMITTED it can disable the account after the active read
+            // above; guard the write itself and refuse a zero-row match.
+            const updated = await tx.users.updateIfMatches(
+              record.id,
+              { status: 'active' },
+              {
+                password_hash: passwordHash,
+                // Redeeming a link mailed to the address proves the mailbox, which is
+                // all verification ever claimed.
+                email_verified: true,
+              },
+            );
+            if (!updated) throw invalidResetLink();
 
-          await audit.forStore(tx).record(
-            { id: updated.id, role: updated.role },
-            AuditAction.AUTH_PASSWORD_RESET,
-            { type: 'user', id: updated.id },
-            {
-              email: updated.email,
-              ...(firstTrustedProof
-                ? {
-                    credentials_revocation_pending: true,
-                    cancelled_access_requests: cancelledRequests,
+            const priorProof = await tx.emailProofs.findByUser(updated.id);
+            const firstTrustedProof =
+              priorProof === null ||
+              priorProof.method === 'verification_link' ||
+              priorProof.email !== updated.email.trim().toLowerCase();
+
+            // Redeeming a mailed link proves the mailbox.
+            await tx.emailProofs.upsert(updated.id, updated.email, 'password_reset', nowIso());
+
+            // The revocation a first trusted proof owes is a durable job written
+            // here, so it commits with the proof: Edge being unreachable cannot
+            // leave the squatter's key live with no record that it is owed. The
+            // squatter's outstanding access requests are cancelled with the reset.
+            let cancelledRequests = 0;
+            if (firstTrustedProof) {
+              await tx.accountRecoveryJobs.upsertPending(updated.id, nowIso());
+              for (;;) {
+                const pending = await tx.accessRequests.list({
+                  user_id: updated.id,
+                  status: 'pending',
+                });
+                if (pending.items.length === 0) break;
+                let cancelledThisPage = 0;
+                for (const request of pending.items) {
+                  const cancelled = await tx.accessRequests.updateIfStatus(request.id, 'pending', {
+                    status: 'cancelled',
+                  });
+                  if (cancelled) {
+                    cancelledThisPage += 1;
+                    cancelledRequests += 1;
                   }
-                : {}),
-            },
-            context.ip,
-          );
-          return { user: updated, firstTrustedProof };
-        });
+                }
+                if (cancelledThisPage === 0) break;
+              }
+            }
+
+            // Any other reset link for this account dies with this one, and every
+            // session goes: whoever prompted the reset must not keep a live one.
+            await tx.verificationTokens.deleteForUser(record.id, 'password_reset');
+            await tx.sessions.deleteForUser(record.id);
+
+            await audit.forStore(tx).record(
+              { id: updated.id, role: updated.role },
+              AuditAction.AUTH_PASSWORD_RESET,
+              { type: 'user', id: updated.id },
+              {
+                email: updated.email,
+                ...(firstTrustedProof
+                  ? {
+                      credentials_revocation_pending: true,
+                      cancelled_access_requests: cancelledRequests,
+                    }
+                  : {}),
+              },
+              context.ip,
+            );
+            return { user: updated, firstTrustedProof };
+          }),
+        );
         if (reset.firstTrustedProof) {
           await deps.onFirstEmailProof?.(reset.user, context.ip);
         }

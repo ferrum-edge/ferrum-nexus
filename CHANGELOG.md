@@ -8,6 +8,20 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Gateway cleanup trusts only Ferrum Edge's own "not found"** (#548). Deleting
+  a proxy, plugin config or API spec counts as already done only when Edge
+  answers with its not-found error for that resource. Any other `404`, for
+  example from a misrouted proxy in front of the gateway, now fails the step so
+  it is reported and can be retried. Before, Nexus recorded the cleanup as done while
+  the resource was still live. The same rule now applies to gateway
+  reconciliation and its repair, to restoring a missing deployment (which could
+  build a second proxy beside a live one) and to the undo of a plugin removal.
+- **A failed grant revocation no longer restores a tool request a concurrent
+  password reset cancelled** (#548). On PostgreSQL or MySQL, the rollback could
+  find no account recovery just before a reset committed one, then put the
+  cancelled tool request back to `pending` after the reset had cleared the
+  account's pending requests. The rollback and the reset now commit under one
+  per-account lock, so one of them always sees the other.
 - **Fail closed on ambiguous workflow image syntax** (#546). The image-pin checker now
   checks block-form workflow containers and flow-style workflow environment values,
   and rejects Docker commands with escaped quotes that its shell-word scanner cannot

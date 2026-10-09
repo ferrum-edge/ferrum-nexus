@@ -195,10 +195,12 @@ repeated per endpoint:
   not reflected.
 - `EDGE_PROTOCOL_ERROR` carries `details` with `status`,
   `kind: "protocol_error"` and a fixed `reason` such as `invalid_utf8`. A `404`
-  read as a consumer's absence (gateway access cleanup, the rollback of a failed
-  revocation) counts only when its body is Edge's own `Consumer not found`
-  answer; any other `404` is this error with `reason: "unconfirmed_absence"`, and
-  the cleanup is reported and retried.
+  read as a resource's absence (consumer access cleanup, the rollback of a failed
+  revocation, proxy, plugin-config and API-spec deletes, restoring a missing
+  deployment, gateway reconciliation) counts only when its body is Edge's own
+  not-found answer for that resource, such as `Consumer not found`; any other
+  `404` is this error with `reason: "unconfirmed_absence"`, and the step is
+  reported and can be retried.
   Response bytes and parser exceptions are never included. See
   [Edge response contracts](edge-response-contracts.md).
 - `EDGE_NAMESPACE_UNSERVED` carries `details` with `configured_namespace`,

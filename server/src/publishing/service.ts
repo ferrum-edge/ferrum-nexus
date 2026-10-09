@@ -2215,7 +2215,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     originalApi?: ApiRecord,
   ): Promise<void> {
     assertRecoveryAcknowledged(recovery);
-    const live = await edge.proxies.get(recovery.proxy.id);
+    // Nothing to remove only on Edge's own `Proxy not found` (issue #548).
+    const live = await edge.proxies.get(recovery.proxy.id, { confirmedAbsence: true });
     if (!live) return;
     const attempt = recovery.attempt;
     if (!attempt || live.namespace !== namespace) {
@@ -4916,7 +4917,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // load-bearing: a refused connection, a 500 or an expired admin token
         // must surface as a gateway error, never as "the proxy is gone" —
         // otherwise one flaky minute would talk a provider into building a
-        // second proxy beside a live one.
+        // second proxy beside a live one. So must a `404` that is not Edge's
+        // own `Proxy not found`, from a router in front of it (issue #548).
         const recorded = api.ferrum_proxy_id;
         if (recorded !== null) {
           const present = await binder.withProxy(recorded, async () => {
@@ -4933,7 +4935,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // Re-read under the proxy lease: a conversion that retained its
             // journal while this restore waited owns the deployment now.
             await assertNoConversionJournal(store, api.id);
-            const live = await edge.proxies.get(recorded);
+            const live = await edge.proxies.get(recorded, { confirmedAbsence: true });
             if (!live) return null;
             if (!(await deploymentMatches(latest, current, live))) {
               throw conflict(

@@ -2395,6 +2395,15 @@ This reset-issuance ordering requires every issuing instance to run the
 lease-aware version. An older instance can still mint without that key during
 a mixed-version rollout.
 
+Another per-account key, `users:recovery:<user_id>`, is held around the
+transaction of a password reset that queues an account recovery, and around a
+failed grant revocation's rollback transaction, which reads that recovery before
+it restores a tool request the revocation cancelled. It is always the innermost
+key: the reset takes it inside its password-change lease and the rollback
+inside `users:lifecycle:<user_id>`. During a mixed-version rollout, an older
+instance redeems resets without this key, so the race it closes stays open
+until every instance runs the lease-aware version.
+
 Single sign-on uses three of these keys. A callback that writes one of a
 provider's links (a first-time link or a provisioned account) and every save of
 the single sign-on settings take `sso:provider:<id>`; returning sign-ins do not.

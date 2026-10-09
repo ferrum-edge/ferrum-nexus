@@ -123,6 +123,13 @@ import type { NotificationsService } from '../notifications/service.js';
 /** Credential rows whose gateway entry is supposed to still exist. */
 const LIVE_CREDENTIAL_STATUSES = new Set(['active', 'retiring']);
 
+/**
+ * Every gateway read here acts on a `404`: as an orphan to report, a reference
+ * to clear or a consumer to recreate. Only Edge's own not-found answer for the
+ * resource proves it is gone; a router's `404` throws instead (issue #548).
+ */
+const CONFIRMED_ABSENCE = { confirmedAbsence: true } as const;
+
 /** What {@link GatewayReconciliationService.repair} was asked to fix. */
 export interface RepairGatewayReferencesInput {
   /** Accounts to repair; ignored when `all` is set. */
@@ -241,7 +248,8 @@ export function createGatewayReconciliationService(
    *
    * The whole pass turns on the difference between "Edge said 404" and "Edge
    * did not say anything", so the translation happens once, here, rather than
-   * being re-derived at each call site.
+   * being re-derived at each call site. Each read asks for
+   * {@link CONFIRMED_ABSENCE}, so a `404` that is not Edge's own lands here too.
    */
   async function exists(check: () => Promise<unknown>): Promise<boolean> {
     try {
@@ -265,7 +273,8 @@ export function createGatewayReconciliationService(
           return result;
         }
         result.checked += 1;
-        if (await exists(() => edge.consumers.get(row.ferrum_consumer_id))) continue;
+        if (await exists(() => edge.consumers.get(row.ferrum_consumer_id, CONFIRMED_ABSENCE)))
+          continue;
         result.orphaned += 1;
         orphans.push({
           user_id: row.user_id,
@@ -301,7 +310,7 @@ export function createGatewayReconciliationService(
           return result;
         }
         result.checked += 1;
-        if (await exists(() => edge.proxies.get(proxyId))) continue;
+        if (await exists(() => edge.proxies.get(proxyId, CONFIRMED_ABSENCE))) continue;
         result.orphaned += 1;
         orphans.push({ api_id: api.id, slug: api.slug, ferrum_proxy_id: proxyId });
       }
@@ -622,7 +631,7 @@ export function createGatewayReconciliationService(
             if (!row) return { kind: 'gone' };
             const staleId = row.ferrum_consumer_id;
             const recreate = async (): Promise<ConsumerRepairOutcome> => {
-              if ((await edge.consumers.get(staleId)) !== null) {
+              if ((await edge.consumers.get(staleId, CONFIRMED_ABSENCE)) !== null) {
                 if (kept === null || kept.consumerId !== staleId) {
                   return { kind: 'present', consumerId: staleId };
                 }
@@ -908,8 +917,9 @@ export function createGatewayReconciliationService(
 
         // Asked again, under the key: the pass's `404` may be minutes old. A
         // transport failure throws, and throws out of the repair of this API
-        // only — an unreachable gateway is never evidence that a proxy is gone.
-        if ((await edge.proxies.get(orphan.ferrum_proxy_id)) !== null) {
+        // only — an unreachable gateway is never evidence that a proxy is gone,
+        // and nor is a `404` that is not Edge's own `Proxy not found`.
+        if ((await edge.proxies.get(orphan.ferrum_proxy_id, CONFIRMED_ABSENCE)) !== null) {
           return { kind: 'present' } as const;
         }
 
