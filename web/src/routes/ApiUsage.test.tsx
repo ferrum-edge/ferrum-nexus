@@ -38,6 +38,32 @@ describe('API usage measurements', () => {
     expect(screen.queryByText(/No traffic/)).not.toBeInTheDocument();
   });
 
+  it('names a refused metrics read and an unreadable backend state', () => {
+    render(
+      <UsageDetails
+        usage={{
+          ...usage,
+          unavailable_code: 'refused',
+          unavailable_reason:
+            'The gateway did not allow this portal to read its request metrics. A portal ' +
+            'operator can enable this.',
+          backend: {
+            status: 'unavailable',
+            detail:
+              'The gateway did not allow this portal to read its runtime metrics. A portal ' +
+              'operator can enable this.',
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText(/Gateway metrics are unavailable/)).toHaveTextContent(
+      /read its request metrics/,
+    );
+    expect(screen.getByText('Unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Unknown')).not.toBeInTheDocument();
+    expect(screen.queryByText('Requests')).not.toBeInTheDocument();
+  });
+
   it('displays explicitly measured zero traffic', () => {
     render(<UsageDetails usage={{ ...usage, available: true }} />);
     expect(screen.queryByText(/Gateway metrics are unavailable/)).not.toBeInTheDocument();

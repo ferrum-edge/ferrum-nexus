@@ -46,6 +46,7 @@ import {
   FERRUM_NAMESPACE_HEADER,
   FERRUM_PROVISIONED_BY_HEADER,
   FERRUM_PROVISIONED_BY_VALUE,
+  type ApiUsageUnavailableCode,
   type EdgeCredentialType,
 } from '@ferrum-nexus/shared';
 
@@ -53,7 +54,12 @@ import type { EdgeConfig } from '../config/index.js';
 import type { LeaseRepo } from '../db/store.js';
 import { conflict, edgeError, edgeUnavailable, internal, NexusError } from '../lib/errors.js';
 import { createKeyedSerializer, type KeyedSerializer } from '../lib/keyed-serializer.js';
-import { createAdminTokenMinter, DEFAULT_ADMIN_SUBJECT, type AdminTokenMinter } from './jwt.js';
+import {
+  createAdminTokenMinter,
+  createFleetReadTokenMinter,
+  DEFAULT_ADMIN_SUBJECT,
+  type AdminTokenMinter,
+} from './jwt.js';
 import {
   createNamespaceMonitor,
   parseNamespaceServing,
@@ -169,6 +175,14 @@ interface CallOptions {
   tolerate?: number[];
   /** Override the JWT `sub` claim so Edge's audit log names the acting user. */
   subject?: string;
+  /** Sign with this minter instead of the admin one (the fleet-read token). */
+  minter?: AdminTokenMinter;
+  /**
+   * Skip the per-call log of a gateway error status, every one (`true`) or
+   * those listed: the caller logs the failure itself, once per change rather
+   * than once per call.
+   */
+  quiet?: true | readonly number[];
   /** Refuse to buffer a response larger than this many bytes. */
   maxResponseBytes?: number;
   ifMatch?: string;
@@ -211,7 +225,10 @@ export interface FerrumAdminClient {
   /**
    * Best-effort version probe. Edge has **no `/version` endpoint** (none in its
    * `docs/admin_api.md`), so this returns `null` on a 404 rather than
-   * failing; take the real version from your deployment metadata.
+   * failing; take the real version from your deployment metadata. Edge v0.9.16
+   * answers an unknown global path `403` to a token with an `ns` claim, which is
+   * the same "no endpoint" and also reads `null`; because a `403` can also be a
+   * refused credential, it is logged distinctly (once per transition).
    */
   version(): Promise<string | null>;
   /** Combined reachability probe for `GET /api/health`; never throws. */
@@ -247,7 +264,10 @@ export interface FerrumAdminClient {
     ): Promise<void>;
   };
 
-  /** `GET /namespaces` — a list of name strings. */
+  /**
+   * `GET /namespaces` — a list of name strings. Edge v0.9.16 lists only the
+   * namespaces the token's `ns` claim names, so for this portal at most its own.
+   */
   listNamespaces(): Promise<string[]>;
   /**
    * Make sure the configured namespace exists. Writing any resource with a new
@@ -452,9 +472,14 @@ export interface FerrumAdminClient {
    *
    * Both calls are **best-effort diagnostics and never throw**: an unreachable
    * gateway, a non-2xx answer or an unparseable body all resolve to a result
-   * with `available: false` and empty counters. They are rendered on a
-   * provider's overview card, and a gateway hiccup must not turn that page into
-   * an error.
+   * with `available: false`, empty counters and a `reason`. They are rendered
+   * on a provider's overview card, and a gateway hiccup must not turn that page
+   * into an error.
+   *
+   * Both endpoints are fleet-global, so Edge v0.9.16 refuses the portal's
+   * namespace-scoped admin token on them with `403`. Each therefore has its own
+   * optional credential, and a refusal reads as unavailable with the cause,
+   * never as "no traffic" or "no circuit breakers".
    *
    * Both are cached in-process per proxy for {@link METRICS_CACHE_TTL_MS}. Edge
    * caches its own rendering for 5 seconds, so polling faster than this buys
@@ -463,12 +488,15 @@ export interface FerrumAdminClient {
   readonly metrics: {
     /**
      * Scrape `GET /metrics` and reduce the Prometheus exposition to this
-     * proxy's request counters and latency histogram.
+     * proxy's request counters and latency histogram. Presents the gateway's
+     * metrics bearer token when `FERRUM_METRICS_BEARER_TOKEN` is set, and the
+     * admin JWT otherwise.
      */
     scrapeProxy(proxyId: string): Promise<EdgeProxyMetrics>;
     /**
      * Read `GET /admin/metrics` and pick out this proxy's circuit breakers and
-     * unhealthy targets.
+     * unhealthy targets. Signs with the fleet-read key when
+     * `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` is set, and the admin key otherwise.
      */
     backendState(proxyId: string): Promise<EdgeBackendState>;
   };
@@ -832,20 +860,160 @@ async function readBoundedBody(body: AsyncIterable<Uint8Array>, maxBytes: number
 }
 
 /** An unavailable scrape: zeroed rather than absent, so callers never branch. */
-function emptyProxyMetrics(
-  reason = 'The gateway request metrics could not be read.',
-): EdgeProxyMetrics {
+function emptyProxyMetrics(code: ApiUsageUnavailableCode, reason: string): EdgeProxyMetrics {
   return {
     available: false,
     reason,
+    unavailableCode: code,
     requests: { byMethod: {}, byStatus: {}, total: 0 },
     latency: { buckets: [], count: null, sum: null },
   };
 }
 
 /** An unavailable backend read. */
-function emptyBackendState(): EdgeBackendState {
-  return { available: false, breakers: [], unhealthyTargets: [], uptimeSeconds: null };
+function emptyBackendState(reason: string): EdgeBackendState {
+  return { available: false, reason, breakers: [], unhealthyTargets: [], uptimeSeconds: null };
+}
+
+/**
+ * Why a metrics read yielded nothing, said twice: once for whoever reads the
+ * usage card and once for the operator's log.
+ *
+ * Providers see `reason`, so it stays generic: it never names a portal or
+ * gateway setting or a gateway version. `hint` carries that detail, and only
+ * ever reaches the server log.
+ */
+export interface MetricsReadFailure {
+  /** Provider-safe explanation, shown on the usage card. */
+  reason: string;
+  /** What an operator should check or set; logged, never shown. `null` when `reason` suffices. */
+  hint: string | null;
+}
+
+/** Why a `GET /metrics` scrape yielded nothing; cached like a successful one. */
+export interface ScrapeFailure extends MetricsReadFailure {
+  code: ApiUsageUnavailableCode;
+}
+
+/** A `GET` of a non-JSON body: its status, and its text unless that could not be read. */
+interface TextResponse {
+  statusCode: number;
+  body: string | null;
+  /** Why `body` is `null`. */
+  bodyError?: 'response_too_large' | 'body_read_failed';
+}
+
+/** One `GET /admin/metrics` read: the payload, or why there is none. */
+type BackendRead =
+  { payload: Record<string, unknown> } | { payload: null; failure: MetricsReadFailure };
+
+/** What a metrics read's failure log carries, or `null` for a read that worked. */
+type FailureLogFields = Record<string, unknown> | null;
+
+const METRICS_UNREACHABLE: ScrapeFailure = {
+  code: 'unreachable',
+  reason: 'The gateway could not be reached for its request metrics.',
+  hint: null,
+};
+
+const METRICS_UNREADABLE: ScrapeFailure = {
+  code: 'gateway_error',
+  reason: 'The gateway sent no readable request metrics.',
+  hint: null,
+};
+
+/** The provider-facing sentence for a refused read; the operator's detail is in the log. */
+function refusedReason(what: string): string {
+  return (
+    `The gateway did not allow this portal to read its ${what}. ` +
+    'A portal operator can enable this.'
+  );
+}
+
+/**
+ * Why a non-2xx `GET /metrics` answer yielded nothing.
+ *
+ * A `403` to the admin JWT is Edge v0.9.16 refusing a token with an `ns` claim
+ * on a fleet-global route, and the log says so, because the fix is a setting
+ * on the portal: the gateway's metrics bearer token. With that token
+ * configured, a `401`/`403` means the two sides disagree about it.
+ */
+export function metricsScrapeFailure(status: number, bearerConfigured: boolean): ScrapeFailure {
+  if ((status === 401 || status === 403) && bearerConfigured) {
+    return {
+      code: 'refused',
+      reason: refusedReason('request metrics'),
+      hint:
+        'The gateway refused the metrics bearer token this portal presents; ' +
+        "FERRUM_METRICS_BEARER_TOKEN must equal the gateway's.",
+    };
+  }
+  if (status === 403) {
+    return {
+      code: 'refused',
+      reason: refusedReason('request metrics'),
+      hint:
+        "Ferrum Edge v0.9.16 and later refuse the portal's namespace-scoped admin token on " +
+        "GET /metrics. Set FERRUM_METRICS_BEARER_TOKEN on the portal to the gateway's.",
+    };
+  }
+  if (status === 401) {
+    return {
+      code: 'refused',
+      reason: refusedReason('request metrics'),
+      hint:
+        "The gateway rejected the portal's admin JWT; check FERRUM_ADMIN_JWT_SECRET and " +
+        'FERRUM_ADMIN_JWT_ISSUER.',
+    };
+  }
+  return {
+    code: 'gateway_error',
+    reason: `The gateway answered its request metrics with HTTP ${status}.`,
+    hint: null,
+  };
+}
+
+/**
+ * Why `GET /admin/metrics` yielded nothing, from the failed call's status:
+ * an error status, the (successful) status of an unusable body, or `undefined`
+ * when nothing answered.
+ */
+export function backendStateFailure(
+  status: unknown,
+  fleetReadConfigured: boolean,
+): MetricsReadFailure {
+  if ((status === 401 || status === 403) && fleetReadConfigured) {
+    return {
+      reason: refusedReason('runtime metrics'),
+      hint:
+        'The gateway refused the fleet-read token this portal signs with ' +
+        "FERRUM_ADMIN_FLEET_READ_JWT_SECRET; it must equal the gateway's " +
+        'FERRUM_ADMIN_JWT_VIEWER_SECRET, with no FERRUM_ADMIN_JWT_VIEWER_NAMESPACES ceiling.',
+    };
+  }
+  if (status === 403) {
+    return {
+      reason: refusedReason('runtime metrics'),
+      hint:
+        "Ferrum Edge v0.9.16 and later refuse the portal's namespace-scoped admin token on " +
+        'GET /admin/metrics. FERRUM_ADMIN_FLEET_READ_JWT_SECRET restores the read; see the ' +
+        'operations guide for what that key can read.',
+    };
+  }
+  if (status === 401) {
+    return {
+      reason: refusedReason('runtime metrics'),
+      hint:
+        "The gateway rejected the portal's admin JWT; check FERRUM_ADMIN_JWT_SECRET and " +
+        'FERRUM_ADMIN_JWT_ISSUER.',
+    };
+  }
+  if (typeof status !== 'number') {
+    return { reason: 'The gateway could not be reached for its runtime metrics.', hint: null };
+  }
+  return status >= 400
+    ? { reason: `The gateway answered its runtime metrics with HTTP ${status}.`, hint: null }
+    : { reason: 'The gateway sent no readable runtime metrics.', hint: null };
 }
 
 /** A finite, non-negative sample value, or `null`. */
@@ -1131,6 +1299,9 @@ export function createFerrumAdminClient(
   deps: FerrumAdminClientDeps = {},
 ): FerrumAdminClient {
   const minter = deps.minter ?? createAdminTokenMinter(config);
+  // Only `GET /admin/metrics` uses it; `null` keeps that read on the admin key.
+  const fleetReadMinter = createFleetReadTokenMinter(config);
+  const metricsBearerToken = config.metricsBearerToken;
   const dispatcher = deps.dispatcher ?? buildDispatcher(config);
   // Without `leases` this is the historical in-process queue: correct for a
   // single writer, and what the client's own unit tests construct.
@@ -1184,6 +1355,95 @@ export function createFerrumAdminClient(
     );
   }
 
+  /** Whether the last health answer was the minimal tier; logged once per transition. */
+  let minimalHealthTier = false;
+
+  /**
+   * Notice a `GET /health` answer that carries neither `mode` nor
+   * `admin_writes_enabled`: the minimal tier, which Edge serves a caller it
+   * does not trust with detail. Edge v0.9.16 serves the portal's
+   * namespace-scoped token its bounded tenant tier instead, which keeps both
+   * fields; a gateway that pairs the token bound with no tenant tier leaves the
+   * portal blind to its mode, write state and namespace routing, and says so
+   * once rather than on every probe.
+   */
+  function noteHealthTier(health: EdgeHealth): void {
+    const minimal = health.mode === undefined && health.admin_writes_enabled === undefined;
+    if (minimal && !minimalHealthTier) {
+      logger.warn(
+        { namespace },
+        'Ferrum Edge answered GET /health with its minimal tier; the gateway mode, admin ' +
+          'write state and namespace routing are unknown to the portal',
+      );
+    }
+    minimalHealthTier = minimal;
+  }
+
+  /** Whether the last `GET /version` was refused with `403`; logged once per transition. */
+  let versionRefused = false;
+
+  /**
+   * `GET /version`, best effort. Edge has no such endpoint and answers `404`
+   * (or `405`), which reads `null`. Edge v0.9.16 answers an unknown global path
+   * `403` to a token with an `ns` claim, so a `403` reads `null` too. But a
+   * `403` is also what a refused admin credential looks like on an earlier
+   * gateway, so it is logged on its own, once per transition, rather than
+   * folded in silently.
+   */
+  async function readVersion(signal?: AbortSignal): Promise<string | null> {
+    let result: { version?: unknown } | null;
+    try {
+      result = await call<{ version?: unknown }>('GET', '/version', {
+        ...(signal === undefined ? {} : { signal }),
+        allow404: true,
+        tolerate: [404, 405],
+        quiet: [403],
+      });
+    } catch (error) {
+      const details = error instanceof NexusError ? error.details : undefined;
+      if (!isRecord(details) || details.status !== 403) throw error;
+      if (!versionRefused) {
+        logger.warn(
+          { path: '/version', status: 403 },
+          'Ferrum Edge refused GET /version. Edge v0.9.16 and later refuse it to the ' +
+            "portal's namespace-scoped admin token, which is expected; on an earlier gateway " +
+            'it means the admin credential itself was refused',
+        );
+      }
+      versionRefused = true;
+      return null;
+    }
+    versionRefused = false;
+    const version = result?.version;
+    return typeof version === 'string' ? version : null;
+  }
+
+  /**
+   * Log a metrics read's failures once per change of cause rather than on
+   * every cache miss, which is one per {@link METRICS_CACHE_TTL_MS} per page
+   * view: a gateway that refuses the portal's token refuses it on every read,
+   * and that is one fact. A recovery resets it, so a later failure logs again.
+   */
+  function createFailureLog(path: string, message: string): (fields: FailureLogFields) => void {
+    let last: string | null = null;
+    return (fields) => {
+      const key = fields === null ? null : JSON.stringify(fields);
+      if (key === last) return;
+      last = key;
+      if (fields === null) {
+        logger.debug({ path }, `${message}: readable again`);
+      } else {
+        logger.warn({ path, ...fields }, message);
+      }
+    };
+  }
+
+  const noteScrape = createFailureLog('/metrics', 'Ferrum Edge request metrics could not be read');
+  const noteBackendRead = createFailureLog(
+    '/admin/metrics',
+    'Ferrum Edge runtime metrics could not be read',
+  );
+
   async function call<T>(
     method: 'GET' | 'POST' | 'PUT' | 'DELETE',
     path: string,
@@ -1192,7 +1452,8 @@ export function createFerrumAdminClient(
     const contract: ResponseContract = options.deployment
       ? { statuses: [200], body: isDeploymentAcknowledgement }
       : responseContract(method, path);
-    const token = await minter.getToken(options.subject ?? DEFAULT_ADMIN_SUBJECT);
+    const signer = options.minter ?? minter;
+    const token = await signer.getToken(options.subject ?? DEFAULT_ADMIN_SUBJECT);
     const url = urlFor(path, options.query);
     const headers: Record<string, string> = {
       authorization: `Bearer ${token}`,
@@ -1309,7 +1570,8 @@ export function createFerrumAdminClient(
       // Only error-status classification may inspect an absent JSON body.
     }
     if (statusCode >= 400 && !contract.statuses.includes(statusCode)) {
-      throw classify(statusCode, parsed, method, path, options.deployment);
+      const quiet = options.quiet === true || (options.quiet ?? []).includes(statusCode);
+      throw classify(statusCode, parsed, method, path, options.deployment, quiet);
     }
     if (!contract.statuses.includes(statusCode)) {
       throw protocolError(statusCode, 'unexpected_status', method, path);
@@ -1391,6 +1653,7 @@ export function createFerrumAdminClient(
     method: string,
     path: string,
     deployment = false,
+    quiet = false,
   ): Error {
     const body = (parsed ?? {}) as {
       error?: unknown;
@@ -1409,7 +1672,9 @@ export function createFerrumAdminClient(
       deployment;
     const isApiSpecWrite =
       (method === 'POST' || method === 'PUT') && /^\/api-specs(?:\/[^/]+)?$/.test(path);
-    if (sensitive) {
+    if (quiet) {
+      // The caller logs this failure itself, once per change.
+    } else if (sensitive) {
       logger.error(
         { method, path, status },
         'Ferrum Edge Admin API returned an error; response content was omitted',
@@ -1699,16 +1964,19 @@ export function createFerrumAdminClient(
   }
 
   /**
-   * `GET` a non-JSON body (the Prometheus exposition) with the admin JWT.
+   * `GET` a non-JSON body (the Prometheus exposition).
    *
-   * Returns `null` rather than throwing when nothing reached the gateway; the
+   * Presents the gateway's metrics bearer token when one is configured and
+   * the admin JWT otherwise. Edge reads either from `Authorization: Bearer`;
+   * the bearer token is the one that still works once the admin JWT's `ns`
+   * claim bounds it to namespace routes (Edge v0.9.16).
+   *
+   * Returns `null` rather than throwing when nothing reached the gateway, and
+   * `body: null` when the gateway answered but its body could not be read; the
    * only caller is the metrics scrape, which must never fail a page render.
    */
-  async function callText(
-    path: string,
-    accept: string,
-  ): Promise<{ statusCode: number; body: string } | null> {
-    const token = await minter.getToken(DEFAULT_ADMIN_SUBJECT);
+  async function callText(path: string, accept: string): Promise<TextResponse | null> {
+    const token = metricsBearerToken ?? (await minter.getToken(DEFAULT_ADMIN_SUBJECT));
     const signal = AbortSignal.timeout(config.timeoutMs);
     const send = () =>
       request(urlFor(path), {
@@ -1722,18 +1990,15 @@ export function createFerrumAdminClient(
         dispatcher,
         signal,
       });
+    let response: Awaited<ReturnType<typeof send>>;
     try {
       // The same stale-pooled-socket recovery as `call`, on the one other read
       // this client makes. Nothing has been read yet, so no response byte can
       // have arrived.
-      const response = await send().catch((error: unknown) => {
+      response = await send().catch((error: unknown) => {
         if (!shouldRetryOnFreshConnection('GET', error, false, signal)) throw error;
         return send();
       });
-      return {
-        statusCode: response.statusCode,
-        body: (await readBoundedBody(response.body, METRICS_RESPONSE_MAX_BYTES)).toString('utf8'),
-      };
     } catch (cause) {
       logger.warn(
         { path, code: (cause as NodeJS.ErrnoException).code ?? null },
@@ -1741,14 +2006,27 @@ export function createFerrumAdminClient(
       );
       return null;
     }
+    try {
+      const bytes = await readBoundedBody(response.body, METRICS_RESPONSE_MAX_BYTES);
+      return { statusCode: response.statusCode, body: bytes.toString('utf8') };
+    } catch (cause) {
+      // The gateway answered; its body was too large or broke off mid-read.
+      // That is an unusable answer, not an unreachable gateway.
+      return {
+        statusCode: response.statusCode,
+        body: null,
+        bodyError:
+          cause instanceof ResponseTooLargeError ? 'response_too_large' : 'body_read_failed',
+      };
+    }
   }
 
   /* ── Metrics caches ───────────────────────────────────────────────────── */
 
-  let scrapeCache: CacheEntry<PrometheusSample[] | null> | null = null;
-  let scrapePending: Promise<PrometheusSample[] | null> | null = null;
-  let backendCache: CacheEntry<unknown> | null = null;
-  let backendPending: Promise<unknown> | null = null;
+  let scrapeCache: CacheEntry<PrometheusSample[] | ScrapeFailure> | null = null;
+  let scrapePending: Promise<PrometheusSample[] | ScrapeFailure> | null = null;
+  let backendCache: CacheEntry<BackendRead> | null = null;
+  let backendPending: Promise<BackendRead> | null = null;
 
   function readGlobalCache<T>(cache: CacheEntry<T> | null): T | undefined {
     return cache && cache.expiresAt > Date.now() ? cache.value : undefined;
@@ -1818,7 +2096,7 @@ export function createFerrumAdminClient(
     }
 
     if (!hasRequests) {
-      return emptyProxyMetrics('The gateway has no request metrics for this API yet.');
+      return emptyProxyMetrics('no_series', 'The gateway has no request metrics for this API yet.');
     }
 
     const sorted: EdgeLatencyBucket[] = [...buckets.entries()]
@@ -1915,12 +2193,7 @@ export function createFerrumAdminClient(
     },
 
     async version(): Promise<string | null> {
-      const result = await call<{ version?: unknown }>('GET', '/version', {
-        allow404: true,
-        tolerate: [404, 405],
-      });
-      const version = (result ?? {}).version;
-      return typeof version === 'string' ? version : null;
+      return readVersion();
     },
 
     async probe(timeoutMs = config.timeoutMs): Promise<EdgeProbe> {
@@ -1946,12 +2219,7 @@ export function createFerrumAdminClient(
         }
         let version: string | null = null;
         try {
-          const result = await call<{ version?: unknown }>('GET', '/version', {
-            signal,
-            allow404: true,
-            tolerate: [404, 405],
-          });
-          version = typeof result?.version === 'string' ? result.version : null;
+          version = await readVersion(signal);
         } catch {
           version = null;
         }
@@ -1961,6 +2229,10 @@ export function createFerrumAdminClient(
         // recover without restarting it.
         const serving = parseNamespaceServing(health.namespace);
         namespaceMonitor.observeHealth(serving);
+        // The minimal tier (`status` and `ready` only) is what a gateway
+        // serves a credential it does not trust with detail. Nothing it omits
+        // is assumed: mode, write state and routability all read unknown.
+        noteHealthTier(health);
         return {
           reachable: true,
           latencyMs: Date.now() - started,
@@ -2397,64 +2669,87 @@ export function createFerrumAdminClient(
 
     metrics: {
       async scrapeProxy(proxyId: string): Promise<EdgeProxyMetrics> {
-        let samples = readGlobalCache(scrapeCache);
-        if (samples === undefined) {
-          scrapePending ??= (async () => {
+        let scraped = readGlobalCache(scrapeCache);
+        if (scraped === undefined) {
+          scrapePending ??= (async (): Promise<PrometheusSample[] | ScrapeFailure> => {
             const response = await callText('/metrics', 'text/plain;version=0.0.4');
-            let parsed: PrometheusSample[] | null = null;
-            if (response && response.statusCode >= 200 && response.statusCode < 300) {
-              parsed = parsePrometheusText(response.body);
-              if (parsed.length === 0) {
-                logger.warn({}, 'Ferrum Edge metrics scrape produced no parseable samples');
-                parsed = null;
+            let result: PrometheusSample[] | ScrapeFailure;
+            let detail: string | null = null;
+            if (response === null) {
+              result = METRICS_UNREACHABLE;
+            } else if (response.statusCode >= 200 && response.statusCode < 300) {
+              result = response.body === null ? [] : parsePrometheusText(response.body);
+              if (result.length === 0) {
+                detail = response.bodyError ?? 'no_parseable_samples';
+                result = METRICS_UNREADABLE;
               }
-            } else if (response) {
-              logger.warn(
-                { status: response.statusCode },
-                'Ferrum Edge metrics scrape returned a non-2xx status',
-              );
+            } else {
+              result = metricsScrapeFailure(response.statusCode, metricsBearerToken !== undefined);
             }
-            scrapeCache = { value: parsed, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
-            return parsed;
+            // An unreachable gateway is logged where it happens, in `callText`.
+            if (Array.isArray(result)) {
+              noteScrape(null);
+            } else if (result !== METRICS_UNREACHABLE) {
+              noteScrape({
+                code: result.code,
+                status: response?.statusCode ?? null,
+                credential: metricsBearerToken === undefined ? 'admin_jwt' : 'metrics_bearer',
+                detail,
+                hint: result.hint,
+              });
+            }
+            scrapeCache = { value: result, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
+            return result;
           })().finally(() => {
             scrapePending = null;
           });
-          samples = await scrapePending;
+          scraped = await scrapePending;
         }
-        return samples ? reduceProxySamples(samples, proxyId) : emptyProxyMetrics();
+        return Array.isArray(scraped)
+          ? reduceProxySamples(scraped, proxyId)
+          : emptyProxyMetrics(scraped.code, scraped.reason);
       },
 
       async backendState(proxyId: string): Promise<EdgeBackendState> {
-        let payload = readGlobalCache(backendCache);
-        if (payload === undefined) {
+        let read = readGlobalCache(backendCache);
+        if (read === undefined) {
           backendPending ??= call<unknown>('GET', '/admin/metrics', {
             maxResponseBytes: METRICS_RESPONSE_MAX_BYTES,
+            quiet: true,
+            ...(fleetReadMinter === null ? {} : { minter: fleetReadMinter }),
           })
-            .then((value) => {
-              backendCache = { value, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
-              return value;
+            .then((value): BackendRead => {
+              const result: BackendRead = isRecord(value)
+                ? { payload: value }
+                : { payload: null, failure: backendStateFailure(200, false) };
+              noteBackendRead(result.payload === null ? { status: 200, hint: null } : null);
+              backendCache = { value: result, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
+              return result;
             })
-            .catch((error: unknown) => {
-              logger.warn(
-                {
-                  path: '/admin/metrics',
-                  error: error instanceof Error ? error.message : 'unknown',
-                },
-                'Ferrum Edge runtime metrics could not be read',
-              );
-              backendCache = { value: null, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
-              return null;
+            .catch((error: unknown): BackendRead => {
+              const details = error instanceof NexusError ? error.details : undefined;
+              const status = isRecord(details) ? details.status : undefined;
+              const failure = backendStateFailure(status, fleetReadMinter !== null);
+              noteBackendRead({
+                status: typeof status === 'number' ? status : null,
+                credential: fleetReadMinter === null ? 'admin_jwt' : 'fleet_read_jwt',
+                error: error instanceof Error ? error.message : 'unknown',
+                hint: failure.hint,
+              });
+              const result: BackendRead = { payload: null, failure };
+              backendCache = { value: result, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
+              return result;
             })
             .finally(() => {
               backendPending = null;
             });
-          payload = await backendPending;
+          read = await backendPending;
         }
-        if (typeof payload !== 'object' || payload === null) {
-          return emptyBackendState();
+        if (read.payload === null) {
+          return emptyBackendState(read.failure.reason);
         }
 
-        const body = payload as Record<string, unknown>;
+        const body = read.payload;
         const rawBreakers = Array.isArray(body.circuit_breakers) ? body.circuit_breakers : [];
         const breakers: EdgeCircuitBreaker[] = [];
         for (const entry of rawBreakers) {

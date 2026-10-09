@@ -6,7 +6,47 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Separate credentials for the gateway's fleet-wide metrics reads**
+  (ferrum-edge/ferrum-edge#6095). Every admin token Nexus mints carries an `ns`
+  claim, and Ferrum Edge v0.9.16 refuses such a token on `GET /metrics` and
+  `GET /admin/metrics`. Two optional settings restore the Usage card on that
+  release. Ferrum Edge v0.9.15 needs neither.
+  - `FERRUM_METRICS_BEARER_TOKEN` is the gateway's own metrics bearer token;
+    the request-count scrape uses it.
+  - `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` is a separate key, set to the
+    gateway's `FERRUM_ADMIN_JWT_VIEWER_SECRET`. Nexus signs only the
+    circuit-breaker read with it, as a `viewer` token with no `ns` claim.
+    Without a `FERRUM_ADMIN_JWT_VIEWER_NAMESPACES` ceiling that key reads every
+    namespace, so it is off by default; docs/operations.md describes the
+    trade-off. Nexus refuses to start if it equals `FERRUM_ADMIN_JWT_SECRET`.
+
 ### Fixed
+
+- **A refused metrics read is reported, not shown as zero**
+  (ferrum-edge/ferrum-edge#6095). When the gateway refuses the portal's
+  credential on `GET /metrics`, `GET /api/apis/:id/usage` now answers
+  `unavailable_code: "refused"` and a generic reason a provider can read. The
+  setting to check goes to the server log, once per change of cause rather than
+  on every cache miss. Every unavailable answer now carries an
+  `unavailable_code`. A backend state that could not be read now reports
+  `backend.status: "unavailable"` with its cause, instead of `unknown` (which
+  reads as "no circuit breaker configured"). An oversized or truncated metrics
+  body reads as `gateway_error`, not `unreachable`.
+- **Gateway health without its details is reported as unknown**
+  (ferrum-edge/ferrum-edge#6095). Nexus reads `mode`, `admin_writes_enabled`
+  and the namespace block from Edge's detailed `/health` tier (v0.9.15) and
+  from its bounded tenant tier (v0.9.16). When a gateway answers only
+  `status` and `ready`, those fields read `null` and an earlier "namespace
+  served" verdict is dropped. The portal no longer keeps reporting the
+  namespace as served without evidence, and logs the minimal tier once.
+  When a single-namespace data plane withholds its namespace name from the
+  portal's token (Edge v0.9.16 sends `active: null` when the token's claim does
+  not cover it), the portal treats its namespace as unserved: health degrades
+  and publishing is refused with `409 EDGE_NAMESPACE_UNSERVED`. `version()`
+  reads a `403` as "no version endpoint", as it already did for a `404`, and
+  logs it once, since on an earlier gateway it means a refused credential.
 
 - **Gateway cleanup trusts only Ferrum Edge's own "not found"** (#548). Deleting
   a proxy, plugin config or API spec counts as already done only when Edge

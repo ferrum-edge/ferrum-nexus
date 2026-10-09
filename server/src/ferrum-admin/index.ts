@@ -33,6 +33,7 @@ export type { BackendEgressAdmission, EgressProfile } from './egress-policy.js';
 
 export {
   createAdminTokenMinter,
+  createFleetReadTokenMinter,
   signAdminJwt,
   DEFAULT_ADMIN_SUBJECT,
   MAX_TTL_SECONDS,

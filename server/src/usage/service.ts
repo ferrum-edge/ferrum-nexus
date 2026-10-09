@@ -21,8 +21,14 @@
  *
  * A provider opening an API page while the gateway is restarting must see the
  * page, not an error. A failed request-metrics scrape resolves to
- * `available: false` with zeroed counters and HTTP `200`. Independent backend
- * state may still be shown; its failure does not discard valid counters.
+ * `available: false` with zeroed counters, an `unavailable_code`, a reason and
+ * HTTP `200`. Independent backend state may still be shown; its failure does
+ * not discard valid counters, and reads `unavailable` rather than `unknown`.
+ *
+ * Both reads are fleet-global on the gateway. From Ferrum Edge v0.9.16 the
+ * portal's namespace-scoped admin token is refused on them, which surfaces
+ * here as that explicit unavailable state with the cause — never as zero
+ * traffic or as a proxy with no circuit breaker.
  * The only errors this service raises are the portal's own: `404` for an API
  * that does not exist and `403` for one the caller may not administer.
  */
@@ -185,8 +191,8 @@ function scopeOf(target: string | undefined): string {
 function backendFrom(state: EdgeBackendState, hasTraffic: boolean | null): ApiUsageBackend {
   if (!state.available) {
     return {
-      status: 'unknown',
-      detail: 'The gateway could not be reached for its backend state.',
+      status: 'unavailable',
+      detail: state.reason ?? "The gateway's backend state could not be read.",
     };
   }
 
@@ -266,6 +272,7 @@ export function createUsageService(deps: UsageServiceDeps): UsageService {
           available: false,
           unavailable_reason:
             'This API has no proxy on the gateway, so there is nothing to measure.',
+          unavailable_code: 'no_proxy',
           sampled_at: sampledAt,
           requests: emptyRequests(),
           latency_ms: null,
@@ -290,6 +297,9 @@ export function createUsageService(deps: UsageServiceDeps): UsageService {
         // not make missing traffic measurements look like measured zeroes.
         available: metrics.available,
         ...(!metrics.available && metrics.reason ? { unavailable_reason: metrics.reason } : {}),
+        ...(!metrics.available
+          ? { unavailable_code: metrics.unavailableCode ?? 'gateway_error' }
+          : {}),
         sampled_at: sampledAt,
         ...(backendState.uptimeSeconds !== null
           ? { gateway_uptime_seconds: backendState.uptimeSeconds }

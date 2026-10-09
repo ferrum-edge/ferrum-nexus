@@ -132,6 +132,7 @@ describe('api usage', () => {
       const usage = await usageFor(provider, apiId);
 
       assert.equal(usage.available, false);
+      assert.equal(usage.unavailable_code, 'no_series');
       assert.match(usage.unavailable_reason ?? '', /no request metrics for this API/);
       assert.doesNotMatch(usage.backend.detail ?? '', /No traffic/);
     });
@@ -204,10 +205,13 @@ describe('api usage', () => {
         const usage = await usageFor(provider, apiId);
 
         assert.equal(usage.available, false);
+        assert.equal(usage.unavailable_code, 'unreachable');
         assert.equal(usage.requests.total, 0);
         assert.deepEqual(usage.requests.by_status, {});
         assert.equal(usage.latency_ms, null);
-        assert.equal(usage.backend.status, 'unknown');
+        // Nothing was read, which is not the same as nothing being reported.
+        assert.equal(usage.backend.status, 'unavailable');
+        assert.match(String(usage.backend.detail), /could not be reached/);
         assert.equal(usage.gateway_uptime_seconds, undefined);
       } finally {
         await harness.edge.start();
@@ -239,9 +243,10 @@ describe('api usage', () => {
       harness.edge.queueFailure(503, { error: 'unavailable' }, '/admin/metrics', 'GET');
       const usage = await usageFor(provider, apiId);
       assert.equal(usage.available, true);
+      assert.equal(usage.unavailable_code, undefined);
       assert.equal(usage.requests.total, 42);
-      assert.equal(usage.backend.status, 'unknown');
-      assert.match(String(usage.backend.detail), /could not be reached/);
+      assert.equal(usage.backend.status, 'unavailable');
+      assert.match(String(usage.backend.detail), /HTTP 503/);
       assert.doesNotMatch(String(usage.backend.detail), /No traffic/);
     });
 
@@ -257,7 +262,11 @@ describe('api usage', () => {
       const usage = await usageFor(provider, apiId);
 
       assert.equal(usage.available, false);
+      assert.equal(usage.unavailable_code, 'gateway_error');
+      assert.match(usage.unavailable_reason ?? '', /HTTP 503/);
       assert.equal(usage.requests.total, 0);
+      assert.equal(usage.backend.status, 'unavailable');
+      assert.match(String(usage.backend.detail), /HTTP 500/);
     });
   });
 

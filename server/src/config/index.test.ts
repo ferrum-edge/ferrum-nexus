@@ -228,6 +228,43 @@ describe('loadConfig', () => {
     );
   });
 
+  it('leaves both gateway observability credentials unset by default', () => {
+    const config = loadConfig(baseEnv({ FERRUM_METRICS_BEARER_TOKEN: '  ' }));
+    assert.equal(config.edge.metricsBearerToken, undefined);
+    assert.equal(config.edge.fleetReadJwtSecret, undefined);
+  });
+
+  it('accepts a metrics bearer token and a separate fleet-read key', () => {
+    const config = loadConfig(
+      baseEnv({
+        FERRUM_METRICS_BEARER_TOKEN: ` ${'m'.repeat(40)} `,
+        FERRUM_ADMIN_FLEET_READ_JWT_SECRET: 'v'.repeat(40),
+      }),
+    );
+    assert.equal(config.edge.metricsBearerToken, 'm'.repeat(40), 'trimmed, as Edge trims it');
+    assert.equal(config.edge.fleetReadJwtSecret, 'v'.repeat(40));
+  });
+
+  it('refuses a short or reused gateway observability credential', () => {
+    expectConfigError(
+      baseEnv({ FERRUM_METRICS_BEARER_TOKEN: 'short' }),
+      'FERRUM_METRICS_BEARER_TOKEN must be at least 32 characters',
+    );
+    expectConfigError(
+      baseEnv({ FERRUM_METRICS_BEARER_TOKEN: SECRET }),
+      'FERRUM_METRICS_BEARER_TOKEN must not equal FERRUM_ADMIN_JWT_SECRET',
+    );
+    expectConfigError(
+      baseEnv({ FERRUM_ADMIN_FLEET_READ_JWT_SECRET: 'short' }),
+      'FERRUM_ADMIN_FLEET_READ_JWT_SECRET must be at least 32 characters',
+    );
+    // Never a claim-less token signed with the key that can mint `admin`.
+    expectConfigError(
+      baseEnv({ FERRUM_ADMIN_FLEET_READ_JWT_SECRET: SECRET }),
+      'FERRUM_ADMIN_FLEET_READ_JWT_SECRET must differ from FERRUM_ADMIN_JWT_SECRET',
+    );
+  });
+
   it('rejects a short NEXUS_BOOTSTRAP_TOKEN', () => {
     // A guessable token is worse than none: it looks configured while leaving
     // the founding super_admin election open to anyone who can reach the port.
