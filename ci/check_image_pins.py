@@ -37,6 +37,10 @@ FIELD = re.compile(
 WORKFLOW_IMAGE_VARIABLE = re.compile(
     r'^\s*(?:export\s+)?["\']?(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)["\']?\s*:\s*(.*?)\s*$'
 )
+FLOW_WORKFLOW_IMAGE_VARIABLE = re.compile(
+    r'(?:(?<!\$)\{|,)\s*["\']?(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)["\']?\s*:\s*'
+    r'(["\']?\$\{\{.*?\}\}["\']?|[^,}]+)'
+)
 TOP_LEVEL_SERVICES = re.compile(r'^services\s*:', re.M)
 
 
@@ -69,12 +73,17 @@ def workflow_env_error(image):
 def workflow_env_image_fields(path, source):
     for line_no, line in enumerate(source.splitlines(), 1):
         match = WORKFLOW_IMAGE_VARIABLE.match(line)
-        if not match:
+        if match:
+            yield line_no, _unquote(match.group(2).strip())
             continue
-        value = match.group(2).strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        yield line_no, value
+        for match in FLOW_WORKFLOW_IMAGE_VARIABLE.finditer(line):
+            yield line_no, _unquote(match.group(2).strip())
+
+
+def _unquote(value):
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        return value[1:-1]
+    return value
 
 
 def image_fields(path, source):
@@ -112,7 +121,27 @@ def image_fields(path, source):
     lines = list(enumerate(source.splitlines(), 1))
     if path.parts[:2] == ('.github', 'workflows'):
         lines = list(workflow_lines(lines))
-    for line_no, line in lines:
+    block_image_lines = set()
+    block_container_lines = set()
+    if path.parts[:2] == ('.github', 'workflows'):
+        for index, (line_no, line) in enumerate(lines):
+            container = re.match(r'^(\s*)container\s*:\s*(?:#.*)?$', line)
+            if not container:
+                continue
+            parent_indent = len(container.group(1))
+            for child_index in range(index + 1, len(lines)):
+                child_no, child = lines[child_index]
+                if child.strip() and len(child) - len(child.lstrip()) <= parent_indent:
+                    break
+                image = re.match(r'^\s+image\s*:\s*(.*?)\s*$', child)
+                if image:
+                    block_container_lines.add(index)
+                    block_image_lines.add(child_index)
+                    yield child_no, _unquote(image.group(1).strip()) or '<empty image field>'
+                    break
+    for index, (line_no, line) in enumerate(lines):
+        if index in block_image_lines or index in block_container_lines:
+            continue
         for match in FIELD.finditer(line):
             ref = match.group(2).strip().strip("'\"")
             if not ref:
@@ -339,6 +368,8 @@ def _docker_images_in_words(words, glued, quoted, depth=0):
 def workflow_docker_images(line):
     line = _workflow_run_text(line)
     expected = len(DOCKER_COMMAND.findall(re.sub(r'(?:^|\s)#.*$', '', line)))
+    if expected and re.search(r"\\[\"']", line):
+        return ['<escaped quote in docker command>']
     try:
         words, glued, quoted = _lex(line)
         images = _docker_images_in_words(words, glued, quoted)

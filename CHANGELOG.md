@@ -6,6 +6,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Fail closed on ambiguous workflow image syntax** (#546). The image-pin checker now
+  checks block-form workflow containers and flow-style workflow environment values,
+  and rejects Docker commands with escaped quotes that its shell-word scanner cannot
+  safely resolve. The image-pin policy documents the local image exceptions.
+
 ## [0.5.2] - 2026-10-08
 
 Paired with Ferrum Edge `v0.9.15`, a security release that fixes 26 published Ferrum
