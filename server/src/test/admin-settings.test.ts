@@ -240,7 +240,7 @@ describe('admin settings', () => {
     const row = await harness.store.settings.get(SMTP_PASSWORD_SETTINGS_KEY);
     assert.equal(row?.encrypted, true);
     const raw = String(row?.value);
-    assert.ok(raw.startsWith('v1:'), 'the stored value is an AES-GCM blob');
+    assert.ok(raw.startsWith('v2:'), 'the stored value is a key-bound AES-GCM blob');
     assert.ok(!raw.includes(SMTP_PASSWORD), 'the plaintext never reaches the row');
 
     // The email service decrypts it back for the transport.

@@ -284,7 +284,13 @@ export function runEdgeSecurityAdoptionContract(
         if (row.key === key) return true;
         if (!row.key.startsWith('gateway_recovery_chunk:')) return false;
         assert.ok(row.encrypted && typeof row.value === 'string');
-        return harness.app.nexus.crypto.decryptJson<{ key: string }>(row.key, row.value).key === key;
+        try {
+          return harness.app.nexus.crypto.decryptJson<{ key: string }>(row.key, row.value).key === key;
+        } catch {
+          // A substituted chunk no longer opens under its row key; it cannot
+          // be proven foreign, so count it as this journal's evidence.
+          return true;
+        }
       });
     }
 

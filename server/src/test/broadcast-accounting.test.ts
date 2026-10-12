@@ -86,8 +86,9 @@ describe('broadcast accounting', () => {
   });
 
   it('does not count an optional email failure as an undelivered recipient', async () => {
-    // Every outbox enqueue fails after the inbox rows land: delivery is the
-    // inbox write, so all recipients count delivered and none failed.
+    // The first outbox enqueue fails after that recipient's inbox row lands:
+    // delivery is the inbox write, so all recipients count delivered and
+    // none failed; only the two remaining mail copies queue.
     faults.failAfter('emailOutbox', 'enqueue', 0);
     const response = await harness.authed(founder, {
       method: 'POST',
@@ -103,7 +104,7 @@ describe('broadcast accounting', () => {
     const body = response.json<GodBroadcastResponse>();
     assert.equal(body.delivered, 3);
     assert.equal(body.failed, 0);
-    assert.equal(body.emails_enqueued, 0);
+    assert.equal(body.emails_enqueued, 2);
     assert.ok(body.delivered + body.failed <= 3, 'no recipient is counted on both sides');
   });
 

@@ -526,6 +526,7 @@ export function runMailLifecycleContract(
               host: '127.0.0.1',
               port: relay.port,
               secure: false,
+              allowPlaintext: true,
               user: null,
               password: null,
               from: 'portal@example.test',

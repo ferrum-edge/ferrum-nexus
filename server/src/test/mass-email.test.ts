@@ -112,57 +112,6 @@ describe('mass email', () => {
     assert.equal(rows.filter((row) => row.to_email === 'client-b@example.test').length, 1);
   });
 
-  it('scopes a campaign key to its administrator', async () => {
-    // A second administrator reusing the same caller key with different
-    // content runs their own campaign: no digest aliasing, no outbox
-    // collision on overlapping recipients, and each is charged separately.
-    const second = await harness.registerUser({ email: 'second-admin@example.test' });
-    await harness.store.users.update(second.user.id, { role: 'super_admin' });
-    const audience = { scope: 'filtered', roles: ['client'] } as const;
-    const first = await harness.authed(founder, {
-      method: 'POST',
-      url: '/api/admin/mass-email',
-      payload: {
-        subject: 'Founder campaign',
-        body_html: '<p>From the founder.</p>',
-        body_text: 'From the founder.',
-        audience,
-        idempotency_key: 'shared-campaign-key',
-      },
-    });
-    assert.equal(first.statusCode, 200, first.body);
-    assert.deepEqual(first.json<MassEmailResponse>(), {
-      enqueued: 2,
-      recipients: 2,
-      batch_id: 'shared-campaign-key',
-    });
-
-    const other = await harness.authed(second, {
-      method: 'POST',
-      url: '/api/admin/mass-email',
-      payload: {
-        subject: 'Second admin campaign',
-        body_html: '<p>From the second admin.</p>',
-        body_text: 'From the second admin.',
-        audience,
-        idempotency_key: 'shared-campaign-key',
-      },
-    });
-    assert.equal(other.statusCode, 200, other.body);
-    assert.deepEqual(other.json<MassEmailResponse>(), {
-      enqueued: 2,
-      recipients: 2,
-      batch_id: 'shared-campaign-key',
-    });
-
-    const rows = (await harness.outbox()).filter((row) =>
-      row.idempotency_key?.includes(':shared-campaign-key:'),
-    );
-    assert.equal(rows.length, 4, 'each administrator queued their own rows');
-    assert.equal(rows.filter((row) => row.subject === 'Founder campaign').length, 2);
-    assert.equal(rows.filter((row) => row.subject === 'Second admin campaign').length, 2);
-  });
-
   it('honours the all and explicit audiences', async () => {
     const all = await harness.authed(founder, {
       method: 'POST',
@@ -288,6 +237,57 @@ describe('mass email', () => {
     assert.equal(result.sent, 4);
     assert.equal(harness.mailbox.sent.length - sentBefore, 4);
     assert.equal((await harness.tick()).sent, 0);
+  });
+
+  it('scopes a campaign key to its administrator', async () => {
+    // A second administrator reusing the same caller key with different
+    // content runs their own campaign: no digest aliasing, no outbox
+    // collision on overlapping recipients, and each is charged separately.
+    const second = await harness.registerUser({ email: 'second-admin@example.test' });
+    await harness.store.users.update(second.user.id, { role: 'super_admin' });
+    const audience = { scope: 'filtered', roles: ['client'] } as const;
+    const first = await harness.authed(founder, {
+      method: 'POST',
+      url: '/api/admin/mass-email',
+      payload: {
+        subject: 'Founder campaign',
+        body_html: '<p>From the founder.</p>',
+        body_text: 'From the founder.',
+        audience,
+        idempotency_key: 'shared-campaign-key',
+      },
+    });
+    assert.equal(first.statusCode, 200, first.body);
+    assert.deepEqual(first.json<MassEmailResponse>(), {
+      enqueued: 2,
+      recipients: 2,
+      batch_id: 'shared-campaign-key',
+    });
+
+    const other = await harness.authed(second, {
+      method: 'POST',
+      url: '/api/admin/mass-email',
+      payload: {
+        subject: 'Second admin campaign',
+        body_html: '<p>From the second admin.</p>',
+        body_text: 'From the second admin.',
+        audience,
+        idempotency_key: 'shared-campaign-key',
+      },
+    });
+    assert.equal(other.statusCode, 200, other.body);
+    assert.deepEqual(other.json<MassEmailResponse>(), {
+      enqueued: 2,
+      recipients: 2,
+      batch_id: 'shared-campaign-key',
+    });
+
+    const rows = (await harness.outbox()).filter((row) =>
+      row.idempotency_key?.includes(':shared-campaign-key:'),
+    );
+    assert.equal(rows.length, 4, 'each administrator queued their own rows');
+    assert.equal(rows.filter((row) => row.subject === 'Founder campaign').length, 2);
+    assert.equal(rows.filter((row) => row.subject === 'Second admin campaign').length, 2);
   });
 });
 

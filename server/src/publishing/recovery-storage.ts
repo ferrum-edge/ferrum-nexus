@@ -72,7 +72,14 @@ async function load(
     if (!row?.encrypted || typeof row.value !== 'string') {
       throw conflict('An encrypted gateway recovery chunk is unavailable');
     }
-    const chunk = crypto.decryptJson<Chunk>(chunkKey(manifest, index), row.value);
+    let chunk: Chunk;
+    try {
+      chunk = crypto.decryptJson<Chunk>(chunkKey(manifest, index), row.value);
+    } catch {
+      // Chunks are key-bound at rest: a substituted chunk cannot even open
+      // under this row's key, which is the same evidence mismatch.
+      throw conflict('An encrypted gateway recovery chunk does not match its manifest');
+    }
     if (
       chunk.key !== key ||
       chunk.generation !== manifest.generation ||

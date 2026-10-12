@@ -266,7 +266,7 @@ describe('mass email fan-out is recorded first and chunked', () => {
     });
     assert.equal(replay.json<MassEmailResponse>().enqueued, 0);
     const rows = (await harness.outbox()).filter((row) =>
-      row.idempotency_key?.startsWith(`mass:${details.batch_id}:`),
+      row.idempotency_key?.startsWith(`mass:${founder.user.id}:${details.batch_id}:`),
     );
     assert.equal(rows.length, 7, 'one row per recipient, however many times it was retried');
   });

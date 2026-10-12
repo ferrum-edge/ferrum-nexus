@@ -293,7 +293,17 @@ describe('stale auth probes', () => {
     expect(await screen.findByText('unauthenticated')).toBeInTheDocument();
 
     await act(async () => {
-      resolveProbe({ user: alice, capabilities: null });
+      resolveProbe({
+        user: alice,
+        capabilities: {
+          can_publish_apis: false,
+          can_review_access_requests: false,
+          can_manage_users: false,
+          can_manage_settings: false,
+          can_view_audit_log: false,
+          can_use_god_mode: false,
+        },
+      });
     });
     expect(screen.getByText('unauthenticated')).toBeInTheDocument();
     expect(screen.queryByText('Alice')).toBeNull();
