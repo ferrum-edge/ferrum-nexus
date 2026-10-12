@@ -128,7 +128,7 @@ export function runGatewayRecoveryAtomicityContract(
         if (row.key === key) return true;
         if (!row.key.startsWith('gateway_recovery_chunk:')) return false;
         assert.ok(row.encrypted && typeof row.value === 'string');
-        return harness.app.nexus.crypto.decryptJson<{ key: string }>(row.value).key === key;
+        return harness.app.nexus.crypto.decryptJson<{ key: string }>(row.key, row.value).key === key;
       });
     }
 

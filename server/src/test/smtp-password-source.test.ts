@@ -97,7 +97,7 @@ describe('SMTP password source', () => {
   async function storePassword(secretKey: string): Promise<void> {
     await harness.store.settings.set(
       SMTP_PASSWORD_SETTINGS_KEY,
-      createCrypto(secretKey).encryptJson(STORED_PASSWORD),
+      createCrypto(secretKey).encryptJson(SMTP_PASSWORD_SETTINGS_KEY, STORED_PASSWORD),
       true,
     );
   }

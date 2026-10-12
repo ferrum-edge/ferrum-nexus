@@ -199,7 +199,7 @@ export async function readClientSecret(
   if (!row) return { state: 'absent' };
   if (!row.encrypted || typeof row.value !== 'string') return { state: 'unreadable' };
   try {
-    const value = crypto.decryptJson<unknown>(row.value);
+    const value = crypto.decryptJson<unknown>(ssoClientSecretKey(providerId), row.value);
     return typeof value === 'string' && value !== ''
       ? { state: 'value', value }
       : { state: 'unreadable' };

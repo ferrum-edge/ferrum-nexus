@@ -23,8 +23,11 @@ schema baseline; `v0.2.0` froze the forward migrations `002` and `003`, `v0.3.0`
 adds no migration:
 
 - `server/src/db/released-migrations.ts` lists every shipped or pending migration with its
-  per-backend checksums; `released-migrations.test.ts` fails on any edit to a released one (or to
-  its MongoDB snapshot in `server/src/db/released/`).
+  per-backend checksums; `released-migrations.test.ts` fails on any edit to a released SQL
+  migration (or to its MongoDB snapshot in `server/src/db/released/`). For MongoDB the guard
+  freezes each step's declared indexes only — document-transform code is covered by the
+  immutability policy and review, not by automated comparison (an intentional limit recorded
+  in PR #323); never edit a released transform.
 - A schema change is a new forward migration with a higher id in every backend, never an edit to a
   released one, and it must upgrade retained data in place. See
   [docs/operations.md, "Schema versioning and upgrades"](docs/operations.md#schema-versioning-and-upgrades).

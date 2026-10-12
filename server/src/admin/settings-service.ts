@@ -297,7 +297,7 @@ export async function readEncryptedSettingState(
       : { state: 'unreadable' };
   }
   try {
-    const decrypted = crypto.decryptJson<unknown>(String(row.value));
+    const decrypted = crypto.decryptJson<unknown>(key, String(row.value));
     return typeof decrypted === 'string' && decrypted !== ''
       ? { state: 'value', value: decrypted }
       : { state: 'unreadable' };
@@ -743,7 +743,7 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
             } else {
               await tx.settings.set(
                 CAPTCHA_SECRET_SETTINGS_KEY,
-                crypto.encryptJson(patch.captcha.secret_key),
+                crypto.encryptJson(CAPTCHA_SECRET_SETTINGS_KEY, patch.captcha.secret_key),
                 true,
               );
             }
@@ -801,7 +801,7 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
             } else {
               await tx.settings.set(
                 SMTP_PASSWORD_SETTINGS_KEY,
-                crypto.encryptJson(patch.smtp.password),
+                crypto.encryptJson(SMTP_PASSWORD_SETTINGS_KEY, patch.smtp.password),
                 true,
               );
             }

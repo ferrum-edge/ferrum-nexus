@@ -47,8 +47,8 @@ export async function rotateEncryptedSettings(
   const unreadable: string[] = [];
   for (const row of encrypted) {
     try {
-      const plain = previous.decryptJson<unknown>(String(row.value));
-      rewritten.push({ key: row.key, value: next.encryptJson(plain), encrypted: true });
+      const plain = previous.decryptJson<unknown>(row.key, String(row.value));
+      rewritten.push({ key: row.key, value: next.encryptJson(row.key, plain), encrypted: true });
     } catch {
       unreadable.push(row.key);
     }

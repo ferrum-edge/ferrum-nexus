@@ -63,7 +63,7 @@ async function load(
   if (!row.encrypted || typeof row.value !== 'string') {
     throw conflict('The encrypted gateway recovery record is unavailable');
   }
-  const value = crypto.decryptJson<unknown>(row.value);
+  const value = crypto.decryptJson<unknown>(key, row.value);
   const manifest = manifestFor(value, key);
   if (!manifest) return { value, manifest: null };
   const parts: string[] = [];
@@ -72,7 +72,7 @@ async function load(
     if (!row?.encrypted || typeof row.value !== 'string') {
       throw conflict('An encrypted gateway recovery chunk is unavailable');
     }
-    const chunk = crypto.decryptJson<Chunk>(row.value);
+    const chunk = crypto.decryptJson<Chunk>(chunkKey(manifest, index), row.value);
     if (
       chunk.key !== key ||
       chunk.generation !== manifest.generation ||
@@ -176,7 +176,7 @@ export async function writeRecoveryJournal(
   const entries: { key: string; value: string }[] = [];
   let sealed: string;
   if (bytes.length <= INLINE_BYTES) {
-    sealed = crypto.encryptJson(value);
+    sealed = crypto.encryptJson(key, value);
   } else {
     const encoded = bytes.toString('base64');
     const manifest: Manifest = {
@@ -194,9 +194,9 @@ export async function writeRecoveryJournal(
         index,
         data: encoded.slice(index * CHUNK_CHARACTERS, (index + 1) * CHUNK_CHARACTERS),
       };
-      entries.push({ key: chunkKey(manifest, index), value: crypto.encryptJson(chunk) });
+      entries.push({ key: chunkKey(manifest, index), value: crypto.encryptJson(chunkKey(manifest, index), chunk) });
     }
-    sealed = crypto.encryptJson(manifest);
+    sealed = crypto.encryptJson(key, manifest);
   }
   await store.transaction(
     async (tx) => {

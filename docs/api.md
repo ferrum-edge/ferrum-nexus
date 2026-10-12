@@ -1503,7 +1503,7 @@ _admin_ — enqueues **one outbox row per recipient**, never a BCC blast.
 { "enqueued": 240, "recipients": 251, "batch_id": "c3f0…" }
 ```
 
-Rows are keyed `mass:<batch>:<user_id>`, where `<batch>` is your
+Rows are keyed `mass:<actor_id>:<batch>:<user_id>`, where `<batch>` is your
 `idempotency_key` or a fresh UUID. `recipients` is who matched; `enqueued`
 excludes rows the key already produced, so resending with the same key queues
 nothing new.
@@ -3211,8 +3211,9 @@ and revoking stays allowed. The audit row records
 `details.revoked_existing_access: false`. To stop an integration, delete the
 application or revoke its grants.
 
-Re-enabling fails with `502 EDGE_ERROR` (`details.identities`) when the
-application holds active grants but has no consumer mapping.
+Re-enabling is a portal row update only: it makes no Edge call and has no
+consumer-mapping precondition, so it cannot fail with a mapping `502` (that
+contract belongs to account restore, not application PATCH).
 
 ### `DELETE /api/applications/:id`
 

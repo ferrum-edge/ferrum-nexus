@@ -695,23 +695,37 @@ export function createGodService(deps: GodServiceDeps): GodService {
             delivered += 1;
 
             if (input.send_email) {
-              render ??= await email.prepareRenderer('mass', MASS_RAW_HTML_VARS);
-              const rendered = render({
-                recipient_name: recipient.display_name,
-                recipient_email: recipient.email,
-                subject,
-                body_html: `<p>${escapeHtml(body)}</p>`,
-                body_text: body,
-              });
-              const queued = await store.emailOutbox.enqueue({
-                to_email: recipient.email,
-                recipient_user_id: recipient.id,
-                subject: rendered.subject,
-                body_html: rendered.html,
-                body_text: rendered.text,
-                idempotency_key: `god-broadcast:${batch}:${recipient.id}`,
-              });
-              if (queued.created) emails += 1;
+              // The mail copy is optional and its outcome is accounted
+              // separately: a renderer/outbox failure after the inbox write
+              // must not also count this recipient as failed (that counter
+              // means "inbox not written").
+              try {
+                render ??= await email.prepareRenderer('mass', MASS_RAW_HTML_VARS);
+                const rendered = render({
+                  recipient_name: recipient.display_name,
+                  recipient_email: recipient.email,
+                  subject,
+                  body_html: `<p>${escapeHtml(body)}</p>`,
+                  body_text: body,
+                });
+                const queued = await store.emailOutbox.enqueue({
+                  to_email: recipient.email,
+                  recipient_user_id: recipient.id,
+                  subject: rendered.subject,
+                  body_html: rendered.html,
+                  body_text: rendered.text,
+                  idempotency_key: `god-broadcast:${batch}:${recipient.id}`,
+                });
+                if (queued.created) emails += 1;
+              } catch (error) {
+                deps.log?.(
+                  {
+                    recipient_id: recipient.id,
+                    error: error instanceof Error ? error.message : String(error),
+                  },
+                  'Could not queue the optional email copy of a god-mode broadcast',
+                );
+              }
             }
           } catch (error) {
             failed += 1;

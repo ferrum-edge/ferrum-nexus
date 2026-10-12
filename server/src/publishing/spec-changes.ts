@@ -330,23 +330,53 @@ function childPath(path: string, name: string): string {
   return path === '' ? name : `${path}.${name}`;
 }
 
-/** Every operation of a document, keyed `METHOD path`, in document order. */
-function operationsOf(document: Record<string, unknown>): Map<string, Record<string, unknown>> {
+/** A Path Item as the object it names: inline, or through a local `$ref`. */
+function resolvePathItem(
+  resolver: OpenApiRefResolver,
+  item: unknown,
+): Record<string, unknown> | null {
+  if (!isRecord(item)) return null;
+  if (refOf(item) === null) return item;
+  const resolution = resolver.resolve(item);
+  return resolution.ok ? resolution.value : null;
+}
+
+/**
+ * Every operation of a document, keyed `METHOD path`, in document order.
+ * Locally referenced Path Items contribute the operations of the object
+ * they name; one that cannot be resolved marks the enumeration incomplete
+ * instead of silently hiding its operations from both sides.
+ */
+function operationsOf(
+  document: Record<string, unknown>,
+  resolver: OpenApiRefResolver,
+): { operations: Map<string, Record<string, unknown>>; complete: boolean } {
   const operations = new Map<string, Record<string, unknown>>();
-  for (const [path, item] of entriesOf(ownRecord(document, 'paths'))) {
-    if (!isRecord(item)) continue;
+  let complete = true;
+  for (const [path, raw] of entriesOf(ownRecord(document, 'paths'))) {
+    if (!isRecord(raw)) continue;
+    const item = resolvePathItem(resolver, raw);
+    if (item === null) {
+      complete = false;
+      continue;
+    }
     for (const method of OPENAPI_OPERATION_METHODS) {
       const operation = ownRecord(item, method);
       if (operation) operations.set(`${method.toUpperCase()} ${path}`, operation);
     }
   }
-  return operations;
+  return { operations, complete };
 }
 
-/** The path item an operation key belongs to. */
-function pathItemOf(document: Record<string, unknown>, path: string): Record<string, unknown> {
+/** The path item an operation key belongs to, resolved when it is a `$ref`. */
+function pathItemOf(
+  document: Record<string, unknown>,
+  resolver: OpenApiRefResolver,
+  path: string,
+): Record<string, unknown> {
   const paths = ownRecord(document, 'paths');
-  return (paths && ownRecord(paths, path)) ?? {};
+  const raw = paths ? own(paths, path) : undefined;
+  return resolvePathItem(resolver, raw) ?? {};
 }
 
 /** `METHOD path` back into its two halves, the path cut for display. */
@@ -936,7 +966,7 @@ export function compareSpecRevisions(
     path: string,
     operation: Record<string, unknown>,
   ): KeyedOpenApiParameter[] => {
-    const item = pathItemOf(document, path);
+    const item = pathItemOf(document, resolver, path);
     const shared = ownArray(item, 'parameters') ?? [];
     const declared = ownArray(operation, 'parameters') ?? [];
     return mergeOpenApiParameters(
@@ -945,9 +975,11 @@ export function compareSpecRevisions(
     );
   };
 
-  const fromOperations = operationsOf(before);
-  const toOperations = operationsOf(after);
-  let complete = true;
+  const fromEnumerated = operationsOf(before, beforeRefs);
+  const toEnumerated = operationsOf(after, afterRefs);
+  const fromOperations = fromEnumerated.operations;
+  const toOperations = toEnumerated.operations;
+  let complete = fromEnumerated.complete && toEnumerated.complete;
 
   try {
     for (const [key, operation] of toOperations) {

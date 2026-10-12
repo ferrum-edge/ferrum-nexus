@@ -117,6 +117,7 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
       host: '127.0.0.1',
       port: relay.port,
       secure: false,
+      allowPlaintext: true,
       user: USER,
       password: PASSWORD,
       from: FROM,
@@ -126,6 +127,7 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
         NEXUS_SMTP_HOST: '127.0.0.1',
         NEXUS_SMTP_PORT: String(relay.port),
         NEXUS_SMTP_SECURE: 'false',
+        NEXUS_SMTP_ALLOW_PLAINTEXT: 'true',
         NEXUS_SMTP_USER: USER,
         NEXUS_SMTP_PASSWORD: PASSWORD,
         NEXUS_EMAIL_FROM: FROM,
@@ -169,6 +171,24 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
     assert.ok(message.includes(MAIL.text));
     assert.ok(message.includes(MAIL.html));
     assert.equal(message.includes(PASSWORD), false);
+  });
+
+  it('refuses plaintext delivery when STARTTLS is not offered', async () => {
+    // The fixture relay never advertises STARTTLS. Without the explicit
+    // plaintext escape hatch the connection must fail before any credential
+    // or message crosses it.
+    const strict = createSmtpTransport({
+      host: '127.0.0.1',
+      port: relay.port,
+      secure: false,
+      user: USER,
+      password: PASSWORD,
+      from: FROM,
+    });
+    await assert.rejects(() => strict.send(MAIL));
+    assert.deepEqual(relay.credentials, []);
+    assert.equal(relay.messages.length, 0);
+    await strict.close?.();
   });
 
   it('preserves a quoted local part without redirecting its domain', async () => {

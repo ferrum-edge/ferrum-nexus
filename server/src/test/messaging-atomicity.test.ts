@@ -192,7 +192,7 @@ describe('mass email fan-out is recorded first and chunked', () => {
     assert.match(failure.message, /3 of 7/);
 
     const queued = (await harness.outbox()).filter((row) =>
-      row.idempotency_key?.startsWith('mass:chunked-campaign:'),
+      row.idempotency_key?.includes(':chunked-campaign:'),
     );
     assert.equal(queued.length, 3, 'the first chunk stays; the failed one rolled back whole');
     assert.equal((await harness.outbox()).length, outboxBefore + 3);
@@ -220,7 +220,7 @@ describe('mass email fan-out is recorded first and chunked', () => {
       batch_id: 'chunked-campaign',
     });
     const rows = (await harness.outbox()).filter((row) =>
-      row.idempotency_key?.startsWith('mass:chunked-campaign:'),
+      row.idempotency_key?.includes(':chunked-campaign:'),
     );
     assert.equal(rows.length, 7, 'one row per recipient across both attempts');
     assert.equal(new Set(rows.map((row) => row.to_email)).size, 7);

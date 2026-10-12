@@ -924,6 +924,30 @@ describe('provider plugin palette', () => {
       );
     });
 
+    it('does not reinsert palette metadata when the API is deleted mid-save', async () => {
+      // Simulate deletion finishing between reconciliation and the metadata
+      // commit: the first parent load (target resolution) succeeds, the
+      // revalidation inside the final transaction finds no API.
+      const realFindById = harness.store.apis.findById.bind(harness.store.apis);
+      let loads = 0;
+      harness.store.apis.findById = async (id) => {
+        loads += 1;
+        return loads === 1 ? realFindById(id) : null;
+      };
+      try {
+        const response = await setPlugin('request_termination', { config: { status_code: 503 } });
+        assert.equal(response.statusCode, 404, response.body);
+      } finally {
+        harness.store.apis.findById = realFindById;
+      }
+      assert.equal(await harness.store.apiPlugins.find(apiId, 'request_termination'), null);
+      assert.equal(
+        harness.edge.pluginForProxy(proxyId, 'request_termination'),
+        undefined,
+        'the gateway write was unwound with the refused metadata commit',
+      );
+    });
+
     it('undoes the gateway write when the store row cannot be saved', async () => {
       failNextUpsert(harness, 'database unavailable');
       const response = await setPlugin('request_termination', { config: { status_code: 503 } });

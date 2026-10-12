@@ -108,6 +108,12 @@ export interface ResolvedSmtpSettings {
   host: string | null;
   port: number;
   secure: boolean;
+  /**
+   * Permit plaintext delivery when `secure` is false. Environment-only: a
+   * stored `app_settings` override can never enable it. Absent means
+   * STARTTLS is required on the non-implicit-TLS path.
+   */
+  allowPlaintext?: boolean;
   user: string | null;
   password: string | null;
   /** RFC 5322 `From` header. */
@@ -253,6 +259,10 @@ export function createSmtpTransport(
         host: settings.host ?? '',
         port: settings.port,
         secure: settings.secure,
+        // `secure: false` is documented as STARTTLS: make the upgrade
+        // mandatory so a stripped/absent STARTTLS advertisement fails the
+        // connection instead of authenticating and delivering in plaintext.
+        requireTLS: !settings.secure && !settings.allowPlaintext,
         connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
         greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
         socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
@@ -491,6 +501,7 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
       host: stored.host ?? config.smtp.host ?? null,
       port: stored.port ?? config.smtp.port,
       secure: stored.secure ?? config.smtp.secure,
+      allowPlaintext: config.smtp.allowPlaintext,
       user: stored.username ?? config.smtp.user ?? null,
       password: await resolvePassword(stored),
       from: stored.from_address ?? config.smtp.from,

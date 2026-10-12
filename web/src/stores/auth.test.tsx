@@ -277,6 +277,29 @@ describe('late unauthorized responses', () => {
   });
 });
 
+describe('stale auth probes', () => {
+  it('does not resurrect a principal when a pre-logout probe succeeds late', async () => {
+    setup();
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+    let resolveProbe: (value: Awaited<ReturnType<typeof authApi.meSilent>>) => void = () => {};
+    const held = new Promise<Awaited<ReturnType<typeof authApi.meSilent>>>((resolve) => {
+      resolveProbe = resolve;
+    });
+    const probe = vi.spyOn(authApi, 'meSilent').mockReturnValueOnce(held);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(probe).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Logout' }));
+    expect(await screen.findByText('unauthenticated')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveProbe({ user: alice, capabilities: null });
+    });
+    expect(screen.getByText('unauthenticated')).toBeInTheDocument();
+    expect(screen.queryByText('Alice')).toBeNull();
+  });
+});
+
 describe('session cache isolation', () => {
   it.each(['Refresh', 'Logout', 'Probe'])(
     'removes Alice credentials before Bob signs in after %s',

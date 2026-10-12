@@ -401,6 +401,17 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
           const configId = written?.id ?? null;
           const replaced = existing !== undefined;
           return await store.transaction(async (tx) => {
+            // Revalidate the parent inside the committing transaction: the
+            // binder reconciliation above released the canonical proxy
+            // lease, so a concurrent API deletion can have finished since
+            // `loadTarget`. On MongoDB the upsert below would otherwise
+            // happily reinsert palette metadata for a deleted API (SQL's
+            // foreign key refuses it; Mongo has no such guard). Throwing
+            // here rolls the metadata back and unwinds the gateway write.
+            const parent = await tx.apis.findById(target.apiId);
+            if (!parent || parent.ferrum_proxy_id !== target.proxyId) {
+              throw notFound('API', target.apiId);
+            }
             const upserted = await tx.apiPlugins.upsert({
               api_id: target.apiId,
               plugin_name: pluginName,

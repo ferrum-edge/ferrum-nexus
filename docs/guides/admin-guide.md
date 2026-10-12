@@ -222,7 +222,7 @@ The **Registration** card sits on the CAPTCHA tab and is editable by any admin.
 
 | Setting                                       | Effect                                                                                      |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| **Allow self-service registration**           | Off means nobody can sign up; you create accounts.                                          |
+| **Allow self-service registration**           | Off means nobody can sign up. There is no manual account-creation action: onboard via single sign-on/JIT provisioning, or temporarily reopen registration. |
 | **Require email verification before sign-in** | Users must click an emailed link before they can sign in.                                   |
 | **Self-selectable roles**                     | Which of Client and Provider a visitor may pick. Untick Provider to vet providers yourself. |
 
