@@ -295,6 +295,8 @@ describe('stale auth probes', () => {
     await act(async () => {
       resolveProbe({
         user: alice,
+        csrf_token: 'csrf-token',
+        expires_at: '2026-09-09T00:00:00.000Z',
         capabilities: {
           can_publish_apis: false,
           can_review_access_requests: false,
