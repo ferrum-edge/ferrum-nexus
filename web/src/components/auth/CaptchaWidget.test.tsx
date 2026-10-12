@@ -53,7 +53,10 @@ function vendorScript(src: string): HTMLScriptElement {
   return script;
 }
 
-function installVendor(globalName: string): { render: ReturnType<typeof vi.fn>; reset: ReturnType<typeof vi.fn> } {
+function installVendor(globalName: string): {
+  render: ReturnType<typeof vi.fn>;
+  reset: ReturnType<typeof vi.fn>;
+} {
   const renderFn = vi.fn((_container: HTMLElement, _parameters: RenderParams) => 'widget-id');
   const resetFn = vi.fn((_id?: unknown) => undefined);
   (window as unknown as Record<string, unknown>)[globalName] = { render: renderFn, reset: resetFn };

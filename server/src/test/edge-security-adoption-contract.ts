@@ -285,7 +285,9 @@ export function runEdgeSecurityAdoptionContract(
         if (!row.key.startsWith('gateway_recovery_chunk:')) return false;
         assert.ok(row.encrypted && typeof row.value === 'string');
         try {
-          return harness.app.nexus.crypto.decryptJson<{ key: string }>(row.key, row.value).key === key;
+          return (
+            harness.app.nexus.crypto.decryptJson<{ key: string }>(row.key, row.value).key === key
+          );
         } catch {
           // A substituted chunk no longer opens under its row key; it cannot
           // be proven foreign, so count it as this journal's evidence.
@@ -569,7 +571,8 @@ export function runEdgeSecurityAdoptionContract(
           assert.deepEqual(journal.mutations.at(-1)!.original, args[1]);
           assert.equal(journal.mutations.at(-1)!.acknowledged, false);
           assert.ok(
-            Buffer.byteLength(harness.app.nexus.crypto.encryptJson(key, journal)) > 16 * 1024 * 1024,
+            Buffer.byteLength(harness.app.nexus.crypto.encryptJson(key, journal)) >
+              16 * 1024 * 1024,
           );
         }
         return remove(...args);

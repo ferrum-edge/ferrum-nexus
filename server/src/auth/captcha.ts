@@ -218,7 +218,10 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
     if (!row) return null;
     if (!row.encrypted) return typeof row.value === 'string' ? row.value : null;
     try {
-      const decrypted = deps.crypto.decryptJson<unknown>(CAPTCHA_SECRET_SETTINGS_KEY, String(row.value));
+      const decrypted = deps.crypto.decryptJson<unknown>(
+        CAPTCHA_SECRET_SETTINGS_KEY,
+        String(row.value),
+      );
       return typeof decrypted === 'string' ? decrypted : null;
     } catch {
       return null;

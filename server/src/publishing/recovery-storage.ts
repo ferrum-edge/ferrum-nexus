@@ -201,7 +201,10 @@ export async function writeRecoveryJournal(
         index,
         data: encoded.slice(index * CHUNK_CHARACTERS, (index + 1) * CHUNK_CHARACTERS),
       };
-      entries.push({ key: chunkKey(manifest, index), value: crypto.encryptJson(chunkKey(manifest, index), chunk) });
+      entries.push({
+        key: chunkKey(manifest, index),
+        value: crypto.encryptJson(chunkKey(manifest, index), chunk),
+      });
     }
     sealed = crypto.encryptJson(key, manifest);
   }

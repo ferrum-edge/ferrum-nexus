@@ -220,11 +220,11 @@ The site key is public by design; the secret never leaves the server.
 
 The **Registration** card sits on the CAPTCHA tab and is editable by any admin.
 
-| Setting                                       | Effect                                                                                      |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Setting                                       | Effect                                                                                                                                                     |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Allow self-service registration**           | Off means nobody can sign up. There is no manual account-creation action: onboard via single sign-on/JIT provisioning, or temporarily reopen registration. |
-| **Require email verification before sign-in** | Users must click an emailed link before they can sign in.                                   |
-| **Self-selectable roles**                     | Which of Client and Provider a visitor may pick. Untick Provider to vet providers yourself. |
+| **Require email verification before sign-in** | Users must click an emailed link before they can sign in.                                                                                                  |
+| **Self-selectable roles**                     | Which of Client and Provider a visitor may pick. Untick Provider to vet providers yourself.                                                                |
 
 The sign-up form offers exactly the roles you allow. With none ticked, nobody
 can register; turn registration off instead so the form says so plainly.

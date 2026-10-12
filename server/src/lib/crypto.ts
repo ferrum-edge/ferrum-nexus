@@ -248,7 +248,11 @@ export function encryptSettingWithKey(key: Buffer, settingKey: string, value: un
  * written before this binding keep working; every new write and every key
  * rotation re-encrypts them as `v2` under their actual key.
  */
-export function decryptSettingWithKey<T = unknown>(key: Buffer, settingKey: string, blob: string): T {
+export function decryptSettingWithKey<T = unknown>(
+  key: Buffer,
+  settingKey: string,
+  blob: string,
+): T {
   if (blob.startsWith(`${SETTINGS_ENCRYPTED_PREFIX}:`)) {
     return decryptBlob<T>(key, blob, settingsAad(settingKey), SETTINGS_ENCRYPTED_PREFIX);
   }

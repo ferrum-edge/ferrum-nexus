@@ -27,8 +27,16 @@ describe('rotateEncryptedSettings', () => {
     );
     await store.init();
     await store.migrate();
-    await store.settings.set('smtp.password', previous.encryptJson('smtp.password', 'hunter2'), true);
-    await store.settings.set('captcha.secret_key', previous.encryptJson('captcha.secret_key', '0xSECRET'), true);
+    await store.settings.set(
+      'smtp.password',
+      previous.encryptJson('smtp.password', 'hunter2'),
+      true,
+    );
+    await store.settings.set(
+      'captcha.secret_key',
+      previous.encryptJson('captcha.secret_key', '0xSECRET'),
+      true,
+    );
     await store.settings.set('branding', { name: 'Nexus' }, false);
   });
 
@@ -51,7 +59,10 @@ describe('rotateEncryptedSettings', () => {
       'the old key no longer opens it',
     );
     assert.equal(
-      next.decryptJson('captcha.secret_key', String((await store.settings.get('captcha.secret_key'))?.value)),
+      next.decryptJson(
+        'captcha.secret_key',
+        String((await store.settings.get('captcha.secret_key'))?.value),
+      ),
       '0xSECRET',
     );
     assert.deepEqual((await store.settings.get('branding'))?.value, { name: 'Nexus' });

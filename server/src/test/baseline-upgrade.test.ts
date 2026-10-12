@@ -188,7 +188,10 @@ const approvedGroup = (apiId: string): string => `nexus:api:${apiId}:approved`;
  */
 async function buildFixture(ids: readonly string[]): Promise<FixtureRow[]> {
   const passwordHash = await hashPassword(FIXTURE_PASSWORD);
-  const encryptedSmtpPassword = createCrypto(SECRET).encryptJson(SMTP_PASSWORD_SETTINGS_KEY, SMTP_PASSWORD);
+  const encryptedSmtpPassword = createCrypto(SECRET).encryptJson(
+    SMTP_PASSWORD_SETTINGS_KEY,
+    SMTP_PASSWORD,
+  );
   const stamps = { created_at: T0, updated_at: T1 };
   const user = (id: string, email: string, role: string, org: string | null): FixtureRow => ({
     table: 'users',
@@ -871,7 +874,10 @@ async function assertPortalInvariants(store: NexusStore): Promise<void> {
   const smtp = await store.settings.get(SMTP_PASSWORD_SETTINGS_KEY);
   assert.ok(smtp, 'the encrypted SMTP password is still stored');
   assert.equal(smtp.encrypted, true);
-  assert.equal(createCrypto(SECRET).decryptJson(SMTP_PASSWORD_SETTINGS_KEY, String(smtp.value)), SMTP_PASSWORD);
+  assert.equal(
+    createCrypto(SECRET).decryptJson(SMTP_PASSWORD_SETTINGS_KEY, String(smtp.value)),
+    SMTP_PASSWORD,
+  );
 }
 
 /* ── Backends ───────────────────────────────────────────────────────────── */

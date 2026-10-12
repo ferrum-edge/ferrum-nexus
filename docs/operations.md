@@ -1609,12 +1609,12 @@ Atomic writes run in `store.transaction`. Within one instance transactions run
 one at a time; across instances the database may roll one back because of a
 collision:
 
-| Engine     | Reported as                                                       |
-| ---------- | ----------------------------------------------------------------- |
+| Engine     | Reported as                                                                                               |
+| ---------- | --------------------------------------------------------------------------------------------------------- |
 | MySQL      | `ER_LOCK_DEADLOCK` (1213), `40001` (a plain `ER_LOCK_WAIT_TIMEOUT` (1205) is **not** retried — see below) |
-| PostgreSQL | `40001` serialization failure, `40P01` deadlock                   |
-| MongoDB    | `WriteConflict` (112), labelled `TransientTransactionError`       |
-| SQLite     | cannot happen (one connection)                                    |
+| PostgreSQL | `40001` serialization failure, `40P01` deadlock                                                           |
+| MongoDB    | `WriteConflict` (112), labelled `TransientTransactionError`                                               |
+| SQLite     | cannot happen (one connection)                                                                            |
 
 Nexus re-runs the transaction in these cases:
 

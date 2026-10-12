@@ -1377,7 +1377,10 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       // Encrypted before the body, which may be re-run.
       const encrypted = new Map<string, string | null>();
       for (const [id, secret] of secretWrites) {
-        encrypted.set(id, secret === null ? null : crypto.encryptJson(ssoClientSecretKey(id), secret));
+        encrypted.set(
+          id,
+          secret === null ? null : crypto.encryptJson(ssoClientSecretKey(id), secret),
+        );
       }
       // Every provider this save can touch — removed, disabled, reconfigured,
       // or cut off by the policy or the domain list — is locked first, so a

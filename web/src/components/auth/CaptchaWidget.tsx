@@ -143,7 +143,11 @@ export interface CaptchaWidgetProps {
 }
 
 /** Renders the configured CAPTCHA vendor's widget, or nothing when disabled. */
-export function CaptchaWidget({ config, onToken, resetSignal = 0 }: CaptchaWidgetProps): ReactElement | null {
+export function CaptchaWidget({
+  config,
+  onToken,
+  resetSignal = 0,
+}: CaptchaWidgetProps): ReactElement | null {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const widgetRef = useRef<{ api: CaptchaVendorApi; id: unknown } | null>(null);
   const seenResetSignal = useRef(resetSignal);
