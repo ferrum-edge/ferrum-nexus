@@ -221,7 +221,7 @@ jobs:
       - name: Start MongoDB replica set
         if: ${{ matrix.backend == 'mongodb' }}
         run: |
-          docker run -d --name nexus-mongo -p 27017:27017 mongo:9@sha256:bac22ea7710d774103dcad3ec8ac13cba1eb378f488e3ce8a6b3a1adf2ba9dcc --replSet rs0 --bind_ip_all
+          docker run -d --name nexus-mongo -p 27017:27017 mongo:7@sha256:1f995ad6fdb93244a1addab1b58f934a0bc2f5643c38e02f5e9d7f0c7d227a7b --replSet rs0 --bind_ip_all
           ready=""
           for attempt in $(seq 1 60); do
             if docker exec nexus-mongo mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'; then
