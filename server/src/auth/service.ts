@@ -597,9 +597,11 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
    * that used to leave a portal with users and no administrator — rolls the
    * account back too, and the next attempt finds the seat still open.
    *
-   * A candidate that arrives to a seat somebody else has just taken is not an
-   * error; it keeps the role it asked for, exactly as a later registration
-   * would.
+   * A candidate that arrives to a seat somebody else has just taken is an
+   * ordinary registration from then on: it keeps the role it asked for only
+   * if the policies in force allow it (open registration, that role, not
+   * `sso_only`), gets the current verification rule, and is refused
+   * otherwise.
    */
   async function seatFounder(
     tx: NexusStore,

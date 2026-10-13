@@ -971,6 +971,65 @@ describe('registration policy fence', () => {
     }
   });
 
+  it('refuses to commit a registration or an SSO policy save while the key is held', async () => {
+    // No waiting: a held key answers 409 at once, so each assertion fails if
+    // its writer stops taking the key. The policy stays permissive throughout.
+    const harness = await buildTestApp({ deps: { storeLockWaitMs: 0 } });
+    try {
+      const founder = await harness.registerUser({ email: 'held-founder@example.test' });
+      const holder = createKeyedSerializer({ leases: harness.store.leases });
+      await holder(REGISTRATION_POLICY_LOCK_KEY, async () => {
+        const registration = await harness.app.inject({
+          method: 'POST',
+          url: '/api/auth/register',
+          payload: {
+            email: 'held@example.test',
+            password: TEST_PASSWORD,
+            display_name: 'Held',
+            role: 'client',
+          },
+        });
+        assert.equal(registration.statusCode, 409, registration.body);
+        assert.equal(await harness.store.users.findByEmail('held@example.test'), null);
+
+        const sso = await harness.authed(founder, {
+          method: 'PUT',
+          url: '/api/admin/sso',
+          payload: { policy: 'local_only' },
+        });
+        assert.equal(sso.statusCode, 409, sso.body);
+
+        const settings = await harness.authed(founder, {
+          method: 'PUT',
+          url: '/api/admin/settings',
+          payload: { registration: { open_registration: false } },
+        });
+        assert.equal(settings.statusCode, 409, settings.body);
+      });
+
+      // Released: all three go through.
+      const registered = await harness.app.inject({
+        method: 'POST',
+        url: '/api/auth/register',
+        payload: {
+          email: 'held@example.test',
+          password: TEST_PASSWORD,
+          display_name: 'Held',
+          role: 'client',
+        },
+      });
+      assert.equal(registered.statusCode, 201, registered.body);
+      const sso = await harness.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/sso',
+        payload: { policy: 'local_only' },
+      });
+      assert.equal(sso.statusCode, 200, sso.body);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('makes an admin registration-policy save wait for the key', async () => {
     const harness = await buildTestApp();
     try {

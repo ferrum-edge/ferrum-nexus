@@ -1219,8 +1219,18 @@ created as a verified `super_admin`, the `bootstrap.super_admin_claimed` record
 is written and the `auth.register` audit row lands, all or nothing. A failed
 bootstrap leaves the seat open for the next attempt; see
 [Recovering a portal with no super admin](operations.md#recovering-a-portal-with-no-super-admin).
-Candidates that reach the lease after the seat is taken get the role they
-asked for.
+Candidates that reach the lease after the seat is taken are ordinary
+registrations from then on: they are authorized against the registration and
+login policies in force (closed registration, a withdrawn role or `sso_only`
+refuse them with `403`) and get the current email-verification rule.
+
+Every ordinary registration commits under the cross-instance
+`auth:registration-policy` lease, re-reading both policies inside its
+transaction. The admin settings save that changes `registration` and every
+single sign-on settings save commit under the same lease, so no policy change
+lands between a registration's final policy read and its account. It is always
+the innermost key: taken after `users:super-admins`, and after `sso:settings`
+and the provider keys.
 
 **The last active `super_admin` cannot be demoted, disabled or removed** →
 `409 LAST_SUPER_ADMIN`. The count excludes the target. It is enforced in both
@@ -1232,7 +1242,8 @@ says how to fix it: promote a second super admin.
 ### Cross-instance locks are fenced at commit
 
 Every cross-instance lock (the super-admin, account-lifecycle, password-change,
-`sso:settings`, `sso:provider:<id>`, message-budget, access-request-budget and
+`sso:settings`, `sso:provider:<id>`, `auth:registration-policy`, message-budget,
+access-request-budget and
 broadcast keys, and the gateway consumer, identity and proxy keys) is an
 `edge_leases` row with a 60-second TTL,
 renewed at half-life. A waiter gives up after 30 seconds with `409 CONFLICT`.
