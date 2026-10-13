@@ -1592,6 +1592,16 @@ NEXUS_DB_DRIVER=mongodb
 NEXUS_DB_URL=mongodb://mongo-a:27017,mongo-b:27017/nexus?replicaSet=rs0
 ```
 
+**Supported servers: MongoDB 4.4.2 through 9.0.** The `mongodb` 7.7 Node.js
+driver rejects servers older than 4.4 (wire version 9), and `init()` sends the
+`hello` command, which MongoDB added in 4.4.2. CI runs the store contracts on
+MongoDB 7.0 and the standalone-refusal check on 4.4.29. Azure Cosmos DB for
+MongoDB accounts on server version 4.2 or older and AWS DocumentDB 3.6/4.0 are
+below that floor. MongoDB 8.0.21+, 8.3 and 9.0 refuse to start on Linux
+kernels 6.19 through 7.0.13 (SERVER-125742), which includes hosts whose kernel
+reports 7.0.0 such as Ubuntu 26.04; the `mongo:9` 9.0.2 image is affected
+(SERVER-136272, fixed in 9.0.4).
+
 **A replica set or sharded cluster is required.** `init()` checks with `hello`
 and refuses to start against a standalone `mongod`:
 
