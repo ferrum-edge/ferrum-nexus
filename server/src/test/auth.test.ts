@@ -898,7 +898,24 @@ describe('registration policy fence', () => {
   };
 
   it('refuses the founder-seat loser when registration is closed', async () => {
-    const harness = await buildTestApp();
+    // Both candidates must pass the founder pre-check before either commits,
+    // so each hash waits until both are hashing.
+    const bothHashing = signal();
+    let hashing = 0;
+    const crypto = createCrypto(TEST_SECRET_KEY);
+    const harness = await buildTestApp({
+      deps: {
+        crypto: {
+          ...crypto,
+          hashPassword: async (password) => {
+            hashing += 1;
+            if (hashing === 2) bothHashing.resolve();
+            await bothHashing.promise;
+            return crypto.hashPassword(password);
+          },
+        },
+      },
+    });
     try {
       await harness.store.settings.set(REGISTRATION_SETTINGS_KEY, closed);
       const candidates = await Promise.all(
