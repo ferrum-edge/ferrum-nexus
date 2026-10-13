@@ -215,6 +215,35 @@ describe('consumer-facing revision comparison', () => {
     assert.ok(counters.units > 50_000);
   });
 
+  it('still reports a removed operation when deep comparisons exhaust the budget', () => {
+    // Eight referenced paths whose shared duplicate parameters spend the
+    // default budget before the removal pass: the removal of an inline GET
+    // must still be reported, so the revision is not read as "no change".
+    const repeated = Array.from({ length: 20_000 }, () => ({ name: 'id', in: 'query' }));
+    const operation = {
+      parameters: [{ name: 'id', in: 'query', required: true }],
+      responses: { '200': {} },
+    };
+    const components = { pathItems: { Shared: { parameters: repeated, get: operation } } };
+    const paths = (withGone: boolean): Document => {
+      const result: Document = { '/kept': { get: { responses: { '200': {} } } } };
+      if (withGone) result['/gone'] = { get: { responses: { '200': {} } } };
+      for (let index = 0; index < 8; index += 1) {
+        result[`/p${index}`] = { $ref: '#/components/pathItems/Shared' };
+      }
+      return result;
+    };
+    const report = compareSpecRevisions(
+      document(paths(true), components),
+      document(paths(false), components),
+    );
+    assert.equal(report.complete, false);
+    assert.equal(report.changed, true);
+    assert.deepEqual(lines(report), [
+      'breaking | operation_removed | GET /gone | operation | - | -',
+    ]);
+  });
+
   it('marks the comparison incomplete when a Path Item reference cannot be followed', () => {
     const before = document({ '/shared': { $ref: '#/components/pathItems/Missing' } });
     const report = compareSpecRevisions(before, structuredClone(before));

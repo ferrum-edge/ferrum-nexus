@@ -1008,17 +1008,23 @@ export function compareSpecRevisions(
   const fromOperations = new Map<string, Record<string, unknown>>();
   const toOperations = new Map<string, Record<string, unknown>>();
   let complete = true;
+  /** Both documents' operations were read in full. */
+  let enumerated = false;
+  /** Operations already reported as added or removed. */
+  const reportedOperations = new Set<string>();
 
   try {
     // Inside the budget: every Path Item reference followed is charged to it.
     complete = enumerateOperations(before, readBefore, fromOperations) && complete;
     complete = enumerateOperations(after, readAfter, toOperations) && complete;
+    enumerated = true;
     for (const [key, operation] of toOperations) {
       spend(1);
       const ref = operationRef(key);
       const opPlace: Place = { operation: ref, section: 'operation', location: null };
       const previous = fromOperations.get(key);
       if (previous === undefined) {
+        reportedOperations.add(key);
         record(opPlace, 'operation_added', 'non_breaking');
         continue;
       }
@@ -1041,6 +1047,7 @@ export function compareSpecRevisions(
     for (const key of fromOperations.keys()) {
       if (toOperations.has(key)) continue;
       spend(1);
+      reportedOperations.add(key);
       record(
         { operation: operationRef(key), section: 'operation', location: null },
         'operation_removed',
@@ -1052,6 +1059,28 @@ export function compareSpecRevisions(
   } catch (error) {
     if (!(error instanceof BudgetExhausted)) throw error;
     complete = false;
+    // Operations added or removed cost nothing more to name once both
+    // documents were enumerated, and a removal is the change consumers most
+    // need to hear about: a budget spent on deep comparisons must not hide
+    // one, nor leave the report reading as "no change".
+    if (enumerated) {
+      for (const key of toOperations.keys()) {
+        if (fromOperations.has(key) || reportedOperations.has(key)) continue;
+        record(
+          { operation: operationRef(key), section: 'operation', location: null },
+          'operation_added',
+          'non_breaking',
+        );
+      }
+      for (const key of fromOperations.keys()) {
+        if (toOperations.has(key) || reportedOperations.has(key)) continue;
+        record(
+          { operation: operationRef(key), section: 'operation', location: null },
+          'operation_removed',
+          'breaking',
+        );
+      }
+    }
   }
 
   const fromInfo = ownRecord(before, 'info') ?? {};

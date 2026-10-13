@@ -3547,15 +3547,17 @@ records no proof of its own. The one exception is the **founding
 `super_admin`**, the account seated with the bootstrap token: the token already
 proves the operator owns it, so it links without a proof.
 
-With `require_email_verification` off and no SMTP configured, nothing can
-record a proof (verification and reset mail stays queued), so no account but
-the founder can link explicitly. To offer single sign-on to such accounts,
-configure SMTP: holders, new registrations included, then prove their address
-with **Forgot password** (redeeming the registration verification link is not
-enough). Otherwise let the provider create the
-accounts (`jit_provisioning`), or link them automatically once their address
-is proven. The founder's exemption keeps the `sso_only` setup below open on a
-portal without mail.
+With no SMTP configured, a locally registered account cannot earn a trusted
+proof (reset mail stays queued), so such an account without one can link
+explicitly only if it is the founder. Accounts a provider provisioned with
+`email_verified: true`, and accounts that already hold a password-reset or
+provider proof from before, keep that proof and can still link. To offer single
+sign-on to such accounts, configure SMTP: holders, new registrations included,
+then prove their address with **Forgot password** (redeeming the registration
+verification link is not enough). Otherwise let the provider create the accounts
+(`jit_provisioning`), or link them automatically once their address is proven.
+The founder's exemption keeps the `sso_only` setup below open on a portal
+without mail.
 
 **Passwords of linked accounts.** A pre-existing account keeps its password
 when it is linked, so the provider's offboarding and MFA do not bind it: it
