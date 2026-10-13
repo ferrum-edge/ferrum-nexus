@@ -8,9 +8,11 @@
  *
  * - the hosts of the provider that is **enabled** right now, for the sign-in
  *   and registration widgets; and
- * - every provider's hosts when the shell is loaded by a signed-in, active
- *   `super_admin`, because the activation self-test in Admin -> Settings
- *   renders a provider before it is enabled, and only a super admin can run it.
+ * - every provider's hosts when the settings page (`/admin/settings`) is
+ *   loaded by a signed-in, active `super_admin`, because the CAPTCHA
+ *   activation self-test there renders a provider before it is enabled, and
+ *   only a super admin can run it. Only that path pays for the session read:
+ *   every other shell load stays free of auth lookups (#343).
  *
  * With CAPTCHA off, the shell an anonymous visitor gets lists no vendor host,
  * so an injection sink could not pull script or frames from one. That matters
@@ -140,6 +142,18 @@ async function requestIsSuperAdmin(
   return user !== null && user.status === 'active' && user.role === 'super_admin';
 }
 
+/** The SPA path that renders the CAPTCHA activation self-test. */
+export const CAPTCHA_SELF_TEST_PATH = '/admin/settings';
+
+/**
+ * Whether this shell request is for the settings page, the only page whose
+ * policy may depend on who is signed in.
+ */
+function isSettingsShell(request: FastifyRequest): boolean {
+  const path = request.url.split('?')[0] ?? '';
+  return path === CAPTCHA_SELF_TEST_PATH || path.startsWith(`${CAPTCHA_SELF_TEST_PATH}/`);
+}
+
 /** Add `Cookie` to the response's `Vary`, keeping whatever is already there. */
 function varyOnCookie(reply: FastifyReply): void {
   const existing = reply.getHeader('vary');
@@ -196,7 +210,7 @@ export function registerContentSecurityPolicy(
     try {
       const enabled = await enabledVendor();
       if (enabled !== null) vendors.add(enabled);
-      superAdmin = await requestIsSuperAdmin(request, options);
+      if (isSettingsShell(request)) superAdmin = await requestIsSuperAdmin(request, options);
     } catch (error) {
       // Fail closed: the base policy already on the reply stands, which costs
       // at most a CAPTCHA widget that does not load until the next page load.

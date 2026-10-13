@@ -1882,9 +1882,11 @@ helmet is configured in `server/src/index.ts`; the Content-Security-Policy is se
 Deliberate loosenings:
 
 - CAPTCHA vendor hosts appear only on the SPA shell (`index.html`), never on
-  API or asset responses, and only for the provider that is enabled. A shell
-  loaded by a signed-in, active `super_admin` lists every provider, because
-  the CAPTCHA activation self-test renders a provider before it is enabled. A
+  API or asset responses, and only for the provider that is enabled. The
+  settings page (`/admin/settings`) loaded by a signed-in, active
+  `super_admin` lists every provider, because the CAPTCHA activation self-test
+  there renders a provider before it is enabled; no other shell load reads the
+  session. A
   settings page opened before signing in cannot load another provider's widget
   until it is reloaded; the self-test says so. With CAPTCHA off, an anonymous
   visitor's shell lists no vendor host at all.

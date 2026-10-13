@@ -149,8 +149,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **The Content-Security-Policy admits only the CAPTCHA provider in use**
   (#585). CAPTCHA vendor hosts are no longer listed on every response: only the
   SPA shell lists them, and only the enabled provider's, or every provider's
-  for a signed-in super admin so the activation self-test can load one before
-  it is enabled. With CAPTCHA off an anonymous visitor's shell lists none. The
+  on the settings page of a signed-in super admin so the activation self-test
+  can load one before it is enabled. With CAPTCHA off an anonymous visitor's shell lists none. The
   admin self-test now says to reload the page when the widget cannot load.
   `style-src 'unsafe-inline'` stays, because the UI's Radix components inject
   runtime `<style>` elements; `docs/security.md` records why.

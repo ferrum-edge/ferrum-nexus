@@ -91,10 +91,14 @@ describe('Content-Security-Policy on responses', () => {
     return buildTestApp({ env: { NEXUS_WEB_DIST: webDist }, deps: { serveStatic: true } });
   }
 
-  async function shellPolicy(harness: TestApp, session?: TestSession): Promise<string> {
+  async function shellPolicy(
+    harness: TestApp,
+    session?: TestSession,
+    url = '/catalog',
+  ): Promise<string> {
     const response = await harness.app.inject({
       method: 'GET',
-      url: '/catalog',
+      url,
       headers: session ? { cookie: session.cookieHeader } : {},
     });
     assert.equal(response.statusCode, 200);
@@ -125,7 +129,7 @@ describe('Content-Security-Policy on responses', () => {
     assert.equal(missing.headers['content-security-policy'], BASE_CONTENT_SECURITY_POLICY);
   });
 
-  it('admits only the enabled provider, and every provider for a super admin', async (t) => {
+  it("admits only the enabled provider, and all on a super admin's settings page", async (t) => {
     const harness = await portal();
     t.after(() => harness.close());
     // Accounts first: once CAPTCHA is on, registration needs a solved challenge.
@@ -140,10 +144,14 @@ describe('Content-Security-Policy on responses', () => {
     assertAdmitsOnly(anonymous, ['hcaptcha']);
     assertAdmitsOnly(await shellPolicy(harness, client), ['hcaptcha']);
     assertAdmitsOnly(await shellPolicy(harness, admin), ['hcaptcha']);
+    assertAdmitsOnly(await shellPolicy(harness, admin, '/admin/settings'), ['hcaptcha']);
+    // Only the settings page, where the self-test lives, is widened (#343 keeps
+    // every other shell load free of session reads).
+    assertAdmitsOnly(await shellPolicy(harness, superAdmin), ['hcaptcha']);
 
     const elevated = await harness.app.inject({
       method: 'GET',
-      url: '/catalog',
+      url: '/admin/settings?tab=captcha',
       headers: { cookie: superAdmin.cookieHeader },
     });
     assert.equal(elevated.statusCode, 200);
@@ -165,6 +173,9 @@ describe('Content-Security-Policy on responses', () => {
     t.after(() => harness.close());
     const superAdmin = await harness.registerUser();
     await harness.store.users.update(superAdmin.user.id, { status: 'disabled' });
-    assert.equal(await shellPolicy(harness, superAdmin), BASE_CONTENT_SECURITY_POLICY);
+    assert.equal(
+      await shellPolicy(harness, superAdmin, '/admin/settings'),
+      BASE_CONTENT_SECURITY_POLICY,
+    );
   });
 });

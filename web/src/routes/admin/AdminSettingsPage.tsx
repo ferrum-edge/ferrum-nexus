@@ -70,13 +70,13 @@ const CAPTCHA_PROVIDERS: ReadonlyArray<{ value: CaptchaProvider; label: string }
 
 /**
  * The self-test's failure note. The page's Content-Security-Policy admits only
- * the enabled provider's hosts, plus every provider's when the page was loaded
- * by a signed-in super admin, so a page opened before signing in cannot load
- * another vendor's script until it is reloaded.
+ * the enabled provider's hosts, plus every provider's when this settings page
+ * was loaded by a signed-in super admin, so a page opened before signing in
+ * cannot load another vendor's script until it is reloaded.
  */
 export const CAPTCHA_SELF_TEST_LOAD_FAILURE =
   "The provider's CAPTCHA script could not be loaded. Reload this page and test again: the " +
-  "portal's security policy admits a provider that is not yet enabled only on a page loaded " +
+  "portal's security policy admits a provider that is not yet enabled only on this page, loaded " +
   'while signed in as a super admin.';
 
 /**
