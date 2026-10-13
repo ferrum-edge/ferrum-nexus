@@ -346,20 +346,27 @@ type PathItemReader = (path: string) => AgentPathItem | null;
 
 function createPathItemReader(
   document: Record<string, unknown>,
-  charge: (cost: number) => void,
+  charge: (pointerCodeUnits: number) => void,
 ): PathItemReader {
   const paths = ownRecord(document, 'paths');
   const memo = new WeakMap<object, AgentPathItem>();
   const byPath = new Map<string, AgentPathItem | null>();
+  // A chain that failed once fails again from the same first reference: the
+  // document does not change during a comparison. Successes are shared
+  // through `memo`; this shares failures, so paths that all point into one
+  // broken chain walk it once.
+  const failedRefs = new Set<string>();
   return (path) => {
     if (byPath.has(path)) return byPath.get(path) ?? null;
     const raw = paths ? own(paths, path) : undefined;
     let resolved: AgentPathItem | null = null;
-    if (isRecord(raw)) {
+    const ref = isRecord(raw) ? refOf(raw) : null;
+    if (isRecord(raw) && (ref === null || !failedRefs.has(ref))) {
       try {
-        resolved = resolveAgentPathItem(document, path, raw, { memo, charge: () => charge(1) });
+        resolved = resolveAgentPathItem(document, path, raw, { memo, charge });
       } catch (error) {
         if (error instanceof BudgetExhausted) throw error;
+        if (ref !== null) failedRefs.add(ref);
         resolved = null;
       }
     }
@@ -1003,8 +1010,15 @@ export function compareSpecRevisions(
     );
   };
 
-  const readBefore = createPathItemReader(before, spend);
-  const readAfter = createPathItemReader(after, spend);
+  // A unit per reference followed, plus its pointer text at the keyed-text
+  // rate, so a long pointer costs what reading it costs.
+  const pointerText = createKeyTextCharge(spend);
+  const chargePointer = (codeUnits: number): void => {
+    spend(1);
+    pointerText.charge(codeUnits);
+  };
+  const readBefore = createPathItemReader(before, chargePointer);
+  const readAfter = createPathItemReader(after, chargePointer);
   const fromOperations = new Map<string, Record<string, unknown>>();
   const toOperations = new Map<string, Record<string, unknown>>();
   let complete = true;
@@ -1056,6 +1070,7 @@ export function compareSpecRevisions(
     }
     compareComponents();
     keyText.settle();
+    pointerText.settle();
   } catch (error) {
     if (!(error instanceof BudgetExhausted)) throw error;
     complete = false;

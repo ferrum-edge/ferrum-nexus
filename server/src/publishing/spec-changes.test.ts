@@ -244,6 +244,36 @@ describe('consumer-facing revision comparison', () => {
     ]);
   });
 
+  it('walks a broken reference chain shared by many paths once', () => {
+    // Every path points into one chain that ends at a missing item: the chain
+    // is walked once per document, not once per path.
+    const chain: Document = {};
+    for (let index = 0; index < 20; index += 1) {
+      chain[`H${index}`] = { $ref: `#/components/pathItems/H${index + 1}` };
+    }
+    let reads = 0;
+    const counted = new Proxy(chain, {
+      get(target, key, receiver) {
+        reads += 1;
+        return Reflect.get(target, key, receiver);
+      },
+      getOwnPropertyDescriptor(target, key) {
+        reads += 1;
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+    const paths: Document = { '/inline': { get: { responses: { '200': {} } } } };
+    for (let index = 0; index < 1_000; index += 1) {
+      paths[`/p${index}`] = { $ref: '#/components/pathItems/H0' };
+    }
+    const report = compareSpecRevisions(
+      document(paths, { pathItems: counted }),
+      document(structuredClone(paths), { pathItems: counted }),
+    );
+    assert.equal(report.complete, false);
+    assert.ok(reads < 1_000, `read the chain ${reads} times`);
+  });
+
   it('marks the comparison incomplete when a Path Item reference cannot be followed', () => {
     const before = document({ '/shared': { $ref: '#/components/pathItems/Missing' } });
     const report = compareSpecRevisions(before, structuredClone(before));
@@ -537,8 +567,12 @@ describe('consumer-facing revision comparison', () => {
       stats: counters,
     });
     assert.equal(report.complete, false);
-    assert.ok(report.counts.operations_removed < 200);
-    assert.ok(counters.units > 50);
+    // Spending stopped at the budget…
+    assert.ok(counters.units > 50 && counters.units <= 51, `spent ${counters.units}`);
+    // …but every removed operation is still named, at no further cost: both
+    // documents were enumerated, and a removal must never read as no change.
+    assert.equal(report.counts.operations_removed, 200);
+    assert.equal(report.changed, true);
   });
 
   it('lists breaking changes first and counts past the list cap', () => {
