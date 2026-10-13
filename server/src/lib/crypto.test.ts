@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { scryptSync } from 'node:crypto';
 import { describe, it } from 'node:test';
 
 import {
@@ -79,15 +80,33 @@ describe('password hashing', () => {
     assert.equal(await verifyPassword('correct-horse-battery-staple', hash), true);
   });
 
-  it('refuses a stored salt or key length outside the verify limits', async () => {
-    const hash = await hashPassword('pw-length-check');
-    const [, N, r, p, salt, key] = hash.split(':');
-    const longKey = Buffer.alloc(SCRYPT_VERIFY_LIMITS.maxKeyLength + 1).toString('base64');
-    const shortSalt = Buffer.alloc(SCRYPT_VERIFY_LIMITS.minSaltBytes - 1).toString('base64');
-    const params = `scrypt:${N}:${r}:${p}`;
-    assert.equal(await verifyPassword('pw-length-check', `${params}:${salt}:${longKey}`), false);
-    assert.equal(await verifyPassword('pw-length-check', `${params}:${shortSalt}:${key}`), false);
-    assert.equal(await verifyPassword('pw-length-check', hash), true);
+  it('refuses a correctly derived hash whose salt or key length is out of range', async () => {
+    // Real derivations, so only the length guards can make these fail: without
+    // them every out-of-range fixture below would verify.
+    const password = 'pw-length-check';
+    const derived = (saltBytes: number, keyBytes: number): string => {
+      const salt = Buffer.alloc(saltBytes, 7);
+      const key = scryptSync(password, salt, keyBytes, { N: 1024, r: 8, p: 1 });
+      return `scrypt:1024:8:1:${salt.toString('base64')}:${key.toString('base64')}`;
+    };
+    const { minSaltBytes, maxSaltBytes, minKeyLength, maxKeyLength } = SCRYPT_VERIFY_LIMITS;
+    for (const [saltBytes, keyBytes, accepted] of [
+      [minSaltBytes - 1, 32, false],
+      [minSaltBytes, 32, true],
+      [maxSaltBytes, 32, true],
+      [maxSaltBytes + 1, 32, false],
+      [16, minKeyLength - 1, false],
+      [16, minKeyLength, true],
+      [16, maxKeyLength, true],
+      [16, maxKeyLength + 1, false],
+    ] as const) {
+      const stored = derived(saltBytes, keyBytes);
+      assert.equal(
+        await verifyPassword(password, stored),
+        accepted,
+        `salt ${saltBytes}, key ${keyBytes}`,
+      );
+    }
   });
 });
 

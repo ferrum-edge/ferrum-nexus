@@ -167,8 +167,9 @@ export function markSpaShell(request: FastifyRequest): void {
 /** Whether this response is the SPA shell, a `304` revalidation of it included. */
 function isShellResponse(request: FastifyRequest, reply: FastifyReply): boolean {
   if (spaShellRequests.has(request.raw)) return true;
-  // `/index.html` is also a static file `@fastify/static` serves directly.
-  if ((request.url.split('?')[0] ?? '') === '/index.html') return true;
+  // `/index.html` is also a static file `@fastify/static` serves directly. Match
+  // the route Fastify selected, so every spelling that reaches it counts.
+  if (request.routeOptions.url === '/index.html') return true;
   const type = reply.getHeader('content-type');
   return typeof type === 'string' && type.toLowerCase().startsWith('text/html');
 }

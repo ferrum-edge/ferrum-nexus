@@ -184,7 +184,7 @@ describe('Content-Security-Policy on responses', () => {
     const harness = await portal();
     t.after(() => harness.close());
     await enableCaptcha(harness, 'recaptcha');
-    for (const url of ['/index.html', '/catalog']) {
+    for (const url of ['/index.html', '/%69ndex.html', '/catalog']) {
       const first = await harness.app.inject({ method: 'GET', url });
       assert.equal(first.statusCode, 200, url);
       const etag = first.headers.etag;
