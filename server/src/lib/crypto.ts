@@ -243,20 +243,28 @@ export function encryptSettingWithKey(key: Buffer, settingKey: string, value: un
 }
 
 /**
- * Decrypt an `app_settings` blob for `settingKey`. `v2` blobs must have been
- * written for that exact key. Legacy `v1` blobs (no AAD) still open so rows
- * written before this binding keep working; every new write and every key
- * rotation re-encrypts them as `v2` under their actual key.
+ * Decrypt an `app_settings` blob for `settingKey`. Only a `v2` blob written
+ * for that exact key opens: an unbound legacy `v1` blob is refused, because
+ * it is exactly what a storage-layer writer could move between rows. Pass
+ * `{ legacy: true }` only on the upgrade and rotation paths that re-encrypt
+ * such a row under its own key (`bindLegacyEncryptedSettings`, key rotation).
  */
 export function decryptSettingWithKey<T = unknown>(
   key: Buffer,
   settingKey: string,
   blob: string,
+  options: { legacy?: boolean } = {},
 ): T {
   if (blob.startsWith(`${SETTINGS_ENCRYPTED_PREFIX}:`)) {
     return decryptBlob<T>(key, blob, settingsAad(settingKey), SETTINGS_ENCRYPTED_PREFIX);
   }
-  return decryptJsonWithKey<T>(key, blob);
+  if (options.legacy === true) return decryptJsonWithKey<T>(key, blob);
+  throw internal('Encrypted setting is not bound to its key');
+}
+
+/** True for an unbound legacy (`v1`) `app_settings` blob awaiting re-encryption. */
+export function isLegacySettingBlob(value: unknown): value is string {
+  return typeof value === 'string' && value.startsWith(`${ENCRYPTED_PREFIX}:`);
 }
 
 /**
@@ -317,10 +325,17 @@ export interface NexusCrypto {
   encryptJson(settingKey: string, value: unknown): string;
   /**
    * Decrypt an `app_settings` blob written for `settingKey`. Throws on
-   * tampering, a rotated key, or a blob transplanted from another setting.
-   * Legacy unbound (`v1`) blobs still open; new writes are bound (`v2`).
+   * tampering, a rotated key, a blob transplanted from another setting, or an
+   * unbound legacy (`v1`) blob: startup re-encrypts those under their own key
+   * first (`bindLegacyEncryptedSettings`).
    */
   decryptJson<T = unknown>(settingKey: string, blob: string): T;
+  /**
+   * {@link NexusCrypto.decryptJson}, but also opening an unbound legacy
+   * (`v1`) blob. Only for the paths that immediately re-encrypt the row under
+   * its own key: the startup upgrade and key rotation.
+   */
+  decryptLegacySetting<T = unknown>(settingKey: string, blob: string): T;
   /**
    * Seal a JSON value for an `email_outbox` row under the outbox key, bound to
    * `aad` (the message's identity).
@@ -358,6 +373,8 @@ export function createCrypto(secretKey: string): NexusCrypto {
     encryptJson: (settingKey, value) => encryptSettingWithKey(settingsKey, settingKey, value),
     decryptJson: <T>(settingKey: string, blob: string) =>
       decryptSettingWithKey<T>(settingsKey, settingKey, blob),
+    decryptLegacySetting: <T>(settingKey: string, blob: string) =>
+      decryptSettingWithKey<T>(settingsKey, settingKey, blob, { legacy: true }),
     sealOutbox: (value, aad) => encryptJsonWithKey(outboxKey, value, aad),
     openOutbox: <T>(blob: string, aad: string) => decryptJsonWithKey<T>(outboxKey, blob, aad),
     sealSsoTransaction: (value) =>

@@ -294,6 +294,10 @@ account-matching rules are in
 Saved settings override the deployment's environment variables. The email
 worker re-reads them every poll (5 seconds), so no restart is needed.
 
+With **Use TLS (implicit)** off, the relay must offer STARTTLS: Nexus refuses to
+send credentials or mail over an unencrypted connection. Only the deployment's
+`NEXUS_SMTP_ALLOW_PLAINTEXT=true` setting permits a plaintext relay.
+
 **Send test email** (any admin) sends one message **directly through SMTP**
 using the saved settings, not through the outbox, and shows the relay's own
 error (for example `535 authentication failed`). It goes to your own address;

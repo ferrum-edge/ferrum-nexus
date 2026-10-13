@@ -22,6 +22,22 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     namespace, so it is off by default; docs/operations.md describes the
     trade-off. Nexus refuses to start if it equals `FERRUM_ADMIN_JWT_SECRET`.
 
+### Changed
+
+- **Mass-email outbox keys name the administrator** (#565). Rows are keyed
+  `mass:<actor_id>:<batch>:<user_id>`, the same `(administrator, batch)` scope
+  the campaign digest check and the daily charge already used, so two
+  administrators who pick the same `idempotency_key` run separate campaigns
+  instead of aliasing each other's rows. A campaign retried across the upgrade
+  queues again under the new keys.
+- **Documentation corrections** (#560, #561, #562, #567, #568, #569). Closed
+  registration has no manual account creation (onboard through single sign-on
+  or reopen registration); a first trusted password reset revokes the
+  account's credentials; a redeemed verification link does not count as proof
+  for single sign-on matching; re-enabling an application cannot fail with a
+  mapping `502`; the MongoDB released-migration guard freezes indexes only;
+  MySQL `1205` is not retried.
+
 ### Fixed
 
 - **A refused metrics read is reported, not shown as zero**
@@ -66,6 +82,43 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   checks block-form workflow containers and flow-style workflow environment values,
   and rejects Docker commands with escaped quotes that its shell-word scanner cannot
   safely resolve. The image-pin policy documents the local image exceptions.
+- **A rejected sign-in or registration asks for a fresh CAPTCHA** (#558). The
+  form clears the consumed token and resets the widget, so a corrected retry no
+  longer resubmits a single-use token the vendor already redeemed.
+- **A stale session probe cannot sign a user back in** (#559). Probes started
+  before a sign-out or a newer sign-in are ignored when they finish.
+- **Palette saves cannot recreate metadata for a deleted API on MongoDB**
+  (#563). The save re-reads the API inside its final transaction and unwinds
+  the gateway write if the API is gone.
+- **Consumer revision summaries follow referenced Path Items** (#564).
+  Operations and shared parameters behind a local Path Item `$ref`, and those
+  written beside it, are compared; a reference that cannot be followed marks
+  the comparison incomplete instead of reporting no change.
+- **A failed optional email copy is not counted as an undelivered broadcast**
+  (#566). God-mode broadcast `failed` counts only recipients whose inbox
+  message was not written.
+
+### Security
+
+- **SMTP requires STARTTLS when implicit TLS is off**
+  ([GHSA-v7p7-85wx-8wrp](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-v7p7-85wx-8wrp)).
+  With `NEXUS_SMTP_SECURE=false` a relay that does not offer STARTTLS, or a path
+  that strips it, now fails the delivery before credentials or mail are sent.
+  The new environment-only `NEXUS_SMTP_ALLOW_PLAINTEXT=true` permits a plaintext
+  relay on a trusted network.
+- **Encrypted settings are bound to their row**
+  ([GHSA-qm46-qg94-mpg7](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-qm46-qg94-mpg7)).
+  `app_settings` secrets are written as `v2` blobs authenticated with
+  `app_settings:v2:<key>`, so a ciphertext copied to another setting's row no
+  longer opens. Reads refuse unbound `v1` blobs; every start re-encrypts each
+  `v1` row the key opens, and `rotate-secret-key` writes `v2`.
+- **Registration re-checks its policy when it commits**
+  ([GHSA-9cr4-49fg-gfcx](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-9cr4-49fg-gfcx)).
+  A registration in flight when an administrator closes registration, removes
+  its role, turns on `sso_only` or requires email verification is created
+  under the policy in force at commit, or refused.
+- **API deletion never names an operator's plugin config.** The sweep after
+  the proxy delete only targets configs the portal recorded as its own.
 
 ## [0.5.2] - 2026-10-08
 

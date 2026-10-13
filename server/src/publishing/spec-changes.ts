@@ -88,6 +88,8 @@ import {
   emptySpecChangeReport,
   keyOpenApiParameters,
   mergeOpenApiParameters,
+  resolveAgentPathItem,
+  type AgentPathItem,
   type KeyedOpenApiParameter,
   type OpenApiRefResolver,
   type SpecChange,
@@ -330,32 +332,52 @@ function childPath(path: string, name: string): string {
   return path === '' ? name : `${path}.${name}`;
 }
 
-/** A Path Item as the object it names: inline, or through a local `$ref`. */
+/**
+ * A Path Item as the gateway reads it: inline, or through a chain of local
+ * Path Item `$ref`s. Fields written beside a `$ref` are kept, the outermost
+ * one winning (the same member semantics as agent operations), so a sibling
+ * method or shared `parameters` entry is compared rather than dropped. A
+ * chain that cannot be followed answers `null`.
+ */
 function resolvePathItem(
-  resolver: OpenApiRefResolver,
+  document: Record<string, unknown>,
+  path: string,
   item: unknown,
 ): Record<string, unknown> | null {
   if (!isRecord(item)) return null;
   if (refOf(item) === null) return item;
-  const resolution = resolver.resolve(item);
-  return resolution.ok ? resolution.value : null;
+  let resolved: AgentPathItem;
+  try {
+    resolved = resolveAgentPathItem(document, path, item);
+  } catch {
+    return null;
+  }
+  // Null-prototype, so a document key such as `__proto__` stays a member.
+  const merged = Object.assign(Object.create(null) as Record<string, unknown>, resolved.target);
+  for (let index = resolved.chain.length - 1; index >= 0; index -= 1) {
+    for (const [key, value] of Object.entries(resolved.chain[index] as Record<string, unknown>)) {
+      if (key !== '$ref') merged[key] = value;
+    }
+  }
+  return merged;
 }
 
 /**
  * Every operation of a document, keyed `METHOD path`, in document order.
  * Locally referenced Path Items contribute the operations of the object
- * they name; one that cannot be resolved marks the enumeration incomplete
- * instead of silently hiding its operations from both sides.
+ * they name plus any written beside the reference; one that cannot be
+ * resolved marks the enumeration incomplete instead of silently hiding its
+ * operations from both sides.
  */
-function operationsOf(
-  document: Record<string, unknown>,
-  resolver: OpenApiRefResolver,
-): { operations: Map<string, Record<string, unknown>>; complete: boolean } {
+function operationsOf(document: Record<string, unknown>): {
+  operations: Map<string, Record<string, unknown>>;
+  complete: boolean;
+} {
   const operations = new Map<string, Record<string, unknown>>();
   let complete = true;
   for (const [path, raw] of entriesOf(ownRecord(document, 'paths'))) {
     if (!isRecord(raw)) continue;
-    const item = resolvePathItem(resolver, raw);
+    const item = resolvePathItem(document, path, raw);
     if (item === null) {
       complete = false;
       continue;
@@ -369,14 +391,10 @@ function operationsOf(
 }
 
 /** The path item an operation key belongs to, resolved when it is a `$ref`. */
-function pathItemOf(
-  document: Record<string, unknown>,
-  resolver: OpenApiRefResolver,
-  path: string,
-): Record<string, unknown> {
+function pathItemOf(document: Record<string, unknown>, path: string): Record<string, unknown> {
   const paths = ownRecord(document, 'paths');
   const raw = paths ? own(paths, path) : undefined;
-  return resolvePathItem(resolver, raw) ?? {};
+  return resolvePathItem(document, path, raw) ?? {};
 }
 
 /** `METHOD path` back into its two halves, the path cut for display. */
@@ -966,7 +984,7 @@ export function compareSpecRevisions(
     path: string,
     operation: Record<string, unknown>,
   ): KeyedOpenApiParameter[] => {
-    const item = pathItemOf(document, resolver, path);
+    const item = pathItemOf(document, path);
     const shared = ownArray(item, 'parameters') ?? [];
     const declared = ownArray(operation, 'parameters') ?? [];
     return mergeOpenApiParameters(
@@ -975,8 +993,8 @@ export function compareSpecRevisions(
     );
   };
 
-  const fromEnumerated = operationsOf(before, beforeRefs);
-  const toEnumerated = operationsOf(after, afterRefs);
+  const fromEnumerated = operationsOf(before);
+  const toEnumerated = operationsOf(after);
   const fromOperations = fromEnumerated.operations;
   const toOperations = toEnumerated.operations;
   let complete = fromEnumerated.complete && toEnumerated.complete;

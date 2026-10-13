@@ -154,7 +154,9 @@ container image.
    Single sign-on (`server/src/sso/`) never grants, removes or changes `super_admin` from claims,
    and the founding registration works under every login policy, `sso_only` included.
 9. **Encrypted `app_settings` rows** (SMTP password, CAPTCHA secret, SSO client secrets) use
-   AES-256-GCM with keys HKDF-derived from `NEXUS_SECRET_KEY`. Key rotation:
+   AES-256-GCM with keys HKDF-derived from `NEXUS_SECRET_KEY`, bound to their row key
+   (`crypto.encryptJson(settingKey, value)`, AAD `app_settings:v2:<key>`). Always pass the row's
+   own key; runtime reads refuse unbound legacy `v1` blobs, which startup re-binds. Key rotation:
    [docs/operations.md](docs/operations.md).
 10. **MongoDB requires a replica set** for multi-document transactions. They run through the
     driver's `session.withTransaction()`, so a `TransientTransactionError` is retried rather than

@@ -17,7 +17,7 @@
  */
 
 import type { NexusStore } from '../db/store.js';
-import type { NexusCrypto } from '../lib/crypto.js';
+import { isLegacySettingBlob, type NexusCrypto } from '../lib/crypto.js';
 import { NexusError } from '../lib/errors.js';
 
 /** What {@link rotateEncryptedSettings} did. */
@@ -47,7 +47,8 @@ export async function rotateEncryptedSettings(
   const unreadable: string[] = [];
   for (const row of encrypted) {
     try {
-      const plain = previous.decryptJson<unknown>(row.key, String(row.value));
+      // A row not yet re-bound by a start of this release is still `v1`.
+      const plain = previous.decryptLegacySetting<unknown>(row.key, String(row.value));
       rewritten.push({ key: row.key, value: next.encryptJson(row.key, plain), encrypted: true });
     } catch {
       unreadable.push(row.key);
@@ -72,4 +73,51 @@ export async function rotateEncryptedSettings(
     skipped: rows.length - encrypted.length,
     keys: rewritten.map((row) => row.key),
   };
+}
+
+/** What {@link bindLegacyEncryptedSettings} did. */
+export interface BindingSummary {
+  /** Legacy rows re-encrypted bound to their own key. */
+  bound: string[];
+  /**
+   * Legacy rows the current key does not open (a key rotated without
+   * `rotate-key`). Left as they are: they were unreadable before too.
+   */
+  unreadable: string[];
+}
+
+/**
+ * Re-encrypt every unbound legacy (`v1`) `app_settings` blob as a `v2` blob
+ * bound to its own row key — the forward step for GHSA-qm46-qg94-mpg7.
+ *
+ * Runtime reads refuse `v1` (a storage-layer writer could move one between
+ * rows), so this runs at every start before any service reads a setting, and
+ * is a no-op once nothing legacy is left. Each row is rewritten in its own
+ * transaction, and only if it still holds the blob that was read: a value an
+ * administrator saved in the meantime is never overwritten with a stale one.
+ */
+export async function bindLegacyEncryptedSettings(
+  store: NexusStore,
+  crypto: NexusCrypto,
+): Promise<BindingSummary> {
+  const summary: BindingSummary = { bound: [], unreadable: [] };
+  for (const row of await store.settings.all()) {
+    if (!row.encrypted || !isLegacySettingBlob(row.value)) continue;
+    const legacy = row.value;
+    let bound: string;
+    try {
+      bound = crypto.encryptJson(row.key, crypto.decryptLegacySetting<unknown>(row.key, legacy));
+    } catch {
+      summary.unreadable.push(row.key);
+      continue;
+    }
+    const written = await store.transaction(async (tx) => {
+      const current = await tx.settings.get(row.key);
+      if (!current?.encrypted || current.value !== legacy) return false;
+      await tx.settings.set(row.key, bound, true);
+      return true;
+    });
+    if (written) summary.bound.push(row.key);
+  }
+  return summary;
 }

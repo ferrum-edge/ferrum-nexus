@@ -5629,10 +5629,24 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         //    disassociation step is needed at all; the sweep afterwards only
         //    exists in case a gateway ever leaves one behind, and 404s
         //    harmlessly when the cascade did its job.
+        //
+        //    The sweep names only configs the portal recorded as its own
+        //    (`api_plugins`, `api_gateway_plugins`). An operator's config on
+        //    this proxy goes with the proxy through Edge's cascade, as every
+        //    proxy-scoped config does, but Nexus itself never issues a delete
+        //    for an id it did not create (CLAUDE.md rule 13).
         if (api.ferrum_proxy_id) {
           const attached = await pluginsOf(api);
+          const owned = new Set<string>();
+          for (const row of await store.apiPlugins.listByApi(api.id)) {
+            if (row.ferrum_plugin_config_id) owned.add(row.ferrum_plugin_config_id);
+          }
+          for (const row of await store.apiGatewayPlugins.listByApi(api.id)) {
+            if (row.ferrum_plugin_config_id) owned.add(row.ferrum_plugin_config_id);
+          }
           await edge.proxies.delete(api.ferrum_proxy_id, actor.id);
           for (const plugin of attached) {
+            if (!owned.has(plugin.id)) continue;
             await edge.pluginConfigs.delete(plugin.id, actor.id).catch(() => undefined);
           }
         }

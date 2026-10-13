@@ -1437,12 +1437,18 @@ The procedures are in
 `smtp.password`, `captcha.secret_key` and each single sign-on provider's
 `sso.client_secret.<id>` are stored encrypted:
 
-| Property    | Value                                                                    |
-| ----------- | ------------------------------------------------------------------------ |
-| Cipher      | AES-256-GCM                                                              |
-| Blob format | `v1:<iv b64>:<ciphertext b64>:<tag b64>`, 12-byte IV, 16-byte tag        |
-| Key         | HKDF-SHA-256 from `NEXUS_SECRET_KEY`, info `nexus-settings-v1`, 32 bytes |
-| Integrity   | A tampered blob fails to decrypt                                         |
+| Property    | Value                                                                     |
+| ----------- | ------------------------------------------------------------------------- |
+| Cipher      | AES-256-GCM                                                               |
+| Blob format | `v2:<iv b64>:<ciphertext b64>:<tag b64>`, 12-byte IV, 16-byte tag         |
+| Key         | HKDF-SHA-256 from `NEXUS_SECRET_KEY`, info `nexus-settings-v1`, 32 bytes  |
+| Binding     | Additional authenticated data is `app_settings:v2:<setting key>`          |
+| Integrity   | A tampered blob, or one copied to another setting's row, fails to decrypt |
+
+Releases before the binding wrote unbound `v1` blobs. Reads refuse them, and
+every start re-encrypts each `v1` row the current key opens as `v2` bound to its
+own key before any service reads a setting. A `v1` row the key cannot open is
+left as it is and logged; it was unreadable before too.
 
 All are **write-only over HTTP**: set through `PUT /api/admin/settings` (or
 `PUT /api/admin/sso`), never returned. Responses expose only `password_set` /

@@ -30,6 +30,7 @@ import {
 } from './admin/gateway-reconciliation.js';
 import { createGodService, type GodService } from './admin/god-service.js';
 import { createMassEmailService, type MassEmailService } from './admin/mass-email-service.js';
+import { bindLegacyEncryptedSettings } from './admin/rotate-key.js';
 import { createSettingsService, type SettingsService } from './admin/settings-service.js';
 import { createSmtpTestService, type SmtpTestService } from './admin/smtp-test-service.js';
 import { createAuditService, type AuditService } from './audit/service.js';
@@ -359,6 +360,21 @@ export async function buildServer(
     bodyLimit: 4 * 1024 * 1024,
     frameworkErrors: handleFrameworkError,
   });
+
+  // Before any service reads a setting: runtime reads refuse an unbound
+  // legacy (`v1`) encrypted setting, so every one the key opens is re-bound to
+  // its own row first (GHSA-qm46-qg94-mpg7). A no-op once none are left.
+  const binding = await bindLegacyEncryptedSettings(deps.store, crypto);
+  if (binding.bound.length > 0) {
+    app.log.info({ keys: binding.bound }, 'Bound legacy encrypted settings to their keys');
+  }
+  if (binding.unreadable.length > 0) {
+    app.log.warn(
+      { keys: binding.unreadable },
+      'Legacy encrypted settings do not open with NEXUS_SECRET_KEY and stay unreadable; ' +
+        're-enter them, or run rotate-secret-key from the key they were written under',
+    );
+  }
 
   /* ── COMPOSITION — services ─────────────────────────────────────────────
    * Construct every service exactly once, in dependency order. Services take

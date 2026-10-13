@@ -927,6 +927,13 @@ settings override these at runtime.
 | `NEXUS_EMAIL_FROM`                        | `Ferrum Nexus <no-reply@example.com>` |
 | `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` | _(empty)_                             |
 
+With `NEXUS_SMTP_SECURE=false` (port 587 style) the connection must upgrade
+with STARTTLS: a relay that does not offer it, or a network path that strips
+it, fails the delivery before any credential or message is sent.
+`NEXUS_SMTP_ALLOW_PLAINTEXT=true` turns that requirement off, for a plaintext
+relay on a trusted local network only. It is environment-only; stored settings
+cannot enable it.
+
 `NEXUS_SMTP_PASSWORD` is only sent with the environment's own host, port, TLS
 mode and username. If stored settings change any of those, they need their own
 stored password; with none (or one the current `NEXUS_SECRET_KEY` cannot
