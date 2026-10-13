@@ -948,6 +948,36 @@ describe('provider plugin palette', () => {
       );
     });
 
+    it('holds the canonical proxy lease through the metadata commit', async () => {
+      // An API deletion deletes the rows under `proxy:<id>`. On MongoDB a
+      // deletion committing between this save's parent read and its upsert
+      // leaves an orphan row unless the save commits under the same lease, so
+      // every transaction the save opens is probed for it from outside.
+      const probes: ('held' | 'free')[] = [];
+      const transaction = harness.store.transaction.bind(harness.store);
+      harness.store.transaction = async (fn, options) => {
+        const owner = `probe-${probes.length}`;
+        const now = new Date();
+        const acquired = await harness.store.leases.acquire(
+          `proxy:${proxyId}`,
+          owner,
+          new Date(now.getTime() + 1_000).toISOString(),
+          now.toISOString(),
+        );
+        if (acquired) await harness.store.leases.release(`proxy:${proxyId}`, owner);
+        probes.push(acquired ? 'free' : 'held');
+        return transaction(fn, options);
+      };
+      try {
+        const response = await setPlugin('request_termination', { config: { status_code: 503 } });
+        assert.equal(response.statusCode, 200, response.body);
+      } finally {
+        harness.store.transaction = transaction;
+      }
+      assert.ok(probes.includes('held'), `the commit ran under the proxy lease: ${probes.join()}`);
+      assert.ok(await harness.store.apiPlugins.find(apiId, 'request_termination'));
+    });
+
     it('undoes the gateway write when the store row cannot be saved', async () => {
       failNextUpsert(harness, 'database unavailable');
       const response = await setPlugin('request_termination', { config: { status_code: 503 } });
