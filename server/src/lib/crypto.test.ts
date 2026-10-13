@@ -50,7 +50,7 @@ describe('password hashing', () => {
     }
   });
 
-  it('refuses stored cost parameters beyond the verify limits without deriving (#584)', async () => {
+  it('refuses cost parameters beyond the verify limits without deriving (#584)', async () => {
     const hash = await hashPassword('correct-horse-battery-staple');
     const [, , , , salt, key] = hash.split(':');
     const withParams = (N: number | string, r: number | string, p: number | string): string =>
