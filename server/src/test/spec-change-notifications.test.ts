@@ -626,6 +626,54 @@ describe('spec change notifications', () => {
         'exactly one unread notice',
       );
     });
+
+    it('keeps an unread incomplete comparison\'s warning through a harmless rewrite', async () => {
+      const api = await harness.store.apis.findById(quickId);
+      assert.ok(api);
+      await harness.store.notifications.markAllRead(erin.user.id, new Date().toISOString());
+      const notifier = createSpecChangeNotifier({
+        store: harness.store,
+        email: harness.services.email,
+        audit: harness.services.audit,
+        config: harness.config,
+      });
+      const entry = (revision: string, report: SpecChangeReport): ApiSpecChangeEntry => ({
+        id: `${revision}-change`,
+        api_id: quickId,
+        revision_id: revision,
+        previous_revision_id: null,
+        kind: 'update',
+        version: revision,
+        previous_version: null,
+        report,
+        created_at: new Date().toISOString(),
+      });
+      const actor = { id: provider.user.id, role: provider.user.role };
+      // A's comparison could not be completed and named nothing; B, a complete
+      // and harmless revision, arrives after A's notice was written.
+      await notifier.notify(
+        actor,
+        api,
+        entry('inc-a', { ...emptySpecChangeReport(), changed: false, complete: false }),
+        null,
+      );
+      await notifier.idle();
+      await notifier.notify(
+        actor,
+        api,
+        entry('inc-b', { ...emptySpecChangeReport(), changed: true, info_changes: ['version'] }),
+        null,
+      );
+      await notifier.idle();
+
+      const unread = (await quickNotices()).filter((row) => row.read_at === null);
+      assert.equal(unread.length, 1, 'one unread notice, rewritten');
+      assert.equal(
+        unread[0]?.title,
+        'Notify Quick spec updated to inc-b (could not fully compare)',
+      );
+      assert.match(unread[0]?.body ?? '', /could not be fully compared/);
+    });
   });
 
   it('never fails the publish when notifying fails', async () => {

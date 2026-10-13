@@ -218,19 +218,19 @@ export function summarizeSpecChange(apiName: string, entry: ApiSpecChangeEntry):
 
   const sentences: string[] = [];
   if (total === 0) {
-    // Nothing structural: `changed` is set by an `info` field or an agent
-    // tool's definition alone.
+    // Nothing structural named: `changed` is set by an `info` field or an
+    // agent tool's definition alone, or the comparison could not finish.
     const fields = report.info_changes;
     const named =
       fields.length > 1 ? `${fields.slice(0, -1).join(', ')} and ${fields.at(-1)}` : fields[0];
     if (named !== undefined) {
-      sentences.push(tools.length > 0 ? `Its ${named} changed.` : `Only its ${named} changed.`);
-    } else if (!report.complete) {
+      // "Only" is a claim a complete comparison alone can make.
       sentences.push(
-        'The comparison could not be completed, so it cannot say what changed: treat this ' +
-          'revision as possibly breaking.',
+        tools.length > 0 || !report.complete
+          ? `Its ${named} changed.`
+          : `Only its ${named} changed.`,
       );
-    } else if (tools.length === 0) {
+    } else if (report.complete && tools.length === 0) {
       sentences.push('The comparison found no difference in its operations or schemas.');
     }
   } else {
@@ -248,8 +248,12 @@ export function summarizeSpecChange(apiName: string, entry: ApiSpecChangeEntry):
     sentences.push(`${plural(total, 'change')} in all, ${counts.breaking} breaking.`);
   }
   if (tools.length > 0) sentences.push(agentToolsChangedText(tools));
-  if (!report.complete && total > 0) {
-    sentences.push('The comparison was incomplete, so this may not be everything.');
+  if (!report.complete) {
+    // Every incomplete report says so, in the summary the email carries too.
+    sentences.push(
+      'The comparison was incomplete, so this may not be everything: treat this revision as ' +
+        'possibly breaking.',
+    );
   }
 
   // Removed operations first: they are the changes a caller is most likely to
@@ -278,21 +282,52 @@ export function specChangeEmailLine(line: string): string {
 }
 
 /**
+ * The risk an earlier, unread revision carried into a rewrite: it broke
+ * something (`true`), its comparison could not be completed (`'incomplete'`),
+ * or neither (`false`).
+ */
+export type EarlierRisk = boolean | 'incomplete';
+
+/** The risk a notice's own title records. */
+export function titleRisk(title: string): EarlierRisk {
+  if (title.endsWith(BREAKING_TITLE_MARK)) return true;
+  return title.endsWith(INCOMPLETE_TITLE_MARK) ? 'incomplete' : false;
+}
+
+/**
  * What an unread notice becomes when a later revision rewrites it: the newest
  * summary, saying that earlier revisions are on the Changes tab, and still
- * marked breaking when an earlier one was.
+ * marked breaking when an earlier one was — or marked as not fully compared
+ * when an earlier one could not be, so neither warning is lost to a harmless
+ * revision after it.
  */
 export function rewrittenNotice(
   notice: SpecChangeNotice,
-  earlierBreaking: boolean,
+  earlier: EarlierRisk,
 ): { title: string; body: string } {
-  const title =
-    earlierBreaking && !notice.breaking ? `${notice.title}${BREAKING_TITLE_MARK}` : notice.title;
-  const earlier =
-    earlierBreaking && !notice.breaking
-      ? 'An earlier revision since you last read included breaking changes; see the Changes tab.'
-      : 'Earlier revisions since you last read are on the Changes tab too.';
-  return { title, body: `${notice.body} ${earlier}` };
+  const own = titleRisk(notice.title);
+  const bare =
+    own === 'incomplete' ? notice.title.slice(0, -INCOMPLETE_TITLE_MARK.length) : notice.title;
+  if (earlier === true && own !== true) {
+    return {
+      title: `${bare}${BREAKING_TITLE_MARK}`,
+      body:
+        `${notice.body} An earlier revision since you last read included breaking changes; ` +
+        'see the Changes tab.',
+    };
+  }
+  if (earlier === 'incomplete' && own === false) {
+    return {
+      title: `${notice.title}${INCOMPLETE_TITLE_MARK}`,
+      body:
+        `${notice.body} An earlier revision since you last read could not be fully compared ` +
+        'and may include breaking changes; see the Changes tab.',
+    };
+  }
+  return {
+    title: notice.title,
+    body: `${notice.body} Earlier revisions since you last read are on the Changes tab too.`,
+  };
 }
 
 /** Tells an API's grantees about a recorded spec change. */
@@ -378,18 +413,28 @@ interface FanOut {
   supersededIds: Uuid[];
   /** Whether any of those revisions included a breaking change. */
   supersededBreaking: boolean;
+  /** Whether any of those revisions' comparisons could not be completed. */
+  supersededIncomplete: boolean;
 }
 
 /** What a waiting fan-out passes on to the one that replaces it. */
 function carriedFrom(
   previous: FanOut | null,
-): Pick<FanOut, 'supersededIds' | 'supersededBreaking'> {
-  if (previous === null) return { supersededIds: [], supersededBreaking: false };
+): Pick<FanOut, 'supersededIds' | 'supersededBreaking' | 'supersededIncomplete'> {
+  if (previous === null) {
+    return { supersededIds: [], supersededBreaking: false, supersededIncomplete: false };
+  }
   return {
     supersededIds: [...previous.supersededIds, previous.change.revision_id],
-    supersededBreaking: previous.supersededBreaking || specChangeIsBreaking(previous.change.report),
+    supersededBreaking: previous.supersededBreaking || previous.change.report.counts.breaking > 0,
+    supersededIncomplete: previous.supersededIncomplete || !previous.change.report.complete,
   };
 }
+
+/** What an email adds when a replaced revision broke something and this one did not. */
+const SUPERSEDED_INCOMPLETE_NOTE =
+  'A revision published just before this one could not be fully compared and may include ' +
+  'breaking changes; see the Changes tab.';
 
 /** What an email adds when a replaced revision broke something and this one did not. */
 const SUPERSEDED_BREAKING_NOTE =
@@ -426,11 +471,23 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
     const notice = summarizeSpecChange(api.name, change);
     // A replaced revision that broke something is still news: it marks every
     // notice, fresh or rewritten, and the email says so.
-    const carried = run.supersededBreaking && !notice.breaking;
-    const freshContent = carried
-      ? rewrittenNotice(notice, true)
-      : { title: notice.title, body: notice.body };
-    const summary = carried ? `${notice.summary} ${SUPERSEDED_BREAKING_NOTE}` : notice.summary;
+    const own = titleRisk(notice.title);
+    const carried: EarlierRisk =
+      run.supersededBreaking && own !== true
+        ? true
+        : run.supersededIncomplete && own === false
+          ? 'incomplete'
+          : false;
+    const freshContent =
+      carried !== false
+        ? rewrittenNotice(notice, carried)
+        : { title: notice.title, body: notice.body };
+    const summary =
+      carried === true
+        ? `${notice.summary} ${SUPERSEDED_BREAKING_NOTE}`
+        : carried === 'incomplete'
+          ? `${notice.summary} ${SUPERSEDED_INCOMPLETE_NOTE}`
+          : notice.summary;
     const vars = {
       api_name: inertText(oneLine(api.name)),
       api_slug: api.slug,
@@ -466,6 +523,7 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
       superseded: run.supersededIds.length,
       superseded_spec_ids: run.supersededIds,
       superseded_breaking: run.supersededBreaking,
+      superseded_incomplete: run.supersededIncomplete,
       batches,
       failed_batches: failedBatches,
     });
@@ -518,20 +576,29 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
             );
           }
           // A rewritten notice keeps saying an earlier revision was breaking,
-          // whichever of an account's unread notices said it.
-          const marked = new Set<Uuid>();
+          // or could not be fully compared, whichever of an account's unread
+          // notices said it; breaking outranks not fully compared.
+          const risk = new Map<Uuid, EarlierRisk>();
           for (const row of unread) {
-            if (carried || row.title.endsWith(BREAKING_TITLE_MARK)) marked.add(row.user_id);
+            const rowRisk = titleRisk(row.title);
+            const current = risk.get(row.user_id) ?? carried;
+            const worst =
+              current === true || rowRisk === true
+                ? true
+                : current === 'incomplete' || rowRisk === 'incomplete'
+                  ? 'incomplete'
+                  : false;
+            risk.set(row.user_id, worst);
           }
-          const earlierBreaking = [...unreadBy.keys()].filter((userId) => marked.has(userId));
-          const plain = [...unreadBy.keys()].filter((userId) => !marked.has(userId));
-          await tx.notifications.updateUnread(
-            earlierBreaking,
-            type,
-            link,
-            rewrittenNotice(notice, true),
-          );
-          await tx.notifications.updateUnread(plain, type, link, rewrittenNotice(notice, false));
+          for (const level of [true, 'incomplete', false] as const) {
+            const userIds = [...unreadBy.keys()].filter((userId) => risk.get(userId) === level);
+            await tx.notifications.updateUnread(
+              userIds,
+              type,
+              link,
+              rewrittenNotice(notice, level),
+            );
+          }
           counts.notified = fresh.length;
           counts.already_notified = unreadBy.size;
           await audit

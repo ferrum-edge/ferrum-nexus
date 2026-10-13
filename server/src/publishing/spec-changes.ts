@@ -430,6 +430,11 @@ function pathItemRecord(item: AgentPathItem, key: string): Record<string, unknow
   return isRecord(member) ? member : null;
 }
 
+/** A key of `paths` that names a path, as the agent enumerator reads them. */
+function isPathKey(key: string): boolean {
+  return key.startsWith('/');
+}
+
 /** What is known of one document's operations, filled in as it is read. */
 interface OperationIndex {
   /** Every operation read so far, keyed `METHOD path`, in document order. */
@@ -446,7 +451,7 @@ function operationIndex(document: Record<string, unknown>): OperationIndex {
   return {
     operations: new Map(),
     resolved: new Set(),
-    named: new Set(entriesOf(ownRecord(document, 'paths')).keys()),
+    named: new Set([...entriesOf(ownRecord(document, 'paths')).keys()].filter(isPathKey)),
     complete: true,
   };
 }
@@ -461,7 +466,14 @@ function enumerateOperations(
   index: OperationIndex,
 ): void {
   for (const [path, raw] of entriesOf(ownRecord(document, 'paths'))) {
-    if (!isRecord(raw)) continue;
+    // `x-` extensions beside the paths are arbitrary data, not Path Items.
+    if (!isPathKey(path)) continue;
+    // A path whose item is not an object declares no operations: known
+    // empty, the way the parser reads it.
+    if (!isRecord(raw)) {
+      index.resolved.add(path);
+      continue;
+    }
     const item = read(path);
     if (item === null) {
       index.complete = false;

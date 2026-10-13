@@ -259,6 +259,32 @@ describe('spec change notices', () => {
     assert.equal(specChangeIsNews(unchanged), false);
   });
 
+  it('warns about an incomplete comparison even when only info changed', () => {
+    const notice = summarizeSpecChange(
+      'Billing',
+      entry({ complete: false, changed: true, info_changes: ['version'] }),
+    );
+    assert.doesNotMatch(notice.summary, /Only its/);
+    assert.match(notice.summary, /Its version changed\./);
+    assert.match(notice.summary, /The comparison was incomplete/);
+    assert.equal(notice.breaking, true);
+  });
+
+  it('keeps an earlier incomplete comparison in a rewritten notice', () => {
+    const harmless = summarizeSpecChange(
+      'Billing',
+      entry({ changed: true, info_changes: ['version'] }),
+    );
+    const rewritten = rewrittenNotice(harmless, 'incomplete');
+    assert.ok(rewritten.title.endsWith(INCOMPLETE_TITLE_MARK), rewritten.title);
+    assert.match(rewritten.body, /could not be fully compared/);
+    // Breaking outranks it, replacing the incomplete mark.
+    const incomplete = summarizeSpecChange('Billing', entry({ complete: false, changed: false }));
+    const upgraded = rewrittenNotice(incomplete, true);
+    assert.ok(upgraded.title.endsWith(BREAKING_TITLE_MARK), upgraded.title);
+    assert.ok(!upgraded.title.includes(INCOMPLETE_TITLE_MARK), upgraded.title);
+  });
+
   it('marks an incomplete comparison that named nothing as possibly breaking', () => {
     const notice = summarizeSpecChange('Billing', entry({ complete: false, changed: false }));
     assert.equal(notice.breaking, true);

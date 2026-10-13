@@ -278,6 +278,33 @@ describe('consumer-facing revision comparison', () => {
     assert.ok(counters.units < 20_000, `spent ${counters.units}`);
   });
 
+  it('reads a path whose item is not an object as declaring no operations', () => {
+    for (const replacement of [null, 'gone', ['get']]) {
+      const before = document({
+        '/kept': { get: { responses: { '200': {} } } },
+        '/gone': { get: { responses: { '200': {} } } },
+      });
+      const after = document({
+        '/kept': { get: { responses: { '200': {} } } },
+        '/gone': replacement,
+      });
+      const report = compareSpecRevisions(before, after);
+      assert.equal(report.complete, true, String(replacement));
+      assert.deepEqual(lines(report), [
+        'breaking | operation_removed | GET /gone | operation | - | -',
+      ]);
+    }
+  });
+
+  it('ignores extensions beside the paths', () => {
+    const before = document({
+      '/kept': { get: { responses: { '200': {} } } },
+      'x-example': { $ref: '#/examples/Foo' },
+    });
+    const report = compareSpecRevisions(before, structuredClone(before));
+    assert.deepEqual(report, emptySpecChangeReport());
+  });
+
   it('marks the comparison incomplete when a Path Item reference cannot be followed', () => {
     const before = document({ '/shared': { $ref: '#/components/pathItems/Missing' } });
     const report = compareSpecRevisions(before, structuredClone(before));
