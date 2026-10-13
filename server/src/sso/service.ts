@@ -97,6 +97,7 @@ import { SCRYPT_PARAMS, type NexusCrypto } from '../lib/crypto.js';
 import { conflict, forbidden, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import {
+  REGISTRATION_POLICY_LOCK_KEY,
   SSO_SETTINGS_LOCK_KEY,
   ssoProviderLockKey,
   userLifecycleLockKey,
@@ -1392,73 +1393,76 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
       ];
       await locks(SSO_SETTINGS_LOCK_KEY, () =>
         underProviderLocks(affected, () =>
-          store.transaction(async (tx) => {
-            // A compare-and-swap. Everything above, the keys just taken and the
-            // providers whose links go below included, was worked out from
-            // `stored`, which was read before any key was held. A save that
-            // committed since would make all of it stale: a provider it added
-            // would be dropped unlocked, and its links left behind.
-            if (!isDeepStrictEqual(await readStoredSsoSettings(tx), stored)) {
-              throw conflict(
-                'Single sign-on settings changed since they were read; reload and try again',
-              );
-            }
-            for (const id of reissued) {
-              if ((await tx.userIdentities.countByProvider(id)) > 0) throw issuerHasLinks(id);
-            }
-            await tx.settings.set(SSO_SETTINGS_KEY, next, false);
-            for (const [id, blob] of encrypted) {
-              if (blob === null) await tx.settings.delete(ssoClientSecretKey(id));
-              else await tx.settings.set(ssoClientSecretKey(id), blob, true);
-            }
-            // A removed provider's links go with it, so a provider added later
-            // under the same id starts with none. A stored provider shadowed by an
-            // environment one leaves the links alone: they are the environment
-            // provider's, which stays in force.
-            const envIds = new Set(config.sso.providers.map((provider) => provider.settings.id));
-            const linksRemoved: Record<string, number> = {};
-            for (const id of removed) {
-              if (envIds.has(id)) continue;
-              linksRemoved[id] = await tx.userIdentities.deleteByProvider(id);
-            }
-            const nextProviders = new Map(
-              providersInForce(config, next).map(({ settings }): [string, SsoProviderSettings] => [
-                settings.id,
-                settings,
-              ]),
-            );
-            const providersTrustLowered = providersInForce(config, stored)
-              .filter(({ settings }) => {
-                const updated = nextProviders.get(settings.id);
-                return (
-                  updated !== undefined &&
-                  updated.issuer === settings.issuer &&
-                  grantsAdmin(settings) &&
-                  !grantsAdmin(updated)
+          // Innermost, after the provider keys: the registration commit reads
+          // `sso_only` under this key (GHSA-9cr4-49fg-gfcx).
+          locks(REGISTRATION_POLICY_LOCK_KEY, () =>
+            store.transaction(async (tx) => {
+              // A compare-and-swap. Everything above, the keys just taken and the
+              // providers whose links go below included, was worked out from
+              // `stored`, which was read before any key was held. A save that
+              // committed since would make all of it stale: a provider it added
+              // would be dropped unlocked, and its links left behind.
+              if (!isDeepStrictEqual(await readStoredSsoSettings(tx), stored)) {
+                throw conflict(
+                  'Single sign-on settings changed since they were read; reload and try again',
                 );
-              })
-              .map(({ settings }) => settings.id)
-              .sort();
-            // Key names and provider ids only: never a secret, and never the
-            // mappings themselves, which the settings page shows to admins anyway.
-            await audit.forStore(tx).record(
-              actor,
-              AuditAction.ADMIN_SETTINGS_UPDATE,
-              { type: 'settings', id: SSO_SETTINGS_KEY },
-              {
-                section: 'sso',
-                changed_keys: changed,
-                providers_added: added,
-                providers_removed: removed,
-                links_removed: linksRemoved,
-                client_secrets_changed: [...secretWrites.keys()],
-                ...(providersTrustLowered.length > 0
-                  ? { providers_trust_lowered: providersTrustLowered }
-                  : {}),
-              },
-              ip,
-            );
-          }),
+              }
+              for (const id of reissued) {
+                if ((await tx.userIdentities.countByProvider(id)) > 0) throw issuerHasLinks(id);
+              }
+              await tx.settings.set(SSO_SETTINGS_KEY, next, false);
+              for (const [id, blob] of encrypted) {
+                if (blob === null) await tx.settings.delete(ssoClientSecretKey(id));
+                else await tx.settings.set(ssoClientSecretKey(id), blob, true);
+              }
+              // A removed provider's links go with it, so a provider added later
+              // under the same id starts with none. A stored provider shadowed by an
+              // environment one leaves the links alone: they are the environment
+              // provider's, which stays in force.
+              const envIds = new Set(config.sso.providers.map((provider) => provider.settings.id));
+              const linksRemoved: Record<string, number> = {};
+              for (const id of removed) {
+                if (envIds.has(id)) continue;
+                linksRemoved[id] = await tx.userIdentities.deleteByProvider(id);
+              }
+              const nextProviders = new Map(
+                providersInForce(config, next).map(
+                  ({ settings }): [string, SsoProviderSettings] => [settings.id, settings],
+                ),
+              );
+              const providersTrustLowered = providersInForce(config, stored)
+                .filter(({ settings }) => {
+                  const updated = nextProviders.get(settings.id);
+                  return (
+                    updated !== undefined &&
+                    updated.issuer === settings.issuer &&
+                    grantsAdmin(settings) &&
+                    !grantsAdmin(updated)
+                  );
+                })
+                .map(({ settings }) => settings.id)
+                .sort();
+              // Key names and provider ids only: never a secret, and never the
+              // mappings themselves, which the settings page shows to admins anyway.
+              await audit.forStore(tx).record(
+                actor,
+                AuditAction.ADMIN_SETTINGS_UPDATE,
+                { type: 'settings', id: SSO_SETTINGS_KEY },
+                {
+                  section: 'sso',
+                  changed_keys: changed,
+                  providers_added: added,
+                  providers_removed: removed,
+                  links_removed: linksRemoved,
+                  client_secrets_changed: [...secretWrites.keys()],
+                  ...(providersTrustLowered.length > 0
+                    ? { providers_trust_lowered: providersTrustLowered }
+                    : {}),
+                },
+                ip,
+              );
+            }),
+          ),
         ),
       );
       oidc.clearCache();

@@ -118,7 +118,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   ([GHSA-9cr4-49fg-gfcx](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-9cr4-49fg-gfcx)).
   A registration in flight when an administrator closes registration, removes
   its role, turns on `sso_only` or requires email verification is created
-  under the policy in force at commit, or refused.
+  under the policy in force at commit, or refused. The commit and every writer
+  of either policy share one cross-instance key (`auth:registration-policy`),
+  so no policy change can land between the final read and the account. A
+  bootstrap candidate that loses the founder seat now answers to the
+  registration policy like any other registration.
 - **API deletion never names an operator's plugin config.** The sweep after
   the proxy delete only targets configs the portal recorded as its own.
 
