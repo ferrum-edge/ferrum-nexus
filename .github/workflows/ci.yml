@@ -222,12 +222,23 @@ jobs:
         if: ${{ matrix.backend == 'mongodb' }}
         run: |
           docker run -d --name nexus-mongo -p 27017:27017 mongo:9@sha256:bac22ea7710d774103dcad3ec8ac13cba1eb378f488e3ce8a6b3a1adf2ba9dcc --replSet rs0 --bind_ip_all
+          ready=""
           for attempt in $(seq 1 60); do
             if docker exec nexus-mongo mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'; then
+              ready=1
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' nexus-mongo)" != true ]; then
               break
             fi
             sleep 1
           done
+          if [ -z "$ready" ]; then
+            echo "::error::mongod did not become ready"
+            docker inspect --format 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' nexus-mongo
+            docker logs --tail 60 nexus-mongo 2>&1
+            exit 1
+          fi
           docker exec nexus-mongo mongosh --quiet --eval \
             'rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] })'
           docker exec nexus-mongo mongosh --quiet --eval \
