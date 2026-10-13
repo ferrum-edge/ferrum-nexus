@@ -50,6 +50,7 @@ import {
   type ApiSpecChangeEntry,
   type Role,
   type SpecChange,
+  type SpecChangeReport,
   type Uuid,
 } from '@ferrum-nexus/shared';
 
@@ -88,6 +89,31 @@ export interface SpecChangeNotice {
  * dropped from an unread notice by a harmless one after it.
  */
 export const BREAKING_TITLE_MARK = ' (breaking changes)';
+
+/**
+ * How a notice's title says the comparison could not be completed. Such a
+ * revision may have broken anything, so it travels the breaking path.
+ */
+export const INCOMPLETE_TITLE_MARK = ' (could not fully compare)';
+
+/**
+ * Whether a recorded revision is news for its grantees. One rule at the
+ * boundary: a comparison that could not be completed — at any stage — is
+ * never read as "no change"; it is sent, and as breaking
+ * ({@link summarizeSpecChange}). Only a complete comparison that found nothing
+ * is withheld.
+ */
+export function specChangeIsNews(report: SpecChangeReport): boolean {
+  return report.changed || !report.complete;
+}
+
+/**
+ * Whether a revision must be treated as breaking: it broke something, or the
+ * comparison could not establish that it did not.
+ */
+export function specChangeIsBreaking(report: SpecChangeReport): boolean {
+  return report.counts.breaking > 0 || !report.complete;
+}
 
 /**
  * Provider-written text made inert as a link. Mail clients turn anything that
@@ -199,6 +225,11 @@ export function summarizeSpecChange(apiName: string, entry: ApiSpecChangeEntry):
       fields.length > 1 ? `${fields.slice(0, -1).join(', ')} and ${fields.at(-1)}` : fields[0];
     if (named !== undefined) {
       sentences.push(tools.length > 0 ? `Its ${named} changed.` : `Only its ${named} changed.`);
+    } else if (!report.complete) {
+      sentences.push(
+        'The comparison could not be completed, so it cannot say what changed: treat this ' +
+          'revision as possibly breaking.',
+      );
     } else if (tools.length === 0) {
       sentences.push('The comparison found no difference in its operations or schemas.');
     }
@@ -217,7 +248,7 @@ export function summarizeSpecChange(apiName: string, entry: ApiSpecChangeEntry):
     sentences.push(`${plural(total, 'change')} in all, ${counts.breaking} breaking.`);
   }
   if (tools.length > 0) sentences.push(agentToolsChangedText(tools));
-  if (!report.complete) {
+  if (!report.complete && total > 0) {
     sentences.push('The comparison was incomplete, so this may not be everything.');
   }
 
@@ -235,8 +266,9 @@ export function summarizeSpecChange(apiName: string, entry: ApiSpecChangeEntry):
   const summary = [...sentences, caveat].join(' ');
   const listed = lines.length > 0 ? [`${lines.join('; ')}.`] : [];
   const body = [...sentences, ...listed, caveat].join(' ');
-  const breaking = counts.breaking > 0;
-  const title = `${oneLine(apiName)} spec ${headline}${breaking ? BREAKING_TITLE_MARK : ''}`;
+  const breaking = specChangeIsBreaking(report);
+  const mark = counts.breaking > 0 ? BREAKING_TITLE_MARK : breaking ? INCOMPLETE_TITLE_MARK : '';
+  const title = `${oneLine(apiName)} spec ${headline}${mark}`;
   return { headline, title, breaking, summary, lines, body };
 }
 
@@ -355,7 +387,7 @@ function carriedFrom(
   if (previous === null) return { supersededIds: [], supersededBreaking: false };
   return {
     supersededIds: [...previous.supersededIds, previous.change.revision_id],
-    supersededBreaking: previous.supersededBreaking || previous.change.report.counts.breaking > 0,
+    supersededBreaking: previous.supersededBreaking || specChangeIsBreaking(previous.change.report),
   };
 }
 
@@ -659,7 +691,7 @@ export function createSpecChangeNotifier(deps: SpecChangeNotifierDeps): SpecChan
     notify(actor, api, change, ip): Promise<void> {
       // A revision that changed nothing is nobody's news, and must not take
       // the place of one waiting that did.
-      if (!change.report.changed || stopping) return Promise.resolve();
+      if (!specChangeIsNews(change.report) || stopping) return Promise.resolve();
       const lane = lanes.get(api.id);
       if (lane) {
         lane.waiting = { actor, api, change, ip, ...carriedFrom(lane.waiting) };

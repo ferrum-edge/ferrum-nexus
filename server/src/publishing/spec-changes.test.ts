@@ -215,35 +215,6 @@ describe('consumer-facing revision comparison', () => {
     assert.ok(counters.units > 50_000);
   });
 
-  it('still reports a removed operation when deep comparisons exhaust the budget', () => {
-    // Eight referenced paths whose shared duplicate parameters spend the
-    // default budget before the removal pass: the removal of an inline GET
-    // must still be reported, so the revision is not read as "no change".
-    const repeated = Array.from({ length: 20_000 }, () => ({ name: 'id', in: 'query' }));
-    const operation = {
-      parameters: [{ name: 'id', in: 'query', required: true }],
-      responses: { '200': {} },
-    };
-    const components = { pathItems: { Shared: { parameters: repeated, get: operation } } };
-    const paths = (withGone: boolean): Document => {
-      const result: Document = { '/kept': { get: { responses: { '200': {} } } } };
-      if (withGone) result['/gone'] = { get: { responses: { '200': {} } } };
-      for (let index = 0; index < 8; index += 1) {
-        result[`/p${index}`] = { $ref: '#/components/pathItems/Shared' };
-      }
-      return result;
-    };
-    const report = compareSpecRevisions(
-      document(paths(true), components),
-      document(paths(false), components),
-    );
-    assert.equal(report.complete, false);
-    assert.equal(report.changed, true);
-    assert.deepEqual(lines(report), [
-      'breaking | operation_removed | GET /gone | operation | - | -',
-    ]);
-  });
-
   it('walks a broken reference chain shared by many paths once', () => {
     // Every path points into one chain that ends at a missing item: the chain
     // is walked once per document, not once per path.
@@ -274,11 +245,10 @@ describe('consumer-facing revision comparison', () => {
     assert.ok(reads < 1_000, `read the chain ${reads} times`);
   });
 
-  it('reports an inline removal however following references goes', () => {
+  it('walks a broken tail shared through distinct entries once', () => {
     // 1,000 distinct entries share one hub whose long chain ends at a
-    // missing item. The removal of an inline GET is known without following
-    // any of them, so neither a broken chain nor a budget spent on following
-    // references may hide it.
+    // missing item: the tail is walked once per document, so the comparison
+    // stays well inside its budget and still names the inline removal.
     const name = (index: number): string => `T${index}-${'x'.repeat(500)}`;
     const pathItems: Document = { Hub: { $ref: `#/components/pathItems/${name(1)}` } };
     for (let index = 1; index < 30; index += 1) {
@@ -293,20 +263,19 @@ describe('consumer-facing revision comparison', () => {
       }
       return result;
     };
-    for (const options of [{}, { unitLimit: 200 }]) {
-      const counters = stats();
-      const report = compareSpecRevisions(
-        document(paths(true), { pathItems }),
-        document(paths(false), { pathItems }),
-        { ...options, stats: counters },
-      );
-      assert.equal(report.complete, false);
-      assert.equal(report.changed, true);
-      assert.deepEqual(lines(report), [
-        'breaking | operation_removed | GET /gone | operation | - | -',
-      ]);
-      assert.ok(counters.units <= MAX_SPEC_CHANGE_UNITS + 1, `spent ${counters.units}`);
-    }
+    const counters = stats();
+    const report = compareSpecRevisions(
+      document(paths(true), { pathItems }),
+      document(paths(false), { pathItems }),
+      { stats: counters },
+    );
+    assert.equal(report.complete, false, 'the broken references are unreadable');
+    assert.equal(report.changed, true);
+    assert.deepEqual(lines(report), [
+      'breaking | operation_removed | GET /gone | operation | - | -',
+    ]);
+    // Two pointers per entry and one walk of the tail, not 1,000.
+    assert.ok(counters.units < 20_000, `spent ${counters.units}`);
   });
 
   it('marks the comparison incomplete when a Path Item reference cannot be followed', () => {
@@ -601,13 +570,11 @@ describe('consumer-facing revision comparison', () => {
       unitLimit: 50,
       stats: counters,
     });
+    // Spending stops at the budget, and the result says it is incomplete;
+    // the notifier sends an incomplete comparison as possibly breaking.
     assert.equal(report.complete, false);
-    // Spending stopped at the budget…
+    assert.ok(report.counts.operations_removed < 200);
     assert.ok(counters.units > 50 && counters.units <= 51, `spent ${counters.units}`);
-    // …but every removed operation is still named, at no further cost: both
-    // documents were enumerated, and a removal must never read as no change.
-    assert.equal(report.counts.operations_removed, 200);
-    assert.equal(report.changed, true);
   });
 
   it('lists breaking changes first and counts past the list cap', () => {

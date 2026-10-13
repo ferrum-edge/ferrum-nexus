@@ -432,11 +432,7 @@ function pathItemRecord(item: AgentPathItem, key: string): Record<string, unknow
 
 /** What is known of one document's operations, filled in as it is read. */
 interface OperationIndex {
-  /**
-   * Every operation read so far, keyed `METHOD path`: inline Path Items
-   * first, then referenced ones, until {@link orderOperations} puts them in
-   * document order.
-   */
+  /** Every operation read so far, keyed `METHOD path`, in document order. */
   operations: Map<string, Record<string, unknown>>;
   /** Paths whose Path Item was read in full: what they lack, they lack. */
   resolved: Set<string>;
@@ -456,19 +452,16 @@ function operationIndex(document: Record<string, unknown>): OperationIndex {
 }
 
 /**
- * Read the Path Items of `document` into `index`: the inline ones when
- * `referenced` is false (they cost nothing to follow), the referenced ones
- * when it is true (each pointer is charged, so this pass may run out of
- * budget part way, leaving what it read).
+ * Read every Path Item of `document` into `index`, in document order. Each
+ * pointer followed is charged, so this may run out of budget part way.
  */
 function enumerateOperations(
   document: Record<string, unknown>,
   read: PathItemReader,
   index: OperationIndex,
-  referenced: boolean,
 ): void {
   for (const [path, raw] of entriesOf(ownRecord(document, 'paths'))) {
-    if (!isRecord(raw) || (refOf(raw) !== null) !== referenced) continue;
+    if (!isRecord(raw)) continue;
     const item = read(path);
     if (item === null) {
       index.complete = false;
@@ -480,30 +473,6 @@ function enumerateOperations(
       if (operation) index.operations.set(`${method.toUpperCase()} ${path}`, operation);
     }
   }
-}
-
-/**
- * Put `index.operations` back in document order (path, then method), after
- * the inline and referenced passes filled it in two sweeps.
- */
-function orderOperations(index: OperationIndex): void {
-  const pathOrder = new Map<string, number>();
-  for (const path of index.named) pathOrder.set(path, pathOrder.size);
-  const methodOrder = new Map<string, number>();
-  for (const method of OPENAPI_OPERATION_METHODS) {
-    methodOrder.set(method.toUpperCase(), methodOrder.size);
-  }
-  const rank = (key: string): [number, number] => {
-    const space = key.indexOf(' ');
-    return [pathOrder.get(key.slice(space + 1)) ?? 0, methodOrder.get(key.slice(0, space)) ?? 0];
-  };
-  const sorted = [...index.operations].sort(([left], [right]) => {
-    const [leftPath, leftMethod] = rank(left);
-    const [rightPath, rightMethod] = rank(right);
-    return leftPath - rightPath || leftMethod - rightMethod;
-  });
-  index.operations.clear();
-  for (const [key, operation] of sorted) index.operations.set(key, operation);
 }
 
 /**
@@ -1132,19 +1101,11 @@ export function compareSpecRevisions(
   const fromOperations = from.operations;
   const toOperations = to.operations;
   let complete = true;
-  /** Operations already reported as added or removed. */
-  const reportedOperations = new Set<string>();
 
   try {
-    // Inline Path Items first, in both documents: they cost nothing to read,
-    // so what they add and remove is known even if following references
-    // later runs out of budget. Every reference followed is charged.
-    enumerateOperations(before, readBefore, from, false);
-    enumerateOperations(after, readAfter, to, false);
-    enumerateOperations(before, readBefore, from, true);
-    enumerateOperations(after, readAfter, to, true);
-    orderOperations(from);
-    orderOperations(to);
+    // Inside the budget: every Path Item reference followed is charged.
+    enumerateOperations(before, readBefore, from);
+    enumerateOperations(after, readAfter, to);
     complete = from.complete && to.complete;
     for (const [key, operation] of toOperations) {
       spend(1);
@@ -1154,10 +1115,7 @@ export function compareSpecRevisions(
       if (previous === undefined) {
         // Added only when the earlier document is known to lack it: an
         // unreadable Path Item there is not evidence of an addition.
-        if (knownAbsent(from, key)) {
-          reportedOperations.add(key);
-          record(opPlace, 'operation_added', 'non_breaking');
-        }
+        if (knownAbsent(from, key)) record(opPlace, 'operation_added', 'non_breaking');
         continue;
       }
       const wasDeprecated = own(previous, 'deprecated') === true;
@@ -1179,7 +1137,6 @@ export function compareSpecRevisions(
     for (const key of fromOperations.keys()) {
       if (!knownAbsent(to, key)) continue;
       spend(1);
-      reportedOperations.add(key);
       record(
         { operation: operationRef(key), section: 'operation', location: null },
         'operation_removed',
@@ -1191,28 +1148,10 @@ export function compareSpecRevisions(
     pointerText.settle();
   } catch (error) {
     if (!(error instanceof BudgetExhausted)) throw error;
+    // Wherever the budget ran out, the result is only "incomplete": the
+    // notifier sends an incomplete comparison as possibly breaking
+    // (`specChangeIsNews`), so nothing here has to rescue particular changes.
     complete = false;
-    // What has been read is enough to name every operation known to be added
-    // or removed, at no further cost; a removal is the change consumers most
-    // need to hear about, so a budget spent on deep comparisons or on
-    // following references must not hide one, nor leave the report reading
-    // as "no change". Nothing is inferred about a path left unread.
-    for (const key of toOperations.keys()) {
-      if (reportedOperations.has(key) || !knownAbsent(from, key)) continue;
-      record(
-        { operation: operationRef(key), section: 'operation', location: null },
-        'operation_added',
-        'non_breaking',
-      );
-    }
-    for (const key of fromOperations.keys()) {
-      if (reportedOperations.has(key) || !knownAbsent(to, key)) continue;
-      record(
-        { operation: operationRef(key), section: 'operation', location: null },
-        'operation_removed',
-        'breaking',
-      );
-    }
   }
 
   const fromInfo = ownRecord(before, 'info') ?? {};
