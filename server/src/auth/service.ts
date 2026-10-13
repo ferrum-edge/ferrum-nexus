@@ -68,6 +68,7 @@ import {
 import { isoInSeconds, nowIso } from '../lib/ids.js';
 import {
   accountRecoveryLockKey,
+  REGISTRATION_POLICY_LOCK_KEY,
   SUPER_ADMIN_LOCK_KEY,
   userLifecycleLockKey,
   type KeyedSerializer,
@@ -596,16 +597,45 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
    * that used to leave a portal with users and no administrator — rolls the
    * account back too, and the next attempt finds the seat still open.
    *
-   * A candidate that arrives to a seat somebody else has just taken is not an
-   * error; it keeps the role it asked for, exactly as a later registration
-   * would.
+   * A candidate that arrives to a seat somebody else has just taken is an
+   * ordinary registration from then on: it keeps the role it asked for only
+   * if the policies in force allow it (open registration, that role, not
+   * `sso_only`), gets the current verification rule, and is refused
+   * otherwise.
    */
   async function seatFounder(
     tx: NexusStore,
     draft: RegistrationDraft,
   ): Promise<RegistrationOutcome> {
     const seatTaken = (await tx.users.countActiveSuperAdmins()) > 0;
+    // A candidate that lost the seat registers as an ordinary member, so it
+    // answers to the policy an ordinary registration does.
+    if (seatTaken) await applyRegistrationPolicy(tx, draft);
     return persistRegistration(tx, draft, !seatTaken);
+  }
+
+  /**
+   * Authorize an ordinary registration against the policies in force **now**,
+   * read through `tx` under {@link REGISTRATION_POLICY_LOCK_KEY}: the
+   * pre-check in `register` ran before CAPTCHA verification and password
+   * hashing, so registration may have closed, the role been withdrawn,
+   * `sso_only` been turned on, or verification become mandatory since. Every
+   * writer of those policies commits under the same key, so none can land
+   * between this read and the commit. Applies the current verification rule
+   * to `draft`.
+   */
+  async function applyRegistrationPolicy(tx: NexusStore, draft: RegistrationDraft): Promise<void> {
+    if ((await readLoginPolicy(tx)) === 'sso_only') {
+      throw forbidden(REGISTRATION_SSO_ONLY_MESSAGE);
+    }
+    const current = await readRegistrationPolicy(tx);
+    if (!current.open_registration) {
+      throw forbidden('Self-service registration is currently closed');
+    }
+    if (!current.allowed_roles.includes(draft.role)) {
+      throw forbidden(`Registration with the ${draft.role} role is not permitted`);
+    }
+    draft.requireEmailVerification = current.require_email_verification;
   }
 
   async function issueSession(
@@ -711,27 +741,19 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       // has to finish before the lease can be released.
       const founderTransaction = (): Promise<RegistrationOutcome> =>
         store.transaction((tx) => seatFounder(tx, draft));
+      // Both paths commit under the registration policy key, innermost, so a
+      // policy writer cannot commit between the final policy read and the
+      // account (GHSA-9cr4-49fg-gfcx).
       const { record, promoted, verificationToken } = seatOpen
-        ? await locks(SUPER_ADMIN_LOCK_KEY, founderTransaction)
-        : await store.transaction(async (tx) => {
-            // Re-read the policy at commit time: the pre-check above ran
-            // before CAPTCHA verification and password hashing, so an
-            // administrator may have closed registration (or narrowed the
-            // roles, or enabled verification) since. The account is created
-            // under the policy in force now, or not at all.
-            if ((await readLoginPolicy(tx)) === 'sso_only') {
-              throw forbidden(REGISTRATION_SSO_ONLY_MESSAGE);
-            }
-            const current = await readRegistrationPolicy(tx);
-            if (!current.open_registration) {
-              throw forbidden('Self-service registration is currently closed');
-            }
-            if (!current.allowed_roles.includes(input.role)) {
-              throw forbidden(`Registration with the ${input.role} role is not permitted`);
-            }
-            draft.requireEmailVerification = current.require_email_verification;
-            return persistRegistration(tx, draft, false);
-          });
+        ? await locks(SUPER_ADMIN_LOCK_KEY, () =>
+            locks(REGISTRATION_POLICY_LOCK_KEY, founderTransaction),
+          )
+        : await locks(REGISTRATION_POLICY_LOCK_KEY, () =>
+            store.transaction(async (tx) => {
+              await applyRegistrationPolicy(tx, draft);
+              return persistRegistration(tx, draft, false);
+            }),
+          );
 
       if (promoted) brandingRevision += 1;
 

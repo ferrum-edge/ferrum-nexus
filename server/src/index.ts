@@ -464,6 +464,7 @@ export async function buildServer(
     audit,
     auth,
     captcha,
+    locks,
   });
   const messaging = createMessagingService({
     config,

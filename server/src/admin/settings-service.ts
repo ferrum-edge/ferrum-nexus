@@ -84,6 +84,7 @@ import type { NexusCrypto } from '../lib/crypto.js';
 import { conflict, forbidden, validationFailed } from '../lib/errors.js';
 import { GATEWAY_PUBLIC_URL_RULE, normalizeGatewayPublicUrl } from '../lib/gateway-url.js';
 import { newId, nowIso } from '../lib/ids.js';
+import { REGISTRATION_POLICY_LOCK_KEY, type KeyedSerializer } from '../lib/keyed-serializer.js';
 
 /**
  * Sections of {@link UpdateSettingsRequest} that only a `super_admin` may touch.
@@ -435,11 +436,17 @@ export interface SettingsServiceDeps {
    * from every visitor a moment later.
    */
   captcha: CaptchaService;
+  /**
+   * Store-level cross-instance locks: a save that changes the registration
+   * policy commits under `auth:registration-policy`, the key registration
+   * commits under (GHSA-9cr4-49fg-gfcx).
+   */
+  locks: KeyedSerializer;
 }
 
 /** Build the settings service. */
 export function createSettingsService(deps: SettingsServiceDeps): SettingsService {
-  const { config, store, crypto, audit, auth, captcha } = deps;
+  const { config, store, crypto, audit, auth, captcha, locks } = deps;
   let brandingRevision = 0;
 
   /** Memoised gateway origin; dropped the moment a write changes it. */
@@ -693,158 +700,161 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
 
       // Every settings row and its audit record share one transaction-scoped
       // store. In particular, secret writes cannot split from their config.
-      await store.transaction(async (tx) => {
-        const changed: string[] = [];
-        let smtpPasswordSourceChange:
-          { from: 'override' | 'environment'; to: 'override' | 'environment' } | undefined;
+      const commit = (): Promise<void> =>
+        store.transaction(async (tx) => {
+          const changed: string[] = [];
+          let smtpPasswordSourceChange:
+            { from: 'override' | 'environment'; to: 'override' | 'environment' } | undefined;
 
-        if (patch.branding) {
-          const current = await readBranding(tx);
-          const next: BrandingSettings = { ...current };
-          for (const [field, value] of Object.entries(patch.branding)) {
-            if (value === undefined) continue;
-            // The route rejects unknown keys; internal callers use the shared DTO.
-            (next as unknown as Record<string, unknown>)[field] = value;
-            changed.push(`branding.${field}`);
+          if (patch.branding) {
+            const current = await readBranding(tx);
+            const next: BrandingSettings = { ...current };
+            for (const [field, value] of Object.entries(patch.branding)) {
+              if (value === undefined) continue;
+              // The route rejects unknown keys; internal callers use the shared DTO.
+              (next as unknown as Record<string, unknown>)[field] = value;
+              changed.push(`branding.${field}`);
+            }
+            await tx.settings.set(BRANDING_SETTINGS_KEY, next, false);
           }
-          await tx.settings.set(BRANDING_SETTINGS_KEY, next, false);
-        }
 
-        // Normalised above rather than only in the route schema, so the stored
-        // value is an origin no matter who calls the service.
-        if (nextGatewayUrl !== undefined) {
-          await tx.settings.set(GATEWAY_SETTINGS_KEY, { public_url: nextGatewayUrl }, false);
-          changed.push('gateway.public_url');
-        }
-
-        if (patch.captcha && captchaPlan) {
-          // Compare-and-swap. `captchaPlan.next` is a merge over rows read
-          // before the vendor round-trip, so writing it blind would silently
-          // revert a concurrent CAPTCHA edit — and could store a
-          // `{site_key, secret}` pair neither save ever proved, which is
-          // exactly the lockout this section exists to prevent. Re-checking
-          // here also means a body a pooled adapter re-runs after a rollback
-          // re-fails instead of re-applying a merge that has gone stale.
-          if ((await captchaFingerprint(tx)) !== captchaPlan.fingerprint) {
-            throw conflict(
-              'The CAPTCHA settings changed while this patch was being verified with the ' +
-                'provider; reload the settings and try again',
-            );
+          // Normalised above rather than only in the route schema, so the stored
+          // value is an origin no matter who calls the service.
+          if (nextGatewayUrl !== undefined) {
+            await tx.settings.set(GATEWAY_SETTINGS_KEY, { public_url: nextGatewayUrl }, false);
+            changed.push('gateway.public_url');
           }
-          for (const field of ['enabled', 'provider', 'site_key'] as const) {
-            if (patch.captcha[field] !== undefined) changed.push(`captcha.${field}`);
-          }
-          await tx.settings.set(CAPTCHA_SETTINGS_KEY, captchaPlan.next, false);
 
-          if (patch.captcha.secret_key !== undefined) {
-            changed.push('captcha.secret_key');
-            if (patch.captcha.secret_key === null || patch.captcha.secret_key === '') {
-              await tx.settings.delete(CAPTCHA_SECRET_SETTINGS_KEY);
-            } else {
-              await tx.settings.set(
-                CAPTCHA_SECRET_SETTINGS_KEY,
-                crypto.encryptJson(CAPTCHA_SECRET_SETTINGS_KEY, patch.captcha.secret_key),
-                true,
+          if (patch.captcha && captchaPlan) {
+            // Compare-and-swap. `captchaPlan.next` is a merge over rows read
+            // before the vendor round-trip, so writing it blind would silently
+            // revert a concurrent CAPTCHA edit — and could store a
+            // `{site_key, secret}` pair neither save ever proved, which is
+            // exactly the lockout this section exists to prevent. Re-checking
+            // here also means a body a pooled adapter re-runs after a rollback
+            // re-fails instead of re-applying a merge that has gone stale.
+            if ((await captchaFingerprint(tx)) !== captchaPlan.fingerprint) {
+              throw conflict(
+                'The CAPTCHA settings changed while this patch was being verified with the ' +
+                  'provider; reload the settings and try again',
               );
             }
-          }
-        }
+            for (const field of ['enabled', 'provider', 'site_key'] as const) {
+              if (patch.captcha[field] !== undefined) changed.push(`captcha.${field}`);
+            }
+            await tx.settings.set(CAPTCHA_SETTINGS_KEY, captchaPlan.next, false);
 
-        if (patch.smtp) {
-          const current = await readStoredSmtp(tx);
-          const next: StoredSmtpSettings = {
-            ...EMPTY_SMTP,
-            ...current,
-            ...(patch.smtp.host !== undefined ? { host: patch.smtp.host } : {}),
-            ...(patch.smtp.port !== undefined ? { port: patch.smtp.port } : {}),
-            ...(patch.smtp.secure !== undefined ? { secure: patch.smtp.secure } : {}),
-            ...(patch.smtp.username !== undefined ? { username: patch.smtp.username } : {}),
-            ...(patch.smtp.from_address !== undefined
-              ? { from_address: patch.smtp.from_address }
-              : {}),
-          };
-          const connectionChanged =
-            (str(next.host) ?? config.smtp.host ?? null) !==
-              (current.host ?? config.smtp.host ?? null) ||
-            (next.port ?? config.smtp.port) !== (current.port ?? config.smtp.port) ||
-            (next.secure ?? config.smtp.secure) !== (current.secure ?? config.smtp.secure) ||
-            (str(next.username) ?? config.smtp.user ?? null) !==
-              (current.username ?? config.smtp.user ?? null);
-          const storedPassword = await tx.settings.get(SMTP_PASSWORD_SETTINGS_KEY);
-          const passwordSet = storedPassword !== null || config.smtp.password !== undefined;
-          const clearingPassword = patch.smtp.password === null || patch.smtp.password === '';
-          const connectionMatchesEnvironment = smtpConnectionMatchesEnvironment(next, config);
-          // Clearing an override restores the environment credential. Its connection
-          // must also belong to the environment, even when this patch did not move it.
-          if (clearingPassword && !connectionMatchesEnvironment) {
-            throw validationFailed(
-              'SMTP password can only be cleared when the connection matches the environment',
-            );
-          }
-          if (connectionChanged && passwordSet && !patch.smtp.password) {
-            throw validationFailed(
-              'SMTP password is required when changing the SMTP connection settings',
-            );
-          }
-          for (const field of ['host', 'port', 'secure', 'username', 'from_address'] as const) {
-            if (patch.smtp[field] !== undefined) changed.push(`smtp.${field}`);
-          }
-          await tx.settings.set(SMTP_SETTINGS_KEY, next, false);
-
-          if (patch.smtp.password !== undefined) {
-            changed.push('smtp.password');
-            const from = storedPassword === null ? 'environment' : 'override';
-            const to = clearingPassword ? 'environment' : 'override';
-            if (from !== to) smtpPasswordSourceChange = { from, to };
-            if (clearingPassword) {
-              await tx.settings.delete(SMTP_PASSWORD_SETTINGS_KEY);
-            } else {
-              await tx.settings.set(
-                SMTP_PASSWORD_SETTINGS_KEY,
-                crypto.encryptJson(SMTP_PASSWORD_SETTINGS_KEY, patch.smtp.password),
-                true,
-              );
+            if (patch.captcha.secret_key !== undefined) {
+              changed.push('captcha.secret_key');
+              if (patch.captcha.secret_key === null || patch.captcha.secret_key === '') {
+                await tx.settings.delete(CAPTCHA_SECRET_SETTINGS_KEY);
+              } else {
+                await tx.settings.set(
+                  CAPTCHA_SECRET_SETTINGS_KEY,
+                  crypto.encryptJson(CAPTCHA_SECRET_SETTINGS_KEY, patch.captcha.secret_key),
+                  true,
+                );
+              }
             }
           }
-        }
 
-        if (patch.registration) {
-          const current = await readRegistrationPolicy(tx);
-          const next = {
-            open_registration: patch.registration.open_registration ?? current.open_registration,
-            require_email_verification:
-              patch.registration.require_email_verification ?? current.require_email_verification,
-            allowed_roles: (patch.registration.allowed_roles ?? current.allowed_roles) as Role[],
-          };
-          for (const field of [
-            'open_registration',
-            'require_email_verification',
-            'allowed_roles',
-          ] as const) {
-            if (patch.registration[field] !== undefined) changed.push(`registration.${field}`);
+          if (patch.smtp) {
+            const current = await readStoredSmtp(tx);
+            const next: StoredSmtpSettings = {
+              ...EMPTY_SMTP,
+              ...current,
+              ...(patch.smtp.host !== undefined ? { host: patch.smtp.host } : {}),
+              ...(patch.smtp.port !== undefined ? { port: patch.smtp.port } : {}),
+              ...(patch.smtp.secure !== undefined ? { secure: patch.smtp.secure } : {}),
+              ...(patch.smtp.username !== undefined ? { username: patch.smtp.username } : {}),
+              ...(patch.smtp.from_address !== undefined
+                ? { from_address: patch.smtp.from_address }
+                : {}),
+            };
+            const connectionChanged =
+              (str(next.host) ?? config.smtp.host ?? null) !==
+                (current.host ?? config.smtp.host ?? null) ||
+              (next.port ?? config.smtp.port) !== (current.port ?? config.smtp.port) ||
+              (next.secure ?? config.smtp.secure) !== (current.secure ?? config.smtp.secure) ||
+              (str(next.username) ?? config.smtp.user ?? null) !==
+                (current.username ?? config.smtp.user ?? null);
+            const storedPassword = await tx.settings.get(SMTP_PASSWORD_SETTINGS_KEY);
+            const passwordSet = storedPassword !== null || config.smtp.password !== undefined;
+            const clearingPassword = patch.smtp.password === null || patch.smtp.password === '';
+            const connectionMatchesEnvironment = smtpConnectionMatchesEnvironment(next, config);
+            // Clearing an override restores the environment credential. Its connection
+            // must also belong to the environment, even when this patch did not move it.
+            if (clearingPassword && !connectionMatchesEnvironment) {
+              throw validationFailed(
+                'SMTP password can only be cleared when the connection matches the environment',
+              );
+            }
+            if (connectionChanged && passwordSet && !patch.smtp.password) {
+              throw validationFailed(
+                'SMTP password is required when changing the SMTP connection settings',
+              );
+            }
+            for (const field of ['host', 'port', 'secure', 'username', 'from_address'] as const) {
+              if (patch.smtp[field] !== undefined) changed.push(`smtp.${field}`);
+            }
+            await tx.settings.set(SMTP_SETTINGS_KEY, next, false);
+
+            if (patch.smtp.password !== undefined) {
+              changed.push('smtp.password');
+              const from = storedPassword === null ? 'environment' : 'override';
+              const to = clearingPassword ? 'environment' : 'override';
+              if (from !== to) smtpPasswordSourceChange = { from, to };
+              if (clearingPassword) {
+                await tx.settings.delete(SMTP_PASSWORD_SETTINGS_KEY);
+              } else {
+                await tx.settings.set(
+                  SMTP_PASSWORD_SETTINGS_KEY,
+                  crypto.encryptJson(SMTP_PASSWORD_SETTINGS_KEY, patch.smtp.password),
+                  true,
+                );
+              }
+            }
           }
-          await tx.settings.set(REGISTRATION_SETTINGS_KEY, next, false);
-        }
 
-        // Record key names and credential provenance, never setting values,
-        // which would put the SMTP password and CAPTCHA secret in the audit log.
-        await audit.forStore(tx).record(
-          actor,
-          AuditAction.ADMIN_SETTINGS_UPDATE,
-          { type: 'settings', id: null },
-          {
-            changed_keys: changed,
-            ...(smtpPasswordSourceChange
-              ? { smtp_password_source_change: smtpPasswordSourceChange }
-              : {}),
-            // Recorded because it is the evidence that this activation was
-            // provably usable at the moment it was stored, and because its
-            // absence on a `captcha.enabled` change would be an anomaly.
-            ...(captchaPlan?.selfTested ? { captcha_self_test: 'passed' } : {}),
-          },
-          ip,
-        );
-      });
+          if (patch.registration) {
+            const current = await readRegistrationPolicy(tx);
+            const next = {
+              open_registration: patch.registration.open_registration ?? current.open_registration,
+              require_email_verification:
+                patch.registration.require_email_verification ?? current.require_email_verification,
+              allowed_roles: (patch.registration.allowed_roles ?? current.allowed_roles) as Role[],
+            };
+            for (const field of [
+              'open_registration',
+              'require_email_verification',
+              'allowed_roles',
+            ] as const) {
+              if (patch.registration[field] !== undefined) changed.push(`registration.${field}`);
+            }
+            await tx.settings.set(REGISTRATION_SETTINGS_KEY, next, false);
+          }
+
+          // Record key names and credential provenance, never setting values,
+          // which would put the SMTP password and CAPTCHA secret in the audit log.
+          await audit.forStore(tx).record(
+            actor,
+            AuditAction.ADMIN_SETTINGS_UPDATE,
+            { type: 'settings', id: null },
+            {
+              changed_keys: changed,
+              ...(smtpPasswordSourceChange
+                ? { smtp_password_source_change: smtpPasswordSourceChange }
+                : {}),
+              // Recorded because it is the evidence that this activation was
+              // provably usable at the moment it was stored, and because its
+              // absence on a `captcha.enabled` change would be an anomaly.
+              ...(captchaPlan?.selfTested ? { captcha_self_test: 'passed' } : {}),
+            },
+            ip,
+          );
+        });
+      if (patch.registration === undefined) await commit();
+      else await locks(REGISTRATION_POLICY_LOCK_KEY, commit);
       brandingRevision += 1;
       // Only committed updates invalidate the cached public origin.
       if (nextGatewayUrl !== undefined) gatewayUrlCache = null;

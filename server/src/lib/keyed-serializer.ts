@@ -190,6 +190,18 @@ export function ssoProviderLockKey(providerId: string): string {
 export const SSO_SETTINGS_LOCK_KEY = 'sso:settings';
 
 /**
+ * The deployment-wide **registration policy** key (GHSA-9cr4-49fg-gfcx). An
+ * ordinary self-service registration re-reads the registration and login
+ * policies and commits its account under it, and every writer of either
+ * policy (the admin settings save of `registration`, every single sign-on
+ * settings save) commits under it too, so a registration either commits
+ * before a withdrawal or sees it. Always the innermost key: it is taken after
+ * `users:super-admins` and after `sso:settings` and the provider keys, never
+ * before them.
+ */
+export const REGISTRATION_POLICY_LOCK_KEY = 'auth:registration-policy';
+
+/**
  * The per-sender key the rolling daily **message budget** is spent under.
  *
  * The budget is a read-then-write — count the sender's rows in the window, then
