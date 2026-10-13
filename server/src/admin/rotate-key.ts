@@ -108,10 +108,9 @@ export interface BindingSummary {
   /** Legacy rows another writer replaced or deleted first; left as they are. */
   changed: string[];
   /**
-   * Legacy rows left as they are because they cannot be read: the current key
-   * does not open them (a key rotated without `rotate-secret-key`), or —
-   * after the conversion was recorded — any `v1` row at all, which reads
-   * refuse.
+   * After the conversion was recorded: every `v1` row still present, which
+   * reads refuse. (Before it, a `v1` row the key cannot open aborts the
+   * conversion instead.)
    */
   unreadable: string[];
 }
@@ -143,6 +142,10 @@ export async function bindLegacyEncryptedSettings(
   locks: KeyedSerializer,
 ): Promise<BindingSummary> {
   return locks(SETTINGS_BINDING_LOCK_KEY, async () => {
+    // Prepared outside the transaction: decrypting is pure, and a row the key
+    // cannot open stops the conversion before anything is written or
+    // recorded, so a start with the wrong key leaves the next start with the
+    // right one free to convert.
     const legacy = (await store.settings.all()).filter(
       (row) => row.encrypted && isLegacySettingBlob(row.value),
     );
@@ -154,39 +157,52 @@ export async function bindLegacyEncryptedSettings(
         unreadable: legacy.map((row) => row.key),
       };
     }
-    const summary: BindingSummary = {
-      alreadyRecorded: false,
-      bound: [],
-      changed: [],
-      unreadable: [],
-    };
+    const plans: { key: string; blob: string; bound: string }[] = [];
+    const unreadable: string[] = [];
     for (const row of legacy) {
       const blob = String(row.value);
-      let bound: string;
       try {
-        bound = crypto.encryptJson(row.key, crypto.decryptLegacySetting<unknown>(row.key, blob));
+        const plain = crypto.decryptLegacySetting<unknown>(row.key, blob);
+        plans.push({ key: row.key, blob, bound: crypto.encryptJson(row.key, plain) });
       } catch {
-        summary.unreadable.push(row.key);
-        continue;
-      }
-      if (await store.settings.replaceEncryptedIfMatches(row.key, blob, bound)) {
-        summary.bound.push(row.key);
-      } else {
-        summary.changed.push(row.key);
+        unreadable.push(row.key);
       }
     }
-    await store.transaction(async (tx) => {
+    if (unreadable.length > 0) {
+      throw new NexusError(
+        'VALIDATION_FAILED',
+        `${unreadable.length} legacy encrypted setting(s) do not open with NEXUS_SECRET_KEY ` +
+          `(${unreadable.join(', ')}). Nothing was converted or recorded. Start with the key ` +
+          'they were written under, or delete those rows and re-enter the secrets after start.',
+        { keys: unreadable },
+      );
+    }
+    // One transaction, opened under the lease and fenced by it at commit: the
+    // marker re-check, every conditional replacement and the marker itself
+    // commit together or not at all, so a converter that stalled past the
+    // lease cannot write after another instance recorded completion.
+    return store.transaction(async (tx) => {
+      const summary: BindingSummary = {
+        alreadyRecorded: false,
+        bound: [],
+        changed: [],
+        unreadable: [],
+      };
+      if (await legacyBindingRecorded(tx)) return { ...summary, alreadyRecorded: true };
+      for (const plan of plans) {
+        if (await tx.settings.replaceEncryptedIfMatches(plan.key, plan.blob, plan.bound)) {
+          summary.bound.push(plan.key);
+        } else {
+          summary.changed.push(plan.key);
+        }
+      }
       await audit.forStore(tx).record(
         SYSTEM_ACTOR,
         AuditAction.SETTINGS_ENCRYPTION_BOUND,
         { type: 'settings', id: null },
-        {
-          bound_keys: summary.bound,
-          changed_keys: summary.changed,
-          unreadable_keys: summary.unreadable,
-        },
+        { bound_keys: summary.bound, changed_keys: summary.changed },
       );
+      return summary;
     });
-    return summary;
   });
 }

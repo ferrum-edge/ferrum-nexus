@@ -404,8 +404,9 @@ export async function buildServer(
   const audit = createAuditService(deps.store);
   // Before any service reads a setting: runtime reads refuse an unbound
   // legacy (`v1`) encrypted setting, so the first start of this release
-  // re-binds every one the key opens to its own row, once, and records that
-  // it did (GHSA-qm46-qg94-mpg7). Later starts convert nothing.
+  // re-binds every one to its own row, once, and records that it did
+  // (GHSA-qm46-qg94-mpg7); a legacy row this key cannot open stops the start
+  // with nothing converted. Later starts convert nothing.
   const binding = await bindLegacyEncryptedSettings(deps.store, crypto, audit, locks);
   if (binding.bound.length > 0) {
     app.log.info({ keys: binding.bound }, 'Bound legacy encrypted settings to their keys');
@@ -413,10 +414,8 @@ export async function buildServer(
   if (binding.unreadable.length > 0) {
     app.log.warn(
       { keys: binding.unreadable },
-      binding.alreadyRecorded
-        ? 'Unbound legacy encrypted settings are refused; re-enter them in the admin settings'
-        : 'Legacy encrypted settings could not be re-bound and stay unreadable; re-enter them, ' +
-            'or run rotate-secret-key from the key they were written under',
+      'Unbound legacy encrypted settings are refused (the one-time binding already ran); ' +
+        're-enter them in the admin settings',
     );
   }
   const captcha = createCaptchaService({

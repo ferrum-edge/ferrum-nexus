@@ -91,6 +91,15 @@ describe('rotateEncryptedSettings', () => {
   });
 });
 
+/** A promise and the function that settles it. */
+function signal(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 /** A cross-instance serializer of its own, as a separate Nexus process has. */
 const locksFor = (store: NexusStore) => createKeyedSerializer({ leases: store.leases });
 
@@ -119,47 +128,58 @@ describe('bindLegacyEncryptedSettings', () => {
     await store.close();
   });
 
-  it('re-binds every legacy row it can open to its own key, once, and records it', async () => {
+  it('converts nothing with the wrong key, then converts with the right one', async () => {
     const audit = createAuditService(store);
-    await store.settings.set('smtp.password', legacy(OLD_KEY, 'hunter2'), true);
-    await store.settings.set('captcha.secret_key', legacy(NEW_KEY, '0xSECRET'), true);
+    const smtpLegacy = legacy(OLD_KEY, 'hunter2');
+    await store.settings.set('smtp.password', smtpLegacy, true);
     const bound = crypto.encryptJson('sso.client_secret.a', 'already-bound');
     await store.settings.set('sso.client_secret.a', bound, true);
 
     // Runtime reads refuse the unbound row until it is re-bound.
-    const before = String((await store.settings.get('smtp.password'))?.value);
-    assert.throws(() => crypto.decryptJson('smtp.password', before));
-    assert.equal(crypto.decryptLegacySetting('smtp.password', before), 'hunter2');
+    assert.throws(() => crypto.decryptJson('smtp.password', smtpLegacy));
+    assert.equal(crypto.decryptLegacySetting('smtp.password', smtpLegacy), 'hunter2');
 
+    // A start with the wrong master key converts and records nothing…
+    await assert.rejects(
+      bindLegacyEncryptedSettings(store, createCrypto(NEW_KEY), audit, locksFor(store)),
+      (error: Error) => {
+        assert.match(error.message, /smtp\.password/);
+        return true;
+      },
+    );
+    assert.equal((await store.settings.get('smtp.password'))?.value, smtpLegacy);
+    const marker = (): Promise<number> =>
+      store.auditLogs.list({ action: 'settings.encryption_bound' }).then((page) => page.total);
+    assert.equal(await marker(), 0);
+
+    // …so the next start, with the right one, still converts.
     assert.deepEqual(await bindLegacyEncryptedSettings(store, crypto, audit, locksFor(store)), {
       alreadyRecorded: false,
       bound: ['smtp.password'],
       changed: [],
-      unreadable: ['captcha.secret_key'],
+      unreadable: [],
     });
     const smtp = String((await store.settings.get('smtp.password'))?.value);
     assert.ok(smtp.startsWith('v2:'));
     assert.equal(crypto.decryptJson('smtp.password', smtp), 'hunter2');
     assert.throws(() => crypto.decryptJson('captcha.secret_key', smtp), 'bound to its own row');
     assert.equal((await store.settings.get('sso.client_secret.a'))?.value, bound);
-    const marker = await store.auditLogs.list({ action: 'settings.encryption_bound' });
-    assert.equal(marker.items.length, 1);
+    assert.equal(await marker(), 1);
 
     // After the recorded conversion, a pre-upgrade `v1` copy of another
-    // setting's secret written into the SMTP row is never re-bound there.
+    // setting's secret written into the SMTP row is never re-bound there…
     const transplanted = legacy(OLD_KEY, 'oidc-client-secret');
     await store.settings.set('smtp.password', transplanted, true);
     assert.deepEqual(await bindLegacyEncryptedSettings(store, crypto, audit, locksFor(store)), {
       alreadyRecorded: true,
       bound: [],
       changed: [],
-      unreadable: ['captcha.secret_key', 'smtp.password'],
+      unreadable: ['smtp.password'],
     });
     assert.equal((await store.settings.get('smtp.password'))?.value, transplanted);
     assert.throws(() => crypto.decryptJson('smtp.password', transplanted));
 
-    // Nor does a later key rotation launder it into a valid bound blob: the
-    // rotation refuses and changes nothing.
+    // …nor laundered by a later key rotation, which refuses and changes nothing.
     const rows = await store.settings.all();
     await assert.rejects(
       rotateEncryptedSettings(store, crypto, createCrypto(NEW_KEY)),
@@ -169,6 +189,7 @@ describe('bindLegacyEncryptedSettings', () => {
       },
     );
     assert.deepEqual(await store.settings.all(), rows);
+    assert.equal(await marker(), 1);
   });
 
   it('never overwrites a value another writer saved after it was read', async () => {
@@ -238,6 +259,57 @@ describe('bindLegacyEncryptedSettings', () => {
         { alreadyRecorded: false, bound: ['smtp.password'], changed: [], unreadable: [] },
         { alreadyRecorded: true, bound: [], changed: [], unreadable: [] },
       ]);
+      const markers = await shared.auditLogs.list({ action: 'settings.encryption_bound' });
+      assert.equal(markers.total, 1);
+    } finally {
+      await shared.close();
+    }
+  });
+
+  it('lets a converter that lost its lease write nothing after completion', async () => {
+    const shared = createStore(
+      loadConfig({
+        NEXUS_ENV: 'test',
+        NEXUS_SECRET_KEY: OLD_KEY,
+        NEXUS_SQLITE_PATH: ':memory:',
+        FERRUM_ADMIN_JWT_SECRET: 'edge-secret-0123456789abcdef0123456789abcdef',
+        FERRUM_ADMIN_URL: 'http://127.0.0.1:9000',
+      }),
+    );
+    await shared.init();
+    await shared.migrate();
+    try {
+      const smtpLegacy = legacy(OLD_KEY, 'hunter2');
+      await shared.settings.set('smtp.password', smtpLegacy, true);
+      const audit = createAuditService(shared);
+      // Converter A scans and prepares, then stalls just before its
+      // transaction; its lease is gone (a pass-through serializer stands in
+      // for one that expired), so only the in-transaction re-check can stop it.
+      const scanned = signal();
+      const resume = signal();
+      const transaction = shared.transaction.bind(shared);
+      let paused = false;
+      shared.transaction = async (fn, options) => {
+        if (!paused) {
+          paused = true;
+          scanned.resolve();
+          await resume.promise;
+        }
+        return transaction(fn, options);
+      };
+      const stale = bindLegacyEncryptedSettings(shared, crypto, audit, (_key, fn) => fn());
+      await scanned.promise;
+      // Converter B takes over and records completion…
+      const takeover = await bindLegacyEncryptedSettings(shared, crypto, audit, locksFor(shared));
+      assert.deepEqual(takeover.bound, ['smtp.password']);
+      // …then a storage writer puts A's expected legacy blob back.
+      await shared.settings.set('smtp.password', smtpLegacy, true);
+      resume.resolve();
+      const late = await stale;
+      shared.transaction = transaction;
+      assert.equal(late.alreadyRecorded, true);
+      assert.deepEqual(late.bound, []);
+      assert.equal((await shared.settings.get('smtp.password'))?.value, smtpLegacy);
       const markers = await shared.auditLogs.list({ action: 'settings.encryption_bound' });
       assert.equal(markers.total, 1);
     } finally {

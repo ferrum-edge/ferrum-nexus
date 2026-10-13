@@ -658,8 +658,8 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   ),
   [AuditAction.ADMIN_SETTINGS_UPDATE]: TRANSACTIONAL,
   [AuditAction.SETTINGS_ENCRYPTION_BOUND]: rowOnly(
-    'Marks the one-time legacy-settings conversion complete; each row it converted was ' +
-      'replaced by its own atomic compare-and-set before the marker is written.',
+    'Commits with the conversion it marks complete; on a portal with no legacy rows to ' +
+      'convert it is the transaction’s only write.',
   ),
   [AuditAction.ADMIN_TEMPLATE_UPDATE]: TRANSACTIONAL,
   [AuditAction.ADMIN_MASS_EMAIL]: INTENT,
