@@ -274,6 +274,41 @@ describe('consumer-facing revision comparison', () => {
     assert.ok(reads < 1_000, `read the chain ${reads} times`);
   });
 
+  it('reports an inline removal however following references goes', () => {
+    // 1,000 distinct entries share one hub whose long chain ends at a
+    // missing item. The removal of an inline GET is known without following
+    // any of them, so neither a broken chain nor a budget spent on following
+    // references may hide it.
+    const name = (index: number): string => `T${index}-${'x'.repeat(500)}`;
+    const pathItems: Document = { Hub: { $ref: `#/components/pathItems/${name(1)}` } };
+    for (let index = 1; index < 30; index += 1) {
+      pathItems[name(index)] = { $ref: `#/components/pathItems/${name(index + 1)}` };
+    }
+    const paths = (withGone: boolean): Document => {
+      const result: Document = { '/kept': { get: { responses: { '200': {} } } } };
+      if (withGone) result['/gone'] = { get: { responses: { '200': {} } } };
+      for (let index = 0; index < 1_000; index += 1) {
+        pathItems[`Entry${index}`] = { $ref: '#/components/pathItems/Hub' };
+        result[`/e${index}`] = { $ref: `#/components/pathItems/Entry${index}` };
+      }
+      return result;
+    };
+    for (const options of [{}, { unitLimit: 200 }]) {
+      const counters = stats();
+      const report = compareSpecRevisions(
+        document(paths(true), { pathItems }),
+        document(paths(false), { pathItems }),
+        { ...options, stats: counters },
+      );
+      assert.equal(report.complete, false);
+      assert.equal(report.changed, true);
+      assert.deepEqual(lines(report), [
+        'breaking | operation_removed | GET /gone | operation | - | -',
+      ]);
+      assert.ok(counters.units <= MAX_SPEC_CHANGE_UNITS + 1, `spent ${counters.units}`);
+    }
+  });
+
   it('marks the comparison incomplete when a Path Item reference cannot be followed', () => {
     const before = document({ '/shared': { $ref: '#/components/pathItems/Missing' } });
     const report = compareSpecRevisions(before, structuredClone(before));

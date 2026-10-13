@@ -89,7 +89,9 @@ import {
   keyOpenApiParameters,
   mergeOpenApiParameters,
   agentPathItemMember,
-  resolveAgentPathItem,
+  MAX_PATH_ITEM_REF_HOPS,
+  PATH_ITEM_REF_BASES,
+  resolveOpenApiPointer,
   type AgentPathItem,
   type KeyedOpenApiParameter,
   type OpenApiRefResolver,
@@ -337,10 +339,18 @@ function childPath(path: string, name: string): string {
  * Reads a document's Path Items as the gateway does: inline, or through a
  * chain of local Path Item `$ref`s, with fields written beside a `$ref`
  * kept and the outermost one winning (the agent operations' member
- * semantics). Nothing is copied: members are read through the chain, and
- * each path's resolution is memoised, so a large item shared by many paths
- * costs each path its chain, not the item's size. Each pointer followed is
- * charged to `charge`. `null` means the chain cannot be followed.
+ * semantics, `resolveAgentPathItem`'s rules: at most
+ * {@link MAX_PATH_ITEM_REF_HOPS} hops, acyclic, into `paths`,
+ * `components.pathItems` or `webhooks`). Nothing is copied: members are read
+ * through the chain.
+ *
+ * Both outcomes are shared by node identity, so many paths that reach one
+ * item walk its chain once: a resolved chain is memoised for every node on
+ * it, and a chain that can never resolve (a missing or invalid target, or a
+ * cycle) marks every node on it broken. A chain refused only for its length
+ * is not memoised, since a shorter prefix may reach the same node legally;
+ * each such walk is paid for. Every pointer followed is charged to `charge`
+ * with its length. `null` means the chain cannot be followed.
  */
 type PathItemReader = (path: string) => AgentPathItem | null;
 
@@ -349,29 +359,68 @@ function createPathItemReader(
   charge: (pointerCodeUnits: number) => void,
 ): PathItemReader {
   const paths = ownRecord(document, 'paths');
-  const memo = new WeakMap<object, AgentPathItem>();
+  const resolved = new WeakMap<object, AgentPathItem>();
+  const broken = new WeakSet<object>();
   const byPath = new Map<string, AgentPathItem | null>();
-  // A chain that failed once fails again from the same first reference: the
-  // document does not change during a comparison. Successes are shared
-  // through `memo`; this shares failures, so paths that all point into one
-  // broken chain walk it once.
-  const failedRefs = new Set<string>();
+
+  const resolve = (raw: Record<string, unknown>): AgentPathItem | null => {
+    const chain: Record<string, unknown>[] = [];
+    const seen = new Set<string>();
+    let node = raw;
+    let tail: AgentPathItem | undefined;
+    let intrinsic = false;
+    for (;;) {
+      tail = resolved.get(node);
+      if (tail) break;
+      if (broken.has(node)) {
+        intrinsic = true;
+        break;
+      }
+      if (!Object.hasOwn(node, '$ref')) {
+        tail = { chain: [], target: node };
+        break;
+      }
+      const ref = node.$ref;
+      if (
+        typeof ref !== 'string' ||
+        !PATH_ITEM_REF_BASES.some((base) => ref.startsWith(base)) ||
+        seen.has(ref)
+      ) {
+        chain.push(node);
+        intrinsic = true;
+        break;
+      }
+      if (seen.size >= MAX_PATH_ITEM_REF_HOPS) break;
+      charge(ref.length + 1);
+      seen.add(ref);
+      chain.push(node);
+      const target = resolveOpenApiPointer(document, ref);
+      if (!isRecord(target)) {
+        intrinsic = true;
+        break;
+      }
+      node = target;
+    }
+    if (!tail || chain.length + tail.chain.length > MAX_PATH_ITEM_REF_HOPS) {
+      if (intrinsic) for (const visited of chain) broken.add(visited);
+      return null;
+    }
+    if (tail.chain.length === 0) resolved.set(tail.target, tail);
+    let result: AgentPathItem = tail;
+    for (let index = chain.length - 1; index >= 0; index -= 1) {
+      const visited = chain[index] as Record<string, unknown>;
+      result = { chain: [visited, ...result.chain], target: tail.target };
+      resolved.set(visited, result);
+    }
+    return result;
+  };
+
   return (path) => {
     if (byPath.has(path)) return byPath.get(path) ?? null;
     const raw = paths ? own(paths, path) : undefined;
-    let resolved: AgentPathItem | null = null;
-    const ref = isRecord(raw) ? refOf(raw) : null;
-    if (isRecord(raw) && (ref === null || !failedRefs.has(ref))) {
-      try {
-        resolved = resolveAgentPathItem(document, path, raw, { memo, charge });
-      } catch (error) {
-        if (error instanceof BudgetExhausted) throw error;
-        if (ref !== null) failedRefs.add(ref);
-        resolved = null;
-      }
-    }
-    byPath.set(path, resolved);
-    return resolved;
+    const item = isRecord(raw) ? resolve(raw) : null;
+    byPath.set(path, item);
+    return item;
   };
 }
 
@@ -381,32 +430,91 @@ function pathItemRecord(item: AgentPathItem, key: string): Record<string, unknow
   return isRecord(member) ? member : null;
 }
 
+/** What is known of one document's operations, filled in as it is read. */
+interface OperationIndex {
+  /**
+   * Every operation read so far, keyed `METHOD path`: inline Path Items
+   * first, then referenced ones, until {@link orderOperations} puts them in
+   * document order.
+   */
+  operations: Map<string, Record<string, unknown>>;
+  /** Paths whose Path Item was read in full: what they lack, they lack. */
+  resolved: Set<string>;
+  /** Every path the document names, read or not. */
+  named: Set<string>;
+  /** False once a Path Item could not be followed. */
+  complete: boolean;
+}
+
+function operationIndex(document: Record<string, unknown>): OperationIndex {
+  return {
+    operations: new Map(),
+    resolved: new Set(),
+    named: new Set(entriesOf(ownRecord(document, 'paths')).keys()),
+    complete: true,
+  };
+}
+
 /**
- * Every operation of a document, keyed `METHOD path`, in document order,
- * written into `operations` as it goes (so a budget that runs out part way
- * leaves what was read). A Path Item that cannot be resolved marks the
- * enumeration incomplete instead of silently hiding its operations from both
- * sides.
+ * Read the Path Items of `document` into `index`: the inline ones when
+ * `referenced` is false (they cost nothing to follow), the referenced ones
+ * when it is true (each pointer is charged, so this pass may run out of
+ * budget part way, leaving what it read).
  */
 function enumerateOperations(
   document: Record<string, unknown>,
   read: PathItemReader,
-  operations: Map<string, Record<string, unknown>>,
-): boolean {
-  let complete = true;
+  index: OperationIndex,
+  referenced: boolean,
+): void {
   for (const [path, raw] of entriesOf(ownRecord(document, 'paths'))) {
-    if (!isRecord(raw)) continue;
+    if (!isRecord(raw) || (refOf(raw) !== null) !== referenced) continue;
     const item = read(path);
     if (item === null) {
-      complete = false;
+      index.complete = false;
       continue;
     }
+    index.resolved.add(path);
     for (const method of OPENAPI_OPERATION_METHODS) {
       const operation = pathItemRecord(item, method);
-      if (operation) operations.set(`${method.toUpperCase()} ${path}`, operation);
+      if (operation) index.operations.set(`${method.toUpperCase()} ${path}`, operation);
     }
   }
-  return complete;
+}
+
+/**
+ * Put `index.operations` back in document order (path, then method), after
+ * the inline and referenced passes filled it in two sweeps.
+ */
+function orderOperations(index: OperationIndex): void {
+  const pathOrder = new Map<string, number>();
+  for (const path of index.named) pathOrder.set(path, pathOrder.size);
+  const methodOrder = new Map<string, number>();
+  for (const method of OPENAPI_OPERATION_METHODS) {
+    methodOrder.set(method.toUpperCase(), methodOrder.size);
+  }
+  const rank = (key: string): [number, number] => {
+    const space = key.indexOf(' ');
+    return [pathOrder.get(key.slice(space + 1)) ?? 0, methodOrder.get(key.slice(0, space)) ?? 0];
+  };
+  const sorted = [...index.operations].sort(([left], [right]) => {
+    const [leftPath, leftMethod] = rank(left);
+    const [rightPath, rightMethod] = rank(right);
+    return leftPath - rightPath || leftMethod - rightMethod;
+  });
+  index.operations.clear();
+  for (const [key, operation] of sorted) index.operations.set(key, operation);
+}
+
+/**
+ * Whether `index` is known to lack the operation `key`: its path is absent
+ * from the document, or its Path Item was read in full without it. A path
+ * that is present but unread proves nothing.
+ */
+function knownAbsent(index: OperationIndex, key: string): boolean {
+  if (index.operations.has(key)) return false;
+  const path = key.slice(key.indexOf(' ') + 1);
+  return index.resolved.has(path) || !index.named.has(path);
 }
 
 /** `METHOD path` back into its two halves, the path cut for display. */
@@ -1019,27 +1127,37 @@ export function compareSpecRevisions(
   };
   const readBefore = createPathItemReader(before, chargePointer);
   const readAfter = createPathItemReader(after, chargePointer);
-  const fromOperations = new Map<string, Record<string, unknown>>();
-  const toOperations = new Map<string, Record<string, unknown>>();
+  const from = operationIndex(before);
+  const to = operationIndex(after);
+  const fromOperations = from.operations;
+  const toOperations = to.operations;
   let complete = true;
-  /** Both documents' operations were read in full. */
-  let enumerated = false;
   /** Operations already reported as added or removed. */
   const reportedOperations = new Set<string>();
 
   try {
-    // Inside the budget: every Path Item reference followed is charged to it.
-    complete = enumerateOperations(before, readBefore, fromOperations) && complete;
-    complete = enumerateOperations(after, readAfter, toOperations) && complete;
-    enumerated = true;
+    // Inline Path Items first, in both documents: they cost nothing to read,
+    // so what they add and remove is known even if following references
+    // later runs out of budget. Every reference followed is charged.
+    enumerateOperations(before, readBefore, from, false);
+    enumerateOperations(after, readAfter, to, false);
+    enumerateOperations(before, readBefore, from, true);
+    enumerateOperations(after, readAfter, to, true);
+    orderOperations(from);
+    orderOperations(to);
+    complete = from.complete && to.complete;
     for (const [key, operation] of toOperations) {
       spend(1);
       const ref = operationRef(key);
       const opPlace: Place = { operation: ref, section: 'operation', location: null };
       const previous = fromOperations.get(key);
       if (previous === undefined) {
-        reportedOperations.add(key);
-        record(opPlace, 'operation_added', 'non_breaking');
+        // Added only when the earlier document is known to lack it: an
+        // unreadable Path Item there is not evidence of an addition.
+        if (knownAbsent(from, key)) {
+          reportedOperations.add(key);
+          record(opPlace, 'operation_added', 'non_breaking');
+        }
         continue;
       }
       const wasDeprecated = own(previous, 'deprecated') === true;
@@ -1059,7 +1177,7 @@ export function compareSpecRevisions(
       compareResponses(ref, previous, operation);
     }
     for (const key of fromOperations.keys()) {
-      if (toOperations.has(key)) continue;
+      if (!knownAbsent(to, key)) continue;
       spend(1);
       reportedOperations.add(key);
       record(
@@ -1074,27 +1192,26 @@ export function compareSpecRevisions(
   } catch (error) {
     if (!(error instanceof BudgetExhausted)) throw error;
     complete = false;
-    // Operations added or removed cost nothing more to name once both
-    // documents were enumerated, and a removal is the change consumers most
-    // need to hear about: a budget spent on deep comparisons must not hide
-    // one, nor leave the report reading as "no change".
-    if (enumerated) {
-      for (const key of toOperations.keys()) {
-        if (fromOperations.has(key) || reportedOperations.has(key)) continue;
-        record(
-          { operation: operationRef(key), section: 'operation', location: null },
-          'operation_added',
-          'non_breaking',
-        );
-      }
-      for (const key of fromOperations.keys()) {
-        if (toOperations.has(key) || reportedOperations.has(key)) continue;
-        record(
-          { operation: operationRef(key), section: 'operation', location: null },
-          'operation_removed',
-          'breaking',
-        );
-      }
+    // What has been read is enough to name every operation known to be added
+    // or removed, at no further cost; a removal is the change consumers most
+    // need to hear about, so a budget spent on deep comparisons or on
+    // following references must not hide one, nor leave the report reading
+    // as "no change". Nothing is inferred about a path left unread.
+    for (const key of toOperations.keys()) {
+      if (reportedOperations.has(key) || !knownAbsent(from, key)) continue;
+      record(
+        { operation: operationRef(key), section: 'operation', location: null },
+        'operation_added',
+        'non_breaking',
+      );
+    }
+    for (const key of fromOperations.keys()) {
+      if (reportedOperations.has(key) || !knownAbsent(to, key)) continue;
+      record(
+        { operation: operationRef(key), section: 'operation', location: null },
+        'operation_removed',
+        'breaking',
+      );
     }
   }
 
