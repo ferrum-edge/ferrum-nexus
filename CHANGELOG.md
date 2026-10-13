@@ -112,9 +112,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `app_settings:v2:<key>`, so a ciphertext copied to another setting's row no
   longer opens. Reads refuse unbound `v1` blobs. The first start re-encrypts
   each `v1` row the key opens, with an atomic compare-and-set per row, and
-  records a `settings.encryption_bound` audit row; later starts convert
-  nothing, so a `v1` blob injected after the upgrade stays refused.
-  `rotate-secret-key` writes `v2`. Upgrade every instance together.
+  records a `settings.encryption_bound` audit row in the same transaction;
+  later starts convert nothing, and `rotate-secret-key` then refuses `v1` too,
+  so a `v1` blob injected after the upgrade stays refused. A `v1` row the key
+  cannot open stops the start with nothing converted. Upgrade every instance
+  together.
 - **Registration re-checks its policy when it commits**
   ([GHSA-9cr4-49fg-gfcx](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-9cr4-49fg-gfcx)).
   A registration in flight when an administrator closes registration, removes

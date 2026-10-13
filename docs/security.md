@@ -1448,13 +1448,16 @@ The procedures are in
 Releases before the binding wrote unbound `v1` blobs. Reads refuse them. The
 first start of a release with the binding re-encrypts each `v1` row the current
 key opens as `v2` bound to its own key, before any service reads a setting, with
-an atomic compare-and-set per row so a value another instance saved meanwhile
-is kept. It then records a `settings.encryption_bound` audit row, and no later
+an atomic compare-and-set per row so a value another instance saved meanwhile is
+kept. It then records a `settings.encryption_bound` audit row, and no later
 start converts again: a `v1` blob written into a row after that (for example a
-pre-upgrade copy of another setting's secret) stays refused. A `v1` row the key
-cannot open is left as it is and logged; it was unreadable before too. Upgrade
-every instance together: an older instance still writes `v1`, which the new
-release refuses, and cannot read `v2`.
+pre-upgrade copy of another setting's secret) stays refused, and
+`rotate-secret-key` refuses it too. The conversion commits in one transaction
+with its marker. If a `v1` row does not open with the current key, the start
+fails with nothing converted or recorded: start with the key the rows were
+written under, or delete those rows and re-enter the secrets. Upgrade every
+instance together: an older instance still writes `v1`, which the new release
+refuses, and cannot read `v2`.
 
 All are **write-only over HTTP**: set through `PUT /api/admin/settings` (or
 `PUT /api/admin/sso`), never returned. Responses expose only `password_set` /
