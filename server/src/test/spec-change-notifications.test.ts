@@ -627,7 +627,7 @@ describe('spec change notifications', () => {
       );
     });
 
-    it('keeps an unread incomplete comparison\'s warning through a harmless rewrite', async () => {
+    it("keeps an unread incomplete comparison's warning through a harmless rewrite", async () => {
       const api = await harness.store.apis.findById(quickId);
       assert.ok(api);
       await harness.store.notifications.markAllRead(erin.user.id, new Date().toISOString());
