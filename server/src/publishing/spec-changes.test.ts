@@ -278,7 +278,7 @@ describe('consumer-facing revision comparison', () => {
     assert.ok(counters.units < 20_000, `spent ${counters.units}`);
   });
 
-  it('reads a path whose item is not an object as declaring no operations', () => {
+  it('marks the comparison incomplete when a path item is not an object', () => {
     for (const replacement of [null, 'gone', ['get']]) {
       const before = document({
         '/kept': { get: { responses: { '200': {} } } },
@@ -289,10 +289,9 @@ describe('consumer-facing revision comparison', () => {
         '/gone': replacement,
       });
       const report = compareSpecRevisions(before, after);
-      assert.equal(report.complete, true, String(replacement));
-      assert.deepEqual(lines(report), [
-        'breaking | operation_removed | GET /gone | operation | - | -',
-      ]);
+      // Unread, so incomplete: the notifier sends it as possibly breaking.
+      assert.equal(report.complete, false, String(replacement));
+      assert.deepEqual(lines(report), []);
     }
   });
 

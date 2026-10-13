@@ -468,13 +468,10 @@ function enumerateOperations(
   for (const [path, raw] of entriesOf(ownRecord(document, 'paths'))) {
     // `x-` extensions beside the paths are arbitrary data, not Path Items.
     if (!isPathKey(path)) continue;
-    // A path whose item is not an object declares no operations: known
-    // empty, the way the parser reads it.
-    if (!isRecord(raw)) {
-      index.resolved.add(path);
-      continue;
-    }
-    const item = read(path);
+    // A path whose item is not an object, or cannot be followed, is unread:
+    // the comparison is incomplete (and so sent as possibly breaking), and
+    // nothing is inferred about its operations.
+    const item = isRecord(raw) ? read(path) : null;
     if (item === null) {
       index.complete = false;
       continue;
