@@ -1456,10 +1456,19 @@ The procedures are in
 | Binding     | Additional authenticated data is `app_settings:v2:<setting key>`          |
 | Integrity   | A tampered blob, or one copied to another setting's row, fails to decrypt |
 
-Releases before the binding wrote unbound `v1` blobs. Reads refuse them, and
-every start re-encrypts each `v1` row the current key opens as `v2` bound to its
-own key before any service reads a setting. A `v1` row the key cannot open is
-left as it is and logged; it was unreadable before too.
+Releases before the binding wrote unbound `v1` blobs. Reads refuse them. The
+first start of a release with the binding re-encrypts each `v1` row the current
+key opens as `v2` bound to its own key, before any service reads a setting, with
+an atomic compare-and-set per row so a value another instance saved meanwhile is
+kept. It then records a `settings.encryption_bound` audit row, and no later
+start converts again: a `v1` blob written into a row after that (for example a
+pre-upgrade copy of another setting's secret) stays refused, and
+`rotate-secret-key` refuses it too. The conversion commits in one transaction
+with its marker. If a `v1` row does not open with the current key, the start
+fails with nothing converted or recorded: start with the key the rows were
+written under, or delete those rows and re-enter the secrets. Upgrade every
+instance together: an older instance still writes `v1`, which the new release
+refuses, and cannot read `v2`.
 
 All are **write-only over HTTP**: set through `PUT /api/admin/settings` (or
 `PUT /api/admin/sso`), never returned. Responses expose only `password_set` /
@@ -2275,6 +2284,7 @@ Revoking a `retiring` credential again completes it.
 | Action                      | Target type      | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | --------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `admin.settings_update`     | `settings`       | Portal settings changed. `target_id` is `null`, or `sso` for `PUT /api/admin/sso`. `details`: `changed_keys` (never values), `smtp_password_source_change` when relevant, `captcha_self_test: "passed"` when one ran; for `sso`, `section`, `providers_added`, `providers_removed`, `links_removed` (provider id → links deleted with it), `client_secrets_changed` (provider ids only), and `providers_trust_lowered` (provider ids whose settings stopped granting admin trust).                             |
+| `settings.encryption_bound` | `settings`       | The one-time startup conversion of unbound legacy (`v1`) encrypted settings to key-bound `v2` blobs ran (GHSA-qm46-qg94-mpg7). Written once by the system; while it exists no later start converts a `v1` row, so do not delete it. `target_id` is `null`. `details`: `bound_keys`, `changed_keys` (names only); a row the key cannot open stops the start, so none is recorded.                                                                                                                               |
 | `admin.template_update`     | `email_template` | An email template was overridden. `target_id` is the template key. `details`: `key`, `body_html_sha256`, `body_text_sha256` (hex SHA-256 of the saved bodies).                                                                                                                                                                                                                                                                                                                                                 |
 | `admin.mass_email`          | `mass_email`     | A mass-email campaign was started: written, and counted against `NEXUS_MAX_MASS_EMAILS_PER_DAY`, **before** any outbox row is queued; if it cannot be written nothing is queued. One row per campaign — a retry of the same batch by the same administrator writes none, and is a retry only if its `content_sha256` matches (otherwise `409`). `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `bytes` (rendered size × recipients), `content_sha256`, `phase: "started"`. |
 | `admin.mass_email_complete` | `mass_email`     | What one attempt at a campaign queued, written best-effort after its chunked fan-out. `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `enqueued`, `chunks` (fan-out transactions committed), `failed` (a chunk failed; the retry with the same batch id queues the rest).                                                                                                                                                                                                   |

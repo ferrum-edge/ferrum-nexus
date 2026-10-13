@@ -419,6 +419,13 @@ export const AuditAction = {
 
   /* admin */
   ADMIN_SETTINGS_UPDATE: 'admin.settings_update',
+  /**
+   * The one-time startup conversion of unbound legacy (`v1`) encrypted
+   * settings to key-bound `v2` blobs ran (GHSA-qm46-qg94-mpg7). Written by the
+   * system once; its presence is what stops any later start from converting a
+   * `v1` row again, so it must not be deleted.
+   */
+  SETTINGS_ENCRYPTION_BOUND: 'settings.encryption_bound',
   ADMIN_TEMPLATE_UPDATE: 'admin.template_update',
   /**
    * A mass-email campaign was started. Written in a transaction of its own
@@ -650,6 +657,10 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
     "Marks the caller's own notifications read; no authority, access or shared state changes.",
   ),
   [AuditAction.ADMIN_SETTINGS_UPDATE]: TRANSACTIONAL,
+  [AuditAction.SETTINGS_ENCRYPTION_BOUND]: rowOnly(
+    'Commits with the conversion it marks complete; on a portal with no legacy rows to ' +
+      'convert it is the transaction’s only write.',
+  ),
   [AuditAction.ADMIN_TEMPLATE_UPDATE]: TRANSACTIONAL,
   [AuditAction.ADMIN_MASS_EMAIL]: INTENT,
   [AuditAction.ADMIN_MASS_EMAIL_COMPLETE]: postCommit(
