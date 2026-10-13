@@ -191,6 +191,30 @@ describe('consumer-facing revision comparison', () => {
     assert.ok(counters.units < 20 * 1_900, `spent ${counters.units}`);
   });
 
+  it('charges every shared parameter, even ones an operation overrides', () => {
+    // A shared item repeats one parameter identity 20,000 times and every
+    // operation overrides it down to one survivor: the comparison must pay
+    // for the raw list each time it reads it, and stop at its budget.
+    const repeated = Array.from({ length: 20_000 }, () => ({ name: 'id', in: 'query' }));
+    const operation = {
+      parameters: [{ name: 'id', in: 'query', required: true }],
+      responses: { '200': {} },
+    };
+    const components = { pathItems: { Shared: { parameters: repeated, get: operation } } };
+    const paths: Document = {};
+    for (let index = 0; index < 4; index += 1) {
+      paths[`/p${index}`] = { $ref: '#/components/pathItems/Shared' };
+    }
+    const counters = stats();
+    const report = compareSpecRevisions(
+      document(paths, components),
+      document(structuredClone(paths), components, { 'x-revision': 2 }),
+      { unitLimit: 50_000, stats: counters },
+    );
+    assert.equal(report.complete, false);
+    assert.ok(counters.units > 50_000);
+  });
+
   it('marks the comparison incomplete when a Path Item reference cannot be followed', () => {
     const before = document({ '/shared': { $ref: '#/components/pathItems/Missing' } });
     const report = compareSpecRevisions(before, structuredClone(before));

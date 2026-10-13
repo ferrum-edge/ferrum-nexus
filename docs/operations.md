@@ -3576,8 +3576,9 @@ Administrators see and remove an account's links with
    with their password and links their account from **Profile → Linked
    sign-in**. The portal refuses `sso_only` until the `super_admin` saving it
    has a link to an enabled provider. The founder links without an address
-   proof; any other `super_admin` must first verify their address or reset
-   their password (`address_unproven` otherwise).
+   proof; any other `super_admin` must first complete a password reset, or
+   already hold a provider-verified proof (`address_unproven` otherwise; a
+   redeemed verification link is not enough).
 2. Switch the policy to `sso_only`. The founding registration (with the
    bootstrap token) still works on an empty portal.
 3. Keep `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN` in your runbook. Set it to `true`

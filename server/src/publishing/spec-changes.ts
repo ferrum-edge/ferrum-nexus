@@ -878,7 +878,7 @@ export function compareSpecRevisions(
     left: readonly KeyedOpenApiParameter[],
     right: readonly KeyedOpenApiParameter[],
   ): void => {
-    spend(left.length + right.length);
+    // Already paid for: `parametersOf` charged every raw entry of both lists.
     // Parameters without an identity cannot be matched with anything, so they
     // are left out rather than reported as a removal and an addition.
     const byKey = (
@@ -993,6 +993,10 @@ export function compareSpecRevisions(
     const sharedMember = item === null ? undefined : agentPathItemMember(item, 'parameters');
     const shared = Array.isArray(sharedMember) ? sharedMember : [];
     const declared = ownArray(operation, 'parameters') ?? [];
+    // Every raw entry, before any is keyed or merged away: a long shared list
+    // that an operation overrides down to one parameter still costs its length
+    // each time it is read.
+    spend(shared.length + declared.length);
     return mergeOpenApiParameters(
       keyOpenApiParameters(resolver, shared, true, parameterKeys),
       keyOpenApiParameters(resolver, declared, false, parameterKeys),

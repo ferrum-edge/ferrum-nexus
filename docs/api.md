@@ -638,9 +638,9 @@ and session, and returns where to send the browser:
 The SPA navigates to `location`. The callback links whatever identity signs in
 there to this account, whatever its email address, provided it returns to the
 same session (`link_session_mismatch` otherwise) and the portal already holds a
-recorded proof of the account's current address: a redeemed verification link,
-a completed password reset, or an earlier provider-verified provisioning or
-automatic link. Without one the link is refused with `address_unproven`, even
+recorded trusted proof of the account's current address: a completed password
+reset, or an earlier provider-verified provisioning or automatic link. A
+redeemed registration verification link does not count. Without one the link is refused with `address_unproven`, even
 when the provider asserts `email_verified: true` for the same address. The
 founding `super_admin`, seated with the bootstrap token, needs no proof. The
 provider's own `allowed_email_domains` still apply, and a subject already
