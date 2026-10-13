@@ -88,7 +88,10 @@ import {
   emptySpecChangeReport,
   keyOpenApiParameters,
   mergeOpenApiParameters,
-  resolveAgentPathItem,
+  agentPathItemMember,
+  MAX_PATH_ITEM_REF_HOPS,
+  PATH_ITEM_REF_BASES,
+  resolveOpenApiPointer,
   type AgentPathItem,
   type KeyedOpenApiParameter,
   type OpenApiRefResolver,
@@ -333,68 +336,163 @@ function childPath(path: string, name: string): string {
 }
 
 /**
- * A Path Item as the gateway reads it: inline, or through a chain of local
- * Path Item `$ref`s. Fields written beside a `$ref` are kept, the outermost
- * one winning (the same member semantics as agent operations), so a sibling
- * method or shared `parameters` entry is compared rather than dropped. A
- * chain that cannot be followed answers `null`.
+ * Reads a document's Path Items as the gateway does: inline, or through a
+ * chain of local Path Item `$ref`s, with fields written beside a `$ref`
+ * kept and the outermost one winning (the agent operations' member
+ * semantics, `resolveAgentPathItem`'s rules: at most
+ * {@link MAX_PATH_ITEM_REF_HOPS} hops, acyclic, into `paths`,
+ * `components.pathItems` or `webhooks`). Nothing is copied: members are read
+ * through the chain.
+ *
+ * Both outcomes are shared by node identity, so many paths that reach one
+ * item walk its chain once: a resolved chain is memoised for every node on
+ * it, and a chain that can never resolve (a missing or invalid target, or a
+ * cycle) marks every node on it broken. A chain refused only for its length
+ * is not memoised, since a shorter prefix may reach the same node legally;
+ * each such walk is paid for. Every pointer followed is charged to `charge`
+ * with its length. `null` means the chain cannot be followed.
  */
-function resolvePathItem(
+type PathItemReader = (path: string) => AgentPathItem | null;
+
+function createPathItemReader(
   document: Record<string, unknown>,
-  path: string,
-  item: unknown,
-): Record<string, unknown> | null {
-  if (!isRecord(item)) return null;
-  if (refOf(item) === null) return item;
-  let resolved: AgentPathItem;
-  try {
-    resolved = resolveAgentPathItem(document, path, item);
-  } catch {
-    return null;
-  }
-  // Null-prototype, so a document key such as `__proto__` stays a member.
-  const merged = Object.assign(Object.create(null) as Record<string, unknown>, resolved.target);
-  for (let index = resolved.chain.length - 1; index >= 0; index -= 1) {
-    for (const [key, value] of Object.entries(resolved.chain[index] as Record<string, unknown>)) {
-      if (key !== '$ref') merged[key] = value;
+  charge: (pointerCodeUnits: number) => void,
+): PathItemReader {
+  const paths = ownRecord(document, 'paths');
+  const resolved = new WeakMap<object, AgentPathItem>();
+  const broken = new WeakSet<object>();
+  const byPath = new Map<string, AgentPathItem | null>();
+
+  const resolve = (raw: Record<string, unknown>): AgentPathItem | null => {
+    const chain: Record<string, unknown>[] = [];
+    const seen = new Set<string>();
+    let node = raw;
+    let tail: AgentPathItem | undefined;
+    let intrinsic = false;
+    for (;;) {
+      tail = resolved.get(node);
+      if (tail) break;
+      if (broken.has(node)) {
+        intrinsic = true;
+        break;
+      }
+      if (!Object.hasOwn(node, '$ref')) {
+        tail = { chain: [], target: node };
+        break;
+      }
+      const ref = node.$ref;
+      if (
+        typeof ref !== 'string' ||
+        !PATH_ITEM_REF_BASES.some((base) => ref.startsWith(base)) ||
+        seen.has(ref)
+      ) {
+        chain.push(node);
+        intrinsic = true;
+        break;
+      }
+      if (seen.size >= MAX_PATH_ITEM_REF_HOPS) break;
+      charge(ref.length + 1);
+      seen.add(ref);
+      chain.push(node);
+      const target = resolveOpenApiPointer(document, ref);
+      if (!isRecord(target)) {
+        intrinsic = true;
+        break;
+      }
+      node = target;
     }
-  }
-  return merged;
+    if (!tail || chain.length + tail.chain.length > MAX_PATH_ITEM_REF_HOPS) {
+      if (intrinsic) for (const visited of chain) broken.add(visited);
+      return null;
+    }
+    if (tail.chain.length === 0) resolved.set(tail.target, tail);
+    let result: AgentPathItem = tail;
+    for (let index = chain.length - 1; index >= 0; index -= 1) {
+      const visited = chain[index] as Record<string, unknown>;
+      result = { chain: [visited, ...result.chain], target: tail.target };
+      resolved.set(visited, result);
+    }
+    return result;
+  };
+
+  return (path) => {
+    if (byPath.has(path)) return byPath.get(path) ?? null;
+    const raw = paths ? own(paths, path) : undefined;
+    const item = isRecord(raw) ? resolve(raw) : null;
+    byPath.set(path, item);
+    return item;
+  };
+}
+
+/** A member of a resolved Path Item that is an object, or `null`. */
+function pathItemRecord(item: AgentPathItem, key: string): Record<string, unknown> | null {
+  const member = agentPathItemMember(item, key);
+  return isRecord(member) ? member : null;
+}
+
+/** A key of `paths` that names a path, as the agent enumerator reads them. */
+function isPathKey(key: string): boolean {
+  return key.startsWith('/');
+}
+
+/** What is known of one document's operations, filled in as it is read. */
+interface OperationIndex {
+  /** Every operation read so far, keyed `METHOD path`, in document order. */
+  operations: Map<string, Record<string, unknown>>;
+  /** Paths whose Path Item was read in full: what they lack, they lack. */
+  resolved: Set<string>;
+  /** Every path the document names, read or not. */
+  named: Set<string>;
+  /** False once a Path Item could not be followed. */
+  complete: boolean;
+}
+
+function operationIndex(document: Record<string, unknown>): OperationIndex {
+  return {
+    operations: new Map(),
+    resolved: new Set(),
+    named: new Set([...entriesOf(ownRecord(document, 'paths')).keys()].filter(isPathKey)),
+    complete: true,
+  };
 }
 
 /**
- * Every operation of a document, keyed `METHOD path`, in document order.
- * Locally referenced Path Items contribute the operations of the object
- * they name plus any written beside the reference; one that cannot be
- * resolved marks the enumeration incomplete instead of silently hiding its
- * operations from both sides.
+ * Read every Path Item of `document` into `index`, in document order. Each
+ * pointer followed is charged, so this may run out of budget part way.
  */
-function operationsOf(document: Record<string, unknown>): {
-  operations: Map<string, Record<string, unknown>>;
-  complete: boolean;
-} {
-  const operations = new Map<string, Record<string, unknown>>();
-  let complete = true;
+function enumerateOperations(
+  document: Record<string, unknown>,
+  read: PathItemReader,
+  index: OperationIndex,
+): void {
   for (const [path, raw] of entriesOf(ownRecord(document, 'paths'))) {
-    if (!isRecord(raw)) continue;
-    const item = resolvePathItem(document, path, raw);
+    // `x-` extensions beside the paths are arbitrary data, not Path Items.
+    if (!isPathKey(path)) continue;
+    // A path whose item is not an object, or cannot be followed, is unread:
+    // the comparison is incomplete (and so sent as possibly breaking), and
+    // nothing is inferred about its operations.
+    const item = isRecord(raw) ? read(path) : null;
     if (item === null) {
-      complete = false;
+      index.complete = false;
       continue;
     }
+    index.resolved.add(path);
     for (const method of OPENAPI_OPERATION_METHODS) {
-      const operation = ownRecord(item, method);
-      if (operation) operations.set(`${method.toUpperCase()} ${path}`, operation);
+      const operation = pathItemRecord(item, method);
+      if (operation) index.operations.set(`${method.toUpperCase()} ${path}`, operation);
     }
   }
-  return { operations, complete };
 }
 
-/** The path item an operation key belongs to, resolved when it is a `$ref`. */
-function pathItemOf(document: Record<string, unknown>, path: string): Record<string, unknown> {
-  const paths = ownRecord(document, 'paths');
-  const raw = paths ? own(paths, path) : undefined;
-  return resolvePathItem(document, path, raw) ?? {};
+/**
+ * Whether `index` is known to lack the operation `key`: its path is absent
+ * from the document, or its Path Item was read in full without it. A path
+ * that is present but unread proves nothing.
+ */
+function knownAbsent(index: OperationIndex, key: string): boolean {
+  if (index.operations.has(key)) return false;
+  const path = key.slice(key.indexOf(' ') + 1);
+  return index.resolved.has(path) || !index.named.has(path);
 }
 
 /** `METHOD path` back into its two halves, the path cut for display. */
@@ -873,7 +971,7 @@ export function compareSpecRevisions(
     left: readonly KeyedOpenApiParameter[],
     right: readonly KeyedOpenApiParameter[],
   ): void => {
-    spend(left.length + right.length);
+    // Already paid for: `parametersOf` charged every raw entry of both lists.
     // Parameters without an identity cannot be matched with anything, so they
     // are left out rather than reported as a removal and an addition.
     const byKey = (
@@ -980,33 +1078,53 @@ export function compareSpecRevisions(
 
   const parametersOf = (
     resolver: OpenApiRefResolver,
-    document: Record<string, unknown>,
+    read: PathItemReader,
     path: string,
     operation: Record<string, unknown>,
   ): KeyedOpenApiParameter[] => {
-    const item = pathItemOf(document, path);
-    const shared = ownArray(item, 'parameters') ?? [];
+    const item = read(path);
+    const sharedMember = item === null ? undefined : agentPathItemMember(item, 'parameters');
+    const shared = Array.isArray(sharedMember) ? sharedMember : [];
     const declared = ownArray(operation, 'parameters') ?? [];
+    // Every raw entry, before any is keyed or merged away: a long shared list
+    // that an operation overrides down to one parameter still costs its length
+    // each time it is read.
+    spend(shared.length + declared.length);
     return mergeOpenApiParameters(
       keyOpenApiParameters(resolver, shared, true, parameterKeys),
       keyOpenApiParameters(resolver, declared, false, parameterKeys),
     );
   };
 
-  const fromEnumerated = operationsOf(before);
-  const toEnumerated = operationsOf(after);
-  const fromOperations = fromEnumerated.operations;
-  const toOperations = toEnumerated.operations;
-  let complete = fromEnumerated.complete && toEnumerated.complete;
+  // A unit per reference followed, plus its pointer text at the keyed-text
+  // rate, so a long pointer costs what reading it costs.
+  const pointerText = createKeyTextCharge(spend);
+  const chargePointer = (codeUnits: number): void => {
+    spend(1);
+    pointerText.charge(codeUnits);
+  };
+  const readBefore = createPathItemReader(before, chargePointer);
+  const readAfter = createPathItemReader(after, chargePointer);
+  const from = operationIndex(before);
+  const to = operationIndex(after);
+  const fromOperations = from.operations;
+  const toOperations = to.operations;
+  let complete = true;
 
   try {
+    // Inside the budget: every Path Item reference followed is charged.
+    enumerateOperations(before, readBefore, from);
+    enumerateOperations(after, readAfter, to);
+    complete = from.complete && to.complete;
     for (const [key, operation] of toOperations) {
       spend(1);
       const ref = operationRef(key);
       const opPlace: Place = { operation: ref, section: 'operation', location: null };
       const previous = fromOperations.get(key);
       if (previous === undefined) {
-        record(opPlace, 'operation_added', 'non_breaking');
+        // Added only when the earlier document is known to lack it: an
+        // unreadable Path Item there is not evidence of an addition.
+        if (knownAbsent(from, key)) record(opPlace, 'operation_added', 'non_breaking');
         continue;
       }
       const wasDeprecated = own(previous, 'deprecated') === true;
@@ -1019,14 +1137,14 @@ export function compareSpecRevisions(
       const path = key.slice(key.indexOf(' ') + 1);
       compareParameters(
         ref,
-        parametersOf(beforeRefs, before, path, previous),
-        parametersOf(afterRefs, after, path, operation),
+        parametersOf(beforeRefs, readBefore, path, previous),
+        parametersOf(afterRefs, readAfter, path, operation),
       );
       compareRequestBody(ref, previous, operation);
       compareResponses(ref, previous, operation);
     }
     for (const key of fromOperations.keys()) {
-      if (toOperations.has(key)) continue;
+      if (!knownAbsent(to, key)) continue;
       spend(1);
       record(
         { operation: operationRef(key), section: 'operation', location: null },
@@ -1036,8 +1154,12 @@ export function compareSpecRevisions(
     }
     compareComponents();
     keyText.settle();
+    pointerText.settle();
   } catch (error) {
     if (!(error instanceof BudgetExhausted)) throw error;
+    // Wherever the budget ran out, the result is only "incomplete": the
+    // notifier sends an incomplete comparison as possibly breaking
+    // (`specChangeIsNews`), so nothing here has to rescue particular changes.
     complete = false;
   }
 

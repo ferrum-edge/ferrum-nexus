@@ -638,9 +638,9 @@ and session, and returns where to send the browser:
 The SPA navigates to `location`. The callback links whatever identity signs in
 there to this account, whatever its email address, provided it returns to the
 same session (`link_session_mismatch` otherwise) and the portal already holds a
-recorded proof of the account's current address: a redeemed verification link,
-a completed password reset, or an earlier provider-verified provisioning or
-automatic link. Without one the link is refused with `address_unproven`, even
+recorded trusted proof of the account's current address: a completed password
+reset, or an earlier provider-verified provisioning or automatic link. A
+redeemed registration verification link does not count. Without one the link is refused with `address_unproven`, even
 when the provider asserts `email_verified: true` for the same address. The
 founding `super_admin`, seated with the bootstrap token, needs no proof. The
 provider's own `allowed_email_domains` still apply, and a subject already
@@ -1030,7 +1030,8 @@ _session_
 ```
 
 **`api_spec_updated`** is sent when an API the account holds an active grant on
-publishes a revision that changes something (see
+publishes a revision that changes something, or whose comparison could not be
+completed (see
 [`PUT /api/apis/:id/spec`](#put-apiapisidspec)). Its title is
 `<API name> spec updated to <version>` (or `rolled back to`), its body counts
 the changes and names up to five, removed operations first, and its `link` is
@@ -1038,7 +1039,11 @@ the changes and names up to five, removed operations first, and its `link` is
 API gets no second one: its unread one is rewritten to describe the newest
 revision, moved to the top of the list, and says earlier revisions are on the
 Changes tab. A title ending `(breaking changes)` keeps that ending through a
-rewrite by a revision that broke nothing.
+rewrite by a revision that broke nothing. A comparison that could not be
+completed is treated as possibly breaking: its title ends `(could not fully
+compare)` unless it also named a breaking change, its body says the comparison
+was incomplete, and that ending likewise survives a rewrite or a coalesced
+revision that compared cleanly (`(breaking changes)` outranks it).
 
 ### `POST /api/notifications/read`
 
@@ -2387,7 +2392,9 @@ _provider_, owner or admin — publish a new spec revision. Body: `spec`
   `api.spec_update` (or `api.spec_rollback`) row carries
   `spec_changes: { breaking, non_breaking, complete }`.
 - **Grantees are told.** Once the revision has committed, when the comparison
-  found a change, every account holding an active grant on the API gets an
+  found a change or could not be completed (`complete: false`, at any stage,
+  which is sent as possibly breaking), every account holding an active grant
+  on the API gets an
   `api_spec_updated` notification, and a `spec_updated` email if it turned
   email on, once per account however many of its identities hold a grant, and
   never the account that published. Each channel follows the account's

@@ -34,8 +34,9 @@
  * - **Otherwise an existing account with the same address is linked only
  *   when both sides have proven it**: the provider asserts
  *   `email_verified: true` (the JSON boolean) *and* the portal holds a proof
- *   of the address in `user_email_proofs` — a redeemed verification link, a
- *   completed reset, or a provider that verified it before. `email_verified`
+ *   of the address in `user_email_proofs` — a completed reset, or a provider
+ *   that verified it before (a redeemed registration verification link does
+ *   not count; see `addressProven`). `email_verified`
  *   alone is not proof. An `admin` or `super_admin` is never linked this way,
  *   and neither is an account this provider's claims would make one: its
  *   holder links explicitly. Anything less is refused and nothing is linked.
@@ -663,7 +664,8 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
    * turning verification on later does not change what those rows are. A
    * proof is written only by a redeemed verification link, a completed
    * password reset, or a provider that verified the address, and covers the
-   * address it was written for.
+   * address it was written for. A `verification_link` proof does not count
+   * for linking: only a reset or a provider assertion does.
    */
   async function addressProven(account: UserRecord): Promise<boolean> {
     const proof = await store.emailProofs.findByUser(account.id);

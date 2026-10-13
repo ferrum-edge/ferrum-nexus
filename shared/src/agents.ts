@@ -56,10 +56,14 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 /** Where a Path Item reference may point. */
-const PATH_ITEM_REF_BASES = ['#/paths/', '#/components/pathItems/', '#/webhooks/'];
+export const PATH_ITEM_REF_BASES: readonly string[] = [
+  '#/paths/',
+  '#/components/pathItems/',
+  '#/webhooks/',
+];
 
 /** Hops one Path Item reference chain may take. */
-const MAX_PATH_ITEM_REF_HOPS = 32;
+export const MAX_PATH_ITEM_REF_HOPS = 32;
 
 /**
  * A Path Item reached through its chain of references, read in place: nothing

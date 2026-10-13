@@ -5,9 +5,11 @@
  * so a bad address retries (and eventually fails) on its own instead of taking
  * the whole send with it, and the admin can see per-recipient state.
  *
- * **Idempotency.** Every row is keyed `mass:<batch>:<user_id>`. The batch id is
- * the caller's `idempotency_key` when supplied, otherwise a fresh UUID per
- * call. Re-posting the same request with the same key therefore enqueues
+ * **Idempotency.** Every row is keyed `mass:<actor_id>:<batch>:<user_id>`. The
+ * batch id is the caller's `idempotency_key` when supplied, otherwise a fresh
+ * UUID per call, and it is scoped to the sending administrator: two
+ * administrators who pick the same key run separate campaigns. Re-posting the
+ * same request with the same key as the same administrator therefore enqueues
  * nothing new — the unique index on `email_outbox.idempotency_key` does the
  * work — which makes the composer safe to retry after a timeout or a partial
  * failure. The batch id comes back on both the success and the failure path

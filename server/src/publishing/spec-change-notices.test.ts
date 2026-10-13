@@ -17,12 +17,15 @@ import {
 
 import {
   BREAKING_TITLE_MARK,
+  INCOMPLETE_TITLE_MARK,
   agentToolsRenamedText,
   inertText,
   rewrittenNotice,
   specChangeEmailLine,
+  specChangeIsNews,
   summarizeSpecChange,
 } from './spec-change-notices.js';
+import { compareSpecRevisions } from './spec-changes.js';
 
 function change(overrides: Partial<SpecChange>): SpecChange {
   return {
@@ -202,6 +205,92 @@ describe('spec change notices', () => {
       }),
     );
     assert.match(notice.summary, /The comparison was incomplete/);
+  });
+
+  it('sends a comparison that ran out of budget at any stage as possibly breaking', () => {
+    type Doc = Record<string, unknown>;
+    const doc = (paths: Doc, components: Doc = {}): Doc => ({
+      openapi: '3.1.0',
+      info: { title: 'Orders', version: '1.0.0' },
+      paths,
+      components,
+    });
+    const many = (count: number, item: (index: number) => Doc): Doc =>
+      Object.fromEntries(Array.from({ length: count }, (_, index) => [`/p${index}`, item(index)]));
+    const shared = (parameters: number): Doc => ({
+      pathItems: {
+        Shared: {
+          parameters: Array.from({ length: parameters }, () => ({ name: 'id', in: 'query' })),
+          get: { parameters: [{ name: 'id', in: 'query' }], responses: { '200': {} } },
+        },
+      },
+    });
+    const viaRef = (): Doc => ({ $ref: '#/components/pathItems/Shared' });
+    const stages: [string, Doc, Doc, number][] = [
+      // Following references while the operations are discovered.
+      ['discovery', doc(many(400, viaRef), shared(1)), doc(many(400, viaRef), shared(1)), 300],
+      // Comparing the parameters of an operation present on both sides.
+      [
+        'parameters',
+        doc(many(4, viaRef), shared(5_000)),
+        doc(many(4, viaRef), shared(5_000)),
+        9_000,
+      ],
+      // Naming operations removed, after the comparisons.
+      ['removals', doc(many(200, () => ({ get: { responses: { '200': {} } } }))), doc({}), 50],
+    ];
+    for (const [stage, before, after, unitLimit] of stages) {
+      const report = compareSpecRevisions(before, after, { unitLimit });
+      assert.equal(report.complete, false, stage);
+      assert.equal(specChangeIsNews(report), true, `${stage}: never withheld as no change`);
+      const notice = summarizeSpecChange('Billing', entry(report));
+      assert.equal(notice.breaking, true, `${stage}: travels the breaking path`);
+      assert.ok(
+        notice.title.endsWith(BREAKING_TITLE_MARK) || notice.title.endsWith(INCOMPLETE_TITLE_MARK),
+        `${stage}: ${notice.title}`,
+      );
+      assert.doesNotMatch(notice.summary, /found no difference/, stage);
+    }
+
+    // Only a complete comparison that found nothing is withheld.
+    const same = doc({ '/x': { get: { responses: { '200': {} } } } });
+    const unchanged = compareSpecRevisions(same, structuredClone(same));
+    assert.equal(unchanged.complete, true);
+    assert.equal(specChangeIsNews(unchanged), false);
+  });
+
+  it('warns about an incomplete comparison even when only info changed', () => {
+    const notice = summarizeSpecChange(
+      'Billing',
+      entry({ complete: false, changed: true, info_changes: ['version'] }),
+    );
+    assert.doesNotMatch(notice.summary, /Only its/);
+    assert.match(notice.summary, /Its version changed\./);
+    assert.match(notice.summary, /The comparison was incomplete/);
+    assert.equal(notice.breaking, true);
+  });
+
+  it('keeps an earlier incomplete comparison in a rewritten notice', () => {
+    const harmless = summarizeSpecChange(
+      'Billing',
+      entry({ changed: true, info_changes: ['version'] }),
+    );
+    const rewritten = rewrittenNotice(harmless, 'incomplete');
+    assert.ok(rewritten.title.endsWith(INCOMPLETE_TITLE_MARK), rewritten.title);
+    assert.match(rewritten.body, /could not be fully compared/);
+    // Breaking outranks it, replacing the incomplete mark.
+    const incomplete = summarizeSpecChange('Billing', entry({ complete: false, changed: false }));
+    const upgraded = rewrittenNotice(incomplete, true);
+    assert.ok(upgraded.title.endsWith(BREAKING_TITLE_MARK), upgraded.title);
+    assert.ok(!upgraded.title.includes(INCOMPLETE_TITLE_MARK), upgraded.title);
+  });
+
+  it('marks an incomplete comparison that named nothing as possibly breaking', () => {
+    const notice = summarizeSpecChange('Billing', entry({ complete: false, changed: false }));
+    assert.equal(notice.breaking, true);
+    assert.ok(notice.title.endsWith(INCOMPLETE_TITLE_MARK), notice.title);
+    assert.match(notice.summary, /The comparison was incomplete/);
+    assert.match(notice.summary, /possibly breaking/);
   });
 
   it('breaks up anything a mail client would turn into a link', () => {

@@ -160,6 +160,155 @@ describe('consumer-facing revision comparison', () => {
     );
   });
 
+  it('reads a large Path Item shared by many paths without copying it', () => {
+    // One referenced item with many extension fields behind every path: each
+    // path must cost its reference, not the item's size, on both sides.
+    const fields: Document = { get: { responses: { '200': {} } } };
+    for (let index = 0; index < 20_000; index += 1) fields[`x-field-${index}`] = index;
+    let enumerations = 0;
+    const shared = new Proxy(fields, {
+      ownKeys(target) {
+        enumerations += 1;
+        return Reflect.ownKeys(target);
+      },
+    });
+    const paths = (): Document => {
+      const result: Document = {};
+      for (let index = 0; index < 1_900; index += 1) {
+        result[`/p${index}`] = { $ref: '#/components/pathItems/Shared' };
+      }
+      return result;
+    };
+    const counters = stats();
+    const report = compareSpecRevisions(
+      document(paths(), { pathItems: { Shared: shared } }),
+      document(paths(), { pathItems: { Shared: shared } }),
+      { stats: counters },
+    );
+    assert.equal(report.complete, true);
+    assert.equal(report.changed, false);
+    assert.equal(enumerations, 0, 'the shared item is never copied or enumerated');
+    assert.ok(counters.units < 20 * 1_900, `spent ${counters.units}`);
+  });
+
+  it('charges every shared parameter, even ones an operation overrides', () => {
+    // A shared item repeats one parameter identity 20,000 times and every
+    // operation overrides it down to one survivor: the comparison must pay
+    // for the raw list each time it reads it, and stop at its budget.
+    const repeated = Array.from({ length: 20_000 }, () => ({ name: 'id', in: 'query' }));
+    const operation = {
+      parameters: [{ name: 'id', in: 'query', required: true }],
+      responses: { '200': {} },
+    };
+    const components = { pathItems: { Shared: { parameters: repeated, get: operation } } };
+    const paths: Document = {};
+    for (let index = 0; index < 4; index += 1) {
+      paths[`/p${index}`] = { $ref: '#/components/pathItems/Shared' };
+    }
+    const counters = stats();
+    const report = compareSpecRevisions(
+      document(paths, components),
+      document(structuredClone(paths), components, { 'x-revision': 2 }),
+      { unitLimit: 50_000, stats: counters },
+    );
+    assert.equal(report.complete, false);
+    assert.ok(counters.units > 50_000);
+  });
+
+  it('walks a broken reference chain shared by many paths once', () => {
+    // Every path points into one chain that ends at a missing item: the chain
+    // is walked once per document, not once per path.
+    const chain: Document = {};
+    for (let index = 0; index < 20; index += 1) {
+      chain[`H${index}`] = { $ref: `#/components/pathItems/H${index + 1}` };
+    }
+    // Only the shared tail is counted: every path's own first hop to `H0` is
+    // unavoidable, while walking `H1` onwards per path is what memoising saves.
+    let reads = 0;
+    const count = (key: string | symbol): void => {
+      if (key !== 'H0') reads += 1;
+    };
+    const counted = new Proxy(chain, {
+      get(target, key, receiver) {
+        count(key);
+        return Reflect.get(target, key, receiver);
+      },
+      getOwnPropertyDescriptor(target, key) {
+        count(key);
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+    const paths: Document = { '/inline': { get: { responses: { '200': {} } } } };
+    for (let index = 0; index < 1_000; index += 1) {
+      paths[`/p${index}`] = { $ref: '#/components/pathItems/H0' };
+    }
+    const report = compareSpecRevisions(
+      document(paths, { pathItems: counted }),
+      document(structuredClone(paths), { pathItems: counted }),
+    );
+    assert.equal(report.complete, false);
+    assert.ok(reads < 1_000, `read the chain ${reads} times`);
+  });
+
+  it('walks a broken tail shared through distinct entries once', () => {
+    // 1,000 distinct entries share one hub whose long chain ends at a
+    // missing item: the tail is walked once per document, so the comparison
+    // stays well inside its budget and still names the inline removal.
+    const name = (index: number): string => `T${index}-${'x'.repeat(500)}`;
+    const pathItems: Document = { Hub: { $ref: `#/components/pathItems/${name(1)}` } };
+    for (let index = 1; index < 30; index += 1) {
+      pathItems[name(index)] = { $ref: `#/components/pathItems/${name(index + 1)}` };
+    }
+    const paths = (withGone: boolean): Document => {
+      const result: Document = { '/kept': { get: { responses: { '200': {} } } } };
+      if (withGone) result['/gone'] = { get: { responses: { '200': {} } } };
+      for (let index = 0; index < 1_000; index += 1) {
+        pathItems[`Entry${index}`] = { $ref: '#/components/pathItems/Hub' };
+        result[`/e${index}`] = { $ref: `#/components/pathItems/Entry${index}` };
+      }
+      return result;
+    };
+    const counters = stats();
+    const report = compareSpecRevisions(
+      document(paths(true), { pathItems }),
+      document(paths(false), { pathItems }),
+      { stats: counters },
+    );
+    assert.equal(report.complete, false, 'the broken references are unreadable');
+    assert.equal(report.changed, true);
+    assert.deepEqual(lines(report), [
+      'breaking | operation_removed | GET /gone | operation | - | -',
+    ]);
+    // Two pointers per entry and one walk of the tail, not 1,000.
+    assert.ok(counters.units < 20_000, `spent ${counters.units}`);
+  });
+
+  it('marks the comparison incomplete when a path item is not an object', () => {
+    for (const replacement of [null, 'gone', ['get']]) {
+      const before = document({
+        '/kept': { get: { responses: { '200': {} } } },
+        '/gone': { get: { responses: { '200': {} } } },
+      });
+      const after = document({
+        '/kept': { get: { responses: { '200': {} } } },
+        '/gone': replacement,
+      });
+      const report = compareSpecRevisions(before, after);
+      // Unread, so incomplete: the notifier sends it as possibly breaking.
+      assert.equal(report.complete, false, String(replacement));
+      assert.deepEqual(lines(report), []);
+    }
+  });
+
+  it('ignores extensions beside the paths', () => {
+    const before = document({
+      '/kept': { get: { responses: { '200': {} } } },
+      'x-example': { $ref: '#/examples/Foo' },
+    });
+    const report = compareSpecRevisions(before, structuredClone(before));
+    assert.deepEqual(report, emptySpecChangeReport());
+  });
+
   it('marks the comparison incomplete when a Path Item reference cannot be followed', () => {
     const before = document({ '/shared': { $ref: '#/components/pathItems/Missing' } });
     const report = compareSpecRevisions(before, structuredClone(before));
@@ -452,9 +601,11 @@ describe('consumer-facing revision comparison', () => {
       unitLimit: 50,
       stats: counters,
     });
+    // Spending stops at the budget, and the result says it is incomplete;
+    // the notifier sends an incomplete comparison as possibly breaking.
     assert.equal(report.complete, false);
     assert.ok(report.counts.operations_removed < 200);
-    assert.ok(counters.units > 50);
+    assert.ok(counters.units > 50 && counters.units <= 51, `spent ${counters.units}`);
   });
 
   it('lists breaking changes first and counts past the list cap', () => {

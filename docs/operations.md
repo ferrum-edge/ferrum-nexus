@@ -3537,9 +3537,10 @@ Linked sign-in**, whatever address the provider holds. The provider's domain
 list still applies. This is how administrators link: no provider can link an
 `admin` or `super_admin` account by address.
 
-An explicit link needs the same **recorded proof** of the account's address
-as an automatic one: a redeemed verification link, a completed password reset,
-or an earlier provider-verified provisioning or automatic link. Without it the
+An explicit link needs the same **recorded trusted proof** of the account's
+address as an automatic one: a completed password reset, or an earlier
+provider-verified provisioning or automatic link. A redeemed registration
+verification link does not count. Without it the
 link is refused with `address_unproven`, even when the provider asserts
 `email_verified: true` for that very address. Otherwise whoever registered an
 address first could link an identity they control and keep signing in through
@@ -3548,15 +3549,17 @@ records no proof of its own. The one exception is the **founding
 `super_admin`**, the account seated with the bootstrap token: the token already
 proves the operator owns it, so it links without a proof.
 
-With `require_email_verification` off and no SMTP configured, nothing can
-record a proof (verification and reset mail stays queued), so no account but
-the founder can link explicitly. To offer single sign-on to such accounts,
-configure SMTP: existing holders then prove their address with **Forgot
-password**, and with `require_email_verification` on, new registrations prove
-it by redeeming their verification link. Otherwise let the provider create the
-accounts (`jit_provisioning`), or link them automatically once their address
-is proven. The founder's exemption keeps the `sso_only` setup below open on a
-portal without mail.
+With no SMTP configured, a locally registered account cannot earn a trusted
+proof (reset mail stays queued), so such an account without one can link
+explicitly only if it is the founder. Accounts a provider provisioned with
+`email_verified: true`, and accounts that already hold a password-reset or
+provider proof from before, keep that proof and can still link. To offer single
+sign-on to such accounts, configure SMTP: holders, new registrations included,
+then prove their address with **Forgot password** (redeeming the registration
+verification link is not enough). Otherwise let the provider create the accounts
+(`jit_provisioning`), or link them automatically once their address is proven.
+The founder's exemption keeps the `sso_only` setup below open on a portal
+without mail.
 
 **Passwords of linked accounts.** A pre-existing account keeps its password
 when it is linked, so the provider's offboarding and MFA do not bind it: it
@@ -3577,8 +3580,9 @@ Administrators see and remove an account's links with
    with their password and links their account from **Profile → Linked
    sign-in**. The portal refuses `sso_only` until the `super_admin` saving it
    has a link to an enabled provider. The founder links without an address
-   proof; any other `super_admin` must first verify their address or reset
-   their password (`address_unproven` otherwise).
+   proof; any other `super_admin` must first complete a password reset, or
+   already hold a provider-verified proof (`address_unproven` otherwise; a
+   redeemed verification link is not enough).
 2. Switch the policy to `sso_only`. The founding registration (with the
    bootstrap token) still works on an empty portal.
 3. Keep `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN` in your runbook. Set it to `true`
