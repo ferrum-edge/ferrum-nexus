@@ -9,6 +9,7 @@ import { AuditAction } from '../audit/service.js';
 import { REGISTRATION_SETTINGS_KEY, SUPER_ADMIN_CLAIM_KEY } from '../auth/service.js';
 import { createCrypto } from '../lib/crypto.js';
 import { isoInSeconds } from '../lib/ids.js';
+import { createKeyedSerializer, REGISTRATION_POLICY_LOCK_KEY } from '../lib/keyed-serializer.js';
 import {
   buildTestApp,
   cookieValue,
@@ -877,5 +878,126 @@ describe('registration policy withdrawn while a registration is in flight', () =
     assert.equal(cookieValue(response, SESSION_COOKIE), undefined, 'no session until verified');
     const stored = await harness.store.users.findByEmail('verify-mid-flight@example.test');
     assert.equal(stored?.email_verified, false);
+  });
+});
+
+describe('registration policy fence', () => {
+  /** A promise and the function that settles it. */
+  function signal(): { promise: Promise<void>; resolve: () => void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  const closed = {
+    open_registration: false,
+    require_email_verification: false,
+    allowed_roles: ['client', 'provider'],
+  };
+
+  it('refuses the founder-seat loser when registration is closed', async () => {
+    const harness = await buildTestApp();
+    try {
+      await harness.store.settings.set(REGISTRATION_SETTINGS_KEY, closed);
+      const candidates = await Promise.all(
+        ['seat-a@example.test', 'seat-b@example.test'].map((email) =>
+          harness.app.inject({
+            method: 'POST',
+            url: '/api/auth/register',
+            payload: {
+              email,
+              password: TEST_PASSWORD,
+              display_name: 'Candidate',
+              role: 'client',
+              bootstrap_token: TEST_BOOTSTRAP_TOKEN,
+            },
+          }),
+        ),
+      );
+      const codes = candidates.map((response) => response.statusCode).sort();
+      assert.deepEqual(codes, [201, 403], candidates.map((response) => response.body).join('\n'));
+      assert.equal((await harness.store.users.list({})).total, 1, 'only the founder exists');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('commits a registration only after a policy writer holding the key finishes', async () => {
+    /** Resolved by the next password hash once armed. */
+    let onHash: (() => void) | null = null;
+    const crypto = createCrypto(TEST_SECRET_KEY);
+    const harness = await buildTestApp({
+      deps: {
+        crypto: {
+          ...crypto,
+          hashPassword: async (password) => {
+            const hash = await crypto.hashPassword(password);
+            onHash?.();
+            return hash;
+          },
+        },
+      },
+    });
+    try {
+      await harness.registerUser({ email: 'fence-founder@example.test' });
+      const hashed = signal();
+      onHash = hashed.resolve;
+      const holder = createKeyedSerializer({ leases: harness.store.leases });
+      let registration: Promise<LightMyRequestResponse> | undefined;
+      await holder(REGISTRATION_POLICY_LOCK_KEY, async () => {
+        // The registration passes its pre-check (registration is open) and
+        // hashes while a policy writer holds the key…
+        registration = harness.app.inject({
+          method: 'POST',
+          url: '/api/auth/register',
+          payload: {
+            email: 'fenced@example.test',
+            password: TEST_PASSWORD,
+            display_name: 'Fenced',
+            role: 'client',
+          },
+        });
+        await hashed.promise;
+        // …and that writer closes registration before it lets go.
+        await harness.store.settings.set(REGISTRATION_SETTINGS_KEY, closed);
+      });
+      const response = await registration!;
+      assert.equal(response.statusCode, 403, response.body);
+      assert.equal(await harness.store.users.findByEmail('fenced@example.test'), null);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('makes an admin registration-policy save wait for the key', async () => {
+    const harness = await buildTestApp();
+    try {
+      const founder = await harness.registerUser({ email: 'policy-founder@example.test' });
+      const holder = createKeyedSerializer({ leases: harness.store.leases });
+      let settled = false;
+      let save: Promise<LightMyRequestResponse> | undefined;
+      await holder(REGISTRATION_POLICY_LOCK_KEY, async () => {
+        save = Promise.resolve(
+          harness.authed(founder, {
+            method: 'PUT',
+            url: '/api/admin/settings',
+            payload: { registration: { open_registration: false } },
+          }),
+        ).then((response) => {
+          settled = true;
+          return response;
+        });
+        await new Promise((resume) => setTimeout(resume, 300));
+        assert.equal(settled, false, 'the save waits while the key is held');
+      });
+      const response = await save!;
+      assert.equal(response.statusCode, 200, response.body);
+      const policy = await harness.store.settings.get(REGISTRATION_SETTINGS_KEY);
+      assert.equal((policy?.value as { open_registration?: boolean }).open_registration, false);
+    } finally {
+      await harness.close();
+    }
   });
 });
