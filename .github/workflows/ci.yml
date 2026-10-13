@@ -200,7 +200,7 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-      # The oldest server the mongodb 7.x driver accepts (wire version 9), so
+      # The oldest server the mongodb 7.7 driver accepts (wire version 9), so
       # the standalone refusal check also proves the floor still connects.
       # 4.4 images ship the legacy `mongo` shell, not `mongosh`.
       mongo-standalone:
