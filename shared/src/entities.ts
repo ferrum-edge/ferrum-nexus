@@ -835,13 +835,23 @@ export interface DependencyHealth {
   error: string | null;
 }
 
-/** Aggregate health payload returned by `GET /api/health`. */
+/**
+ * Aggregate health payload returned by `GET /api/health`.
+ *
+ * The endpoint is public, so it tells an anonymous caller only what a monitor
+ * needs: the verdicts and their timing. Version, uptime and the database
+ * driver identify the deployment, and are `null` for anyone who is not a
+ * signed-in admin (issue #583).
+ */
 export interface AppHealth {
   status: HealthStatus;
-  version: string;
-  uptime_seconds: number;
+  /** The Nexus server version; `null` below `admin`. */
+  version: string | null;
+  /** Seconds since the process started; `null` below `admin`. */
+  uptime_seconds: number | null;
   checked_at: IsoTimestamp;
-  database: DependencyHealth & { driver: DbDriver };
+  /** `driver` is `null` below `admin`. */
+  database: DependencyHealth & { driver: DbDriver | null };
   edge: EdgeHealth;
   /** Credential-maintenance detail, shown only to administrators. */
   credentials: {
@@ -917,6 +927,14 @@ export interface EdgeNamespaceRouting {
   checked_at: IsoTimestamp | null;
 }
 
+/**
+ * {@link EdgeNamespaceRouting} as `/api/health` renders it: `configured` is
+ * withheld (`null`) from a caller below `admin`.
+ */
+export type EdgeHealthNamespaceRouting = Omit<EdgeNamespaceRouting, 'configured'> & {
+  configured: string | null;
+};
+
 /** Health of the Ferrum Edge Admin API, as reported by `GET /api/health/edge`. */
 export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
   status: EdgeHealthStatus;
@@ -957,9 +975,16 @@ export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
    * it never authorizes a mutation.
    */
   public_egress_guaranteed: boolean | null;
-  namespace: string;
-  /** Namespace routability; `unserved` is what makes `status` `degraded`. */
-  namespace_routing: EdgeNamespaceRouting;
+  /**
+   * `FERRUM_NAMESPACE` on the portal. `null` below `admin`: the namespace is
+   * deployment topology, like the gateway's own `namespace_routing.active`.
+   */
+  namespace: string | null;
+  /**
+   * Namespace routability; `unserved` is what makes `status` `degraded`.
+   * `configured` is `null` below `admin`, like {@link EdgeHealth.namespace}.
+   */
+  namespace_routing: EdgeHealthNamespaceRouting;
   /**
    * Whether the gateway still holds the consumer and proxy ids Nexus stored.
    *

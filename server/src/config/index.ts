@@ -18,7 +18,11 @@ import { isIP } from 'node:net';
 
 import { z } from 'zod';
 
-import { DEFAULT_FERRUM_NAMESPACE, DEFAULT_SESSION_TTL_SECONDS } from '@ferrum-nexus/shared';
+import {
+  DEFAULT_FERRUM_NAMESPACE,
+  DEFAULT_SESSION_MAX_AGE_SECONDS,
+  DEFAULT_SESSION_TTL_SECONDS,
+} from '@ferrum-nexus/shared';
 import type { CaptchaEnforcement, DbDriver } from '@ferrum-nexus/shared';
 import { NexusError } from '../lib/errors.js';
 import { GATEWAY_PUBLIC_URL_RULE, normalizeGatewayPublicUrl } from '../lib/gateway-url.js';
@@ -299,6 +303,13 @@ export interface NexusConfig {
   bootstrapToken: string | undefined;
   /** Session idle lifetime in seconds (sliding). */
   sessionTtlSeconds: number;
+  /**
+   * Absolute session lifetime in seconds, measured from `sessions.created_at`
+   * (`NEXUS_SESSION_MAX_AGE`). Sliding never extends a session past it, so a
+   * stolen cookie that is kept busy still dies; signing in again starts a new
+   * session. Defaults to 7 days, or to `sessionTtlSeconds` when that is longer.
+   */
+  sessionMaxAgeSeconds: number;
   /**
    * Whether the stored CAPTCHA configuration applies at all
    * (`NEXUS_CAPTCHA_ENFORCEMENT`); `enforced` by default.
@@ -659,6 +670,8 @@ const envSchema = z.object({
       return z.NEVER;
     }),
   NEXUS_SESSION_TTL: intish(DEFAULT_SESSION_TTL_SECONDS, 60, 60 * 60 * 24 * 30),
+  // 0 (the default) means "derive it": see `sessionMaxAgeSeconds` below.
+  NEXUS_SESSION_MAX_AGE: intish(0, 0, 60 * 60 * 24 * 365),
   NEXUS_CAPTCHA_ENFORCEMENT: z
     .string()
     .optional()
@@ -951,6 +964,21 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     );
   }
 
+  // ── Absolute session lifetime ───────────────────────────────────────────
+  // Unset or 0 derives the cap; an explicit one shorter than the idle TTL would
+  // make every session end before its first slide could matter, so it is a
+  // configuration mistake rather than a policy.
+  const sessionMaxAgeSeconds =
+    raw.NEXUS_SESSION_MAX_AGE === 0
+      ? Math.max(DEFAULT_SESSION_MAX_AGE_SECONDS, raw.NEXUS_SESSION_TTL)
+      : raw.NEXUS_SESSION_MAX_AGE;
+  if (raw.NEXUS_SESSION_MAX_AGE !== 0 && raw.NEXUS_SESSION_MAX_AGE < raw.NEXUS_SESSION_TTL) {
+    problems.push(
+      `NEXUS_SESSION_MAX_AGE (${raw.NEXUS_SESSION_MAX_AGE}) must be at least NEXUS_SESSION_TTL ` +
+        `(${raw.NEXUS_SESSION_TTL}), or 0 / unset for the default`,
+    );
+  }
+
   // ── Single sign-on providers ─────────────────────────────────────────────
   // Validated with the same rules `PUT /api/admin/sso` applies. A client
   // secret may come from the JSON or from `NEXUS_OIDC_CLIENT_SECRET_<ID>`, and
@@ -981,6 +1009,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     secretKey: raw.NEXUS_SECRET_KEY,
     bootstrapToken,
     sessionTtlSeconds: raw.NEXUS_SESSION_TTL,
+    sessionMaxAgeSeconds,
     captchaEnforcement: raw.NEXUS_CAPTCHA_ENFORCEMENT,
     rateLimitEnabled: nodeEnv === 'test' ? false : raw.NEXUS_RATE_LIMIT_ENABLED,
     healthCacheMs: raw.NEXUS_HEALTH_CACHE_MS,

@@ -320,6 +320,12 @@ export const ACCOUNT_IDENTITY_SCOPE = 'account';
 /** Session idle lifetime in seconds (12 hours). */
 export const DEFAULT_SESSION_TTL_SECONDS = 43_200;
 
+/**
+ * Absolute session lifetime in seconds (7 days), measured from sign-in.
+ * Sliding expiry never extends a session past it.
+ */
+export const DEFAULT_SESSION_MAX_AGE_SECONDS = 604_800;
+
 /** Email verification token lifetime in seconds (24 hours). */
 export const EMAIL_VERIFICATION_TTL_SECONDS = 86_400;
 

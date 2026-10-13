@@ -33,7 +33,9 @@ Sign in with `POST /api/auth/login`. The response sets two cookies:
 Send cookies on every request (`credentials: 'include'` in the browser).
 Sessions last `NEXUS_SESSION_TTL` (default 12 hours) and slide: a request made
 when less than half the TTL remains extends the session and re-stamps both
-cookies with the same values.
+cookies with the same values. No slide reaches past `NEXUS_SESSION_MAX_AGE`
+(default 7 days, measured from sign-in); after that the session ends however
+active it is, and the client must sign in again.
 
 ### CSRF
 
@@ -292,9 +294,10 @@ Example for an admin session:
 ```
 
 **Admin-only fields.** For anyone who is not a signed-in admin these are `null`:
-`edge.mode`, `edge.admin_writes_enabled`, `edge.public_egress_guaranteed`,
-`edge.namespace_routing.active`,
-`.serving_scope`, `.data_plane_single_namespace`, and the
+`version`, `uptime_seconds`, `database.driver`, `edge.edge_version`,
+`edge.namespace`, `edge.mode`, `edge.admin_writes_enabled`,
+`edge.public_egress_guaranteed`, `edge.namespace_routing.configured`,
+`.active`, `.serving_scope`, `.data_plane_single_namespace`, and the
 `edge.reconciliation` counts (`orphaned_consumers`, `orphaned_proxies`,
 `awaiting_restore`, `complete`). `database.error` is always the constant
 `"unreachable"` (the driver's message goes to the server log); `edge.error` is
@@ -303,13 +306,13 @@ the real probe failure for an admin and `"unreachable"` for everyone else.
 | Field                           | Values and meaning                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `status`                        | `ok` \| `degraded` \| `down`                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `version`                       | the server package version                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `version`                       | the server package version; `null` below admin                                                                                                                                                                                                                                                                                                                                                                                               |
 | `edge.status`                   | `ok` \| `degraded` \| `not_ready` \| `down`                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `edge.reason`                   | why a `degraded` gateway is degraded: `"namespace_unserved"`, or `"backend_egress_unverified"` for an admin and the generic `"unspecified"` for everyone else; `null` otherwise                                                                                                                                                                                                                                                              |
 | `edge.ready`                    | Edge's own readiness from its health payload; `null` when nothing answered. Edge answers `503` with a full payload while `starting`, `draining` or `unavailable`, which Nexus reports as `not_ready`                                                                                                                                                                                                                                         |
-| `edge.edge_version`             | always `null` against a stock gateway — Edge has no version endpoint                                                                                                                                                                                                                                                                                                                                                                         |
+| `edge.edge_version`             | always `null` against a stock gateway (Edge has no version endpoint), and below admin                                                                                                                                                                                                                                                                                                                                                        |
 | `edge.public_egress_guaranteed` | admin only (`null` otherwise): `true` only when the sampled gateway policy proves public-only backend egress on its local data plane, or on every connected data plane of a control plane through data-plane attestation with at least `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`) connected, counting only those that did not just start; unchanged by either egress opt-out. Observational, never mutation authorization |
-| `edge.namespace`                | `FERRUM_NAMESPACE` on the portal                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `edge.namespace`                | `FERRUM_NAMESPACE` on the portal; `null` below admin                                                                                                                                                                                                                                                                                                                                                                                         |
 
 #### Is the published API actually reachable?
 

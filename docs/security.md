@@ -260,11 +260,15 @@ does not reinterpret that), so it publishes only under
 - **Sliding expiry.** Default idle lifetime 12 hours (`NEXUS_SESSION_TTL`,
   seconds). Every API request extends the session, but the row is only written
   when less than half the TTL remains. That write also re-issues both cookies
-  with their existing values and a fresh full `Max-Age`, so the browser's
-  expiry tracks `sessions.expires_at`. The one exception is
+  with their existing values and a `Max-Age` that ends with the row, so the
+  browser's expiry tracks `sessions.expires_at`. The one exception is
   `GET /api/branding`: its response is publicly cacheable, so it never slides
   the session or sets a cookie, and the next request to any other API route
   does the renewal.
+- **Absolute lifetime.** No slide reaches past `NEXUS_SESSION_MAX_AGE` seconds
+  after `sessions.created_at` (default 7 days, or `NEXUS_SESSION_TTL` when that
+  is longer). A cookie that is stolen and kept busy still dies then; a session
+  past it is deleted on its next request and the user signs in again.
 - **Revocation is immediate.** An `onRequest` hook re-reads the user on every
   request Fastify routes under `/api` (static SPA assets are skipped; they embed
   no auth state). An expired session is deleted. If the account is deleted or
@@ -1861,14 +1865,15 @@ fix the settings and remove it. Runbook:
 
 ## 8. CSP and response headers
 
-helmet is configured in `server/src/index.ts`:
+helmet is configured in `server/src/index.ts`; the Content-Security-Policy is set by
+`server/src/middleware/content-security-policy.ts`:
 
 | Header                      | Value                                                                                                                                                                                             |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Content-Security-Policy`   | `default-src 'self'`; `base-uri 'self'`; `object-src 'none'`; `frame-ancestors 'none'`; `form-action 'self'`; `img-src 'self' data:`; `font-src 'self' data:`; `style-src 'self' 'unsafe-inline'` |
-| `script-src`                | `'self'` plus `https://challenges.cloudflare.com`, `https://hcaptcha.com`, `https://*.hcaptcha.com`, `https://www.google.com`, `https://www.gstatic.com`                                          |
-| `frame-src`                 | `'self'` plus `https://challenges.cloudflare.com`, `https://hcaptcha.com`, `https://*.hcaptcha.com`, `https://www.google.com`                                                                     |
-| `connect-src`               | `'self'`, `https://hcaptcha.com`, `https://*.hcaptcha.com`                                                                                                                                        |
+| `script-src`                | `'self'`. On the SPA shell only, plus the enabled CAPTCHA provider's hosts (Turnstile, hCaptcha or reCAPTCHA), or every provider's on a shell a signed-in super admin loads                       |
+| `frame-src`                 | `'self'`, widened on the SPA shell exactly like `script-src`                                                                                                                                      |
+| `connect-src`               | `'self'`. On the SPA shell, plus `https://hcaptcha.com` and `https://*.hcaptcha.com` while hCaptcha is enabled, or for a super admin                                                              |
 | `X-Frame-Options`           | `DENY`                                                                                                                                                                                            |
 | `Referrer-Policy`           | `no-referrer`                                                                                                                                                                                     |
 | `Strict-Transport-Security` | `max-age=31536000; includeSubDomains`, only when `NEXUS_COOKIE_SECURE` is on                                                                                                                      |
@@ -1876,10 +1881,20 @@ helmet is configured in `server/src/index.ts`:
 
 Deliberate loosenings:
 
-- The CAPTCHA vendor hosts are always allowed but inert unless an admin enables
-  that provider.
-- `style-src 'unsafe-inline'` is needed for runtime theming from branding
-  settings. `script-src` has no `unsafe-inline` or `unsafe-eval`.
+- CAPTCHA vendor hosts appear only on the SPA shell (`index.html`), never on
+  API or asset responses, and only for the provider that is enabled. A shell
+  loaded by a signed-in, active `super_admin` lists every provider, because
+  the CAPTCHA activation self-test renders a provider before it is enabled. A
+  settings page opened before signing in cannot load another provider's widget
+  until it is reloaded; the self-test says so. With CAPTCHA off, an anonymous
+  visitor's shell lists no vendor host at all.
+- `style-src 'unsafe-inline'` is needed by the UI's Radix primitives, which
+  inject `<style>` elements at runtime (the scroll lock behind dialogs, selects
+  and menus writes computed widths; the select viewport renders another).
+  Those cannot be hashed; removing it needs per-response nonces threaded into
+  the shell and the libraries. Branding does not need it: it sets CSS custom
+  properties through the CSSOM. `script-src` has no `unsafe-inline` or
+  `unsafe-eval`, and `script-src-attr` is `'none'`.
 - `img-src data:` is needed because the logo is stored as a `data:` URL.
 - `crossOriginEmbedderPolicy` is off so the CAPTCHA iframes work.
 
@@ -1888,7 +1903,10 @@ database probe reports `error: "unreachable"`, never the driver's message
 (which could name hosts, ports and database users); the real text is logged.
 For anyone but an admin, `edge.error` is `"unreachable"` and `edge.mode`,
 `edge.admin_writes_enabled` and `edge.namespace_routing.active`,
-`.serving_scope` and `.data_plane_single_namespace` are `null`. The verdict
+`.serving_scope` and `.data_plane_single_namespace` are `null`. Nothing that
+fingerprints the deployment reaches an anonymous caller either: `version`,
+`uptime_seconds`, `database.driver`, `edge.edge_version`, `edge.namespace` and
+`edge.namespace_routing.configured` are `null` below admin. The verdict
 (`edge.status`, `edge.reason: "namespace_unserved"`,
 `edge.namespace_routing.unserved`) stays public.
 

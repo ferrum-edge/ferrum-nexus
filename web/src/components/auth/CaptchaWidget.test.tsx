@@ -151,6 +151,25 @@ describe('CaptchaWidget', () => {
     expect(document.querySelector(`script[src="${TURNSTILE.src}"]`)).toBeNull();
   });
 
+  it('shows the caller-supplied failure note in place of the default', async () => {
+    const onToken = vi.fn();
+    render(
+      <CaptchaWidget
+        config={configFor('turnstile')}
+        onToken={onToken}
+        failureNote="Reload this page and test again."
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.error(vendorScript(TURNSTILE.src));
+    });
+
+    expect(screen.getByRole('status')).toHaveTextContent('Reload this page and test again.');
+    expect(screen.getByRole('status')).not.toHaveTextContent('could not be loaded');
+    expect(onToken).toHaveBeenCalledWith(null);
+  });
+
   it('reuses a script that already loaded instead of injecting another', async () => {
     const vendor = installVendor(TURNSTILE.globalName);
     const firstToken = vi.fn();

@@ -45,7 +45,6 @@ import type { NexusConfig } from '../config/index.js';
 import type { NexusStore, SessionRecord, UserRecord } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { csrfMismatch, forbidden, unauthorized, userDisabled } from '../lib/errors.js';
-import { isoInSeconds } from '../lib/ids.js';
 import { isApiRequest } from './api-route.js';
 import { setSessionCookies } from './session-cookies.js';
 
@@ -85,6 +84,29 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 export interface AuthContext {
   user: UserRecord;
   session: SessionRecord;
+}
+
+/**
+ * The epoch-millisecond instant after which `session` is dead whatever its
+ * sliding expiry says: `created_at` plus `NEXUS_SESSION_MAX_AGE` (issue #582).
+ *
+ * A row whose `created_at` does not parse yields `-Infinity`, so it reads as
+ * already past its cap: an unreadable timestamp must not mean "no cap".
+ */
+export function sessionAbsoluteDeadlineMs(session: SessionRecord, config: NexusConfig): number {
+  const createdAt = Date.parse(session.created_at);
+  if (!Number.isFinite(createdAt)) return Number.NEGATIVE_INFINITY;
+  return createdAt + config.sessionMaxAgeSeconds * 1000;
+}
+
+/**
+ * Whether `session` is still usable at `now`: inside both its sliding expiry
+ * and its absolute lifetime. An unreadable `expires_at` is not usable either.
+ */
+export function sessionIsLive(session: SessionRecord, config: NexusConfig, now: number): boolean {
+  const expiresAt = Date.parse(session.expires_at);
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) return false;
+  return sessionAbsoluteDeadlineMs(session, config) > now;
 }
 
 function safeEqual(a: string | undefined, b: string | undefined): boolean {
@@ -149,7 +171,9 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (app, options) =
     if (!session) return;
 
     const now = Date.now();
-    if (Date.parse(session.expires_at) <= now) {
+    // Past its sliding expiry, or past its absolute lifetime however busy it
+    // has been (issue #582): either way the row is dead.
+    if (!sessionIsLive(session, config, now)) {
       await store.sessions.delete(session.id);
       return;
     }
@@ -170,17 +194,33 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (app, options) =
     if (request.routeOptions.config?.sharedCacheable === true) return;
 
     // Sliding expiration: only write when less than half the TTL remains, so a
-    // busy SPA does not issue one UPDATE per request.
-    const remainingMs = Date.parse(session.expires_at) - now;
+    // busy SPA does not issue one UPDATE per request. The new expiry is capped
+    // at the session's absolute deadline, so activity can never carry a
+    // session past `NEXUS_SESSION_MAX_AGE`; once the cap is reached there is
+    // nothing left to extend and the row simply runs out.
+    const currentExpiry = Date.parse(session.expires_at);
+    const remainingMs = currentExpiry - now;
     if (remainingMs < (config.sessionTtlSeconds * 1000) / 2) {
-      const expiresAt = isoInSeconds(config.sessionTtlSeconds);
-      await store.sessions.touch(session.id, expiresAt);
-      request.session = { ...session, expires_at: expiresAt };
-      // Extending only the row would leave the browser dropping both cookies at
-      // the wall-clock set when the session was issued, so a still-live session
-      // would look logged out. Re-stamp the pair with a fresh full-TTL Max-Age;
-      // the values are unchanged, so nothing about the session is rotated.
-      setSessionCookies(reply, config, { token, csrfToken: session.csrf_token });
+      const slidTo = Math.min(
+        now + config.sessionTtlSeconds * 1000,
+        sessionAbsoluteDeadlineMs(session, config),
+      );
+      if (slidTo > currentExpiry) {
+        const expiresAt = new Date(slidTo).toISOString();
+        await store.sessions.touch(session.id, expiresAt);
+        request.session = { ...session, expires_at: expiresAt };
+        // Extending only the row would leave the browser dropping both cookies
+        // at the wall-clock set when the session was issued, so a still-live
+        // session would look logged out. Re-stamp the pair with a Max-Age that
+        // ends with the row; the values are unchanged, so nothing about the
+        // session is rotated.
+        setSessionCookies(
+          reply,
+          config,
+          { token, csrfToken: session.csrf_token },
+          Math.floor((slidTo - now) / 1000),
+        );
+      }
     }
   });
 

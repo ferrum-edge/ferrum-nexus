@@ -69,6 +69,17 @@ const CAPTCHA_PROVIDERS: ReadonlyArray<{ value: CaptchaProvider; label: string }
 ];
 
 /**
+ * The self-test's failure note. The page's Content-Security-Policy admits only
+ * the enabled provider's hosts, plus every provider's when the page was loaded
+ * by a signed-in super admin, so a page opened before signing in cannot load
+ * another vendor's script until it is reloaded.
+ */
+export const CAPTCHA_SELF_TEST_LOAD_FAILURE =
+  "The provider's CAPTCHA script could not be loaded. Reload this page and test again: the " +
+  "portal's security policy admits a provider that is not yet enabled only on a page loaded " +
+  'while signed in as a super admin.';
+
+/**
  * Shown in place of the save button on a section an ordinary `admin` may read
  * but not write.
  *
@@ -643,6 +654,7 @@ export function CaptchaCard({ settings }: { settings: AdminSettingsResponse }): 
                 key={challenge.attempt}
                 config={{ enabled: true, provider, site_key: trimmedSiteKey }}
                 onToken={onToken}
+                failureNote={CAPTCHA_SELF_TEST_LOAD_FAILURE}
               />
             ) : null}
             {provenToken === null ? (

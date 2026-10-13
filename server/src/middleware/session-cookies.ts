@@ -120,19 +120,22 @@ export interface SessionCookieMaterial {
  * `SameSite=Lax`, path `/`, and `Secure` unless `NEXUS_COOKIE_SECURE=false`
  * (the default outside `NEXUS_ENV=development`).
  *
- * `Max-Age` is always the full session TTL, so a re-issue after a slide moves
- * the browser's expiry forward in step with the `sessions.expires_at` row.
+ * `Max-Age` defaults to the full session TTL, which is what a new session's
+ * row gets. A re-issue after a slide passes the seconds the slid row has left
+ * instead, which is shorter once the slide is capped by the session's absolute
+ * lifetime, so the browser's expiry moves in step with `sessions.expires_at`.
  */
 export function setSessionCookies(
   reply: FastifyReply,
   config: NexusConfig,
   issued: SessionCookieMaterial,
+  maxAgeSeconds: number = config.sessionTtlSeconds,
 ): void {
   const base = {
     path: '/',
     sameSite: 'lax' as const,
     secure: config.cookieSecure,
-    maxAge: config.sessionTtlSeconds,
+    maxAge: maxAgeSeconds,
   };
   reply.setCookie(SESSION_COOKIE, issued.token, { ...base, httpOnly: true });
   reply.setCookie(CSRF_COOKIE, issued.csrfToken, { ...base, httpOnly: false });

@@ -140,6 +140,12 @@ export interface CaptchaWidgetProps {
    * and reports `null` until the visitor completes it.
    */
   resetSignal?: number;
+  /**
+   * Replaces the default failure note. The admin self-test uses it: there the
+   * likeliest cause is a page loaded before its viewer signed in as a super
+   * admin, whose security policy does not admit a provider that is not enabled.
+   */
+  failureNote?: string;
 }
 
 /** Renders the configured CAPTCHA vendor's widget, or nothing when disabled. */
@@ -147,6 +153,7 @@ export function CaptchaWidget({
   config,
   onToken,
   resetSignal = 0,
+  failureNote,
 }: CaptchaWidgetProps): ReactElement | null {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const widgetRef = useRef<{ api: CaptchaVendorApi; id: unknown } | null>(null);
@@ -232,8 +239,8 @@ export function CaptchaWidget({
       <div ref={containerRef} data-testid="captcha-container" />
       {failed ? (
         <p className="text-xs text-warning" role="status">
-          The CAPTCHA widget could not be loaded. You can still submit the form; the server will
-          reject the request if a challenge is required.
+          {failureNote ??
+            'The CAPTCHA widget could not be loaded. You can still submit the form; the server will reject the request if a challenge is required.'}
         </p>
       ) : null}
     </div>

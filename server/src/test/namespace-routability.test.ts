@@ -69,7 +69,9 @@ describe('namespace routability', () => {
     assert.equal(body.edge.status, 'degraded');
     assert.equal(body.edge.reason, 'namespace_unserved');
     assert.equal(body.edge.ready, true, 'the gateway itself is healthy');
-    assert.equal(body.edge.namespace, PORTAL_NAMESPACE);
+    // The portal's own namespace is deployment detail too (#583).
+    assert.equal(body.edge.namespace, null);
+    assert.equal(body.edge.namespace_routing.configured, null);
     assert.equal(body.edge.namespace_routing.unserved, true);
     // The gateway's own topology is admin-only, exactly as `mode` is.
     assert.equal(body.edge.namespace_routing.active, null);

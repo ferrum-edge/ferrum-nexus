@@ -54,6 +54,45 @@ export const SCRYPT_PARAMS = { N: 16_384, r: 8, p: 1, keyLength: 32 } as const;
 
 const SCRYPT_SALT_BYTES = 16;
 
+/**
+ * The most expensive stored hash {@link verifyPassword} will derive.
+ *
+ * The parameters come from `users.password_hash`, so they are data, not code:
+ * a corrupt row, a bad import, or any future write primitive could carry
+ * `N`, `r` and `p` that ask scrypt for gigabytes of memory or hours of CPU on
+ * every sign-in attempt for that account (issue #584). Everything above these
+ * ceilings is refused as a verification failure before scrypt runs.
+ *
+ * The bounds leave generous room above {@link SCRYPT_PARAMS} (16 MiB, one
+ * lane) for a later cost increase: 256 MiB of memory (`128 * N * r`), at most
+ * 16 lanes, and a total work factor (`N * r * p`) of 2^24, 128 times today's.
+ */
+export const SCRYPT_VERIFY_LIMITS = {
+  maxN: 1 << 22,
+  maxR: 32,
+  maxP: 16,
+  maxMemoryBytes: 256 * 1024 * 1024,
+  maxWork: 2 ** 24,
+  minSaltBytes: 8,
+  maxSaltBytes: 64,
+  minKeyLength: 16,
+  maxKeyLength: 64,
+} as const;
+
+/** Whether a stored hash's cost parameters are within {@link SCRYPT_VERIFY_LIMITS}. */
+function scryptParamsAcceptable(N: number, r: number, p: number): boolean {
+  const limits = SCRYPT_VERIFY_LIMITS;
+  if (!Number.isSafeInteger(N) || !Number.isSafeInteger(r) || !Number.isSafeInteger(p)) {
+    return false;
+  }
+  if (N < 2 || r < 1 || p < 1) return false;
+  if (N > limits.maxN || r > limits.maxR || p > limits.maxP) return false;
+  // scrypt requires a power of two; refusing it here keeps the failure cheap.
+  if ((N & (N - 1)) !== 0) return false;
+  if (128 * N * r > limits.maxMemoryBytes) return false;
+  return N * r * p <= limits.maxWork;
+}
+
 function scryptMaxmem(N: number, r: number): number {
   // node's default maxmem is 32 MiB; give scrypt twice its nominal 128*N*r need.
   return Math.max(32 * 1024 * 1024, 256 * N * r);
@@ -72,8 +111,9 @@ export async function hashPassword(password: string): Promise<string> {
 
 /**
  * Verify a plaintext password against a stored hash. Returns `false` (never
- * throws) for malformed or unknown-scheme hashes, and compares in constant
- * time for well-formed ones.
+ * throws) for malformed or unknown-scheme hashes, and for hashes whose cost
+ * parameters, salt or key length fall outside {@link SCRYPT_VERIFY_LIMITS},
+ * without running scrypt. Well-formed hashes are compared in constant time.
  */
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
   const parts = stored.split(':');
@@ -81,9 +121,7 @@ export async function verifyPassword(password: string, stored: string): Promise<
   const N = Number(parts[1]);
   const r = Number(parts[2]);
   const p = Number(parts[3]);
-  if (!Number.isSafeInteger(N) || !Number.isSafeInteger(r) || !Number.isSafeInteger(p))
-    return false;
-  if (N < 2 || r < 1 || p < 1 || N > 1 << 22) return false;
+  if (!scryptParamsAcceptable(N, r, p)) return false;
 
   let salt: Buffer;
   let expected: Buffer;
@@ -93,7 +131,9 @@ export async function verifyPassword(password: string, stored: string): Promise<
   } catch {
     return false;
   }
-  if (salt.length === 0 || expected.length === 0) return false;
+  const limits = SCRYPT_VERIFY_LIMITS;
+  if (salt.length < limits.minSaltBytes || salt.length > limits.maxSaltBytes) return false;
+  if (expected.length < limits.minKeyLength || expected.length > limits.maxKeyLength) return false;
 
   let derived: Buffer;
   try {

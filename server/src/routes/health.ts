@@ -13,7 +13,11 @@
  * driver message ("connect ECONNREFUSED 10.0.3.14:5432", `password
  * authentication failed for user "nexus_app"`) hands an anonymous caller
  * internal addresses and account names; the body carries the constant
- * {@link OPAQUE_ERROR} instead and the real text goes to the log.
+ * {@link OPAQUE_ERROR} instead and the real text goes to the log. Nor does
+ * anything that fingerprints the deployment: the Nexus and Edge versions,
+ * uptime, the database driver and the configured namespace are `null` for
+ * anyone who is not a signed-in admin (issue #583). Liveness and readiness
+ * are the status code and the `status` verdicts, which stay public.
  *
  * ## Why the probes are cached
  *
@@ -79,7 +83,7 @@ import {
   type FerrumAdminClient,
 } from '../ferrum-admin/index.js';
 
-/** Version reported by `GET /api/health`. */
+/** Version `GET /api/health` reports to an admin. */
 export const NEXUS_VERSION = process.env.npm_package_version ?? '0.5.2';
 
 /** Services this route plugin needs. */
@@ -217,18 +221,26 @@ function presentEdge(
     // probe. `ready` is the readiness signal a monitor needs and stays public.
     mode: detailAllowed ? result.mode : null,
     admin_writes_enabled: detailAllowed ? result.adminWritesEnabled : null,
-    edge_version: result.version,
+    // Version detail fingerprints the deployment for vulnerability matching;
+    // a monitor needs none of it (issue #583).
+    edge_version: detailAllowed ? result.version : null,
     public_egress_guaranteed: detailAllowed ? result.publicEgressGuaranteed === true : null,
-    namespace: routing.configured,
+    namespace: detailAllowed ? routing.configured : null,
     // `unserved` and the reason above are the monitor's signal and stay
     // public; the gateway's *own* namespace and serving scope are deployment
     // topology Edge itself only tells an authenticated caller, so they follow
-    // `mode` behind the admin gate. The operator who has to fix this is an
-    // admin, and the publish refusal names both namespaces to the provider
-    // who hit it.
+    // `mode` behind the admin gate, and so does the portal's configured
+    // namespace (issue #583). The operator who has to fix this is an admin,
+    // and the publish refusal names both namespaces to the provider who hit it.
     namespace_routing: detailAllowed
       ? routing
-      : { ...routing, active: null, serving_scope: null, data_plane_single_namespace: null },
+      : {
+          ...routing,
+          configured: null,
+          active: null,
+          serving_scope: null,
+          data_plane_single_namespace: null,
+        },
     reconciliation: presentReconciliation(reconciliation, detailAllowed),
   };
 }
@@ -321,11 +333,17 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (app,
     const [db, gateway] = await Promise.all([probeDatabase(), probeEdge()]);
     const dbResult = db.value;
 
+    // Version, uptime and the database driver identify the deployment and
+    // when it was last restarted, which is vulnerability-matching material and
+    // nothing a monitor keys on; only an admin reads them (issue #583).
+    const detailAllowed =
+      request.currentUser !== null && roleAtLeast(request.currentUser.role, 'admin');
+
     const database: DependencyHealth & { driver: AppHealth['database']['driver'] } = {
       status: dbResult.ok ? 'ok' : 'down',
       latency_ms: dbResult.latencyMs,
       error: dbResult.ok ? null : OPAQUE_ERROR,
-      driver: config.db.driver,
+      driver: detailAllowed ? config.db.driver : null,
     };
     const edgeHealth = presentEdge(
       gateway.value,
@@ -352,18 +370,15 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (app,
 
     return {
       status,
-      version: NEXUS_VERSION,
-      uptime_seconds: Math.round((Date.now() - startedAt) / 1000),
+      version: detailAllowed ? NEXUS_VERSION : null,
+      uptime_seconds: detailAllowed ? Math.round((Date.now() - startedAt) / 1000) : null,
       // The older of the two probes: the payload is only as fresh as its
       // stalest half, and a monitor reading this must not be told otherwise.
       checked_at: new Date(Math.min(db.checkedAt, gateway.checkedAt)).toISOString(),
       database,
       edge: edgeHealth,
       credentials: {
-        legacy_basicauth_scan:
-          request.currentUser !== null && roleAtLeast(request.currentUser.role, 'admin')
-            ? credentials.legacyBasicAuthScanState()
-            : null,
+        legacy_basicauth_scan: detailAllowed ? credentials.legacyBasicAuthScanState() : null,
       },
     };
   });

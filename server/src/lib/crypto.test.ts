@@ -12,6 +12,7 @@ import {
   isEncryptedBlob,
   last4,
   randomToken,
+  SCRYPT_VERIFY_LIMITS,
   SESSION_HMAC_KEY_INFO,
   SETTINGS_KEY_INFO,
   verifyPassword,
@@ -46,6 +47,47 @@ describe('password hashing', () => {
     ]) {
       assert.equal(await verifyPassword('anything', bad), false);
     }
+  });
+
+  it('refuses stored cost parameters beyond the verify limits without deriving (#584)', async () => {
+    const hash = await hashPassword('correct-horse-battery-staple');
+    const [, , , , salt, key] = hash.split(':');
+    const withParams = (N: number | string, r: number | string, p: number | string): string =>
+      `scrypt:${N}:${r}:${p}:${salt}:${key}`;
+    const oversized = [
+      // r alone drives maxmem: 128 * 2^14 * 100000 bytes is ~200 GiB.
+      withParams(16_384, 100_000, 1),
+      // p alone drives CPU: one million lanes of the default cost.
+      withParams(16_384, 8, 1_000_000),
+      withParams(16_384, SCRYPT_VERIFY_LIMITS.maxR + 1, 1),
+      withParams(16_384, 8, SCRYPT_VERIFY_LIMITS.maxP + 1),
+      // Each within its own bound, together over the memory ceiling (512 MiB).
+      withParams(1 << 17, 32, 1),
+      // Within the memory ceiling, over the total work ceiling (2^25).
+      withParams(1 << 16, 32, 16),
+      withParams(1 << 23, 1, 1),
+      // Not a power of two.
+      withParams(16_383, 8, 1),
+      withParams('1e9', 8, 1),
+    ];
+    for (const stored of oversized) {
+      const started = Date.now();
+      assert.equal(await verifyPassword('correct-horse-battery-staple', stored), false, stored);
+      assert.ok(Date.now() - started < 1_000, `refused without deriving: ${stored}`);
+    }
+    // The hash as written still verifies.
+    assert.equal(await verifyPassword('correct-horse-battery-staple', hash), true);
+  });
+
+  it('refuses a stored salt or key length outside the verify limits', async () => {
+    const hash = await hashPassword('pw-length-check');
+    const [, N, r, p, salt, key] = hash.split(':');
+    const longKey = Buffer.alloc(SCRYPT_VERIFY_LIMITS.maxKeyLength + 1).toString('base64');
+    const shortSalt = Buffer.alloc(SCRYPT_VERIFY_LIMITS.minSaltBytes - 1).toString('base64');
+    const params = `scrypt:${N}:${r}:${p}`;
+    assert.equal(await verifyPassword('pw-length-check', `${params}:${salt}:${longKey}`), false);
+    assert.equal(await verifyPassword('pw-length-check', `${params}:${shortSalt}:${key}`), false);
+    assert.equal(await verifyPassword('pw-length-check', hash), true);
   });
 });
 
