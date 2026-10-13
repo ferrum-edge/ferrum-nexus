@@ -196,12 +196,14 @@ export async function bindLegacyEncryptedSettings(
           summary.changed.push(plan.key);
         }
       }
-      await audit.forStore(tx).record(
-        SYSTEM_ACTOR,
-        AuditAction.SETTINGS_ENCRYPTION_BOUND,
-        { type: 'settings', id: null },
-        { bound_keys: summary.bound, changed_keys: summary.changed },
-      );
+      await audit
+        .forStore(tx)
+        .record(
+          SYSTEM_ACTOR,
+          AuditAction.SETTINGS_ENCRYPTION_BOUND,
+          { type: 'settings', id: null },
+          { bound_keys: summary.bound, changed_keys: summary.changed },
+        );
       return summary;
     });
   });
