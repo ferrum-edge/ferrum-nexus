@@ -3615,6 +3615,16 @@ class SqliteStore implements NexusStore {
       );
     },
 
+    replaceEncryptedIfMatches: async (key, expected, value) => {
+      const changed = execute(
+        this.db,
+        `UPDATE app_settings SET value_json = ?, updated_at = ?
+         WHERE key = ? AND encrypted = 1 AND value_json = ?`,
+        [JSON.stringify(value), nowIso(), key, JSON.stringify(expected)],
+      );
+      return changed > 0;
+    },
+
     setMany: async (entries) => {
       if (entries.length === 0) return;
       const apply = this.db.transaction(() => {

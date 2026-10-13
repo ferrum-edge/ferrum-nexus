@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
 import { loadConfig } from '../config/index.js';
+import { createAuditService } from '../audit/service.js';
 import { createStore } from '../db/index.js';
 import type { NexusStore } from '../db/store.js';
 import { createCrypto, deriveKey, encryptJsonWithKey, SETTINGS_KEY_INFO } from '../lib/crypto.js';
@@ -114,7 +115,8 @@ describe('bindLegacyEncryptedSettings', () => {
     await store.close();
   });
 
-  it('re-binds every legacy row it can open to its own key, once', async () => {
+  it('re-binds every legacy row it can open to its own key, once, and records it', async () => {
+    const audit = createAuditService(store);
     await store.settings.set('smtp.password', legacy(OLD_KEY, 'hunter2'), true);
     await store.settings.set('captcha.secret_key', legacy(NEW_KEY, '0xSECRET'), true);
     const bound = crypto.encryptJson('sso.client_secret.a', 'already-bound');
@@ -125,7 +127,8 @@ describe('bindLegacyEncryptedSettings', () => {
     assert.throws(() => crypto.decryptJson('smtp.password', before));
     assert.equal(crypto.decryptLegacySetting('smtp.password', before), 'hunter2');
 
-    assert.deepEqual(await bindLegacyEncryptedSettings(store, crypto), {
+    assert.deepEqual(await bindLegacyEncryptedSettings(store, crypto, audit), {
+      alreadyRecorded: false,
       bound: ['smtp.password'],
       unreadable: ['captcha.secret_key'],
     });
@@ -134,10 +137,53 @@ describe('bindLegacyEncryptedSettings', () => {
     assert.equal(crypto.decryptJson('smtp.password', smtp), 'hunter2');
     assert.throws(() => crypto.decryptJson('captcha.secret_key', smtp), 'bound to its own row');
     assert.equal((await store.settings.get('sso.client_secret.a'))?.value, bound);
+    const marker = await store.auditLogs.list({ action: 'settings.encryption_bound' });
+    assert.equal(marker.items.length, 1);
 
-    assert.deepEqual(await bindLegacyEncryptedSettings(store, crypto), {
+    // After the recorded conversion, a pre-upgrade `v1` copy of another
+    // setting's secret written into the SMTP row is never re-bound there.
+    const transplanted = legacy(OLD_KEY, 'oidc-client-secret');
+    await store.settings.set('smtp.password', transplanted, true);
+    assert.deepEqual(await bindLegacyEncryptedSettings(store, crypto, audit), {
+      alreadyRecorded: true,
       bound: [],
-      unreadable: ['captcha.secret_key'],
+      unreadable: ['captcha.secret_key', 'smtp.password'],
     });
+    assert.equal((await store.settings.get('smtp.password'))?.value, transplanted);
+    assert.throws(() => crypto.decryptJson('smtp.password', transplanted));
+  });
+
+  it('never overwrites a value another writer saved after it was read', async () => {
+    const other = createStore(
+      loadConfig({
+        NEXUS_ENV: 'test',
+        NEXUS_SECRET_KEY: OLD_KEY,
+        NEXUS_SQLITE_PATH: ':memory:',
+        FERRUM_ADMIN_JWT_SECRET: 'edge-secret-0123456789abcdef0123456789abcdef',
+        FERRUM_ADMIN_URL: 'http://127.0.0.1:9000',
+      }),
+    );
+    await other.init();
+    await other.migrate();
+    try {
+      await other.settings.set('captcha.secret_key', legacy(OLD_KEY, '0xOLD'), true);
+      await other.settings.set('smtp.password', legacy(OLD_KEY, 'old-password'), true);
+      const fresh = crypto.encryptJson('captcha.secret_key', 'saved-meanwhile');
+      const read = other.settings.all.bind(other.settings);
+      // Another instance saves the CAPTCHA secret and deletes the SMTP
+      // override between the scan and the swap.
+      other.settings.all = async () => {
+        const rows = await read();
+        await other.settings.set('captcha.secret_key', fresh, true);
+        await other.settings.delete('smtp.password');
+        return rows;
+      };
+      const summary = await bindLegacyEncryptedSettings(other, crypto, createAuditService(other));
+      assert.deepEqual(summary.bound, []);
+      assert.equal((await other.settings.get('captcha.secret_key'))?.value, fresh);
+      assert.equal(await other.settings.get('smtp.password'), null);
+    } finally {
+      await other.close();
+    }
   });
 });

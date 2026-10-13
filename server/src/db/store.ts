@@ -1796,6 +1796,14 @@ export interface SettingRepo {
    * "exactly one winner" decision rather than read-then-write.
    */
   insertIfAbsent(key: string, value: unknown, encrypted?: boolean): Promise<boolean>;
+  /**
+   * Replace an **encrypted** row's value only if it still holds exactly
+   * `expected`, in one conditional statement, returning whether it did. A row
+   * that is gone, not encrypted, or holds anything else is left untouched and
+   * reported as `false`. Used to re-encrypt a setting without overwriting a
+   * value another writer saved (or a delete it made) in the meantime.
+   */
+  replaceEncryptedIfMatches(key: string, expected: string, value: string): Promise<boolean>;
   /** Upsert several keys; adapters apply them in one statement batch. */
   setMany(entries: { key: string; value: unknown; encrypted?: boolean }[]): Promise<void>;
   delete(key: string): Promise<boolean>;

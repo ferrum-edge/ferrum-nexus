@@ -16,7 +16,8 @@
  * than the failure it reports. Nothing here logs a value; callers get counts.
  */
 
-import type { NexusStore } from '../db/store.js';
+import { AuditAction, SYSTEM_ACTOR, type AuditService } from '../audit/service.js';
+import type { NexusStore, SettingRepo } from '../db/store.js';
 import { isLegacySettingBlob, type NexusCrypto } from '../lib/crypto.js';
 import { NexusError } from '../lib/errors.js';
 
@@ -77,47 +78,77 @@ export async function rotateEncryptedSettings(
 
 /** What {@link bindLegacyEncryptedSettings} did. */
 export interface BindingSummary {
+  /**
+   * `true` when an earlier start already recorded the one-time conversion,
+   * so this start converted nothing.
+   */
+  alreadyRecorded: boolean;
   /** Legacy rows re-encrypted bound to their own key. */
   bound: string[];
   /**
-   * Legacy rows the current key does not open (a key rotated without
-   * `rotate-key`). Left as they are: they were unreadable before too.
+   * Legacy rows left as they are: the current key does not open them (a key
+   * rotated without `rotate-key`), another writer changed them first, or —
+   * after the conversion was recorded — any `v1` row at all, which reads
+   * refuse. They were unreadable before too.
    */
   unreadable: string[];
 }
 
 /**
- * Re-encrypt every unbound legacy (`v1`) `app_settings` blob as a `v2` blob
- * bound to its own row key — the forward step for GHSA-qm46-qg94-mpg7.
+ * The one-time forward step for GHSA-qm46-qg94-mpg7: re-encrypt every unbound
+ * legacy (`v1`) `app_settings` blob as a `v2` blob bound to its own row key,
+ * then record that it ran.
  *
  * Runtime reads refuse `v1` (a storage-layer writer could move one between
- * rows), so this runs at every start before any service reads a setting, and
- * is a no-op once nothing legacy is left. Each row is rewritten in its own
- * transaction, and only if it still holds the blob that was read: a value an
- * administrator saved in the meantime is never overwritten with a stale one.
+ * rows). The conversion runs at the first start of a release with the binding
+ * and is recorded as a `settings.encryption_bound` audit row, outside
+ * `app_settings` and append-only. Once that row exists no start converts
+ * again, so a `v1` blob written into a row afterwards — a pre-upgrade copy of
+ * another setting's secret — is never re-bound to the row it was moved to; it
+ * stays refused.
+ *
+ * Each row is replaced with an atomic compare-and-set on its exact legacy
+ * value ({@link SettingRepo.replaceEncryptedIfMatches}), so a secret another
+ * instance saved or deleted in the meantime is never overwritten with the
+ * stale one.
  */
 export async function bindLegacyEncryptedSettings(
   store: NexusStore,
   crypto: NexusCrypto,
+  audit: AuditService,
 ): Promise<BindingSummary> {
-  const summary: BindingSummary = { bound: [], unreadable: [] };
-  for (const row of await store.settings.all()) {
-    if (!row.encrypted || !isLegacySettingBlob(row.value)) continue;
-    const legacy = row.value;
+  const rows = await store.settings.all();
+  const legacy = rows.filter((row) => row.encrypted && isLegacySettingBlob(row.value));
+  const recorded = await store.auditLogs.list(
+    { action: AuditAction.SETTINGS_ENCRYPTION_BOUND },
+    { limit: 1 },
+  );
+  if (recorded.items.length > 0) {
+    return { alreadyRecorded: true, bound: [], unreadable: legacy.map((row) => row.key) };
+  }
+  const summary: BindingSummary = { alreadyRecorded: false, bound: [], unreadable: [] };
+  for (const row of legacy) {
+    const blob = String(row.value);
     let bound: string;
     try {
-      bound = crypto.encryptJson(row.key, crypto.decryptLegacySetting<unknown>(row.key, legacy));
+      bound = crypto.encryptJson(row.key, crypto.decryptLegacySetting<unknown>(row.key, blob));
     } catch {
       summary.unreadable.push(row.key);
       continue;
     }
-    const written = await store.transaction(async (tx) => {
-      const current = await tx.settings.get(row.key);
-      if (!current?.encrypted || current.value !== legacy) return false;
-      await tx.settings.set(row.key, bound, true);
-      return true;
-    });
-    if (written) summary.bound.push(row.key);
+    if (await store.settings.replaceEncryptedIfMatches(row.key, blob, bound)) {
+      summary.bound.push(row.key);
+    } else {
+      summary.unreadable.push(row.key);
+    }
   }
+  await store.transaction(async (tx) => {
+    await audit.forStore(tx).record(
+      SYSTEM_ACTOR,
+      AuditAction.SETTINGS_ENCRYPTION_BOUND,
+      { type: 'settings', id: null },
+      { bound_keys: summary.bound, unreadable_keys: summary.unreadable },
+    );
+  });
   return summary;
 }

@@ -4478,6 +4478,48 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.deepEqual((await store.settings.get(takenKey))?.value, { from: 'set' });
     });
 
+    it('settings: replaceEncryptedIfMatches swaps only the value it was given', async () => {
+      const key = `smtp.password-${newId().slice(0, 8)}`;
+      await store.settings.set(key, 'v1:old:blob:tag', true);
+      const created = await store.settings.get(key);
+
+      // A value another writer saved in between is never overwritten.
+      assert.equal(
+        await store.settings.replaceEncryptedIfMatches(key, 'v1:x:y:z', 'v2:a:b:c'),
+        false,
+      );
+      assert.equal((await store.settings.get(key))?.value, 'v1:old:blob:tag');
+
+      assert.equal(
+        await store.settings.replaceEncryptedIfMatches(key, 'v1:old:blob:tag', 'v2:a:b:c'),
+        true,
+      );
+      const replaced = await store.settings.get(key);
+      assert.equal(replaced?.value, 'v2:a:b:c');
+      assert.equal(replaced?.encrypted, true);
+      assert.equal(replaced?.created_at, created?.created_at);
+      // Already replaced: a second attempt with the old value changes nothing.
+      assert.equal(
+        await store.settings.replaceEncryptedIfMatches(key, 'v1:old:blob:tag', 'v2:d:e:f'),
+        false,
+      );
+
+      // A deleted row stays deleted, and a plaintext row is never touched.
+      await store.settings.delete(key);
+      assert.equal(
+        await store.settings.replaceEncryptedIfMatches(key, 'v2:a:b:c', 'v2:d:e:f'),
+        false,
+      );
+      assert.equal(await store.settings.get(key), null);
+      await store.settings.set(key, 'v1:old:blob:tag', false);
+      assert.equal(
+        await store.settings.replaceEncryptedIfMatches(key, 'v1:old:blob:tag', 'v2:a:b:c'),
+        false,
+      );
+      assert.equal((await store.settings.get(key))?.encrypted, false);
+      await store.settings.delete(key);
+    });
+
     /* ── email templates ──────────────────────────────────────────────── */
 
     it('emailTemplates: upsert by key replaces the body and keeps the row', async () => {
