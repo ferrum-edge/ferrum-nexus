@@ -361,21 +361,6 @@ export async function buildServer(
     frameworkErrors: handleFrameworkError,
   });
 
-  // Before any service reads a setting: runtime reads refuse an unbound
-  // legacy (`v1`) encrypted setting, so every one the key opens is re-bound to
-  // its own row first (GHSA-qm46-qg94-mpg7). A no-op once none are left.
-  const binding = await bindLegacyEncryptedSettings(deps.store, crypto);
-  if (binding.bound.length > 0) {
-    app.log.info({ keys: binding.bound }, 'Bound legacy encrypted settings to their keys');
-  }
-  if (binding.unreadable.length > 0) {
-    app.log.warn(
-      { keys: binding.unreadable },
-      'Legacy encrypted settings do not open with NEXUS_SECRET_KEY and stay unreadable; ' +
-        're-enter them, or run rotate-secret-key from the key they were written under',
-    );
-  }
-
   /* ── COMPOSITION — services ─────────────────────────────────────────────
    * Construct every service exactly once, in dependency order. Services take
    * an explicit dependency object; none of them reads process.env.
@@ -417,6 +402,22 @@ export async function buildServer(
   });
 
   const audit = createAuditService(deps.store);
+  // Before any service reads a setting: runtime reads refuse an unbound
+  // legacy (`v1`) encrypted setting, so the first start of this release
+  // re-binds every one to its own row, once, and records that it did
+  // (GHSA-qm46-qg94-mpg7); a legacy row this key cannot open stops the start
+  // with nothing converted. Later starts convert nothing.
+  const binding = await bindLegacyEncryptedSettings(deps.store, crypto, audit, locks);
+  if (binding.bound.length > 0) {
+    app.log.info({ keys: binding.bound }, 'Bound legacy encrypted settings to their keys');
+  }
+  if (binding.unreadable.length > 0) {
+    app.log.warn(
+      { keys: binding.unreadable },
+      'Unbound legacy encrypted settings are refused (the one-time binding already ran); ' +
+        're-enter them in the admin settings',
+    );
+  }
   const captcha = createCaptchaService({
     store: deps.store,
     crypto,

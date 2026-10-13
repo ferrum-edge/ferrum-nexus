@@ -4482,6 +4482,15 @@ class MongoStore implements NexusStore {
       }
     },
 
+    replaceEncryptedIfMatches: async (key, expected, value) => {
+      const result = await this.col(COLLECTIONS.settings).updateOne(
+        { _id: key, encrypted: true, value: expected } as Filter<NexusDoc>,
+        { $set: { value, updated_at: nowIso() } },
+        this.opts,
+      );
+      return result.modifiedCount > 0;
+    },
+
     setMany: async (entries) => {
       if (entries.length === 0) return;
       // One session transaction around the whole batch, matching the SQL

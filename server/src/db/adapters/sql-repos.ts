@@ -3647,6 +3647,16 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return affected > 0;
     },
 
+    replaceEncryptedIfMatches: async (key, expected, value) => {
+      const changed = await execute(
+        exec,
+        `UPDATE app_settings SET value_json = ?, updated_at = ?
+         WHERE "key" = ? AND encrypted = 1 AND value_json = ?`,
+        [JSON.stringify(value), nowIso(), key, JSON.stringify(expected)],
+      );
+      return changed > 0;
+    },
+
     setMany: async (entries) => {
       if (entries.length === 0) return;
       await inTransaction(async (tx) => {
