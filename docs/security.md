@@ -1888,8 +1888,11 @@ Deliberate loosenings:
   there renders a provider before it is enabled; no other shell load reads the
   session. A
   settings page opened before signing in cannot load another provider's widget
-  until it is reloaded; the self-test says so. With CAPTCHA off, an anonymous
-  visitor's shell lists no vendor host at all.
+  until it is reloaded; the self-test says so. The shell reads the CAPTCHA
+  settings on every load (a `304` revalidation included), so a new page always
+  matches them; a tab opened before CAPTCHA was switched on or changed shows a
+  **Reload the page** action when its widget cannot load. With CAPTCHA off, an
+  anonymous visitor's shell lists no vendor host at all.
 - `style-src 'unsafe-inline'` is needed by the UI's Radix primitives, which
   inject `<style>` elements at runtime (the scroll lock behind dialogs, selects
   and menus writes computed widths; the select viewport renders another).

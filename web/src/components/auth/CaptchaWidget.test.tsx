@@ -147,6 +147,8 @@ describe('CaptchaWidget', () => {
     });
 
     expect(screen.getByRole('status')).toHaveTextContent('could not be loaded');
+    // A tab opened before CAPTCHA changed needs a fresh document (and CSP).
+    expect(screen.getByRole('button', { name: 'Reload the page' })).toBeInTheDocument();
     expect(onToken).toHaveBeenCalledWith(null);
     expect(document.querySelector(`script[src="${TURNSTILE.src}"]`)).toBeNull();
   });

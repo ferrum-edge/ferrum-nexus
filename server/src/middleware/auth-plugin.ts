@@ -41,6 +41,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import type { RequestContext } from '../auth/service.js';
+import { sessionAbsoluteDeadlineMs, sessionIsLive } from '../auth/session-lifetime.js';
 import type { NexusConfig } from '../config/index.js';
 import type { NexusStore, SessionRecord, UserRecord } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
@@ -84,29 +85,6 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 export interface AuthContext {
   user: UserRecord;
   session: SessionRecord;
-}
-
-/**
- * The epoch-millisecond instant after which `session` is dead whatever its
- * sliding expiry says: `created_at` plus `NEXUS_SESSION_MAX_AGE` (issue #582).
- *
- * A row whose `created_at` does not parse yields `-Infinity`, so it reads as
- * already past its cap: an unreadable timestamp must not mean "no cap".
- */
-export function sessionAbsoluteDeadlineMs(session: SessionRecord, config: NexusConfig): number {
-  const createdAt = Date.parse(session.created_at);
-  if (!Number.isFinite(createdAt)) return Number.NEGATIVE_INFINITY;
-  return createdAt + config.sessionMaxAgeSeconds * 1000;
-}
-
-/**
- * Whether `session` is still usable at `now`: inside both its sliding expiry
- * and its absolute lifetime. An unreadable `expires_at` is not usable either.
- */
-export function sessionIsLive(session: SessionRecord, config: NexusConfig, now: number): boolean {
-  const expiresAt = Date.parse(session.expires_at);
-  if (!Number.isFinite(expiresAt) || expiresAt <= now) return false;
-  return sessionAbsoluteDeadlineMs(session, config) > now;
 }
 
 function safeEqual(a: string | undefined, b: string | undefined): boolean {

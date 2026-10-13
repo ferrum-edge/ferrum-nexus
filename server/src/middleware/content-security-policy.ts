@@ -38,7 +38,7 @@ import {
 import type { NexusConfig } from '../config/index.js';
 import type { NexusStore } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
-import { sessionIsLive } from './auth-plugin.js';
+import { sessionIsLive } from '../auth/session-lifetime.js';
 
 /** A provider that has vendor hosts. */
 export type CaptchaVendor = Exclude<CaptchaProvider, 'none'>;
@@ -111,9 +111,6 @@ export function contentSecurityPolicy(vendors: Iterable<CaptchaVendor> = []): st
 /** The policy every response carries unless it is the SPA shell. */
 export const BASE_CONTENT_SECURITY_POLICY = contentSecurityPolicy();
 
-/** How long the shell reuses one read of the CAPTCHA settings. */
-const CAPTCHA_SETTINGS_CACHE_MS = 2_000;
-
 /** What {@link registerContentSecurityPolicy} needs. */
 export interface ContentSecurityPolicyOptions {
   config: NexusConfig;
@@ -154,6 +151,28 @@ function isSettingsShell(request: FastifyRequest): boolean {
   return path === CAPTCHA_SELF_TEST_PATH || path.startsWith(`${CAPTCHA_SELF_TEST_PATH}/`);
 }
 
+/** Requests the SPA fallback answered with the shell; see {@link markSpaShell}. */
+const spaShellRequests = new WeakSet<object>();
+
+/**
+ * Mark `request` as answered with the SPA shell. The fallback calls this, so
+ * the shell is recognised by what serves it rather than by its `Content-Type`,
+ * which a `304` revalidation does not carry (and whose headers a browser
+ * merges into the cached document).
+ */
+export function markSpaShell(request: FastifyRequest): void {
+  spaShellRequests.add(request.raw);
+}
+
+/** Whether this response is the SPA shell, a `304` revalidation of it included. */
+function isShellResponse(request: FastifyRequest, reply: FastifyReply): boolean {
+  if (spaShellRequests.has(request.raw)) return true;
+  // `/index.html` is also a static file `@fastify/static` serves directly.
+  if ((request.url.split('?')[0] ?? '') === '/index.html') return true;
+  const type = reply.getHeader('content-type');
+  return typeof type === 'string' && type.toLowerCase().startsWith('text/html');
+}
+
 /** Add `Cookie` to the response's `Vary`, keeping whatever is already there. */
 function varyOnCookie(reply: FastifyReply): void {
   const existing = reply.getHeader('vary');
@@ -177,23 +196,15 @@ export function registerContentSecurityPolicy(
   app: FastifyInstance,
   options: ContentSecurityPolicyOptions,
 ): void {
-  // The anonymous shell is unauthenticated and unthrottled, so it must not
-  // turn every hit into fresh settings reads: one read per window, shared by
-  // concurrent callers. A failed read is not cached.
-  let cached: { vendor: CaptchaVendor | null; expiresAt: number } | null = null;
-  let pending: Promise<CaptchaVendor | null> | null = null;
+  // Read on every shell response, never cached: a shell served with a policy
+  // older than the CAPTCHA settings would block the very widget the sign-in
+  // form is about to require, and nothing on the page could repair it. It is
+  // the same two point reads `GET /api/auth/captcha` makes, which the shell
+  // triggers on every sign-in page anyway.
   async function enabledVendor(): Promise<CaptchaVendor | null> {
-    if (cached && cached.expiresAt > Date.now()) return cached.vendor;
-    pending ??= (async () => {
-      const captcha = await options.captchaPublicConfig();
-      const provider = captcha.enabled ? captcha.provider : null;
-      const vendor = isCaptchaVendor(provider) ? provider : null;
-      cached = { vendor, expiresAt: Date.now() + CAPTCHA_SETTINGS_CACHE_MS };
-      return vendor;
-    })().finally(() => {
-      pending = null;
-    });
-    return pending;
+    const captcha = await options.captchaPublicConfig();
+    const provider = captcha.enabled ? captcha.provider : null;
+    return isCaptchaVendor(provider) ? provider : null;
   }
 
   // Before any handler runs, on the raw response, the way helmet sets its
@@ -203,8 +214,7 @@ export function registerContentSecurityPolicy(
   });
 
   app.addHook('onSend', async (request, reply, payload) => {
-    const type = reply.getHeader('content-type');
-    if (typeof type !== 'string' || !type.toLowerCase().startsWith('text/html')) return payload;
+    if (!isShellResponse(request, reply)) return payload;
     const vendors = new Set<CaptchaVendor>();
     let superAdmin = false;
     try {

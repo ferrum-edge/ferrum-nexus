@@ -204,6 +204,41 @@ export function runSsoLinkSessionContract(
       }
     });
 
+    it('refuses a session whose absolute lifetime ends during token exchange (#582)', async () => {
+      const subject = await provenAccount();
+      const exchanging = barrier();
+      const resume = barrier();
+      idp.beforeNextTokenResponse = async () => {
+        exchanging.resolve();
+        await resume.promise;
+      };
+      const pending = callback(subject, newId());
+      const original = h.config.sessionMaxAgeSeconds;
+      try {
+        await Promise.race([
+          exchanging.promise,
+          pending.then(() => {
+            throw new Error('token exchange barrier missed');
+          }),
+        ]);
+        // The sliding expiry stays ahead; only the absolute cap has passed.
+        // A cap of zero puts the deadline at `created_at`.
+        h.config.sessionMaxAgeSeconds = 0;
+        resume.resolve();
+        const response = await pending;
+        assert.equal(
+          new URL(String(response.headers.location)).searchParams.get('sso_error'),
+          'link_session_mismatch',
+        );
+        assert.ok(!cookieValue(response, SESSION_COOKIE), 'no replacement session was issued');
+        assert.deepEqual(await peer.userIdentities.listByUser(subject.user.id), []);
+      } finally {
+        h.config.sessionMaxAgeSeconds = original;
+        resume.resolve();
+        await pending;
+      }
+    });
+
     it('still links and promotes from a live initiating session', async () => {
       const subject = await provenAccount();
       const response = await callback(subject, newId());

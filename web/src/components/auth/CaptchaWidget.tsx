@@ -36,6 +36,17 @@ const VENDOR_GLOBALS: Readonly<Record<Exclude<CaptchaProvider, 'none'>, string>>
   recaptcha: 'grecaptcha',
 };
 
+/**
+ * Shown when the vendor script cannot be loaded. The page's
+ * Content-Security-Policy admits only the CAPTCHA provider enabled when the
+ * page was loaded, so a tab opened before CAPTCHA was switched on or changed
+ * cannot load the new provider until it is reloaded.
+ */
+const DEFAULT_FAILURE_NOTE =
+  'The CAPTCHA widget could not be loaded. If CAPTCHA settings changed since this page was ' +
+  'opened, reloading it fixes this; otherwise the server will reject the request if a ' +
+  'challenge is required.';
+
 /** Bound on the vendor `<script>` fetch itself, not the later global poll. */
 const SCRIPT_LOAD_TIMEOUT_MS = 10_000;
 
@@ -239,8 +250,17 @@ export function CaptchaWidget({
       <div ref={containerRef} data-testid="captcha-container" />
       {failed ? (
         <p className="text-xs text-warning" role="status">
-          {failureNote ??
-            'The CAPTCHA widget could not be loaded. You can still submit the form; the server will reject the request if a challenge is required.'}
+          {failureNote ?? DEFAULT_FAILURE_NOTE}{' '}
+          {/* A page loaded before CAPTCHA was switched on or changed carries a
+              security policy without the provider's hosts; only a fresh
+              document gets the current one. */}
+          <button
+            type="button"
+            className="underline underline-offset-2"
+            onClick={() => window.location.reload()}
+          >
+            Reload the page
+          </button>
         </p>
       ) : null}
     </div>

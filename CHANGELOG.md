@@ -151,7 +151,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   SPA shell lists them, and only the enabled provider's, or every provider's
   on the settings page of a signed-in super admin so the activation self-test
   can load one before it is enabled. With CAPTCHA off an anonymous visitor's shell lists none. The
-  admin self-test now says to reload the page when the widget cannot load.
+  self-test and the sign-in and registration forms offer to reload the page
+  when the widget cannot load, which is what a tab opened before CAPTCHA was
+  switched on or changed needs.
   `style-src 'unsafe-inline'` stays, because the UI's Radix components inject
   runtime `<style>` elements; `docs/security.md` records why.
 - **SMTP requires STARTTLS when implicit TLS is off**

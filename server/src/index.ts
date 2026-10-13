@@ -78,7 +78,10 @@ import {
 import { buildLoggerOptions, type LoggerOptions } from './lib/logger.js';
 import { createMessagingService, type MessagingService } from './messaging/service.js';
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
-import { registerContentSecurityPolicy } from './middleware/content-security-policy.js';
+import {
+  markSpaShell,
+  registerContentSecurityPolicy,
+} from './middleware/content-security-policy.js';
 import { userOrIpKey } from './middleware/rate-limit-keys.js';
 import {
   handleFrameworkError,
@@ -747,13 +750,17 @@ export async function buildServer(
   registerErrorHandler(app, {
     ...(webDist
       ? {
-          spaFallback: (_request, reply) =>
+          spaFallback: (request, reply) => {
+            // Its Content-Security-Policy depends on the CAPTCHA settings, and
+            // a 304 revalidation carries no Content-Type to recognise it by.
+            markSpaShell(request);
             // no-cache: browsers must revalidate the shell so a fresh deploy's
             // hashed asset references are picked up immediately.
-            reply
+            return reply
               .type('text/html')
               .header('cache-control', 'no-cache')
-              .sendFile('index.html', { cacheControl: false }),
+              .sendFile('index.html', { cacheControl: false });
+          },
         }
       : {}),
   });

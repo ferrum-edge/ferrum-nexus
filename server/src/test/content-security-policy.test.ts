@@ -168,6 +168,37 @@ describe('Content-Security-Policy on responses', () => {
     assert.equal(api.headers['content-security-policy'], BASE_CONTENT_SECURITY_POLICY);
   });
 
+  it('follows a CAPTCHA settings change on the very next shell', async (t) => {
+    const harness = await portal();
+    t.after(() => harness.close());
+    // Warm whatever the shell reads, with CAPTCHA off.
+    assert.equal(await shellPolicy(harness), BASE_CONTENT_SECURITY_POLICY);
+    await enableCaptcha(harness, 'hcaptcha');
+    assertAdmitsOnly(await shellPolicy(harness), ['hcaptcha']);
+    // A provider switch is just as immediate.
+    await enableCaptcha(harness, 'turnstile');
+    assertAdmitsOnly(await shellPolicy(harness), ['turnstile']);
+  });
+
+  it('keeps the vendor sources on a 304 revalidation of the shell', async (t) => {
+    const harness = await portal();
+    t.after(() => harness.close());
+    await enableCaptcha(harness, 'recaptcha');
+    for (const url of ['/index.html', '/catalog']) {
+      const first = await harness.app.inject({ method: 'GET', url });
+      assert.equal(first.statusCode, 200, url);
+      const etag = first.headers.etag;
+      assert.ok(typeof etag === 'string', `${url} carries an ETag`);
+      const revalidated = await harness.app.inject({
+        method: 'GET',
+        url,
+        headers: { 'if-none-match': etag },
+      });
+      assert.equal(revalidated.statusCode, 304, url);
+      assertAdmitsOnly(String(revalidated.headers['content-security-policy']), ['recaptcha']);
+    }
+  });
+
   it('does not widen the shell for a disabled super admin', async (t) => {
     const harness = await portal();
     t.after(() => harness.close());
