@@ -383,77 +383,84 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
         // The config this save writes: the owned one, or a new one whose id
         // is fixed before its create is dispatched.
         const pluginConfigId = existing?.id ?? newId();
-        try {
-          const written = await binder.reconcileOptionalPlugin(
-            target.proxyId,
-            existing,
-            pluginName,
-            paletteGatewaySettings(descriptor.name, input.config, config.edge.rateLimit),
-            actor.id,
-            undo,
-            { enabled: input.enabled, trigger, priorityOverride, id: pluginConfigId },
-          );
-          // Written last but inside the compensated block, like every other
-          // gateway-then-store sequence in the portal — and with its audit
-          // row, so a failed insert rolls the row back and the catch below
-          // puts the gateway back too, rather than leaving the plugin
-          // applied and unaudited behind a `500`.
-          const configId = written?.id ?? null;
-          const replaced = existing !== undefined;
-          return await store.transaction(async (tx) => {
-            // Revalidate the parent inside the committing transaction: the
-            // binder reconciliation above released the canonical proxy
-            // lease, so a concurrent API deletion can have finished since
-            // `loadTarget`. On MongoDB the upsert below would otherwise
-            // happily reinsert palette metadata for a deleted API (SQL's
-            // foreign key refuses it; Mongo has no such guard). Throwing
-            // here rolls the metadata back and unwinds the gateway write.
-            const parent = await tx.apis.findById(target.apiId);
-            if (!parent || parent.ferrum_proxy_id !== target.proxyId) {
-              throw notFound('API', target.apiId);
-            }
-            const upserted = await tx.apiPlugins.upsert({
-              api_id: target.apiId,
-              plugin_name: pluginName,
-              enabled: input.enabled,
-              config: input.config,
-              trigger: input.trigger,
-              ferrum_plugin_config_id: configId,
-            });
-            await audit.forStore(tx).record(
-              { id: actor.id, role: actor.role },
-              AuditAction.API_PLUGIN_SET,
-              { type: 'api', id: target.apiId },
-              {
+        // The canonical proxy lease is held from the gateway write through the
+        // metadata commit and any compensation, so an API deletion (which
+        // deletes the rows under the same lease) either finished before this
+        // save re-reads the parent or starts after the row is committed and
+        // removes it. Without it a MongoDB deletion committing between the
+        // parent read and the upsert left an orphan row (#563).
+        return binder.withProxy(target.proxyId, async () => {
+          try {
+            const written = await binder.reconcileOptionalPluginLocked(
+              target.proxyId,
+              existing,
+              pluginName,
+              paletteGatewaySettings(descriptor.name, input.config, config.edge.rateLimit),
+              actor.id,
+              undo,
+              { enabled: input.enabled, trigger, priorityOverride, id: pluginConfigId },
+            );
+            // Written last but inside the compensated block, like every other
+            // gateway-then-store sequence in the portal — and with its audit
+            // row, so a failed insert rolls the row back and the catch below
+            // puts the gateway back too, rather than leaving the plugin
+            // applied and unaudited behind a `500`.
+            const configId = written?.id ?? null;
+            const replaced = existing !== undefined;
+            return await store.transaction(async (tx) => {
+              // Revalidate the parent inside the committing transaction: a
+              // deletion that held the proxy lease before this save took it
+              // has removed the API since `loadTarget`. On MongoDB the upsert
+              // below would otherwise reinsert palette metadata for it (SQL's
+              // foreign key refuses it; Mongo has no such guard). Throwing
+              // here rolls the metadata back and unwinds the gateway write.
+              const parent = await tx.apis.findById(target.apiId);
+              if (!parent || parent.ferrum_proxy_id !== target.proxyId) {
+                throw notFound('API', target.apiId);
+              }
+              const upserted = await tx.apiPlugins.upsert({
+                api_id: target.apiId,
                 plugin_name: pluginName,
                 enabled: input.enabled,
-                // The keys, not the values: a config can carry a CSP or an
-                // IP allow-list, and an audit row is not the place for
-                // either.
-                config_keys: Object.keys(input.config).sort(),
+                config: input.config,
                 trigger: input.trigger,
-                replaced,
-                // Which config was written, so the log says what was touched
-                // rather than only that something of this name was.
-                plugin_config_id: configId,
-              },
+                ferrum_plugin_config_id: configId,
+              });
+              await audit.forStore(tx).record(
+                { id: actor.id, role: actor.role },
+                AuditAction.API_PLUGIN_SET,
+                { type: 'api', id: target.apiId },
+                {
+                  plugin_name: pluginName,
+                  enabled: input.enabled,
+                  // The keys, not the values: a config can carry a CSP or an
+                  // IP allow-list, and an audit row is not the place for
+                  // either.
+                  config_keys: Object.keys(input.config).sort(),
+                  trigger: input.trigger,
+                  replaced,
+                  // Which config was written, so the log says what was touched
+                  // rather than only that something of this name was.
+                  plugin_config_id: configId,
+                },
+                ip,
+              );
+              return upserted;
+            });
+          } catch (error) {
+            await unwind({
+              actor,
+              target,
+              operation: 'set',
+              pluginName,
+              pluginConfigId,
+              undo,
+              error,
               ip,
-            );
-            return upserted;
-          });
-        } catch (error) {
-          await unwind({
-            actor,
-            target,
-            operation: 'set',
-            pluginName,
-            pluginConfigId,
-            undo,
-            error,
-            ip,
-          });
-          throw error;
-        }
+            });
+            throw error;
+          }
+        });
       });
 
       return present(saved);

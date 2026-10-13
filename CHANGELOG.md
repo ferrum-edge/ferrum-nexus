@@ -88,8 +88,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **A stale session probe cannot sign a user back in** (#559). Probes started
   before a sign-out or a newer sign-in are ignored when they finish.
 - **Palette saves cannot recreate metadata for a deleted API on MongoDB**
-  (#563). The save re-reads the API inside its final transaction and unwinds
-  the gateway write if the API is gone.
+  (#563). The save holds the API's canonical proxy lease from the gateway write
+  through the metadata commit and any compensation, the lease an API deletion
+  deletes the rows under, and re-reads the API inside its final transaction,
+  unwinding the gateway write if the API is gone.
 - **Consumer revision summaries follow referenced Path Items** (#564).
   Operations and shared parameters behind a local Path Item `$ref`, and those
   written beside it, are compared; a reference that cannot be followed marks
