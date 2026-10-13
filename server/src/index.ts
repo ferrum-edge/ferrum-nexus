@@ -406,7 +406,7 @@ export async function buildServer(
   // legacy (`v1`) encrypted setting, so the first start of this release
   // re-binds every one the key opens to its own row, once, and records that
   // it did (GHSA-qm46-qg94-mpg7). Later starts convert nothing.
-  const binding = await bindLegacyEncryptedSettings(deps.store, crypto, audit);
+  const binding = await bindLegacyEncryptedSettings(deps.store, crypto, audit, locks);
   if (binding.bound.length > 0) {
     app.log.info({ keys: binding.bound }, 'Bound legacy encrypted settings to their keys');
   }

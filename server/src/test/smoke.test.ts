@@ -4520,6 +4520,22 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       await store.settings.delete(key);
     });
 
+    it('settings: exactly one concurrent replaceEncryptedIfMatches wins', async () => {
+      // Several writers (on pooled backends, several connections) race to
+      // replace the same legacy value: the conditional statement is the only
+      // arbiter, so exactly one replaces it and the rest leave its value.
+      const key = `captcha.secret_key-${newId().slice(0, 8)}`;
+      await store.settings.set(key, 'v1:race:blob:tag', true);
+      const results = await Promise.all(
+        Array.from({ length: 6 }, (_unused, index) =>
+          store.settings.replaceEncryptedIfMatches(key, 'v1:race:blob:tag', `v2:winner:${index}:x`),
+        ),
+      );
+      assert.equal(results.filter(Boolean).length, 1, results.join(', '));
+      assert.equal((await store.settings.get(key))?.value, `v2:winner:${results.indexOf(true)}:x`);
+      await store.settings.delete(key);
+    });
+
     /* ── email templates ──────────────────────────────────────────────── */
 
     it('emailTemplates: upsert by key replaces the body and keeps the row', async () => {
