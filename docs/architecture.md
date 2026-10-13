@@ -1170,7 +1170,8 @@ service ──enqueue──> email_outbox(pending) ──claim──> sending �
   until an admin configures SMTP, instead of burning its retries.
 - `enqueue` with an `idempotencyKey` is at-most-once (unique index on
   `email_outbox.idempotency_key`). For example, registration uses
-  `verify:<user_id>` and mass email `mass:<batch>:<user_id>`.
+  `verify:<user_id>` and mass email `mass:<actor_id>:<batch>:<user_id>` (a
+  campaign's identity includes the administrator who sent it).
 - SMTP settings are read on **every** tick, so edits apply without a restart.
 - Account-bound enqueue and claim transactions write the recipient's internal
   `email_lifecycle_fence` while it still owns the address. Immediately before

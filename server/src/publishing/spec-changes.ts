@@ -88,6 +88,7 @@ import {
   emptySpecChangeReport,
   keyOpenApiParameters,
   mergeOpenApiParameters,
+  agentPathItemMember,
   resolveAgentPathItem,
   type AgentPathItem,
   type KeyedOpenApiParameter,
@@ -333,68 +334,72 @@ function childPath(path: string, name: string): string {
 }
 
 /**
- * A Path Item as the gateway reads it: inline, or through a chain of local
- * Path Item `$ref`s. Fields written beside a `$ref` are kept, the outermost
- * one winning (the same member semantics as agent operations), so a sibling
- * method or shared `parameters` entry is compared rather than dropped. A
- * chain that cannot be followed answers `null`.
+ * Reads a document's Path Items as the gateway does: inline, or through a
+ * chain of local Path Item `$ref`s, with fields written beside a `$ref`
+ * kept and the outermost one winning (the agent operations' member
+ * semantics). Nothing is copied: members are read through the chain, and
+ * each path's resolution is memoised, so a large item shared by many paths
+ * costs each path its chain, not the item's size. Each pointer followed is
+ * charged to `charge`. `null` means the chain cannot be followed.
  */
-function resolvePathItem(
+type PathItemReader = (path: string) => AgentPathItem | null;
+
+function createPathItemReader(
   document: Record<string, unknown>,
-  path: string,
-  item: unknown,
-): Record<string, unknown> | null {
-  if (!isRecord(item)) return null;
-  if (refOf(item) === null) return item;
-  let resolved: AgentPathItem;
-  try {
-    resolved = resolveAgentPathItem(document, path, item);
-  } catch {
-    return null;
-  }
-  // Null-prototype, so a document key such as `__proto__` stays a member.
-  const merged = Object.assign(Object.create(null) as Record<string, unknown>, resolved.target);
-  for (let index = resolved.chain.length - 1; index >= 0; index -= 1) {
-    for (const [key, value] of Object.entries(resolved.chain[index] as Record<string, unknown>)) {
-      if (key !== '$ref') merged[key] = value;
+  charge: (cost: number) => void,
+): PathItemReader {
+  const paths = ownRecord(document, 'paths');
+  const memo = new WeakMap<object, AgentPathItem>();
+  const byPath = new Map<string, AgentPathItem | null>();
+  return (path) => {
+    if (byPath.has(path)) return byPath.get(path) ?? null;
+    const raw = paths ? own(paths, path) : undefined;
+    let resolved: AgentPathItem | null = null;
+    if (isRecord(raw)) {
+      try {
+        resolved = resolveAgentPathItem(document, path, raw, { memo, charge: () => charge(1) });
+      } catch (error) {
+        if (error instanceof BudgetExhausted) throw error;
+        resolved = null;
+      }
     }
-  }
-  return merged;
+    byPath.set(path, resolved);
+    return resolved;
+  };
+}
+
+/** A member of a resolved Path Item that is an object, or `null`. */
+function pathItemRecord(item: AgentPathItem, key: string): Record<string, unknown> | null {
+  const member = agentPathItemMember(item, key);
+  return isRecord(member) ? member : null;
 }
 
 /**
- * Every operation of a document, keyed `METHOD path`, in document order.
- * Locally referenced Path Items contribute the operations of the object
- * they name plus any written beside the reference; one that cannot be
- * resolved marks the enumeration incomplete instead of silently hiding its
- * operations from both sides.
+ * Every operation of a document, keyed `METHOD path`, in document order,
+ * written into `operations` as it goes (so a budget that runs out part way
+ * leaves what was read). A Path Item that cannot be resolved marks the
+ * enumeration incomplete instead of silently hiding its operations from both
+ * sides.
  */
-function operationsOf(document: Record<string, unknown>): {
-  operations: Map<string, Record<string, unknown>>;
-  complete: boolean;
-} {
-  const operations = new Map<string, Record<string, unknown>>();
+function enumerateOperations(
+  document: Record<string, unknown>,
+  read: PathItemReader,
+  operations: Map<string, Record<string, unknown>>,
+): boolean {
   let complete = true;
   for (const [path, raw] of entriesOf(ownRecord(document, 'paths'))) {
     if (!isRecord(raw)) continue;
-    const item = resolvePathItem(document, path, raw);
+    const item = read(path);
     if (item === null) {
       complete = false;
       continue;
     }
     for (const method of OPENAPI_OPERATION_METHODS) {
-      const operation = ownRecord(item, method);
+      const operation = pathItemRecord(item, method);
       if (operation) operations.set(`${method.toUpperCase()} ${path}`, operation);
     }
   }
-  return { operations, complete };
-}
-
-/** The path item an operation key belongs to, resolved when it is a `$ref`. */
-function pathItemOf(document: Record<string, unknown>, path: string): Record<string, unknown> {
-  const paths = ownRecord(document, 'paths');
-  const raw = paths ? own(paths, path) : undefined;
-  return resolvePathItem(document, path, raw) ?? {};
+  return complete;
 }
 
 /** `METHOD path` back into its two halves, the path cut for display. */
@@ -980,12 +985,13 @@ export function compareSpecRevisions(
 
   const parametersOf = (
     resolver: OpenApiRefResolver,
-    document: Record<string, unknown>,
+    read: PathItemReader,
     path: string,
     operation: Record<string, unknown>,
   ): KeyedOpenApiParameter[] => {
-    const item = pathItemOf(document, path);
-    const shared = ownArray(item, 'parameters') ?? [];
+    const item = read(path);
+    const sharedMember = item === null ? undefined : agentPathItemMember(item, 'parameters');
+    const shared = Array.isArray(sharedMember) ? sharedMember : [];
     const declared = ownArray(operation, 'parameters') ?? [];
     return mergeOpenApiParameters(
       keyOpenApiParameters(resolver, shared, true, parameterKeys),
@@ -993,13 +999,16 @@ export function compareSpecRevisions(
     );
   };
 
-  const fromEnumerated = operationsOf(before);
-  const toEnumerated = operationsOf(after);
-  const fromOperations = fromEnumerated.operations;
-  const toOperations = toEnumerated.operations;
-  let complete = fromEnumerated.complete && toEnumerated.complete;
+  const readBefore = createPathItemReader(before, spend);
+  const readAfter = createPathItemReader(after, spend);
+  const fromOperations = new Map<string, Record<string, unknown>>();
+  const toOperations = new Map<string, Record<string, unknown>>();
+  let complete = true;
 
   try {
+    // Inside the budget: every Path Item reference followed is charged to it.
+    complete = enumerateOperations(before, readBefore, fromOperations) && complete;
+    complete = enumerateOperations(after, readAfter, toOperations) && complete;
     for (const [key, operation] of toOperations) {
       spend(1);
       const ref = operationRef(key);
@@ -1019,8 +1028,8 @@ export function compareSpecRevisions(
       const path = key.slice(key.indexOf(' ') + 1);
       compareParameters(
         ref,
-        parametersOf(beforeRefs, before, path, previous),
-        parametersOf(afterRefs, after, path, operation),
+        parametersOf(beforeRefs, readBefore, path, previous),
+        parametersOf(afterRefs, readAfter, path, operation),
       );
       compareRequestBody(ref, previous, operation);
       compareResponses(ref, previous, operation);

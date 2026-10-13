@@ -160,6 +160,37 @@ describe('consumer-facing revision comparison', () => {
     );
   });
 
+  it('reads a large Path Item shared by many paths without copying it', () => {
+    // One referenced item with many extension fields behind every path: each
+    // path must cost its reference, not the item's size, on both sides.
+    const fields: Document = { get: { responses: { '200': {} } } };
+    for (let index = 0; index < 20_000; index += 1) fields[`x-field-${index}`] = index;
+    let enumerations = 0;
+    const shared = new Proxy(fields, {
+      ownKeys(target) {
+        enumerations += 1;
+        return Reflect.ownKeys(target);
+      },
+    });
+    const paths = (): Document => {
+      const result: Document = {};
+      for (let index = 0; index < 1_900; index += 1) {
+        result[`/p${index}`] = { $ref: '#/components/pathItems/Shared' };
+      }
+      return result;
+    };
+    const counters = stats();
+    const report = compareSpecRevisions(
+      document(paths(), { pathItems: { Shared: shared } }),
+      document(paths(), { pathItems: { Shared: shared } }),
+      { stats: counters },
+    );
+    assert.equal(report.complete, true);
+    assert.equal(report.changed, false);
+    assert.equal(enumerations, 0, 'the shared item is never copied or enumerated');
+    assert.ok(counters.units < 20 * 1_900, `spent ${counters.units}`);
+  });
+
   it('marks the comparison incomplete when a Path Item reference cannot be followed', () => {
     const before = document({ '/shared': { $ref: '#/components/pathItems/Missing' } });
     const report = compareSpecRevisions(before, structuredClone(before));

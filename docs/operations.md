@@ -3535,9 +3535,10 @@ Linked sign-in**, whatever address the provider holds. The provider's domain
 list still applies. This is how administrators link: no provider can link an
 `admin` or `super_admin` account by address.
 
-An explicit link needs the same **recorded proof** of the account's address
-as an automatic one: a redeemed verification link, a completed password reset,
-or an earlier provider-verified provisioning or automatic link. Without it the
+An explicit link needs the same **recorded trusted proof** of the account's
+address as an automatic one: a completed password reset, or an earlier
+provider-verified provisioning or automatic link. A redeemed registration
+verification link does not count. Without it the
 link is refused with `address_unproven`, even when the provider asserts
 `email_verified: true` for that very address. Otherwise whoever registered an
 address first could link an identity they control and keep signing in through
@@ -3549,9 +3550,9 @@ proves the operator owns it, so it links without a proof.
 With `require_email_verification` off and no SMTP configured, nothing can
 record a proof (verification and reset mail stays queued), so no account but
 the founder can link explicitly. To offer single sign-on to such accounts,
-configure SMTP: existing holders then prove their address with **Forgot
-password**, and with `require_email_verification` on, new registrations prove
-it by redeeming their verification link. Otherwise let the provider create the
+configure SMTP: holders, new registrations included, then prove their address
+with **Forgot password** (redeeming the registration verification link is not
+enough). Otherwise let the provider create the
 accounts (`jit_provisioning`), or link them automatically once their address
 is proven. The founder's exemption keeps the `sso_only` setup below open on a
 portal without mail.

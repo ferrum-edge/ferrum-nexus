@@ -98,6 +98,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   (#566). God-mode broadcast `failed` counts only recipients whose inbox
   message was not written.
 
+- **Referenced Path Items are read in place, inside the comparison budget**
+  (#564 follow-up). Revision summaries no longer copy a referenced Path Item for
+  every path that uses it; members are read through the memoised reference
+  chain, and each reference followed is charged to the comparison's budget, so
+  a large item shared by many paths cannot make a publish slow.
+- **SSO linking and campaign-key docs match the code.** The operations guide no
+  longer says a redeemed verification link enables explicit linking, and the
+  architecture guide shows the actor-scoped `mass:<actor_id>:<batch>:<user_id>`
+  key.
+
 ### Security
 
 - **SMTP requires STARTTLS when implicit TLS is off**
