@@ -2499,11 +2499,13 @@ inside `users:lifecycle:<user_id>`. During a mixed-version rollout, an older
 instance redeems resets without this key, so the race it closes stays open
 until every instance runs the lease-aware version.
 
-Single sign-on uses three of these keys. A callback that writes one of a
+Single sign-on uses four of these keys. A callback that writes one of a
 provider's links (a first-time link or a provisioned account) and every save of
 the single sign-on settings take `sso:provider:<id>`; returning sign-ins do not.
 Every settings save first takes the deployment-wide `sso:settings` key, then
-the affected provider keys in sorted order. A sign-in into an existing account
+the affected provider keys in sorted order, and commits under
+`auth:registration-policy` (the key registration commits under, so `sso_only`
+cannot land mid-registration). A sign-in into an existing account
 takes its `users:lifecycle:<user_id>` key; a callback that also writes a new
 link takes the provider key first, so a claims promotion and an automatic link
 at another provider never miss each other's write.
