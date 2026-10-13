@@ -289,7 +289,8 @@ describe('spec change notices', () => {
     const notice = summarizeSpecChange('Billing', entry({ complete: false, changed: false }));
     assert.equal(notice.breaking, true);
     assert.ok(notice.title.endsWith(INCOMPLETE_TITLE_MARK), notice.title);
-    assert.match(notice.summary, /could not be completed/);
+    assert.match(notice.summary, /The comparison was incomplete/);
+    assert.match(notice.summary, /possibly breaking/);
   });
 
   it('breaks up anything a mail client would turn into a link', () => {

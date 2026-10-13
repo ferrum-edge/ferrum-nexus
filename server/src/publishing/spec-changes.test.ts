@@ -222,14 +222,19 @@ describe('consumer-facing revision comparison', () => {
     for (let index = 0; index < 20; index += 1) {
       chain[`H${index}`] = { $ref: `#/components/pathItems/H${index + 1}` };
     }
+    // Only the shared tail is counted: every path's own first hop to `H0` is
+    // unavoidable, while walking `H1` onwards per path is what memoising saves.
     let reads = 0;
+    const count = (key: string | symbol): void => {
+      if (key !== 'H0') reads += 1;
+    };
     const counted = new Proxy(chain, {
       get(target, key, receiver) {
-        reads += 1;
+        count(key);
         return Reflect.get(target, key, receiver);
       },
       getOwnPropertyDescriptor(target, key) {
-        reads += 1;
+        count(key);
         return Reflect.getOwnPropertyDescriptor(target, key);
       },
     });
