@@ -23,8 +23,11 @@ schema baseline; `v0.2.0` froze the forward migrations `002` and `003`, `v0.3.0`
 adds no migration:
 
 - `server/src/db/released-migrations.ts` lists every shipped or pending migration with its
-  per-backend checksums; `released-migrations.test.ts` fails on any edit to a released one (or to
-  its MongoDB snapshot in `server/src/db/released/`).
+  per-backend checksums; `released-migrations.test.ts` fails on any edit to a released SQL
+  migration (or to its MongoDB snapshot in `server/src/db/released/`). For MongoDB the guard
+  freezes each step's declared indexes only — document-transform code is covered by the
+  immutability policy and review, not by automated comparison (an intentional limit recorded
+  in PR #323); never edit a released transform.
 - A schema change is a new forward migration with a higher id in every backend, never an edit to a
   released one, and it must upgrade retained data in place. See
   [docs/operations.md, "Schema versioning and upgrades"](docs/operations.md#schema-versioning-and-upgrades).
@@ -151,7 +154,9 @@ container image.
    Single sign-on (`server/src/sso/`) never grants, removes or changes `super_admin` from claims,
    and the founding registration works under every login policy, `sso_only` included.
 9. **Encrypted `app_settings` rows** (SMTP password, CAPTCHA secret, SSO client secrets) use
-   AES-256-GCM with keys HKDF-derived from `NEXUS_SECRET_KEY`. Key rotation:
+   AES-256-GCM with keys HKDF-derived from `NEXUS_SECRET_KEY`, bound to their row key
+   (`crypto.encryptJson(settingKey, value)`, AAD `app_settings:v2:<key>`). Always pass the row's
+   own key; runtime reads refuse unbound legacy `v1` blobs, which startup re-binds. Key rotation:
    [docs/operations.md](docs/operations.md).
 10. **MongoDB requires a replica set** for multi-document transactions. They run through the
     driver's `session.withTransaction()`, so a `TransientTransactionError` is retried rather than

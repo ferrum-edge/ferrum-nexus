@@ -921,10 +921,18 @@ settings override these at runtime.
 | `NEXUS_SMTP_HOST`                         | _(unset — mail stays queued)_         |
 | `NEXUS_SMTP_PORT`                         | `587`                                 |
 | `NEXUS_SMTP_SECURE`                       | `false`                               |
+| `NEXUS_SMTP_ALLOW_PLAINTEXT`              | `false`                               |
 | `NEXUS_SMTP_USER`                         | _(unset)_                             |
 | `NEXUS_SMTP_PASSWORD`                     | _(unset)_                             |
 | `NEXUS_EMAIL_FROM`                        | `Ferrum Nexus <no-reply@example.com>` |
 | `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` | _(empty)_                             |
+
+With `NEXUS_SMTP_SECURE=false` (port 587 style) the connection must upgrade
+with STARTTLS: a relay that does not offer it, or a network path that strips
+it, fails the delivery before any credential or message is sent.
+`NEXUS_SMTP_ALLOW_PLAINTEXT=true` turns that requirement off, for a plaintext
+relay on a trusted local network only. It is environment-only; stored settings
+cannot enable it.
 
 `NEXUS_SMTP_PASSWORD` is only sent with the environment's own host, port, TLS
 mode and username. If stored settings change any of those, they need their own
@@ -1267,6 +1275,11 @@ diverge. Every schema change is a **new forward migration**:
    (its MongoDB index snapshot). The release that ships it sets `release` to its
    tag, which freezes it.
 
+The MongoDB guard freezes the declared indexes in that snapshot only; it does
+not freeze document-transform code (an intentional limit). The immutability
+policy above still forbids editing a released transform — review, not the
+test, enforces that half.
+
 **Released forward migrations.** `002_api_gateway_plugins` (shipped in
 `v0.2.0`) adds the `api_gateway_plugins` table, which records the Edge plugin
 config id of each config the portal creates for an API (auth, `access_control`,
@@ -1603,12 +1616,12 @@ Atomic writes run in `store.transaction`. Within one instance transactions run
 one at a time; across instances the database may roll one back because of a
 collision:
 
-| Engine     | Reported as                                                       |
-| ---------- | ----------------------------------------------------------------- |
-| MySQL      | `ER_LOCK_DEADLOCK` (1213), `ER_LOCK_WAIT_TIMEOUT` (1205), `40001` |
-| PostgreSQL | `40001` serialization failure, `40P01` deadlock                   |
-| MongoDB    | `WriteConflict` (112), labelled `TransientTransactionError`       |
-| SQLite     | cannot happen (one connection)                                    |
+| Engine     | Reported as                                                                                               |
+| ---------- | --------------------------------------------------------------------------------------------------------- |
+| MySQL      | `ER_LOCK_DEADLOCK` (1213), `40001` (a plain `ER_LOCK_WAIT_TIMEOUT` (1205) is **not** retried — see below) |
+| PostgreSQL | `40001` serialization failure, `40P01` deadlock                                                           |
+| MongoDB    | `WriteConflict` (112), labelled `TransientTransactionError`                                               |
+| SQLite     | cannot happen (one connection)                                                                            |
 
 Nexus re-runs the transaction in these cases:
 
@@ -1621,6 +1634,10 @@ Nexus re-runs the transaction in these cases:
   the driver could not confirm is `409 CONFLICT` with
   `details.reason: "transaction_commit_unknown"`; check state before retrying.
 - Uniqueness violations, validation errors and lost connections are not retried.
+  MySQL `ER_LOCK_WAIT_TIMEOUT` (1205, SQLSTATE `HY000`) is deliberately not
+  retried either: the transaction rolls back and the error propagates at once
+  to the caller's normal error handling (a `40001`-labelled error still is
+  retried).
 - Emails, gateway calls and notifications happen after commit, so a retry never
   repeats them.
 
@@ -2139,7 +2156,7 @@ turn, so a large campaign no longer stalls the instance while it is written,
 and no transaction approaches MongoDB's 16 MB cap.
 
 - **Retry with the same `idempotency_key`.** Rows are keyed
-  `mass:<batch>:<user_id>`, so a retry after a lost response is a no-op. If the
+  `mass:<actor_id>:<batch>:<user_id>`, so a retry after a lost response is a no-op. If the
   campaign row cannot be written, nothing is queued. If a chunk fails, it rolls
   back alone, the chunks before it stay queued, and the answer is
   `500 OUTBOX_FAILURE` with `details: { batch_id, recipients, enqueued }`;
@@ -3461,16 +3478,18 @@ provider id. See
    - the account is not an `admin` or `super_admin`, and the provider's claims
      would not make it one (`privileged_account`);
    - the provider asserts `email_verified: true`;
-   - the portal holds a **recorded proof** of the account's address. The
-     holder redeemed a verification link or completed a password reset for
-     it, or an identity provider asserted it verified when it provisioned or
-     linked the account.
+   - the portal holds a **recorded trusted proof** of the account's address:
+     the holder completed a password reset for it, or an identity provider
+     asserted it verified when it provisioned or linked the account. A
+     redeemed registration verification link is recorded as proof for other
+     purposes but does **not** count for SSO matching.
 
    The registration policy plays no part. Accounts registered while
    `require_email_verification` was off have no proof, and turning the
    requirement on later does not give them one. They are linked, automatically
-   or explicitly (below), only once their holder verifies or resets. Otherwise
-   the sign-in is refused with `account_exists`.
+   or explicitly (below), only once their holder completes a password reset
+   (or gains a provider-asserted proof). Otherwise the sign-in is refused
+   with `account_exists`.
 
 3. Otherwise a new account is created (`jit_provisioning`) with the mapped role
    and organization. It has no usable password: password sign-in fails,

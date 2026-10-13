@@ -20,6 +20,8 @@ interface CaptchaVendorApi {
       'expired-callback'?: () => void;
     },
   ) => unknown;
+  /** Every supported vendor can reset a rendered widget for a fresh challenge. */
+  reset?: (widgetId?: unknown) => void;
 }
 
 const VENDOR_SCRIPTS: Readonly<Record<Exclude<CaptchaProvider, 'none'>, string>> = {
@@ -132,11 +134,23 @@ export interface CaptchaWidgetProps {
   config: CaptchaPublicConfig | undefined;
   /** Receives the vendor token, or `null` when it expires or cannot load. */
   onToken: (token: string | null) => void;
+  /**
+   * Bump after a submission reached server verification and was rejected:
+   * vendor tokens are single-use, so the widget resets for a fresh challenge
+   * and reports `null` until the visitor completes it.
+   */
+  resetSignal?: number;
 }
 
 /** Renders the configured CAPTCHA vendor's widget, or nothing when disabled. */
-export function CaptchaWidget({ config, onToken }: CaptchaWidgetProps): ReactElement | null {
+export function CaptchaWidget({
+  config,
+  onToken,
+  resetSignal = 0,
+}: CaptchaWidgetProps): ReactElement | null {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const widgetRef = useRef<{ api: CaptchaVendorApi; id: unknown } | null>(null);
+  const seenResetSignal = useRef(resetSignal);
   const [failed, setFailed] = useState(false);
 
   const provider = config?.provider ?? 'none';
@@ -170,11 +184,12 @@ export function CaptchaWidget({ config, onToken }: CaptchaWidgetProps): ReactEle
           const api = readVendorApi(globalName);
           if (api) {
             container.innerHTML = '';
-            api.render(container, {
+            const id = api.render(container, {
               sitekey: siteKey,
               callback: (token: string) => onToken(token),
               'expired-callback': () => onToken(null),
             });
+            widgetRef.current = { api, id };
             return;
           }
           if (remaining === 0) {
@@ -191,9 +206,24 @@ export function CaptchaWidget({ config, onToken }: CaptchaWidgetProps): ReactEle
 
     return () => {
       cancelled = true;
+      widgetRef.current = null;
       if (pollTimer !== undefined) window.clearTimeout(pollTimer);
     };
   }, [enabled, provider, siteKey, onToken]);
+
+  useEffect(() => {
+    if (resetSignal === seenResetSignal.current) return;
+    seenResetSignal.current = resetSignal;
+    const widget = widgetRef.current;
+    if (!widget) return;
+    onToken(null);
+    try {
+      widget.api.reset?.(widget.id);
+    } catch {
+      // A vendor that refuses to reset leaves the expired challenge in
+      // place; the cleared token still stops the form reusing the old one.
+    }
+  }, [resetSignal, onToken]);
 
   if (!enabled) return null;
 

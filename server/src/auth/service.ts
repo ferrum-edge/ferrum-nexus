@@ -713,7 +713,25 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         store.transaction((tx) => seatFounder(tx, draft));
       const { record, promoted, verificationToken } = seatOpen
         ? await locks(SUPER_ADMIN_LOCK_KEY, founderTransaction)
-        : await store.transaction((tx) => persistRegistration(tx, draft, false));
+        : await store.transaction(async (tx) => {
+            // Re-read the policy at commit time: the pre-check above ran
+            // before CAPTCHA verification and password hashing, so an
+            // administrator may have closed registration (or narrowed the
+            // roles, or enabled verification) since. The account is created
+            // under the policy in force now, or not at all.
+            if ((await readLoginPolicy(tx)) === 'sso_only') {
+              throw forbidden(REGISTRATION_SSO_ONLY_MESSAGE);
+            }
+            const current = await readRegistrationPolicy(tx);
+            if (!current.open_registration) {
+              throw forbidden('Self-service registration is currently closed');
+            }
+            if (!current.allowed_roles.includes(input.role)) {
+              throw forbidden(`Registration with the ${input.role} role is not permitted`);
+            }
+            draft.requireEmailVerification = current.require_email_verification;
+            return persistRegistration(tx, draft, false);
+          });
 
       if (promoted) brandingRevision += 1;
 

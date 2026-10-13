@@ -53,10 +53,14 @@ function vendorScript(src: string): HTMLScriptElement {
   return script;
 }
 
-function installVendor(globalName: string): { render: ReturnType<typeof vi.fn> } {
+function installVendor(globalName: string): {
+  render: ReturnType<typeof vi.fn>;
+  reset: ReturnType<typeof vi.fn>;
+} {
   const renderFn = vi.fn((_container: HTMLElement, _parameters: RenderParams) => 'widget-id');
-  (window as unknown as Record<string, unknown>)[globalName] = { render: renderFn };
-  return { render: renderFn };
+  const resetFn = vi.fn((_id?: unknown) => undefined);
+  (window as unknown as Record<string, unknown>)[globalName] = { render: renderFn, reset: resetFn };
+  return { render: renderFn, reset: resetFn };
 }
 
 function clearVendorGlobals(): void {
@@ -162,6 +166,24 @@ describe('CaptchaWidget', () => {
     render(<CaptchaWidget config={configFor('turnstile')} onToken={secondToken} />);
     await waitFor(() => expect(vendor.render).toHaveBeenCalledTimes(2));
     expect(document.querySelectorAll(`script[src="${TURNSTILE.src}"]`)).toHaveLength(1);
+  });
+
+  it('resets the widget and clears the token when the form signals a consumed challenge', async () => {
+    const vendor = installVendor(TURNSTILE.globalName);
+    const onToken = vi.fn();
+    const view = render(
+      <CaptchaWidget config={configFor('turnstile')} onToken={onToken} resetSignal={0} />,
+    );
+    await act(async () => {
+      fireEvent.load(vendorScript(TURNSTILE.src));
+    });
+    await waitFor(() => expect(vendor.render).toHaveBeenCalledTimes(1));
+
+    view.rerender(
+      <CaptchaWidget config={configFor('turnstile')} onToken={onToken} resetSignal={1} />,
+    );
+    expect(vendor.reset).toHaveBeenCalledWith('widget-id');
+    expect(onToken).toHaveBeenCalledWith(null);
   });
 
   it('does not report failure after unmount cancels an in-flight load', async () => {

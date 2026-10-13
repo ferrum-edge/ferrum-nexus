@@ -146,6 +146,7 @@ function settingsFor(port: number): ResolvedSmtpSettings {
     host: '127.0.0.1',
     port,
     secure: false,
+    allowPlaintext: true,
     user: null,
     password: null,
     from: 'Nexus Relay <portal@example.test>',

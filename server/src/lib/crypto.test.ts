@@ -132,8 +132,16 @@ describe('createCrypto', () => {
 
   it('round-trips encrypted settings through the bound helper', () => {
     const crypto = createCrypto(SECRET);
-    const blob = crypto.encryptJson({ host: 'smtp.example.com', password: 'hunter2' });
-    assert.deepEqual(crypto.decryptJson(blob), { host: 'smtp.example.com', password: 'hunter2' });
+    const blob = crypto.encryptJson('smtp.password', {
+      host: 'smtp.example.com',
+      password: 'hunter2',
+    });
+    assert.deepEqual(crypto.decryptJson('smtp.password', blob), {
+      host: 'smtp.example.com',
+      password: 'hunter2',
+    });
+    // A blob transplanted to another setting's row must not open there.
+    assert.throws(() => crypto.decryptJson('captcha.secret_key', blob));
   });
 
   it('seals outbox content under its own key, bound to the message identity', () => {
@@ -147,8 +155,11 @@ describe('createCrypto', () => {
     assert.throws(() => crypto.openOutbox(blob, 'message-b'), refused);
     const other = createCrypto('another-master-secret-0123456789abcdefgh');
     assert.throws(() => other.openOutbox(blob, 'message-a'), refused);
-    assert.throws(() => crypto.decryptJson(blob), refused);
-    assert.throws(() => crypto.openOutbox(crypto.encryptJson(content), 'message-a'), refused);
+    assert.throws(() => crypto.decryptJson('smtp.password', blob), refused);
+    assert.throws(
+      () => crypto.openOutbox(crypto.encryptJson('smtp.password', content), 'message-a'),
+      refused,
+    );
   });
 });
 

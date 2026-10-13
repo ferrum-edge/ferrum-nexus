@@ -198,7 +198,13 @@ export function deriveKey(secretKey: string, info: string, length = 32): Buffer 
 /* ── AES-256-GCM value encryption ───────────────────────────────────────── */
 
 const ENCRYPTED_PREFIX = 'v1';
+const SETTINGS_ENCRYPTED_PREFIX = 'v2';
 const GCM_IV_BYTES = 12;
+
+/** AAD binding an `app_settings` ciphertext to the row it was written for. */
+function settingsAad(settingKey: string): string {
+  return `app_settings:v2:${settingKey}`;
+}
 
 /**
  * Encrypt a JSON-serialisable value under `key` (32 bytes).
@@ -209,6 +215,10 @@ const GCM_IV_BYTES = 12;
  * written for.
  */
 export function encryptJsonWithKey(key: Buffer, value: unknown, aad?: string): string {
+  return encryptBlob(key, value, aad, ENCRYPTED_PREFIX);
+}
+
+function encryptBlob(key: Buffer, value: unknown, aad: string | undefined, prefix: string): string {
   const iv = randomBytes(GCM_IV_BYTES);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   if (aad !== undefined) cipher.setAAD(Buffer.from(aad, 'utf8'));
@@ -216,11 +226,45 @@ export function encryptJsonWithKey(key: Buffer, value: unknown, aad?: string): s
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const tag = cipher.getAuthTag();
   return [
-    ENCRYPTED_PREFIX,
+    prefix,
     iv.toString('base64'),
     ciphertext.toString('base64'),
     tag.toString('base64'),
   ].join(':');
+}
+
+/**
+ * Encrypt an `app_settings` value bound to its setting key (`v2` envelope).
+ * A storage-layer writer who copies the blob to another setting's row gets
+ * an authentication failure there, not a relocated secret.
+ */
+export function encryptSettingWithKey(key: Buffer, settingKey: string, value: unknown): string {
+  return encryptBlob(key, value, settingsAad(settingKey), SETTINGS_ENCRYPTED_PREFIX);
+}
+
+/**
+ * Decrypt an `app_settings` blob for `settingKey`. Only a `v2` blob written
+ * for that exact key opens: an unbound legacy `v1` blob is refused, because
+ * it is exactly what a storage-layer writer could move between rows. Pass
+ * `{ legacy: true }` only on the upgrade and rotation paths that re-encrypt
+ * such a row under its own key (`bindLegacyEncryptedSettings`, key rotation).
+ */
+export function decryptSettingWithKey<T = unknown>(
+  key: Buffer,
+  settingKey: string,
+  blob: string,
+  options: { legacy?: boolean } = {},
+): T {
+  if (blob.startsWith(`${SETTINGS_ENCRYPTED_PREFIX}:`)) {
+    return decryptBlob<T>(key, blob, settingsAad(settingKey), SETTINGS_ENCRYPTED_PREFIX);
+  }
+  if (options.legacy === true) return decryptJsonWithKey<T>(key, blob);
+  throw internal('Encrypted setting is not bound to its key');
+}
+
+/** True for an unbound legacy (`v1`) `app_settings` blob awaiting re-encryption. */
+export function isLegacySettingBlob(value: unknown): value is string {
+  return typeof value === 'string' && value.startsWith(`${ENCRYPTED_PREFIX}:`);
 }
 
 /**
@@ -231,8 +275,12 @@ export function encryptJsonWithKey(key: Buffer, value: unknown, aad?: string): s
  * tampering).
  */
 export function decryptJsonWithKey<T = unknown>(key: Buffer, blob: string, aad?: string): T {
+  return decryptBlob<T>(key, blob, aad, ENCRYPTED_PREFIX);
+}
+
+function decryptBlob<T>(key: Buffer, blob: string, aad: string | undefined, prefix: string): T {
   const parts = blob.split(':');
-  if (parts.length !== 4 || parts[0] !== ENCRYPTED_PREFIX) {
+  if (parts.length !== 4 || parts[0] !== prefix) {
     throw internal('Encrypted value has an unrecognised format');
   }
   try {
@@ -255,7 +303,10 @@ export function decryptJsonWithKey<T = unknown>(key: Buffer, blob: string, aad?:
 
 /** True when `value` looks like a blob produced by {@link encryptJsonWithKey}. */
 export function isEncryptedBlob(value: unknown): value is string {
-  return typeof value === 'string' && value.startsWith(`${ENCRYPTED_PREFIX}:`);
+  return (
+    typeof value === 'string' &&
+    (value.startsWith(`${ENCRYPTED_PREFIX}:`) || value.startsWith(`${SETTINGS_ENCRYPTED_PREFIX}:`))
+  );
 }
 
 /* ── Bound helper ───────────────────────────────────────────────────────── */
@@ -266,10 +317,25 @@ export interface NexusCrypto {
   hashPassword(password: string): Promise<string>;
   /** Constant-time password verification; `false` for malformed stored hashes. */
   verifyPassword(password: string, stored: string): Promise<boolean>;
-  /** Encrypt a JSON value for an `app_settings` row with `encrypted = 1`. */
-  encryptJson(value: unknown): string;
-  /** Decrypt an `app_settings` blob. Throws on tampering or a rotated key. */
-  decryptJson<T = unknown>(blob: string): T;
+  /**
+   * Encrypt a JSON value for the `app_settings` row `settingKey`
+   * (`encrypted = 1`), bound to that key so the ciphertext cannot be
+   * transplanted to another setting's row.
+   */
+  encryptJson(settingKey: string, value: unknown): string;
+  /**
+   * Decrypt an `app_settings` blob written for `settingKey`. Throws on
+   * tampering, a rotated key, a blob transplanted from another setting, or an
+   * unbound legacy (`v1`) blob: startup re-encrypts those under their own key
+   * first (`bindLegacyEncryptedSettings`).
+   */
+  decryptJson<T = unknown>(settingKey: string, blob: string): T;
+  /**
+   * {@link NexusCrypto.decryptJson}, but also opening an unbound legacy
+   * (`v1`) blob. Only for the paths that immediately re-encrypt the row under
+   * its own key: the startup upgrade and key rotation.
+   */
+  decryptLegacySetting<T = unknown>(settingKey: string, blob: string): T;
   /**
    * Seal a JSON value for an `email_outbox` row under the outbox key, bound to
    * `aad` (the message's identity).
@@ -304,8 +370,11 @@ export function createCrypto(secretKey: string): NexusCrypto {
   return {
     hashPassword,
     verifyPassword,
-    encryptJson: (value) => encryptJsonWithKey(settingsKey, value),
-    decryptJson: <T>(blob: string) => decryptJsonWithKey<T>(settingsKey, blob),
+    encryptJson: (settingKey, value) => encryptSettingWithKey(settingsKey, settingKey, value),
+    decryptJson: <T>(settingKey: string, blob: string) =>
+      decryptSettingWithKey<T>(settingsKey, settingKey, blob),
+    decryptLegacySetting: <T>(settingKey: string, blob: string) =>
+      decryptSettingWithKey<T>(settingsKey, settingKey, blob, { legacy: true }),
     sealOutbox: (value, aad) => encryptJsonWithKey(outboxKey, value, aad),
     openOutbox: <T>(blob: string, aad: string) => decryptJsonWithKey<T>(outboxKey, blob, aad),
     sealSsoTransaction: (value) =>

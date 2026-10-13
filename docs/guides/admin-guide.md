@@ -220,11 +220,11 @@ The site key is public by design; the secret never leaves the server.
 
 The **Registration** card sits on the CAPTCHA tab and is editable by any admin.
 
-| Setting                                       | Effect                                                                                      |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| **Allow self-service registration**           | Off means nobody can sign up; you create accounts.                                          |
-| **Require email verification before sign-in** | Users must click an emailed link before they can sign in.                                   |
-| **Self-selectable roles**                     | Which of Client and Provider a visitor may pick. Untick Provider to vet providers yourself. |
+| Setting                                       | Effect                                                                                                                                                     |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Allow self-service registration**           | Off means nobody can sign up. There is no manual account-creation action: onboard via single sign-on/JIT provisioning, or temporarily reopen registration. |
+| **Require email verification before sign-in** | Users must click an emailed link before they can sign in.                                                                                                  |
+| **Self-selectable roles**                     | Which of Client and Provider a visitor may pick. Untick Provider to vet providers yourself.                                                                |
 
 The sign-up form offers exactly the roles you allow. With none ticked, nobody
 can register; turn registration off instead so the form says so plainly.
@@ -293,6 +293,10 @@ account-matching rules are in
 
 Saved settings override the deployment's environment variables. The email
 worker re-reads them every poll (5 seconds), so no restart is needed.
+
+With **Use TLS (implicit)** off, the relay must offer STARTTLS: Nexus refuses to
+send credentials or mail over an unencrypted connection. Only the deployment's
+`NEXUS_SMTP_ALLOW_PLAINTEXT=true` setting permits a plaintext relay.
 
 **Send test email** (any admin) sends one message **directly through SMTP**
 using the saved settings, not through the outbox, and shows the relay's own

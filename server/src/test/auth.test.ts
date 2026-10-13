@@ -793,3 +793,89 @@ describe('registration of a taken address', () => {
     assert.deepEqual(hashed, ['a-different-password-entirely']);
   });
 });
+
+describe('registration policy withdrawn while a registration is in flight', () => {
+  let harness: TestApp;
+  /** The policy an administrator saves while the next password is hashed. */
+  let saveDuringHash: Record<string, unknown> | null = null;
+
+  before(async () => {
+    const crypto = createCrypto(TEST_SECRET_KEY);
+    harness = await buildTestApp({
+      deps: {
+        crypto: {
+          ...crypto,
+          hashPassword: async (password) => {
+            const hash = await crypto.hashPassword(password);
+            const policy = saveDuringHash;
+            saveDuringHash = null;
+            if (policy) await harness.store.settings.set(REGISTRATION_SETTINGS_KEY, policy);
+            return hash;
+          },
+        },
+      },
+    });
+    await harness.registerUser({ email: 'mid-flight-founder@example.test' });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  const register = (email: string): Promise<LightMyRequestResponse> =>
+    harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: { email, password: TEST_PASSWORD, display_name: 'In flight', role: 'client' },
+    });
+
+  it('refuses a registration whose policy closed after its pre-check', async () => {
+    saveDuringHash = {
+      open_registration: false,
+      require_email_verification: false,
+      allowed_roles: ['client', 'provider'],
+    };
+    const response = await register('closed-mid-flight@example.test');
+    assert.equal(response.statusCode, 403, response.body);
+    assert.equal(errorCode(response.body), 'FORBIDDEN');
+    assert.equal(await harness.store.users.findByEmail('closed-mid-flight@example.test'), null);
+  });
+
+  it('refuses a role withdrawn after its pre-check', async () => {
+    await harness.store.settings.set(REGISTRATION_SETTINGS_KEY, {
+      open_registration: true,
+      require_email_verification: false,
+      allowed_roles: ['client', 'provider'],
+    });
+    saveDuringHash = {
+      open_registration: true,
+      require_email_verification: false,
+      allowed_roles: ['provider'],
+    };
+    const response = await register('role-mid-flight@example.test');
+    assert.equal(response.statusCode, 403, response.body);
+    assert.equal(await harness.store.users.findByEmail('role-mid-flight@example.test'), null);
+  });
+
+  it('applies email verification turned on after its pre-check', async () => {
+    await harness.store.settings.set(REGISTRATION_SETTINGS_KEY, {
+      open_registration: true,
+      require_email_verification: false,
+      allowed_roles: ['client', 'provider'],
+    });
+    saveDuringHash = {
+      open_registration: true,
+      require_email_verification: true,
+      allowed_roles: ['client', 'provider'],
+    };
+    const response = await register('verify-mid-flight@example.test');
+    assert.equal(response.statusCode, 201, response.body);
+    assert.equal(
+      response.json<{ email_verification_required: boolean }>().email_verification_required,
+      true,
+    );
+    assert.equal(cookieValue(response, SESSION_COOKIE), undefined, 'no session until verified');
+    const stored = await harness.store.users.findByEmail('verify-mid-flight@example.test');
+    assert.equal(stored?.email_verified, false);
+  });
+});

@@ -61,6 +61,7 @@ export function RegisterPage(): ReactElement {
   const [role, setRole] = useState<RegistrableRole>('client');
   const [bootstrapToken, setBootstrapToken] = useState('');
   const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const [captchaReset, setCaptchaReset] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState<{ verificationRequired: boolean } | null>(null);
@@ -99,6 +100,10 @@ export function RegisterPage(): ReactElement {
       });
       setDone({ verificationRequired: response.email_verification_required });
     } catch (caught) {
+      // The submitted CAPTCHA token was consumed by verification (tokens are
+      // single-use): clear it and request a fresh challenge for the retry.
+      setCaptchaToken(null);
+      setCaptchaReset((current) => current + 1);
       setError(ApiError.is(caught) ? caught.message : 'Registration failed.');
     } finally {
       setSubmitting(false);
@@ -288,7 +293,7 @@ export function RegisterPage(): ReactElement {
           />
         </div>
 
-        <CaptchaWidget config={captcha} onToken={onToken} />
+        <CaptchaWidget config={captcha} onToken={onToken} resetSignal={captchaReset} />
 
         <Button
           type="submit"

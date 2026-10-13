@@ -37,8 +37,11 @@ allows only one type, the form tells you which one you get.
 
 Depending on how the portal is configured, you may see:
 
-- **"Not accepting self-service accounts".** Registration is closed. Ask an
-  administrator to create your account.
+- **"Not accepting self-service accounts".** Registration is closed, and
+  administrators cannot create local accounts by hand either. Onboarding then
+  happens only through single sign-on (if configured, including
+  just-in-time provisioning) or by an administrator temporarily reopening
+  registration.
 - **A CAPTCHA.** Complete it as part of the form.
 - **"Check your inbox for a verification link".** You cannot sign in until you
   click the link. It works once and expires after **24 hours**. If it expired
@@ -60,7 +63,13 @@ What to expect:
 - The confirmation always says "If an account exists for that address". The
   portal never tells a visitor which addresses are registered.
 - **Setting a new password signs you out everywhere.** Your API credentials
-  keep working, because they authenticate to the gateway, not the portal.
+  normally keep working, because they authenticate to the gateway, not the
+  portal. One exception: when a reset is the **first trusted proof** of your
+  address (for example the account was registered without email verification,
+  or under a new address), the portal treats it as account recovery — it
+  cancels your pending access requests and revokes all credentials held by
+  you and your applications, and refuses new issuance until that revocation
+  lands. Reissue credentials afterwards.
 - Only one reset link is live at a time, and a second request within 10
   minutes sends nothing. If no email arrives, wait rather than clicking again.
   If it never arrives, the address may not be registered or the account may be

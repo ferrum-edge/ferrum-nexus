@@ -248,6 +248,8 @@ export interface SmtpConfig {
   host: string | undefined;
   port: number;
   secure: boolean;
+  /** Operator-only escape hatch: permit plaintext SMTP (no STARTTLS requirement). */
+  allowPlaintext: boolean;
   user: string | undefined;
   password: string | undefined;
   /** RFC 5322 `From` header, e.g. `Ferrum Nexus <no-reply@example.com>`. */
@@ -744,6 +746,10 @@ const envSchema = z.object({
   NEXUS_SMTP_HOST: optionalString(),
   NEXUS_SMTP_PORT: intish(587, 1, 65_535),
   NEXUS_SMTP_SECURE: boolish(false),
+  // Explicitly insecure escape hatch for a plaintext loopback relay. When
+  // false (the default), a non-implicit-TLS connection must upgrade via
+  // STARTTLS or fail; credentials are never sent on a plaintext channel.
+  NEXUS_SMTP_ALLOW_PLAINTEXT: boolish(false),
   NEXUS_SMTP_USER: optionalString(),
   NEXUS_SMTP_PASSWORD: optionalString(),
   NEXUS_EMAIL_FROM: stringish('Ferrum Nexus <no-reply@example.com>'),
@@ -1029,6 +1035,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
       host: raw.NEXUS_SMTP_HOST,
       port: raw.NEXUS_SMTP_PORT,
       secure: raw.NEXUS_SMTP_SECURE,
+      allowPlaintext: raw.NEXUS_SMTP_ALLOW_PLAINTEXT,
       user: raw.NEXUS_SMTP_USER,
       password: raw.NEXUS_SMTP_PASSWORD,
       from: raw.NEXUS_EMAIL_FROM,

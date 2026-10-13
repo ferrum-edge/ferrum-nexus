@@ -85,6 +85,29 @@ describe('broadcast accounting', () => {
     assert.equal(completion.details.recipients, 3, 'the audience size is still recorded');
   });
 
+  it('does not count an optional email failure as an undelivered recipient', async () => {
+    // The first outbox enqueue fails after that recipient's inbox row lands:
+    // delivery is the inbox write, so all recipients count delivered and
+    // none failed; only the two remaining mail copies queue.
+    faults.failAfter('emailOutbox', 'enqueue', 0);
+    const response = await harness.authed(founder, {
+      method: 'POST',
+      url: '/api/admin/god/broadcast',
+      payload: {
+        subject: 'Mail copy failed',
+        body: 'An announcement',
+        audience: { scope: 'all' },
+        send_email: true,
+      },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    const body = response.json<GodBroadcastResponse>();
+    assert.equal(body.delivered, 3);
+    assert.equal(body.failed, 0);
+    assert.equal(body.emails_enqueued, 2);
+    assert.ok(body.delivered + body.failed <= 3, 'no recipient is counted on both sides');
+  });
+
   it('reports a clean broadcast as wholly delivered', async () => {
     const response = await send('Wholly delivered');
     assert.equal(response.statusCode, 200, response.body);

@@ -33,6 +33,7 @@ export function LoginPage(): ReactElement {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const [captchaReset, setCaptchaReset] = useState(0);
   const [error, setError] = useState<ApiError | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [breakGlassOpen, setBreakGlassOpen] = useState(false);
@@ -66,6 +67,10 @@ export function LoginPage(): ReactElement {
       });
       await navigate({ to: '/' });
     } catch (caught) {
+      // The submitted CAPTCHA token was consumed by verification (tokens are
+      // single-use): clear it and request a fresh challenge for the retry.
+      setCaptchaToken(null);
+      setCaptchaReset((current) => current + 1);
       setError(
         ApiError.is(caught) ? caught : new ApiError(ERROR_CODES.INTERNAL, 'Sign-in failed', 0),
       );
@@ -185,7 +190,7 @@ export function LoginPage(): ReactElement {
               </Link>
             </div>
 
-            <CaptchaWidget config={captcha} onToken={onToken} />
+            <CaptchaWidget config={captcha} onToken={onToken} resetSignal={captchaReset} />
 
             <Button
               type="submit"

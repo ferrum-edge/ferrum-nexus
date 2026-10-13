@@ -105,7 +105,15 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
     [clearSessionCache],
   );
 
+  // Session-transition generation. Every login/logout (and any local
+  // session clear) advances it; an auth probe captures the generation at
+  // launch and may only apply its result while that generation is current,
+  // so a slow successful probe can never resurrect a signed-out principal
+  // or overwrite a newer login.
+  const generation = useRef(0);
+
   const clearLocalSession = useCallback(() => {
+    generation.current += 1;
     previousUserId.current = null;
     setUser(null);
     setCapabilities(null);
@@ -115,11 +123,16 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
 
   const confirmUnauthorized = useCallback((): void => {
     if (unauthorizedProbe.current) return;
+    const launched = generation.current;
     const probe = authApi
       .meSilent()
-      .then((me) => acceptUser(me.user, me.capabilities))
+      .then((me) => {
+        if (generation.current === launched) acceptUser(me.user, me.capabilities);
+      })
       .catch((error: unknown) => {
-        if (ApiError.is(error) && error.status === 401) clearLocalSession();
+        if (generation.current === launched && ApiError.is(error) && error.status === 401) {
+          clearLocalSession();
+        }
       })
       .finally(() => {
         unauthorizedProbe.current = null;
@@ -133,10 +146,13 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
   }, [confirmUnauthorized]);
 
   const refresh = useCallback(async () => {
+    const launched = generation.current;
     try {
       const me = await authApi.meSilent();
+      if (generation.current !== launched) return;
       acceptUser(me.user, me.capabilities);
     } catch (error) {
+      if (generation.current !== launched) return;
       if (ApiError.is(error) && error.status === 401) {
         clearLocalSession();
         return;
@@ -153,12 +169,15 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
 
   const login = useCallback(
     async (body: LoginRequest): Promise<User> => {
+      const launched = ++generation.current;
       const response = await authApi.login(body);
-      acceptUser(response.user, null);
+      if (generation.current === launched) acceptUser(response.user, null);
       // Pull the authoritative capability set right after the cookie lands.
       void authApi
         .meSilent()
-        .then((me) => acceptUser(me.user, me.capabilities))
+        .then((me) => {
+          if (generation.current === launched) acceptUser(me.user, me.capabilities);
+        })
         .catch(() => undefined);
       return response.user;
     },
@@ -171,6 +190,9 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
   );
 
   const logout = useCallback(async () => {
+    // Invalidate outstanding probes immediately, not only when the logout
+    // request settles: a probe launched before it must stay stale.
+    generation.current += 1;
     try {
       await authApi.logout();
     } finally {

@@ -284,7 +284,15 @@ export function runEdgeSecurityAdoptionContract(
         if (row.key === key) return true;
         if (!row.key.startsWith('gateway_recovery_chunk:')) return false;
         assert.ok(row.encrypted && typeof row.value === 'string');
-        return harness.app.nexus.crypto.decryptJson<{ key: string }>(row.value).key === key;
+        try {
+          return (
+            harness.app.nexus.crypto.decryptJson<{ key: string }>(row.key, row.value).key === key
+          );
+        } catch {
+          // A substituted chunk no longer opens under its row key; it cannot
+          // be proven foreign, so count it as this journal's evidence.
+          return true;
+        }
       });
     }
 
@@ -316,12 +324,12 @@ export function runEdgeSecurityAdoptionContract(
         attempt: { observed: { authority: original } },
       };
       const legacy = { ...journal, attempt: null };
-      const sealed = crypto.encryptJson(legacy);
+      const sealed = crypto.encryptJson(key, legacy);
       assert.ok(Buffer.byteLength(sealed) > 12 * 1024 * 1024);
       assert.ok(Buffer.byteLength(sealed) < 16 * 1024 * 1024);
       await harness.store.settings.set(key, sealed, true);
       assert.deepEqual(await readRecoveryJournal(harness.store, crypto, key), legacy);
-      assert.ok(Buffer.byteLength(crypto.encryptJson(journal)) > 16 * 1024 * 1024);
+      assert.ok(Buffer.byteLength(crypto.encryptJson(key, journal)) > 16 * 1024 * 1024);
       await writeRecoveryJournal(harness.store, crypto, key, journal);
       assert.deepEqual(await readLargeJournal(key), journal);
       const rows = await journalRows(key);
@@ -358,7 +366,7 @@ export function runEdgeSecurityAdoptionContract(
       const rows = await journalRows(key);
       const manifest = await harness.store.settings.get(key);
       assert.ok(manifest?.encrypted && typeof manifest.value === 'string');
-      const { count } = crypto.decryptJson<{ count: number }>(manifest.value);
+      const { count } = crypto.decryptJson<{ count: number }>(key, manifest.value);
       const next = { ...journal, mutations: [{ original, acknowledged: true }] };
       for (const boundary of [0, 1, count]) {
         faults.failAfter('settings', 'set', boundary, new Error('journal publication refused'));
@@ -444,7 +452,7 @@ export function runEdgeSecurityAdoptionContract(
         assert.deepEqual(journal.mutations.at(-1)!.original, args[2]);
         assert.equal(journal.mutations.at(-1)!.acknowledged, false);
         assert.ok(
-          Buffer.byteLength(harness.app.nexus.crypto.encryptJson(journal)) > 16 * 1024 * 1024,
+          Buffer.byteLength(harness.app.nexus.crypto.encryptJson(key, journal)) > 16 * 1024 * 1024,
         );
         for (const row of await journalRows(key)) {
           assert.ok(Buffer.byteLength(JSON.stringify(row)) < 1024 * 1024);
@@ -563,7 +571,8 @@ export function runEdgeSecurityAdoptionContract(
           assert.deepEqual(journal.mutations.at(-1)!.original, args[1]);
           assert.equal(journal.mutations.at(-1)!.acknowledged, false);
           assert.ok(
-            Buffer.byteLength(harness.app.nexus.crypto.encryptJson(journal)) > 16 * 1024 * 1024,
+            Buffer.byteLength(harness.app.nexus.crypto.encryptJson(key, journal)) >
+              16 * 1024 * 1024,
           );
         }
         return remove(...args);
@@ -613,7 +622,7 @@ export function runEdgeSecurityAdoptionContract(
         assert.equal(journal.cutover.acknowledged, true);
         assert.equal(journal.acknowledged, false);
         assert.ok(
-          Buffer.byteLength(harness.app.nexus.crypto.encryptJson(journal)) > 16 * 1024 * 1024,
+          Buffer.byteLength(harness.app.nexus.crypto.encryptJson(key, journal)) > 16 * 1024 * 1024,
         );
         return remove(...args);
       };

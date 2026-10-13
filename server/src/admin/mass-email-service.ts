@@ -527,7 +527,11 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
                   subject: rendered.subject,
                   body_html: rendered.html,
                   body_text: rendered.text,
-                  idempotency_key: `mass:${batch}:${recipient.id}`,
+                  // Campaign identity is (actor, batch) everywhere: the
+                  // digest check and the daily charge are actor-scoped, so
+                  // the outbox key is too — two administrators who happen to
+                  // pick the same key never alias each other's campaigns.
+                  idempotency_key: `mass:${actor.id}:${batch}:${recipient.id}`,
                 });
                 if (result.created) created += 1;
               }

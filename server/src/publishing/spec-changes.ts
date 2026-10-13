@@ -88,6 +88,8 @@ import {
   emptySpecChangeReport,
   keyOpenApiParameters,
   mergeOpenApiParameters,
+  resolveAgentPathItem,
+  type AgentPathItem,
   type KeyedOpenApiParameter,
   type OpenApiRefResolver,
   type SpecChange,
@@ -330,23 +332,69 @@ function childPath(path: string, name: string): string {
   return path === '' ? name : `${path}.${name}`;
 }
 
-/** Every operation of a document, keyed `METHOD path`, in document order. */
-function operationsOf(document: Record<string, unknown>): Map<string, Record<string, unknown>> {
+/**
+ * A Path Item as the gateway reads it: inline, or through a chain of local
+ * Path Item `$ref`s. Fields written beside a `$ref` are kept, the outermost
+ * one winning (the same member semantics as agent operations), so a sibling
+ * method or shared `parameters` entry is compared rather than dropped. A
+ * chain that cannot be followed answers `null`.
+ */
+function resolvePathItem(
+  document: Record<string, unknown>,
+  path: string,
+  item: unknown,
+): Record<string, unknown> | null {
+  if (!isRecord(item)) return null;
+  if (refOf(item) === null) return item;
+  let resolved: AgentPathItem;
+  try {
+    resolved = resolveAgentPathItem(document, path, item);
+  } catch {
+    return null;
+  }
+  // Null-prototype, so a document key such as `__proto__` stays a member.
+  const merged = Object.assign(Object.create(null) as Record<string, unknown>, resolved.target);
+  for (let index = resolved.chain.length - 1; index >= 0; index -= 1) {
+    for (const [key, value] of Object.entries(resolved.chain[index] as Record<string, unknown>)) {
+      if (key !== '$ref') merged[key] = value;
+    }
+  }
+  return merged;
+}
+
+/**
+ * Every operation of a document, keyed `METHOD path`, in document order.
+ * Locally referenced Path Items contribute the operations of the object
+ * they name plus any written beside the reference; one that cannot be
+ * resolved marks the enumeration incomplete instead of silently hiding its
+ * operations from both sides.
+ */
+function operationsOf(document: Record<string, unknown>): {
+  operations: Map<string, Record<string, unknown>>;
+  complete: boolean;
+} {
   const operations = new Map<string, Record<string, unknown>>();
-  for (const [path, item] of entriesOf(ownRecord(document, 'paths'))) {
-    if (!isRecord(item)) continue;
+  let complete = true;
+  for (const [path, raw] of entriesOf(ownRecord(document, 'paths'))) {
+    if (!isRecord(raw)) continue;
+    const item = resolvePathItem(document, path, raw);
+    if (item === null) {
+      complete = false;
+      continue;
+    }
     for (const method of OPENAPI_OPERATION_METHODS) {
       const operation = ownRecord(item, method);
       if (operation) operations.set(`${method.toUpperCase()} ${path}`, operation);
     }
   }
-  return operations;
+  return { operations, complete };
 }
 
-/** The path item an operation key belongs to. */
+/** The path item an operation key belongs to, resolved when it is a `$ref`. */
 function pathItemOf(document: Record<string, unknown>, path: string): Record<string, unknown> {
   const paths = ownRecord(document, 'paths');
-  return (paths && ownRecord(paths, path)) ?? {};
+  const raw = paths ? own(paths, path) : undefined;
+  return resolvePathItem(document, path, raw) ?? {};
 }
 
 /** `METHOD path` back into its two halves, the path cut for display. */
@@ -945,9 +993,11 @@ export function compareSpecRevisions(
     );
   };
 
-  const fromOperations = operationsOf(before);
-  const toOperations = operationsOf(after);
-  let complete = true;
+  const fromEnumerated = operationsOf(before);
+  const toEnumerated = operationsOf(after);
+  const fromOperations = fromEnumerated.operations;
+  const toOperations = toEnumerated.operations;
+  let complete = fromEnumerated.complete && toEnumerated.complete;
 
   try {
     for (const [key, operation] of toOperations) {

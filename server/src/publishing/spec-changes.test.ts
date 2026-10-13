@@ -86,6 +86,87 @@ describe('consumer-facing revision comparison', () => {
     assert.deepEqual(report, emptySpecChangeReport());
   });
 
+  it('compares operations behind a referenced Path Item', () => {
+    // The referenced item changes GET -> POST while an inline operation and
+    // `info` stay identical: the change must surface, not read as no change.
+    const before = document(
+      {
+        '/inline': { get: { responses: { '200': {} } } },
+        '/shared': { $ref: '#/components/pathItems/Shared' },
+      },
+      { pathItems: { Shared: { get: { responses: { '200': {} } } } } },
+    );
+    const after = document(
+      {
+        '/inline': { get: { responses: { '200': {} } } },
+        '/shared': { $ref: '#/components/pathItems/Shared' },
+      },
+      { pathItems: { Shared: { post: { responses: { '201': {} } } } } },
+    );
+    const report = compareSpecRevisions(before, after);
+    assert.equal(report.complete, true);
+    assert.equal(report.changed, true);
+    assert.deepEqual(lines(report), [
+      'breaking | operation_removed | GET /shared | operation | - | -',
+      'non_breaking | operation_added | POST /shared | operation | - | -',
+    ]);
+  });
+
+  it('keeps methods written beside a Path Item reference', () => {
+    // `/shared` references a component with POST and adds a sibling GET.
+    // Removing only the sibling GET is a breaking change the comparison
+    // must see, not lose to the reference target.
+    const shared = { $ref: '#/components/pathItems/Shared', get: { responses: { '200': {} } } };
+    const components = { pathItems: { Shared: { post: { responses: { '201': {} } } } } };
+    const before = document(
+      { '/inline': { get: { responses: { '200': {} } } }, '/shared': shared },
+      components,
+    );
+    const after = document(
+      {
+        '/inline': { get: { responses: { '200': {} } } },
+        '/shared': { $ref: '#/components/pathItems/Shared' },
+      },
+      components,
+    );
+    const report = compareSpecRevisions(before, after);
+    assert.equal(report.complete, true);
+    assert.equal(report.changed, true);
+    assert.deepEqual(lines(report), [
+      'breaking | operation_removed | GET /shared | operation | - | -',
+    ]);
+  });
+
+  it('keeps shared parameters written beside a Path Item reference', () => {
+    const components = { pathItems: { Shared: { get: { responses: { '200': {} } } } } };
+    const before = document(
+      {
+        '/shared': {
+          $ref: '#/components/pathItems/Shared',
+          parameters: [
+            { name: 'tenant', in: 'header', required: true, schema: { type: 'string' } },
+          ],
+        },
+      },
+      components,
+    );
+    const after = document({ '/shared': { $ref: '#/components/pathItems/Shared' } }, components);
+    const report = compareSpecRevisions(before, after);
+    assert.equal(report.complete, true);
+    assert.equal(report.changed, true);
+    assert.ok(
+      lines(report).some((entry) => entry.includes('parameter_removed | GET /shared')),
+      lines(report).join('\n'),
+    );
+  });
+
+  it('marks the comparison incomplete when a Path Item reference cannot be followed', () => {
+    const before = document({ '/shared': { $ref: '#/components/pathItems/Missing' } });
+    const report = compareSpecRevisions(before, structuredClone(before));
+    assert.equal(report.complete, false);
+    assert.equal(report.changed, false);
+  });
+
   it('names operations added, removed and deprecated, removals as breaking', () => {
     const before = document({
       '/orders': { get: { responses: { '200': {} } }, post: { responses: { '201': {} } } },

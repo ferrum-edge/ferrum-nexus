@@ -2797,6 +2797,42 @@ describe('publishing', () => {
       assert.deepEqual(effectiveNames(harness, proxyId), []);
       assert.equal(await harness.store.apis.findById(api.id), null);
     });
+
+    it('never issues a delete for an operator config on the proxy', async () => {
+      harness.edge.reset();
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'teardown-operator' }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const api = published.json<PublishApiResponse>().api;
+      const proxyId = String(api.ferrum_proxy_id);
+      const owned = harness.edge.pluginsForProxy(proxyId).map((config) => String(config.id));
+      assert.ok(owned.length > 0);
+      const operatorId = 'operator-limiter';
+      harness.edge.pluginConfigs.set(`nexus/${operatorId}`, {
+        id: operatorId,
+        namespace: 'nexus',
+        plugin_name: 'rate_limiting',
+        scope: 'proxy',
+        proxy_id: proxyId,
+        enabled: true,
+        config: {},
+      });
+
+      const response = await harness.authed(provider, {
+        method: 'DELETE',
+        url: `/api/apis/${api.id}`,
+      });
+      assert.equal(response.statusCode, 200, response.body);
+
+      const swept = harness.edge
+        .callsTo('DELETE', '/plugins/config/')
+        .map((call) => call.path.slice('/plugins/config/'.length));
+      assert.ok(!swept.includes(operatorId), 'the operator config is never named in a delete');
+      for (const id of owned) assert.ok(swept.includes(id), `the owned config ${id} is swept`);
+    });
   });
 
   describe('test consumers', () => {

@@ -155,6 +155,8 @@ services:
       NEXUS_SMTP_HOST: mail
       NEXUS_SMTP_PORT: '1025'
       NEXUS_SMTP_SECURE: 'false'
+      # The test sink offers no STARTTLS; plaintext is a test-stack-only opt-in.
+      NEXUS_SMTP_ALLOW_PLAINTEXT: 'true'
       NEXUS_EMAIL_FROM: nexus@example.test
       # Single sign-on through the `dex` service. The issuer is plain HTTP on
       # 127.0.0.1, which the portal refuses unless the loopback development

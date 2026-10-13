@@ -484,8 +484,8 @@ export type AuditLogRecord = Omit<AuditLog, 'actor'>;
  * An `app_settings` row.
  *
  * The store is deliberately crypto-unaware: when `encrypted` is `true`, `value`
- * is the opaque `v1:iv:ciphertext:tag` string produced by
- * `NexusCrypto.encryptJson`, and the settings service is responsible for
+ * is the opaque `v2:iv:ciphertext:tag` string produced by
+ * `NexusCrypto.encryptJson` (bound to `key`), and the settings service is responsible for
  * encrypting before `set` and decrypting after `get`.
  */
 export interface SettingRecord {
