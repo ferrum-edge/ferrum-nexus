@@ -1592,6 +1592,12 @@ NEXUS_DB_DRIVER=mongodb
 NEXUS_DB_URL=mongodb://mongo-a:27017,mongo-b:27017/nexus?replicaSet=rs0
 ```
 
+**Supported servers: MongoDB 4.4 through 9.0.** The `mongodb` 7.x Node.js driver
+rejects servers older than 4.4 (wire version 9). CI runs the store contracts on
+MongoDB 9.0 and the standalone-refusal check on 4.4. Azure Cosmos DB for
+MongoDB accounts on server version 4.2 or older and AWS DocumentDB 3.6/4.0 are
+below that floor.
+
 **A replica set or sharded cluster is required.** `init()` checks with `hello`
 and refuses to start against a standalone `mongod`:
 
