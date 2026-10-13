@@ -78,6 +78,10 @@ import {
 import { buildLoggerOptions, type LoggerOptions } from './lib/logger.js';
 import { createMessagingService, type MessagingService } from './messaging/service.js';
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
+import {
+  markSpaShell,
+  registerContentSecurityPolicy,
+} from './middleware/content-security-policy.js';
 import { userOrIpKey } from './middleware/rate-limit-keys.js';
 import {
   handleFrameworkError,
@@ -746,51 +750,35 @@ export async function buildServer(
   registerErrorHandler(app, {
     ...(webDist
       ? {
-          spaFallback: (_request, reply) =>
+          spaFallback: (request, reply) => {
+            // Its Content-Security-Policy depends on the CAPTCHA settings, and
+            // a 304 revalidation carries no Content-Type to recognise it by.
+            markSpaShell(request);
             // no-cache: browsers must revalidate the shell so a fresh deploy's
             // hashed asset references are picked up immediately.
-            reply
+            return reply
               .type('text/html')
               .header('cache-control', 'no-cache')
-              .sendFile('index.html', { cacheControl: false }),
+              .sendFile('index.html', { cacheControl: false });
+          },
         }
       : {}),
   });
 
   await app.register(cookie, { parseOptions: { path: '/' } });
 
+  // The Content-Security-Policy is set by our own hooks rather than helmet:
+  // the SPA shell's policy depends on the stored CAPTCHA provider and on who
+  // loads it (issue #585). See `middleware/content-security-policy.ts`.
+  registerContentSecurityPolicy(app, {
+    config,
+    store: deps.store,
+    crypto,
+    captchaPublicConfig: () => captcha.getPublicConfig(),
+  });
+
   await app.register(helmet, {
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        baseUri: ["'self'"],
-        // CAPTCHA widgets load a vendor script and iframe; the hosts are fixed
-        // and inert unless an admin enables the corresponding provider.
-        scriptSrc: [
-          "'self'",
-          'https://challenges.cloudflare.com',
-          'https://hcaptcha.com',
-          'https://*.hcaptcha.com',
-          'https://www.google.com',
-          'https://www.gstatic.com',
-        ],
-        frameSrc: [
-          "'self'",
-          'https://challenges.cloudflare.com',
-          'https://hcaptcha.com',
-          'https://*.hcaptcha.com',
-          'https://www.google.com',
-        ],
-        connectSrc: ["'self'", 'https://hcaptcha.com', 'https://*.hcaptcha.com'],
-        styleSrc: ["'self'", "'unsafe-inline'"],
-        imgSrc: ["'self'", 'data:'],
-        fontSrc: ["'self'", 'data:'],
-        objectSrc: ["'none'"],
-        formAction: ["'self'"],
-        frameAncestors: ["'none'"],
-        upgradeInsecureRequests: null,
-      },
-    },
+    contentSecurityPolicy: false,
     crossOriginEmbedderPolicy: false,
     frameguard: { action: 'deny' },
     hsts: config.cookieSecure ? { maxAge: 31_536_000, includeSubDomains: true } : false,

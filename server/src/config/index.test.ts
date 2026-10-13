@@ -112,6 +112,28 @@ describe('loadConfig', () => {
       expectConfigError(baseEnv({ NEXUS_HEALTH_PROBE_TIMEOUT_MS: value }), 'NEXUS_HEALTH_PROBE');
     }
   });
+  it('caps session lifetime absolutely, never below the idle TTL (#582)', () => {
+    assert.equal(loadConfig(baseEnv()).sessionMaxAgeSeconds, 604_800);
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_SESSION_MAX_AGE: '86400' })).sessionMaxAgeSeconds,
+      86_400,
+    );
+    // Unset (or 0) follows a longer idle TTL rather than undercutting it.
+    const longTtl = baseEnv({ NEXUS_SESSION_TTL: '2592000' });
+    assert.equal(loadConfig(longTtl).sessionMaxAgeSeconds, 2_592_000);
+    assert.equal(
+      loadConfig({ ...longTtl, NEXUS_SESSION_MAX_AGE: '0' }).sessionMaxAgeSeconds,
+      2_592_000,
+    );
+    expectConfigError(
+      baseEnv({ NEXUS_SESSION_TTL: '43200', NEXUS_SESSION_MAX_AGE: '3600' }),
+      'NEXUS_SESSION_MAX_AGE',
+    );
+    for (const value of ['-1', '31536001', '7d', '1e5']) {
+      expectConfigError(baseEnv({ NEXUS_SESSION_MAX_AGE: value }), 'NEXUS_SESSION_MAX_AGE');
+    }
+  });
+
   it('applies every documented default', () => {
     const config = loadConfig(baseEnv());
 

@@ -119,17 +119,19 @@ describe('health endpoints', () => {
     const body = response.json<AppHealth>();
     assert.equal(body.status, 'ok');
     assert.equal(body.database.status, 'ok');
-    assert.equal(body.database.driver, 'sqlite');
+    assert.equal(body.database.driver, null, 'the driver is admin-only detail');
     assert.equal(body.database.error, null);
     assert.equal(body.edge.status, 'ok');
-    assert.equal(body.edge.namespace, 'nexus');
+    assert.equal(body.edge.namespace, null, 'the namespace is admin-only detail');
+    assert.equal(body.edge.namespace_routing.configured, null);
     assert.equal(body.edge.ready, true);
     assert.equal(body.edge.mode, null, 'gateway mode is admin-only detail');
     assert.equal(body.edge.admin_writes_enabled, null, 'admin-only detail');
     assert.equal(body.edge.edge_version, null, 'Ferrum Edge exposes no version endpoint');
     assert.equal(body.edge.public_egress_guaranteed, null, 'egress posture is admin-only detail');
     assert.equal(body.credentials.legacy_basicauth_scan, null, 'scan state is admin-only detail');
-    assert.ok(body.uptime_seconds >= 0);
+    assert.equal(body.version, null, 'the version is admin-only detail');
+    assert.equal(body.uptime_seconds, null, 'uptime is admin-only detail');
     assert.ok(Date.parse(body.checked_at) > 0);
   });
 
@@ -137,6 +139,30 @@ describe('health endpoints', () => {
     const response = await harness.authed(admin, { method: 'GET', url: '/api/health' });
     assert.equal(response.statusCode, 200);
     assert.equal(response.json<AppHealth>().credentials.legacy_basicauth_scan, 'completed');
+  });
+
+  it('shows an administrator the deployment detail it withholds (#583)', async () => {
+    const response = await harness.authed(admin, { method: 'GET', url: '/api/health' });
+    assert.equal(response.statusCode, 200);
+    const body = response.json<AppHealth>();
+    assert.ok(typeof body.version === 'string' && body.version.length > 0);
+    assert.ok(body.uptime_seconds !== null && body.uptime_seconds >= 0);
+    assert.equal(body.database.driver, 'sqlite');
+    assert.equal(body.edge.namespace, 'nexus');
+    assert.equal(body.edge.namespace_routing.configured, 'nexus');
+
+    const edgeOnly = await harness.authed(admin, { method: 'GET', url: '/api/health/edge' });
+    assert.equal(edgeOnly.json<EdgeHealth>().namespace, 'nexus');
+  });
+
+  it('withholds the namespace from an anonymous /api/health/edge too', async () => {
+    const response = await harness.app.inject({ method: 'GET', url: '/api/health/edge' });
+    assert.equal(response.statusCode, 200);
+    const body = response.json<EdgeHealth>();
+    assert.equal(body.status, 'ok');
+    assert.equal(body.namespace, null);
+    assert.equal(body.namespace_routing.configured, null);
+    assert.equal(body.edge_version, null);
   });
 
   it('builds when the legacy Basic Auth scan throws and reports the failure', async () => {

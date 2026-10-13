@@ -125,6 +125,37 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Security
 
+- **Sessions have an absolute lifetime** (#582). A session now ends
+  `NEXUS_SESSION_MAX_AGE` seconds after sign-in however active it is; sliding
+  expiry never extends it past that, and the cookies a slide re-issues expire
+  with it. Unset or `0` means 7 days, or `NEXUS_SESSION_TTL` when that is
+  longer; an explicit value below `NEXUS_SESSION_TTL` is refused at startup.
+  **Upgrade note:** sessions older than the cap end on their next request, so
+  long-lived tabs sign in again once after the upgrade.
+- **Anonymous health checks no longer fingerprint the deployment** (#583).
+  For anyone who is not a signed-in admin, `GET /api/health` reports `version`,
+  `uptime_seconds` and `database.driver` as `null`, and both health endpoints
+  report `edge.edge_version`, `edge.namespace` and
+  `edge.namespace_routing.configured` as `null`. Status codes and every
+  `status` verdict are unchanged, so liveness and readiness probes keep working.
+  **Upgrade note:** a monitor that read the version anonymously must sign in as
+  an admin or take it from the deployment.
+- **Stored scrypt parameters are bounded before verification** (#584).
+  `verifyPassword` refuses a stored hash whose `r` exceeds 32, `p` exceeds 16,
+  memory (`128 * N * r`) exceeds 256 MiB, or total work (`N * r * p`) exceeds
+  2^24, and one whose salt or key length is out of range, without running
+  scrypt. A corrupt or planted `password_hash` can no longer make every
+  sign-in attempt for that account allocate gigabytes.
+- **The Content-Security-Policy admits only the CAPTCHA provider in use**
+  (#585). CAPTCHA vendor hosts are no longer listed on every response: only the
+  SPA shell lists them, and only the enabled provider's, or every provider's
+  on the settings page of a signed-in super admin so the activation self-test
+  can load one before it is enabled. With CAPTCHA off an anonymous visitor's shell lists none. The
+  self-test and the sign-in and registration forms offer to reload the page
+  when the widget cannot load, which is what a tab opened before CAPTCHA was
+  switched on or changed needs.
+  `style-src 'unsafe-inline'` stays, because the UI's Radix components inject
+  runtime `<style>` elements; `docs/security.md` records why.
 - **SMTP requires STARTTLS when implicit TLS is off**
   ([GHSA-v7p7-85wx-8wrp](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-v7p7-85wx-8wrp)).
   With `NEXUS_SMTP_SECURE=false` a relay that does not offer STARTTLS, or a path

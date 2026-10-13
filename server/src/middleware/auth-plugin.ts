@@ -41,11 +41,11 @@ import {
 } from '@ferrum-nexus/shared';
 
 import type { RequestContext } from '../auth/service.js';
+import { sessionAbsoluteDeadlineMs, sessionIsLive } from '../auth/session-lifetime.js';
 import type { NexusConfig } from '../config/index.js';
 import type { NexusStore, SessionRecord, UserRecord } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { csrfMismatch, forbidden, unauthorized, userDisabled } from '../lib/errors.js';
-import { isoInSeconds } from '../lib/ids.js';
 import { isApiRequest } from './api-route.js';
 import { setSessionCookies } from './session-cookies.js';
 
@@ -149,7 +149,9 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (app, options) =
     if (!session) return;
 
     const now = Date.now();
-    if (Date.parse(session.expires_at) <= now) {
+    // Past its sliding expiry, or past its absolute lifetime however busy it
+    // has been (issue #582): either way the row is dead.
+    if (!sessionIsLive(session, config, now)) {
       await store.sessions.delete(session.id);
       return;
     }
@@ -170,17 +172,33 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (app, options) =
     if (request.routeOptions.config?.sharedCacheable === true) return;
 
     // Sliding expiration: only write when less than half the TTL remains, so a
-    // busy SPA does not issue one UPDATE per request.
-    const remainingMs = Date.parse(session.expires_at) - now;
+    // busy SPA does not issue one UPDATE per request. The new expiry is capped
+    // at the session's absolute deadline, so activity can never carry a
+    // session past `NEXUS_SESSION_MAX_AGE`; once the cap is reached there is
+    // nothing left to extend and the row simply runs out.
+    const currentExpiry = Date.parse(session.expires_at);
+    const remainingMs = currentExpiry - now;
     if (remainingMs < (config.sessionTtlSeconds * 1000) / 2) {
-      const expiresAt = isoInSeconds(config.sessionTtlSeconds);
-      await store.sessions.touch(session.id, expiresAt);
-      request.session = { ...session, expires_at: expiresAt };
-      // Extending only the row would leave the browser dropping both cookies at
-      // the wall-clock set when the session was issued, so a still-live session
-      // would look logged out. Re-stamp the pair with a fresh full-TTL Max-Age;
-      // the values are unchanged, so nothing about the session is rotated.
-      setSessionCookies(reply, config, { token, csrfToken: session.csrf_token });
+      const slidTo = Math.min(
+        now + config.sessionTtlSeconds * 1000,
+        sessionAbsoluteDeadlineMs(session, config),
+      );
+      if (slidTo > currentExpiry) {
+        const expiresAt = new Date(slidTo).toISOString();
+        await store.sessions.touch(session.id, expiresAt);
+        request.session = { ...session, expires_at: expiresAt };
+        // Extending only the row would leave the browser dropping both cookies
+        // at the wall-clock set when the session was issued, so a still-live
+        // session would look logged out. Re-stamp the pair with a Max-Age that
+        // ends with the row; the values are unchanged, so nothing about the
+        // session is rotated.
+        setSessionCookies(
+          reply,
+          config,
+          { token, csrfToken: session.csrf_token },
+          Math.floor((slidTo - now) / 1000),
+        );
+      }
     }
   });
 

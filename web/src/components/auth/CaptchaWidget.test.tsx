@@ -147,8 +147,29 @@ describe('CaptchaWidget', () => {
     });
 
     expect(screen.getByRole('status')).toHaveTextContent('could not be loaded');
+    // A tab opened before CAPTCHA changed needs a fresh document (and CSP).
+    expect(screen.getByRole('button', { name: 'Reload the page' })).toBeInTheDocument();
     expect(onToken).toHaveBeenCalledWith(null);
     expect(document.querySelector(`script[src="${TURNSTILE.src}"]`)).toBeNull();
+  });
+
+  it('shows the caller-supplied failure note in place of the default', async () => {
+    const onToken = vi.fn();
+    render(
+      <CaptchaWidget
+        config={configFor('turnstile')}
+        onToken={onToken}
+        failureNote="Reload this page and test again."
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.error(vendorScript(TURNSTILE.src));
+    });
+
+    expect(screen.getByRole('status')).toHaveTextContent('Reload this page and test again.');
+    expect(screen.getByRole('status')).not.toHaveTextContent('could not be loaded');
+    expect(onToken).toHaveBeenCalledWith(null);
   });
 
   it('reuses a script that already loaded instead of injecting another', async () => {

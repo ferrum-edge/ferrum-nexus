@@ -388,6 +388,84 @@ describe('sliding session expiry', () => {
     assert.equal(response.statusCode, 200);
     assert.equal(setCookies(response).size, 0, 'a busy SPA is not re-stamped on every request');
   });
+
+  /** Run `body` with `NEXUS_SESSION_MAX_AGE` overridden, restoring it after. */
+  async function withMaxAge(seconds: number, body: () => Promise<void>): Promise<void> {
+    const original = harness.config.sessionMaxAgeSeconds;
+    harness.config.sessionMaxAgeSeconds = seconds;
+    try {
+      await body();
+    } finally {
+      harness.config.sessionMaxAgeSeconds = original;
+    }
+  }
+
+  it('defaults the absolute lifetime to seven days', () => {
+    assert.equal(harness.config.sessionMaxAgeSeconds, 604_800);
+  });
+
+  it('rejects a session past its absolute lifetime (#582)', async () => {
+    const session = await harness.registerUser({ email: 'stale@example.test' });
+    const row = await sessionRowFor(session.sessionToken);
+    assert.ok(Date.parse(row.expires_at) > Date.now(), 'the sliding expiry is in the future');
+
+    // A cap of zero puts the deadline at `created_at`, which is already past.
+    await withMaxAge(0, async () => {
+      const response = await harness.app.inject({
+        method: 'GET',
+        url: '/api/auth/me',
+        headers: { cookie: session.cookieHeader },
+      });
+      assert.equal(response.statusCode, 401);
+    });
+    const hash = createCrypto(TEST_SECRET_KEY).hashToken(session.sessionToken);
+    assert.equal(await harness.store.sessions.findByTokenHash(hash), null, 'the row is deleted');
+
+    // Restoring the cap does not resurrect it.
+    const restored = await harness.app.inject({
+      method: 'GET',
+      url: '/api/auth/me',
+      headers: { cookie: session.cookieHeader },
+    });
+    assert.equal(restored.statusCode, 401);
+  });
+
+  it('never slides a session past its absolute lifetime', async () => {
+    const session = await harness.registerUser({ email: 'capped@example.test' });
+    const ttl = harness.config.sessionTtlSeconds;
+    const row = await sessionRowFor(session.sessionToken);
+    const createdAt = Date.parse(row.created_at);
+    // Put the deadline half a TTL from now: inside the window a full slide
+    // would reach, so the slide has to stop at it.
+    const maxAge = Math.ceil((Date.now() - createdAt) / 1000) + ttl / 2;
+    const deadline = new Date(createdAt + maxAge * 1000).toISOString();
+    await harness.store.sessions.touch(row.id, isoInSeconds(ttl / 4));
+
+    await withMaxAge(maxAge, async () => {
+      const slid = await harness.app.inject({
+        method: 'GET',
+        url: '/api/auth/me',
+        headers: { cookie: session.cookieHeader },
+      });
+      assert.equal(slid.statusCode, 200);
+      assert.equal((await sessionRowFor(session.sessionToken)).expires_at, deadline);
+      const cookie = setCookies(slid).get(SESSION_COOKIE);
+      assert.ok(cookie, 'the cookies are re-stamped to the capped expiry');
+      const maxAgeHeader = maxAgeOf(cookie);
+      assert.ok(maxAgeHeader !== null && maxAgeHeader <= ttl / 2, `Max-Age ${maxAgeHeader}`);
+      assert.ok(maxAgeHeader > ttl / 2 - 60, `Max-Age ${maxAgeHeader}`);
+
+      // At the cap there is nothing left to extend: no write, no cookies.
+      const again = await harness.app.inject({
+        method: 'GET',
+        url: '/api/auth/me',
+        headers: { cookie: session.cookieHeader },
+      });
+      assert.equal(again.statusCode, 200);
+      assert.equal(setCookies(again).size, 0);
+      assert.equal((await sessionRowFor(session.sessionToken)).expires_at, deadline);
+    });
+  });
 });
 
 describe('email verification', () => {

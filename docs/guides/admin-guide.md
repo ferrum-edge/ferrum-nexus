@@ -196,7 +196,9 @@ Turnstile**, **hCaptcha** and **Google reCAPTCHA**.
    **Provider**, and paste both keys.
 3. Choose **Test this CAPTCHA configuration** and complete the challenge. You
    cannot save until the test passes, and it runs again whenever you change the
-   provider or either key.
+   provider or either key. If the widget does not load, reload the page and
+   test again: the portal's Content-Security-Policy admits a provider that is
+   not yet enabled only on the settings page loaded while you were signed in.
 4. Save. Then load the sign-in page in a private window and check the widget
    works.
 

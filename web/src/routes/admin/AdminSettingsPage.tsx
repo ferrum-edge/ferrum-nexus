@@ -7,7 +7,7 @@ import {
   type AdminSettingsResponse,
   type CaptchaProvider,
   type EdgeHealthStatus,
-  type EdgeNamespaceRouting,
+  type EdgeHealthNamespaceRouting,
   type EmailTemplateKey,
   type RegistrableRole,
 } from '@ferrum-nexus/shared';
@@ -67,6 +67,17 @@ const CAPTCHA_PROVIDERS: ReadonlyArray<{ value: CaptchaProvider; label: string }
   { value: 'hcaptcha', label: 'hCaptcha' },
   { value: 'recaptcha', label: 'Google reCAPTCHA' },
 ];
+
+/**
+ * The self-test's failure note. The page's Content-Security-Policy admits only
+ * the enabled provider's hosts, plus every provider's when this settings page
+ * was loaded by a signed-in super admin, so a page opened before signing in
+ * cannot load another vendor's script until it is reloaded.
+ */
+export const CAPTCHA_SELF_TEST_LOAD_FAILURE =
+  "The provider's CAPTCHA script could not be loaded. Reload this page and test again: the " +
+  "portal's security policy admits a provider that is not yet enabled only on this page, loaded " +
+  'while signed in as a super admin.';
 
 /**
  * Shown in place of the save button on a section an ordinary `admin` may read
@@ -354,14 +365,23 @@ function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
  * namespace from the portal's namespace-scoped token: each says which
  * namespace is wrong without saying which one is right.
  */
-function NamespaceUnservedNotice({ routing }: { routing: EdgeNamespaceRouting }): ReactElement {
+function NamespaceUnservedNotice({
+  routing,
+}: {
+  routing: EdgeHealthNamespaceRouting;
+}): ReactElement {
+  // `configured` is withheld below admin (#583); this card is admin-only.
+  const portal =
+    routing.configured === null
+      ? 'its configured Ferrum Edge namespace'
+      : `the Ferrum Edge namespace '${routing.configured}'`;
   const gateway =
     routing.active === null
       ? "read the gateway's own active namespace from its GET /health, field namespace.active, with a fleet admin token (one without an ns claim)"
       : `the gateway's data plane serves '${routing.active}'`;
   return (
     <FormNotice tone="danger">
-      {`Published APIs are not reachable. This portal publishes into the Ferrum Edge namespace '${routing.configured}', which this gateway accepts and never routes — ${gateway}. Every API already published here answers 404 on the listener, and new publishes are refused until FERRUM_NAMESPACE matches on the portal and on the gateway.`}
+      {`Published APIs are not reachable. This portal publishes into ${portal}, which this gateway accepts and never routes — ${gateway}. Every API already published here answers 404 on the listener, and new publishes are refused until FERRUM_NAMESPACE matches on the portal and on the gateway.`}
     </FormNotice>
   );
 }
@@ -643,6 +663,7 @@ export function CaptchaCard({ settings }: { settings: AdminSettingsResponse }): 
                 key={challenge.attempt}
                 config={{ enabled: true, provider, site_key: trimmedSiteKey }}
                 onToken={onToken}
+                failureNote={CAPTCHA_SELF_TEST_LOAD_FAILURE}
               />
             ) : null}
             {provenToken === null ? (

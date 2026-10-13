@@ -91,6 +91,7 @@ import {
   type IssuedSession,
   type RequestContext,
 } from '../auth/service.js';
+import { sessionIsLive } from '../auth/session-lifetime.js';
 import type { NexusConfig } from '../config/index.js';
 import { runGatewayTeardown, type CredentialsService } from '../credentials/service.js';
 import type { NexusStore, UserIdentityRecord, UserRecord } from '../db/store.js';
@@ -925,10 +926,12 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
             // Check under the lifecycle lease, in the transaction that links and
             // issues the replacement, including an already-linked explicit attempt.
             const session = await tx.sessions.findById(plan.initiatingSessionId);
+            // Live means inside both the sliding expiry and the absolute lifetime
+            // (#582): the cap may pass while the token exchange is in flight.
             if (
               !session ||
               session.user_id !== current.id ||
-              Date.parse(session.expires_at) <= Date.now()
+              !sessionIsLive(session, config, Date.now())
             ) {
               throw new OidcError(
                 'link_session_mismatch',
