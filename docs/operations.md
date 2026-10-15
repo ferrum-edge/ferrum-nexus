@@ -188,17 +188,18 @@ and `PUT` the whole resource back, keeping `enabled`, `trigger`,
 SELECT api_id, ferrum_plugin_config_id
   FROM api_gateway_plugins
   WHERE role = 'rate_limit' AND ferrum_plugin_config_id IS NOT NULL;
--- Proxies to check for <proxy_id>-nexus-tool-budget and
--- request_deduplication configs.
+-- Deduplication configs (MongoDB: the api_plugins collection).
+SELECT api_id, ferrum_plugin_config_id
+  FROM api_plugins
+  WHERE plugin_name = 'request_deduplication' AND ferrum_plugin_config_id IS NOT NULL;
+-- Tool budgets: the config id is <ferrum_proxy_id>-nexus-tool-budget; a 404
+-- means the API has no agent tools.
 SELECT id, ferrum_proxy_id FROM apis WHERE ferrum_proxy_id IS NOT NULL;
 ```
 
 ```bash
-# One config by id, or every config on one proxy.
 curl -sS -H "Authorization: Bearer $ADMIN_JWT" -H "X-Ferrum-Namespace: $FERRUM_NAMESPACE" \
   "$FERRUM_ADMIN_URL/plugins/config/$CONFIG_ID"
-curl -sS -H "Authorization: Bearer $ADMIN_JWT" -H "X-Ferrum-Namespace: $FERRUM_NAMESPACE" \
-  "$FERRUM_ADMIN_URL/plugins/config?proxy_id=$PROXY_ID"
 ```
 
 **Verify** by reading each config again: in `redis` mode `config.sync_mode` is
@@ -2493,6 +2494,10 @@ anything in the first two rows:
    `POST /api/apis/:id/restore-gateway`) and use the command. Otherwise plan to
    reconcile each listed API by hand, as in
    [Resolving an unconfirmed gateway deployment mutation](#resolving-an-unconfirmed-gateway-deployment-mutation).
+   When that query returns nothing again, delete every remaining
+   `gateway_recovery_chunk:` row (instances stopped, backup taken): they were
+   sealed under the lost key and nothing references them, and the rotation
+   command refuses to run while any encrypted row does not open.
 
 2. **CAPTCHA:** set `NEXUS_CAPTCHA_ENFORCEMENT=disabled` for the window
    ([Recovering a portal locked out by CAPTCHA](#recovering-a-portal-locked-out-by-captcha)).
