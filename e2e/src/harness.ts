@@ -95,9 +95,9 @@ function withAttemptSignal<T extends { signal?: AbortSignal | null }>(init: T): 
  * that aborts at the deadline. `check` receives it, and {@link portalRaw},
  * {@link callGateway} and the mail reads pick it up on their own, so a stalled
  * request and its body read are cancelled; a check that ignores it is still
- * abandoned at the deadline. An attempt that does not succeed is aborted as
- * soon as it ends, so a response it left unread (a `503` poll, say) does not
- * stay open. A success reported after the deadline does not count.
+ * abandoned at the deadline. Every attempt is aborted as soon as it ends, so
+ * a response it left unread (a `503` poll, or a `200` checked by status only)
+ * does not stay open. A success reported after the deadline does not count.
  */
 export async function waitFor(
   what: string,
@@ -125,22 +125,23 @@ export async function waitFor(
     // Observed from the start: the abort that ends a finished attempt must
     // never surface as an unhandled rejection.
     abandoned.catch(() => undefined);
-    let succeeded = false;
     try {
       const ready = await Promise.race([
         // Async, so a check that throws synchronously rejects inside the race.
         attemptSignal.run(attempt.signal, async () => check(attempt.signal)),
         abandoned,
       ]);
-      succeeded = ready && !attempt.signal.aborted && Date.now() <= deadline;
-      if (succeeded) return;
+      if (ready && !attempt.signal.aborted && Date.now() <= deadline) return;
       lastError = undefined;
     } catch (error) {
       lastError = attempt.signal.aborted ? attempt.signal.reason : error;
     } finally {
       clearTimeout(timer);
-      // A successful attempt's responses may still be read by the caller.
-      if (!succeeded && !attempt.signal.aborted) attempt.abort(new Error('attempt ended'));
+      // Whatever the attempt left open ends with it, success included: a
+      // status-only poll that never read a stalled body must not leave the
+      // request running. A check whose response is used after the wait reads
+      // it first with {@link bufferedResponse}.
+      if (!attempt.signal.aborted) attempt.abort(new Error('attempt ended'));
     }
     const pause = Math.min(POLL_INTERVAL_MS, deadline - Date.now());
     if (pause > 0) await delay(pause);

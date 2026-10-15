@@ -169,6 +169,35 @@ describe('waitFor', { timeout: 30_000 }, () => {
     assert.ok((await closedOn('/initialize')) > 0, 'the stalled request was torn down');
   });
 
+  it('closes a stalled body a status-only poll succeeded on', async () => {
+    await harness.waitFor(
+      'a status-only poll',
+      async () => (await harness.callGateway('/status-only')).status === 200,
+      2_000,
+    );
+    assert.ok((await closedOn('/status-only')) > 0, 'the unread body was torn down');
+  });
+
+  it('bounds a request that combines the attempt signal with its own timeout', async () => {
+    const took = await elapsed(() =>
+      assert.rejects(
+        harness.waitFor(
+          'a combined signal',
+          async (signal) => {
+            const response = await fetch(`${process.env.E2E_PORTAL_URL}/combined`, {
+              signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+            });
+            return ((await response.json()) as { ok?: boolean }).ok === true;
+          },
+          300,
+        ),
+        /Timed out after 300ms waiting for a combined signal/,
+      ),
+    );
+    assert.ok(took < 300 + TOLERANCE_MS, `rejected after ${took}ms`);
+    assert.ok((await closedOn('/combined')) > 0, 'the stalled request was torn down');
+  });
+
   it('closes an unread non-OK response as soon as its attempt ends', async () => {
     let attempts = 0;
     await assert.rejects(
