@@ -153,40 +153,57 @@ See the README for a two-stack example.
 
 #### Changing the quota sync mode on a live portal
 
-Nexus rewrites an API's `rate_limiting` config only when its quota **changes**.
+Three kinds of gateway config carry the sync settings in `redis` mode, and none
+of them is rewritten just because the variables changed:
+
+| Config                                                                | Redis keys Nexus writes                                                                                            | When Nexus rewrites it                                                                                                                     |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| The API's quota (`rate_limiting`, role `rate_limit`)                  | `sync_mode`, `redis_url`, `redis_tls`                                                                              | Only when the quota **changes**. It writes its keys over the live config and keeps every other key, so it never removes Redis keys (#150). |
+| The MCP tool budget (`rate_limiting`, `<proxy_id>-nexus-tool-budget`) | `sync_mode`, `redis_url`, `redis_tls`, `redis_failure_policy: fail_closed`, `redis_key_prefix: nexus:<api_id>:mcp` | When the API's agent plugins are rewritten. The config is replaced whole, so it then matches the current mode.                             |
+| `request_deduplication` palette configs                               | `sync_mode`, `redis_url`, `redis_tls`                                                                              | When the provider saves that plugin. The config is replaced whole, so it then matches the current mode.                                    |
+
 A `PATCH /api/apis/:id` (or a Settings-tab save) whose `rate_limit` equals the
-stored one is deliberately a no-op on the gateway, so it never picks up a new
-sync mode. When a quota does change, Nexus writes its own keys over the live
-config and keeps every other key, including Redis settings an operator added by
-hand (#150). That gives three cases:
+stored one is deliberately a no-op on the gateway. For `local` → `redis` or a
+new Redis URL or TLS setting, a provider can migrate a quota by changing it and
+setting it back (it runs briefly at the intermediate limit). Nothing a provider
+saves removes Redis keys from a quota, so `redis` → `local` always needs the
+edit below for quotas. Tool budgets and deduplication configs can instead wait
+for the next rewrite in the table, but keep their old mode until then.
 
-| Change                                      | What a changed quota writes                                               | Migrating an existing config                                                                                                                                                             |
-| ------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `local` → `redis`                           | `sync_mode`, `redis_url` and `redis_tls` from the new variables           | Edit the config on Edge (below), or change the quota and then set it back. The second way runs briefly at the intermediate limit.                                                        |
-| New `FERRUM_RATE_LIMIT_REDIS_URL` or `_TLS` | The new `redis_url` and `redis_tls`                                       | The same as `local` → `redis`.                                                                                                                                                           |
-| `redis` → `local`                           | No sync keys, so the merge **keeps** the live `sync_mode` and `redis_url` | Saving a quota never removes them. Edit the config on Edge, or clear the API's rate limit and set it again, which deletes the config and creates one without them (no quota in between). |
+**Edit each config on Edge.** Read it, change only the Redis keys in `config`,
+and `PUT` the whole resource back, keeping `enabled`, `trigger`,
+`priority_override` and every other key as they were:
 
-To edit on Edge, find the portal-owned configs, then for each one read it, set
-or remove `sync_mode`, `redis_url` and `redis_tls` in `config`, and `PUT` the
-whole config back. Change nothing else on it.
+- **To `redis`, or to a new endpoint:** set the keys in the table to the values
+  of the new variables.
+- **To `local`:** remove `sync_mode` and **every** `redis_*` key, including ones
+  an operator added (`redis_key_prefix`, pool, timeout and credential settings),
+  and on `request_deduplication` also `on_redis_unavailable`. Edge refuses those
+  keys outside Redis mode.
 
 ```sql
--- The rate_limiting config Nexus owns for each API (MongoDB: the
--- api_gateway_plugins collection, same fields).
+-- Quotas Nexus owns (MongoDB: the api_gateway_plugins collection).
 SELECT api_id, ferrum_plugin_config_id
   FROM api_gateway_plugins
   WHERE role = 'rate_limit' AND ferrum_plugin_config_id IS NOT NULL;
+-- Proxies to check for <proxy_id>-nexus-tool-budget and
+-- request_deduplication configs.
+SELECT id, ferrum_proxy_id FROM apis WHERE ferrum_proxy_id IS NOT NULL;
 ```
 
 ```bash
+# One config by id, or every config on one proxy.
 curl -sS -H "Authorization: Bearer $ADMIN_JWT" -H "X-Ferrum-Namespace: $FERRUM_NAMESPACE" \
   "$FERRUM_ADMIN_URL/plugins/config/$CONFIG_ID"
+curl -sS -H "Authorization: Bearer $ADMIN_JWT" -H "X-Ferrum-Namespace: $FERRUM_NAMESPACE" \
+  "$FERRUM_ADMIN_URL/plugins/config?proxy_id=$PROXY_ID"
 ```
 
-**Verify** by reading each config again: `config.sync_mode` is `redis` with the
-intended `redis_url` and `redis_tls`, or, after moving to `local`, none of the
-three keys is present. A `request_deduplication` palette config carries the same
-three keys in `redis` mode; check and edit those the same way.
+**Verify** by reading each config again: in `redis` mode `config.sync_mode` is
+`redis` with the intended `redis_url` and `redis_tls` (and, on a tool budget,
+`redis_failure_policy: fail_closed`); after moving to `local`, no `sync_mode`
+or `redis_*` key is left. Check that `enabled`, `trigger` and
+`priority_override` did not change.
 
 #### Connection pooling and the gateway's idle bound
 
@@ -2470,16 +2487,25 @@ anything in the first two rows:
    - declare the provider in `NEXUS_OIDC_PROVIDERS` with the **same `id` and
      issuer** and its secret in `NEXUS_OIDC_CLIENT_SECRET_<ID>`. The environment
      entry shadows the stored one, and accounts linked to it keep matching.
+     While it does, the stored provider is read-only and its secret cannot be
+     re-entered (see the handoff below).
 
    If neither is possible, do not replace the key: nobody will be able to sign
    in to re-enter the secrets.
 
-Then: store the new key where the server reads it, restart every instance, sign
-in as that super admin, re-enter the SMTP password, CAPTCHA secret and each
-stored provider's client secret, and check **Send test email**. Remove
-`NEXUS_CAPTCHA_ENFORCEMENT` and `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN` (or the
-temporary environment provider) and restart again. Finally sign out and sign in
-through the portal's normal route.
+Then:
+
+1. Store the new key where the server reads it, restart every instance and sign
+   in as that super admin.
+2. Re-enter the SMTP password and CAPTCHA secret, and check **Send test email**.
+3. Re-enter each stored provider's client secret, except one the environment
+   now shadows. For that one, either keep the environment entry permanently, or
+   hand back to the stored provider without signing out: remove the
+   environment entry and restart (your session survives, because the key did
+   not change), re-enter the stored secret, and confirm a single sign-on
+   sign-in works in a separate browser.
+4. Remove `NEXUS_CAPTCHA_ENFORCEMENT` and `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN` and
+   restart. Confirm normal sign-in in a separate browser before you sign out.
 
 ### Rotating `FERRUM_ADMIN_JWT_SECRET`
 
