@@ -74,6 +74,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   gets an abort signal that fires at the deadline, so a listener that stalls
   its headers or body no longer holds the wait past it, and a success that
   arrives late does not count.
+- **Web console state fixes** (#593, #594, #596, #597).
+  - A credential issue or rotation that is in flight can no longer be
+    dismissed, and show-once secrets are queued, so a second result can never
+    replace a secret that has not been acknowledged. The acknowledgement tick
+    belongs to one secret.
+  - The email-template editor shows an error with Retry when a template fails
+    to load, and Save is enabled only for the template whose content is on
+    screen. Previously a failed load left the previous template's content in
+    the editor, and Save wrote it under the new key.
+  - The documentation viewers list steps back a page when a revocation
+    empties the page on screen.
+  - Rate-limit, timeout and SMTP port fields read the whole number typed, so
+    `1e3` is 1000 rather than 1. A fraction is refused, not truncated.
 
 - **A refused metrics read is reported, not shown as zero**
   (ferrum-edge/ferrum-edge#6095). When the gateway refuses the portal's

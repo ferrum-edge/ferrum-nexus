@@ -56,6 +56,10 @@ export function ConfirmDialog({
       title={title}
       description={description}
       size="sm"
+      // Cancel is disabled while the action is in flight, so Escape, overlay
+      // clicks and the close button are too: dismissing a pending dialog lets
+      // its result land behind whatever the user opens next (issue #593).
+      dismissible={!loading}
       footer={
         <>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={loading}>
