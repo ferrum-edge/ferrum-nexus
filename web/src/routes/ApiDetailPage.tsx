@@ -84,6 +84,7 @@ import { LoadingPanel } from '../components/ui/Spinner';
 import { QueryErrorState } from '../components/ui/QueryErrorState';
 import { AccessModeBadge, StatusPill, VisibilityBadge } from '../components/ui/StatusPill';
 import { Tabs } from '../components/ui/Tabs';
+import { parseWholeNumber } from '../lib/numbers';
 
 const WINDOW_OPTIONS = [
   { value: '1', label: 'per second' },
@@ -278,10 +279,11 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
 
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
-    const parsedLimit = Number.parseInt(rateLimitValue, 10);
+    // The whole field, so `1e3` is 1000 rather than 1 (issue #597).
+    const parsedLimit = parseWholeNumber(rateLimitValue);
     if (
       rateLimitEnabled &&
-      (!Number.isFinite(parsedLimit) || parsedLimit < 1 || parsedLimit > MAX_RATE_LIMIT_REQUESTS)
+      (parsedLimit === null || parsedLimit < 1 || parsedLimit > MAX_RATE_LIMIT_REQUESTS)
     ) {
       toast.error(
         'Rate limit out of range',
@@ -289,9 +291,10 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
       );
       return;
     }
-    const rateLimit: RateLimitConfig | null = rateLimitEnabled
-      ? { limit: parsedLimit, window_seconds: Number.parseInt(rateLimitWindow, 10) }
-      : null;
+    const rateLimit: RateLimitConfig | null =
+      rateLimitEnabled && parsedLimit !== null
+        ? { limit: parsedLimit, window_seconds: Number.parseInt(rateLimitWindow, 10) }
+        : null;
 
     const origins = parseCorsOrigins(corsOrigins);
     if (origins.length > MAX_CORS_ORIGINS) {

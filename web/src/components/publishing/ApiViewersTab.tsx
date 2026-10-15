@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactElement } from 'react';
+import { useEffect, useState, type FormEvent, type ReactElement } from 'react';
 import type { Api } from '@ferrum-nexus/shared';
 import { formatDateTime } from '../../lib/format';
 import { useApiViewers, useAuthorizeApiViewer, useRevokeApiViewer } from '../../hooks/useApis';
@@ -51,6 +51,18 @@ export function ApiViewersTab({ api }: { api: Api }): ReactElement {
 
   const total = query.data?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // Only a settled answer for this page: a cached total from an earlier visit
+  // can be out of date while its refetch is in flight.
+  const settledTotal = query.isSuccess && !query.isFetching ? query.data.total : undefined;
+
+  // A revocation (here or elsewhere) can shrink the list below the page on
+  // screen. Step back to the last page that still has viewers rather than
+  // stranding the provider on an empty page with no pagination (issue #596).
+  useEffect(() => {
+    if (settledTotal === undefined) return;
+    const lastPage = Math.max(0, Math.ceil(settledTotal / PAGE_SIZE) - 1);
+    if (page > lastPage) setPage(lastPage);
+  }, [settledTotal, page]);
 
   const submit = (event: FormEvent): void => {
     event.preventDefault();

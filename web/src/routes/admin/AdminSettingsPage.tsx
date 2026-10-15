@@ -42,6 +42,7 @@ import {
 import { LabeledSelect } from '../../components/ui/Select';
 import { LoadingPanel } from '../../components/ui/Spinner';
 import { QueryErrorState } from '../../components/ui/QueryErrorState';
+import { parseWholeNumber } from '../../lib/numbers';
 import { Tabs } from '../../components/ui/Tabs';
 import { FormNotice } from '../../components/auth/AuthShell';
 import { BrandingTab } from './settings/BrandingTab';
@@ -829,12 +830,22 @@ function EmailTab({ settings }: { settings: AdminSettingsResponse }): ReactEleme
             <Button
               variant="primary"
               loading={update.isPending}
-              onClick={() =>
+              onClick={() => {
+                // The whole field, so `25e1` is port 250 rather than 25
+                // (issue #597). A blank field keeps the STARTTLS default.
+                const parsedPort = port.trim() === '' ? 587 : parseWholeNumber(port);
+                if (parsedPort === null || parsedPort < 1 || parsedPort > 65_535) {
+                  toast.error(
+                    'Invalid port',
+                    'The SMTP port must be a whole number from 1 to 65535.',
+                  );
+                  return;
+                }
                 update.mutate(
                   {
                     smtp: {
                       host: host.trim() || null,
-                      port: Number.parseInt(port, 10) || 587,
+                      port: parsedPort,
                       secure,
                       username: username.trim() || null,
                       from_address: fromAddress.trim() || null,
@@ -847,8 +858,8 @@ function EmailTab({ settings }: { settings: AdminSettingsResponse }): ReactEleme
                       toast.success('Email settings saved');
                     },
                   },
-                )
-              }
+                );
+              }}
             >
               Save email settings
             </Button>
@@ -902,7 +913,8 @@ function EmailTab({ settings }: { settings: AdminSettingsResponse }): ReactEleme
   );
 }
 
-function TemplatesTab(): ReactElement {
+/** @internal Exported for tests. */
+export function TemplatesTab(): ReactElement {
   const [key, setKey] = useState<EmailTemplateKey>('verification');
   const query = useEmailTemplate(key);
   const update = useUpdateEmailTemplate();
@@ -911,14 +923,22 @@ function TemplatesTab(): ReactElement {
   const [subject, setSubject] = useState('');
   const [bodyHtml, setBodyHtml] = useState('');
   const [bodyText, setBodyText] = useState('');
+  // The template the editor fields were loaded from. The selector moves on
+  // its own, so without this a failed load for the newly chosen template
+  // left the previous one's content on screen, and Save wrote it under the
+  // new key (issue #594).
+  const [loadedKey, setLoadedKey] = useState<EmailTemplateKey | null>(null);
 
   useEffect(() => {
-    if (query.data) {
+    if (query.data && query.data.template.key === key) {
       setSubject(query.data.template.subject);
       setBodyHtml(query.data.template.body_html);
       setBodyText(query.data.template.body_text);
+      setLoadedKey(key);
     }
-  }, [query.data]);
+  }, [query.data, key]);
+
+  const editorReady = query.data !== undefined && loadedKey === key;
 
   return (
     <Card>
@@ -939,7 +959,14 @@ function TemplatesTab(): ReactElement {
           }))}
         />
 
-        {query.isLoading ? (
+        {query.isError && !query.data ? (
+          <QueryErrorState
+            title="Template unavailable"
+            description="This template could not be loaded, so it cannot be edited or saved."
+            onRetry={() => query.refetch()}
+            retrying={query.isFetching}
+          />
+        ) : !editorReady ? (
           <LoadingPanel />
         ) : (
           <>
@@ -980,13 +1007,14 @@ function TemplatesTab(): ReactElement {
         <Button
           variant="primary"
           loading={update.isPending}
-          disabled={query.isLoading}
-          onClick={() =>
+          disabled={!editorReady}
+          onClick={() => {
+            if (!editorReady) return;
             update.mutate(
               { key, body: { subject, body_html: bodyHtml, body_text: bodyText } },
               { onSuccess: () => toast.success('Template saved') },
-            )
-          }
+            );
+          }}
         >
           Save template
         </Button>
