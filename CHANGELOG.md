@@ -135,6 +135,27 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Security
 
+- **A recipient's display name can no longer stop a mass-email campaign.** A
+  personalized mass template interpolates `{{recipient_name}}`, and the link
+  policy refuses an off-portal URL in a rendered message. A URL in one
+  recipient's own display name used to fail the whole campaign: it aborted the
+  size estimate, or rolled back a chunk and stopped the fan-out for everyone
+  after it. Each explicit URL in a recipient's name is now replaced by
+  `[link removed]` before rendering, so no off-portal link is ever mailed and
+  every recipient is still queued. A name that would still complete a refused
+  link with the template's own text is left out of that one copy. A campaign
+  whose own content links off the portal is refused as before.
+- **The SMTP password is only presented to the relay it was stored for, and a
+  CAPTCHA secret only to its vendor.** The connection and its password, like
+  the CAPTCHA provider and its secret, are two settings rows that the writer
+  commits together but readers fetched one after the other. A delivery or SMTP
+  test that read during an administrator's relay change could pair the old
+  host with the new password. Both reads are now bound to one committed
+  generation of the configuration: the anchor row is re-read afterwards, and
+  the result is used only if it did not change, otherwise the read retries,
+  and after five attempts it fails with `CONFLICT` rather than mixing two
+  configurations.
+
 - **Sessions have an absolute lifetime** (#582). A session now ends
   `NEXUS_SESSION_MAX_AGE` seconds after sign-in however active it is; sliding
   expiry never extends it past that, and the cookies a slide re-issues expire

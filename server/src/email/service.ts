@@ -28,15 +28,17 @@ import type { EmailTemplateKey } from '@ferrum-nexus/shared';
 
 import {
   readBranding,
+  parseStoredSmtp,
   readEncryptedSettingState,
-  readStoredSmtp,
   smtpConnectionMatchesEnvironment,
   SMTP_PASSWORD_SETTINGS_KEY,
+  SMTP_SETTINGS_KEY,
   type StoredSmtpSettings,
 } from '../admin/settings-service.js';
 import type { NexusConfig } from '../config/index.js';
 import { OUTBOX_PRIORITY, type EmailOutboxRecord, type NexusStore } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
+import { readBoundToSetting } from '../lib/setting-generation.js';
 import { isBearerTemplate, sealedEnqueueInput } from './sealed-outbox.js';
 import {
   isUrlVariable,
@@ -495,17 +497,25 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
     return config.smtp.password;
   }
 
+  /**
+   * The connection and the password from one committed generation of the
+   * settings. They are two rows, read one after the other; without the check
+   * a read that straddled an administrator's relay change could pair the old
+   * host with the new relay's password (see {@link readBoundToSetting}).
+   */
   async function resolveSettings(): Promise<ResolvedSmtpSettings> {
-    const stored = await readStoredSmtp(store);
-    return {
-      host: stored.host ?? config.smtp.host ?? null,
-      port: stored.port ?? config.smtp.port,
-      secure: stored.secure ?? config.smtp.secure,
-      allowPlaintext: config.smtp.allowPlaintext,
-      user: stored.username ?? config.smtp.user ?? null,
-      password: await resolvePassword(stored),
-      from: stored.from_address ?? config.smtp.from,
-    };
+    return readBoundToSetting(store, SMTP_SETTINGS_KEY, async (row) => {
+      const stored = parseStoredSmtp(row);
+      return {
+        host: stored.host ?? config.smtp.host ?? null,
+        port: stored.port ?? config.smtp.port,
+        secure: stored.secure ?? config.smtp.secure,
+        allowPlaintext: config.smtp.allowPlaintext,
+        user: stored.username ?? config.smtp.user ?? null,
+        password: await resolvePassword(stored),
+        from: stored.from_address ?? config.smtp.from,
+      };
+    });
   }
 
   async function resolveTemplate(key: EmailTemplateKey): Promise<EmailTemplateContent> {

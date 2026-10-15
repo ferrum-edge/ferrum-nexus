@@ -73,7 +73,7 @@ import {
   type AuthService,
 } from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
-import type { NexusStore } from '../db/store.js';
+import type { NexusStore, SettingRecord } from '../db/store.js';
 import { validateTemplateLinks } from '../email/template-links.js';
 import {
   DEFAULT_EMAIL_TEMPLATES,
@@ -259,7 +259,11 @@ export async function readStoredGatewayPublicUrl(store: NexusStore): Promise<str
 
 /** The stored SMTP overrides; every field is `null` when unset. */
 export async function readStoredSmtp(store: NexusStore): Promise<StoredSmtpSettings> {
-  const row = await store.settings.get(SMTP_SETTINGS_KEY);
+  return parseStoredSmtp(await store.settings.get(SMTP_SETTINGS_KEY));
+}
+
+/** The stored SMTP connection, from an already-read `smtp` row. */
+export function parseStoredSmtp(row: SettingRecord | null): StoredSmtpSettings {
   const value = asRecord(row?.value);
   return {
     host: str(value.host),

@@ -6,6 +6,10 @@ import type { ApiErrorBody, MassEmailResponse } from '@ferrum-nexus/shared';
 
 import { DEFAULT_MAX_MASS_EMAIL_BYTES, DEFAULT_MAX_MASS_EMAILS_PER_DAY } from '../config/index.js';
 import { OUTBOX_PRIORITY, type NexusStore, type TransactionOptions } from '../db/store.js';
+import {
+  RECIPIENT_NAME_URL_PLACEHOLDER,
+  neutralRecipientName,
+} from '../admin/mass-email-service.js';
 import { NexusError } from '../lib/errors.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -1031,5 +1035,124 @@ describe('mass email chunked fan-out', () => {
     } finally {
       await harness.close();
     }
+  });
+});
+
+/**
+ * A recipient's own display name cannot stop a personalized campaign for
+ * everyone else. The link policy still keeps an off-portal URL out of every
+ * message; the name's link is replaced rather than the campaign refused.
+ */
+describe('mass email recipient names', () => {
+  const OFF_PORTAL = 'https://attacker.example/landing';
+
+  async function personalized(harness: TestApp, admin: TestSession): Promise<void> {
+    const template = await harness.authed(admin, {
+      method: 'PUT',
+      url: '/api/admin/email-templates/mass',
+      payload: {
+        subject: '{{subject}} for {{recipient_name}}',
+        body_html: '<p>Hello {{recipient_name}},</p>{{body_html}}',
+        body_text: 'Hello {{recipient_name}},\n\n{{body_text}}',
+      },
+    });
+    assert.equal(template.statusCode, 200, template.body);
+  }
+
+  function campaign(userIds: string[]) {
+    return {
+      method: 'POST' as const,
+      url: '/api/admin/mass-email',
+      payload: {
+        subject: 'Notice',
+        body_html: '<p>Maintenance tonight.</p>',
+        body_text: 'Maintenance tonight.',
+        audience: { scope: 'explicit', user_ids: userIds },
+      },
+    };
+  }
+
+  for (const [label, chunk, name] of [
+    // The longest name is the one the size estimate renders.
+    ['the size estimate', 50, `Mallory ${OFF_PORTAL} ${'m'.repeat(150)}`],
+    // One recipient per chunk: the name is met in a later chunk.
+    ['a later chunk', 1, `Mallory ${OFF_PORTAL}`],
+  ] as const) {
+    it(`queues everyone when a name with an off-portal link reaches ${label}`, async () => {
+      const harness = await buildTestApp({
+        deps: { startOutboxWorker: false, massEmailChunkRecipients: chunk },
+      });
+      try {
+        const admin = await harness.registerUser({ email: 'names-admin@example.test' });
+        const recipients: TestSession[] = [];
+        for (const index of [1, 2, 3]) {
+          recipients.push(
+            await harness.registerUser({ email: `names-${index}@example.test`, role: 'client' }),
+          );
+        }
+        const mallory = recipients[1]!;
+        await harness.store.users.update(mallory.user.id, { display_name: name });
+        await personalized(harness, admin);
+
+        const response = await harness.authed(
+          admin,
+          campaign(recipients.map((recipient) => recipient.user.id)),
+        );
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(response.json<MassEmailResponse>().enqueued, 3);
+
+        const rows = (await harness.outbox()).filter((row) =>
+          row.idempotency_key?.startsWith('mass:'),
+        );
+        assert.equal(rows.length, 3, 'every recipient was queued');
+        for (const row of rows) {
+          for (const part of [row.subject, row.body_html, row.body_text]) {
+            assert.ok(!part.includes('attacker.example'), `no off-portal link: ${part}`);
+          }
+        }
+        const malloryRow = rows.find((row) => row.to_email === mallory.user.email);
+        assert.ok(
+          malloryRow?.body_text.includes(`Hello Mallory ${RECIPIENT_NAME_URL_PLACEHOLDER}`),
+        );
+        const other = recipients[0]!;
+        const otherRow = rows.find((row) => row.to_email === other.user.email);
+        assert.ok(otherRow?.body_text.includes(`Hello ${other.user.display_name},`));
+      } finally {
+        await harness.close();
+      }
+    });
+  }
+
+  it('still refuses a campaign whose own content links off the portal', async () => {
+    const harness = await buildTestApp({ deps: { startOutboxWorker: false } });
+    try {
+      const admin = await harness.registerUser({ email: 'names-policy-admin@example.test' });
+      const client = await harness.registerUser({
+        email: 'names-policy-client@example.test',
+        role: 'client',
+      });
+      await personalized(harness, admin);
+      const request = campaign([client.user.id]);
+      const response = await harness.authed(admin, {
+        ...request,
+        payload: { ...request.payload, body_text: `Read ${OFF_PORTAL} first.` },
+      });
+      assert.equal(response.statusCode, 400, response.body);
+      assert.equal(
+        (await harness.outbox()).filter((row) => row.idempotency_key?.startsWith('mass:')).length,
+        0,
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('removes explicit links and control characters from a name, and nothing else', () => {
+    assert.equal(
+      neutralRecipientName('Ada https://a.example/x and HTTP:\\\\b.example'),
+      `Ada ${RECIPIENT_NAME_URL_PLACEHOLDER} and ${RECIPIENT_NAME_URL_PLACEHOLDER}`,
+    );
+    assert.equal(neutralRecipientName('Big Data: Ops // Team'), 'Big Data: Ops // Team');
+    assert.equal(neutralRecipientName('tab\there'), 'tab here');
   });
 });
