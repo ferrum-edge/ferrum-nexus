@@ -4347,6 +4347,10 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         visibility: 'public',
       });
       assert.equal((await store.apis.findById(versioned.id))?.version, longVersion);
+      // So does `info.description`, for the API's description.
+      const longDescription = '說明'.repeat(40_000);
+      await store.apis.update(versioned.id, { description: longDescription });
+      assert.equal((await store.apis.findById(versioned.id))?.description, longDescription);
       const first = await store.apiSpecs.create({
         api_id: versioned.id,
         version: longVersion,

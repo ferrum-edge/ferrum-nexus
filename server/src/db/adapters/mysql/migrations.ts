@@ -52,6 +52,8 @@ interface WidenColumn {
   table: string;
   column: string;
   nullable: boolean;
+  /** Whether the column carries the `('{}')` expression default. */
+  jsonDefault: boolean;
 }
 
 interface AddIndex {
@@ -83,6 +85,7 @@ function migrationSteps(migration: MigrationFile): MigrationStep[] {
         table: widen[1]!,
         column: widen[2]!,
         nullable: widen[3]!.toUpperCase() === 'DEFAULT NULL',
+        jsonDefault: widen[3]!.toUpperCase().includes('DEFAULT ('),
       };
     }
     const index = CREATE_INDEX.exec(statement);
@@ -148,15 +151,16 @@ async function columnExists(connection: mysql.PoolConnection, step: AddColumn): 
  * Whether a widening already landed. `MODIFY COLUMN` commits on its own, so a
  * replay after an interruption finds it done; it is skipped rather than
  * rebuilding the table again. A column that is neither the type an earlier
- * release created nor the finished LONGTEXT, or whose nullability or
- * collation differs, is refused rather than converted.
+ * release created nor the finished LONGTEXT, or whose nullability, default,
+ * generation or collation differs, is refused rather than converted.
  */
 async function columnWidened(
   connection: mysql.PoolConnection,
   step: WidenColumn,
 ): Promise<boolean> {
   const [rows] = await connection.execute<mysql.RowDataPacket[]>(
-    `SELECT c.DATA_TYPE, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLLATION_NAME, t.TABLE_COLLATION
+    `SELECT c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, c.GENERATION_EXPRESSION,
+            c.COLLATION_NAME, t.TABLE_COLLATION
        FROM information_schema.COLUMNS c
        JOIN information_schema.TABLES t
          ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
@@ -169,7 +173,14 @@ async function columnWidened(
     !column ||
     !(WIDENABLE_TYPES.has(type) || WIDENABLE_VARCHAR.test(type)) ||
     column.IS_NULLABLE !== (step.nullable ? 'YES' : 'NO') ||
-    column.COLLATION_NAME !== column.TABLE_COLLATION
+    column.COLLATION_NAME !== column.TABLE_COLLATION ||
+    // A generated column, or one with a default other than the one expected,
+    // is not the column an earlier release created, whatever its type.
+    String(column.GENERATION_EXPRESSION ?? '') !== '' ||
+    column.EXTRA !== (step.jsonDefault ? 'DEFAULT_GENERATED' : '') ||
+    (step.jsonDefault
+      ? !String(column.COLUMN_DEFAULT ?? '').includes('{}')
+      : column.COLUMN_DEFAULT !== null)
   ) {
     throw new Error(
       `MySQL migration column ${step.table}.${step.column} has an incompatible definition`,

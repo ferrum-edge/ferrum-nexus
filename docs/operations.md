@@ -1403,10 +1403,10 @@ issuing a credential, so it would skip the revocation or issue a credential whil
 one is owed, and it runs no worker to drain the table.
 
 `014_mysql_text_capacity` (not yet released) changes only MySQL. It widens
-seven columns to `LONGTEXT`, keeping each column's nullability, default and
+eight columns to `LONGTEXT`, keeping each column's nullability, default and
 collation:
 
-- `audit_logs.details_json`, from `TEXT`;
+- `audit_logs.details_json` and `apis.description`, from `TEXT`;
 - `api_specs.parsed_title`, from `VARCHAR(255)`;
 - `api_specs.parsed_version`, `api_specs.version`, `apis.version`,
   `api_spec_changes.version` and `api_spec_changes.previous_version`, from
@@ -1414,14 +1414,14 @@ collation:
 
 Those columns were narrower than what the API accepts. An MCP agents update can
 audit 256 tool descriptions of 2,048 characters each. An OpenAPI document's
-`info.title` and `info.version` have no length limit of their own, and
-`info.version` becomes the API and revision version when the request names
-none. Strict-mode MySQL refused such writes, and non-strict mode truncated them.
+`info.title`, `info.version` and `info.description` have no length limit of
+their own, and `info.version` and `info.description` become the API's version
+and description when the request names none. Strict-mode MySQL refused such writes, and non-strict mode truncated them.
 Retained values are unchanged. On SQLite, PostgreSQL and MongoDB the migration
 is recorded and does nothing. `MODIFY COLUMN` rebuilds each table on MySQL, so
 plan for the copy time and disk space on a large `audit_logs` table. The runner
 skips a column that is already `LONGTEXT` on a replay, and refuses one whose
-type, nullability or collation it does not expect.
+type, nullability, default, generation or collation it does not expect.
 
 `003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
 `ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,

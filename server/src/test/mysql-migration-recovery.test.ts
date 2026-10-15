@@ -191,7 +191,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
     const migration = migrations.find((file) => file.id === '014_mysql_text_capacity');
     assert.ok(migration);
     const statements = splitSqlStatements(migration.sql);
-    assert.equal(statements.length, 7);
+    assert.equal(statements.length, 8);
     const expected = await fixture(async (pool) => {
       await runMysqlMigrations(pool);
       return schema(pool);
@@ -244,17 +244,26 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
   });
 
   it('refuses a widening target it does not recognise without recording 014', async () => {
-    for (const definition of [
-      "TEXT NULL DEFAULT ('{}')",
-      "MEDIUMBLOB NOT NULL DEFAULT ('{}')",
-      "TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT ('{}')",
-    ]) {
+    for (const [table, column, definition] of [
+      ['audit_logs', 'details_json', "TEXT NULL DEFAULT ('{}')"],
+      ['audit_logs', 'details_json', "MEDIUMBLOB NOT NULL DEFAULT ('{}')"],
+      [
+        'audit_logs',
+        'details_json',
+        "TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT ('{}')",
+      ],
+      ['audit_logs', 'details_json', 'TEXT NOT NULL'],
+      // Already LONGTEXT, but not a column an earlier release created.
+      ['api_specs', 'parsed_title', 'LONGTEXT GENERATED ALWAYS AS (version) STORED'],
+      ['api_specs', 'parsed_title', "LONGTEXT DEFAULT ('untitled')"],
+      ['apis', 'description', "TEXT DEFAULT ('none')"],
+    ] as const) {
       await fixture(async (pool) => {
         await runMysqlMigrations(
           pool,
           migrations.filter((file) => file.id < '014_mysql_text_capacity'),
         );
-        await pool.query(`ALTER TABLE audit_logs MODIFY COLUMN details_json ${definition}`);
+        await pool.query(`ALTER TABLE ${table} MODIFY COLUMN ${column} ${definition}`);
         const [before] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
         await assert.rejects(() => runMysqlMigrations(pool), /has an incompatible definition/);
         const [after] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');

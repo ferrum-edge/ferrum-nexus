@@ -35,7 +35,7 @@
  * `012_access_request_grant` keeps every retained request a request for
  * access rather than for more tools on a grant; and `013_account_recovery_jobs`
  * only adds an empty table, so no retained account owes a recovery revocation.
- * `014_mysql_text_capacity` widens seven MySQL text columns in place and changes
+ * `014_mysql_text_capacity` widens eight MySQL text columns in place and changes
  * nothing on the other backends; retained values read back unchanged.
  *
  * - **sqlite** always runs, against a temporary file.
