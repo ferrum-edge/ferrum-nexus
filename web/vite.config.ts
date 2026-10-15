@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
+import { CSP_NONCE_PLACEHOLDER } from '@ferrum-nexus/shared';
 import { loadEnv } from 'vite';
 import { defineConfig } from 'vitest/config';
 
@@ -38,6 +39,12 @@ export default defineConfig(({ mode }) => {
           changeOrigin: false,
         },
       },
+    },
+    // Every script, style and link tag in the built shell carries this
+    // placeholder as its nonce, plus a <meta property="csp-nonce"> the app
+    // reads at startup. The server swaps in a per-response nonce (issue #587).
+    html: {
+      cspNonce: CSP_NONCE_PLACEHOLDER,
     },
     build: {
       outDir: 'dist',

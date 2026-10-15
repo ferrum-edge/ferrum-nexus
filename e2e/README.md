@@ -106,6 +106,11 @@ request access, and see the provider's approval land.
 The browser test stops before issuing a credential and calling the gateway. The data-plane suite
 already covers that.
 
+**`src/content-security-policy.spec.ts`** — that the UI works under the shell's strict `style-src`
+(no `'unsafe-inline'`, issue #587): it signs in as the operator, checks that the policy's nonce is
+the one the shell carries, opens the account menu, a select and a dialog, requires that the styles
+Radix injects for them applied, and fails on any `securitypolicyviolation`.
+
 ## Artifacts
 
 `run.sh` writes each service's container logs to `e2e/artifacts/`. Playwright writes a trace and a
