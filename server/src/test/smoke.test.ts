@@ -5292,6 +5292,60 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
     /* ── adapter parity (issue #345) ───────────────────────────────────── */
 
+    it('search matches backslashes, percent signs and underscores literally (issue #595)', async () => {
+      // PostgreSQL and MySQL use POSITION and MongoDB an escaped regex; SQLite
+      // used LIKE with an unescaped escape character, so a backslash in the
+      // term was read as pattern syntax.
+      const marker = newId().slice(0, 8);
+      const names = [
+        `North\\West ${marker}`,
+        `NorthWest ${marker}`,
+        `X\\% ${marker}`,
+        `X\\Y ${marker}`,
+        `X\\YZZ ${marker}`,
+        `Tail\\ ${marker}`,
+        `A\\_B ${marker}`,
+        `A_B ${marker}`,
+        `AxB ${marker}`,
+        `50% ${marker}`,
+        `500 ${marker}`,
+      ];
+      for (const name of names) await store.organizations.create({ name });
+      const search = async (q: string): Promise<{ names: string[]; total: number }> => {
+        const result = await store.organizations.list({ q, limit: 50 });
+        return {
+          names: result.items
+            .map((entry) => entry.name)
+            .filter((name) => name.endsWith(marker))
+            .sort(),
+          total: result.total,
+        };
+      };
+      const cases: Array<[string, string[]]> = [
+        [`north\\west ${marker}`, [`North\\West ${marker}`]],
+        [`X\\% ${marker}`, [`X\\% ${marker}`]],
+        [`Tail\\ ${marker}`, [`Tail\\ ${marker}`]],
+        [`A\\_B ${marker}`, [`A\\_B ${marker}`]],
+        [`A_B ${marker}`, [`A_B ${marker}`]],
+        [`50% ${marker}`, [`50% ${marker}`]],
+      ];
+      for (const [q, expected] of cases) {
+        assert.deepEqual(await search(q), { names: expected.sort(), total: expected.length }, q);
+      }
+      assert.deepEqual(
+        (await search(`\\`)).names.filter((name) => name.endsWith(marker)),
+        [
+          `A\\_B ${marker}`,
+          `North\\West ${marker}`,
+          `Tail\\ ${marker}`,
+          `X\\% ${marker}`,
+          `X\\Y ${marker}`,
+          `X\\YZZ ${marker}`,
+        ].sort(),
+        'a lone backslash matches every name holding one',
+      );
+    });
+
     it('organizations and applications enforce Unicode case-insensitive unique names', async () => {
       // SQLite's built-in lower() folds ASCII only; the search filter and the
       // case-insensitive unique indexes must agree with JS toLowerCase, as they
