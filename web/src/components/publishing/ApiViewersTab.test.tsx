@@ -88,6 +88,71 @@ describe('private API viewers', () => {
     expect(apisApi.revokeViewer).toHaveBeenCalledWith(API.id, 'user-partner');
   });
 
+  it('steps back a page when a revocation empties the last one (issue #596)', async () => {
+    let viewers: ApiViewer[] = Array.from({ length: 21 }, (_, index) => ({
+      ...VIEWER,
+      id: `viewer-${index}`,
+      user_id: `user-${index}`,
+      user: { ...VIEWER.user!, id: `user-${index}`, email: `viewer-${index}@example.test` },
+    }));
+    vi.mocked(apisApi.viewers).mockImplementation(async (_id, query = {}) => {
+      const offset = query.offset ?? 0;
+      return { items: viewers.slice(offset, offset + (query.limit ?? 20)), total: viewers.length };
+    });
+    vi.mocked(apisApi.revokeViewer).mockImplementation(async (_id, userId) => {
+      viewers = viewers.filter((viewer) => viewer.user_id !== userId);
+      return { ok: true };
+    });
+    await renderPage(<ApiViewersTab api={api} />);
+    await screen.findByText('viewer-0@example.test');
+    expect(screen.getByText(/Page 1 of 2/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await screen.findByText('viewer-20@example.test');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Revoke documentation access' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke' }));
+    await screen.findByText('Documentation access revoked');
+
+    // The 20 remaining viewers are shown again, not an empty page.
+    expect(await screen.findByText('viewer-0@example.test')).toBeInTheDocument();
+    expect(screen.getByText('viewer-19@example.test')).toBeInTheDocument();
+    expect(screen.queryByText('Nobody is authorized yet')).not.toBeInTheDocument();
+    expect(apisApi.viewers).toHaveBeenLastCalledWith(API.id, { limit: 20, offset: 0 });
+  });
+
+  it('keeps paging when the last page empties and several pages remain', async () => {
+    let viewers: ApiViewer[] = Array.from({ length: 41 }, (_, index) => ({
+      ...VIEWER,
+      id: `viewer-${index}`,
+      user_id: `user-${index}`,
+      user: { ...VIEWER.user!, id: `user-${index}`, email: `viewer-${index}@example.test` },
+    }));
+    vi.mocked(apisApi.viewers).mockImplementation(async (_id, query = {}) => {
+      const offset = query.offset ?? 0;
+      return { items: viewers.slice(offset, offset + (query.limit ?? 20)), total: viewers.length };
+    });
+    vi.mocked(apisApi.revokeViewer).mockImplementation(async (_id, userId) => {
+      viewers = viewers.filter((viewer) => viewer.user_id !== userId);
+      return { ok: true };
+    });
+    await renderPage(<ApiViewersTab api={api} />);
+    await screen.findByText('viewer-0@example.test');
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await screen.findByText('viewer-20@example.test');
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await screen.findByText('viewer-40@example.test');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Revoke documentation access' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke' }));
+    await screen.findByText('Documentation access revoked');
+
+    expect(await screen.findByText('viewer-20@example.test')).toBeInTheDocument();
+    expect(screen.getByText(/Page 2 of 2/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeEnabled();
+  });
+
   it('warns that the list enforces nothing while the API is unlisted', async () => {
     await renderPage(<ApiViewersTab api={{ ...API, visibility: 'internal' }} />);
     await waitFor(() => expect(screen.getByText(/Unlisted is not private/)).toBeInTheDocument());
