@@ -175,7 +175,9 @@ and `PUT` the whole resource back, keeping `enabled`, `trigger`,
 `priority_override` and every other key as they were:
 
 - **To `redis`, or to a new endpoint:** set the keys in the table to the values
-  of the new variables.
+  of the new variables. Separate `redis_username` and `redis_password` keys
+  override credentials in `redis_url`, so update or remove any that an operator
+  set for the old server.
 - **To `local`:** remove `sync_mode` and **every** `redis_*` key, including ones
   an operator added (`redis_key_prefix`, pool, timeout and credential settings),
   and on `request_deduplication` also `on_redis_unavailable`. Edge refuses those
@@ -203,7 +205,10 @@ curl -sS -H "Authorization: Bearer $ADMIN_JWT" -H "X-Ferrum-Namespace: $FERRUM_N
 `redis` with the intended `redis_url` and `redis_tls` (and, on a tool budget,
 `redis_failure_policy: fail_closed`); after moving to `local`, no `sync_mode`
 or `redis_*` key is left. Check that `enabled`, `trigger` and
-`priority_override` did not change.
+`priority_override` did not change. A readable config does not prove Redis
+accepts the connection: after a Redis change, confirm that the quota's keys
+appear on the new server, or that requests through two replicas draw on one
+budget.
 
 #### Connection pooling and the gateway's idle bound
 
@@ -2365,8 +2370,9 @@ These subkeys are HKDF-derived from `NEXUS_SECRET_KEY`:
 | Single sign-on attempt (AES-256-GCM) | `nexus-sso-transaction-v1` | The `nexus_sso` cookie of a sign-in in progress (10 minutes at most)                                      |
 
 Encrypted gateway recovery journals use the same settings subkey: every
-`gateway_recovery:<namespace>:<api_id>` row and its `gateway_recovery_chunk:…`
-rows. The rotation command re-encrypts them with the other settings; losing the
+`gateway_recovery:<namespace>:<api_id>` and
+`gateway_restore_cleanup:<namespace>:<api_id>` row and their
+`gateway_recovery_chunk:…` rows. The rotation command re-encrypts them with the other settings; losing the
 key that sealed them makes recovery refuse instead of guessing at resource
 ownership.
 
@@ -2462,22 +2468,24 @@ own image or container (`node server/dist/db/rotate-key-cli.js` with the same
 environment). Replacing the key without re-encrypting is only for a key that is
 **lost**, and it cannot recover anything sealed under it:
 
-| Sealed under the old key                                          | Without the old key                                                                                                                     |
-| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `smtp.password`, `captcha.secret_key`                             | Re-entered by a super admin after signing in.                                                                                           |
-| `sso.client_secret.<id>` (providers saved in settings)            | Re-entered by a super admin. Until then that provider answers `provider_unavailable`.                                                   |
-| `gateway_recovery:*` journals and `gateway_recovery_chunk:*`      | **Lost.** Restoring that API fails closed; reconcile its gateway resources by hand ([§8](#when-a-gateway-change-cannot-be-taken-back)). |
-| Sessions, unused verification and reset links, queued sealed mail | Lost. Everyone signs in again; sealed mail fails as `sealed-unreadable:`.                                                               |
+| Sealed under the old key                                                                  | Without the old key                                                                                                                                                  |
+| ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `smtp.password`, `captcha.secret_key`                                                     | Re-entered by a super admin after signing in.                                                                                                                        |
+| `sso.client_secret.<id>` (providers saved in settings)                                    | Re-entered by a super admin. Until then that provider answers `provider_unavailable`.                                                                                |
+| `gateway_recovery:*` and `gateway_restore_cleanup:*` journals, `gateway_recovery_chunk:*` | **Lost.** Restoring that API fails closed; reconcile its gateway resources by hand ([unconfirmed mutations](#resolving-an-unconfirmed-gateway-deployment-mutation)). |
+| Sessions, unused verification and reset links, queued sealed mail                         | Lost. Everyone signs in again; sealed mail fails as `sealed-unreadable:`.                                                                                            |
 
 Before you replace the key, make sure a super admin can still sign in **without**
 anything in the first two rows:
 
 1. **Check for gateway recovery state:**
-   `SELECT key FROM app_settings WHERE key LIKE 'gateway_recovery:%'` lists each
-   unfinished gateway conversion or recovery, keyed by API id. If any exist and
-   the old key can still be found, finish them first (an API marked
-   `repair_required` through `POST /api/apis/:id/restore-gateway`) and use the
-   command. Otherwise plan to reconcile each listed API by hand.
+   `SELECT key FROM app_settings WHERE key LIKE 'gateway_recovery:%' OR key LIKE 'gateway_restore_cleanup:%'`
+   lists each unfinished gateway conversion, recovery or restore cleanup, keyed
+   by API id. If any exist and the old key can still be found, finish them
+   first (an API marked `repair_required` through
+   `POST /api/apis/:id/restore-gateway`) and use the command. Otherwise plan to
+   reconcile each listed API by hand, as in
+   [Resolving an unconfirmed gateway deployment mutation](#resolving-an-unconfirmed-gateway-deployment-mutation).
 2. **CAPTCHA:** set `NEXUS_CAPTCHA_ENFORCEMENT=disabled` for the window
    ([Recovering a portal locked out by CAPTCHA](#recovering-a-portal-locked-out-by-captcha)).
 3. **Login policy `sso_only`:** password sign-in is refused, and a provider saved
