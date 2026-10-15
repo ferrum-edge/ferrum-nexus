@@ -588,6 +588,21 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
       provider: patch.provider ?? current.provider,
       site_key: patch.site_key === undefined ? current.site_key : patch.site_key,
     };
+    // A secret is issued by one vendor. It cannot stay behind a change to
+    // another vendor, even one saved while CAPTCHA is off: the next activation
+    // would treat it as that vendor's and post it there in its self-test.
+    // Switching to `none` keeps it harmlessly: leaving `none` is a change again.
+    if (
+      next.provider !== 'none' &&
+      next.provider !== current.provider &&
+      patch.secret_key === undefined &&
+      current.secret_set
+    ) {
+      throw validationFailed(
+        'Changing the CAPTCHA provider requires sending captcha.secret_key in the same request ' +
+          '(null to clear it), because the stored secret belongs to the previous provider',
+      );
+    }
     if (!next.enabled) return { next, fingerprint, selfTested: false };
 
     const provider = next.provider;

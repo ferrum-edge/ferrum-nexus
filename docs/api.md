@@ -1373,8 +1373,10 @@ update of `policy`, `allowed_email_domains`, `deprovision_on_access_loss` and
   and keep their password lock. Each entry carries
   every field shown above except `source`, `client_secret_set` and
   `redirect_uri`, plus an optional write-only `client_secret`: omit it to keep
-  the stored one, `null` to clear it. Environment providers are never part of
-  the list.
+  the stored one, `null` to clear it. A change of `issuer` or `client_id` on a
+  provider that holds a stored secret must send `client_secret` (or `null`),
+  because the stored secret belongs to the previous client. Environment
+  providers are never part of the list.
 - `role` in a mapping is `client`, `provider` or `admin`; `super_admin` is
   refused. `default_role` may be `null` (no match → no access).
 - Allowed domains, deployment-wide and per provider, are normalized
@@ -1387,6 +1389,8 @@ Errors: `400 VALIDATION_FAILED` for any of:
 - an unknown field, or a provider missing a field;
 - an id declared in `NEXUS_OIDC_PROVIDERS`, or a duplicate id;
 - a non-HTTPS issuer, or an issuer change on a provider that holds links;
+- an `issuer` or `client_id` change that keeps a stored secret (no
+  `client_secret` in the request);
 - more than 10 providers, or an invalid domain;
 - `sso_only` without an enabled provider, or before the caller has a link of
   their own to an enabled provider.

@@ -183,7 +183,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   rather than the old one. Changing a stored single sign-on provider's
   `issuer` or `client_id` now requires `client_secret` in the same request
   (`null` to clear it), as changing the SMTP connection or the CAPTCHA provider
-  already required their secrets.
+  already required their secrets. Likewise, moving the CAPTCHA provider to
+  another vendor now requires `captcha.secret_key` even while CAPTCHA is off.
 
 - **Sessions have an absolute lifetime** (#582). A session now ends
   `NEXUS_SESSION_MAX_AGE` seconds after sign-in however active it is; sliding

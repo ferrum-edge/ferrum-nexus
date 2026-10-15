@@ -36,7 +36,7 @@ import {
   SSO_SETTINGS_KEY,
   ssoClientSecretKey,
 } from '../sso/settings.js';
-import { buildTestApp, type TestApp } from './helpers.js';
+import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 /** `store`, with `onGet` run before each settings read of `key`. */
 function intercepted(store: NexusStore, key: string, onGet: () => Promise<void>): NexusStore {
@@ -64,10 +64,14 @@ function intercepted(store: NexusStore, key: string, onGet: () => Promise<void>)
 describe('settings read as one generation', () => {
   let harness: TestApp;
   let crypto: NexusCrypto;
+  let founder: TestSession;
 
   before(async () => {
     harness = await buildTestApp({ deps: { startOutboxWorker: false } });
     crypto = createCrypto(harness.config.secretKey);
+    // Registered before any test turns CAPTCHA on; the first account is the
+    // founding super admin.
+    founder = await harness.registerUser({ email: 'generation-founder@example.test' });
   });
 
   after(async () => {
@@ -269,7 +273,6 @@ describe('settings read as one generation', () => {
   });
 
   it('runs the CAPTCHA activation self-test only with the stored provider’s own secret', async () => {
-    const admin = await harness.registerUser({ email: 'generation-admin@example.test' });
     // Turnstile is on; this save changes only its site key, so the self-test
     // posts the *stored* secret.
     let moved = false;
@@ -302,7 +305,7 @@ describe('settings read as one generation', () => {
     });
     await settings
       .updateSettings(
-        { id: admin.user.id, role: 'super_admin' },
+        { id: founder.user.id, role: 'super_admin' },
         { captcha: { site_key: 'turnstile-site-key-2', captcha_token: 'token' } },
       )
       .catch(() => undefined);
@@ -314,7 +317,6 @@ describe('settings read as one generation', () => {
     }
   });
   it('refuses to keep a client secret across an issuer or client change', async () => {
-    const founder = await harness.registerUser({ email: 'generation-founder@example.test' });
     const put = (provider: SsoProviderSettings, secret?: string | null) =>
       harness.authed(founder, {
         method: 'PUT',
@@ -349,5 +351,21 @@ describe('settings read as one generation', () => {
       { issuer: provider?.settings.issuer, secret: provider?.clientSecret },
       { issuer: 'https://second-idp.example.test', secret: 'second-secret' },
     );
+  });
+  it('refuses to keep a CAPTCHA secret across a provider change saved while off', async () => {
+    const off = await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: { captcha: { enabled: false, provider: 'hcaptcha' } },
+    });
+    assert.equal(off.statusCode, 400, off.body);
+    assert.match(off.body, /requires sending captcha.secret_key/);
+    // Turning it off without moving to another vendor needs no secret.
+    const none = await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: { captcha: { enabled: false, provider: 'none' } },
+    });
+    assert.equal(none.statusCode, 200, none.body);
   });
 });
