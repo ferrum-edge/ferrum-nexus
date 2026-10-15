@@ -2478,14 +2478,22 @@ environment). Replacing the key without re-encrypting is only for a key that is
 Before you replace the key, make sure a super admin can still sign in **without**
 anything in the first two rows:
 
-1. **Check for gateway recovery state:**
-   `SELECT key FROM app_settings WHERE key LIKE 'gateway_recovery:%' OR key LIKE 'gateway_restore_cleanup:%'`
-   lists each unfinished gateway conversion, recovery or restore cleanup, keyed
-   by API id. If any exist and the old key can still be found, finish them
+1. **Check for gateway recovery state.** This query lists each unfinished
+   gateway conversion, recovery or restore cleanup, keyed by API id (on MySQL
+   write the column as `` `key` ``; on MongoDB match `_id` in `app_settings`
+   against `^gateway_(recovery|restore_cleanup):`):
+
+   ```sql
+   SELECT "key" FROM app_settings
+     WHERE "key" LIKE 'gateway_recovery:%' OR "key" LIKE 'gateway_restore_cleanup:%';
+   ```
+
+   If any exist and the old key can still be found, finish them
    first (an API marked `repair_required` through
    `POST /api/apis/:id/restore-gateway`) and use the command. Otherwise plan to
    reconcile each listed API by hand, as in
    [Resolving an unconfirmed gateway deployment mutation](#resolving-an-unconfirmed-gateway-deployment-mutation).
+
 2. **CAPTCHA:** set `NEXUS_CAPTCHA_ENFORCEMENT=disabled` for the window
    ([Recovering a portal locked out by CAPTCHA](#recovering-a-portal-locked-out-by-captcha)).
 3. **Login policy `sso_only`:** password sign-in is refused, and a provider saved
@@ -2504,7 +2512,12 @@ anything in the first two rows:
 Then:
 
 1. Store the new key where the server reads it, restart every instance and sign
-   in as that super admin.
+   in as that super admin. If the first start of this release has not happened
+   yet on this database, the server refuses to start with "legacy encrypted
+   setting(s) do not open with NEXUS_SECRET_KEY" and names them. They cannot be
+   recovered: with every instance stopped and a fresh backup taken, delete
+   those `app_settings` rows (for a `gateway_recovery:` or
+   `gateway_restore_cleanup:` row, only that manifest row) and start again.
 2. Re-enter the SMTP password and CAPTCHA secret, and check **Send test email**.
 3. Re-enter each stored provider's client secret, except one the environment
    now shadows. For that one, either keep the environment entry permanently, or
