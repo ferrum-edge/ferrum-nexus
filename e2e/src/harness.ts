@@ -105,8 +105,11 @@ export async function waitFor(
   timeoutMs = READY_TIMEOUT_MS,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  // A wait inside another wait's check ends with the outer attempt too.
+  const parent = attemptSignal.getStore();
   let lastError: unknown;
   for (;;) {
+    if (parent?.aborted) throw parent.reason;
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       const because = lastError instanceof Error ? `: ${lastError.message}` : '';
@@ -125,6 +128,8 @@ export async function waitFor(
     // Observed from the start: the abort that ends a finished attempt must
     // never surface as an unhandled rejection.
     abandoned.catch(() => undefined);
+    const fromParent = (): void => attempt.abort(parent?.reason);
+    parent?.addEventListener('abort', fromParent, { once: true });
     try {
       const ready = await Promise.race([
         // Async, so a check that throws synchronously rejects inside the race.
@@ -137,14 +142,16 @@ export async function waitFor(
       lastError = attempt.signal.aborted ? attempt.signal.reason : error;
     } finally {
       clearTimeout(timer);
+      parent?.removeEventListener('abort', fromParent);
       // Whatever the attempt left open ends with it, success included: a
       // status-only poll that never read a stalled body must not leave the
       // request running. A check whose response is used after the wait reads
       // it first with {@link bufferedResponse}.
       if (!attempt.signal.aborted) attempt.abort(new Error('attempt ended'));
     }
+    if (parent?.aborted) throw parent.reason;
     const pause = Math.min(POLL_INTERVAL_MS, deadline - Date.now());
-    if (pause > 0) await delay(pause);
+    if (pause > 0) await delay(pause, undefined, parent ? { signal: parent } : {});
   }
 }
 

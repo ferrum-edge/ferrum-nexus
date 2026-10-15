@@ -198,6 +198,28 @@ describe('waitFor', { timeout: 30_000 }, () => {
     assert.ok((await closedOn('/combined')) > 0, 'the stalled request was torn down');
   });
 
+  it('ends a nested wait, and its request, with the outer attempt', async () => {
+    const took = await elapsed(() =>
+      assert.rejects(
+        harness.waitFor(
+          'an outer wait',
+          async () => {
+            await harness.waitFor(
+              'an inner wait',
+              async () => (await (await harness.callGateway('/nested')).json()) !== null,
+              20_000,
+            );
+            return true;
+          },
+          300,
+        ),
+        /Timed out after 300ms waiting for an outer wait/,
+      ),
+    );
+    assert.ok(took < 300 + TOLERANCE_MS, `rejected after ${took}ms`);
+    assert.ok((await closedOn('/nested')) > 0, 'the inner request was torn down');
+  });
+
   it('closes an unread non-OK response as soon as its attempt ends', async () => {
     let attempts = 0;
     await assert.rejects(
