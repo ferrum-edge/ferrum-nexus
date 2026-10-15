@@ -24,7 +24,8 @@
  * `006_user_identities`; from every release before `v0.4.0`,
  * `007_outbox_recipient` to `011_mcp_tool_subsets`; from every release before
  * `v0.5.0`, `012_access_request_grant`; from every release before `v0.5.1`,
- * `013_account_recovery_jobs`) is applied here on top of a
+ * `013_account_recovery_jobs`; and, pending, `014_mysql_text_capacity`) is
+ * applied here on top of a
  * populated database with no change to the harness. `007_outbox_recipient`
  * adds a nullable account binding without changing retained message contents;
  * `008_email_lifecycle_fence` adds a private account fence without changing user DTOs;
@@ -34,8 +35,8 @@
  * `012_access_request_grant` keeps every retained request a request for
  * access rather than for more tools on a grant; and `013_account_recovery_jobs`
  * only adds an empty table, so no retained account owes a recovery revocation.
- * From the newest release (`v0.5.1`) nothing is pending, so its run proves the
- * current code opens that database unchanged.
+ * `014_mysql_text_capacity` widens eight MySQL text columns in place and changes
+ * nothing on the other backends; retained values read back unchanged.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
@@ -1241,6 +1242,39 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
               api_spec_updated_email: false,
             });
             assert.equal(saved.api_spec_updated_email, false);
+
+            // `014_mysql_text_capacity`: values the API accepts but MySQL's
+            // TEXT and VARCHAR columns could not hold fit on the upgraded
+            // database (issues #604 and #605), and read back whole.
+            const wideDetails = { descriptions: 'é'.repeat(40_000) };
+            const wideAudit = await store.auditLogs.create({
+              actor_user_id: null,
+              actor_role: null,
+              action: 'test.upgrade_capacity',
+              target_type: 'upgrade_capacity',
+              target_id: 'upgrade-capacity',
+              details: wideDetails,
+            });
+            const wideRows = await store.auditLogs.list({
+              target_type: 'upgrade_capacity',
+              target_id: 'upgrade-capacity',
+            });
+            assert.deepEqual(
+              wideRows.items.find((row) => row.id === wideAudit.id)?.details,
+              wideDetails,
+            );
+            const wideSpec = await store.apiSpecs.create({
+              api_id: ID.invoices,
+              version: 'upgrade-capacity',
+              raw_spec: 'openapi: 3.1.0',
+              parsed_title: 'T'.repeat(300),
+              parsed_version: 'v'.repeat(100),
+              is_current: false,
+            });
+            const readSpec = await store.apiSpecs.findById(wideSpec.id);
+            assert.equal(readSpec?.parsed_title, 'T'.repeat(300));
+            assert.equal(readSpec?.parsed_version, 'v'.repeat(100));
+            assert.equal(await store.apiSpecs.delete(wideSpec.id), true);
 
             // Re-running in the same process changes nothing.
             await store.migrate();

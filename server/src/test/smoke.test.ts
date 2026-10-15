@@ -36,6 +36,8 @@ import mysql from 'mysql2/promise';
 import pg from 'pg';
 
 import {
+  MAX_AGENT_DESCRIPTION_LENGTH,
+  MAX_AGENT_TOOLS,
   emptySpecChangeReport,
   mcpAllGroupForApi,
   mcpToolGroupForApi,
@@ -4302,6 +4304,105 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.ok((await store.accountRecoveryJobs.releaseStale(isoInSeconds(60))) >= 1);
       assert.equal((await store.accountRecoveryJobs.findByUser(user.id))?.status, 'pending');
       await store.accountRecoveryJobs.deleteByUser(user.id);
+    });
+
+    it('stores spec metadata and audit details as large as the API accepts (#604, #605)', async () => {
+      // MySQL held these in VARCHAR(255), VARCHAR(64) and TEXT (65,535 bytes),
+      // narrower than what the parser and the agents schema accept; strict
+      // mode refused the write and non-strict mode truncated it.
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+      for (const [title, version] of [
+        ['T'.repeat(255), 'v'.repeat(64)],
+        ['T'.repeat(256), 'v'.repeat(65)],
+        ['題'.repeat(300), 'é'.repeat(100)],
+        ['T'.repeat(70_000), 'v'.repeat(1_000)],
+      ] as const) {
+        const spec = await store.apiSpecs.create({
+          api_id: api.id,
+          version: '1',
+          raw_spec: 'openapi: 3.1.0',
+          parsed_title: title,
+          parsed_version: version,
+          is_current: false,
+        });
+        const read = await store.apiSpecs.findById(spec.id);
+        assert.equal(read?.parsed_title, title, `a ${title.length}-character title`);
+        assert.equal(read?.parsed_version, version, `a ${version.length}-character version`);
+      }
+
+      // A document's `info.version` is also the API's and the revision's
+      // version when the request names none, and history records both sides.
+      const longVersion = `${'é'.repeat(40)}-${'v'.repeat(1_000)}`;
+      const versioned = await store.apis.create({
+        name: 'Long version',
+        slug: `long-version-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: longVersion,
+        spec_format: 'openapi',
+        requestable: true,
+        auth_plugin: 'key_auth',
+        status: 'published',
+        visibility: 'public',
+      });
+      assert.equal((await store.apis.findById(versioned.id))?.version, longVersion);
+      // So does `info.description`, for the API's description.
+      const longDescription = '說明'.repeat(40_000);
+      await store.apis.update(versioned.id, { description: longDescription });
+      assert.equal((await store.apis.findById(versioned.id))?.description, longDescription);
+      const first = await store.apiSpecs.create({
+        api_id: versioned.id,
+        version: longVersion,
+        raw_spec: 'openapi: 3.1.0',
+        parsed_version: longVersion,
+        is_current: true,
+      });
+      const second = await store.apiSpecs.create({
+        api_id: versioned.id,
+        version: `${longVersion}.2`,
+        raw_spec: 'openapi: 3.1.0',
+        parsed_version: `${longVersion}.2`,
+        is_current: true,
+      });
+      assert.equal((await store.apiSpecs.findById(first.id))?.version, longVersion);
+      await store.apiSpecChanges.create({
+        api_id: versioned.id,
+        revision_id: second.id,
+        previous_revision_id: first.id,
+        kind: 'update',
+        version: `${longVersion}.2`,
+        previous_version: longVersion,
+        revision_seq: 2,
+        report: emptySpecChangeReport(),
+      });
+      const [change] = (await store.apiSpecChanges.listByApi(versioned.id)).items;
+      assert.equal(change?.version, `${longVersion}.2`);
+      assert.equal(change?.previous_version, longVersion);
+
+      // The largest agents object an update or publish may audit: every
+      // operation a tool, every description at the length limit, multibyte.
+      const description = '題'.repeat(MAX_AGENT_DESCRIPTION_LENGTH);
+      const details = {
+        agents: {
+          operations: Array.from({ length: MAX_AGENT_TOOLS }, (_, index) => ({
+            method: 'GET',
+            path: `/items/${index}`,
+            name: `tool_${index}`,
+            description,
+          })),
+        },
+      };
+      const record = await store.auditLogs.create({
+        actor_user_id: owner.id,
+        actor_role: owner.role,
+        action: 'test.capacity',
+        target_type: 'api',
+        target_id: api.id,
+        details,
+      });
+      const page = await store.auditLogs.list({ target_type: 'api', target_id: api.id });
+      assert.deepEqual(page.items.find((row) => row.id === record.id)?.details, details);
     });
 
     /* ── audit logs ───────────────────────────────────────────────────── */
