@@ -220,6 +220,20 @@ export async function callGateway(
   );
 }
 
+/**
+ * `response` with its body already read, for a {@link waitFor} check whose
+ * response is used after the wait. The read happens inside the attempt, so a
+ * listener that sends `200` headers and then stalls the body is cancelled at
+ * the deadline instead of hanging whatever reads the body afterwards.
+ */
+export async function bufferedResponse(response: Response): Promise<Response> {
+  return new Response(await response.arrayBuffer(), {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
 /** Whether a gateway response actually reached the deterministic upstream. */
 export function reachedUpstream(response: Response): boolean {
   return response.headers.get(UPSTREAM_MARKER) === 'ferrum-nexus-e2e';

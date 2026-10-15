@@ -31,6 +31,7 @@ import {
   type PublishedApi,
 } from './fixtures.js';
 import {
+  bufferedResponse,
   ADMIN_PASSWORD,
   GATEWAY_URL,
   adminSession,
@@ -812,12 +813,15 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
   ): Promise<Record<string, string>> {
     let response: Response | undefined;
     await waitFor('the MCP endpoint policy to initialize', async () => {
-      response = await rpc(api, headers, 'initialize', {
+      const answer = await rpc(api, headers, 'initialize', {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
         clientInfo: { name: 'subset-acceptance', version: '1' },
       });
-      return response.status === 200;
+      if (answer.status !== 200) return false;
+      // Read the body inside the bounded attempt; it is parsed after the wait.
+      response = await bufferedResponse(answer);
+      return true;
     });
     assert.ok(response);
     return negotiatedHeaders(response, headers);
@@ -1355,12 +1359,14 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       const { grantId } = await grantAccess(client, provider, api.id, applicationId);
       let initialized: Response | undefined;
       await waitFor('the approved MCP endpoint to initialize', async () => {
-        initialized = await rpc(api, headers, 'initialize', {
+        const answer = await rpc(api, headers, 'initialize', {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {},
           clientInfo: { name: 'nexus-acceptance', version: '1' },
         });
-        return initialized.status === 200;
+        if (answer.status !== 200) return false;
+        initialized = await bufferedResponse(answer);
+        return true;
       });
       assert.ok(initialized);
       const sessionHeaders = await negotiatedHeaders(initialized, headers);
@@ -1531,12 +1537,14 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     });
     let initialized: Response | undefined;
     await waitFor('the updated agent policy to initialize', async () => {
-      initialized = await rpc(api, headers, 'initialize', {
+      const answer = await rpc(api, headers, 'initialize', {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
         clientInfo: { name: 'nexus-governance', version: '1' },
       });
-      return initialized.status === 200;
+      if (answer.status !== 200) return false;
+      initialized = await bufferedResponse(answer);
+      return true;
     });
     assert.ok(initialized);
     const scoped = await negotiatedHeaders(initialized, headers);

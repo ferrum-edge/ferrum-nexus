@@ -22,7 +22,9 @@ async function elapsed(run: () => Promise<unknown>): Promise<number> {
   return Date.now() - started;
 }
 
-describe('waitFor', () => {
+// Bounded on its own: a regression to an unbounded wait fails here, not at
+// the CI job timeout.
+describe('waitFor', { timeout: 30_000 }, () => {
   let server: Server;
   let harness: Harness;
   const closed = new Map<string, number>();
@@ -143,6 +145,28 @@ describe('waitFor', () => {
     );
     assert.ok(took < 300 + TOLERANCE_MS, `rejected after ${took}ms`);
     assert.ok((await closedOn('/stalled')) > 0, 'the stalled request was torn down');
+  });
+
+  it('bounds a body buffered for use after the wait', async () => {
+    let kept: Response | undefined;
+    const took = await elapsed(() =>
+      assert.rejects(
+        harness.waitFor(
+          'a stalled 200 body',
+          async () => {
+            const answer = await harness.callGateway('/initialize');
+            if (answer.status !== 200) return false;
+            kept = await harness.bufferedResponse(answer);
+            return true;
+          },
+          300,
+        ),
+        /Timed out after 300ms waiting for a stalled 200 body/,
+      ),
+    );
+    assert.ok(took < 300 + TOLERANCE_MS, `rejected after ${took}ms`);
+    assert.equal(kept, undefined);
+    assert.ok((await closedOn('/initialize')) > 0, 'the stalled request was torn down');
   });
 
   it('closes an unread non-OK response as soon as its attempt ends', async () => {
