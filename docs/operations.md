@@ -1600,10 +1600,10 @@ MongoDB 7.0 and the standalone-refusal check on 4.4.29. Azure Cosmos DB for
 MongoDB accounts on server version 4.2 or older and AWS DocumentDB 3.6/4.0 are
 below that floor. MongoDB 8.0.21+, 8.3 and 9.0 refuse to start on Linux
 kernels 6.19 through 7.0.13 (SERVER-125742), which includes hosts whose kernel
-reports 7.0.0 such as Ubuntu 26.04. SERVER-136272 was meant to fix that in
-9.0.4, but the `mongo:9` 9.0.4 image still refuses to start on GitHub's
-`ubuntu-26.04` runner (image 20260927.149.1), so check your kernel before
-running 9.0.
+reports 7.0.0 such as Ubuntu 26.04. 9.0.4 relaxes that for Ubuntu kernels that
+carry the fix (SERVER-136272): it starts on `7.0.0-1017-azure` but still
+refuses `7.0.0-1012-azure`, so check the exact kernel build before running
+9.0 on Ubuntu 26.04.
 
 **A replica set or sharded cluster is required.** `init()` checks with `hello`
 and refuses to start against a standalone `mongod`:

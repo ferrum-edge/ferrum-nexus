@@ -28,8 +28,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   floor.** The `mongodb` driver is already at the latest release (7.7.0),
   which rejects servers older than 4.4; `init()` also needs the `hello`
   command from 4.4.2. The standalone-refusal check now runs on MongoDB 4.4.29.
-  The store contracts stay on 7.0 because the official `mongo:9` image, 9.0.2
-  and still 9.0.4, does not start on the `ubuntu-26.04` runner kernel.
+  The store contracts stay on 7.0 because the official `mongo:9` image (9.0.4)
+  starts on only some `ubuntu-26.04` runner kernels while GitHub rolls out a
+  new runner image.
   `docs/operations.md` lists the supported range and that kernel limitation.
 - **Mass-email outbox keys name the administrator** (#565). Rows are keyed
   `mass:<actor_id>:<batch>:<user_id>`, the same `(administrator, batch)` scope

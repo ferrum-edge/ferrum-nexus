@@ -220,11 +220,13 @@ jobs:
           cache: npm
       - name: Start MongoDB replica set
         if: ${{ matrix.backend == 'mongodb' }}
-        # MongoDB 7.0, not 9.0: the `mongo:9` 9.0.4 image (sha256:f9050790...)
-        # still exits at startup on the ubuntu-26.04 runner (image
-        # 20260927.149.1) with "Linux kernel versions 6.19.0 through 7.0.13 have
-        # a known incompatibility" (SERVER-121912 / SERVER-125742). Move to 9.0
-        # once a mongo:9 image starts here; this step prints the kernel on failure.
+        # MongoDB 7.0, not 9.0, until GitHub finishes rolling out ubuntu-26.04
+        # runner image 20261012+. `mongo:9` 9.0.4 (sha256:f9050790...) starts on
+        # that image's kernel (7.0.0-1017-azure) but exits on 20260927's
+        # (7.0.0-1012-azure) with "Linux kernel versions 6.19.0 through 7.0.13
+        # have a known incompatibility" (SERVER-121912 / SERVER-136272), so jobs
+        # pass or fail by which image they draw. 7.0 has no such check. This
+        # step prints the kernel on failure.
         run: |
           docker run -d --name nexus-mongo -p 27017:27017 mongo:7@sha256:1f995ad6fdb93244a1addab1b58f934a0bc2f5643c38e02f5e9d7f0c7d227a7b --replSet rs0 --bind_ip_all
           ready=""
