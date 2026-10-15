@@ -57,6 +57,21 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Application deletion trusts only Ferrum Edge's own "Consumer not found"**
+  (#598). Both consumer reads on the delete path (the mapped consumer and the
+  derived-id lookup for an unmapped one) now require Edge's not-found body. A
+  generic `404`, for example from a router in front of the gateway, fails the
+  delete with `EDGE_PROTOCOL_ERROR` and keeps the application, its grants and
+  credentials for a retry. Previously the rows were cascaded while the consumer
+  stayed live.
+- **SQLite search matches backslashes literally** (#595). The `q` filters
+  match the term as a literal substring, as PostgreSQL, MySQL and MongoDB
+  already did. A backslash, `%` or `_` in the term is an ordinary character.
+- **Acceptance readiness waits honour their deadline** (#606). Each check
+  gets an abort signal that fires at the deadline, so a listener that stalls
+  its headers or body no longer holds the wait past it, and a success that
+  arrives late does not count.
+
 - **A refused metrics read is reported, not shown as zero**
   (ferrum-edge/ferrum-edge#6095). When the gateway refuses the portal's
   credential on `GET /metrics`, `GET /api/apis/:id/usage` now answers

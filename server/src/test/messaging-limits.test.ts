@@ -16,7 +16,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { after, before, describe, it } from 'node:test';
+import { after, before, describe, it, mock } from 'node:test';
 
 import type {
   ApiErrorBody,
@@ -479,33 +479,42 @@ describe('message email coalescing', () => {
   });
 
   it('sends again in the next bucket', async () => {
-    // Cross a bucket boundary without waiting ten real minutes: rewrite the
-    // stored key to the previous bucket, which is what the outbox would hold if
-    // the earlier mail had been enqueued one window ago.
-    const [existing] = (await harness.outbox()).filter(
+    // Cross the bucket boundary without waiting ten real minutes: freeze the
+    // clock at the first instant of the bucket after the one the earlier mail
+    // was keyed to (issue #608). Deriving it from that key, rather than from
+    // the wall clock, keeps the test exact even if a real boundary passed.
+    const queuedBefore = (await harness.outbox()).filter(
       (row) => row.to_email === 'coalesce-founder@example.test',
     );
-    assert.ok(existing, 'the first window enqueued one');
-    const previousBucket = Math.floor(Date.now() / COALESCE_WINDOW_MS) - 1;
-    await harness.store.emailOutbox.enqueue({
-      to_email: 'unrelated@example.test',
-      subject: 'placeholder',
-      body_html: '<p>x</p>',
-      body_text: 'x',
-      idempotency_key: `message_received:${threadId}:${founder.user.id}:${previousBucket}`,
-    });
+    assert.equal(queuedBefore.length, 1, 'the first window enqueued one');
+    const prefix = `message_received:${threadId}:${founder.user.id}:`;
+    const firstKey = queuedBefore[0]?.idempotency_key ?? '';
+    assert.ok(firstKey.startsWith(prefix), firstKey);
+    const firstBucket = Number(firstKey.slice(prefix.length));
+    assert.ok(Number.isSafeInteger(firstBucket), firstKey);
+    const nextBucket = firstBucket + 1;
 
-    // A message now lands in the *current* bucket, whose key is still free.
-    const response = await harness.authed(sender, {
-      method: 'POST',
-      url: `/api/threads/${threadId}/messages`,
-      payload: { body: 'A later window' },
-    });
-    assert.equal(response.statusCode, 201, response.body);
+    const clock = mock.method(Date, 'now', () => nextBucket * COALESCE_WINDOW_MS);
+    try {
+      for (const body of ['A later window', 'Still the later window']) {
+        const response = await harness.authed(sender, {
+          method: 'POST',
+          url: `/api/threads/${threadId}/messages`,
+          payload: { body },
+        });
+        assert.equal(response.statusCode, 201, response.body);
+      }
+    } finally {
+      clock.mock.restore();
+    }
 
-    const keys = (await harness.outbox())
-      .filter((row) => row.idempotency_key?.startsWith(`message_received:${threadId}:`))
-      .map((row) => row.idempotency_key);
-    assert.equal(new Set(keys).size, 2, `two distinct buckets, one mail each: ${keys.join(', ')}`);
+    const queuedAfter = (await harness.outbox()).filter(
+      (row) => row.to_email === 'coalesce-founder@example.test',
+    );
+    assert.equal(queuedAfter.length, 2, 'one more mail for the new window, and only one');
+    assert.deepEqual(queuedAfter.map((row) => row.idempotency_key).sort(), [
+      `${prefix}${firstBucket}`,
+      `${prefix}${nextBucket}`,
+    ]);
   });
 });

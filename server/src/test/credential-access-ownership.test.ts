@@ -51,6 +51,9 @@ import type { StoredConsumer } from './mock-ferrum-edge.js';
 
 const NAMESPACE = 'nexus';
 
+/** What a router in front of Edge answers for a route it does not have. */
+const ROUTER_404 = { message: 'Route not found', error: 'Not Found', statusCode: 404 };
+
 function errorOf(body: string): ApiErrorBody['error'] {
   return (JSON.parse(body) as ApiErrorBody).error;
 }
@@ -377,6 +380,84 @@ describe('credential and access ownership (issue #341)', () => {
         'a consumer the portal did not create is never deleted',
       );
       assert.equal(harness.edge.callsTo('DELETE', `/consumers/${derived}`).length, 0);
+      assert.equal((await auditFor('application.delete', appId)).consumer_id, null);
+    });
+
+    it('keeps a mapped application when a router answers its consumer read with a 404', async () => {
+      const appId = await createApplication('Router mapped');
+      const issued = await harness.authed(owner, {
+        method: 'POST',
+        url: '/api/credentials',
+        payload: { credential_type: 'keyauth', application_id: appId },
+      });
+      assert.equal(issued.statusCode, 201, issued.body);
+      const mapping = await harness.store.consumers.findByUserAndNamespace(
+        owner.user.id,
+        NAMESPACE,
+        appId,
+      );
+      assert.ok(mapping?.ferrum_consumer_id);
+      const consumerId = mapping.ferrum_consumer_id;
+
+      // Only Edge's own `Consumer not found` proves the consumer gone (#598).
+      harness.edge.queueFailure(404, ROUTER_404, `/consumers/${consumerId}`, 'GET');
+      const failed = await harness.authed(owner, {
+        method: 'DELETE',
+        url: `/api/applications/${appId}`,
+      });
+      assert.equal(failed.statusCode, 502, failed.body);
+      assert.equal(errorOf(failed.body).code, 'EDGE_PROTOCOL_ERROR');
+      assert.ok(await harness.store.applications.findById(appId), 'nothing was cascaded');
+      assert.equal((await harness.store.credentials.list({ application_id: appId })).total, 1);
+      assert.ok(appConsumer(appId), 'the consumer is still live');
+      assert.equal(harness.edge.callsTo('DELETE', `/consumers/${consumerId}`).length, 0);
+
+      // Answered by the gateway itself, the retry takes it down.
+      const removed = await harness.authed(owner, {
+        method: 'DELETE',
+        url: `/api/applications/${appId}`,
+      });
+      assert.equal(removed.statusCode, 200, removed.body);
+      assert.equal(appConsumer(appId), undefined);
+      assert.equal(await harness.store.applications.findById(appId), null);
+    });
+
+    it('keeps an unmapped application when a router answers its derived-id read with a 404', async () => {
+      const appId = await createApplication('Router unmapped');
+      const username = consumerUsernameForApplication(appId);
+      const { consumer } = await harness.edgeClient.consumers.ensure({
+        username,
+        custom_id: appId,
+        acl_groups: [],
+      });
+
+      harness.edge.queueFailure(404, ROUTER_404, `/consumers/${consumer.id}`, 'GET');
+      const failed = await harness.authed(owner, {
+        method: 'DELETE',
+        url: `/api/applications/${appId}`,
+      });
+      assert.equal(failed.statusCode, 502, failed.body);
+      assert.equal(errorOf(failed.body).code, 'EDGE_PROTOCOL_ERROR');
+      assert.ok(await harness.store.applications.findById(appId), 'nothing was cascaded');
+      assert.ok(appConsumer(appId), 'the consumer is still live');
+
+      const removed = await harness.authed(owner, {
+        method: 'DELETE',
+        url: `/api/applications/${appId}`,
+      });
+      assert.equal(removed.statusCode, 200, removed.body);
+      assert.equal(appConsumer(appId), undefined);
+      assert.equal((await auditFor('application.delete', appId)).unmapped_consumer, true);
+    });
+
+    it('completes the delete when Edge itself says there is no consumer', async () => {
+      const appId = await createApplication('Never provisioned');
+      const deleted = await harness.authed(owner, {
+        method: 'DELETE',
+        url: `/api/applications/${appId}`,
+      });
+      assert.equal(deleted.statusCode, 200, deleted.body);
+      assert.equal(await harness.store.applications.findById(appId), null);
       assert.equal((await auditFor('application.delete', appId)).consumer_id, null);
     });
   });

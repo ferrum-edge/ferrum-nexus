@@ -346,9 +346,12 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
           // consumer that still carries this identity's username is touched.
           let consumerId = mapped?.ferrum_consumer_id ?? null;
           let unmapped = false;
+          // Only Edge's own `Consumer not found` proves absence: a router's
+          // `404` in front of the gateway throws instead, so the rows stay
+          // for a retry rather than cascading past a live consumer (#598).
           if (consumerId === null) {
             const derivedId = edge.consumers.derivedId(username);
-            const live = await edge.consumers.get(derivedId);
+            const live = await edge.consumers.get(derivedId, { confirmedAbsence: true });
             if (live && live.username === username) {
               consumerId = derivedId;
               unmapped = true;
@@ -451,7 +454,7 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
           const target = consumerId;
           if (target === null) return drop(startedId);
           return edge.serializePerKey(target, async () => {
-            const live = await edge.consumers.get(target);
+            const live = await edge.consumers.get(target, { confirmedAbsence: true });
             if (live) await edge.consumers.delete(target, actor.id);
             return drop(startedId);
           });

@@ -74,26 +74,48 @@ export class HttpError extends Error {
  * Every wait in this suite is bounded. A CI job that hangs until the runner
  * times out tells an operator nothing; one that says "the gateway data plane
  * never served /nexus/e2e-keyauth within 120s" tells them where to look.
+ *
+ * The deadline bounds each attempt too, not only the gap between them: a
+ * listener that accepts a connection and then stalls its headers or body used
+ * to hold `await check()` past it (issue #606). Each attempt gets a signal that
+ * aborts at the deadline, which a check passes to `fetch` so the request and
+ * its body read are cancelled; a check that ignores it is still abandoned at
+ * the deadline. A success reported after the deadline does not count.
  */
 export async function waitFor(
   what: string,
-  check: () => Promise<boolean>,
+  check: (signal: AbortSignal) => Promise<boolean>,
   timeoutMs = READY_TIMEOUT_MS,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   for (;;) {
-    try {
-      if (await check()) return;
-      lastError = undefined;
-    } catch (error) {
-      lastError = error;
-    }
-    if (Date.now() >= deadline) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
       const because = lastError instanceof Error ? `: ${lastError.message}` : '';
       throw new Error(`Timed out after ${timeoutMs}ms waiting for ${what}${because}`);
     }
-    await delay(POLL_INTERVAL_MS);
+    const attempt = new AbortController();
+    const timer = setTimeout(
+      () => attempt.abort(new Error('the last check did not finish before the deadline')),
+      remaining,
+    );
+    const abandoned = new Promise<never>((_, reject) => {
+      attempt.signal.addEventListener('abort', () => reject(attempt.signal.reason), {
+        once: true,
+      });
+    });
+    try {
+      const ready = await Promise.race([check(attempt.signal), abandoned]);
+      if (ready && !attempt.signal.aborted && Date.now() <= deadline) return;
+      lastError = undefined;
+    } catch (error) {
+      lastError = attempt.signal.aborted ? attempt.signal.reason : error;
+    } finally {
+      clearTimeout(timer);
+    }
+    const pause = Math.min(POLL_INTERVAL_MS, deadline - Date.now());
+    if (pause > 0) await delay(pause);
   }
 }
 
@@ -187,8 +209,8 @@ export async function latestMailTo(
   address: string,
 ): Promise<{ subject: string; text: string; from: string }> {
   let found: MailpitMessage | undefined;
-  await waitFor(`mail delivered to ${address}`, async () => {
-    const response = await fetch(`${MAIL_URL}/api/v1/messages?limit=50`);
+  await waitFor(`mail delivered to ${address}`, async (signal) => {
+    const response = await fetch(`${MAIL_URL}/api/v1/messages?limit=50`, { signal });
     if (!response.ok) return false;
     const body = (await response.json()) as { messages?: MailpitMessage[] };
     found = (body.messages ?? []).find((message) =>
@@ -279,24 +301,27 @@ export async function signIn(email: string, password: string): Promise<Session> 
 
 /** Wait until the portal, the gateway's data plane and the sink all answer. */
 export async function waitForStack(): Promise<void> {
-  await waitFor('the portal to report a database', async () => {
-    const response = await fetch(`${PORTAL_URL}/api/health`);
+  await waitFor('the portal to report a database', async (signal) => {
+    const response = await fetch(`${PORTAL_URL}/api/health`, { signal });
+    await response.body?.cancel();
     return response.status === 200;
   });
-  await waitFor('the portal to report a reachable gateway', async () => {
-    const response = await fetch(`${PORTAL_URL}/api/health`);
+  await waitFor('the portal to report a reachable gateway', async (signal) => {
+    const response = await fetch(`${PORTAL_URL}/api/health`, { signal });
     if (!response.ok) return false;
     const body = (await response.json()) as { edge?: { status?: string } };
     return body.edge?.status === 'ok';
   });
   // The data plane answers 404 for an unpublished path, which is exactly the
   // proof that it is listening.
-  await waitFor('the gateway data plane to listen', async () => {
-    const response = await callGateway('/__e2e_readiness__');
+  await waitFor('the gateway data plane to listen', async (signal) => {
+    const response = await callGateway('/__e2e_readiness__', { signal });
+    await response.body?.cancel();
     return response.status > 0;
   });
-  await waitFor('the mail sink to answer', async () => {
-    const response = await fetch(`${MAIL_URL}/api/v1/messages?limit=1`);
+  await waitFor('the mail sink to answer', async (signal) => {
+    const response = await fetch(`${MAIL_URL}/api/v1/messages?limit=1`, { signal });
+    await response.body?.cancel();
     return response.ok;
   });
 }

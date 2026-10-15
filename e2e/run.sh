@@ -224,6 +224,10 @@ if [[ ! -d node_modules ]]; then
   npm install --no-audit --no-fund
 fi
 
+# The harness's own bounds, before anything waits on them (issue #606).
+echo "==> acceptance harness"
+npx tsx --test src/harness.test.ts
+
 # Bootstrap the portal once, before either suite. Only the *first*
 # registration becomes `super_admin`, so the two suites cannot each claim it —
 # whichever ran second used to find itself an ordinary provider and fail on its
