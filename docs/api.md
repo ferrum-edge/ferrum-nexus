@@ -2980,9 +2980,9 @@ Registered under `/api/credentials`; _session_.
 `POST /api/credentials`, `POST /api/credentials/:id/rotate` and
 `POST /api/apis/:id/test-consumer` — and only once.** Nexus stores a SHA-256
 fingerprint and the last four characters. Edge redacts material on its ordinary
-Admin API reads; its credential-complete verification read is used only inside
-the server for whole-consumer updates and never reaches a response, the
-database or an audit row.
+Admin API reads. Its credential-complete reads, consumer verification and
+deployment snapshots, never reach a response or an audit row; only a
+deployment snapshot is persisted, inside an encrypted gateway recovery journal.
 
 A credential belongs to an **identity**: the account itself, or one of its
 [applications](#applications). Each identity has its own Edge consumer

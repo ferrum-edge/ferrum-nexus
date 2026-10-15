@@ -65,8 +65,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   to the document's `servers[0].url` is not a pin. MCP approvals cover all
   tools, a subset or REST only, and a refused revocation can restore the
   pending tool request. The service-manifest preview's oversized body is a
-  `400`; whole-consumer writes carry `If-Match`; the server-only verification
-  read is the one credential-complete Edge read; spec-change email is
+  `400`; whole-consumer writes carry `If-Match`; consumer verification and
+  deployment snapshots are named as the credential-complete Edge reads; spec-change email is
   normal-priority outbox mail; and `/metrics` and `/admin/metrics` authenticate
   differently.
 

@@ -2524,12 +2524,14 @@ Then:
    those `app_settings` rows (for a `gateway_recovery:` or
    `gateway_restore_cleanup:` row, only that manifest row) and start again.
 2. Re-enter the SMTP password and CAPTCHA secret, and check **Send test email**.
-3. Re-enter each stored provider's client secret, except one the environment
-   now shadows. For that one, either keep the environment entry permanently, or
-   hand back to the stored provider without signing out: remove the
-   environment entry and restart (your session survives, because the key did
-   not change), re-enter the stored secret, and confirm a single sign-on
-   sign-in works in a separate browser.
+3. If an environment entry now shadows a stored provider, settle it **before
+   saving any provider**: a single sign-on save sends only the providers the
+   page lists, and the shadowed one is not listed, so any save deletes it.
+   Either keep the environment entry permanently, or hand back without signing
+   out: remove the environment entry and restart (your session survives,
+   because the key did not change). Then re-enter every stored provider's
+   client secret and confirm a single sign-on sign-in works in a separate
+   browser.
 4. Remove `NEXUS_CAPTCHA_ENFORCEMENT` and `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN` and
    restart. Confirm normal sign-in in a separate browser before you sign out.
 

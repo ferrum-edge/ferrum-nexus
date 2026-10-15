@@ -1388,10 +1388,13 @@ secret, and the owner issues a new one.
 
 **Ferrum Edge enforces the same independently.** Ordinary Admin API reads return
 `keyauth.key` and `jwt.secret` as `[REDACTED]` and omit `basicauth` entirely.
-The privileged `GET /consumers/{id}/verification` read is the exception: Nexus
-uses its credential-complete snapshot only in server memory, to replace a whole
-consumer without losing credentials, and never returns, stores or audits it.
-No portal route returns plaintext; a lost credential is rotated, not
+Two privileged reads are the exceptions. Nexus uses the credential-complete
+`GET /consumers/{id}/verification` snapshot only in server memory, to replace a
+whole consumer without losing credentials, and never returns, stores or audits
+it. A gateway deployment snapshot also carries complete consumer credentials;
+Nexus keeps it only inside an encrypted gateway recovery journal
+(`app_settings`, sealed with `NEXUS_SECRET_KEY`) until the conversion or
+restore it protects completes. No portal route returns plaintext; a lost credential is rotated, not
 recovered.
 
 **What the provider's upstream sees differs by type.** Edge strips `X-API-Key`
