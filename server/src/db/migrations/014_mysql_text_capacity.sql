@@ -1,3 +1,3 @@
--- MySQL only: widens three text columns to LONGTEXT (issues #604 and #605).
+-- MySQL only: widens seven text columns to LONGTEXT (issues #604 and #605).
 -- SQLite TEXT has no length limit, so there is nothing to change here; the
 -- file exists so that every backend applies the same migration ids.

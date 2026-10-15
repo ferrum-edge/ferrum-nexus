@@ -211,9 +211,9 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
     // `release` and freezes these checksums.
     release: null,
     sha256: {
-      sqlite: 'f7cfbe62b4a5d0dd05c640c242ef9bc280399dd1216a3f8212e70d72555a3ebd',
-      pg: '48f8465a4494754acc16075974713d3f6a5c70379b6d2b883639c3974eb9ef18',
-      mysql: '95e9ce0445d35689761c52436c90c0cbe21fb18bf1cfd4882962fd7191210fa0',
+      sqlite: '366dd95351f8163cf636d36edbc03716b2732bad2c6f995b26eb1c5749c76e8f',
+      pg: '4c23d348785f290aea20bb56a05c0c70bba27a9eaa774d79438a4f570c58c1e7',
+      mysql: '7f1e8333960c907519c91706ec3ea5ca454db876204bbf45f1dbf14641f4d3c1',
       mongodb: '2dd08d197a2c9e4c514c870186750fd1af03b55eaf67b3fc104eb9370d804f04',
     },
   },

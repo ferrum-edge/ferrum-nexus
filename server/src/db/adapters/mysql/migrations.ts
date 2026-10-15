@@ -19,11 +19,11 @@ const INTEGER_COLUMN = /^INT NOT NULL DEFAULT ([0-9]+)$/i;
 const CREATE_INDEX = /^CREATE INDEX ([a-z][a-z0-9_]*) ON ([a-z][a-z0-9_]*) \((.+)\)$/i;
 /**
  * Widening an existing text column to LONGTEXT, keeping its nullability and
- * default (`014_mysql_text_capacity`). Only these two spellings, so the
+ * default (`014_mysql_text_capacity`). Only these three spellings, so the
  * replay check below knows exactly what a finished change looks like.
  */
 const WIDEN_TO_LONGTEXT =
-  /^ALTER TABLE ([a-z][a-z0-9_]*) MODIFY COLUMN ([a-z][a-z0-9_]*) LONGTEXT (NOT NULL DEFAULT \('\{\}'\)|DEFAULT NULL)$/i;
+  /^ALTER TABLE ([a-z][a-z0-9_]*) MODIFY COLUMN ([a-z][a-z0-9_]*) LONGTEXT (NOT NULL DEFAULT \('\{\}'\)|NOT NULL|DEFAULT NULL)$/i;
 /** The column types a widening may start from: what earlier releases created. */
 const WIDENABLE_TYPES = new Set(['text', 'longtext']);
 const WIDENABLE_VARCHAR = /^varchar\([1-9][0-9]*\)$/;

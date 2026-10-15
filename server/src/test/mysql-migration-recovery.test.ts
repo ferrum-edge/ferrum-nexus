@@ -191,7 +191,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
     const migration = migrations.find((file) => file.id === '014_mysql_text_capacity');
     assert.ok(migration);
     const statements = splitSqlStatements(migration.sql);
-    assert.equal(statements.length, 3);
+    assert.equal(statements.length, 7);
     const expected = await fixture(async (pool) => {
       await runMysqlMigrations(pool);
       return schema(pool);

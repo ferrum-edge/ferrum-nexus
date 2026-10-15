@@ -4331,6 +4331,51 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         assert.equal(read?.parsed_version, version, `a ${version.length}-character version`);
       }
 
+      // A document's `info.version` is also the API's and the revision's
+      // version when the request names none, and history records both sides.
+      const longVersion = `${'é'.repeat(40)}-${'v'.repeat(1_000)}`;
+      const versioned = await store.apis.create({
+        name: 'Long version',
+        slug: `long-version-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: longVersion,
+        spec_format: 'openapi',
+        requestable: true,
+        auth_plugin: 'key_auth',
+        status: 'published',
+        visibility: 'public',
+      });
+      assert.equal((await store.apis.findById(versioned.id))?.version, longVersion);
+      const first = await store.apiSpecs.create({
+        api_id: versioned.id,
+        version: longVersion,
+        raw_spec: 'openapi: 3.1.0',
+        parsed_version: longVersion,
+        is_current: true,
+      });
+      const second = await store.apiSpecs.create({
+        api_id: versioned.id,
+        version: `${longVersion}.2`,
+        raw_spec: 'openapi: 3.1.0',
+        parsed_version: `${longVersion}.2`,
+        is_current: true,
+      });
+      assert.equal((await store.apiSpecs.findById(first.id))?.version, longVersion);
+      await store.apiSpecChanges.create({
+        api_id: versioned.id,
+        revision_id: second.id,
+        previous_revision_id: first.id,
+        kind: 'update',
+        version: `${longVersion}.2`,
+        previous_version: longVersion,
+        revision_seq: 2,
+        report: emptySpecChangeReport(),
+      });
+      const [change] = (await store.apiSpecChanges.listByApi(versioned.id)).items;
+      assert.equal(change?.version, `${longVersion}.2`);
+      assert.equal(change?.previous_version, longVersion);
+
       // The largest agents object an update or publish may audit: every
       // operation a tool, every description at the length limit, multibyte.
       const description = '題'.repeat(MAX_AGENT_DESCRIPTION_LENGTH);
