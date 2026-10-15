@@ -220,8 +220,13 @@ jobs:
           cache: npm
       - name: Start MongoDB replica set
         if: ${{ matrix.backend == 'mongodb' }}
+        # MongoDB 7.0, not 9.0: the `mongo:9` 9.0.4 image (sha256:f9050790...)
+        # still exits at startup on the ubuntu-26.04 runner (image
+        # 20260927.149.1) with "Linux kernel versions 6.19.0 through 7.0.13 have
+        # a known incompatibility" (SERVER-121912 / SERVER-125742). Move to 9.0
+        # once a mongo:9 image starts here; this step prints the kernel on failure.
         run: |
-          docker run -d --name nexus-mongo -p 27017:27017 mongo:9@sha256:f90507905ce6e52e4a63d0ff8964fc254fa4d37ccbe56c56f4bc0186eb02edea --replSet rs0 --bind_ip_all
+          docker run -d --name nexus-mongo -p 27017:27017 mongo:7@sha256:1f995ad6fdb93244a1addab1b58f934a0bc2f5643c38e02f5e9d7f0c7d227a7b --replSet rs0 --bind_ip_all
           ready=""
           for attempt in $(seq 1 60); do
             if docker exec nexus-mongo mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'; then
@@ -235,6 +240,7 @@ jobs:
           done
           if [ -z "$ready" ]; then
             echo "::error::mongod did not become ready"
+            echo "runner kernel: $(uname -r)"
             docker inspect --format 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' nexus-mongo
             docker logs --tail 60 nexus-mongo 2>&1
             exit 1
