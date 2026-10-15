@@ -12,7 +12,10 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
+import type { SsoProviderSettings } from '@ferrum-nexus/shared';
+
 import {
+  createSettingsService,
   SMTP_PASSWORD_SETTINGS_KEY,
   SMTP_SETTINGS_KEY,
   type StoredSmtpSettings,
@@ -27,6 +30,12 @@ import type { NexusStore, SettingRecord } from '../db/store.js';
 import { createEmailService } from '../email/service.js';
 import { createCrypto, type NexusCrypto } from '../lib/crypto.js';
 import { isNexusError } from '../lib/errors.js';
+import {
+  parseStoredSsoSettings,
+  resolveSsoProviders,
+  SSO_SETTINGS_KEY,
+  ssoClientSecretKey,
+} from '../sso/settings.js';
 import { buildTestApp, type TestApp } from './helpers.js';
 
 /** `store`, with `onGet` run before each settings read of `key`. */
@@ -158,5 +167,120 @@ describe('settings read as one generation', () => {
     assert.equal(await captcha.verify('token'), 'verified');
     assert.ok(moved, 'the save landed between the two reads');
     assert.deepEqual(asked, [{ url: CAPTCHA_VERIFY_URLS.hcaptcha, secret: 'hcaptcha-secret' }]);
+  });
+  function ssoProvider(issuer: string): SsoProviderSettings {
+    return {
+      id: 'generation-corp',
+      display_name: 'Generation corp',
+      issuer,
+      client_id: 'generation-client',
+      scopes: ['openid', 'email'],
+      enabled: true,
+      jit_provisioning: false,
+      link_existing_accounts: false,
+      require_verified_email: true,
+      allowed_email_domains: [],
+      disable_local_password_for_linked: false,
+      sync_roles: false,
+      default_role: 'client',
+      role_mappings: [],
+      org_mappings: [],
+    };
+  }
+
+  /** One administrator save of a stored identity provider and its client secret. */
+  async function commitSso(issuer: string, secret: string): Promise<void> {
+    await harness.store.transaction(async (tx) => {
+      await tx.settings.set(
+        SSO_SETTINGS_KEY,
+        {
+          policy: 'local_or_sso',
+          allowed_email_domains: [],
+          deprovision_on_access_loss: false,
+          providers: [ssoProvider(issuer)],
+        },
+        false,
+      );
+      await tx.settings.set(
+        ssoClientSecretKey('generation-corp'),
+        crypto.encryptJson(ssoClientSecretKey('generation-corp'), secret),
+        true,
+      );
+    });
+  }
+
+  it('never pairs an identity provider with another issuer’s client secret', async () => {
+    await commitSso('https://old-idp.example.test', 'old-idp-secret');
+    const stored = parseStoredSsoSettings(await harness.store.settings.get(SSO_SETTINGS_KEY));
+    assert.equal(stored.providers[0]?.issuer, 'https://old-idp.example.test');
+
+    let moved = false;
+    const store = intercepted(harness.store, ssoClientSecretKey('generation-corp'), async () => {
+      if (moved) return;
+      moved = true;
+      await commitSso('https://new-idp.example.test', 'new-idp-secret');
+    });
+    // The request read the old settings; the save landed before the secret
+    // read. The stale pair is refused rather than resolved.
+    await assert.rejects(
+      resolveSsoProviders(harness.config, store, crypto, stored),
+      (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+    );
+    assert.ok(moved);
+
+    // Read again from the start, the request gets the new issuer and its own secret.
+    const fresh = parseStoredSsoSettings(await harness.store.settings.get(SSO_SETTINGS_KEY));
+    const resolved = await resolveSsoProviders(harness.config, store, crypto, fresh);
+    const provider = resolved.find((entry) => entry.settings.id === 'generation-corp');
+    assert.deepEqual(
+      { issuer: provider?.settings.issuer, secret: provider?.clientSecret },
+      { issuer: 'https://new-idp.example.test', secret: 'new-idp-secret' },
+    );
+  });
+
+  it('runs the CAPTCHA activation self-test only with the stored provider’s own secret', async () => {
+    const admin = await harness.registerUser({ email: 'generation-admin@example.test' });
+    // Turnstile is on; this save changes only its site key, so the self-test
+    // posts the *stored* secret.
+    let moved = false;
+    let secretReads = 0;
+    const asked: { url: string; secret: string | null }[] = [];
+    // The third secret read is the one the self-test's secret comes from,
+    // after the fingerprint and after the provider (and `secret_set`) were read.
+    const store = intercepted(harness.store, CAPTCHA_SECRET_SETTINGS_KEY, async () => {
+      secretReads += 1;
+      if (moved || secretReads < 3) return;
+      moved = true;
+      await commitCaptcha('hcaptcha', 'hcaptcha-secret');
+    });
+    const captcha = createCaptchaService({
+      store,
+      crypto,
+      transport: async (url, params) => {
+        asked.push({ url, secret: params.get('secret') });
+        return { success: true, errors: [] };
+      },
+    });
+    const settings = createSettingsService({
+      config: harness.config,
+      store,
+      crypto,
+      audit: harness.services.audit,
+      auth: harness.services.auth,
+      captcha,
+      locks: (_key, fn) => fn(),
+    });
+    await settings
+      .updateSettings(
+        { id: admin.user.id, role: 'super_admin' },
+        { captcha: { site_key: 'turnstile-site-key-2', captcha_token: 'token' } },
+      )
+      .catch(() => undefined);
+    assert.ok(moved, 'the save landed between the provider read and the secret read');
+    assert.ok(asked.length > 0, 'the self-test reached a vendor');
+    for (const call of asked) {
+      const vendor = call.url === CAPTCHA_VERIFY_URLS.turnstile ? 'turnstile' : 'hcaptcha';
+      assert.equal(call.secret, `${vendor}-secret`, `${vendor} received its own secret only`);
+    }
   });
 });

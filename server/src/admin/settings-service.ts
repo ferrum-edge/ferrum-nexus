@@ -75,6 +75,7 @@ import {
 import type { NexusConfig } from '../config/index.js';
 import type { NexusStore, SettingRecord } from '../db/store.js';
 import { validateTemplateLinks } from '../email/template-links.js';
+import { readBoundToSetting } from '../lib/setting-generation.js';
 import {
   DEFAULT_EMAIL_TEMPLATES,
   removedTemplateVariable,
@@ -571,7 +572,17 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
     // patch fails closed with `CONFLICT`. The other order would let a merge
     // built on rows newer than the fingerprint commit as if it were current.
     const fingerprint = await captchaFingerprint(store);
-    const current = await readCaptcha();
+    // The stored provider and its secret from one committed generation: the
+    // self-test below may post the stored secret, and it must only ever reach
+    // the vendor that secret was stored for (see readBoundToSetting).
+    const { current, storedSecretRead } = await readBoundToSetting(
+      store,
+      CAPTCHA_SETTINGS_KEY,
+      async () => ({
+        current: await readCaptcha(),
+        storedSecretRead: await readEncryptedSetting(store, crypto, CAPTCHA_SECRET_SETTINGS_KEY),
+      }),
+    );
     const next: StoredCaptchaSettings = {
       enabled: patch.enabled ?? current.enabled,
       provider: patch.provider ?? current.provider,
@@ -581,10 +592,7 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
 
     const provider = next.provider;
     const siteKey = next.site_key?.trim() ?? '';
-    const storedSecret =
-      patch.secret_key === undefined
-        ? await readEncryptedSetting(store, crypto, CAPTCHA_SECRET_SETTINGS_KEY)
-        : patch.secret_key;
+    const storedSecret = patch.secret_key === undefined ? storedSecretRead : patch.secret_key;
     // An unreadable encrypted row and a cleared one both read as absent here,
     // which is the same "unusable" the `verify` path fails closed on.
     const secret = storedSecret ?? '';

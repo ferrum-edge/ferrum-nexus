@@ -166,6 +166,13 @@ const TEXT_URL = /https?:[/\\]{2}[^\s<>"'()]+/gi;
 export const RECIPIENT_NAME_URL_PLACEHOLDER = '[link removed]';
 
 /**
+ * The name a copy carries instead when the recipient's own name, even with its
+ * links removed, still completes a link the policy refuses together with the
+ * template's text. Non-empty, so it cannot join the text around it into a URL.
+ */
+export const RECIPIENT_NAME_FALLBACK = 'there';
+
+/**
  * A recipient's display name as a campaign interpolates it: every explicit
  * URL replaced by {@link RECIPIENT_NAME_URL_PLACEHOLDER}, and control
  * characters (which the link check reads as separators) by spaces.
@@ -233,9 +240,16 @@ function worstCaseRecipients(recipients: readonly UserRecord[]): {
   plain: RecipientVars;
   escaped: RecipientVars;
 } {
-  const plain: RecipientVars = { name: '', email: '' };
-  const escaped: RecipientVars = { name: '', email: '' };
-  const most = { plainName: 0, plainEmail: 0, escapedName: 0, escapedEmail: 0 };
+  // The fallback name is a candidate too: any copy may carry it instead.
+  const fallback = RECIPIENT_NAME_FALLBACK;
+  const plain: RecipientVars = { name: fallback, email: '' };
+  const escaped: RecipientVars = { name: fallback, email: '' };
+  const most = {
+    plainName: utf8Bytes(fallback),
+    plainEmail: 0,
+    escapedName: utf8Bytes(escapeHtml(fallback)),
+    escapedEmail: 0,
+  };
   for (const recipient of recipients) {
     // The name each copy will actually carry, so the bound is of real copies.
     const name = neutralRecipientName(recipient.display_name);
@@ -405,11 +419,14 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
       const render = await email.prepareRenderer('mass', MASS_RAW_HTML_VARS);
       // `name` is already neutral here (see {@link neutralRecipientName}). A
       // refusal that remains can only come from the name completing a URL
-      // with the template's own text, so that one copy goes out with
-      // `fallback` in its place; if that is still refused, the template itself
-      // is at fault and the campaign stops as before. One recipient's name
-      // never stops the others.
-      function renderFor(recipient: { name: string; email: string }, fallback = ''): RenderedEmail {
+      // with the template's own text, so the copy is rendered again with
+      // `fallback` in its place. If that is refused too, the caller decides:
+      // the size estimate stops the campaign (the template itself is at
+      // fault), and the fan-out skips only that recipient.
+      function renderFor(
+        recipient: { name: string; email: string },
+        fallback: string = RECIPIENT_NAME_FALLBACK,
+      ): RenderedEmail {
         const vars = {
           recipient_name: recipient.name,
           recipient_email: recipient.email,
@@ -432,8 +449,9 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
       // every copy from above, escaping and template repetition included.
       const worst = worstCaseRecipients(recipients);
       // A worst-case name the template refuses is sized by an inert stand-in
-      // at least as large raw and escaped, never by the smaller empty copy
+      // at least as large raw and escaped, never by the smaller fallback copy
       // that recipient would get: the bound must cover every other recipient.
+      // The fallback itself is one of the candidates (worstCaseRecipients).
       const inertLike = (name: string): string => 'x'.repeat(utf8Bytes(escapeHtml(name)));
       const messageBytes = worstCaseBytes(
         renderFor(worst.plain, inertLike(worst.plain.name)),
@@ -569,16 +587,29 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
         let enqueued = 0;
         let chunks = 0;
         let failure: unknown = null;
+        // Recipients whose copy the link policy refused even with the fallback
+        // name. A Set: a transaction body can run more than once.
+        const skipped = new Set<string>();
         for (let start = 0; start < recipients.length; start += perChunk) {
           const chunk = recipients.slice(start, start + perChunk);
           try {
             enqueued += await store.transaction(async (tx) => {
               let created = 0;
               for (const recipient of chunk) {
-                const rendered = renderFor({
-                  name: neutralRecipientName(recipient.display_name),
-                  email: recipient.email,
-                });
+                let rendered: RenderedEmail;
+                try {
+                  rendered = renderFor({
+                    name: neutralRecipientName(recipient.display_name),
+                    email: recipient.email,
+                  });
+                } catch (error) {
+                  // The size estimate rendered this template successfully, so
+                  // only this recipient's name can be at fault: skip it, not
+                  // the chunk and everyone after it.
+                  if (!isLinkPolicyRefusal(error)) throw error;
+                  skipped.add(recipient.id);
+                  continue;
+                }
                 const result = await tx.emailOutbox.enqueue({
                   to_email: recipient.email,
                   priority: OUTBOX_PRIORITY.low,
@@ -603,6 +634,13 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
           }
         }
 
+        if (skipped.size > 0) {
+          deps.log?.(
+            { batch, skipped: skipped.size },
+            'Mass-email recipients skipped: their display name completes a link the policy refuses',
+          );
+        }
+
         // Best effort, unlike the row above. The campaign is already durable,
         // countable and named in the trail, so a failure to record what this
         // attempt queued must not turn queued mail into a `500` the
@@ -618,6 +656,7 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
               recipients: recipients.length,
               enqueued,
               chunks,
+              ...(skipped.size > 0 ? { skipped: skipped.size } : {}),
               failed: failure !== null,
             },
             ip,
