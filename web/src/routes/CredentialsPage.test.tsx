@@ -7,6 +7,7 @@ import {
   type Application,
   type CredentialMetadata,
   type IssueCredentialResponse,
+  type RotateCredentialResponse,
   type ShowOnceSecret,
 } from '@ferrum-nexus/shared';
 import { API, CREDENTIAL, GRANT } from '../../test/fixtures';
@@ -179,6 +180,68 @@ describe('credential management', () => {
       });
     });
     expect(await screen.findByText('test-only-pending-key')).toBeInTheDocument();
+  });
+
+  it('cannot dismiss a pending issuance, so its secret is never overtaken (issue #593)', async () => {
+    const pending = deferred<IssueCredentialResponse>();
+    vi.mocked(credentialsApi.issue).mockImplementationOnce(() => pending.promise);
+    credentials = [CREDENTIAL];
+    renderPage(<CredentialsPage />);
+    await screen.findByText('••••0001');
+    openIssue();
+    fireEvent.click(screen.getByRole('button', { name: 'Issue' }));
+    await waitFor(() => expect(credentialsApi.issue).toHaveBeenCalledTimes(1));
+    const dialog = screen.getByRole('dialog', { name: 'Issue a credential' });
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    expect(within(dialog).queryByRole('button', { name: 'Close dialog' })).not.toBeInTheDocument();
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(dialog).toBeInTheDocument();
+    // Nothing behind the modal can start a second secret-producing request.
+    expect(screen.queryByRole('dialog', { name: 'Rotate credential' })).not.toBeInTheDocument();
+    await act(async () => {
+      pending.resolve({
+        credential: { ...CREDENTIAL, id: 'credential-issued' },
+        consumer_username: 'nexus-user-user-1',
+        secret: { type: 'keyauth', key: 'test-only-first-key' },
+      });
+    });
+    const saved = await screen.findByRole('dialog', { name: 'Save your new credential' });
+    expect(within(saved).getByText('test-only-first-key')).toBeInTheDocument();
+  });
+
+  it('cannot dismiss a pending rotation and asks again for the next secret (issue #593)', async () => {
+    const pending = deferred<RotateCredentialResponse>();
+    vi.mocked(credentialsApi.rotate).mockImplementationOnce(() => pending.promise);
+    credentials = [CREDENTIAL];
+    renderPage(<CredentialsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Rotate' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Rotate credential' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate' }));
+    await waitFor(() => expect(credentialsApi.rotate).toHaveBeenCalledTimes(1));
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    expect(within(dialog).queryByRole('button', { name: 'Close dialog' })).not.toBeInTheDocument();
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(dialog).toBeInTheDocument();
+    await act(async () => {
+      pending.resolve({
+        credential: { ...CREDENTIAL, id: 'credential-2', last4: '0002' },
+        previous: { ...CREDENTIAL, status: 'revoked' },
+        consumer_username: 'nexus-user-user-1',
+        secret: { type: 'keyauth', key: 'test-only-rotated-pending-key' },
+      });
+    });
+    await screen.findByRole('dialog', { name: 'Save your rotated credential' });
+    acknowledge();
+    expect(screen.queryByText('test-only-rotated-pending-key')).not.toBeInTheDocument();
+
+    // The acknowledgement tick belonged to that secret alone.
+    openIssue();
+    fireEvent.click(screen.getByRole('button', { name: 'Issue' }));
+    const next = await screen.findByRole('dialog', { name: 'Save your new credential' });
+    expect(
+      within(next).getByRole('checkbox', { name: /I have saved these values/ }),
+    ).not.toBeChecked();
+    expect(within(next).getByRole('button', { name: 'Done' })).toBeDisabled();
   });
 
   it('retains the issue form after a failure without presenting a show-once secret', async () => {

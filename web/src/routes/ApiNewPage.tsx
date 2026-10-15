@@ -40,6 +40,7 @@ import { Card, CardBody, CardHeader, PageHeader } from '../components/ui/Card';
 import { Icon } from '../components/ui/Icon';
 import { Checkbox, LabeledInput, LabeledTextarea } from '../components/ui/Input';
 import { LabeledSelect } from '../components/ui/Select';
+import { parseWholeNumber } from '../lib/numbers';
 
 /** Rate-limit window presets, mapped onto the shared `window_seconds` field. */
 const WINDOW_OPTIONS = [
@@ -168,19 +169,21 @@ function PublishForm(): ReactElement {
       return;
     }
     if (slugError || upstreamError || !isValidApiSlug(effectiveSlug)) return;
-    const parsedLimit = Number.parseInt(rateLimitValue, 10);
+    // The whole field, so `1e3` is 1000 rather than 1 (issue #597).
+    const parsedLimit = parseWholeNumber(rateLimitValue);
     if (
       rateLimitEnabled &&
-      (!Number.isFinite(parsedLimit) || parsedLimit < 1 || parsedLimit > MAX_RATE_LIMIT_REQUESTS)
+      (parsedLimit === null || parsedLimit < 1 || parsedLimit > MAX_RATE_LIMIT_REQUESTS)
     ) {
       setError(
         `The request limit must be a whole number between 1 and ${MAX_RATE_LIMIT_REQUESTS.toLocaleString()} — the gateway rejects anything higher.`,
       );
       return;
     }
-    const rateLimit: RateLimitConfig | null = rateLimitEnabled
-      ? { limit: parsedLimit, window_seconds: Number.parseInt(rateLimitWindow, 10) }
-      : null;
+    const rateLimit: RateLimitConfig | null =
+      rateLimitEnabled && parsedLimit !== null
+        ? { limit: parsedLimit, window_seconds: Number.parseInt(rateLimitWindow, 10) }
+        : null;
 
     const origins = parseCorsOrigins(corsOrigins);
     if (origins.length > MAX_CORS_ORIGINS) {
