@@ -1260,6 +1260,8 @@ checksums and `release: 'v0.1.0'`, the forward migrations
 `009_outbox_priority`, `010_api_agents` and `011_mcp_tool_subsets` with
 `release: 'v0.4.0'`, `012_access_request_grant` with `release: 'v0.5.0'`, and
 `013_account_recovery_jobs` with `release: 'v0.5.1'`. `v0.5.2` adds no migration.
+`014_mysql_text_capacity` is listed with `release: null` until the next release
+ships it.
 
 **A released migration never changes.** A database only applies migrations its
 ledger lacks, so editing an applied one would make fresh and upgraded installs
@@ -1399,6 +1401,20 @@ drain every older Nexus request handler and background writer: an older instance
 neither writes the row when it completes a password reset nor checks it before
 issuing a credential, so it would skip the revocation or issue a credential while
 one is owed, and it runs no worker to drain the table.
+
+`014_mysql_text_capacity` (not yet released) changes only MySQL. It widens
+`audit_logs.details_json` from `TEXT` and `api_specs.parsed_title` and
+`api_specs.parsed_version` from `VARCHAR(255)` and `VARCHAR(64)` to `LONGTEXT`,
+keeping each column's nullability, default and collation. Those columns were
+narrower than what the API accepts: an MCP agents update can audit 256 tool
+descriptions of 2,048 characters each, and an OpenAPI document's `info.title`
+and `info.version` have no length limit of their own. Strict-mode MySQL refused
+such writes, and non-strict mode truncated them. Retained values are unchanged.
+On SQLite, PostgreSQL and MongoDB the migration is recorded and does nothing.
+`MODIFY COLUMN` rebuilds the table on MySQL, so on a large `audit_logs` table
+plan for the copy time and disk space. The runner skips a column that is
+already `LONGTEXT` on a replay, and refuses one whose type, nullability or
+collation it does not expect.
 
 `003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
 `ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,

@@ -1611,6 +1611,13 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
     indexes: ACCOUNT_RECOVERY_JOB_INDEXES,
     apply: (db: Db): Promise<void> => createIndexes(db, ACCOUNT_RECOVERY_JOB_INDEXES),
   },
+  {
+    // MySQL widens three TEXT columns (issues #604 and #605). BSON strings
+    // have no column width, so MongoDB has nothing to change.
+    id: '014_mysql_text_capacity',
+    indexes: [],
+    apply: async (): Promise<void> => undefined,
+  },
 ];
 
 /**

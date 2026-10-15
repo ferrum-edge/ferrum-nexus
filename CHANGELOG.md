@@ -57,6 +57,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **MySQL stores every value the API accepts in audit details and spec
+  metadata** (#604, #605). The new forward migration `014_mysql_text_capacity`
+  widens `audit_logs.details_json` (`TEXT`, 65,535 bytes) and
+  `api_specs.parsed_title` and `parsed_version` (`VARCHAR(255)` and
+  `VARCHAR(64)`) to `LONGTEXT`. An MCP agents update or publish whose audit row
+  carried long tool descriptions, or a specification with a long
+  `info.title` or `info.version`, failed on strict-mode MySQL with an internal
+  error and was truncated otherwise. The migration is a no-op on SQLite,
+  PostgreSQL and MongoDB. On MySQL it rebuilds `audit_logs` and `api_specs`, so
+  allow for that on a large audit log. The MySQL migration runner now supports
+  this widening and verifies it on replay.
+
 - **A refused metrics read is reported, not shown as zero**
   (ferrum-edge/ferrum-edge#6095). When the gateway refuses the portal's
   credential on `GET /metrics`, `GET /api/apis/:id/usage` now answers

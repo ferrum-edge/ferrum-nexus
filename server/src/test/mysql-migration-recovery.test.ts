@@ -187,6 +187,82 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
     }
   });
 
+  it('replays the LONGTEXT widenings across every interruption, preserving data (#604, #605)', async () => {
+    const migration = migrations.find((file) => file.id === '014_mysql_text_capacity');
+    assert.ok(migration);
+    const statements = splitSqlStatements(migration.sql);
+    assert.equal(statements.length, 3);
+    const expected = await fixture(async (pool) => {
+      await runMysqlMigrations(pool);
+      return schema(pool);
+    });
+    for (const boundary of [...statements, 'before-ledger', 'after-ledger']) {
+      await fixture(async (pool, url) => {
+        await runMysqlMigrations(
+          pool,
+          migrations.filter((file) => file.id < migration.id),
+        );
+        await pool.query(`INSERT INTO organizations (id, name, created_at, updated_at)
+          VALUES ('preserved', 'Survives restart', '2026-01-01', '2026-01-01')`);
+        await pool.query(`INSERT INTO audit_logs (id, action, target_type, details_json, created_at)
+          VALUES ('retained-audit', 'test.retained', 'api', '{"kept":true}', '2026-01-01')`);
+        let fired = false;
+        const faulty = intercept(pool, (method, sql, params, after) => {
+          if (fired) return;
+          const ddl = method === 'query' && after && normalize(sql) === normalize(boundary);
+          const ledger =
+            method === 'execute' &&
+            sql.startsWith('INSERT INTO schema_migrations ') &&
+            Array.isArray(params) &&
+            params[0] === migration.id &&
+            ((boundary === 'before-ledger' && !after) || (boundary === 'after-ledger' && after));
+          if (ddl || ledger) {
+            fired = true;
+            throw new Error(interruption);
+          }
+        });
+        await assert.rejects(() => runMysqlMigrations(faulty), new RegExp(interruption));
+        assert.ok(fired, boundary);
+        await restartAndVerify(pool, url, expected);
+        const [rows] = await pool.query<mysql.RowDataPacket[]>(
+          "SELECT details_json FROM audit_logs WHERE id = 'retained-audit'",
+        );
+        assert.equal(rows[0]?.details_json, '{"kept":true}');
+        // What TEXT could not hold now fits.
+        const wide = JSON.stringify({ description: 'é'.repeat(40_000) });
+        await pool.execute(
+          `INSERT INTO audit_logs (id, action, target_type, details_json, created_at)
+            VALUES ('wide-audit', 'test.wide', 'api', ?, '2026-01-01')`,
+          [wide],
+        );
+        const [wideRows] = await pool.query<mysql.RowDataPacket[]>(
+          "SELECT details_json FROM audit_logs WHERE id = 'wide-audit'",
+        );
+        assert.equal(wideRows[0]?.details_json, wide);
+      });
+    }
+  });
+
+  it('refuses a widening target it does not recognise without recording 014', async () => {
+    for (const definition of [
+      "TEXT NULL DEFAULT ('{}')",
+      "MEDIUMBLOB NOT NULL DEFAULT ('{}')",
+      "TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT ('{}')",
+    ]) {
+      await fixture(async (pool) => {
+        await runMysqlMigrations(
+          pool,
+          migrations.filter((file) => file.id < '014_mysql_text_capacity'),
+        );
+        await pool.query(`ALTER TABLE audit_logs MODIFY COLUMN details_json ${definition}`);
+        const [before] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
+        await assert.rejects(() => runMysqlMigrations(pool), /has an incompatible definition/);
+        const [after] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
+        assert.deepEqual(after, before);
+      });
+    }
+  });
+
   it('resumes after every committed CREATE and before recording the baseline', async () => {
     const expected = await fixture(async (pool) => {
       await runMysqlMigrations(pool);

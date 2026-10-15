@@ -24,6 +24,7 @@ describe('buildout schema baseline', () => {
           '011_mcp_tool_subsets',
           '012_access_request_grant',
           '013_account_recovery_jobs',
+          '014_mysql_text_capacity',
         ],
       );
       const statements = splitSqlStatements(files[0]!.sql);

@@ -17,6 +17,16 @@ const STRING_COLUMN = /^(VARCHAR\([1-9][0-9]*\)) (NULL|NOT NULL DEFAULT '')$/i;
 const NULLABLE_LONGTEXT_COLUMN = /^LONGTEXT DEFAULT NULL$/i;
 const INTEGER_COLUMN = /^INT NOT NULL DEFAULT ([0-9]+)$/i;
 const CREATE_INDEX = /^CREATE INDEX ([a-z][a-z0-9_]*) ON ([a-z][a-z0-9_]*) \((.+)\)$/i;
+/**
+ * Widening an existing text column to LONGTEXT, keeping its nullability and
+ * default (`014_mysql_text_capacity`). Only these two spellings, so the
+ * replay check below knows exactly what a finished change looks like.
+ */
+const WIDEN_TO_LONGTEXT =
+  /^ALTER TABLE ([a-z][a-z0-9_]*) MODIFY COLUMN ([a-z][a-z0-9_]*) LONGTEXT (NOT NULL DEFAULT \('\{\}'\)|DEFAULT NULL)$/i;
+/** The column types a widening may start from: what earlier releases created. */
+const WIDENABLE_TYPES = new Set(['text', 'longtext']);
+const WIDENABLE_VARCHAR = /^varchar\([1-9][0-9]*\)$/;
 // This assignment is idempotent, and changes no delivery state. Do not accept
 // arbitrary DML here: MySQL can commit it before the ledger is recorded.
 const OUTBOX_PRIORITY_BACKFILL =
@@ -36,6 +46,14 @@ interface AddColumn {
   stringColumn: boolean;
 }
 
+interface WidenColumn {
+  kind: 'widen';
+  statement: string;
+  table: string;
+  column: string;
+  nullable: boolean;
+}
+
 interface AddIndex {
   kind: 'index';
   statement: string;
@@ -44,13 +62,28 @@ interface AddIndex {
   columns: { name: string; direction: 'A' | 'D' }[];
 }
 
-/** Only replay-verifiable additions and the idempotent priority backfill are supported. */
-function migrationSteps(migration: MigrationFile): (string | AddColumn | AddIndex)[] {
-  return splitSqlStatements(migration.sql).map<string | AddColumn | AddIndex>((sql) => {
+type MigrationStep = string | AddColumn | AddIndex | WidenColumn;
+
+/**
+ * Only replay-verifiable additions, LONGTEXT widenings and the idempotent
+ * priority backfill are supported.
+ */
+function migrationSteps(migration: MigrationFile): MigrationStep[] {
+  return splitSqlStatements(migration.sql).map<MigrationStep>((sql) => {
     const statement = sql.replace(/\s+/g, ' ').trim();
     if (/^CREATE TABLE IF NOT EXISTS\s/i.test(statement)) return sql;
     if (migration.id === '009_outbox_priority' && statement === OUTBOX_PRIORITY_BACKFILL) {
       return statement;
+    }
+    const widen = WIDEN_TO_LONGTEXT.exec(statement);
+    if (widen) {
+      return {
+        kind: 'widen',
+        statement,
+        table: widen[1]!,
+        column: widen[2]!,
+        nullable: widen[3]!.toUpperCase() === 'DEFAULT NULL',
+      };
     }
     const index = CREATE_INDEX.exec(statement);
     if (index) {
@@ -111,6 +144,40 @@ async function columnExists(connection: mysql.PoolConnection, step: AddColumn): 
   return true;
 }
 
+/**
+ * Whether a widening already landed. `MODIFY COLUMN` commits on its own, so a
+ * replay after an interruption finds it done; it is skipped rather than
+ * rebuilding the table again. A column that is neither the type an earlier
+ * release created nor the finished LONGTEXT, or whose nullability or
+ * collation differs, is refused rather than converted.
+ */
+async function columnWidened(
+  connection: mysql.PoolConnection,
+  step: WidenColumn,
+): Promise<boolean> {
+  const [rows] = await connection.execute<mysql.RowDataPacket[]>(
+    `SELECT c.DATA_TYPE, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLLATION_NAME, t.TABLE_COLLATION
+       FROM information_schema.COLUMNS c
+       JOIN information_schema.TABLES t
+         ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+      WHERE c.TABLE_SCHEMA = DATABASE() AND c.TABLE_NAME = ? AND c.COLUMN_NAME = ?`,
+    [step.table, step.column],
+  );
+  const column = rows[0];
+  const type = String(column?.COLUMN_TYPE ?? '').toLowerCase();
+  if (
+    !column ||
+    !(WIDENABLE_TYPES.has(type) || WIDENABLE_VARCHAR.test(type)) ||
+    column.IS_NULLABLE !== (step.nullable ? 'YES' : 'NO') ||
+    column.COLLATION_NAME !== column.TABLE_COLLATION
+  ) {
+    throw new Error(
+      `MySQL migration column ${step.table}.${step.column} has an incompatible definition`,
+    );
+  }
+  return type === 'longtext';
+}
+
 async function indexExists(connection: mysql.PoolConnection, step: AddIndex): Promise<boolean> {
   const [rows] = await connection.execute<mysql.RowDataPacket[]>(
     `SELECT COLUMN_NAME, COLLATION, NON_UNIQUE, SUB_PART, INDEX_TYPE, IS_VISIBLE, EXPRESSION
@@ -156,11 +223,15 @@ async function applyMigration(
       await connection.query(step);
     } else {
       const present = () =>
-        step.kind === 'column' ? columnExists(connection, step) : indexExists(connection, step);
+        step.kind === 'column'
+          ? columnExists(connection, step)
+          : step.kind === 'widen'
+            ? columnWidened(connection, step)
+            : indexExists(connection, step);
       if (!(await present())) {
         await connection.query(step.statement);
         if (!(await present())) {
-          throw new Error(`MySQL migration failed to add an object to ${step.table}`);
+          throw new Error(`MySQL migration failed to change ${step.table}`);
         }
       }
     }
