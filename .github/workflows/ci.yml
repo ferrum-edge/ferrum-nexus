@@ -225,8 +225,11 @@ jobs:
         # that image's kernel (7.0.0-1017-azure) but exits on 20260927's
         # (7.0.0-1012-azure) with "Linux kernel versions 6.19.0 through 7.0.13
         # have a known incompatibility" (SERVER-121912 / SERVER-136272), so jobs
-        # pass or fail by which image they draw. 7.0 has no such check. This
-        # step prints the kernel on failure.
+        # pass or fail by which image they draw. 7.0 has no such check. Retry
+        # 9.0 once every runner is on 20261012+, a mongo:9 build drops the
+        # kernel gate, or the runner kernel is 7.0.14 or later; the push run
+        # on main proves it (PR runs use main's ci.yml). This step prints the
+        # kernel on failure.
         run: |
           docker run -d --name nexus-mongo -p 27017:27017 mongo:7@sha256:1f995ad6fdb93244a1addab1b58f934a0bc2f5643c38e02f5e9d7f0c7d227a7b --replSet rs0 --bind_ip_all
           ready=""
