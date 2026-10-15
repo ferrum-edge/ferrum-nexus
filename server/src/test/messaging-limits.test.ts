@@ -469,15 +469,22 @@ describe('message email coalescing', () => {
     const queued = (await harness.outbox()).filter(
       (row) => row.to_email === 'coalesce-founder@example.test',
     );
-    assert.equal(queued.length, lastBucket - firstBucket + 1, 'five messages, one mail per window');
+    // Normally one bucket and one mail. A boundary that passed during the run
+    // allows at most one mail per bucket it spanned, never one per message.
+    assert.ok(
+      queued.length >= 1 && queued.length <= lastBucket - firstBucket + 1,
+      `five messages, one mail per window: ${queued.length}`,
+    );
     const prefix = `message_received:${threadId}:${founder.user.id}:`;
-    for (const row of queued) {
-      const bucket = Number(row.idempotency_key?.slice(prefix.length));
+    const buckets = queued.map((row) => Number(row.idempotency_key?.slice(prefix.length)));
+    for (const [index, row] of queued.entries()) {
+      const bucket = buckets[index]!;
       assert.ok(
         row.idempotency_key?.startsWith(prefix) && bucket >= firstBucket && bucket <= lastBucket,
         `the key is thread + recipient + time bucket: ${row.idempotency_key}`,
       );
     }
+    assert.equal(new Set(buckets).size, buckets.length, 'one mail per bucket');
 
     // In-app notifications are deliberately *not* coalesced: they are cheap and
     // the limiter plus the budget already cap how many there can be.

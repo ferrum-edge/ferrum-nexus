@@ -122,10 +122,14 @@ export async function waitFor(
         once: true,
       });
     });
+    // Observed from the start: the abort that ends a finished attempt must
+    // never surface as an unhandled rejection.
+    abandoned.catch(() => undefined);
     let succeeded = false;
     try {
       const ready = await Promise.race([
-        attemptSignal.run(attempt.signal, () => check(attempt.signal)),
+        // Async, so a check that throws synchronously rejects inside the race.
+        attemptSignal.run(attempt.signal, async () => check(attempt.signal)),
         abandoned,
       ]);
       succeeded = ready && !attempt.signal.aborted && Date.now() <= deadline;

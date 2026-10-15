@@ -71,6 +71,31 @@ describe('waitFor', () => {
     assert.equal(calls, 2);
   });
 
+  it('retries a check that throws synchronously, without an unhandled rejection', async () => {
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', record);
+    try {
+      let calls = 0;
+      await harness.waitFor(
+        'a check that throws first',
+        (() => {
+          calls += 1;
+          if (calls === 1) throw new Error('not ready');
+          return Promise.resolve(true);
+        }) as (signal: AbortSignal) => Promise<boolean>,
+        5_000,
+      );
+      assert.equal(calls, 2);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.deepEqual(unhandled, []);
+    } finally {
+      process.off('unhandledRejection', record);
+    }
+  });
+
   it('gives up at the deadline on a check that never settles', async () => {
     let signal: AbortSignal | undefined;
     const took = await elapsed(() =>

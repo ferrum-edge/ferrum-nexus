@@ -5900,6 +5900,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // found and waited for rather than missed — and an owner who is
         // already disabled is refused here, before anything is created.
         const previous = await store.gatewayIdentities.findByUsername(edge.namespace, username);
+        // The consumer the registration names, read before ownership moves.
+        // Only Edge's own `Consumer not found` reads as gone; any other `404`
+        // throws here, while the registration is still the previous owner's.
+        // Read after the claim, that throw left the compensation to discard a
+        // registration that still named a live consumer, and nothing would
+        // ever collect it (issue #598).
+        const bound = previous?.ferrum_consumer_id
+          ? await edge.consumers.get(previous.ferrum_consumer_id, { confirmedAbsence: true })
+          : null;
         const identity = await credentials.claimGatewayIdentity(actor.id, username);
 
         // From here on the registration is the actor's, so everything that
@@ -5919,9 +5928,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // Recreating replaces: a test consumer is disposable by definition,
           // and deleting it is the only way to reset its credentials show-once
           // state.
-          const bound = previous?.ferrum_consumer_id
-            ? await edge.consumers.get(previous.ferrum_consumer_id, { confirmedAbsence: true })
-            : null;
           if (bound && bound.username !== username) {
             throw edgeError('The stored test consumer id belongs to another username');
           }
