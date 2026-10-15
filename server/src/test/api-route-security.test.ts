@@ -9,6 +9,7 @@ import { after, before, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 
 import {
+  CSP_NONCE_PLACEHOLDER,
   CSRF_COOKIE,
   CSRF_HEADER,
   SESSION_COOKIE,
@@ -20,7 +21,15 @@ import { CSRF_EXEMPT_PATHS } from '../middleware/auth-plugin.js';
 import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './helpers.js';
 
 const API_PREFIXES = ['/api', '/%61pi', '/a%70i', '/ap%69', '/%61%70%69'];
-const SPA = '<!doctype html><title>Nexus test shell</title>';
+const SPA_TITLE = '<title>Nexus test shell</title>';
+const SPA = `<!doctype html><meta property="csp-nonce" nonce="${CSP_NONCE_PLACEHOLDER}">${SPA_TITLE}`;
+
+/** `body` is the test shell, templated with some per-response nonce. */
+function assertShell(body: string, path: string): void {
+  const nonce = /nonce="([^"]+)"/.exec(body)?.[1];
+  assert.ok(nonce && nonce !== CSP_NONCE_PLACEHOLDER, `${path} carries a nonce`);
+  assert.equal(body, SPA.replace(CSP_NONCE_PLACEHOLDER, nonce), path);
+}
 const ASSET = 'console.log("Nexus public asset");\n';
 const EXEMPT_POSTS = [
   '/api/auth/login',
@@ -205,7 +214,7 @@ describe('API route security over a listening socket', () => {
       assert.equal((await socketRequest(port, 'HEAD', '/assets/app-test.js', headers)).body, '');
       for (const path of ['/', '/dashboard', '/catalog/some-api']) {
         const shell = await socketRequest(port, 'GET', path, headers);
-        assert.equal(shell.body, SPA, path);
+        assertShell(shell.body, path);
       }
       assert.equal((await socketRequest(port, 'GET', '/missing.js', headers)).statusCode, 404);
       assert.equal(lookups, 0, 'no session lookup outside the API');
@@ -254,8 +263,8 @@ describe('API route security over a listening socket', () => {
     for (const path of ['/', '/dashboard', '/assets/']) {
       const shell = await socketRequest(port, 'GET', path);
       assert.equal(shell.statusCode, 200, path);
-      assert.equal(shell.body, SPA, path);
-      assert.equal(shell.headers['cache-control'], 'no-cache', path);
+      assertShell(shell.body, path);
+      assert.equal(shell.headers['cache-control'], 'no-store', path);
     }
   });
 
@@ -452,8 +461,8 @@ describe('API route security over a listening socket', () => {
     ]) {
       const response = await socketRequest(port, 'GET', path, { cookie: admin.cookieHeader });
       assert.equal(response.statusCode, 200, path);
-      assert.equal(response.body, SPA, path);
-      assert.equal(response.headers['cache-control'], 'no-cache', path);
+      assertShell(response.body, path);
+      assert.equal(response.headers['cache-control'], 'no-store', path);
       assertError(
         await socketRequest(port, 'PATCH', path, { cookie: admin.cookieHeader }),
         404,
@@ -480,7 +489,7 @@ describe('API route security over a listening socket', () => {
           const response = await socketRequest(port, method, path, headers);
           assertError(response, 400, 'VALIDATION_FAILED');
           assert.equal(response.headers['set-cookie'], undefined);
-          assert.equal(response.body.includes(SPA), false);
+          assert.equal(response.body.includes(SPA_TITLE), false);
         }
       }
     }

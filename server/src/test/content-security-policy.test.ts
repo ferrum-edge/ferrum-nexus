@@ -3,6 +3,10 @@
  * on the SPA shell, and only for the provider that is enabled — or for every
  * provider on a shell a signed-in super admin loads, for the activation
  * self-test. Every other response carries the strict base policy.
+ *
+ * Issue #587: no response allows `style-src 'unsafe-inline'`. The shell's
+ * policy names a nonce that is fresh on every response, and the shell carries
+ * the same nonce.
  */
 
 import assert from 'node:assert/strict';
@@ -11,17 +15,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
+import { CSP_NONCE_PLACEHOLDER } from '@ferrum-nexus/shared';
+
 import { CAPTCHA_SECRET_SETTINGS_KEY, CAPTCHA_SETTINGS_KEY } from '../auth/captcha.js';
 import {
   BASE_CONTENT_SECURITY_POLICY,
   CAPTCHA_CSP_SOURCES,
   CAPTCHA_VENDORS,
   contentSecurityPolicy,
+  readSpaShell,
   type CaptchaVendor,
 } from '../middleware/content-security-policy.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
-const SPA = '<!doctype html><title>Nexus CSP shell</title>';
+const SPA = `<!doctype html><meta property="csp-nonce" nonce="${CSP_NONCE_PLACEHOLDER}"><title>Nexus CSP shell</title>`;
 
 function hostsOf(vendor: CaptchaVendor): string[] {
   const sources = CAPTCHA_CSP_SOURCES[vendor];
@@ -38,6 +45,18 @@ function directive(policy: string, name: string): string[] {
     if (key === name) return values;
   }
   assert.fail(`${name} is missing from ${policy}`);
+}
+
+/** `policy` without the shell's style nonce, to compare with a nonce-free policy. */
+function withoutNonce(policy: string): string {
+  return policy.replace(/ 'nonce-[^']+'/g, '');
+}
+
+/** The style nonce `policy` names. */
+function styleNonce(policy: string): string {
+  const nonce = /^'nonce-(.+)'$/.exec(directive(policy, 'style-src').at(-1) ?? '')?.[1];
+  assert.ok(nonce, `style-src names a nonce in ${policy}`);
+  return nonce;
 }
 
 function assertAdmitsOnly(policy: string, vendors: readonly CaptchaVendor[]): void {
@@ -59,6 +78,13 @@ describe('contentSecurityPolicy', () => {
     assert.deepEqual(directive(BASE_CONTENT_SECURITY_POLICY, 'frame-ancestors'), ["'none'"]);
     assert.deepEqual(directive(BASE_CONTENT_SECURITY_POLICY, 'object-src'), ["'none'"]);
     assert.deepEqual(directive(BASE_CONTENT_SECURITY_POLICY, 'script-src-attr'), ["'none'"]);
+    assert.deepEqual(directive(BASE_CONTENT_SECURITY_POLICY, 'style-src'), ["'self'"]);
+  });
+
+  it('allows inline styles only by nonce, never unsafe-inline', () => {
+    const policy = contentSecurityPolicy(CAPTCHA_VENDORS, 'n0nce');
+    assert.deepEqual(directive(policy, 'style-src'), ["'self'", "'nonce-n0nce'"]);
+    assert.equal(policy.includes('unsafe-inline'), false);
   });
 
   for (const vendor of CAPTCHA_VENDORS) {
@@ -91,6 +117,10 @@ describe('Content-Security-Policy on responses', () => {
     return buildTestApp({ env: { NEXUS_WEB_DIST: webDist }, deps: { serveStatic: true } });
   }
 
+  /**
+   * The shell's policy, checked to name the nonce the shell carries, and
+   * returned without it so it compares with the nonce-free policies.
+   */
   async function shellPolicy(
     harness: TestApp,
     session?: TestSession,
@@ -105,7 +135,9 @@ describe('Content-Security-Policy on responses', () => {
     assert.match(String(response.headers['content-type']), /^text\/html/);
     const policy = response.headers['content-security-policy'];
     assert.equal(typeof policy, 'string');
-    return policy as string;
+    const nonce = styleNonce(policy as string);
+    assert.equal(response.body, SPA.replace(CSP_NONCE_PLACEHOLDER, nonce));
+    return withoutNonce(policy as string);
   }
 
   async function enableCaptcha(harness: TestApp, provider: CaptchaVendor): Promise<void> {
@@ -156,6 +188,7 @@ describe('Content-Security-Policy on responses', () => {
     });
     assert.equal(elevated.statusCode, 200);
     assertAdmitsOnly(String(elevated.headers['content-security-policy']), [...CAPTCHA_VENDORS]);
+    styleNonce(String(elevated.headers['content-security-policy']));
     assert.match(String(elevated.headers.vary), /cookie/i);
     assert.match(String(elevated.headers['cache-control']), /private/);
 
@@ -180,22 +213,35 @@ describe('Content-Security-Policy on responses', () => {
     assertAdmitsOnly(await shellPolicy(harness), ['turnstile']);
   });
 
-  it('keeps the vendor sources on a 304 revalidation of the shell', async (t) => {
+  it('templates a fresh nonce into every shell, which is never cached or revalidated', async (t) => {
     const harness = await portal();
     t.after(() => harness.close());
     await enableCaptcha(harness, 'recaptcha');
-    for (const url of ['/index.html', '/%69ndex.html', '/catalog']) {
-      const first = await harness.app.inject({ method: 'GET', url });
-      assert.equal(first.statusCode, 200, url);
-      const etag = first.headers.etag;
-      assert.ok(typeof etag === 'string', `${url} carries an ETag`);
-      const revalidated = await harness.app.inject({
-        method: 'GET',
-        url,
-        headers: { 'if-none-match': etag },
-      });
-      assert.equal(revalidated.statusCode, 304, url);
-      assertAdmitsOnly(String(revalidated.headers['content-security-policy']), ['recaptcha']);
+    const nonces = new Set<string>();
+    for (const url of ['/index.html', '/%69ndex.html', '/catalog', '/catalog']) {
+      const response = await harness.app.inject({ method: 'GET', url });
+      assert.equal(response.statusCode, 200, url);
+      assert.equal(response.headers.etag, undefined, url);
+      assert.equal(response.headers['last-modified'], undefined, url);
+      assert.equal(response.headers['cache-control'], 'no-store', url);
+      const policy = String(response.headers['content-security-policy']);
+      assertAdmitsOnly(policy, ['recaptcha']);
+      const nonce = styleNonce(policy);
+      assert.equal(response.body, SPA.replace(CSP_NONCE_PLACEHOLDER, nonce), url);
+      nonces.add(nonce);
+    }
+    assert.equal(nonces.size, 4, 'every response gets its own nonce');
+  });
+
+  it('refuses a shell built without the nonce placeholder', async () => {
+    const stale = await mkdtemp(join(tmpdir(), 'nexus-csp-stale-'));
+    try {
+      await writeFile(join(stale, 'index.html'), '<!doctype html><title>stale</title>');
+      await assert.rejects(readSpaShell(stale), /no CSP nonce placeholder/);
+      await writeFile(join(stale, 'index.html'), SPA);
+      assert.equal(await readSpaShell(stale), SPA);
+    } finally {
+      await rm(stale, { recursive: true, force: true });
     }
   });
 

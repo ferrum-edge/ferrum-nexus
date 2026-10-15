@@ -19,17 +19,24 @@
  * for `https://www.google.com` in particular, whose script-src allowance is a
  * well-known CSP bypass gadget.
  *
- * `style-src 'unsafe-inline'` stays. The UI's Radix primitives inject `<style>`
- * elements at runtime: the scroll lock behind every Dialog, Select and
- * DropdownMenu writes one with computed widths, and Select's viewport renders
- * another. Neither can carry a hash, so dropping it needs per-response nonces
- * threaded into the shell and those libraries. Branding does **not** need it:
- * it sets custom properties through the CSSOM, which CSP does not govern.
+ * `style-src` has no `'unsafe-inline'` (issue #587). The UI's Radix primitives
+ * inject `<style>` elements at runtime: the scroll lock behind every Dialog,
+ * Select and DropdownMenu writes one with computed widths, and Select's
+ * viewport renders another. Neither can carry a hash, so the shell's policy
+ * names a nonce that is fresh on every response. The SPA fallback writes the
+ * same nonce into the shell (see {@link markSpaShell}), and the app hands it to
+ * those libraries. Every other response gets plain `style-src 'self'`.
+ * Branding sets custom properties through the CSSOM, which CSP does not govern.
  */
+
+import { randomBytes } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import {
+  CSP_NONCE_PLACEHOLDER,
   SESSION_COOKIE,
   type CaptchaProvider,
   type CaptchaPublicConfig,
@@ -77,12 +84,16 @@ function isCaptchaVendor(value: unknown): value is CaptchaVendor {
 }
 
 /**
- * The policy admitting `vendors`' hosts (none for the base policy).
+ * The policy admitting `vendors`' hosts (none for the base policy), and
+ * `<style>` elements carrying `styleNonce` (the SPA shell's, none otherwise).
  *
  * Vendors are emitted in a fixed order whatever the input order, so equal
  * sets always produce the same header.
  */
-export function contentSecurityPolicy(vendors: Iterable<CaptchaVendor> = []): string {
+export function contentSecurityPolicy(
+  vendors: Iterable<CaptchaVendor> = [],
+  styleNonce?: string,
+): string {
   const wanted = new Set(vendors);
   const pick = (kind: keyof VendorSources): string[] => {
     const sources: string[] = [];
@@ -98,7 +109,7 @@ export function contentSecurityPolicy(vendors: Iterable<CaptchaVendor> = []): st
     ['script-src-attr', ["'none'"]],
     ['frame-src', ["'self'", ...pick('frame')]],
     ['connect-src', ["'self'", ...pick('connect')]],
-    ['style-src', ["'self'", "'unsafe-inline'"]],
+    ['style-src', ["'self'", ...(styleNonce ? [`'nonce-${styleNonce}'`] : [])]],
     ['img-src', ["'self'", 'data:']],
     ['font-src', ["'self'", 'data:']],
     ['object-src', ["'none'"]],
@@ -151,25 +162,45 @@ function isSettingsShell(request: FastifyRequest): boolean {
   return path === CAPTCHA_SELF_TEST_PATH || path.startsWith(`${CAPTCHA_SELF_TEST_PATH}/`);
 }
 
-/** Requests the SPA fallback answered with the shell; see {@link markSpaShell}. */
-const spaShellRequests = new WeakSet<object>();
+/** The nonce of each request answered with the shell; see {@link markSpaShell}. */
+const spaShellNonces = new WeakMap<object, string>();
 
-/**
- * Mark `request` as answered with the SPA shell. The fallback calls this, so
- * the shell is recognised by what serves it rather than by its `Content-Type`,
- * which a `304` revalidation does not carry (and whose headers a browser
- * merges into the cached document).
- */
-export function markSpaShell(request: FastifyRequest): void {
-  spaShellRequests.add(request.raw);
+/** A fresh nonce for one shell response: 128 random bits. */
+export function newCspNonce(): string {
+  return randomBytes(16).toString('base64');
 }
 
-/** Whether this response is the SPA shell, a `304` revalidation of it included. */
+/**
+ * The built SPA shell from `webDist`. It must carry Vite's nonce placeholder
+ * (`html.cspNonce`): a shell built without it would be served under a policy
+ * that blocks the UI's runtime styles, so the server refuses to start instead.
+ */
+export async function readSpaShell(webDist: string): Promise<string> {
+  const path = resolve(webDist, 'index.html');
+  const html = await readFile(path, 'utf8');
+  if (!html.includes(CSP_NONCE_PLACEHOLDER)) {
+    throw new Error(
+      `${path} carries no CSP nonce placeholder; build the SPA with html.cspNonce set`,
+    );
+  }
+  return html;
+}
+
+/**
+ * Mark `request` as answered with the SPA shell, templated with `nonce`. The
+ * fallback calls this, so the shell is recognised by what serves it rather
+ * than by its `Content-Type`, and its policy names the nonce it carries.
+ */
+export function markSpaShell(request: FastifyRequest, nonce: string): void {
+  spaShellNonces.set(request.raw, nonce);
+}
+
+/**
+ * Whether this response is the SPA shell. Any other HTML gets the shell's
+ * vendor hosts too, but no nonce: only a templated shell carries one.
+ */
 function isShellResponse(request: FastifyRequest, reply: FastifyReply): boolean {
-  if (spaShellRequests.has(request.raw)) return true;
-  // `/index.html` is also a static file `@fastify/static` serves directly. Match
-  // the route Fastify selected, so every spelling that reaches it counts.
-  if (request.routeOptions.url === '/index.html') return true;
+  if (spaShellNonces.has(request.raw)) return true;
   const type = reply.getHeader('content-type');
   return typeof type === 'string' && type.toLowerCase().startsWith('text/html');
 }
@@ -216,6 +247,9 @@ export function registerContentSecurityPolicy(
 
   app.addHook('onSend', async (request, reply, payload) => {
     if (!isShellResponse(request, reply)) return payload;
+    const nonce = spaShellNonces.get(request.raw);
+    // The base vendor-free policy, plus the shell's own nonce.
+    if (nonce) reply.header('content-security-policy', contentSecurityPolicy([], nonce));
     const vendors = new Set<CaptchaVendor>();
     let superAdmin = false;
     try {
@@ -223,8 +257,9 @@ export function registerContentSecurityPolicy(
       if (enabled !== null) vendors.add(enabled);
       if (isSettingsShell(request)) superAdmin = await requestIsSuperAdmin(request, options);
     } catch (error) {
-      // Fail closed: the base policy already on the reply stands, which costs
-      // at most a CAPTCHA widget that does not load until the next page load.
+      // Fail closed: the vendor-free policy already on the reply stands, which
+      // costs at most a CAPTCHA widget that does not load until the next page
+      // load.
       request.log.warn(
         { error: error instanceof Error ? error.message : String(error) },
         'Could not resolve the CAPTCHA hosts for the Content-Security-Policy',
@@ -236,9 +271,11 @@ export function registerContentSecurityPolicy(
       // This shell's policy depends on who asked for it; a shared cache must
       // not hand the wider one to anybody else.
       varyOnCookie(reply);
-      reply.header('cache-control', 'private, no-cache');
+      reply.header('cache-control', 'private, no-store');
     }
-    if (vendors.size > 0) reply.header('content-security-policy', contentSecurityPolicy(vendors));
+    if (vendors.size > 0) {
+      reply.header('content-security-policy', contentSecurityPolicy(vendors, nonce));
+    }
     return payload;
   });
 }

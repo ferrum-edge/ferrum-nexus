@@ -1,6 +1,7 @@
 import * as SelectPrimitive from '@radix-ui/react-select';
 import { useId, type ReactElement, type ReactNode } from 'react';
 import { cn } from '../../lib/cn';
+import { cspNonce } from '../../lib/csp-nonce';
 import { Field } from './Input';
 import { Icon } from './Icon';
 
@@ -72,7 +73,7 @@ export function Select<T extends string = string>({
           sideOffset={6}
           className="fx-pop animate-pop-in z-50 max-h-72 min-w-[var(--radix-select-trigger-width)] overflow-hidden"
         >
-          <SelectPrimitive.Viewport className="p-1">
+          <SelectPrimitive.Viewport nonce={cspNonce()} className="p-1">
             {options.map((option) => (
               <SelectPrimitive.Item
                 key={option.value}

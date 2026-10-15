@@ -21,7 +21,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import cookie from '@fastify/cookie';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+
+import { CSP_NONCE_PLACEHOLDER } from '@ferrum-nexus/shared';
 
 import { createAccessService, type AccessService } from './access/service.js';
 import {
@@ -80,6 +82,8 @@ import { createMessagingService, type MessagingService } from './messaging/servi
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
 import {
   markSpaShell,
+  newCspNonce,
+  readSpaShell,
   registerContentSecurityPolicy,
 } from './middleware/content-security-policy.js';
 import { userOrIpKey } from './middleware/rate-limit-keys.js';
@@ -743,27 +747,28 @@ export async function buildServer(
     reconciliation,
   };
   const webDist = (deps.serveStatic ?? true) ? resolveWebDist(config) : null;
+  // The shell is templated per response with a fresh CSP nonce (issue #587), so
+  // it is read once here and never served as a static file.
+  const shell = webDist ? await readSpaShell(webDist) : null;
+  const sendShell = (request: FastifyRequest, reply: FastifyReply): FastifyReply => {
+    const nonce = newCspNonce();
+    // Its Content-Security-Policy names this nonce and depends on the CAPTCHA
+    // settings; see `middleware/content-security-policy.ts`.
+    markSpaShell(request, nonce);
+    // no-store: every response carries its own nonce, so a cached or
+    // revalidated copy would not match the policy it is served with. It also
+    // picks up a fresh deploy's hashed asset references immediately.
+    return reply
+      .code(200)
+      .type('text/html; charset=utf-8')
+      .header('cache-control', 'no-store')
+      .send((shell as string).replaceAll(CSP_NONCE_PLACEHOLDER, nonce));
+  };
 
   app.decorate('nexus', { config, store: deps.store, edge: deps.edge, crypto, services });
 
   /* ── COMPOSITION — platform plugins ─────────────────────────────────── */
-  registerErrorHandler(app, {
-    ...(webDist
-      ? {
-          spaFallback: (request, reply) => {
-            // Its Content-Security-Policy depends on the CAPTCHA settings, and
-            // a 304 revalidation carries no Content-Type to recognise it by.
-            markSpaShell(request);
-            // no-cache: browsers must revalidate the shell so a fresh deploy's
-            // hashed asset references are picked up immediately.
-            return reply
-              .type('text/html')
-              .header('cache-control', 'no-cache')
-              .sendFile('index.html', { cacheControl: false });
-          },
-        }
-      : {}),
-  });
+  registerErrorHandler(app, shell !== null ? { spaFallback: sendShell } : {});
 
   await app.register(cookie, { parseOptions: { path: '/' } });
 
@@ -997,7 +1002,15 @@ export async function buildServer(
   /* ── COMPOSITION — static SPA (production) ──────────────────────────── */
   if (webDist) {
     const fastifyStatic = (await import('@fastify/static')).default;
-    await app.register(fastifyStatic, { root: webDist, wildcard: false, index: false });
+    // `index.html` is the templated shell, never the raw file with its
+    // placeholder nonce; `/index.html` gets the shell like any SPA route.
+    await app.register(fastifyStatic, {
+      root: webDist,
+      wildcard: false,
+      index: false,
+      globIgnore: ['index.html'],
+    });
+    app.get('/index.html', sendShell);
   }
 
   app.addHook('onClose', async () => {

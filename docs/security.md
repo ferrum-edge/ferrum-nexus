@@ -1868,16 +1868,16 @@ fix the settings and remove it. Runbook:
 helmet is configured in `server/src/index.ts`; the Content-Security-Policy is set by
 `server/src/middleware/content-security-policy.ts`:
 
-| Header                      | Value                                                                                                                                                                                             |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Content-Security-Policy`   | `default-src 'self'`; `base-uri 'self'`; `object-src 'none'`; `frame-ancestors 'none'`; `form-action 'self'`; `img-src 'self' data:`; `font-src 'self' data:`; `style-src 'self' 'unsafe-inline'` |
-| `script-src`                | `'self'`. On the SPA shell only, plus the enabled CAPTCHA provider's hosts (Turnstile, hCaptcha or reCAPTCHA), or every provider's on a shell a signed-in super admin loads                       |
-| `frame-src`                 | `'self'`, widened on the SPA shell exactly like `script-src`                                                                                                                                      |
-| `connect-src`               | `'self'`. On the SPA shell, plus `https://hcaptcha.com` and `https://*.hcaptcha.com` while hCaptcha is enabled, or for a super admin                                                              |
-| `X-Frame-Options`           | `DENY`                                                                                                                                                                                            |
-| `Referrer-Policy`           | `no-referrer`                                                                                                                                                                                     |
-| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains`, only when `NEXUS_COOKIE_SECURE` is on                                                                                                                      |
-| `Cache-Control`             | `private, no-store` plus `Vary: Cookie` on every response that sets a cookie; else `no-store` on every `/api` response that does not set its own (only `/api/branding` does)                      |
+| Header                      | Value                                                                                                                                                                                       |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Content-Security-Policy`   | `default-src 'self'`; `base-uri 'self'`; `object-src 'none'`; `frame-ancestors 'none'`; `form-action 'self'`; `img-src 'self' data:`; `font-src 'self' data:`; `style-src 'self' 'nonce-…'` |
+| `script-src`                | `'self'`. On the SPA shell only, plus the enabled CAPTCHA provider's hosts (Turnstile, hCaptcha or reCAPTCHA), or every provider's on a shell a signed-in super admin loads                 |
+| `frame-src`                 | `'self'`, widened on the SPA shell exactly like `script-src`                                                                                                                                |
+| `connect-src`               | `'self'`. On the SPA shell, plus `https://hcaptcha.com` and `https://*.hcaptcha.com` while hCaptcha is enabled, or for a super admin                                                        |
+| `X-Frame-Options`           | `DENY`                                                                                                                                                                                      |
+| `Referrer-Policy`           | `no-referrer`                                                                                                                                                                               |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains`, only when `NEXUS_COOKIE_SECURE` is on                                                                                                                |
+| `Cache-Control`             | `private, no-store` plus `Vary: Cookie` on every response that sets a cookie; else `no-store` on every `/api` response that does not set its own (only `/api/branding` does)                |
 
 Deliberate loosenings:
 
@@ -1889,17 +1889,24 @@ Deliberate loosenings:
   session. A
   settings page opened before signing in cannot load another provider's widget
   until it is reloaded; the self-test says so. The shell reads the CAPTCHA
-  settings on every load (a `304` revalidation included), so a new page always
-  matches them; a tab opened before CAPTCHA was switched on or changed shows a
+  settings on every load, so a new page always matches them; a tab opened
+  before CAPTCHA was switched on or changed shows a
   **Reload the page** action when its widget cannot load. With CAPTCHA off, an
   anonymous visitor's shell lists no vendor host at all.
-- `style-src 'unsafe-inline'` is needed by the UI's Radix primitives, which
-  inject `<style>` elements at runtime (the scroll lock behind dialogs, selects
-  and menus writes computed widths; the select viewport renders another).
-  Those cannot be hashed; removing it needs per-response nonces threaded into
-  the shell and the libraries. Branding does not need it: it sets CSS custom
-  properties through the CSSOM. `script-src` has no `unsafe-inline` or
-  `unsafe-eval`, and `script-src-attr` is `'none'`.
+- `style-src` has no `unsafe-inline` (#587). The UI's Radix primitives inject
+  `<style>` elements at runtime (the scroll lock behind dialogs, selects and
+  menus writes computed widths; the select viewport renders another), which
+  cannot be hashed, so the SPA shell's policy names a nonce that is fresh on
+  every response. The server templates `index.html` per request instead of
+  serving the file, writing that nonce into every tag and into
+  `<meta property="csp-nonce">`; the app hands it to `react-style-singleton`
+  (through `get-nonce`) and to the select viewport. The shell is therefore sent
+  `Cache-Control: no-store`, with no `ETag`, since a cached copy would carry a
+  stale nonce. Inline `style` attributes in markup are blocked; branding sets
+  CSS custom properties through the CSSOM, which CSP does not govern. The
+  CAPTCHA widgets render in their own frames and need no inline style on the
+  page. `script-src` has no `unsafe-inline` or `unsafe-eval`, and
+  `script-src-attr` is `'none'`.
 - `img-src data:` is needed because the logo is stored as a `data:` URL.
 - `crossOriginEmbedderPolicy` is off so the CAPTCHA iframes work.
 

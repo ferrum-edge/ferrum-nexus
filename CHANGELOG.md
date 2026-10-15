@@ -24,6 +24,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- **`style-src` no longer allows `'unsafe-inline'`** (#587). The SPA shell's
+  Content-Security-Policy names a nonce that is fresh on every response, and
+  the server templates `index.html` with it instead of serving the file, so
+  the shell is now sent `Cache-Control: no-store` without an `ETag`. Radix's
+  runtime `<style>` elements (the dialog, select and menu scroll lock, and the
+  select viewport) carry the nonce. Every other response gets
+  `style-src 'self'`. The server refuses to start on a web build without the
+  nonce placeholder, so the web and server images must come from the same
+  build.
 - **MongoDB support is documented as 4.4.2 through 9.0, and CI tests the
   floor.** The `mongodb` driver is already at the latest release (7.7.0),
   which rejects servers older than 4.4; `init()` also needs the `hello`
