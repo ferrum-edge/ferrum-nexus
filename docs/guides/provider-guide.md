@@ -178,8 +178,9 @@ is discoverable in the portal; it is **not** anonymous MCP access. Private
 listings keep their existing viewer rules. An account's approval does not grant
 its applications access, or vice versa. Revocation removes the approval group
 and the same credential and MCP session lose access on the next gateway call.
-Approval covers all explicitly exposed tools on this API, including any added
-later; per-tool subset requests are deferred to phase 2.
+What an approval covers depends on the grant: all published tools (including
+ones added later), an explicit subset, or REST access with no tools. See the
+subset rules below.
 
 The picker displays fixed protection: an enforcing tool governor with unselected
 tools denied, argument-only prompt shielding for SSNs, credit cards, API and AWS
@@ -277,8 +278,9 @@ exceed it.
 > **The quota is counted per gateway process.** With several Ferrum Edge
 > replicas, each counts separately, so the real limit is your number times the
 > replica count, unless the operator runs Redis-synced counters
-> (`FERRUM_RATE_LIMIT_SYNC_MODE=redis`). Changing that setting affects only rate
-> limits saved afterwards, so an older API may need its limit saved again.
+> (`FERRUM_RATE_LIMIT_SYNC_MODE=redis`). Changing that setting does not move an
+> existing limit, and saving the same limit again changes nothing; your
+> operator migrates existing limits.
 
 ### CORS
 
@@ -665,17 +667,26 @@ URLs are compared after normalization, so `https://api.example.com/v2` and
 `https://api.example.com:443/v2/` are the same, while `/v2` → `/v3` on the same
 host **is** a move.
 
-In practice:
+There is no separate "pinned" switch: only the two URLs are compared, not how
+the upstream was set. In practice:
 
 - If you never set **Upstream URL**, editing `servers[0].url` and publishing
   **moves your traffic**, even for a base-path-only change.
-- If you set **Upstream URL**, uploads only change documentation.
-- Setting the upstream back to exactly the document's URL makes the API follow
+- If **Upstream URL** differs from the current document's `servers[0].url`,
+  uploads only change documentation.
+- If you type an **Upstream URL** that equals the current document's
+  `servers[0].url`, after normalization, it is **not** a pin. For example, with
+  `https://api.example.com/v2` in both, an upload naming
+  `https://api.example.com:443/v3/` moves the backend to `/v3`.
+- Setting the upstream back to the document's URL is how you make the API follow
   the document again.
 
-For production APIs, set **Upstream URL** explicitly so publishing docs and
-moving the backend stay separate decisions. If an upload that moves the backend
-fails, the move is undone.
+To keep publishing docs and moving the backend separate, make sure the
+document's `servers[0].url` is not your backend address, for example by listing
+the gateway URL your consumers call there. Before each upload, compare the API's
+**Upstream** with the current document's `servers[0].url`: if they match, the
+upload can move traffic. If an upload that moves the backend fails, the move is
+undone.
 
 ### If enforcement is on
 
