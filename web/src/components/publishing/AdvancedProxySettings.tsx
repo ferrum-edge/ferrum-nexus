@@ -12,6 +12,7 @@ import {
 import { Button } from '../ui/Button';
 import { Icon } from '../ui/Icon';
 import { Checkbox, Field, Input } from '../ui/Input';
+import { parseWholeNumber } from '../../lib/numbers';
 
 /** The three timeout boxes as the provider typed them; blank means "default". */
 export interface TimeoutDraft {
@@ -57,12 +58,9 @@ export function parseTimeoutDraft(draft: TimeoutDraft): ApiTimeouts | null | str
       values.push(fallback);
       continue;
     }
-    const parsed = Number.parseInt(raw, 10);
-    if (
-      !Number.isFinite(parsed) ||
-      parsed < MIN_BACKEND_TIMEOUT_MS ||
-      parsed > MAX_BACKEND_TIMEOUT_MS
-    ) {
+    // The whole field, so `100e1` is 1000 ms rather than 100 (issue #597).
+    const parsed = parseWholeNumber(raw);
+    if (parsed === null || parsed < MIN_BACKEND_TIMEOUT_MS || parsed > MAX_BACKEND_TIMEOUT_MS) {
       return `The ${label.toLowerCase()} timeout must be a whole number of milliseconds between ${MIN_BACKEND_TIMEOUT_MS} and ${MAX_BACKEND_TIMEOUT_MS.toLocaleString()}.`;
     }
     values.push(parsed);

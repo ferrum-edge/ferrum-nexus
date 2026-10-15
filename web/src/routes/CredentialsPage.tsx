@@ -36,6 +36,8 @@ import { LabeledSelect } from '../components/ui/Select';
 import { StatusPill } from '../components/ui/StatusPill';
 
 interface ShowOnceState {
+  /** The credential the secret belongs to; keys the dialog so acknowledgement never carries over. */
+  credentialId: string;
   secret: ShowOnceSecret;
   consumerUsername: string;
   title: string;
@@ -221,7 +223,13 @@ export function CredentialsPage(): ReactElement {
   // before applications existed uses.
   const [identity, setIdentity] = useState<string>(ACCOUNT_IDENTITY);
   const [identityName, setIdentityName] = useState<string>('My account');
-  const [showOnce, setShowOnce] = useState<ShowOnceState | null>(null);
+  // Secrets waiting to be acknowledged, oldest first. A queue rather than one
+  // slot so that no successful result can replace another the user has not
+  // saved yet (issue #593).
+  const [showOnceQueue, setShowOnceQueue] = useState<readonly ShowOnceState[]>([]);
+  const showOnce = showOnceQueue[0] ?? null;
+  const enqueueShowOnce = (next: ShowOnceState): void =>
+    setShowOnceQueue((queue) => [...queue, next]);
   const [rotating, setRotating] = useState<CredentialMetadata | null>(null);
   const [revoking, setRevoking] = useState<CredentialMetadata | null>(null);
   // Set when a revoke of `revoking` came back asking to clear the whole HTTP
@@ -395,11 +403,14 @@ export function CredentialsPage(): ReactElement {
       <Dialog
         open={issueOpen}
         onOpenChange={setIssueOpen}
+        // Held open while the request is in flight, so its secret is shown
+        // before anything else can be started (issue #593).
+        dismissible={!issue.isPending}
         title="Issue a credential"
         description="Choose the credential type expected by the APIs you call."
         footer={
           <>
-            <Button variant="ghost" onClick={() => setIssueOpen(false)}>
+            <Button variant="ghost" onClick={() => setIssueOpen(false)} disabled={issue.isPending}>
               Cancel
             </Button>
             <Button
@@ -418,7 +429,8 @@ export function CredentialsPage(): ReactElement {
                       setLabel('');
                       setIdentity(ACCOUNT_IDENTITY);
                       setIdentityName('My account');
-                      setShowOnce({
+                      enqueueShowOnce({
+                        credentialId: response.credential.id,
                         secret: response.secret,
                         consumerUsername: response.consumer_username,
                         title: 'Save your new credential',
@@ -492,7 +504,8 @@ export function CredentialsPage(): ReactElement {
             {
               onSuccess: (response) => {
                 setRotating(null);
-                setShowOnce({
+                enqueueShowOnce({
+                  credentialId: response.credential.id,
                   secret: response.secret,
                   consumerUsername: response.consumer_username,
                   title: 'Save your rotated credential',
@@ -571,17 +584,22 @@ export function CredentialsPage(): ReactElement {
 
       {showOnce ? (
         <ShowOnceSecretDialog
+          // A new key per credential: the acknowledgement tick belongs to one
+          // secret and must never carry over to the next (issue #593).
+          key={showOnce.credentialId}
           open
           secret={showOnce.secret}
           consumerUsername={showOnce.consumerUsername}
           title={showOnce.title}
           onAcknowledge={() => {
-            setShowOnce(null);
+            setShowOnceQueue((queue) => queue.slice(1));
             // The mutation result still holds the plaintext; drop it so the
             // secret really is shown once (issue #336). The hooks set
             // `gcTime: 0`, so the reset mutation leaves the cache at once.
-            issue.reset();
-            rotate.reset();
+            // A mutation still in flight is left alone: resetting it would
+            // detach the callback that queues its secret.
+            if (!issue.isPending) issue.reset();
+            if (!rotate.isPending) rotate.reset();
           }}
         />
       ) : null}

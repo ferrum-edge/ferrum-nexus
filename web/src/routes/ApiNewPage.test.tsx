@@ -336,7 +336,36 @@ describe('API publishing', () => {
     );
   });
 
-  it.each(['', '0', String(MAX_RATE_LIMIT_REQUESTS + 1)])(
+  it('reads exponent notation as the whole number it is (issue #597)', async () => {
+    renderPage(<ApiNewPage />);
+    fillIdentity();
+    fireEvent.click(screen.getByLabelText('Enforce a rate limit'));
+    changeField('Requests', '1e3');
+    changeField('Connect timeout (ms)', '100e1');
+    fireEvent.click(screen.getByRole('button', { name: 'Publish API' }));
+    await screen.findByText('API published');
+    expect(apisApi.publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rate_limit: { limit: 1000, window_seconds: 60 },
+        timeouts: {
+          connect_ms: 1000,
+          read_ms: DEFAULT_BACKEND_READ_TIMEOUT_MS,
+          write_ms: DEFAULT_BACKEND_WRITE_TIMEOUT_MS,
+        },
+      }),
+    );
+  });
+
+  it('refuses a fractional timeout instead of truncating it (issue #597)', () => {
+    renderPage(<ApiNewPage />);
+    fillIdentity();
+    changeField('Write timeout (ms)', '1500.5');
+    submitForm();
+    expect(screen.getByRole('alert')).toHaveTextContent('The write timeout must be');
+    expect(apisApi.publish).not.toHaveBeenCalled();
+  });
+
+  it.each(['', '0', '1.5', String(MAX_RATE_LIMIT_REQUESTS + 1)])(
     'rejects an out-of-range request limit (%s)',
     (value) => {
       renderPage(<ApiNewPage />);
