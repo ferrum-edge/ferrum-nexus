@@ -179,13 +179,13 @@ export async function resolveSsoProviders(
   crypto: NexusCrypto,
   stored: StoredSsoSettings,
 ): Promise<ResolvedSsoProvider[]> {
-  return readBoundToSetting(store, SSO_SETTINGS_KEY, async (row) => {
+  return readBoundToSetting(store, SSO_SETTINGS_KEY, async (row, reader) => {
     if (!isDeepStrictEqual(parseStoredSsoSettings(row), stored)) {
       throw conflict('The single sign-on settings changed during this request; retry', {
         setting: SSO_SETTINGS_KEY,
       });
     }
-    return resolveWithSecrets(config, store, crypto, stored);
+    return resolveWithSecrets(config, reader, crypto, stored);
   });
 }
 

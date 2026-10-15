@@ -1516,6 +1516,15 @@ Rows are keyed `mass:<actor_id>:<batch>:<user_id>`, where `<batch>` is your
 excludes rows the key already produced, so resending with the same key queues
 nothing new.
 
+A template that uses `{{recipient_name}}` gets each display name with any
+explicit `http(s)://` URL replaced by `[link removed]`. When a name would still
+form a link the policy refuses together with the template's text, that copy
+uses `there` instead. If even that copy is refused, the recipient is skipped:
+`enqueued` is lower than `recipients` without a failure, the campaign's
+`admin.mass_email_complete` row records `skipped`, and a retry with the same key
+skips the same recipients. Edit the template or the account's display name to
+reach them.
+
 The campaign's `admin.mass_email` audit row commits **before** any outbox row;
 if it cannot be written, nothing is queued. The rows are then queued in
 transactions of at most 200 recipients (fewer for large messages), so a

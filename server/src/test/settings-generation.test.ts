@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { after, before, beforeEach, describe, it, mock } from 'node:test';
 
 import type { SsoProviderSettings } from '@ferrum-nexus/shared';
 
@@ -133,6 +133,36 @@ describe('settings read as one generation', () => {
         password: 'relay-b-password',
       },
     );
+  });
+
+  it('notices a change written back to an identical value within one millisecond', async () => {
+    // A frozen clock gives every write the same `updated_at`, so the relay
+    // row read before and after looks unchanged although it was rewritten.
+    mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-15T00:00:00.000Z') });
+    try {
+      await commitRelay('relay-a.example.test', 'relay-a-password');
+      let passwordReads = 0;
+      let relayReads = 0;
+      const base = intercepted(harness.store, SMTP_PASSWORD_SETTINGS_KEY, async () => {
+        passwordReads += 1;
+        // Relay B lands just before the password is read …
+        if (passwordReads === 1) await commitRelay('relay-b.example.test', 'relay-b-password');
+      });
+      const store = intercepted(base, SMTP_SETTINGS_KEY, async () => {
+        relayReads += 1;
+        // … and relay A is saved back just before the relay row is re-read.
+        if (relayReads === 2) await commitRelay('relay-a.example.test', 'relay-a-password');
+      });
+      const email = createEmailService({ config: harness.config, store, crypto });
+      const resolved = await email.resolveSettings();
+      assert.ok(passwordReads >= 2 && relayReads >= 2, 'both writes landed mid-read');
+      assert.deepEqual(
+        { host: resolved.host, password: resolved.password },
+        { host: 'relay-a.example.test', password: 'relay-a-password' },
+      );
+    } finally {
+      mock.timers.reset();
+    }
   });
 
   it('gives up rather than return a mixed pair while saves keep landing', async () => {
@@ -282,5 +312,42 @@ describe('settings read as one generation', () => {
       const vendor = call.url === CAPTCHA_VERIFY_URLS.turnstile ? 'turnstile' : 'hcaptcha';
       assert.equal(call.secret, `${vendor}-secret`, `${vendor} received its own secret only`);
     }
+  });
+  it('refuses to keep a client secret across an issuer or client change', async () => {
+    const founder = await harness.registerUser({ email: 'generation-founder@example.test' });
+    const put = (provider: SsoProviderSettings, secret?: string | null) =>
+      harness.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/sso',
+        payload: {
+          providers: [{ ...provider, ...(secret === undefined ? {} : { client_secret: secret }) }],
+        },
+      });
+    const first = ssoProvider('https://first-idp.example.test');
+    const saved = await put(first, 'first-idp-secret');
+    assert.equal(saved.statusCode, 200, saved.body);
+
+    for (const moved of [
+      { ...first, issuer: 'https://second-idp.example.test' },
+      { ...first, client_id: 'another-client' },
+    ]) {
+      const refused = await put(moved);
+      assert.equal(refused.statusCode, 400, refused.body);
+      assert.match(refused.body, /requires client_secret/);
+    }
+    const unchanged = await put({ ...first, display_name: 'Renamed' });
+    assert.equal(unchanged.statusCode, 200, unchanged.body);
+
+    const replaced = await put(
+      { ...first, issuer: 'https://second-idp.example.test' },
+      'second-secret',
+    );
+    assert.equal(replaced.statusCode, 200, replaced.body);
+    const fresh = parseStoredSsoSettings(await harness.store.settings.get(SSO_SETTINGS_KEY));
+    const [provider] = await resolveSsoProviders(harness.config, harness.store, crypto, fresh);
+    assert.deepEqual(
+      { issuer: provider?.settings.issuer, secret: provider?.clientSecret },
+      { issuer: 'https://second-idp.example.test', secret: 'second-secret' },
+    );
   });
 });

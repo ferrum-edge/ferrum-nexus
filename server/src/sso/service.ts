@@ -1333,6 +1333,22 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
               throw issuerHasLinks(provider.id);
             }
           }
+          // A client secret belongs to one client at one issuer. Kept across a
+          // change of either, the next sign-in would present it to the new
+          // issuer's token endpoint, as the SMTP and CAPTCHA settings already
+          // refuse to do for their own secrets.
+          if (
+            before !== undefined &&
+            (before.issuer !== provider.issuer || before.client_id !== provider.client_id) &&
+            secret === undefined &&
+            (await store.settings.get(ssoClientSecretKey(provider.id))) !== null
+          ) {
+            throw validationFailed(
+              `Changing provider '${provider.id}' issuer or client_id requires client_secret in ` +
+                'the same request (null to clear it), because the stored secret belongs to the ' +
+                'previous client',
+            );
+          }
           for (const mapping of provider.org_mappings) {
             if (!(await store.organizations.findById(mapping.org_id))) {
               throw notFound('Organization', mapping.org_id);
@@ -1415,10 +1431,14 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
               for (const id of reissued) {
                 if ((await tx.userIdentities.countByProvider(id)) > 0) throw issuerHasLinks(id);
               }
+              // Replaced secrets go before the providers move and come back
+              // after: on a standalone MongoDB, whose writes land one by one, a
+              // reader in between finds no secret rather than an old one beside
+              // a new issuer. Atomic adapters see no difference.
+              for (const [id] of encrypted) await tx.settings.delete(ssoClientSecretKey(id));
               await tx.settings.set(SSO_SETTINGS_KEY, next, false);
               for (const [id, blob] of encrypted) {
-                if (blob === null) await tx.settings.delete(ssoClientSecretKey(id));
-                else await tx.settings.set(ssoClientSecretKey(id), blob, true);
+                if (blob !== null) await tx.settings.set(ssoClientSecretKey(id), blob, true);
               }
               // A removed provider's links go with it, so a provider added later
               // under the same id starts with none. A stored provider shadowed by an

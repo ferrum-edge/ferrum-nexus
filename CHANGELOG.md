@@ -173,8 +173,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   generation of the configuration: the anchor row is re-read afterwards, and
   the result is used only if it did not change, otherwise the read retries,
   and after five attempts it fails with `CONFLICT` rather than mixing two
-  configurations. A sign-in that read the single sign-on settings before such a
-  change is refused with `CONFLICT` and starts again.
+  configurations. The rows read with the configuration are re-read too, and a
+  rewritten secret never compares equal because it is re-encrypted, so a
+  change saved back to an identical value cannot pass either. A sign-in that read the
+  single sign-on settings before such a change is refused with `CONFLICT` and
+  starts again. The settings writers now remove a replaced secret before moving
+  the configuration and write the new one after it, so on a standalone MongoDB
+  (whose transactions are not atomic) a reader in between finds no secret
+  rather than the old one. Changing a stored single sign-on provider's
+  `issuer` or `client_id` now requires `client_secret` in the same request
+  (`null` to clear it), as changing the SMTP connection or the CAPTCHA provider
+  already required their secrets.
 
 - **Sessions have an absolute lifetime** (#582). A session now ends
   `NEXUS_SESSION_MAX_AGE` seconds after sign-in however active it is; sliding

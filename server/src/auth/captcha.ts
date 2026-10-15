@@ -217,8 +217,8 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
     };
   }
 
-  async function readSecret(): Promise<string | null> {
-    const row = await deps.store.settings.get(CAPTCHA_SECRET_SETTINGS_KEY);
+  async function readSecret(reader: NexusStore = deps.store): Promise<string | null> {
+    const row = await reader.settings.get(CAPTCHA_SECRET_SETTINGS_KEY);
     if (!row) return null;
     if (!row.encrypted) return typeof row.value === 'string' ? row.value : null;
     try {
@@ -312,10 +312,14 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
       // The provider, site key and secret from one committed generation, so a
       // read that straddles a provider change cannot send one vendor's secret
       // to another (see readBoundToSetting).
-      const bound = await readBoundToSetting(deps.store, CAPTCHA_SETTINGS_KEY, async (row) => ({
-        settings: parseSettings(row),
-        secret: await readSecret(),
-      }));
+      const bound = await readBoundToSetting(
+        deps.store,
+        CAPTCHA_SETTINGS_KEY,
+        async (row, reader) => ({
+          settings: parseSettings(row),
+          secret: await readSecret(reader),
+        }),
+      );
       if (!isConfigured(bound.settings)) return 'not_required';
       const { secret } = bound;
       settings = bound.settings;

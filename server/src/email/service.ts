@@ -465,8 +465,11 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
    *   ({@link smtpConnectionMatchesEnvironment}), the same rule the settings
    *   endpoint applies before it lets an override be cleared.
    */
-  async function resolvePassword(stored: StoredSmtpSettings): Promise<string | null> {
-    const override = await readEncryptedSettingState(store, crypto, SMTP_PASSWORD_SETTINGS_KEY);
+  async function resolvePassword(
+    stored: StoredSmtpSettings,
+    reader: NexusStore = store,
+  ): Promise<string | null> {
+    const override = await readEncryptedSettingState(reader, crypto, SMTP_PASSWORD_SETTINGS_KEY);
     if (override.state === 'value') {
       lastPasswordWarning = null;
       return override.value;
@@ -504,7 +507,7 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
    * host with the new relay's password (see {@link readBoundToSetting}).
    */
   async function resolveSettings(): Promise<ResolvedSmtpSettings> {
-    return readBoundToSetting(store, SMTP_SETTINGS_KEY, async (row) => {
+    return readBoundToSetting(store, SMTP_SETTINGS_KEY, async (row, reader) => {
       const stored = parseStoredSmtp(row);
       return {
         host: stored.host ?? config.smtp.host ?? null,
@@ -512,7 +515,7 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
         secure: stored.secure ?? config.smtp.secure,
         allowPlaintext: config.smtp.allowPlaintext,
         user: stored.username ?? config.smtp.user ?? null,
-        password: await resolvePassword(stored),
+        password: await resolvePassword(stored, reader),
         from: stored.from_address ?? config.smtp.from,
       };
     });
