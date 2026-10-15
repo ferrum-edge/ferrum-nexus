@@ -939,6 +939,35 @@ describe('credential and access ownership (issue #341)', () => {
     });
   });
 
+  it('keeps a credential live when a router answers its revoke read with a 404 (#598)', async () => {
+    const issued = await harness.authed(owner, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(issued.statusCode, 201, issued.body);
+    const { id, ferrum_consumer_id: consumerId } =
+      issued.json<IssueCredentialResponse>().credential;
+
+    harness.edge.queueFailure(404, ROUTER_404, `/consumers/${consumerId}`, 'GET');
+    const failed = await harness.authed(owner, { method: 'DELETE', url: `/api/credentials/${id}` });
+    assert.equal(failed.statusCode, 502, failed.body);
+    assert.equal(errorOf(failed.body).code, 'EDGE_PROTOCOL_ERROR');
+    assert.equal((await harness.store.credentials.findById(id))?.status, 'active');
+    assert.equal(
+      harness.edge.consumers.get(`${NAMESPACE}/${consumerId}`)?.credentials.keyauth?.length,
+      1,
+      'the key is still on the gateway',
+    );
+
+    const revoked = await harness.authed(owner, {
+      method: 'DELETE',
+      url: `/api/credentials/${id}`,
+    });
+    assert.equal(revoked.statusCode, 200, revoked.body);
+    assert.equal((await harness.store.credentials.findById(id))?.status, 'revoked');
+  });
+
   /* ── 3. Reconcile only addresses consumers the portal owns ──────────── */
 
   describe('credentials.reconcile', () => {
@@ -1050,6 +1079,31 @@ describe('credential and access ownership (issue #341)', () => {
         revoked_credentials: 1,
         gateway_cleared: true,
       });
+    });
+
+    it('keeps the rows when a router answers the consumer read with a 404 (#598)', async () => {
+      const issued = await harness.authed(owner, {
+        method: 'POST',
+        url: '/api/credentials',
+        payload: { credential_type: 'keyauth' },
+      });
+      assert.equal(issued.statusCode, 201, issued.body);
+      const { id, ferrum_consumer_id: consumerId } =
+        issued.json<IssueCredentialResponse>().credential;
+
+      harness.edge.queueFailure(404, ROUTER_404, `/consumers/${consumerId}`, 'GET');
+      const failed = await reconcile(consumerId);
+      assert.equal(failed.statusCode, 502, failed.body);
+      assert.equal(errorOf(failed.body).code, 'EDGE_PROTOCOL_ERROR');
+      assert.equal((await harness.store.credentials.findById(id))?.status, 'active');
+      assert.equal(harness.edge.callsTo('DELETE', `/consumers/${consumerId}`).length, 0);
+
+      // Edge's own answer that the consumer is gone still settles the rows.
+      await harness.edgeClient.consumers.delete(consumerId);
+      const settled = await reconcile(consumerId);
+      assert.equal(settled.statusCode, 200, settled.body);
+      assert.equal(settled.json<ReconcileCredentialsResponse>().gateway_cleared, false);
+      assert.equal((await harness.store.credentials.findById(id))?.status, 'revoked');
     });
   });
 });

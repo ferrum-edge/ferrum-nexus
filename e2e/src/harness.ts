@@ -10,6 +10,7 @@
  * is the single signal meaning "this response came from the backend".
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 
 /** The header the deterministic upstream stamps on everything it serves. */
@@ -67,6 +68,19 @@ export class HttpError extends Error {
   }
 }
 
+/** The abort signal of the {@link waitFor} attempt the current code runs in. */
+const attemptSignal = new AsyncLocalStorage<AbortSignal>();
+
+/**
+ * `init` with the current {@link waitFor} attempt's signal, unless it carries
+ * one of its own. So every portal and gateway request a readiness check makes
+ * is cancelled with the attempt, without each check having to forward it.
+ */
+function withAttemptSignal<T extends { signal?: AbortSignal | null }>(init: T): T {
+  const signal = attemptSignal.getStore();
+  return init.signal || !signal ? init : { ...init, signal };
+}
+
 /**
  * Poll `check` until it returns true, or fail with a message naming what was
  * being waited for.
@@ -77,10 +91,13 @@ export class HttpError extends Error {
  *
  * The deadline bounds each attempt too, not only the gap between them: a
  * listener that accepts a connection and then stalls its headers or body used
- * to hold `await check()` past it (issue #606). Each attempt gets a signal that
- * aborts at the deadline, which a check passes to `fetch` so the request and
- * its body read are cancelled; a check that ignores it is still abandoned at
- * the deadline. A success reported after the deadline does not count.
+ * to hold `await check()` past it (issue #606). Each attempt runs with a signal
+ * that aborts at the deadline. `check` receives it, and {@link portalRaw},
+ * {@link callGateway} and the mail reads pick it up on their own, so a stalled
+ * request and its body read are cancelled; a check that ignores it is still
+ * abandoned at the deadline. An attempt that does not succeed is aborted as
+ * soon as it ends, so a response it left unread (a `503` poll, say) does not
+ * stay open. A success reported after the deadline does not count.
  */
 export async function waitFor(
   what: string,
@@ -105,14 +122,21 @@ export async function waitFor(
         once: true,
       });
     });
+    let succeeded = false;
     try {
-      const ready = await Promise.race([check(attempt.signal), abandoned]);
-      if (ready && !attempt.signal.aborted && Date.now() <= deadline) return;
+      const ready = await Promise.race([
+        attemptSignal.run(attempt.signal, () => check(attempt.signal)),
+        abandoned,
+      ]);
+      succeeded = ready && !attempt.signal.aborted && Date.now() <= deadline;
+      if (succeeded) return;
       lastError = undefined;
     } catch (error) {
       lastError = attempt.signal.aborted ? attempt.signal.reason : error;
     } finally {
       clearTimeout(timer);
+      // A successful attempt's responses may still be read by the caller.
+      if (!succeeded && !attempt.signal.aborted) attempt.abort(new Error('attempt ended'));
     }
     const pause = Math.min(POLL_INTERVAL_MS, deadline - Date.now());
     if (pause > 0) await delay(pause);
@@ -168,11 +192,14 @@ export async function portalRaw(
     headers.cookie = options.session.cookie;
     headers['x-nexus-csrf'] = options.session.csrf;
   }
-  return fetch(`${PORTAL_URL}${path}`, {
-    method,
-    headers,
-    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-  });
+  return fetch(
+    `${PORTAL_URL}${path}`,
+    withAttemptSignal<RequestInit>({
+      method,
+      headers,
+      ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+    }),
+  );
 }
 
 /**
@@ -183,7 +210,10 @@ export async function callGateway(
   path: string,
   init: RequestInit & { method?: string } = {},
 ): Promise<Response> {
-  return fetch(`${GATEWAY_URL}${path}`, { redirect: 'manual', ...init });
+  return fetch(
+    `${GATEWAY_URL}${path}`,
+    withAttemptSignal<RequestInit>({ redirect: 'manual', ...init }),
+  );
 }
 
 /** Whether a gateway response actually reached the deterministic upstream. */
@@ -208,29 +238,34 @@ interface MailpitMessage {
 export async function latestMailTo(
   address: string,
 ): Promise<{ subject: string; text: string; from: string }> {
-  let found: MailpitMessage | undefined;
+  let delivered: { subject: string; text: string; from: string } | undefined;
+  // The list and the message itself are read inside one bounded attempt, so a
+  // sink that stalls on either cannot outlast the deadline.
   await waitFor(`mail delivered to ${address}`, async (signal) => {
     const response = await fetch(`${MAIL_URL}/api/v1/messages?limit=50`, { signal });
     if (!response.ok) return false;
     const body = (await response.json()) as { messages?: MailpitMessage[] };
-    found = (body.messages ?? []).find((message) =>
+    const found = (body.messages ?? []).find((message) =>
       message.To.some((to) => to.Address.toLowerCase() === address.toLowerCase()),
     );
-    return found !== undefined;
+    if (!found) return false;
+    const detail = await fetch(`${MAIL_URL}/api/v1/message/${found.ID}`, { signal });
+    if (!detail.ok) return false;
+    const message = (await detail.json()) as {
+      Subject: string;
+      Text?: string;
+      HTML?: string;
+      From?: { Address: string };
+    };
+    delivered = {
+      subject: message.Subject,
+      text: `${message.Text ?? ''}\n${message.HTML ?? ''}`,
+      from: message.From?.Address ?? '',
+    };
+    return true;
   });
-  if (!found) throw new Error(`No message for ${address}`);
-  const detail = await fetch(`${MAIL_URL}/api/v1/message/${found.ID}`);
-  const body = (await detail.json()) as {
-    Subject: string;
-    Text?: string;
-    HTML?: string;
-    From?: { Address: string };
-  };
-  return {
-    subject: body.Subject,
-    text: `${body.Text ?? ''}\n${body.HTML ?? ''}`,
-    from: body.From?.Address ?? '',
-  };
+  if (!delivered) throw new Error(`No message for ${address}`);
+  return delivered;
 }
 
 /** Forget every delivered message, so a later wait cannot match an old one. */

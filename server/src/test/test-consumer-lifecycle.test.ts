@@ -899,6 +899,33 @@ describe('test consumer lifecycle', () => {
     assert.equal(await registrationFor(username), null);
   });
 
+  it('keeps a test consumer registration when a router answers its read with a 404 (#598)', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    assert.equal((await createTestConsumer(api.id)).statusCode, 201);
+    const consumerId = harness.edge.consumerByUsername(username)?.id;
+    assert.ok(consumerId);
+
+    harness.edge.queueFailure(
+      404,
+      { message: 'Route not found', error: 'Not Found', statusCode: 404 },
+      `/consumers/${consumerId}`,
+      'GET',
+    );
+    await assert.rejects(
+      harness.services.credentials.teardownGatewayIdentity(username, provider.user.id),
+    );
+    assert.equal((await registrationFor(username))?.ferrum_consumer_id, consumerId);
+    assert.ok(harness.edge.consumerByUsername(username), 'the consumer is still live');
+
+    const result = await harness.services.credentials.teardownGatewayIdentity(
+      username,
+      provider.user.id,
+    );
+    assert.equal(result.consumer_deleted, true);
+    assert.equal(harness.edge.consumerByUsername(username), undefined);
+  });
+
   it('answers 404 to a deletion that finds the row already removed', async () => {
     const api = await publish();
 

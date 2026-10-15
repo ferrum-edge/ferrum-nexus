@@ -5920,7 +5920,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // and deleting it is the only way to reset its credentials show-once
           // state.
           const bound = previous?.ferrum_consumer_id
-            ? await edge.consumers.get(previous.ferrum_consumer_id)
+            ? await edge.consumers.get(previous.ferrum_consumer_id, { confirmedAbsence: true })
             : null;
           if (bound && bound.username !== username) {
             throw edgeError('The stored test consumer id belongs to another username');
