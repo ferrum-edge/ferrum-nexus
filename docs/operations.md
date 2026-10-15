@@ -135,7 +135,7 @@ See the README for a two-stack example.
 | `FERRUM_ADMIN_CA_FILE`               | _(unset)_               | PEM CA bundle for a TLS Admin API. An unreadable file fails startup.                                                                                                                                                                                                      |
 | `FERRUM_ADMIN_ALLOW_INSECURE_HTTP`   | `false`                 | Allows plaintext `http://` to a non-loopback Admin API. For container-network-only traffic.                                                                                                                                                                               |
 | `FERRUM_ADMIN_TIMEOUT_MS`            | `5000`                  | Per-request deadline for Admin API calls, 250–60000.                                                                                                                                                                                                                      |
-| `FERRUM_MAX_CREDENTIALS_PER_TYPE`    | `2`                     | 1–10. Set it to the gateway's own value. Above 1, rotation appends the new credential before deleting the old one, so there is no gap.                                                                                                                                    |
+| `FERRUM_MAX_CREDENTIALS_PER_TYPE`    | `2`                     | 1–10. Set it to the gateway's own value. Above 1, rotation appends the new credential before deleting the old one in the same operation: the consumer is never without one, but the old value stops working at once.                                                      |
 | `FERRUM_RATE_LIMIT_SYNC_MODE`        | `local`                 | `local` \| `redis`. Where Edge keeps consumer-quota counters (see below).                                                                                                                                                                                                 |
 | `FERRUM_RATE_LIMIT_REDIS_URL`        | _(unset)_               | Required when the mode is `redis`; must be `redis://` or `rediss://`. Ignored in `local` mode.                                                                                                                                                                            |
 | `FERRUM_RATE_LIMIT_REDIS_TLS`        | `false`                 | Use TLS for a `redis://` endpoint (`rediss://` already implies it). Edge verifies it with its own `FERRUM_TLS_CA_BUNDLE_PATH`.                                                                                                                                            |
@@ -147,9 +147,46 @@ See the README for a two-stack example.
 > `sync_mode`, `redis_url` and `redis_tls` into every `rate_limiting` config so
 > all replicas share one counter.
 >
-> Changing the mode only affects rate limits saved afterwards. After switching
-> on a live portal, re-save the rate limit of each existing API (any
-> `PATCH /api/apis/:id` with a `rate_limit`, or re-saving the Settings tab).
+> Changing these variables does not touch existing configs. Re-saving an
+> unchanged rate limit does not migrate them either; follow
+> [Changing the quota sync mode on a live portal](#changing-the-quota-sync-mode-on-a-live-portal).
+
+#### Changing the quota sync mode on a live portal
+
+Nexus rewrites an API's `rate_limiting` config only when its quota **changes**.
+A `PATCH /api/apis/:id` (or a Settings-tab save) whose `rate_limit` equals the
+stored one is deliberately a no-op on the gateway, so it never picks up a new
+sync mode. When a quota does change, Nexus writes its own keys over the live
+config and keeps every other key, including Redis settings an operator added by
+hand (#150). That gives three cases:
+
+| Change                                      | What a changed quota writes                                               | Migrating an existing config                                                                                                                                                             |
+| ------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `local` → `redis`                           | `sync_mode`, `redis_url` and `redis_tls` from the new variables           | Edit the config on Edge (below), or change the quota and then set it back. The second way runs briefly at the intermediate limit.                                                        |
+| New `FERRUM_RATE_LIMIT_REDIS_URL` or `_TLS` | The new `redis_url` and `redis_tls`                                       | The same as `local` → `redis`.                                                                                                                                                           |
+| `redis` → `local`                           | No sync keys, so the merge **keeps** the live `sync_mode` and `redis_url` | Saving a quota never removes them. Edit the config on Edge, or clear the API's rate limit and set it again, which deletes the config and creates one without them (no quota in between). |
+
+To edit on Edge, find the portal-owned configs, then for each one read it, set
+or remove `sync_mode`, `redis_url` and `redis_tls` in `config`, and `PUT` the
+whole config back. Change nothing else on it.
+
+```sql
+-- The rate_limiting config Nexus owns for each API (MongoDB: the
+-- api_gateway_plugins collection, same fields).
+SELECT api_id, ferrum_plugin_config_id
+  FROM api_gateway_plugins
+  WHERE role = 'rate_limit' AND ferrum_plugin_config_id IS NOT NULL;
+```
+
+```bash
+curl -sS -H "Authorization: Bearer $ADMIN_JWT" -H "X-Ferrum-Namespace: $FERRUM_NAMESPACE" \
+  "$FERRUM_ADMIN_URL/plugins/config/$CONFIG_ID"
+```
+
+**Verify** by reading each config again: `config.sync_mode` is `redis` with the
+intended `redis_url` and `redis_tls`, or, after moving to `local`, none of the
+three keys is present. A `request_deduplication` palette config carries the same
+three keys in `redis` mode; check and edit those the same way.
 
 #### Connection pooling and the gateway's idle bound
 
@@ -1094,9 +1131,11 @@ Each message writes a message row and an audit row. A **platform thread** (no
   coalesced, capped or had the channel off; a failed batch is logged at `warn`,
   counted as `failed_batches`, and does not stop the next. One fan-out queues
   at most `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` emails (`0` = unlimited), so a
-  large API cannot crowd verification and password-reset mail out of the
-  outbox, which delivers in the order rows were queued; accounts past the cap,
-  the ones latest in the API's grant list, get the in-app notice only.
+  large API cannot bury other routine mail. These messages are normal
+  priority: verification and password-reset mail is high priority and is
+  claimed ahead of them, while other normal mail queued after a fan-out waits
+  behind it ([Priority at each claim](#priority-at-each-claim)). Accounts past
+  the cap, the ones latest in the API's grant list, get the in-app notice only.
   Fan-outs of one API run one at a time, and of several waiting only the
   newest runs: its audit rows name the others (`superseded_spec_ids`), and if
   any of them broke something, its notices and email say so. **It is
@@ -1667,22 +1706,46 @@ investigating.
 ```bash
 docker build -t ferrum-nexus -f docker/Dockerfile .
 
+# Once: generate the master key into a file you keep. The database in the
+# nexus-data volume is only readable with this exact key, so never overwrite it.
+if [ ! -e nexus.env ]; then
+  (
+    umask 077
+    printf 'NEXUS_SECRET_KEY=%s\n' "$(openssl rand -hex 32)" > nexus.env
+    cat >> nexus.env <<'ENV'
+FERRUM_ADMIN_URL=http://host.docker.internal:9000
+FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true
+FERRUM_ADMIN_JWT_SECRET=change-me-at-least-32-characters-long
+NEXUS_PUBLIC_URL=https://portal.example.com
+ENV
+  )
+fi
+
+# Every start, including after the container is removed, reuses that file.
 # Publish on loopback only and put a TLS terminator in front (see §4).
 # A bare -p 8787:8787 exposes an unbootstrapped portal on every interface.
-docker run --rm -p 127.0.0.1:8787:8787 \
-  -e NEXUS_SECRET_KEY="$(openssl rand -hex 32)" \
-  -e NEXUS_BOOTSTRAP_TOKEN="$(openssl rand -hex 32)" \
-  -e FERRUM_ADMIN_URL=http://host.docker.internal:9000 \
-  -e FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true \
-  -e FERRUM_ADMIN_JWT_SECRET=change-me-at-least-32-characters-long \
-  -e NEXUS_PUBLIC_URL=https://portal.example.com \
+docker run -d --rm --name nexus -p 127.0.0.1:8787:8787 \
+  --env-file nexus.env \
   -v nexus-data:/app/data \
   ferrum-nexus
+
+# First run only: the generated bootstrap token is in the log.
+docker logs nexus 2>&1 | grep -A8 'FIRST-RUN BOOTSTRAP'
 ```
 
+`nexus.env` holds the only copy of `NEXUS_SECRET_KEY`. Back it up with the
+volume and never regenerate it for an existing volume: a different key leaves
+the stored SMTP password, CAPTCHA secret, single sign-on client secrets and
+gateway recovery records unreadable and signs everyone out
+([§7](#7-rotating-nexus_secret_key)). `docker stop nexus` followed by the same
+`docker run` resumes the same portal.
+
 `FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true` is needed because
-`host.docker.internal` is not loopback. Without `NEXUS_BOOTSTRAP_TOKEN`, read
-the generated token from `docker logs` ([First run](#first-run-and-the-bootstrap-token)).
+`host.docker.internal` is not loopback. The recipe leaves `NEXUS_BOOTSTRAP_TOKEN`
+unset, so each start generates a token and logs it while the portal has no
+super admin ([First run](#first-run-and-the-bootstrap-token)); a restart before
+you register replaces it. If you set `NEXUS_BOOTSTRAP_TOKEN` instead, put it in
+`nexus.env` too: Nexus never logs a token you supply.
 
 The image ([`docker/Dockerfile`](../docker/Dockerfile)) is a two-stage build on
 a digest-pinned `node:22-bookworm-slim`. The supported Node range since `v0.4.0` is
@@ -2281,11 +2344,14 @@ These subkeys are HKDF-derived from `NEXUS_SECRET_KEY`:
 | ------------------------------------ | -------------------------- | --------------------------------------------------------------------------------------------------------- |
 | Settings encryption (AES-256-GCM)    | `nexus-settings-v1`        | `app_settings` rows with `encrypted = 1`: `smtp.password`, `captcha.secret_key`, `sso.client_secret.<id>` |
 | Session token HMAC (HMAC-SHA-256)    | `nexus-session-hmac-v1`    | `sessions.token_hash`, `email_verification_tokens.token_hash`                                             |
+| Outbox sealing (AES-256-GCM)         | `nexus-outbox-v1`          | Queued messages carrying a link ([§6](#messages-carrying-a-link-are-sealed))                              |
 | Single sign-on attempt (AES-256-GCM) | `nexus-sso-transaction-v1` | The `nexus_sso` cookie of a sign-in in progress (10 minutes at most)                                      |
 
-Encrypted gateway recovery journals use the same settings subkey. Include every
-`gateway_recovery:<namespace>:<api_id>` row in settings re-encryption during rotation;
-losing that key makes recovery refuse instead of guessing at resource ownership.
+Encrypted gateway recovery journals use the same settings subkey: every
+`gateway_recovery:<namespace>:<api_id>` row and its `gateway_recovery_chunk:…`
+rows. The rotation command re-encrypts them with the other settings; losing the
+key that sealed them makes recovery refuse instead of guessing at resource
+ownership.
 
 Passwords are hashed with scrypt and a random salt, independent of the key, so
 password sign-in survives a rotation.
@@ -2371,10 +2437,49 @@ server saves anything under the new key, then restart with the old key. Both
 keys must be stored somewhere durable; a key that only lived in a closed shell
 is gone.
 
-**If you cannot run the command** (for example, a hosted database reachable only
-through the portal): as a super admin, turn CAPTCHA off first, then swap the key
-and restart, sign in, re-enter the SMTP password and CAPTCHA secret, turn CAPTCHA
-back on, and test a sign-out/sign-in.
+#### Replacing the key without the command
+
+Use the command whenever the previous key still exists. It needs only the
+database connection the server already has, so it also runs inside the server's
+own image or container (`node server/dist/db/rotate-key-cli.js` with the same
+environment). Replacing the key without re-encrypting is only for a key that is
+**lost**, and it cannot recover anything sealed under it:
+
+| Sealed under the old key                                          | Without the old key                                                                                                                     |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `smtp.password`, `captcha.secret_key`                             | Re-entered by a super admin after signing in.                                                                                           |
+| `sso.client_secret.<id>` (providers saved in settings)            | Re-entered by a super admin. Until then that provider answers `provider_unavailable`.                                                   |
+| `gateway_recovery:*` journals and `gateway_recovery_chunk:*`      | **Lost.** Restoring that API fails closed; reconcile its gateway resources by hand ([§8](#when-a-gateway-change-cannot-be-taken-back)). |
+| Sessions, unused verification and reset links, queued sealed mail | Lost. Everyone signs in again; sealed mail fails as `sealed-unreadable:`.                                                               |
+
+Before you replace the key, make sure a super admin can still sign in **without**
+anything in the first two rows:
+
+1. **Check for gateway recovery state:**
+   `SELECT key FROM app_settings WHERE key LIKE 'gateway_recovery:%'` lists each
+   unfinished gateway conversion or recovery, keyed by API id. If any exist and
+   the old key can still be found, finish them first (an API marked
+   `repair_required` through `POST /api/apis/:id/restore-gateway`) and use the
+   command. Otherwise plan to reconcile each listed API by hand.
+2. **CAPTCHA:** set `NEXUS_CAPTCHA_ENFORCEMENT=disabled` for the window
+   ([Recovering a portal locked out by CAPTCHA](#recovering-a-portal-locked-out-by-captcha)).
+3. **Login policy `sso_only`:** password sign-in is refused, and a provider saved
+   in settings stops working with the key. Keep one route open:
+   - set `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN=true` for the window, and confirm a
+     `super_admin` account has a password you know; or
+   - declare the provider in `NEXUS_OIDC_PROVIDERS` with the **same `id` and
+     issuer** and its secret in `NEXUS_OIDC_CLIENT_SECRET_<ID>`. The environment
+     entry shadows the stored one, and accounts linked to it keep matching.
+
+   If neither is possible, do not replace the key: nobody will be able to sign
+   in to re-enter the secrets.
+
+Then: store the new key where the server reads it, restart every instance, sign
+in as that super admin, re-enter the SMTP password, CAPTCHA secret and each
+stored provider's client secret, and check **Send test email**. Remove
+`NEXUS_CAPTCHA_ENFORCEMENT` and `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN` (or the
+temporary environment provider) and restart again. Finally sign out and sign in
+through the portal's normal route.
 
 ### Rotating `FERRUM_ADMIN_JWT_SECRET`
 
@@ -2391,13 +2496,17 @@ stored is affected.
 ### How gateway writes are coordinated
 
 The Edge Admin API's `PUT /consumers/{id}` and `PUT /proxies/{id}` replace the
-whole resource with no concurrency token. Nexus changes them by
-read-modify-write, so two interleaved changes can lose one:
+whole resource. Nexus changes them by read-modify-write, so two interleaved
+changes can lose one:
 
 - On a **consumer**, a revocation and an approval can both read `[A]`; one
-  writes `[]`, the other `[A, B]`, and A stays authorized.
+  writes `[]`, the other `[A, B]`, and A stays authorized. Whole-consumer
+  replacements now carry the strong row `If-Match` from Edge's verification
+  read, so Edge refuses the stale one with `412` (answered as `409 CONFLICT`,
+  safe to retry).
 - On a **proxy**, two plugin changes can each drop the other's entry, for
-  example leaving an API with no auth plugin.
+  example leaving an API with no auth plugin. Proxy and plugin-config `PUT`s
+  carry no concurrency token.
 
 Nexus serializes these writes in two layers:
 
@@ -2427,8 +2536,9 @@ grantee's ACL group afterwards, under that grantee's own consumer key.
   right now — please retry". Nothing was written. If this is routine, look for a
   slow Admin API.
 - **Edge does not understand the lease.** A holder paused past the TTL, or on a
-  badly skewed clock, can resume after another instance took over, and Edge will
-  accept its stale `PUT`.
+  badly skewed clock, can resume after another instance took over. Edge refuses
+  its stale whole-consumer `PUT` on the row tag, but accepts a stale proxy or
+  plugin-config `PUT`, so run a single gateway-writing instance.
 - **The Nexus database is fenced.** Every transaction under a lease re-checks
   the lease owner before committing, so a stale holder's database writes fail
   with `409 CONFLICT` and roll back. Such a `409` is safe to retry. See
@@ -2691,10 +2801,18 @@ Scrape Ferrum Edge directly:
 - **`GET /admin/metrics`**: a JSON snapshot of circuit breakers, health checks,
   connection pools, caches and rate limiters.
 
-Both require an admin JWT, the `FERRUM_METRICS_BEARER_TOKEN`, or a source
-address in `FERRUM_METRICS_ALLOWED_CIDRS`; from Ferrum Edge v0.9.16 an admin
-JWT with an `ns` claim, like the portal's, is refused on both. Prefer the
-token or CIDR list for Prometheus:
+They authenticate differently:
+
+- `GET /metrics` accepts an admin JWT, the gateway's
+  `FERRUM_METRICS_BEARER_TOKEN`, or a request with no JWT from a source address
+  in `FERRUM_METRICS_ALLOWED_CIDRS`.
+- `GET /admin/metrics` requires an admin JWT. The metrics bearer token and the
+  CIDR list do not open it; the portal uses its optional fleet-read `viewer`
+  JWT (`FERRUM_ADMIN_FLEET_READ_JWT_SECRET`) there.
+
+From Ferrum Edge v0.9.16 an admin JWT with an `ns` claim, like the portal's
+ordinary one, is refused on both, even from an allowed address. Prometheus
+scrapes `/metrics`; give it the bearer token or a CIDR entry:
 
 ```yaml
 scrape_configs:

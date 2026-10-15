@@ -47,8 +47,11 @@ untrusted browser ──┬── session cookie + CSRF ──> Nexus BFF ──
                     └── never reaches Edge directly   └── DB, SMTP
 ```
 
-The browser never holds anything the gateway would accept. Its session cookie
-is only useful against Nexus.
+The browser never holds an Edge **Admin** credential, and nothing it holds
+reaches the Admin API. Its session cookie is only useful against Nexus. The one
+gateway credential a browser ever sees is the user's own data-plane credential,
+shown once when issued or rotated, which callers present to the gateway's proxy
+listener.
 
 ### Upstream destinations
 
@@ -1282,8 +1285,10 @@ compensation records (`repair_required`, `api.gateway_repair_required`,
 `api.gateway_restore_failed`). New lease-guarded writes belong in a transaction
 taken after the key.
 
-**The fence cannot fence Ferrum Edge.** Edge's whole-resource `PUT`s carry no
-concurrency token, so a stale holder's gateway write still lands. Run a single
+**The fence cannot fence Ferrum Edge.** Whole-consumer replacements carry the
+strong row `If-Match` from the verification read, so Edge refuses a stale one
+with `412` (surfaced as `409 CONFLICT`). Proxy and plugin-config `PUT`s carry no
+concurrency token, so a stale holder's write to those still lands. Run a single
 gateway-writing Nexus instance ([`operations.md` §8](operations.md#8-scaling)).
 
 ### Disabling an account
@@ -1381,9 +1386,12 @@ the row re-read inside the consumer's queue. An administrator who needs a
 credential gone revokes it (`DELETE /api/credentials/:id`), which returns no
 secret, and the owner issues a new one.
 
-**Ferrum Edge enforces the same independently.** Admin API reads return
+**Ferrum Edge enforces the same independently.** Ordinary Admin API reads return
 `keyauth.key` and `jwt.secret` as `[REDACTED]` and omit `basicauth` entirely.
-There is no read path to plaintext; a lost credential is rotated, not
+The privileged `GET /consumers/{id}/verification` read is the exception: Nexus
+uses its credential-complete snapshot only in server memory, to replace a whole
+consumer without losing credentials, and never returns, stores or audits it.
+No portal route returns plaintext; a lost credential is rotated, not
 recovered.
 
 **What the provider's upstream sees differs by type.** Edge strips `X-API-Key`
@@ -1738,14 +1746,17 @@ and emails every active `admin` and `super_admin`. Independent bounds:
    `NEXUS_MAX_MASS_EMAIL_BYTES` (default 64 MiB) bounds one rendered message,
    sized as an upper bound that includes HTML escaping of the recipient's name
    and address, times the audience, and `NEXUS_MAX_MASS_EMAILS_PER_DAY`
-   (default 5, low until security mail has its own outbox lane, issue #500) bounds
+   (default 5) bounds
    campaigns per administrator per rolling 24 hours, counted from
    `admin.mass_email` rows under a per-actor lease. `0` disables each. An
    audience that matches nobody is refused and costs nothing. The campaign row
    commits before the first outbox row, and the fan-out is queued in
    transactions of at most 200 recipients and about 4 MiB, so it never holds
    other writers — password-reset and verification enqueues among them — for
-   its whole audience. A retry under the same `idempotency_key` is free only
+   its whole audience. Campaign rows are queued at low priority, so security
+   mail queued meanwhile is claimed ahead of the rest of the campaign; it still
+   waits for the message being sent and for the worker's next poll
+   ([operations.md §6](operations.md#priority-at-each-claim)). A retry under the same `idempotency_key` is free only
    when its subject, bodies and audience match the digest on the campaign row;
    anything else under that key is `409 CONFLICT`, so a reused key cannot be
    an uncharged second campaign.
@@ -1791,8 +1802,10 @@ unless its config names Redis. With N data-plane replicas, a provider's quota is
 enforced N times over. Set `FERRUM_RATE_LIMIT_SYNC_MODE=redis` and
 `FERRUM_RATE_LIMIT_REDIS_URL` (plus `FERRUM_RATE_LIMIT_REDIS_TLS` if needed) and
 Nexus writes `sync_mode`, `redis_url` and `redis_tls` into every `rate_limiting`
-config it saves. Existing APIs pick it up the next time their rate limit is
-saved.
+config it saves. Existing configs keep their old mode until migrated: an
+unchanged rate-limit save is a no-op, and a changed one never removes Redis
+keys. See
+[operations.md](operations.md#changing-the-quota-sync-mode-on-a-live-portal).
 
 ### Cross-Site WebSocket Hijacking
 

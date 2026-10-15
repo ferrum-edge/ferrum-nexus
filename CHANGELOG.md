@@ -54,6 +54,21 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   for single sign-on matching; re-enabling an application cannot fail with a
   mapping `502`; the MongoDB released-migration guard freezes indexes only;
   MySQL `1205` is not retried.
+- **Runbook and reference corrections** (#599, #600, #601, #602, #603, #607).
+  Changing `FERRUM_RATE_LIMIT_SYNC_MODE` on a live portal has a real migration
+  procedure, since re-saving an unchanged quota is a no-op and a changed one
+  never removes Redis keys. Replacing `NEXUS_SECRET_KEY` without the rotation
+  command is limited to a lost key, lists what cannot be recovered and keeps a
+  sign-in route open first, including on `sso_only` portals. The
+  single-container Docker recipe keeps its master key in a reusable env file
+  and reads the generated bootstrap token from the log. An Upstream URL equal
+  to the document's `servers[0].url` is not a pin. MCP approvals cover all
+  tools, a subset or REST only, and a refused revocation can restore the
+  pending tool request. The service-manifest preview's oversized body is a
+  `400`; whole-consumer writes carry `If-Match`; the server-only verification
+  read is the one credential-complete Edge read; spec-change email is
+  normal-priority outbox mail; and `/metrics` and `/admin/metrics` authenticate
+  differently.
 
 ### Fixed
 
@@ -164,8 +179,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   self-test and the sign-in and registration forms offer to reload the page
   when the widget cannot load, which is what a tab opened before CAPTCHA was
   switched on or changed needs.
-  `style-src 'unsafe-inline'` stays, because the UI's Radix components inject
-  runtime `<style>` elements; `docs/security.md` records why.
+  `style-src` has since dropped `'unsafe-inline'` for a per-response nonce
+  (#587, under Changed).
 - **SMTP requires STARTTLS when implicit TLS is off**
   ([GHSA-v7p7-85wx-8wrp](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-v7p7-85wx-8wrp)).
   With `NEXUS_SMTP_SECURE=false` a relay that does not offer STARTTLS, or a path
