@@ -253,6 +253,9 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
         "TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT ('{}')",
       ],
       ['audit_logs', 'details_json', 'TEXT NOT NULL'],
+      ['audit_logs', 'details_json', "TEXT NOT NULL DEFAULT ('{}suffix')"],
+      ['audit_logs', 'details_json', "LONGTEXT NOT NULL DEFAULT ('{}x')"],
+      ['audit_logs', 'details_json', "LONGTEXT NOT NULL DEFAULT ('x{}')"],
       // Already LONGTEXT, but not a column an earlier release created.
       ['api_specs', 'parsed_title', 'LONGTEXT GENERATED ALWAYS AS (version) STORED'],
       ['api_specs', 'parsed_title', "LONGTEXT DEFAULT ('untitled')"],

@@ -148,6 +148,22 @@ async function columnExists(connection: mysql.PoolConnection, step: AddColumn): 
 }
 
 /**
+ * The string literal an expression default such as `('{}')` evaluates to, as
+ * `information_schema.COLUMNS.COLUMN_DEFAULT` reports it (`_utf8mb4\'{}\'`,
+ * with or without the introducer and the parentheses), or `null` for anything
+ * that is not exactly one string literal.
+ */
+function expressionDefaultLiteral(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  let text = value.trim();
+  while (text.startsWith('(') && text.endsWith(')')) text = text.slice(1, -1).trim();
+  text = text.replace(/^_[a-z0-9]+/i, '');
+  const match = /^\\?'((?:[^'\\]|\\.)*?)\\?'$/s.exec(text);
+  if (!match) return null;
+  return match[1]!.replace(/\\(.)/g, '$1');
+}
+
+/**
  * Whether a widening already landed. `MODIFY COLUMN` commits on its own, so a
  * replay after an interruption finds it done; it is skipped rather than
  * rebuilding the table again. A column that is neither the type an earlier
@@ -179,7 +195,7 @@ async function columnWidened(
     String(column.GENERATION_EXPRESSION ?? '') !== '' ||
     column.EXTRA !== (step.jsonDefault ? 'DEFAULT_GENERATED' : '') ||
     (step.jsonDefault
-      ? !String(column.COLUMN_DEFAULT ?? '').includes('{}')
+      ? expressionDefaultLiteral(column.COLUMN_DEFAULT) !== '{}'
       : column.COLUMN_DEFAULT !== null)
   ) {
     throw new Error(
