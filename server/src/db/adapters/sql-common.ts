@@ -282,9 +282,9 @@ export interface WhereClause {
  * Accumulates `AND`-joined conditions, skipping filters that were not supplied.
  *
  * Behaviourally identical to the sqlite `WhereBuilder`; the only difference is
- * {@link SqlWhereBuilder.addSearch}, which uses `POSITION(… IN …)` instead of
- * `LIKE … ESCAPE`. The two are equivalent: the sqlite version escapes `%` and
- * `_` so the term is matched literally, which is what `POSITION` does anyway.
+ * the spelling of {@link SqlWhereBuilder.addSearch}: `POSITION(? IN …)` here,
+ * `instr(…, ?)` on SQLite. Both match the bound term as a literal substring,
+ * so `%`, `_` and `\` are ordinary characters on every adapter (issue #595).
  */
 export class SqlWhereBuilder {
   private readonly conditions: string[] = [];

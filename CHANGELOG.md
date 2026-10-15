@@ -57,6 +57,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Consumer cleanup trusts only Ferrum Edge's own "Consumer not found"**
+  (#598). Every consumer read whose "absent" answer lets the portal drop
+  tracking now requires Edge's not-found body. That covers application
+  deletion (mapped and derived-id consumers), credential revocation, credential
+  reconciliation, test-consumer teardown and recreation, an account's
+  identity teardown, and the append and rollback checks of credential issue.
+  A generic `404`, for example from a router in front of the gateway, now
+  fails the operation with `EDGE_PROTOCOL_ERROR` (or counts as unknown where
+  the caller already treats a failed read that way) and keeps the rows for a
+  retry. Previously the rows were dropped while the consumer stayed live.
+- **SQLite search matches backslashes literally** (#595). The `q` filters
+  match the term as a literal substring, as PostgreSQL, MySQL and MongoDB
+  already did. A backslash, `%` or `_` in the term is an ordinary character.
 - **Web console state fixes** (#593, #594, #596, #597).
   - A credential issue or rotation that is in flight can no longer be
     dismissed, and show-once secrets are queued, so a second result can never
