@@ -181,10 +181,18 @@ describe('settings read as one generation', () => {
       await commitCaptcha('turnstile', 'turnstile-secret');
       await harness.store.settings.delete(CAPTCHA_SECRET_SETTINGS_KEY);
       let secretReads = 0;
-      const store = intercepted(harness.store, CAPTCHA_SECRET_SETTINGS_KEY, async () => {
+      const base = intercepted(harness.store, CAPTCHA_SECRET_SETTINGS_KEY, async () => {
         secretReads += 1;
         if (secretReads === 2) await commitCaptcha('hcaptcha', 'hcaptcha-secret');
-        if (secretReads === 3) {
+      });
+      let anchorReads = 0;
+      const store = intercepted(base, CAPTCHA_SETTINGS_KEY, async () => {
+        anchorReads += 1;
+        // The validation re-read of the anchor (its second read) runs after
+        // the reader captured B's secret: restore A with no secret first, so
+        // the anchor compares equal and only the second secret observation
+        // can reject the mixed pair.
+        if (anchorReads === 2) {
           await commitCaptcha('turnstile', 'turnstile-secret');
           await harness.store.settings.delete(CAPTCHA_SECRET_SETTINGS_KEY);
         }
