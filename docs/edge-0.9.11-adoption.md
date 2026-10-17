@@ -33,7 +33,9 @@ whose data-plane attestation proves every expected data plane public-only (see t
   `f7ba1a9b9885900d1e110f76d38e37a02eda13c8`, the merge of contracts #25, and
   reads every Edge-owned file at Edge `v0.9.17`. No contract gets a new major and no
   schema changes its wire rules: the schemas record their shapes unchanged at
-  v0.9.17, and the plugin-catalog and gateway-errors name sets are unchanged. The
+  v0.9.17, the plugin-catalog and `ErrorClass` name sets are unchanged, and
+  the vocabularies add the gateway-owned `X-Ferrum-Hops` header plus the
+  `loop_detected` error token. The
   five vocabularies, the egress v2, deployment snapshot v2 and acknowledgement
   schemas change only in provenance, descriptions and vocabulary entries, and
   `fixtures/invalid-expectations.json` only in other
@@ -76,6 +78,11 @@ The full review is in
 - **Cached admin misses** (Edge #6143). A failed database read with no cached
   resource answers `503 CachedReadUnavailable`, not `404`. Nexus's
   confirmed-absence logic already treats non-404 errors as unavailable.
+- **Proxy hop budget** (Edge #6109). Edge counts hops in `X-Ferrum-Hops` and
+  refuses requests past `FERRUM_MAX_PROXY_HOPS` (default `10`), answering
+  with the new `loop_detected` error token. The header name is
+  gateway-owned, so Nexus and its mock gateway refuse it as a
+  `correlation_id` or `request_deduplication` `header_name`, as Edge does.
 
 ## What changed for Nexus in Edge v0.9.15 (adopted by Nexus `v0.5.2`)
 

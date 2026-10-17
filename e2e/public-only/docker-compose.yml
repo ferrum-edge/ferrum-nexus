@@ -21,7 +21,7 @@ services:
     networks: [private]
 
   ferrum-edge:
-    image: ${FERRUM_EDGE_IMAGE:?supply a qualified Edge v0.9.15 image index digest}
+    image: ${FERRUM_EDGE_IMAGE:?supply a qualified Edge v0.9.17 image index digest}
     command: ['run', '-m', 'database']
     environment:
       FERRUM_MODE: database

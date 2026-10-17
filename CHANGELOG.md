@@ -28,8 +28,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `ferrumedge/ferrum-edge:v0.9.17@sha256:f8942bed8d3b77c257d7266c9227450dd3d8c139759a07c47d060521a5fd41d1`
   (tag source `669c574c1d1e88e84dccb26a8159939e6694644d`), with every vendored
   contract re-copied byte for byte from `contracts-edge-0.9.17`
-  (`f7ba1a9b9885900d1e110f76d38e37a02eda13c8`). No contract changes its wire
-  rules and the plugin/error name sets are unchanged. v0.9.17 replaces the
+  (`f7ba1a9b9885900d1e110f76d38e37a02eda13c8`). No schema changes its wire
+  rules and the plugin and `ErrorClass` name sets are unchanged; the
+  vocabularies add the gateway-owned `X-Ferrum-Hops` header and the
+  `loop_detected` error token for Edge's proxy hop budget, and Nexus now
+  refuses `X-Ferrum-Hops` as a `correlation_id` or `request_deduplication`
+  `header_name`, as Edge does. v0.9.17 replaces the
   unpublished v0.9.16, fixes the published QUIC advisories affecting v0.9.15,
   and makes an `ns`-claim admin JWT namespace-bounded: set
   `FERRUM_METRICS_BEARER_TOKEN` before upgrading or the Usage card reports its

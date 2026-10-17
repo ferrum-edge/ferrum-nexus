@@ -128,7 +128,7 @@ See the README for a two-stack example.
 | `FERRUM_ADMIN_JWT_TTL`               | `60`                    | Admin JWT lifetime in seconds, 5–3600.                                                                                                                                                                                                                                    |
 | `FERRUM_ADMIN_JWT_ISSUER`            | `ferrum-edge`           | The `iss` claim. Must equal the gateway's configured issuer.                                                                                                                                                                                                              |
 | `FERRUM_ADMIN_JWT_AUDIENCE`          | _(unset)_               | Set only if the gateway configures an audience; otherwise `aud` is omitted.                                                                                                                                                                                               |
-| `FERRUM_METRICS_BEARER_TOKEN`        | _(unset)_               | The gateway's own `FERRUM_METRICS_BEARER_TOKEN` (at least 32 characters). Presented on `GET /metrics` instead of the admin JWT, which Ferrum Edge v0.9.16 refuses there. See [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0916).         |
+| `FERRUM_METRICS_BEARER_TOKEN`        | _(unset)_               | The gateway's own `FERRUM_METRICS_BEARER_TOKEN` (at least 32 characters). Presented on `GET /metrics` instead of the admin JWT, which Ferrum Edge v0.9.16 refuses there. See [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0917).         |
 | `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` | _(unset)_               | Optional separate key for `GET /admin/metrics` only: `viewer` tokens without an `ns` claim. Set it to the gateway's `FERRUM_ADMIN_JWT_VIEWER_SECRET`; never `FERRUM_ADMIN_JWT_SECRET` (refused). **A fleet-wide read credential**; see the trade-off below.               |
 | `FERRUM_NAMESPACE`                   | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` and as the `ns` claim. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, at most 128 characters. Also the first segment of every listen path (`/<namespace>/<slug>`). See [Namespace routability](#namespace-routability). |
 | `FERRUM_GATEWAY_PUBLIC_URL`          | _(unset)_               | Public origin of the gateway's **proxy listener**, used for each API's `invoke_url`. The `gateway.public_url` admin setting overrides it; with neither, `invoke_url` is `null`.                                                                                           |
@@ -367,7 +367,7 @@ block is unknown, not a mismatch. A block that stops appearing ends an earlier
 the gateway reports the namespace as served. On Ferrum Edge v0.9.16 the
 portal's namespace-scoped token gets the block with `active` withheld (`null`)
 whenever its claim does not cover the gateway's active namespace (see
-[Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0916)).
+[Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0917)).
 A single-namespace data plane that withholds its `active` name serves a
 namespace the claim does not cover, which is `unserved`: health degrades and
 publishing is refused, exactly as for a named mismatch. **Backend egress admission below narrows that
@@ -1002,12 +1002,22 @@ is needed. What changes for Nexus:
   lacks a resource, the admin API answers `503 CachedReadUnavailable` instead
   of `404`. Nexus already treats a non-404 read error as unavailable rather
   than confirmed absence, so no local state is deleted on it.
+- **Proxy hop budget.** Edge counts gateway hops in its gateway-owned
+  `X-Ferrum-Hops` header and refuses a request that has already crossed
+  `FERRUM_MAX_PROXY_HOPS` (default `10`; `0` disables the protection — keep
+  it above `0`). The budget bounds proxy loops; it does not forbid pointing
+  an API at another gateway within the budget. Nexus writes no hop config,
+  but Edge reserves the header name, so Nexus now refuses `X-Ferrum-Hops`
+  (any case, `_` or `-`) as a `correlation_id` or `request_deduplication`
+  `header_name` with `400 VALIDATION_FAILED`; rename any existing one before
+  upgrading.
 
 Procedure:
 
-1. **Check the gateway** with the Edge guide's list, and set
+1. **Check the gateway** with the Edge guide's list, set
    `FERRUM_METRICS_BEARER_TOKEN` on Nexus to the gateway's metrics Bearer [REDACTED]
-   if the Usage card matters.
+   if the Usage card matters, keep `FERRUM_MAX_PROXY_HOPS` above `0`, and
+   rename any palette `header_name` set to `X-Ferrum-Hops`.
 2. **Settle journals** as in step 2 of the v0.9.13 procedure. Tokens a v0.9.15
    gateway issued keep verifying on v0.9.17.
 3. **Upgrade Edge to v0.9.17**, the control plane and every data plane together.
@@ -2964,7 +2974,7 @@ An API with no `ferrum_requests_total` series for its own `proxy_id` shows
 `available: false` with an `unavailable_reason` instead of zero counters. The
 portal's own reads of both endpoints need extra credentials on Ferrum Edge
 v0.9.16; see
-[Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0916).
+[Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0917).
 
 To match a dashboard to a portal API, use the `proxy_id` label: it is the
 `ferrum_proxy_id` on the `apis` row, shown as **Edge proxy id** on the API page.

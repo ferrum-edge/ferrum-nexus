@@ -90,6 +90,16 @@ describe('isGatewayOwnedConsumerHeader', () => {
     }
   });
 
+  it('matches X-Ferrum-Hops exactly, case- and separator-insensitively', () => {
+    // Edge v0.9.17 reserves its loop-guard hop count as a header destination.
+    for (const name of ['X-Ferrum-Hops', 'x_ferrum_hops', 'x-Ferrum_hops', ' x-ferrum-hops ']) {
+      assert.equal(isGatewayOwnedConsumerHeader(name), true, name);
+    }
+    for (const name of ['x-ferrum-hops-count', 'x-ferrum', 'x-hops']) {
+      assert.equal(isGatewayOwnedConsumerHeader(name), false, name);
+    }
+  });
+
   it('leaves names outside the namespace alone', () => {
     for (const name of ['x-consumer', 'consumer-id', 'x-custom-consumer-id', 'x-request-id']) {
       assert.equal(isGatewayOwnedConsumerHeader(name), false);

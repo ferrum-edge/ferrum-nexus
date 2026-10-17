@@ -341,7 +341,7 @@ its cause:
   set.
 
 Every other call keeps the namespace-scoped admin token. See
-[`operations.md`](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0916).
+[`operations.md`](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0917).
 
 **Connection pooling.** Calls use pooled keep-alive connections. The client's
 idle lifetime (4 s, raised to at most 8 s by a `Keep-Alive: timeout=N` hint,

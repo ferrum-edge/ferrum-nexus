@@ -1237,12 +1237,18 @@ function literalListenPathProblem(body: Record<string, unknown>): string | null 
 /**
  * Edge v0.9.9 owns the whole `x-consumer-*` request-header namespace, ignoring
  * case and treating `_` and `-` alike in the prefix (`is_consumer_assertion_header`).
- * Edge v0.9.15 adds the exact name `x-authenticated-identity` to the same check.
+ * Edge v0.9.15 adds the exact name `x-authenticated-identity` to the same check,
+ * and Edge v0.9.17 reserves `x-ferrum-hops` (`is_proxy_hops_header`) as a
+ * configured header destination.
  */
 function isConsumerAssertionHeader(name: unknown): boolean {
   if (typeof name !== 'string') return false;
   const trimmed = name.trim();
-  return /^x[-_]consumer[-_]/i.test(trimmed) || /^x[-_]authenticated[-_]identity$/i.test(trimmed);
+  return (
+    /^x[-_]consumer[-_]/i.test(trimmed) ||
+    /^x[-_]authenticated[-_]identity$/i.test(trimmed) ||
+    /^x[-_]ferrum[-_]hops$/i.test(trimmed)
+  );
 }
 
 function nowIso(): string {
