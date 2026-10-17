@@ -298,17 +298,24 @@ export const CORRELATION_ID_RESERVED_HEADERS: readonly string[] = [
  * starts with `x-consumer-` and refuses a `correlation_id` or
  * `request_deduplication` `header_name` beneath it. Edge `v0.9.15` adds the
  * exact name `x-authenticated-identity`, the external identity header, to the
- * same check, and Edge `v0.9.17` reserves its `X-Ferrum-Hops` loop-guard
- * count the same way (`is_proxy_hops_header`). Case is ignored, and `_` and
- * `-` are equivalent, as in Edge's field-name equivalence.
+ * same check. Case is ignored, and `_` and `-` are equivalent, as in Edge's
+ * `is_consumer_assertion_header`.
  */
 export function isGatewayOwnedConsumerHeader(name: string): boolean {
   const trimmed = name.trim();
-  return (
-    /^x[-_]consumer[-_]/i.test(trimmed) ||
-    /^x[-_]authenticated[-_]identity$/i.test(trimmed) ||
-    /^x[-_]ferrum[-_]hops$/i.test(trimmed)
-  );
+  return /^x[-_]consumer[-_]/i.test(trimmed) || /^x[-_]authenticated[-_]identity$/i.test(trimmed);
+}
+
+/**
+ * Whether `name` is Edge `v0.9.17`'s `X-Ferrum-Hops` loop-guard count
+ * (`is_proxy_hops_header`). Edge reserves it as a configured header
+ * destination — `correlation_id.header_name` among them — but not as a
+ * client-supplied `request_deduplication` key, so this is a separate check
+ * from {@link isGatewayOwnedConsumerHeader}. Case is ignored, and `_` and
+ * `-` are equivalent, as in Edge's field-name equivalence.
+ */
+export function isProxyHopsHeader(name: string): boolean {
+  return /^x[-_]ferrum[-_]hops$/i.test(name.trim());
 }
 
 /* ── The palette ────────────────────────────────────────────────────────── */

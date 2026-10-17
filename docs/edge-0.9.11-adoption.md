@@ -81,8 +81,9 @@ The full review is in
 - **Proxy hop budget** (Edge #6109). Edge counts hops in `X-Ferrum-Hops` and
   refuses requests past `FERRUM_MAX_PROXY_HOPS` (default `10`), answering
   with the new `loop_detected` error token. The header name is
-  gateway-owned, so Nexus and its mock gateway refuse it as a
-  `correlation_id` or `request_deduplication` `header_name`, as Edge does.
+  gateway-owned as a configured destination, so Nexus and its mock gateway
+  refuse it as a `correlation_id` `header_name`, as Edge does (Edge still
+  accepts it as a client-supplied `request_deduplication` key).
 
 ## What changed for Nexus in Edge v0.9.15 (adopted by Nexus `v0.5.2`)
 

@@ -1008,8 +1008,8 @@ is needed. What changes for Nexus:
   it above `0`). The budget bounds proxy loops; it does not forbid pointing
   an API at another gateway within the budget. Nexus writes no hop config,
   but Edge reserves the header name, so Nexus now refuses `X-Ferrum-Hops`
-  (any case, `_` or `-`) as a `correlation_id` or `request_deduplication`
-  `header_name` with `400 VALIDATION_FAILED`; rename any existing one before
+  (any case, `_` or `-`) as a `correlation_id` `header_name` with
+  `400 VALIDATION_FAILED`; rename any existing one before
   upgrading.
 
 Procedure:

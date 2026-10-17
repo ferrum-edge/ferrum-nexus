@@ -1237,18 +1237,21 @@ function literalListenPathProblem(body: Record<string, unknown>): string | null 
 /**
  * Edge v0.9.9 owns the whole `x-consumer-*` request-header namespace, ignoring
  * case and treating `_` and `-` alike in the prefix (`is_consumer_assertion_header`).
- * Edge v0.9.15 adds the exact name `x-authenticated-identity` to the same check,
- * and Edge v0.9.17 reserves `x-ferrum-hops` (`is_proxy_hops_header`) as a
- * configured header destination.
+ * Edge v0.9.15 adds the exact name `x-authenticated-identity` to the same check.
  */
 function isConsumerAssertionHeader(name: unknown): boolean {
   if (typeof name !== 'string') return false;
   const trimmed = name.trim();
-  return (
-    /^x[-_]consumer[-_]/i.test(trimmed) ||
-    /^x[-_]authenticated[-_]identity$/i.test(trimmed) ||
-    /^x[-_]ferrum[-_]hops$/i.test(trimmed)
-  );
+  return /^x[-_]consumer[-_]/i.test(trimmed) || /^x[-_]authenticated[-_]identity$/i.test(trimmed);
+}
+
+/**
+ * Edge v0.9.17 reserves `x-ferrum-hops` (`is_proxy_hops_header`) as a
+ * configured header destination such as `correlation_id.header_name` — but
+ * not as a client-supplied `request_deduplication` key.
+ */
+function isProxyHopsHeaderName(name: unknown): boolean {
+  return typeof name === 'string' && /^x[-_]ferrum[-_]hops$/i.test(name.trim());
 }
 
 function nowIso(): string {
@@ -1498,6 +1501,9 @@ function palettePluginError(pluginName: string, config: Record<string, unknown>)
     case 'correlation_id': {
       if (isConsumerAssertionHeader(config.header_name)) {
         return 'correlation_id: `header_name` is in the gateway-owned `x-consumer-*` consumer assertion namespace and cannot be used for correlation IDs';
+      }
+      if (isProxyHopsHeaderName(config.header_name)) {
+        return 'correlation_id: `header_name` is the gateway-owned `x-ferrum-hops` loop-guard count and cannot be used for correlation IDs';
       }
       return null;
     }

@@ -816,10 +816,10 @@ describe('provider plugin palette', () => {
         // Edge v0.9.15 refuses the external identity header the same way.
         ['correlation_id', 'X-Authenticated-Identity'],
         ['request_deduplication', 'x_authenticated-identity'],
-        // Edge v0.9.17 reserves its loop-guard hop count the same way.
+        // Edge v0.9.17 reserves its loop-guard hop count as a correlation
+        // destination (but not as a client-supplied dedup key).
         ['correlation_id', 'X-Ferrum-Hops'],
         ['correlation_id', 'x_ferrum-hops'],
-        ['request_deduplication', 'X-FERRUM-HOPS'],
       ] as const) {
         const response = await setPlugin(name, { config: { header_name: header } });
         assert.equal(response.statusCode, 400, `${name} should refuse ${header}`);

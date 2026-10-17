@@ -32,7 +32,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   rules and the plugin and `ErrorClass` name sets are unchanged; the
   vocabularies add the gateway-owned `X-Ferrum-Hops` header and the
   `loop_detected` error token for Edge's proxy hop budget, and Nexus now
-  refuses `X-Ferrum-Hops` as a `correlation_id` or `request_deduplication`
+  refuses `X-Ferrum-Hops` as a `correlation_id`
   `header_name`, as Edge does. v0.9.17 replaces the
   unpublished v0.9.16, fixes the published QUIC advisories affecting v0.9.15,
   and makes an `ns`-claim admin JWT namespace-bounded: set
