@@ -38,8 +38,17 @@ function sameRow(a: SettingRecord | null, b: SettingRecord | null): boolean {
   );
 }
 
-/** `store`, with every `settings.get` it answers recorded in `seen`. */
-function recording(store: NexusStore, seen: Map<string, SettingRecord | null>): NexusStore {
+/**
+ * `store`, with every `settings.get` it answers recorded in `seen`. Every
+ * observation is kept, including repeats of a key: recording only the first
+ * would let a later read of the same row go unvalidated, so a value that
+ * appears and is removed again between two reads of it (absent, then present,
+ * then absent) would pair the middle value with the restored configuration.
+ */
+function recording(
+  store: NexusStore,
+  seen: Map<string, (SettingRecord | null)[]>,
+): NexusStore {
   const settings = new Proxy(store.settings, {
     get(target, property) {
       const value = Reflect.get(target, property) as unknown;
@@ -51,7 +60,9 @@ function recording(store: NexusStore, seen: Map<string, SettingRecord | null>): 
           target,
           key,
         );
-        if (!seen.has(key)) seen.set(key, row);
+        const observations = seen.get(key);
+        if (observations === undefined) seen.set(key, [row]);
+        else observations.push(row);
         return row;
       };
     },
@@ -79,11 +90,12 @@ export async function readBoundToSetting<T>(
 ): Promise<T> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const anchor = await store.settings.get(key);
-    const seen = new Map<string, SettingRecord | null>([[key, anchor]]);
+    const seen = new Map<string, (SettingRecord | null)[]>([[key, [anchor]]]);
     const result = await read(anchor, recording(store, seen));
     let unchanged = true;
-    for (const [seenKey, row] of seen) {
-      if (!sameRow(row, await store.settings.get(seenKey))) {
+    for (const [seenKey, observations] of seen) {
+      const current = await store.settings.get(seenKey);
+      if (!observations.every((row) => sameRow(row, current))) {
         unchanged = false;
         break;
       }

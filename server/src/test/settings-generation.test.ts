@@ -30,6 +30,7 @@ import type { NexusStore, SettingRecord } from '../db/store.js';
 import { createEmailService } from '../email/service.js';
 import { createCrypto, type NexusCrypto } from '../lib/crypto.js';
 import { isNexusError } from '../lib/errors.js';
+import { readBoundToSetting } from '../lib/setting-generation.js';
 import {
   parseStoredSsoSettings,
   resolveSsoProviders,
@@ -164,6 +165,38 @@ describe('settings read as one generation', () => {
         { host: resolved.host, password: resolved.password },
         { host: 'relay-a.example.test', password: 'relay-a-password' },
       );
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it('validates every repeat read of a row, not only the first', async () => {
+    // Frozen clock: the restored anchor compares equal to the original, so
+    // only validating the *second* secret observation can catch this. The
+    // first secret read sees no row, provider B and its secret land before
+    // the second read, and provider A with no secret is restored before the
+    // validation re-read: absent, then present, then absent again.
+    mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-15T00:00:00.000Z') });
+    try {
+      await commitCaptcha('turnstile', 'turnstile-secret');
+      await harness.store.settings.delete(CAPTCHA_SECRET_SETTINGS_KEY);
+      let secretReads = 0;
+      const store = intercepted(harness.store, CAPTCHA_SECRET_SETTINGS_KEY, async () => {
+        secretReads += 1;
+        if (secretReads === 2) await commitCaptcha('hcaptcha', 'hcaptcha-secret');
+        if (secretReads === 3) {
+          await commitCaptcha('turnstile', 'turnstile-secret');
+          await harness.store.settings.delete(CAPTCHA_SECRET_SETTINGS_KEY);
+        }
+      });
+      const second = await readBoundToSetting(store, CAPTCHA_SETTINGS_KEY, async (_a, reader) => {
+        await reader.settings.get(CAPTCHA_SECRET_SETTINGS_KEY);
+        return reader.settings.get(CAPTCHA_SECRET_SETTINGS_KEY);
+      });
+      // The first attempt's second read held B's secret under the restored A
+      // anchor and must have been discarded; the retry reads the absent row.
+      assert.equal(second, null);
+      assert.ok(secretReads >= 6, 'the mixed attempt was retried from the start');
     } finally {
       mock.timers.reset();
     }
