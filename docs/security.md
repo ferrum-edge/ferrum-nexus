@@ -157,7 +157,7 @@ plane whose data-plane attestation proves every connected data plane public-only
 at least `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`) connected,
 counting only those that did not just start, and health reports it to admins as
 `edge.public_egress_guaranteed`. Edge source authority is
-`25b37395ff61bfea0f3ffd189d9011c4984fa755` (`v0.9.15`); the Edge and canonical
+`669c574c1d1e88e84dccb26a8159939e6694644d` (`v0.9.17`); the Edge and canonical
 releases are published and pinned. Nexus reads egress policy schema 2 only. Schema 1
 (Edge `v0.9.12` and earlier) reported the policy-only value of the same field and is
 refused rather than reinterpreted (see
@@ -1979,7 +1979,7 @@ only code that mints it.
 
 The two fleet-global reads the Usage card needs have their own optional
 credentials. Neither is needed against Ferrum Edge v0.9.15. See
-[`operations.md`](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0916).
+[`operations.md`](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0917).
 
 - **`FERRUM_METRICS_BEARER_TOKEN`** is the gateway's own metrics bearer token,
   sent only on `GET /metrics`. It is a **fleet-wide observability credential**:

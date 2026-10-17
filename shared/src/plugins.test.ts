@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { CORRELATION_ID_RESERVED_HEADERS, isGatewayOwnedConsumerHeader } from './plugins.js';
+import {
+  CORRELATION_ID_RESERVED_HEADERS,
+  isGatewayOwnedConsumerHeader,
+  isProxyHopsHeader,
+} from './plugins.js';
 
 /**
  * Edge's closed `RESERVED_HEADER_NAMES` set at `v0.9.9`, copied verbatim from
@@ -93,6 +97,18 @@ describe('isGatewayOwnedConsumerHeader', () => {
   it('leaves names outside the namespace alone', () => {
     for (const name of ['x-consumer', 'consumer-id', 'x-custom-consumer-id', 'x-request-id']) {
       assert.equal(isGatewayOwnedConsumerHeader(name), false);
+    }
+  });
+});
+
+describe('isProxyHopsHeader', () => {
+  it('matches X-Ferrum-Hops exactly, case- and separator-insensitively', () => {
+    // Edge v0.9.17 reserves its loop-guard hop count as a header destination.
+    for (const name of ['X-Ferrum-Hops', 'x_ferrum_hops', 'x-Ferrum_hops', ' x-ferrum-hops ']) {
+      assert.equal(isProxyHopsHeader(name), true, name);
+    }
+    for (const name of ['x-ferrum-hops-count', 'x-ferrum', 'x-hops', 'x-consumer-id']) {
+      assert.equal(isProxyHopsHeader(name), false, name);
     }
   });
 });

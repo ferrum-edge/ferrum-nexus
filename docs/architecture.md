@@ -341,7 +341,7 @@ its cause:
   set.
 
 Every other call keeps the namespace-scoped admin token. See
-[`operations.md`](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0916).
+[`operations.md`](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0917).
 
 **Connection pooling.** Calls use pooled keep-alive connections. The client's
 idle lifetime (4 s, raised to at most 8 s by a `Keep-Alive: timeout=N` hint,
@@ -447,7 +447,7 @@ DPs or fleets, so without a qualifying attestation Nexus reports those pairings 
 not guaranteed and admits their writes only under the explicit private opt-in. See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)
 and [packaged fixture](../e2e/public-only/README.md). Source authority is Edge
-`25b37395ff61bfea0f3ffd189d9011c4984fa755` (`v0.9.15`). Nexus adopts its
+`669c574c1d1e88e84dccb26a8159939e6694644d` (`v0.9.17`). Nexus adopts its
 [published image and canonical contracts](edge-0.9.11-adoption.md).
 
 **Leases.** One row per key with an owner token and expiry: 60 s TTL renewed at
@@ -1338,5 +1338,5 @@ are never interpreted as omission. Local presentation/reference budgets further 
 accepted input. The configured Edge namespace is the authorization boundary for this
 single-namespace portal. The service returns an allow-listed redacted DTO from `shared/`
 and has no store, gateway, network or source-file reader dependency. The shared v1 format
-is implemented in published `contracts-edge-0.9.15`. Preview cannot invoke publishing or
+is implemented in published `contracts-edge-0.9.17`. Preview cannot invoke publishing or
 install agent policy.

@@ -26,6 +26,7 @@ import { useId, type ReactElement } from 'react';
 import {
   CORRELATION_ID_RESERVED_HEADERS,
   isGatewayOwnedConsumerHeader,
+  isProxyHopsHeader,
   type PluginFieldSpec,
   type ProviderPluginDescriptor,
 } from '@ferrum-nexus/shared';
@@ -260,6 +261,10 @@ export function validateDraft(
     } else if (isGatewayOwnedConsumerHeader(header)) {
       errors.header_name =
         `The gateway owns every x-consumer-* header and X-Authenticated-Identity, and rejects ` +
+        `'${header}' as a correlation header; choose a name of your own, such as x-request-id`;
+    } else if (isProxyHopsHeader(header)) {
+      errors.header_name =
+        `The gateway owns X-Ferrum-Hops, its loop-guard hop count, and rejects ` +
         `'${header}' as a correlation header; choose a name of your own, such as x-request-id`;
     }
   }
