@@ -822,9 +822,9 @@ describe('single sign-on', () => {
     assert.deepEqual(held[0]?.details.lower_trust_provider_ids, ['partner']);
     assert.equal(held[0]?.details.to_role, undefined);
 
-    // A super admin reviews the account and removes the partner identity. The
-    // next corp sign-in promotes it and ends every session opened before it,
-    // the partner one included, so none of them inherits the new role.
+    // A super admin reviews the account and removes the partner identity.
+    // The unlink itself ends every session opened before it (#591), the
+    // partner one included, so none of them can inherit a later role.
     const partnerIdentity = (await h.store.userIdentities.listByUser(victim.user.id)).find(
       (identity) => identity.provider_id === 'partner',
     );
@@ -834,16 +834,21 @@ describe('single sign-on', () => {
       url: `/api/users/${victim.user.id}/identities/${partnerIdentity.id}`,
     });
     assert.equal(unlinked.statusCode, 200, unlinked.body);
+    assert.equal(await roleOf(attacker), 401, 'the partner session ended at unlink');
+    assert.equal(await roleOf(victim), 401, 'so did every other earlier session');
+    const unlinkRow = (await h.auditRows(AuditAction.AUTH_SSO_UNLINK)).find(
+      (row) => row.target_id === victim.user.id,
+    );
+    assert.equal(unlinkRow?.details.terminated_sessions, 3);
     const promoted = await sessionOf(h, await signIn(h, corp, 'corp', admins));
     assert.equal(promoted.user.role, 'admin');
-    assert.equal(await roleOf(attacker), 401, 'the partner session was ended');
-    assert.equal(await roleOf(victim), 401, 'so was every other earlier session');
     assert.equal(await roleOf(promoted), 'admin');
     const sync = (await h.auditRows(AuditAction.AUTH_SSO_CLAIMS_SYNC)).find(
       (row) => row.target_id === victim.user.id && row.details.to_role === 'admin',
     );
     assert.equal(sync?.details.from_role, 'client');
-    assert.equal(sync?.details.terminated_sessions, 3);
+    // Nothing was left for the promotion to end: the unlink revoked them.
+    assert.equal(sync?.details.terminated_sessions, 0);
   });
 
   it('promotes an account whose other providers are trusted with admin', async () => {

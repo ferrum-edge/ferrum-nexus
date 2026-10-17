@@ -3953,6 +3953,29 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         provisioned: false,
       });
       assert.equal(relinked.user_id, other.id);
+      // Retirement revocation reads every distinct linked account (#591):
+      // several accounts, duplicate links collapsed, none for an unknown one.
+      const extraOwner = await store.userIdentities.create({
+        user_id: owner.id,
+        provider_id: provider,
+        issuer,
+        subject: `subject-${newId()}`,
+        provisioned: false,
+      });
+      const extraOther = await store.userIdentities.create({
+        user_id: other.id,
+        provider_id: provider,
+        issuer,
+        subject: `subject-${newId()}`,
+        provisioned: false,
+      });
+      assert.deepEqual(
+        (await store.userIdentities.listUserIdsByProvider(provider)).sort(),
+        [other.id, owner.id].sort(),
+      );
+      assert.deepEqual(await store.userIdentities.listUserIdsByProvider(`${provider}-none`), []);
+      assert.equal(await store.userIdentities.delete(extraOwner.id), true);
+      assert.equal(await store.userIdentities.delete(extraOther.id), true);
       // Removing a provider removes its links, and only its links.
       assert.equal(await store.userIdentities.deleteByProvider(provider), 1);
       assert.equal(await store.userIdentities.countByProvider(provider), 0);

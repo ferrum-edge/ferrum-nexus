@@ -352,20 +352,20 @@ export function runSsoRetirementContract(
           assert.equal(race.saveBodyRuns, 1, 'the real settings transaction ran');
           const session = observedSession(race);
           assert.ok(session, 'the callback issued a real session');
+          // #515 orders the callback commit before retirement; it does not
+          // keep the issued session valid. Retirement (#591) revokes every
+          // session of the affected account, this just-committed one too.
           assert.equal(
             (await h.store.sessions.findByTokenHash(h.app.nexus.crypto.hashToken(token)))?.id,
-            session.id,
-            'the returned cookie opens the committed session after retirement',
+            undefined,
+            'retirement revokes the session the ordered callback committed',
           );
           const me = await h.app.inject({
             method: 'GET',
             url: '/api/auth/me',
             cookies: { [SESSION_COOKIE]: token },
           });
-          assert.equal(me.statusCode, 200, me.body);
-          assert.equal(me.json<MeResponse>().user.id, account.user.id);
-          assert.equal(me.json<MeResponse>().user.role, 'client');
-          assert.equal(me.json<MeResponse>().user.status, 'active');
+          assert.equal(me.statusCode, 401, me.body);
           const logins = (await h.auditRows(AuditAction.AUTH_SSO_LOGIN)).filter(
             (row) => row.target_id === account.user.id,
           );
