@@ -14,6 +14,8 @@
  * failing every sign-in — and writes are strict (`sso/service.ts`).
  */
 
+import { isDeepStrictEqual } from 'node:util';
+
 import {
   DEFAULT_LOGIN_POLICY,
   isLoginPolicy,
@@ -24,8 +26,10 @@ import {
 } from '@ferrum-nexus/shared';
 
 import type { NexusConfig } from '../config/index.js';
-import type { NexusStore } from '../db/store.js';
+import type { NexusStore, SettingRecord } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
+import { conflict } from '../lib/errors.js';
+import { readBoundToSetting } from '../lib/setting-generation.js';
 import { normalizeEmailDomain, ssoProviderSettingsSchema } from './config.js';
 
 /** `app_settings` key of the non-secret single sign-on configuration. */
@@ -65,7 +69,11 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 /** Read the `sso` row leniently: unknown or malformed parts fall back to defaults. */
 export async function readStoredSsoSettings(store: NexusStore): Promise<StoredSsoSettings> {
-  const row = await store.settings.get(SSO_SETTINGS_KEY);
+  return parseStoredSsoSettings(await store.settings.get(SSO_SETTINGS_KEY));
+}
+
+/** The `sso` row, already read, parsed as {@link readStoredSsoSettings} does. */
+export function parseStoredSsoSettings(row: SettingRecord | null): StoredSsoSettings {
   const value = asRecord(row?.value);
   const domains = Array.isArray(value.allowed_email_domains)
     ? value.allowed_email_domains.flatMap((entry: unknown) => {
@@ -153,8 +161,35 @@ export async function localPasswordBlocked(
   return identities.some((identity) => strict.has(identity.provider_id));
 }
 
-/** Every provider in force, as {@link providersInForce} orders them, with its secret. */
+/**
+ * Every provider in force, as {@link providersInForce} orders them, with its
+ * secret.
+ *
+ * A stored provider's settings (issuer, client id) and its client secret are
+ * two rows, which the settings writer commits together. The secrets are read
+ * only while the `sso` row is the generation `stored` was parsed from (see
+ * {@link readBoundToSetting}), so a sign-in that straddles an administrator's
+ * provider change can never send the new client secret to the previous
+ * issuer. A `stored` that is already out of date is refused with `CONFLICT`,
+ * and the attempt starts again.
+ */
 export async function resolveSsoProviders(
+  config: NexusConfig,
+  store: NexusStore,
+  crypto: NexusCrypto,
+  stored: StoredSsoSettings,
+): Promise<ResolvedSsoProvider[]> {
+  return readBoundToSetting(store, SSO_SETTINGS_KEY, async (row, reader) => {
+    if (!isDeepStrictEqual(parseStoredSsoSettings(row), stored)) {
+      throw conflict('The single sign-on settings changed during this request; retry', {
+        setting: SSO_SETTINGS_KEY,
+      });
+    }
+    return resolveWithSecrets(config, reader, crypto, stored);
+  });
+}
+
+async function resolveWithSecrets(
   config: NexusConfig,
   store: NexusStore,
   crypto: NexusCrypto,

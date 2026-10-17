@@ -76,6 +76,7 @@ import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import { OUTBOX_PRIORITY, type NexusStore, type UserFilter, type UserRecord } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
+import { TEMPLATE_LINK_HOSTS_SETTING } from '../email/template-links.js';
 import { MASS_RAW_HTML_VARS, type RenderedEmail } from '../email/templates.js';
 import { NexusError, isNexusError, quotaExceeded, validationFailed } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
@@ -158,6 +159,49 @@ interface RecipientVars {
   email: string;
 }
 
+/** An explicit `http(s)://` URL, as the rendered-link check finds one in text. */
+const TEXT_URL = /https?:[/\\]{2}[^\s<>"'()]+/gi;
+
+/** What stands in for a URL removed from a recipient's display name. */
+export const RECIPIENT_NAME_URL_PLACEHOLDER = '[link removed]';
+
+/**
+ * The name a copy carries instead when the recipient's own name, even with its
+ * links removed, still completes a link the policy refuses together with the
+ * template's text. Non-empty, so it cannot join the text around it into a URL.
+ */
+export const RECIPIENT_NAME_FALLBACK = 'there';
+
+/**
+ * A recipient's display name as a campaign interpolates it: every explicit
+ * URL replaced by {@link RECIPIENT_NAME_URL_PLACEHOLDER}, and control
+ * characters (which the link check reads as separators) by spaces.
+ *
+ * Any active account may put a URL in its own display name. The link policy
+ * rightly refuses to mail an off-portal URL, but that refusal used to be the
+ * whole campaign's: it aborted the size estimate when the name was the
+ * longest, or rolled back a shared chunk and stopped the fan-out, so one
+ * recipient's name kept everyone after it from being mailed. The name is the
+ * recipient's own text, never a destination the campaign meant to send, so
+ * removing the link keeps the policy and contains the failure.
+ */
+export function neutralRecipientName(name: string): string {
+  return name
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(TEXT_URL, RECIPIENT_NAME_URL_PLACEHOLDER);
+}
+
+/** Whether `error` is the link policy refusing a rendered message. */
+function isLinkPolicyRefusal(error: unknown): boolean {
+  if (!isNexusError(error) || error.code !== 'VALIDATION_FAILED') return false;
+  const details = error.details;
+  return (
+    typeof details === 'object' &&
+    details !== null &&
+    (details as { setting?: unknown }).setting === TEMPLATE_LINK_HOSTS_SETTING
+  );
+}
+
 /** UTF-8 size of `value`. */
 function utf8Bytes(value: string): number {
   return Buffer.byteLength(value, 'utf8');
@@ -196,11 +240,19 @@ function worstCaseRecipients(recipients: readonly UserRecord[]): {
   plain: RecipientVars;
   escaped: RecipientVars;
 } {
-  const plain: RecipientVars = { name: '', email: '' };
-  const escaped: RecipientVars = { name: '', email: '' };
-  const most = { plainName: 0, plainEmail: 0, escapedName: 0, escapedEmail: 0 };
+  // The fallback name is a candidate too: any copy may carry it instead.
+  const fallback = RECIPIENT_NAME_FALLBACK;
+  const plain: RecipientVars = { name: fallback, email: '' };
+  const escaped: RecipientVars = { name: fallback, email: '' };
+  const most = {
+    plainName: utf8Bytes(fallback),
+    plainEmail: 0,
+    escapedName: utf8Bytes(escapeHtml(fallback)),
+    escapedEmail: 0,
+  };
   for (const recipient of recipients) {
-    const name = recipient.display_name;
+    // The name each copy will actually carry, so the bound is of real copies.
+    const name = neutralRecipientName(recipient.display_name);
     const address = recipient.email;
     if (utf8Bytes(name) > most.plainName) {
       most.plainName = utf8Bytes(name);
@@ -365,14 +417,29 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
       // transaction retry and lets each large rendered body become collectible
       // immediately after its insert instead of retaining the entire fan-out.
       const render = await email.prepareRenderer('mass', MASS_RAW_HTML_VARS);
-      function renderFor(recipient: { name: string; email: string }): RenderedEmail {
-        return render({
+      // `name` is already neutral here (see {@link neutralRecipientName}). A
+      // refusal that remains can only come from the name completing a URL
+      // with the template's own text, so the copy is rendered again with
+      // `fallback` in its place. If that is refused too, the caller decides:
+      // the size estimate stops the campaign (the template itself is at
+      // fault), and the fan-out skips only that recipient.
+      function renderFor(
+        recipient: { name: string; email: string },
+        fallback: string = RECIPIENT_NAME_FALLBACK,
+      ): RenderedEmail {
+        const vars = {
           recipient_name: recipient.name,
           recipient_email: recipient.email,
           subject,
           body_html: request.body_html,
           body_text: request.body_text,
-        });
+        };
+        try {
+          return render(vars);
+        } catch (error) {
+          if (recipient.name === fallback || !isLinkPolicyRefusal(error)) throw error;
+          return render({ ...vars, recipient_name: fallback });
+        }
       }
 
       // The aggregate: what the campaign as a whole would put in the outbox.
@@ -381,7 +448,15 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
       // later verification and password-reset message. `messageBytes` bounds
       // every copy from above, escaping and template repetition included.
       const worst = worstCaseRecipients(recipients);
-      const messageBytes = worstCaseBytes(renderFor(worst.plain), renderFor(worst.escaped));
+      // A worst-case name the template refuses is sized by an inert stand-in
+      // at least as large raw and escaped, never by the smaller fallback copy
+      // that recipient would get: the bound must cover every other recipient.
+      // The fallback itself is one of the candidates (worstCaseRecipients).
+      const inertLike = (name: string): string => 'x'.repeat(utf8Bytes(escapeHtml(name)));
+      const messageBytes = worstCaseBytes(
+        renderFor(worst.plain, inertLike(worst.plain.name)),
+        renderFor(worst.escaped, inertLike(worst.escaped.name)),
+      );
       const rowBytes = messageBytes + MASS_EMAIL_ROW_OVERHEAD_BYTES;
       // One row has to fit in a fan-out transaction of its own, whatever the
       // aggregate ceiling says: only an overridden template that repeats the
@@ -512,16 +587,29 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
         let enqueued = 0;
         let chunks = 0;
         let failure: unknown = null;
+        // Recipients whose copy the link policy refused even with the fallback
+        // name. A Set: a transaction body can run more than once.
+        const skipped = new Set<string>();
         for (let start = 0; start < recipients.length; start += perChunk) {
           const chunk = recipients.slice(start, start + perChunk);
           try {
             enqueued += await store.transaction(async (tx) => {
               let created = 0;
               for (const recipient of chunk) {
-                const rendered = renderFor({
-                  name: recipient.display_name,
-                  email: recipient.email,
-                });
+                let rendered: RenderedEmail;
+                try {
+                  rendered = renderFor({
+                    name: neutralRecipientName(recipient.display_name),
+                    email: recipient.email,
+                  });
+                } catch (error) {
+                  // The size estimate rendered this template successfully, so
+                  // only this recipient's name can be at fault: skip it, not
+                  // the chunk and everyone after it.
+                  if (!isLinkPolicyRefusal(error)) throw error;
+                  skipped.add(recipient.id);
+                  continue;
+                }
                 const result = await tx.emailOutbox.enqueue({
                   to_email: recipient.email,
                   priority: OUTBOX_PRIORITY.low,
@@ -546,6 +634,13 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
           }
         }
 
+        if (skipped.size > 0) {
+          deps.log?.(
+            { batch, skipped: skipped.size },
+            'Mass-email recipients skipped: their display name completes a link the policy refuses',
+          );
+        }
+
         // Best effort, unlike the row above. The campaign is already durable,
         // countable and named in the trail, so a failure to record what this
         // attempt queued must not turn queued mail into a `500` the
@@ -561,6 +656,7 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
               recipients: recipients.length,
               enqueued,
               chunks,
+              ...(skipped.size > 0 ? { skipped: skipped.size } : {}),
               failed: failure !== null,
             },
             ip,

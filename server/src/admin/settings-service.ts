@@ -73,8 +73,9 @@ import {
   type AuthService,
 } from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
-import type { NexusStore } from '../db/store.js';
+import type { NexusStore, SettingRecord } from '../db/store.js';
 import { validateTemplateLinks } from '../email/template-links.js';
+import { readBoundToSetting } from '../lib/setting-generation.js';
 import {
   DEFAULT_EMAIL_TEMPLATES,
   removedTemplateVariable,
@@ -259,7 +260,11 @@ export async function readStoredGatewayPublicUrl(store: NexusStore): Promise<str
 
 /** The stored SMTP overrides; every field is `null` when unset. */
 export async function readStoredSmtp(store: NexusStore): Promise<StoredSmtpSettings> {
-  const row = await store.settings.get(SMTP_SETTINGS_KEY);
+  return parseStoredSmtp(await store.settings.get(SMTP_SETTINGS_KEY));
+}
+
+/** The stored SMTP connection, from an already-read `smtp` row. */
+export function parseStoredSmtp(row: SettingRecord | null): StoredSmtpSettings {
   const value = asRecord(row?.value);
   return {
     host: str(value.host),
@@ -489,10 +494,10 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
     return { public_url: await getGatewayPublicUrl() };
   }
 
-  async function readCaptcha(): Promise<CaptchaAdminSettings> {
-    const row = await store.settings.get(CAPTCHA_SETTINGS_KEY);
+  async function readCaptcha(reader: NexusStore = store): Promise<CaptchaAdminSettings> {
+    const row = await reader.settings.get(CAPTCHA_SETTINGS_KEY);
     const value = asRecord(row?.value);
-    const secret = await store.settings.get(CAPTCHA_SECRET_SETTINGS_KEY);
+    const secret = await reader.settings.get(CAPTCHA_SECRET_SETTINGS_KEY);
     return {
       enabled: value.enabled === true,
       provider: (str(value.provider) ?? 'none') as CaptchaProvider,
@@ -567,20 +572,42 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
     // patch fails closed with `CONFLICT`. The other order would let a merge
     // built on rows newer than the fingerprint commit as if it were current.
     const fingerprint = await captchaFingerprint(store);
-    const current = await readCaptcha();
+    // The stored provider and its secret from one committed generation: the
+    // self-test below may post the stored secret, and it must only ever reach
+    // the vendor that secret was stored for (see readBoundToSetting).
+    const { current, storedSecretRead } = await readBoundToSetting(
+      store,
+      CAPTCHA_SETTINGS_KEY,
+      async (_row, reader) => ({
+        current: await readCaptcha(reader),
+        storedSecretRead: await readEncryptedSetting(reader, crypto, CAPTCHA_SECRET_SETTINGS_KEY),
+      }),
+    );
     const next: StoredCaptchaSettings = {
       enabled: patch.enabled ?? current.enabled,
       provider: patch.provider ?? current.provider,
       site_key: patch.site_key === undefined ? current.site_key : patch.site_key,
     };
+    // A secret is issued by one vendor. It cannot stay behind a change to
+    // another vendor, even one saved while CAPTCHA is off: the next activation
+    // would treat it as that vendor's and post it there in its self-test.
+    // Switching to `none` keeps it harmlessly: leaving `none` is a change again.
+    if (
+      next.provider !== 'none' &&
+      next.provider !== current.provider &&
+      patch.secret_key === undefined &&
+      current.secret_set
+    ) {
+      throw validationFailed(
+        'Changing the CAPTCHA provider requires sending captcha.secret_key in the same request ' +
+          '(null to clear it), because the stored secret belongs to the previous provider',
+      );
+    }
     if (!next.enabled) return { next, fingerprint, selfTested: false };
 
     const provider = next.provider;
     const siteKey = next.site_key?.trim() ?? '';
-    const storedSecret =
-      patch.secret_key === undefined
-        ? await readEncryptedSetting(store, crypto, CAPTCHA_SECRET_SETTINGS_KEY)
-        : patch.secret_key;
+    const storedSecret = patch.secret_key === undefined ? storedSecretRead : patch.secret_key;
     // An unreadable encrypted row and a cleared one both read as absent here,
     // which is the same "unusable" the `verify` path fails closed on.
     const secret = storedSecret ?? '';
@@ -742,13 +769,20 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
             for (const field of ['enabled', 'provider', 'site_key'] as const) {
               if (patch.captcha[field] !== undefined) changed.push(`captcha.${field}`);
             }
+            // A replaced secret is removed before the configuration moves and
+            // written after it. Where a transaction is atomic the order is
+            // invisible; on a standalone MongoDB, whose writes land one by one,
+            // a reader in between finds no secret rather than the old one
+            // beside the new provider (see readBoundToSetting).
+            if (patch.captcha.secret_key !== undefined) {
+              await tx.settings.delete(CAPTCHA_SECRET_SETTINGS_KEY);
+            }
             await tx.settings.set(CAPTCHA_SETTINGS_KEY, captchaPlan.next, false);
 
             if (patch.captcha.secret_key !== undefined) {
               changed.push('captcha.secret_key');
-              if (patch.captcha.secret_key === null || patch.captcha.secret_key === '') {
-                await tx.settings.delete(CAPTCHA_SECRET_SETTINGS_KEY);
-              } else {
+              // A cleared secret was already removed above.
+              if (patch.captcha.secret_key !== null && patch.captcha.secret_key !== '') {
                 await tx.settings.set(
                   CAPTCHA_SECRET_SETTINGS_KEY,
                   crypto.encryptJson(CAPTCHA_SECRET_SETTINGS_KEY, patch.captcha.secret_key),
@@ -796,6 +830,15 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
             }
             for (const field of ['host', 'port', 'secure', 'username', 'from_address'] as const) {
               if (patch.smtp[field] !== undefined) changed.push(`smtp.${field}`);
+            }
+            // A replaced secret is removed before the configuration moves and
+            // written after it. Where a transaction is atomic the order is
+            // invisible; on a standalone MongoDB, whose writes land one by one,
+            // a reader in between finds no secret rather than the old one
+            // beside the new relay (see readBoundToSetting).
+            // `storedPassword` was read above, before this delete.
+            if (patch.smtp.password !== undefined) {
+              await tx.settings.delete(SMTP_PASSWORD_SETTINGS_KEY);
             }
             await tx.settings.set(SMTP_SETTINGS_KEY, next, false);
 

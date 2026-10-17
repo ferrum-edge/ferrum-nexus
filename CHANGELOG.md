@@ -200,6 +200,43 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Security
 
+- **A recipient's display name can no longer stop a mass-email campaign.** A
+  personalized mass template interpolates `{{recipient_name}}`, and the link
+  policy refuses an off-portal URL in a rendered message. A URL in one
+  recipient's own display name used to fail the whole campaign: it aborted the
+  size estimate, or rolled back a chunk and stopped the fan-out for everyone
+  after it. Each explicit URL in a recipient's name is now replaced by
+  `[link removed]` before rendering, so no off-portal link is ever mailed and
+  every recipient is still queued. A name that would still complete a refused
+  link with the template's own text is replaced by `there` in that one copy,
+  and a recipient whose copy is refused even then is skipped alone (counted as
+  `skipped` on the completion record). A campaign whose own content links off
+  the portal is refused as before.
+- **The SMTP password is only presented to the relay it was stored for, a
+  CAPTCHA secret only to its vendor, and an identity provider's client secret
+  only to its issuer.** Each of these configurations is two or more settings
+  rows that the writer commits together but readers fetched one after the
+  other: the SMTP connection and its password, the CAPTCHA provider and its
+  secret (at verification and in the activation self-test), and the single
+  sign-on providers and their client secrets. A delivery or SMTP
+  test that read during an administrator's relay change could pair the old
+  host with the new password. Both reads are now bound to one committed
+  generation of the configuration: the anchor row is re-read afterwards, and
+  the result is used only if it did not change, otherwise the read retries,
+  and after five attempts it fails with `CONFLICT` rather than mixing two
+  configurations. The rows read with the configuration are re-read too, and a
+  rewritten secret never compares equal because it is re-encrypted, so a
+  change saved back to an identical value cannot pass either. A sign-in that read the
+  single sign-on settings before such a change is refused with `CONFLICT` and
+  starts again. The settings writers now remove a replaced secret before moving
+  the configuration and write the new one after it, so on a standalone MongoDB
+  (whose transactions are not atomic) a reader in between finds no secret
+  rather than the old one. Changing a stored single sign-on provider's
+  `issuer` or `client_id` now requires `client_secret` in the same request
+  (`null` to clear it), as changing the SMTP connection or the CAPTCHA provider
+  already required their secrets. Likewise, moving the CAPTCHA provider to
+  another vendor now requires `captcha.secret_key` even while CAPTCHA is off.
+
 - **Sessions have an absolute lifetime** (#582). A session now ends
   `NEXUS_SESSION_MAX_AGE` seconds after sign-in however active it is; sliding
   expiry never extends it past that, and the cookies a slide re-issues expire

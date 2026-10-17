@@ -34,9 +34,10 @@ import type {
   CaptchaPublicConfig,
 } from '@ferrum-nexus/shared';
 
-import type { NexusStore } from '../db/store.js';
+import type { NexusStore, SettingRecord } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { captchaFailed, captchaSelfTestFailed } from '../lib/errors.js';
+import { readBoundToSetting } from '../lib/setting-generation.js';
 
 /** `app_settings` key holding the plaintext CAPTCHA configuration. */
 export const CAPTCHA_SETTINGS_KEY = 'captcha';
@@ -202,7 +203,10 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
   let lastBypassLogAt = 0;
 
   async function readSettings(): Promise<StoredCaptchaSettings> {
-    const row = await deps.store.settings.get(CAPTCHA_SETTINGS_KEY);
+    return parseSettings(await deps.store.settings.get(CAPTCHA_SETTINGS_KEY));
+  }
+
+  function parseSettings(row: SettingRecord | null): StoredCaptchaSettings {
     if (!row || row.value === null || typeof row.value !== 'object') return DEFAULT_SETTINGS;
     const value = row.value as Partial<StoredCaptchaSettings>;
     return {
@@ -213,8 +217,8 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
     };
   }
 
-  async function readSecret(): Promise<string | null> {
-    const row = await deps.store.settings.get(CAPTCHA_SECRET_SETTINGS_KEY);
+  async function readSecret(reader: NexusStore = deps.store): Promise<string | null> {
+    const row = await reader.settings.get(CAPTCHA_SECRET_SETTINGS_KEY);
     if (!row) return null;
     if (!row.encrypted) return typeof row.value === 'string' ? row.value : null;
     try {
@@ -286,7 +290,7 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
       token: string | undefined,
       remoteIp: string | null = null,
     ): Promise<CaptchaVerifyOutcome> {
-      const settings = await readSettings();
+      let settings = await readSettings();
       if (!isConfigured(settings)) return 'not_required';
 
       // The break-glass branch, before anything can fail closed: the stored
@@ -305,7 +309,20 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
         return 'bypassed';
       }
 
-      const secret = await readSecret();
+      // The provider, site key and secret from one committed generation, so a
+      // read that straddles a provider change cannot send one vendor's secret
+      // to another (see readBoundToSetting).
+      const bound = await readBoundToSetting(
+        deps.store,
+        CAPTCHA_SETTINGS_KEY,
+        async (row, reader) => ({
+          settings: parseSettings(row),
+          secret: await readSecret(reader),
+        }),
+      );
+      if (!isConfigured(bound.settings)) return 'not_required';
+      const { secret } = bound;
+      settings = bound.settings;
       if (!settings.site_key || !secret?.trim()) {
         // Configured as enabled but unusable — fail closed rather than letting
         // registrations through unverified.

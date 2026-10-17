@@ -1374,8 +1374,10 @@ update of `policy`, `allowed_email_domains`, `deprovision_on_access_loss` and
   and keep their password lock. Each entry carries
   every field shown above except `source`, `client_secret_set` and
   `redirect_uri`, plus an optional write-only `client_secret`: omit it to keep
-  the stored one, `null` to clear it. Environment providers are never part of
-  the list.
+  the stored one, `null` to clear it. A change of `issuer` or `client_id` on a
+  provider that holds a stored secret must send `client_secret` (or `null`),
+  because the stored secret belongs to the previous client. Environment
+  providers are never part of the list.
 - `role` in a mapping is `client`, `provider` or `admin`; `super_admin` is
   refused. `default_role` may be `null` (no match → no access).
 - Allowed domains, deployment-wide and per provider, are normalized
@@ -1388,6 +1390,8 @@ Errors: `400 VALIDATION_FAILED` for any of:
 - an unknown field, or a provider missing a field;
 - an id declared in `NEXUS_OIDC_PROVIDERS`, or a duplicate id;
 - a non-HTTPS issuer, or an issuer change on a provider that holds links;
+- an `issuer` or `client_id` change that keeps a stored secret (no
+  `client_secret` in the request);
 - more than 10 providers, or an invalid domain;
 - `sso_only` without an enabled provider, or before the caller has a link of
   their own to an enabled provider.
@@ -1516,6 +1520,15 @@ Rows are keyed `mass:<actor_id>:<batch>:<user_id>`, where `<batch>` is your
 `idempotency_key` or a fresh UUID. `recipients` is who matched; `enqueued`
 excludes rows the key already produced, so resending with the same key queues
 nothing new.
+
+A template that uses `{{recipient_name}}` gets each display name with any
+explicit `http(s)://` URL replaced by `[link removed]`. When a name would still
+form a link the policy refuses together with the template's text, that copy
+uses `there` instead. If even that copy is refused, the recipient is skipped:
+`enqueued` is lower than `recipients` without a failure, the campaign's
+`admin.mass_email_complete` row records `skipped`, and a retry with the same key
+skips the same recipients. Edit the template or the account's display name to
+reach them.
 
 The campaign's `admin.mass_email` audit row commits **before** any outbox row;
 if it cannot be written, nothing is queued. The rows are then queued in

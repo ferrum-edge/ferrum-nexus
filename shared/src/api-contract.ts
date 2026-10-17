@@ -285,6 +285,8 @@ export interface SsoProviderInput extends SsoProviderSettings {
   /**
    * Write-only; stored AES-256-GCM encrypted. Omit to keep the stored secret,
    * `null` to clear it (a public client that authenticates with PKCE alone).
+   * Required (a value or `null`) when `issuer` or `client_id` changes on a
+   * provider that holds a stored secret.
    */
   client_secret?: string | null;
 }
