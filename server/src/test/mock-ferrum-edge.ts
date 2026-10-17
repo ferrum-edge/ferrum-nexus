@@ -2029,7 +2029,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     return {
       gateway: {
         mode: 'database',
-        ferrum_version: '0.9.15',
+        ferrum_version: '0.9.17',
         uptime_seconds: MOCK_GATEWAY_UPTIME_SECONDS,
         total_requests: totalRequests,
         proxy_count: proxies.size,

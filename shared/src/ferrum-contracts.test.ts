@@ -44,8 +44,8 @@ describe('pinned Ferrum contracts', () => {
   it('keeps every vendored contract file byte-identical to its recorded digest', () => {
     const pin = readFileSync(join(contractsDirectory, 'PIN'), 'utf8');
     const lines = pin.trim().split('\n');
-    assert.equal(lines[0], 'tag: contracts-edge-0.9.15');
-    assert.equal(lines[1], 'commit: 6fb64c5dc2e014204c17609fc717d976f3b4589e');
+    assert.equal(lines[0], 'tag: contracts-edge-0.9.17');
+    assert.equal(lines[1], 'commit: f7ba1a9b9885900d1e110f76d38e37a02eda13c8');
 
     const digestLines = lines.slice(2);
     assert.ok(digestLines.length > 0, 'PIN must list the vendored contract file digests');

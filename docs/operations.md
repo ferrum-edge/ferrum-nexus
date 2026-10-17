@@ -254,9 +254,9 @@ control plane shared by several tenants) only accepts tokens whose `ns` covers
 the requested namespace. Nexus works with or without the flag; make sure the
 gateway grants this portal its `FERRUM_NAMESPACE`.
 
-#### Namespace-bounded admin tokens (Ferrum Edge v0.9.16)
+#### Namespace-bounded admin tokens (Ferrum Edge v0.9.17)
 
-From Ferrum Edge v0.9.16
+From Ferrum Edge v0.9.17
 ([ferrum-edge#6095](https://github.com/ferrum-edge/ferrum-edge/issues/6095)),
 an admin JWT that carries an `ns` claim is a tenant credential whether or not
 `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM` is set. It reaches the namespace-scoped
@@ -267,7 +267,7 @@ claim-less token signed with `FERRUM_ADMIN_JWT_SECRET` has authority over the
 whole fleet. Everything the portal writes is namespace-scoped and keeps working.
 The fleet-global reads are affected like this:
 
-| Read                         | Used for                                     | On Edge v0.9.16, with no extra setting                                                                                                                     | To restore it                                                                                                        |
+| Read                         | Used for                                     | On Edge v0.9.17, with no extra setting                                                                                                                     | To restore it                                                                                                        |
 | ---------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | `GET /metrics`               | Usage card request counts and latency        | `403`. The card shows "Gateway metrics are unavailable" with the reason; `unavailable_code` is `refused`.                                                  | `FERRUM_METRICS_BEARER_TOKEN`, equal to the gateway's own value. Allowlisting the portal's IP does not help (below). |
 | `GET /admin/metrics`         | Usage card circuit breakers, ejected targets | `403`. `backend.status` is `unavailable` with the reason; it never reads as "no circuit breaker".                                                          | Optional `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` (see below).                                                           |
@@ -276,7 +276,9 @@ The fleet-global reads are affected like this:
 | `GET /version` (not on Edge) | Best-effort version probe                    | `403` instead of `404`; still reads as no version.                                                                                                         | Nothing to set.                                                                                                      |
 
 Neither setting is needed against Ferrum Edge v0.9.15, where the admin JWT
-still reads both metrics endpoints; each is used as soon as it is set.
+still reads both metrics endpoints; each is used as soon as it is set. On the
+pinned Edge v0.9.17, set `FERRUM_METRICS_BEARER_TOKEN` before upgrading or the
+Usage card reports its counts unavailable.
 
 Adding the portal's IP to the gateway's `FERRUM_METRICS_ALLOWED_CIDRS` does not
 restore `GET /metrics`. Nexus always presents a credential on the scrape, its
@@ -698,13 +700,16 @@ control-plane attestation within schema 2 and Edge's narrower `durable` outcomes
 the snapshot and token formats are unchanged (see
 [Upgrading to Edge v0.9.14](#upgrading-to-edge-v0914)). Nexus `v0.5.2` pairs with
 Edge `v0.9.15`, a security release that keeps every one of these contracts (see
-[Upgrading to Edge v0.9.15](#upgrading-to-edge-v0915)). The guarantee
+[Upgrading to Edge v0.9.15](#upgrading-to-edge-v0915)). The next release pairs
+with Edge `v0.9.17`, which fixes the published QUIC advisories affecting
+v0.9.15 and keeps every one of these contracts (see
+[Upgrading to Edge v0.9.17](#upgrading-to-edge-v0917)). The guarantee
 still requires `enforcement_scope=local-data-plane` explicitly, not schema 2's
 narrowed `public_only_guaranteed` alone.
 
 [`release/compatibility.env`](../release/compatibility.env) pins the published Edge
-`v0.9.15` default image, and Nexus vendors `contracts-edge-0.9.15` at
-`6fb64c5dc2e014204c17609fc717d976f3b4589e`. See [the adoption facts](edge-0.9.11-adoption.md)
+`v0.9.17` default image, and Nexus vendors `contracts-edge-0.9.17` at
+`f7ba1a9b9885900d1e110f76d38e37a02eda13c8`. See [the adoption facts](edge-0.9.11-adoption.md)
 and the separate [packaged public-only fixture](../e2e/public-only/README.md).
 
 **Fixing a mismatch.** Set the portal's `FERRUM_NAMESPACE` to the gateway's
@@ -971,6 +976,49 @@ Nexus `v0.5.1` reads Edge v0.9.15 unchanged, and `v0.5.2` still reads v0.9.14, s
 order of steps 3 and 4 does not matter for compatibility. **Rolling back** Edge to
 v0.9.14 keeps Nexus working, but reopens the vulnerabilities v0.9.15 fixes; do it only
 to restore service.
+
+### Upgrading to Edge v0.9.17
+
+The next Nexus release pairs with Edge v0.9.17 and requires it: v0.9.17 fixes
+the published QUIC advisories affecting v0.9.15, and it is the only Edge
+version that release's acceptance suite tests. There is no published v0.9.16;
+v0.9.17 is its replacement. Read the
+[Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.17/docs/upgrade_guide.md#upgrading-to-0917)
+for the gateway-wide changes. Every contract Nexus depends on is unchanged:
+egress policy schema 2 and its data-plane attestation, deployment snapshot v2
+and its `deployment_snapshot.v2` tokens, and the acknowledgement shape. The
+ConfigSync protocol revision stays `3`. No Nexus migration or journal change
+is needed. What changes for Nexus:
+
+- **Namespace-bounded admin tokens.** An admin JWT carrying an `ns` claim is
+  namespace-bounded even with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=false`, and
+  every token Nexus mints carries the claim. Portal writes and
+  namespace-scoped reads are unchanged; `/health` answers in the bounded
+  tenant tier. The Usage card's fleet reads are refused `403` unless
+  `FERRUM_METRICS_BEARER_TOKEN` (for `GET /metrics`) and the optional
+  `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` (for `GET /admin/metrics`) are set; see
+  [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0917).
+- **Cached admin misses.** When a database read fails and the fallback cache
+  lacks a resource, the admin API answers `503 CachedReadUnavailable` instead
+  of `404`. Nexus already treats a non-404 read error as unavailable rather
+  than confirmed absence, so no local state is deleted on it.
+
+Procedure:
+
+1. **Check the gateway** with the Edge guide's list, and set
+   `FERRUM_METRICS_BEARER_TOKEN` on Nexus to the gateway's metrics Bearer [REDACTED]
+   if the Usage card matters.
+2. **Settle journals** as in step 2 of the v0.9.13 procedure. Tokens a v0.9.15
+   gateway issued keep verifying on v0.9.17.
+3. **Upgrade Edge to v0.9.17**, the control plane and every data plane together.
+4. **Upgrade Nexus** to the release that pins Edge v0.9.17 in
+   [`release/compatibility.env`](../release/compatibility.env), and check
+   `GET /api/health/edge` as an admin.
+
+Nexus `v0.5.2` already works with Edge v0.9.17's bounded-token behavior, so
+the order of steps 3 and 4 does not matter for compatibility. **Rolling back**
+Edge to v0.9.15 keeps Nexus working, but reopens the QUIC vulnerabilities
+v0.9.17 fixes; do it only to restore service.
 
 ### Email
 
@@ -1829,7 +1877,8 @@ docker compose up -d
 
 The four secrets and `FERRUM_EDGE_IMAGE` are required (`${VAR:?…}`); keep the
 secrets stable across restarts. [`release/compatibility.env`](../release/compatibility.env)
-pins the Edge image by digest: Ferrum Edge `v0.9.15` for Nexus `v0.5.2`. That is the
+pins the Edge image by digest: Ferrum Edge `v0.9.15` for Nexus `v0.5.2`, and Edge
+`v0.9.17` for the next release on `main`. That is the
 release the acceptance suite ([`e2e/`](../e2e/README.md)) tests against;
 other Edge versions are unverified.
 
@@ -2024,7 +2073,8 @@ Nexus has no namespace Admin restore caller. Its API gateway restore rebuilds
 individual resources and repeats egress admission. Conditional Edge backup does not
 make Nexus and Edge backups jointly atomic; keep the writer-drain and paired-backup
 procedure below. Nexus `v0.5.2` pairs with Edge `v0.9.15` and vendors
-`contracts-edge-0.9.15`; Nexus `v0.5.0` and `v0.5.1` paired with Edge `v0.9.14` and
+`contracts-edge-0.9.15`; `main` pairs with Edge `v0.9.17` and vendors
+`contracts-edge-0.9.17`. Nexus `v0.5.0` and `v0.5.1` paired with Edge `v0.9.14` and
 vendored `contracts-edge-0.9.14`, and Nexus `v0.4.0` paired with Edge `v0.9.13` and
 vendored `contracts-edge-0.9.13`. See [the adoption facts](edge-0.9.11-adoption.md).
 

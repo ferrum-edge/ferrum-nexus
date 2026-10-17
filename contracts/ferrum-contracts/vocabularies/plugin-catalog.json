@@ -2,13 +2,13 @@
   "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-plugin-catalog/v1.schema.json",
   "vocabulary": "plugin-catalog",
   "version": 1,
-  "edge_release": "v0.9.15",
-  "description": "Index of every built-in Ferrum Edge plugin at v0.9.15: name, registration failure policy, documented priority, phases and protocol surface, and a pointer to the plugin's config schema in Edge's published openapi.yaml. Build-time custom plugins are not listed.",
+  "edge_release": "v0.9.17",
+  "description": "Index of every built-in Ferrum Edge plugin at v0.9.17: name, registration failure policy, documented priority, phases and protocol surface, and a pointer to the plugin's config schema in Edge's published openapi.yaml. Build-time custom plugins are not listed.",
   "provenance": [
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.15",
-      "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
+      "ref": "v0.9.17",
+      "commit": "669c574c1d1e88e84dccb26a8159939e6694644d",
       "path": "src/plugins/mod.rs",
       "symbols": [
         "BUILTIN_PLUGIN_REGISTRATIONS",
@@ -23,8 +23,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.15",
-      "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
+      "ref": "v0.9.17",
+      "commit": "669c574c1d1e88e84dccb26a8159939e6694644d",
       "path": "src/plugins/builtin_parity.rs",
       "symbols": [
         "BUILTIN_PLUGIN_PARITY_META",
@@ -43,8 +43,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.15",
-      "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
+      "ref": "v0.9.17",
+      "commit": "669c574c1d1e88e84dccb26a8159939e6694644d",
       "path": "openapi.yaml",
       "symbols": [
         "components.schemas.PluginConfigBase"
@@ -52,15 +52,15 @@
       "fields": [
         "config_schema"
       ],
-      "note": "PluginConfigBase and every config_schema pointer are unchanged from v0.9.14. Config schemas the pointers reach change at v0.9.15: LdapAuthConfig drops consumer_mapping and stays closed, so a config that still sets it is refused (ferrum-edge#6088); JwksAuthConfig and Oauth2IntrospectionConfig display claims select X-Authenticated-Identity (#6088); the plugin-config environment references (ApiChargebackSinkConfig clickhouse.password_ref, AiSemanticFirewallConfig provider.api_key_env, WorkloadMetricsConfig Lightstep access_token_env/accessTokenEnv, ProxyAlertsEnvName) take a FERRUM_PLUGIN_SECRET_<NAME> name pattern and maxLength 256, and AiStreamRouterConfig api_key and the ServerlessFunctionConfig Azure/GCP fallbacks are redescribed (#6089); RateLimitingConfig adds ipv6_prefix (1-128, default 64), McpGatewayConfig adds sessions.max_sessions_per_principal (minimum 1, default 128) and sessions.max_sessions now refuses new sessions when full instead of evicting the oldest and BodyValidatorConfig grpc_max_decompressed_size_bytes has minimum 1 (#6079); SoapWsSecurityConfig content_type.allow_mtom describes strict MTOM framing with the first part as root (#6077)."
+      "note": "v0.9.17 keeps PluginConfigBase pointers, registrations, parity metadata and catalog type properties unchanged. Referenced configuration components reserve X-Ferrum-Hops destinations, add the explicit allow_custom_endpoint_with_ambient_credentials opt-in for Lambda/Bedrock custom endpoints, and clarify external identity display-claim precedence. Admission depends on the concrete built-in implementation and instance/transport composition, not a new catalog field; see owner plugin_execution_order and upgrade guidance."
     }
   ],
   "config_schema_document": {
     "repo": "ferrum-edge/ferrum-edge",
-    "ref": "v0.9.15",
-    "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
+    "ref": "v0.9.17",
+    "commit": "669c574c1d1e88e84dccb26a8159939e6694644d",
     "path": "openapi.yaml",
-    "sha256": "f6c7d8b1d247060c4d0ae66e5c149ad3d76721addb8176eff45b6fc3d1b4d6b2",
+    "sha256": "297b312ac1e7b2a7b7cfef74cdf4550063da0676edcee07d9652e3fb16d806b1",
     "openapi": "3.1.0",
     "note": "Each config_schema.pointer is a JSON Pointer into this exact file. The schemas are OpenAPI 3.1 (JSON Schema 2020-12 dialect) and may $ref other components in the same document. They apply to `config` only when the plugin config is enabled. They are referenced, not copied, in this release; see docs/adoption.md (follow-ups)."
   },

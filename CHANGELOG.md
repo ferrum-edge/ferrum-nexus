@@ -24,6 +24,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- **Pinned Ferrum Edge v0.9.17** (#592):
+  `ferrumedge/ferrum-edge:v0.9.17@sha256:f8942bed8d3b77c257d7266c9227450dd3d8c139759a07c47d060521a5fd41d1`
+  (tag source `669c574c1d1e88e84dccb26a8159939e6694644d`), with every vendored
+  contract re-copied byte for byte from `contracts-edge-0.9.17`
+  (`f7ba1a9b9885900d1e110f76d38e37a02eda13c8`). No contract changes its wire
+  rules and the plugin/error name sets are unchanged. v0.9.17 replaces the
+  unpublished v0.9.16, fixes the published QUIC advisories affecting v0.9.15,
+  and makes an `ns`-claim admin JWT namespace-bounded: set
+  `FERRUM_METRICS_BEARER_TOKEN` before upgrading or the Usage card reports its
+  counts unavailable. See
+  [Upgrading to Edge v0.9.17](docs/operations.md#upgrading-to-edge-v0917).
+
 - **`style-src` no longer allows `'unsafe-inline'`** (#587). The SPA shell's
   Content-Security-Policy names a nonce that is fresh on every response, and
   the server templates `index.html` with it instead of serving the file, so
