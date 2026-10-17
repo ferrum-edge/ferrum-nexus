@@ -8,12 +8,12 @@
     "version": 2,
     "status": "implemented",
     "owner": "ferrum-edge/ferrum-edge",
-    "edge_availability": "Released in Ferrum Edge v0.9.13 at 9b83115de7ec23ab51ec4feae6bed65e596db425 (ferrum-edge#6017; see issue #5994 and PR #5999). Edge v0.9.14 at 9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d adds the optional, CP-only data_plane_attestation object (ferrum-edge#6029, issue #6020) without changing schema_version; v0.9.13 never emits it. Replaces v1, which Edge v0.9.11 and v0.9.12 emitted; v0.9.13 through v0.9.15 never emit schema_version 1. Unchanged wire shape re-read at Edge v0.9.15 source 25b37395ff61bfea0f3ffd189d9011c4984fa755.",
+    "edge_availability": "Released in Ferrum Edge v0.9.13 at 9b83115de7ec23ab51ec4feae6bed65e596db425 (ferrum-edge#6017; see issue #5994 and PR #5999). Edge v0.9.14 at 9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d adds the optional, CP-only data_plane_attestation object (ferrum-edge#6029, issue #6020) without changing schema_version; v0.9.13 never emits it. Replaces v1, which Edge v0.9.11 and v0.9.12 emitted; v0.9.13 through v0.9.15 never emit schema_version 1. Unchanged wire shape re-read at Edge v0.9.15 source 25b37395ff61bfea0f3ffd189d9011c4984fa755. Unchanged wire shape re-read at Edge v0.9.17 source 669c574c1d1e88e84dccb26a8159939e6694644d.",
     "provenance": [
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.15",
-        "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
+        "ref": "v0.9.17",
+        "commit": "669c574c1d1e88e84dccb26a8159939e6694644d",
         "path": "openapi.yaml",
         "symbols": [
           "components.schemas.BackendEgressPolicyResponse",
@@ -26,8 +26,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.15",
-        "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
+        "ref": "v0.9.17",
+        "commit": "669c574c1d1e88e84dccb26a8159939e6694644d",
         "path": "src/admin/backend_egress_policy.rs",
         "symbols": [
           "BackendEgressPolicyResponse",
@@ -40,8 +40,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.15",
-        "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
+        "ref": "v0.9.17",
+        "commit": "669c574c1d1e88e84dccb26a8159939e6694644d",
         "path": "src/grpc/backend_egress_attestation.rs",
         "symbols": [
           "EgressMode",
@@ -54,8 +54,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.15",
-        "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
+        "ref": "v0.9.17",
+        "commit": "669c574c1d1e88e84dccb26a8159939e6694644d",
         "path": "src/config/env_config.rs",
         "symbols": [
           "BackendEgressPolicy::metadata",
@@ -65,8 +65,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.15",
-        "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
+        "ref": "v0.9.17",
+        "commit": "669c574c1d1e88e84dccb26a8159939e6694644d",
         "path": "docs/admin_api.md",
         "note": "schema_version 2, the local-enforcement guarantee rule and \"Data-plane attestation on a control plane\"; docs/cp_dp_mode.md \"Backend egress policy attestation\" and docs/upgrade_guide.md \"Upgrading to 0.9.14\" describe the ConfigSync report and its limits."
       }

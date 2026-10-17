@@ -1,50 +1,89 @@
-# Edge v0.9.15 adoption
+# Edge v0.9.17 adoption
 
-Nexus `v0.5.2` pairs with published Edge v0.9.15 and `contracts-edge-0.9.15`. Nexus
+The next Nexus release pairs with published Edge v0.9.17 and `contracts-edge-0.9.17`.
+Nexus `v0.5.2` pairs with Edge v0.9.15 and `contracts-edge-0.9.15`, Nexus
 `v0.5.0` and `v0.5.1` paired with Edge v0.9.14 and `contracts-edge-0.9.14`,
 and Nexus `v0.4.0` paired with Edge v0.9.13 and `contracts-edge-0.9.13`. The
 filename preserves existing links from the Edge v0.9.11 adoption; Nexus PR #522
 adopted Edge v0.9.12, PR #529 advanced the pin to Edge v0.9.13, PR #542 to Edge
-v0.9.14, and this adoption advances it to Edge v0.9.15.
+v0.9.14, PR #552 to Edge v0.9.15, and this adoption advances it to Edge v0.9.17.
+There is no published Edge v0.9.16 release to pair with: its production ARM64
+build failed and v0.9.17 is its replacement.
 The public-only guarantee is granted to a local data plane, or to a control plane
 whose data-plane attestation proves every expected data plane public-only (see the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)).
 
 ## Published identities
 
-- [Edge v0.9.15](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.15)
-  was published on 2026-10-08 at tag source
-  `25b37395ff61bfea0f3ffd189d9011c4984fa755`, the merge of Edge #6103. The
+- [Edge v0.9.17](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.17)
+  was published on 2026-10-10 at tag source
+  `669c574c1d1e88e84dccb26a8159939e6694644d`, the merge of Edge #6162. The
   default Docker Hub multi-architecture index in
   [`release/compatibility.env`](../release/compatibility.env) is
-  `sha256:29b468dfeea13b1ecaac8dfbc7e019f310e71e647611d43800a1dc64436eaca3`; it
+  `sha256:f8942bed8d3b77c257d7266c9227450dd3d8c139759a07c47d060521a5fd41d1`; it
   resolves to
-  `sha256:0404dc6d70d67abb70feea4e5aa295fdb1c19a0968900f467fc4b908528d19d1` on
+  `sha256:64f958ef6c594b7da44345182035318611f2741463cbd1d5e7a77b3e109d22d2` on
   `linux/amd64` and
-  `sha256:51b8134770441b3ad340ba87ca9acd8a03fd864315c54d79911b27d95437c91a` on
+  `sha256:2f80952c2aaaf450980c7d2fad9f28977416ac6ebb1e07dbe8c890c6e05e8ec0` on
   `linux/arm64`. Edge's release run published the release assets and checksum
   sidecars and the default and `-ebpf` image indexes. Nexus does not independently
   verify image signatures or attestations.
-- [contracts-edge-0.9.15](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.15)
-  was published on 2026-10-08 at tag commit
-  `6fb64c5dc2e014204c17609fc717d976f3b4589e`, the merge of contracts #23, and
-  reads every Edge-owned file at Edge `v0.9.15`. No contract gets a new major and no
-  schema changes its wire rules. The five vocabularies, the egress v2, deployment
-  snapshot v2 and acknowledgement schemas change only in provenance, descriptions and
-  vocabulary entries, and `fixtures/invalid-expectations.json` only in other
+- [contracts-edge-0.9.17](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.17)
+  was published on 2026-10-10 at tag commit
+  `f7ba1a9b9885900d1e110f76d38e37a02eda13c8`, the merge of contracts #25, and
+  reads every Edge-owned file at Edge `v0.9.17`. No contract gets a new major and no
+  schema changes its wire rules: the schemas record their shapes unchanged at
+  v0.9.17, the plugin-catalog and `ErrorClass` name sets are unchanged, and
+  the vocabularies add the gateway-owned `X-Ferrum-Hops` header plus the
+  `loop_detected` error token. The
+  five vocabularies, the egress v2, deployment snapshot v2 and acknowledgement
+  schemas change only in provenance, descriptions and vocabulary entries, and
+  `fixtures/invalid-expectations.json` only in other
   contracts' entries. All are copied byte for byte; every other vendored fixture is
   unchanged. `PIN` still records 123
   adopted paths and hashes; `SERVICE-MANIFEST-PIN` moves to the same tag, and the
   shared manifest v1 schema and fixtures are byte-identical to
   `contracts-edge-0.9.12`.
 - The released owner OpenAPI SHA-256 is
-  `f6c7d8b1d247060c4d0ae66e5c149ad3d76721addb8176eff45b6fc3d1b4d6b2`.
+  `297b312ac1e7b2a7b7cfef74cdf4550063da0676edcee07d9652e3fb16d806b1`.
+- Nexus `v0.5.2` pins
+  [Edge v0.9.15](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.15), tag
+  source `25b37395ff61bfea0f3ffd189d9011c4984fa755`, index
+  `sha256:29b468dfeea13b1ecaac8dfbc7e019f310e71e647611d43800a1dc64436eaca3`, with
+  `contracts-edge-0.9.15` at `6fb64c5dc2e014204c17609fc717d976f3b4589e` (owner
+  OpenAPI SHA-256 `f6c7d8b1d247060c4d0ae66e5c149ad3d76721addb8176eff45b6fc3d1b4d6b2`).
 - Nexus `v0.5.0` and `v0.5.1` pin
   [Edge v0.9.14](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.14), tag
   source `9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d`, index
   `sha256:15442f1b1d1758023fe871fe57be50f19caf34bbe6c499a6812f4ffd0da5e3f8`, with
   `contracts-edge-0.9.14` at `ddbdd845733b7046c4393ac951011dafb774db33` (owner
   OpenAPI SHA-256 `6d286649ae744691e2eeb7d16607c538ca02e31bdeaafe98ab07fc861e7b9da4`).
+
+## What changed for Nexus in Edge v0.9.17
+
+Edge v0.9.17 fixes the published QUIC advisories affecting v0.9.15 and carries
+the namespace-bounded admin token changes described below. It keeps every
+contract Nexus depends on: egress policy schema 2 and its data-plane
+attestation, deployment snapshot v2 and its `deployment_snapshot.v2` tokens,
+and the acknowledgement shape; the ConfigSync protocol revision stays `3`
+([Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.17/docs/upgrade_guide.md#upgrading-to-0917)).
+The full review is in
+[Upgrading to Edge v0.9.17](operations.md#upgrading-to-edge-v0917); in short:
+
+- **Namespace-bounded admin tokens** (Edge #6095). An admin JWT with an `ns`
+  claim reaches only namespace-scoped routes and a short allowlist, and every
+  token Nexus mints carries the claim. Nexus already works with this (#556);
+  the Usage card's fleet reads need `FERRUM_METRICS_BEARER_TOKEN` and the
+  optional `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` on the pinned release.
+- **Cached admin misses** (Edge #6143). A failed database read with no cached
+  resource answers `503 CachedReadUnavailable`, not `404`. Nexus's
+  confirmed-absence logic already treats non-404 errors as unavailable.
+- **Proxy hop budget** (Edge #6109). Edge counts hops in `X-Ferrum-Hops` and
+  refuses requests past `FERRUM_MAX_PROXY_HOPS` (default `10`), answering
+  with the new `loop_detected` error token. The header name is
+  gateway-owned as a configured destination, so Nexus and its mock gateway
+  refuse it as a `correlation_id` `header_name`, as Edge does (Edge still
+  accepts it as a client-supplied `request_deduplication` key).
 
 ## What changed for Nexus in Edge v0.9.15 (adopted by Nexus `v0.5.2`)
 
@@ -147,7 +186,7 @@ Edge v0.9.13 changes two response contracts incompatibly and every snapshot toke
 
 Journals written by Nexus `v0.4.0` and later carry `authorityFormat: 2`: every
 deployment snapshot they hold is authority in the Edge v0.9.13 format, which Edge
-v0.9.14 and v0.9.15 keep. Journals written before carry no
+v0.9.14, v0.9.15 and v0.9.17 keep. Journals written before carry no
 marker and may hold Edge v0.9.12 authority (inline spec bytes, no
 `api_spec_contents`). They remain readable, so custody checks, inspection and key
 rotation keep working, and a journal whose recorded operations are all
@@ -158,36 +197,36 @@ mutation, a stored-document comparison or deletion custody) is refused with
 is sent. Settle conversions and restores before upgrading Edge; see the
 [upgrade procedure](operations.md#upgrading-to-edge-v0913).
 
-## Ahead of Edge v0.9.16: namespace-bounded admin tokens
+## Namespace-bounded admin tokens (shipped in Edge v0.9.17)
 
-Edge v0.9.16 is planned to ship
+Edge v0.9.17 ships
 [ferrum-edge#6093](https://github.com/ferrum-edge/ferrum-edge/pull/6093),
-tracked as [ferrum-edge#6095](https://github.com/ferrum-edge/ferrum-edge/issues/6095).
+tracked as [ferrum-edge#6095](https://github.com/ferrum-edge/ferrum-edge/issues/6095)
+(the change was prepared for the unpublished v0.9.16).
 In it, an admin JWT with an `ns` claim reaches only namespace-scoped routes and
-a short allowlist, and every token Nexus mints carries the claim. Nexus already
-works with both releases, with no new opt-in:
+a short allowlist, and every token Nexus mints carries the claim. Nexus works
+with both the v0.9.15 and v0.9.17 behavior, with no new opt-in:
 
 - Every write, and every namespace-scoped read, is unchanged.
 - `/api/health` reads `mode`, `admin_writes_enabled` and the `namespace` block
   from the detailed `/health` tier on v0.9.15 and from the bounded tenant tier
-  on v0.9.16. A minimal tier reads as unknown. The tenant tier sends
+  on v0.9.17. A minimal tier reads as unknown. The tenant tier sends
   `namespace.active: null` when the token's claim does not cover the gateway's
   namespace, which reads as unserved and blocks publishing.
 - The Usage card's two fleet-global reads have optional credentials:
   `FERRUM_METRICS_BEARER_TOKEN` for `GET /metrics`, and
   `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` (a privilege trade-off) for
-  `GET /admin/metrics`. Without them, v0.9.16 refuses both reads and the card
+  `GET /admin/metrics`. Without them, v0.9.17 refuses both reads and the card
   says why.
 
 See
-[Namespace-bounded admin tokens](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0916).
-The pin stays at v0.9.15 until v0.9.16 is published.
+[Namespace-bounded admin tokens](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0917).
 
 ## Release status
 
-[`release/compatibility.env`](../release/compatibility.env) pins the Edge v0.9.15 image
-above for Nexus `v0.5.2`, and the packaged acceptance suite runs against it. The record
-at the `v0.5.1` and `v0.5.0` tags pins Edge v0.9.14, and at the
+[`release/compatibility.env`](../release/compatibility.env) pins the Edge v0.9.17 image
+above for the next Nexus release, and the packaged acceptance suite runs against it. The record
+at the `v0.5.2` tag pins Edge v0.9.15, at the `v0.5.1` and `v0.5.0` tags Edge v0.9.14, and at the
 `v0.4.0` tag Edge v0.9.13. The
 [controlled public-only fixture](../e2e/public-only/README.md) runs a packaged Nexus
 image against the same Edge release on demand, outside CI, and covers the local

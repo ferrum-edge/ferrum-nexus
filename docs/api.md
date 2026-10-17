@@ -373,7 +373,7 @@ pairing. Egress policy schema 1 (Edge v0.9.12 and earlier) is refused as
 `unsupported_egress_policy_schema`.
 See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee).
-Published Edge v0.9.15 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
+Published Edge v0.9.17 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
 
 Whole-consumer metadata replacements pair complete server-only verification with
 the original strong row `If-Match`, using Edge's masked projection and hidden-type
@@ -2263,7 +2263,7 @@ admin token unless the operator configures `FERRUM_METRICS_BEARER_TOKEN` (for
 the counts) and `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` (for backend state). The
 refusal reads `unavailable_code: "refused"` and
 `backend.status: "unavailable"`, each with the reason; see
-[`operations.md`](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0916). There is no per-consumer breakdown, because
+[`operations.md`](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0917). There is no per-consumer breakdown, because
 `ferrum_requests_total` has no consumer label.
 
 A gateway that is unreachable or unparseable is **not** an error here: the route

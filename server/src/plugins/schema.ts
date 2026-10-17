@@ -33,6 +33,7 @@ import {
   CORRELATION_ID_RESERVED_HEADERS,
   MAX_PLUGIN_TRIGGER_PATH_LENGTH,
   isGatewayOwnedConsumerHeader,
+  isProxyHopsHeader,
   type ApiPluginTrigger,
   type PluginFieldSpec,
   type ProviderPluginDescriptor,
@@ -219,6 +220,9 @@ const PLUGIN_INVARIANTS: Readonly<
     if (header !== '' && isGatewayOwnedConsumerHeader(header)) {
       return `The gateway owns every x-consumer-* header and X-Authenticated-Identity, and rejects '${header}' as a correlation header; choose a name of your own, such as x-request-id`;
     }
+    if (header !== '' && isProxyHopsHeader(header)) {
+      return `The gateway owns X-Ferrum-Hops, its loop-guard hop count, and rejects '${header}' as a correlation header; choose a name of your own, such as x-request-id`;
+    }
     return null;
   },
 
@@ -226,7 +230,8 @@ const PLUGIN_INVARIANTS: Readonly<
    * `RequestDeduplicationConfig.header_name` may not be in the gateway-owned
    * `x-consumer-*` namespace (Edge `v0.9.9`) or be `X-Authenticated-Identity`
    * (Edge `v0.9.15`): the gateway strips those headers from every client
-   * request, so the key could never arrive.
+   * request, so the key could never arrive. Edge's parser checks nothing
+   * else — `X-Ferrum-Hops` stays an ordinary client header here.
    */
   request_deduplication: (config) => {
     const header = typeof config.header_name === 'string' ? config.header_name.trim() : '';
