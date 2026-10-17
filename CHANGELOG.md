@@ -72,6 +72,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Acceptance readiness waits honour their deadline** (#606). Each check
+  gets an abort signal that fires at the deadline, so a listener that stalls
+  its headers or body no longer holds the wait past it, and a success that
+  arrives late does not count.
 - **Consumer cleanup trusts only Ferrum Edge's own "Consumer not found"**
   (#598). Every consumer read whose "absent" answer lets the portal drop
   tracking now requires Edge's not-found body. That covers application
