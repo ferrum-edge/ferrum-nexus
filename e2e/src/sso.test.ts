@@ -217,9 +217,11 @@ interface Discovery {
 }
 
 /** Dex's discovery document, straight from Dex. */
-async function dexDiscovery(): Promise<Discovery> {
+async function dexDiscovery(signal?: AbortSignal): Promise<Discovery> {
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   const response = await fetch(`${DEX_ISSUER}/.well-known/openid-configuration`, {
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    // Inside a readiness wait, its attempt's deadline bounds the request too.
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
   if (!response.ok) throw new Error(`Dex discovery answered ${response.status}`);
   return (await response.json()) as Discovery;
@@ -344,12 +346,12 @@ describe('single sign-on through a real Dex', { concurrency: false }, () => {
     await waitForStack();
     // The portal caches a failed discovery for 30 s, so do not let the first
     // sign-in be the thing that finds out Dex is still starting.
-    await waitFor(`Dex to publish discovery for ${DEX_ISSUER}`, async () => {
-      return (await dexDiscovery()).issuer === DEX_ISSUER;
+    await waitFor(`Dex to publish discovery for ${DEX_ISSUER}`, async (signal) => {
+      return (await dexDiscovery(signal)).issuer === DEX_ISSUER;
     });
-    await waitFor('the portal to offer Dex on its sign-in page', async () => {
+    await waitFor('the portal to offer Dex on its sign-in page', async (signal) => {
       const response = await fetch(`${PORTAL_URL}/api/auth/sso`, {
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
       });
       if (!response.ok) return false;
       const body = (await response.json()) as { providers?: { id: string }[] };

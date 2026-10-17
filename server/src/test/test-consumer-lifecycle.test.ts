@@ -899,6 +899,69 @@ describe('test consumer lifecycle', () => {
     assert.equal(await registrationFor(username), null);
   });
 
+  it('keeps a test consumer registration when a router answers its read with a 404 (#598)', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    assert.equal((await createTestConsumer(api.id)).statusCode, 201);
+    const consumerId = harness.edge.consumerByUsername(username)?.id;
+    assert.ok(consumerId);
+
+    harness.edge.queueFailure(
+      404,
+      { message: 'Route not found', error: 'Not Found', statusCode: 404 },
+      `/consumers/${consumerId}`,
+      'GET',
+    );
+    await assert.rejects(
+      harness.services.credentials.teardownGatewayIdentity(username, provider.user.id),
+    );
+    assert.equal((await registrationFor(username))?.ferrum_consumer_id, consumerId);
+    assert.ok(harness.edge.consumerByUsername(username), 'the consumer is still live');
+
+    const result = await harness.services.credentials.teardownGatewayIdentity(
+      username,
+      provider.user.id,
+    );
+    assert.equal(result.consumer_deleted, true);
+    assert.equal(harness.edge.consumerByUsername(username), undefined);
+  });
+
+  it('keeps the incumbent registration when a takeover reads its consumer through a router 404 (#598)', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    assert.equal((await createTestConsumer(api.id)).statusCode, 201);
+    const incumbent = await registrationFor(username);
+    assert.equal(incumbent?.user_id, provider.user.id);
+    const consumerId = incumbent?.ferrum_consumer_id;
+    assert.ok(consumerId);
+
+    // An administrator takes the test consumer over; the read of the one the
+    // registration names is answered by a router, not by Edge.
+    harness.edge.queueFailure(
+      404,
+      { message: 'Route not found', error: 'Not Found', statusCode: 404 },
+      `/consumers/${consumerId}`,
+      'GET',
+    );
+    const takeover = await harness.authed(founder, {
+      method: 'POST',
+      url: `/api/apis/${api.id}/test-consumer`,
+      payload: {},
+    });
+    assert.equal(takeover.statusCode, 502, takeover.body);
+    assert.equal(errorCode(takeover.body), 'EDGE_PROTOCOL_ERROR');
+    const kept = await registrationFor(username);
+    assert.equal(kept?.user_id, provider.user.id, 'ownership did not move');
+    assert.equal(kept?.ferrum_consumer_id, consumerId);
+    assert.ok(harness.edge.consumerByUsername(username), 'the consumer is still live');
+
+    // So the API deletion still finds the consumer and takes it down.
+    const removed = await deleteApi(api.id);
+    assert.equal(removed.statusCode, 200, removed.body);
+    assert.equal(harness.edge.consumerByUsername(username), undefined);
+    assert.equal(await registrationFor(username), null);
+  });
+
   it('answers 404 to a deletion that finds the row already removed', async () => {
     const api = await publish();
 

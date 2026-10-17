@@ -184,14 +184,19 @@ export class WhereBuilder {
     return this;
   }
 
-  /** Add a case-insensitive `LIKE` across one or more columns. */
+  /**
+   * Add a case-insensitive literal substring match across one or more columns.
+   *
+   * `instr`, not `LIKE`: the term is matched as written, so `%`, `_` and `\`
+   * are ordinary characters, exactly as `POSITION` treats them on PostgreSQL
+   * and MySQL and the escaped regex on MongoDB. The `LIKE` spelling escaped
+   * `%` and `_` but not its own escape character, so a backslash in the term
+   * was read as pattern syntax (issue #595).
+   */
   addSearch(term: string | undefined, columns: string[]): this {
     if (term === undefined || term.trim() === '' || columns.length === 0) return this;
-    const needle = `%${term
-      .trim()
-      .toLowerCase()
-      .replace(/[%_]/g, (c) => `\\${c}`)}%`;
-    const parts = columns.map((column) => `lower(coalesce(${column}, '')) LIKE ? ESCAPE '\\'`);
+    const needle = term.trim().toLowerCase();
+    const parts = columns.map((column) => `instr(lower(coalesce(${column}, '')), ?) > 0`);
     this.conditions.push(`(${parts.join(' OR ')})`);
     for (let i = 0; i < parts.length; i += 1) this.values.push(needle);
     return this;

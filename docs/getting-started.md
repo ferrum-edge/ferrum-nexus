@@ -436,8 +436,8 @@ The listen path is always `/<namespace>/<slug>`.
 > a client gets N × 1000 requests a minute, because Edge keeps the counters in
 > memory by default. To share one counter, set `FERRUM_RATE_LIMIT_SYNC_MODE=redis`
 > and `FERRUM_RATE_LIMIT_REDIS_URL` on Nexus. The setting applies to rate
-> limits saved after the change. See
-> [operations.md](operations.md#ferrum-edge-integration).
+> limits written after the change; existing ones need the
+> [migration steps](operations.md#changing-the-quota-sync-mode-on-a-live-portal).
 
 Save the API id:
 
@@ -538,8 +538,9 @@ curl -sS -b client.txt -X POST http://127.0.0.1:8787/api/credentials \
 > ### Save that key now
 >
 > It is shown only once. Nexus stores a SHA-256 fingerprint and the last four
-> characters, and Ferrum Edge redacts credential material on every read, so
-> nobody can recover it. If you lose it, rotate the credential.
+> characters, and Ferrum Edge redacts credential material on its ordinary
+> Admin API reads. Nexus never shows it again, so nobody can recover it through
+> the portal. If you lose it, rotate the credential.
 
 ```bash
 export API_KEY='nxs_pQ7v3H2s…'

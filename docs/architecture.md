@@ -1016,7 +1016,13 @@ Nexus generates the secret, returns it in exactly one HTTP response, and stores
 only a SHA-256 fingerprint and the last four characters in
 `credential_metadata`. **Edge enforces the same independently**: Admin API
 reads redact `keyauth.key` and `jwt.secret` to `[REDACTED]` and never return
-`basicauth` material. There is no read path back to the plaintext.
+`basicauth` material. Two privileged reads are the exceptions. The
+`GET /consumers/{id}/verification` snapshot (§5.2) is held in server memory for
+a whole-consumer update and never returned, stored or logged. A gateway
+deployment snapshot, taken for an enforcement conversion or restore, holds
+complete consumer credentials and is kept only inside an encrypted gateway
+recovery journal until that operation finishes. No portal route leads back to
+the plaintext.
 
 Two Edge schema facts a portal could get wrong:
 

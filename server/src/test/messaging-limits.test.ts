@@ -16,7 +16,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { after, before, describe, it } from 'node:test';
+import { after, before, describe, it, mock } from 'node:test';
 
 import type {
   ApiErrorBody,
@@ -430,12 +430,14 @@ describe('message email coalescing', () => {
   let founder: TestSession;
   let sender: TestSession;
   let threadId: string;
+  let threadOpenedAt: number;
 
   before(async () => {
     harness = await buildTestApp({ deps: { startOutboxWorker: false } });
     founder = await harness.registerUser({ email: 'coalesce-founder@example.test' });
     sender = await harness.registerUser({ email: 'coalesce-sender@example.test' });
 
+    threadOpenedAt = Date.now();
     const opened = await harness.authed(sender, {
       method: 'POST',
       url: '/api/threads',
@@ -450,6 +452,10 @@ describe('message email coalescing', () => {
   });
 
   it('sends one email per recipient per thread per window, however many messages', async () => {
+    // The thread was opened in `before`, under the real clock; a ten-minute
+    // boundary could pass between that and these sends. Rather than assume it
+    // did not, bound the buckets the run spanned (issue #608).
+    const firstBucket = Math.floor(threadOpenedAt / COALESCE_WINDOW_MS);
     for (const body of ['Two', 'Three', 'Four', 'Five']) {
       const response = await harness.authed(sender, {
         method: 'POST',
@@ -458,16 +464,27 @@ describe('message email coalescing', () => {
       });
       assert.equal(response.statusCode, 201, response.body);
     }
+    const lastBucket = Math.floor(Date.now() / COALESCE_WINDOW_MS);
 
     const queued = (await harness.outbox()).filter(
       (row) => row.to_email === 'coalesce-founder@example.test',
     );
-    assert.equal(queued.length, 1, 'five messages, one mail');
-    assert.equal(
-      queued[0]?.idempotency_key,
-      `message_received:${threadId}:${founder.user.id}:${Math.floor(Date.now() / COALESCE_WINDOW_MS)}`,
-      'the key is thread + recipient + time bucket',
+    // Normally one bucket and one mail. A boundary that passed during the run
+    // allows at most one mail per bucket it spanned, never one per message.
+    assert.ok(
+      queued.length >= 1 && queued.length <= lastBucket - firstBucket + 1,
+      `five messages, one mail per window: ${queued.length}`,
     );
+    const prefix = `message_received:${threadId}:${founder.user.id}:`;
+    const buckets = queued.map((row) => Number(row.idempotency_key?.slice(prefix.length)));
+    for (const [index, row] of queued.entries()) {
+      const bucket = buckets[index]!;
+      assert.ok(
+        row.idempotency_key?.startsWith(prefix) && bucket >= firstBucket && bucket <= lastBucket,
+        `the key is thread + recipient + time bucket: ${row.idempotency_key}`,
+      );
+    }
+    assert.equal(new Set(buckets).size, buckets.length, 'one mail per bucket');
 
     // In-app notifications are deliberately *not* coalesced: they are cheap and
     // the limiter plus the budget already cap how many there can be.
@@ -479,33 +496,48 @@ describe('message email coalescing', () => {
   });
 
   it('sends again in the next bucket', async () => {
-    // Cross a bucket boundary without waiting ten real minutes: rewrite the
-    // stored key to the previous bucket, which is what the outbox would hold if
-    // the earlier mail had been enqueued one window ago.
-    const [existing] = (await harness.outbox()).filter(
+    // Cross the bucket boundary without waiting ten real minutes: freeze the
+    // clock at the first instant of the bucket after the one the earlier mail
+    // was keyed to (issue #608). Deriving it from that key, rather than from
+    // the wall clock, keeps the test exact even if a real boundary passed.
+    const queuedBefore = (await harness.outbox()).filter(
       (row) => row.to_email === 'coalesce-founder@example.test',
     );
-    assert.ok(existing, 'the first window enqueued one');
-    const previousBucket = Math.floor(Date.now() / COALESCE_WINDOW_MS) - 1;
-    await harness.store.emailOutbox.enqueue({
-      to_email: 'unrelated@example.test',
-      subject: 'placeholder',
-      body_html: '<p>x</p>',
-      body_text: 'x',
-      idempotency_key: `message_received:${threadId}:${founder.user.id}:${previousBucket}`,
-    });
+    assert.ok(queuedBefore.length >= 1, 'the first window enqueued one');
+    const prefix = `message_received:${threadId}:${founder.user.id}:`;
+    const buckets = queuedBefore.map((row) => Number(row.idempotency_key?.slice(prefix.length)));
+    assert.ok(buckets.every(Number.isSafeInteger), buckets.join(', '));
+    const firstBucket = Math.max(...buckets);
+    const nextBucket = firstBucket + 1;
 
-    // A message now lands in the *current* bucket, whose key is still free.
-    const response = await harness.authed(sender, {
-      method: 'POST',
-      url: `/api/threads/${threadId}/messages`,
-      payload: { body: 'A later window' },
-    });
-    assert.equal(response.statusCode, 201, response.body);
+    const clock = mock.method(Date, 'now', () => nextBucket * COALESCE_WINDOW_MS);
+    try {
+      for (const body of ['A later window', 'Still the later window']) {
+        const response = await harness.authed(sender, {
+          method: 'POST',
+          url: `/api/threads/${threadId}/messages`,
+          payload: { body },
+        });
+        assert.equal(response.statusCode, 201, response.body);
+      }
+    } finally {
+      clock.mock.restore();
+    }
 
-    const keys = (await harness.outbox())
-      .filter((row) => row.idempotency_key?.startsWith(`message_received:${threadId}:`))
-      .map((row) => row.idempotency_key);
-    assert.equal(new Set(keys).size, 2, `two distinct buckets, one mail each: ${keys.join(', ')}`);
+    const queuedAfter = (await harness.outbox()).filter(
+      (row) => row.to_email === 'coalesce-founder@example.test',
+    );
+    assert.equal(
+      queuedAfter.length,
+      queuedBefore.length + 1,
+      'one more mail for the new window, and only one',
+    );
+    const added = queuedAfter.filter(
+      (row) => !queuedBefore.some((earlier) => earlier.id === row.id),
+    );
+    assert.deepEqual(
+      added.map((row) => row.idempotency_key),
+      [`${prefix}${nextBucket}`],
+    );
   });
 });

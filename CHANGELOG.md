@@ -54,8 +54,59 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   for single sign-on matching; re-enabling an application cannot fail with a
   mapping `502`; the MongoDB released-migration guard freezes indexes only;
   MySQL `1205` is not retried.
+- **Runbook and reference corrections** (#599, #600, #601, #602, #603, #607).
+  Changing `FERRUM_RATE_LIMIT_SYNC_MODE` on a live portal has a real migration
+  procedure, since re-saving an unchanged quota is a no-op and a changed one
+  never removes Redis keys. Replacing `NEXUS_SECRET_KEY` without the rotation
+  command is limited to a lost key, lists what cannot be recovered and keeps a
+  sign-in route open first, including on `sso_only` portals. The
+  single-container Docker recipe keeps its master key in a reusable env file
+  and reads the generated bootstrap token from the log. An Upstream URL equal
+  to the document's `servers[0].url` is not a pin. MCP approvals cover all
+  tools, a subset or REST only, and a refused revocation can restore the
+  pending tool request. The service-manifest preview's oversized body is a
+  `400`; whole-consumer writes carry `If-Match`; consumer verification and
+  deployment snapshots are named as the credential-complete Edge reads; spec-change email is
+  normal-priority outbox mail; and `/metrics` and `/admin/metrics` authenticate
+  differently.
 
 ### Fixed
+
+- **Acceptance readiness waits honour their deadline** (#606). Each check
+  gets an abort signal that fires at the deadline, so a listener that stalls
+  its headers or body no longer holds the wait past it, and a success that
+  arrives late does not count.
+- **Consumer cleanup trusts only Ferrum Edge's own "Consumer not found"**
+  (#598). Every consumer read whose "absent" answer lets the portal drop
+  tracking now requires Edge's not-found body. That covers application
+  deletion (mapped and derived-id consumers), credential revocation, credential
+  reconciliation, test-consumer teardown and recreation, an account's
+  identity teardown, and the append and rollback checks of credential issue.
+  A generic `404`, for example from a router in front of the gateway, now
+  fails the operation with `EDGE_PROTOCOL_ERROR` (or counts as unknown where
+  the caller already treats a failed read that way) and keeps the rows for a
+  retry. Previously the rows were dropped while the consumer stayed live.
+- **SQLite search matches backslashes literally** (#595). The `q` filters
+  match the term as a literal substring, as PostgreSQL, MySQL and MongoDB
+  already did. A backslash, `%` or `_` in the term is an ordinary character.
+- **MySQL stores every value the API accepts in audit details and spec
+  metadata** (#604, #605). The new forward migration `014_mysql_text_capacity`
+  widens eight columns to `LONGTEXT`:
+  - `audit_logs.details_json` and `apis.description` (were `TEXT`, 65,535
+    bytes);
+  - `api_specs.parsed_title` (was `VARCHAR(255)`);
+  - the version columns `api_specs.parsed_version`, `api_specs.version`,
+    `apis.version`, `api_spec_changes.version` and
+    `api_spec_changes.previous_version` (were `VARCHAR(64)`).
+
+  An MCP agents update or publish whose audit row carried long tool
+  descriptions failed on strict-mode MySQL with an internal error, and was
+  truncated otherwise. So did a specification with a long `info.title`,
+  `info.version` or `info.description`; the last two become the API's version
+  and description when the request names none. The
+  migration is a no-op on SQLite, PostgreSQL and MongoDB. On MySQL it rebuilds
+  the affected tables, so allow for that on a large audit log. The MySQL
+  migration runner now supports this widening and verifies it on replay.
 
 - **Web console state fixes** (#593, #594, #596, #597).
   - A credential issue or rotation that is in flight can no longer be
@@ -215,8 +266,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   self-test and the sign-in and registration forms offer to reload the page
   when the widget cannot load, which is what a tab opened before CAPTCHA was
   switched on or changed needs.
-  `style-src 'unsafe-inline'` stays, because the UI's Radix components inject
-  runtime `<style>` elements; `docs/security.md` records why.
+  `style-src` has since dropped `'unsafe-inline'` for a per-response nonce
+  (#587, under Changed).
 - **SMTP requires STARTTLS when implicit TLS is off**
   ([GHSA-v7p7-85wx-8wrp](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-v7p7-85wx-8wrp)).
   With `NEXUS_SMTP_SECURE=false` a relay that does not offer STARTTLS, or a path

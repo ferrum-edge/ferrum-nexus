@@ -124,7 +124,8 @@ listed above is unlimited.
 - Ids are opaque strings (UUIDs); timestamps are ISO-8601 strings.
 - Optional values are `null` rather than omitted, except where a field is
   marked as present only in some cases.
-- Request bodies are `application/json`, at most 4 MiB. An OpenAPI document is
+- Request bodies are `application/json`, at most 4 MiB; a larger body answers
+  `400 VALIDATION_FAILED` ("Request body is too large"). An OpenAPI document is
   additionally capped at 2 MiB and by structural limits (see
   [`POST /api/apis`](#post-apiapis)).
 - All `/api` responses carry `cache-control: no-store` unless stated otherwise.
@@ -2966,7 +2967,12 @@ Errors:
 Revoking a grant cancels its pending tool request in the revocation's
 transaction (`access.cancel` with `reason: "grant_inactive"`), so it holds no
 pending slot and leaves the provider's inbox. A revocation the gateway refuses
-puts the grant back but not the request. A tool request that is still pending on
+puts the grant back and, in the same transaction, returns that tool request to
+`pending` with its earlier decision fields, unless the identity has opened
+another pending request for the API since, or an account recovery of the
+grantee is outstanding. The `access.revoke_rollback` audit row names the
+outcome (`tool_request_restored`, or `tool_request_skipped: "account_recovery"`);
+a request that is not restored stays cancelled. A tool request that is still pending on
 a revoked grant can only be cancelled or denied,
 and the identity's next `POST /api/access-requests` cancels it the same way in
 its own transaction, so it never blocks the new request.
@@ -2986,8 +2992,10 @@ Registered under `/api/credentials`; _session_.
 **Plaintext credential material appears in exactly three responses —
 `POST /api/credentials`, `POST /api/credentials/:id/rotate` and
 `POST /api/apis/:id/test-consumer` — and only once.** Nexus stores a SHA-256
-fingerprint and the last four characters; Edge redacts material on every
-read.
+fingerprint and the last four characters. Edge redacts material on its ordinary
+Admin API reads. Its credential-complete reads, consumer verification and
+deployment snapshots, never reach a response or an audit row; only a
+deployment snapshot is persisted, inside an encrypted gateway recovery journal.
 
 A credential belongs to an **identity**: the account itself, or one of its
 [applications](#applications). Each identity has its own Edge consumer
@@ -3318,8 +3326,9 @@ included. See the [migration notes](mcp-subsets-migration-draft.md).
 A provider-or-higher session and CSRF are required. Both namespaces must match the
 configured portal namespace (`403 FORBIDDEN` otherwise). The contract defaults an
 omitted gateway namespace to `ferrum`; it does not inherit the caller's selection.
-Maximum body is 32 KiB (`413`), with bounded nesting/strings/references and strict
-schema validation (`400 VALIDATION_FAILED`). Unknown/null fields are not stripped
+Maximum body is 32 KiB; a larger one answers `400 VALIDATION_FAILED` ("Request
+body is too large"). Nesting, strings and references are bounded and the schema
+is validated strictly (`400 VALIDATION_FAILED`). Unknown/null fields are not stripped
 or coerced. The result has `preview_only: true`, `contract_status: "implemented"`, the
 immutable contract commit, service/public-path/protocol/auth/agent hints and redacted
 reference-presence flags. No upstream/file/TLS/telemetry values or free-form text

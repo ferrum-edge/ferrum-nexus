@@ -281,6 +281,15 @@ export const LIVE_CREDENTIAL_STATUSES = [
   'retiring',
 ] as const satisfies readonly CredentialStatus[];
 const LIVE_STATUSES = new Set<string>(LIVE_CREDENTIAL_STATUSES);
+
+/**
+ * Every consumer read whose `null` lets a credential row, mapping or
+ * registration be dropped takes `null` only from Ferrum Edge's own
+ * `Consumer not found`. Any other `404` (a router in front of the Admin API)
+ * throws, so the tracking stays for a retry instead of being cleared while
+ * the consumer is still live (issue #598).
+ */
+const CONFIRMED_ABSENCE = { confirmedAbsence: true } as const;
 const LEGACY_BASICAUTH_SCAN_SETTING = 'credentials.legacy_basicauth_scan_v1';
 /** What the owner sees on a placeholder the upgrade scan wrote. Never read back. */
 const LEGACY_PLACEHOLDER_LABEL = 'Unconfirmed HTTP Basic credential from an earlier release';
@@ -1305,7 +1314,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     if (input.type === 'basicauth') {
       return { withdrawn: false, arrayAsAppended: false, arrayLength: null };
     }
-    const live = await edge.consumers.get(input.consumerId).catch(() => undefined);
+    const live = await edge.consumers
+      .get(input.consumerId, CONFIRMED_ABSENCE)
+      .catch(() => undefined);
     // A consumer that no longer exists took its credentials with it; one that
     // cannot be read is a question mark, and a question mark is not grounds
     // for a positional delete.
@@ -1333,7 +1344,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // DELETE has no concurrency token and its acknowledgement can be lost
       // after Edge applies it. Re-read while the consumer lease is still held
       // before deciding which metadata rows survive the rollback.
-      const after = await edge.consumers.get(input.consumerId).catch(() => undefined);
+      const after = await edge.consumers
+        .get(input.consumerId, CONFIRMED_ABSENCE)
+        .catch(() => undefined);
       if (after === null) {
         return { withdrawn: true, arrayAsAppended: true, arrayLength: 0 };
       }
@@ -1375,7 +1388,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     length: number,
   ): Promise<boolean> {
     if (type === 'basicauth') return false;
-    const live = await edge.consumers.get(consumerId).catch(() => undefined);
+    const live = await edge.consumers.get(consumerId, CONFIRMED_ABSENCE).catch(() => undefined);
     if (!live) return false;
     const entries = live.credentials[type];
     return (Array.isArray(entries) ? entries.length : 0) === length;
@@ -1657,7 +1670,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       const current = await store.credentials.findById(target.id);
       if (!current || !LIVE_STATUSES.has(current.status)) return false;
 
-      const consumer = await edge.consumers.get(consumerId);
+      const consumer = await edge.consumers.get(consumerId, CONFIRMED_ABSENCE);
       const live = await liveRows(consumerId, type);
       // A whole-type clear affects every row on this consumer. Check ownership
       // only after taking the same key as the delete, so a concurrent issue
@@ -2440,7 +2453,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         // names every consumer it creates: one read of that id says which of
         // the two happened.
         try {
-          created = (await edge.consumers.get(attemptedConsumerId))?.id ?? null;
+          created = (await edge.consumers.get(attemptedConsumerId, CONFIRMED_ABSENCE))?.id ?? null;
         } catch (error) {
           // The gateway cannot say whether the consumer exists, so neither can
           // this. Keep the registration: it is the only thing that will lead
@@ -2648,7 +2661,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       for (const foreignId of foreign) {
         revoked += await edge.serializePerKey(foreignId, async () => {
           await assertStillDisabled(userId);
-          const live = await edge.consumers.get(foreignId);
+          const live = await edge.consumers.get(foreignId, CONFIRMED_ABSENCE);
           // A test consumer is disposable by definition — the next provider or
           // admin who wants one recreates it — so it goes away entirely rather
           // than being stripped and left as an empty identity.
@@ -3202,7 +3215,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       }
 
       const result = await edge.serializePerKey(consumerId, async () => {
-        const live = await edge.consumers.get(consumerId);
+        const live = await edge.consumers.get(consumerId, CONFIRMED_ABSENCE);
         // Only a consumer the portal owns (issue #341). `consumer_id` is free
         // text from the request, and without this any administrator could
         // empty a credential type on a consumer an operator created by hand
@@ -3586,10 +3599,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // was ever created, so a namespace-wide read would be paid on every
       // deletion of an API that simply never had a test consumer.
       const live = !current
-        ? await edge.consumers.get(edge.consumers.derivedId(username))
+        ? await edge.consumers.get(edge.consumers.derivedId(username), CONFIRMED_ABSENCE)
         : current.ferrum_consumer_id !== null
-          ? await edge.consumers.get(current.ferrum_consumer_id)
-          : ((await edge.consumers.get(edge.consumers.derivedId(username))) ??
+          ? await edge.consumers.get(current.ferrum_consumer_id, CONFIRMED_ABSENCE)
+          : ((await edge.consumers.get(edge.consumers.derivedId(username), CONFIRMED_ABSENCE)) ??
             (await edge.consumers.getByUsername(username)));
       let revoked = 0;
       if (live) {

@@ -10,6 +10,7 @@
  * is the single signal meaning "this response came from the backend".
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 
 /** The header the deterministic upstream stamps on everything it serves. */
@@ -67,6 +68,19 @@ export class HttpError extends Error {
   }
 }
 
+/** The abort signal of the {@link waitFor} attempt the current code runs in. */
+const attemptSignal = new AsyncLocalStorage<AbortSignal>();
+
+/**
+ * `init` with the current {@link waitFor} attempt's signal, unless it carries
+ * one of its own. So every portal and gateway request a readiness check makes
+ * is cancelled with the attempt, without each check having to forward it.
+ */
+function withAttemptSignal<T extends { signal?: AbortSignal | null }>(init: T): T {
+  const signal = attemptSignal.getStore();
+  return init.signal || !signal ? init : { ...init, signal };
+}
+
 /**
  * Poll `check` until it returns true, or fail with a message naming what was
  * being waited for.
@@ -74,26 +88,70 @@ export class HttpError extends Error {
  * Every wait in this suite is bounded. A CI job that hangs until the runner
  * times out tells an operator nothing; one that says "the gateway data plane
  * never served /nexus/e2e-keyauth within 120s" tells them where to look.
+ *
+ * The deadline bounds each attempt too, not only the gap between them: a
+ * listener that accepts a connection and then stalls its headers or body used
+ * to hold `await check()` past it (issue #606). Each attempt runs with a signal
+ * that aborts at the deadline. `check` receives it, and {@link portalRaw},
+ * {@link callGateway} and the mail reads pick it up on their own, so a stalled
+ * request and its body read are cancelled; a check that ignores it is still
+ * abandoned at the deadline. Every attempt is aborted as soon as it ends, so
+ * a response it left unread (a `503` poll, or a `200` checked by status only)
+ * does not stay open. A success reported after the deadline does not count.
  */
 export async function waitFor(
   what: string,
-  check: () => Promise<boolean>,
+  check: (signal: AbortSignal) => Promise<boolean>,
   timeoutMs = READY_TIMEOUT_MS,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  // A wait inside another wait's check ends with the outer attempt too.
+  const parent = attemptSignal.getStore();
   let lastError: unknown;
   for (;;) {
-    try {
-      if (await check()) return;
-      lastError = undefined;
-    } catch (error) {
-      lastError = error;
-    }
-    if (Date.now() >= deadline) {
+    if (parent?.aborted) throw parent.reason;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
       const because = lastError instanceof Error ? `: ${lastError.message}` : '';
       throw new Error(`Timed out after ${timeoutMs}ms waiting for ${what}${because}`);
     }
-    await delay(POLL_INTERVAL_MS);
+    const attempt = new AbortController();
+    const timer = setTimeout(
+      () => attempt.abort(new Error('the last check did not finish before the deadline')),
+      remaining,
+    );
+    const abandoned = new Promise<never>((_, reject) => {
+      attempt.signal.addEventListener('abort', () => reject(attempt.signal.reason), {
+        once: true,
+      });
+    });
+    // Observed from the start: the abort that ends a finished attempt must
+    // never surface as an unhandled rejection.
+    abandoned.catch(() => undefined);
+    const fromParent = (): void => attempt.abort(parent?.reason);
+    parent?.addEventListener('abort', fromParent, { once: true });
+    try {
+      const ready = await Promise.race([
+        // Async, so a check that throws synchronously rejects inside the race.
+        attemptSignal.run(attempt.signal, async () => check(attempt.signal)),
+        abandoned,
+      ]);
+      if (ready && !attempt.signal.aborted && Date.now() <= deadline) return;
+      lastError = undefined;
+    } catch (error) {
+      lastError = attempt.signal.aborted ? attempt.signal.reason : error;
+    } finally {
+      clearTimeout(timer);
+      parent?.removeEventListener('abort', fromParent);
+      // Whatever the attempt left open ends with it, success included: a
+      // status-only poll that never read a stalled body must not leave the
+      // request running. A check whose response is used after the wait reads
+      // it first with {@link bufferedResponse}.
+      if (!attempt.signal.aborted) attempt.abort(new Error('attempt ended'));
+    }
+    if (parent?.aborted) throw parent.reason;
+    const pause = Math.min(POLL_INTERVAL_MS, deadline - Date.now());
+    if (pause > 0) await delay(pause, undefined, parent ? { signal: parent } : {});
   }
 }
 
@@ -146,11 +204,14 @@ export async function portalRaw(
     headers.cookie = options.session.cookie;
     headers['x-nexus-csrf'] = options.session.csrf;
   }
-  return fetch(`${PORTAL_URL}${path}`, {
-    method,
-    headers,
-    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-  });
+  return fetch(
+    `${PORTAL_URL}${path}`,
+    withAttemptSignal<RequestInit>({
+      method,
+      headers,
+      ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+    }),
+  );
 }
 
 /**
@@ -161,7 +222,24 @@ export async function callGateway(
   path: string,
   init: RequestInit & { method?: string } = {},
 ): Promise<Response> {
-  return fetch(`${GATEWAY_URL}${path}`, { redirect: 'manual', ...init });
+  return fetch(
+    `${GATEWAY_URL}${path}`,
+    withAttemptSignal<RequestInit>({ redirect: 'manual', ...init }),
+  );
+}
+
+/**
+ * `response` with its body already read, for a {@link waitFor} check whose
+ * response is used after the wait. The read happens inside the attempt, so a
+ * listener that sends `200` headers and then stalls the body is cancelled at
+ * the deadline instead of hanging whatever reads the body afterwards.
+ */
+export async function bufferedResponse(response: Response): Promise<Response> {
+  return new Response(await response.arrayBuffer(), {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }
 
 /** Whether a gateway response actually reached the deterministic upstream. */
@@ -186,29 +264,34 @@ interface MailpitMessage {
 export async function latestMailTo(
   address: string,
 ): Promise<{ subject: string; text: string; from: string }> {
-  let found: MailpitMessage | undefined;
-  await waitFor(`mail delivered to ${address}`, async () => {
-    const response = await fetch(`${MAIL_URL}/api/v1/messages?limit=50`);
+  let delivered: { subject: string; text: string; from: string } | undefined;
+  // The list and the message itself are read inside one bounded attempt, so a
+  // sink that stalls on either cannot outlast the deadline.
+  await waitFor(`mail delivered to ${address}`, async (signal) => {
+    const response = await fetch(`${MAIL_URL}/api/v1/messages?limit=50`, { signal });
     if (!response.ok) return false;
     const body = (await response.json()) as { messages?: MailpitMessage[] };
-    found = (body.messages ?? []).find((message) =>
+    const found = (body.messages ?? []).find((message) =>
       message.To.some((to) => to.Address.toLowerCase() === address.toLowerCase()),
     );
-    return found !== undefined;
+    if (!found) return false;
+    const detail = await fetch(`${MAIL_URL}/api/v1/message/${found.ID}`, { signal });
+    if (!detail.ok) return false;
+    const message = (await detail.json()) as {
+      Subject: string;
+      Text?: string;
+      HTML?: string;
+      From?: { Address: string };
+    };
+    delivered = {
+      subject: message.Subject,
+      text: `${message.Text ?? ''}\n${message.HTML ?? ''}`,
+      from: message.From?.Address ?? '',
+    };
+    return true;
   });
-  if (!found) throw new Error(`No message for ${address}`);
-  const detail = await fetch(`${MAIL_URL}/api/v1/message/${found.ID}`);
-  const body = (await detail.json()) as {
-    Subject: string;
-    Text?: string;
-    HTML?: string;
-    From?: { Address: string };
-  };
-  return {
-    subject: body.Subject,
-    text: `${body.Text ?? ''}\n${body.HTML ?? ''}`,
-    from: body.From?.Address ?? '',
-  };
+  if (!delivered) throw new Error(`No message for ${address}`);
+  return delivered;
 }
 
 /** Forget every delivered message, so a later wait cannot match an old one. */
@@ -279,24 +362,27 @@ export async function signIn(email: string, password: string): Promise<Session> 
 
 /** Wait until the portal, the gateway's data plane and the sink all answer. */
 export async function waitForStack(): Promise<void> {
-  await waitFor('the portal to report a database', async () => {
-    const response = await fetch(`${PORTAL_URL}/api/health`);
+  await waitFor('the portal to report a database', async (signal) => {
+    const response = await fetch(`${PORTAL_URL}/api/health`, { signal });
+    await response.body?.cancel();
     return response.status === 200;
   });
-  await waitFor('the portal to report a reachable gateway', async () => {
-    const response = await fetch(`${PORTAL_URL}/api/health`);
+  await waitFor('the portal to report a reachable gateway', async (signal) => {
+    const response = await fetch(`${PORTAL_URL}/api/health`, { signal });
     if (!response.ok) return false;
     const body = (await response.json()) as { edge?: { status?: string } };
     return body.edge?.status === 'ok';
   });
   // The data plane answers 404 for an unpublished path, which is exactly the
   // proof that it is listening.
-  await waitFor('the gateway data plane to listen', async () => {
-    const response = await callGateway('/__e2e_readiness__');
+  await waitFor('the gateway data plane to listen', async (signal) => {
+    const response = await callGateway('/__e2e_readiness__', { signal });
+    await response.body?.cancel();
     return response.status > 0;
   });
-  await waitFor('the mail sink to answer', async () => {
-    const response = await fetch(`${MAIL_URL}/api/v1/messages?limit=1`);
+  await waitFor('the mail sink to answer', async (signal) => {
+    const response = await fetch(`${MAIL_URL}/api/v1/messages?limit=1`, { signal });
+    await response.body?.cancel();
     return response.ok;
   });
 }

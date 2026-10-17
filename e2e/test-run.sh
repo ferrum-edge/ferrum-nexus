@@ -132,6 +132,7 @@ for suite in all dataplane sso browser; do
 done
 new_fixture suite_default
 run_fixture bash ./run.sh
+contains "$FIXTURE/trace" 'npx tsx --test src/harness.test.ts'
 contains "$FIXTURE/trace" 'npx tsx --test src/dataplane.test.ts'
 contains "$FIXTURE/trace" 'npx tsx --test src/sso.test.ts'
 contains "$FIXTURE/trace" 'npx playwright test'

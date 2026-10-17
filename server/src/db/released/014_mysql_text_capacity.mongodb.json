@@ -1,0 +1,6 @@
+{
+  "id": "014_mysql_text_capacity",
+  "backend": "mongodb",
+  "description": "Snapshot of the 014_mysql_text_capacity step, which widens MySQL text columns only and declares no index",
+  "indexes": []
+}
