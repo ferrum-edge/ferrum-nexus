@@ -866,6 +866,8 @@ export interface UserIdentityRepo {
   listByUser(userId: Uuid): Promise<UserIdentityRecord[]>;
   /** How many links a provider holds. */
   countByProvider(providerId: string): Promise<number>;
+  /** Every distinct account linked at a provider, for session revocation. */
+  listUserIdsByProvider(providerId: string): Promise<Uuid[]>;
   /** Record a sign-in through the link. Returns `false` when the link is gone. */
   touchLogin(id: Uuid, email: string | null, at: IsoTimestamp): Promise<boolean>;
   delete(id: Uuid): Promise<boolean>;

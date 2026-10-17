@@ -1389,6 +1389,13 @@ describe('single sign-on', () => {
       (row) => row.target_id === SSO_SETTINGS_KEY,
     );
     assert.deepEqual(removal?.details.links_removed, { lifecycle: 1 });
+    assert.deepEqual(removal?.details.providers_cut_off, ['lifecycle']);
+    assert.equal(removal?.details.sessions_revoked, 1);
+    // The session the removed provider established ends with it (#591).
+    assert.equal(
+      (await h.authed(account, { method: 'GET', url: '/api/auth/me' })).statusCode,
+      401,
+    );
     // The account it provisioned stays active, and still has no password: a
     // reset must not keep a user the provider offboarded.
     assert.equal((await h.store.users.findById(account.user.id))?.status, 'active');
@@ -1653,10 +1660,11 @@ describe('single sign-on', () => {
       url: `/api/users/${target.id}/identities/${identity.id}`,
     });
     assert.equal(unlinked.statusCode, 200, unlinked.body);
-    // Unlinking itself leaves the lower-trust browser signed in.
+    // Unlinking revokes the account's sessions in the same transaction:
+    // a session established through that identity does not outlive it.
     assert.equal(
       (await h.authed(oldSession, { method: 'GET', url: '/api/auth/me' })).statusCode,
-      200,
+      401,
     );
     const promoted = await h.authed(founder, {
       method: 'PATCH',
@@ -1671,7 +1679,9 @@ describe('single sign-on', () => {
     const row = (await h.auditRows(AuditAction.USER_ROLE_CHANGE)).find(
       (entry) => entry.target_id === target.id,
     );
-    assert.equal(row?.details.terminated_sessions, 1);
+    // The unlink already terminated the only session; the role change
+    // itself terminates none further.
+    assert.equal(row?.details.terminated_sessions, 0);
   });
 
   it('releases a squatted address for a separate rightful admin-mapped SSO account', async () => {
@@ -1898,12 +1908,13 @@ describe('single sign-on', () => {
     assert.equal(unlink?.details.subject, who.sub);
     // Unlinking the identity that provisioned the account gives it no password.
     await assertNoLocalPassword(h, who.email);
-    // The client itself cannot.
+    // The unlink revoked the account's sessions, this one included.
     const forbidden = await h.authed(session, {
       method: 'GET',
       url: `/api/users/${session.user.id}/identities`,
     });
-    assert.equal(forbidden.statusCode, 403, forbidden.body);
+    assert.equal(forbidden.statusCode, 401, forbidden.body);
+    assert.equal(unlink?.details.terminated_sessions, 1);
   });
 
   it('keeps tokens, codes and secrets out of the audit log and the server log', async () => {

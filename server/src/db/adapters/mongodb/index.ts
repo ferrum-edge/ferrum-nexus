@@ -2120,6 +2120,17 @@ class MongoStore implements NexusStore {
         this.opts,
       ),
 
+    listUserIdsByProvider: async (providerId) =>
+      (
+        await this.col(COLLECTIONS.userIdentities).distinct(
+          'user_id',
+          { provider_id: providerId } as Filter<NexusDoc>,
+          this.opts,
+        )
+      )
+        .map((value) => String(value))
+        .sort(),
+
     touchLogin: async (id, email, at) => {
       const result = await this.col(COLLECTIONS.userIdentities).updateOne(
         { _id: id },
