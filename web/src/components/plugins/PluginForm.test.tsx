@@ -170,6 +170,21 @@ describe('validateDraft', () => {
     }
   });
 
+  it('reports X-Ferrum-Hops for correlation_id but allows it for request_deduplication', () => {
+    // Edge v0.9.17 reserves the hop count as a configured destination only.
+    for (const header of ['X-Ferrum-Hops', 'x_ferrum-hops']) {
+      const errors = validateDraft(descriptor('correlation_id'), {
+        header_name: header,
+        echo_downstream: true,
+      });
+      expect(errors.header_name).toMatch(/X-Ferrum-Hops/);
+    }
+    const dedup = descriptor('request_deduplication');
+    expect(
+      validateDraft(dedup, { ...draftFor(dedup, null), header_name: 'X-Ferrum-Hops' }).header_name,
+    ).toBeUndefined();
+  });
+
   it('reports ip_restriction with both lists empty as a whole-plugin problem', () => {
     const errors = validateDraft(descriptor('ip_restriction'), {
       allow: '',
