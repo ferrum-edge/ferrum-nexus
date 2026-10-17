@@ -1461,9 +1461,36 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
               // provider's, which stays in force.
               const envIds = new Set(config.sso.providers.map((provider) => provider.settings.id));
               const linksRemoved: Record<string, number> = {};
+              // Sessions established through a provider this save cuts
+              // off — removed, or disabled in place — end with it (#591):
+              // collect their accounts before the links move, then revoke
+              // in this transaction.
+              const cutOff = new Set<string>();
+              for (const id of removed) if (!envIds.has(id)) cutOff.add(id);
+              const nextEnabled = new Map(
+                providersInForce(config, next).map(({ settings }) => [
+                  settings.id,
+                  settings.enabled,
+                ]),
+              );
+              for (const { settings } of providersInForce(config, stored)) {
+                if (settings.enabled && nextEnabled.get(settings.id) === false) {
+                  cutOff.add(settings.id);
+                }
+              }
+              const cutOffUsers = new Set<Uuid>();
+              for (const id of cutOff) {
+                for (const userId of await tx.userIdentities.listUserIdsByProvider(id)) {
+                  cutOffUsers.add(userId);
+                }
+              }
               for (const id of removed) {
                 if (envIds.has(id)) continue;
                 linksRemoved[id] = await tx.userIdentities.deleteByProvider(id);
+              }
+              let sessionsRevoked = 0;
+              for (const userId of cutOffUsers) {
+                sessionsRevoked += await tx.sessions.deleteForUser(userId);
               }
               const nextProviders = new Map(
                 providersInForce(config, next).map(
@@ -1494,6 +1521,9 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
                   providers_added: added,
                   providers_removed: removed,
                   links_removed: linksRemoved,
+                  ...(cutOff.size > 0
+                    ? { providers_cut_off: [...cutOff].sort(), sessions_revoked: sessionsRevoked }
+                    : {}),
                   client_secrets_changed: [...secretWrites.keys()],
                   ...(providersTrustLowered.length > 0
                     ? { providers_trust_lowered: providersTrustLowered }
@@ -1539,6 +1569,10 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         const identity = await tx.userIdentities.findById(identityId);
         if (!identity || identity.user_id !== userId) throw notFound('Identity', identityId);
         if (!(await tx.userIdentities.delete(identity.id))) throw notFound('Identity', identityId);
+        // Sessions established through this identity must not outlive the
+        // link that authenticated them (#591): unlinking signs the account
+        // out everywhere, in the same transaction, like a password change.
+        const terminatedSessions = await tx.sessions.deleteForUser(userId);
         await audit.forStore(tx).record(
           { id: actor.id, role: actor.role },
           AuditAction.AUTH_SSO_UNLINK,
@@ -1547,6 +1581,7 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
             identity_id: identity.id,
             provider_id: identity.provider_id,
             subject: identity.subject,
+            terminated_sessions: terminatedSessions,
           },
           ip,
         );

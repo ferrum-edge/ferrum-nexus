@@ -1236,6 +1236,13 @@ class SqliteStore implements NexusStore {
         providerId,
       ]),
 
+    listUserIdsByProvider: async (providerId) =>
+      queryAll(
+        this.db,
+        'SELECT DISTINCT user_id FROM user_identities WHERE provider_id = ? ORDER BY user_id ASC',
+        [providerId],
+      ).map((row) => text(row.user_id)),
+
     touchLogin: async (id, email, at) => {
       const changed = execute(
         this.db,

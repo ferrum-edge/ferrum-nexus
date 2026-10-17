@@ -6,6 +6,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- Unlinking an SSO identity revokes the account's sessions in the same
+  transaction, and removing or disabling an SSO provider revokes the
+  sessions of every account linked at it (#591). Sessions established
+  through an identity or provider no longer outlive it; unlinking signs
+  the account out everywhere, like a password change.
+
 ### Added
 
 - **Separate credentials for the gateway's fleet-wide metrics reads**
