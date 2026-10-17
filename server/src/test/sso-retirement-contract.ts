@@ -8,7 +8,6 @@ import type { LightMyRequestResponse } from 'fastify';
 import {
   SESSION_COOKIE,
   SSO_TRANSACTION_COOKIE,
-  type MeResponse,
   type SsoAdminSettingsResponse,
   type SsoProviderSettings,
   type SsoPublicConfigResponse,
