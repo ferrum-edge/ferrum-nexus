@@ -45,10 +45,7 @@ function sameRow(a: SettingRecord | null, b: SettingRecord | null): boolean {
  * appears and is removed again between two reads of it (absent, then present,
  * then absent) would pair the middle value with the restored configuration.
  */
-function recording(
-  store: NexusStore,
-  seen: Map<string, (SettingRecord | null)[]>,
-): NexusStore {
+function recording(store: NexusStore, seen: Map<string, (SettingRecord | null)[]>): NexusStore {
   const settings = new Proxy(store.settings, {
     get(target, property) {
       const value = Reflect.get(target, property) as unknown;
