@@ -1397,10 +1397,7 @@ describe('single sign-on', () => {
     assert.deepEqual(removal?.details.providers_cut_off, ['lifecycle']);
     assert.equal(removal?.details.sessions_revoked, 1);
     // The session the removed provider established ends with it (#591).
-    assert.equal(
-      (await h.authed(account, { method: 'GET', url: '/api/auth/me' })).statusCode,
-      401,
-    );
+    assert.equal((await h.authed(account, { method: 'GET', url: '/api/auth/me' })).statusCode, 401);
     // The account it provisioned stays active, and still has no password: a
     // reset must not keep a user the provider offboarded.
     assert.equal((await h.store.users.findById(account.user.id))?.status, 'active');
