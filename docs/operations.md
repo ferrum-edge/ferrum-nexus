@@ -1017,7 +1017,7 @@ Procedure:
 1. **Check the gateway** with the Edge guide's list, set
    `FERRUM_METRICS_BEARER_TOKEN` on Nexus to the gateway's metrics Bearer [REDACTED]
    if the Usage card matters, keep `FERRUM_MAX_PROXY_HOPS` above `0`, and
-   rename any palette `header_name` set to `X-Ferrum-Hops`.
+   rename any `correlation_id` `header_name` set to `X-Ferrum-Hops`.
 2. **Settle journals** as in step 2 of the v0.9.13 procedure. Tokens a v0.9.15
    gateway issued keep verifying on v0.9.17.
 3. **Upgrade Edge to v0.9.17**, the control plane and every data plane together.
