@@ -1844,6 +1844,14 @@ gateway recovery records unreadable and signs everyone out
 ([§7](#7-rotating-nexus_secret_key)). `docker stop nexus` followed by the same
 `docker run` resumes the same portal.
 
+The checkout ignores `/nexus.env` because it contains deployment secrets.
+Keep it out of version control; an ignore rule does not remove a file that
+Git already tracks. If it is already tracked, run `git rm --cached -- nexus.env`
+from the checkout root to stop tracking it while keeping the local file.
+If it was committed and exposed, rotate its credentials
+and follow the master-key rotation procedure in §7 while retaining the key
+needed for existing backups.
+
 `FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true` is needed because
 `host.docker.internal` is not loopback. The recipe leaves `NEXUS_BOOTSTRAP_TOKEN`
 unset, so each start generates a token and logs it while the portal has no
