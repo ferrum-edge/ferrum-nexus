@@ -6,6 +6,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Plugin config updates and deletes send Ferrum Edge's
+  `expected_proxy_ids` association precondition (forge-ops #569): the
+  proxies Nexus expects to reference the config (`[proxyId]` for its
+  proxy-scoped replaces, `[]` for deletes, which already disassociate or
+  follow the proxy's own delete). A gateway that enforces it refuses a
+  write that would detach a proxy attached after Nexus read the
+  namespace, instead of silently dropping that association. Older
+  gateways ignore the parameter. The mock Edge enforces it in tests.
+
 ### Security
 
 - Unlinking an SSO identity revokes the account's sessions in the same

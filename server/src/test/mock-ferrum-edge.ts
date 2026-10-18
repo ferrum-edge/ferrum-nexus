@@ -3342,6 +3342,59 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     provisionedBy?: string,
   ): void {
     const id = segments[2];
+    // Edge's association precondition (forge-ops #569): PUT/DELETE require
+    // `expected_proxy_ids`, and a referencing proxy outside the set (or a
+    // PUT's kept `proxy` target) refuses the write with 412. Parsed before
+    // the 404 exactly as Edge parses the query first; enforced once the
+    // row is known to exist.
+    const parseExpectedProxyIds = (): Set<string> | null => {
+      const values = query.getAll('expected_proxy_ids');
+      if (values.length === 0) {
+        fail(
+          res,
+          400,
+          'expected_proxy_ids query parameter is required: list every proxy that may reference this plugin config (empty value expects none)',
+        );
+        return null;
+      }
+      if (values.length > 1) {
+        fail(res, 400, 'expected_proxy_ids must not be supplied more than once');
+        return null;
+      }
+      const expected = new Set<string>();
+      if (values[0] === '') return expected;
+      for (const entry of (values[0] as string).split(',')) {
+        if (entry === '' || expected.has(entry)) {
+          fail(res, 400, `expected_proxy_ids: invalid entry '${entry}'`);
+          return null;
+        }
+        expected.add(entry);
+      }
+      return expected;
+    };
+    const refuseUnexpectedReferences = (
+      configId: string,
+      expected: Set<string>,
+      kept: unknown,
+    ): boolean => {
+      const unexpected = [...proxies.values()]
+        .filter(
+          (proxy) =>
+            proxy.namespace === namespace &&
+            Array.isArray(proxy.plugins) &&
+            proxy.plugins.some((entry) => isRecord(entry) && entry.plugin_config_id === configId),
+        )
+        .map((proxy) => String(proxy.id))
+        .filter((proxyId) => proxyId !== kept && !expected.has(proxyId))
+        .sort();
+      if (unexpected.length === 0) return false;
+      fail(
+        res,
+        412,
+        `plugin config '${configId}' is referenced by proxies outside expected_proxy_ids: ${unexpected.join(', ')}; re-read the namespace and retry with the current referencing set`,
+      );
+      return true;
+    };
     if (id === undefined) {
       if (method === 'GET') {
         // Edge v0.9.7's only list filter (#5726): an exact `proxy_id` match,
@@ -3429,6 +3482,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       return existing ? send(res, 200, existing) : fail(res, 404, 'Plugin config not found');
     }
     if (method === 'PUT') {
+      const expected = parseExpectedProxyIds();
+      if (expected === null) return;
       if (!existing) return fail(res, 404, 'Plugin config not found');
       if (!isRecord(body)) return fail(res, 400, 'Request body must be a JSON object');
       // A replace is deserialized by the same `deny_unknown_fields` struct as a
@@ -3472,11 +3527,23 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         );
         if (composition) return fail(res, 400, composition);
       }
+      if (
+        refuseUnexpectedReferences(
+          id,
+          expected,
+          updated.scope === 'proxy' ? updated.proxy_id : undefined,
+        )
+      ) {
+        return;
+      }
       pluginConfigs.set(key(namespace, id), updated);
       return send(res, 200, updated);
     }
     if (method === 'DELETE') {
+      const expected = parseExpectedProxyIds();
+      if (expected === null) return;
       if (!existing) return fail(res, 404, 'Plugin config not found');
+      if (refuseUnexpectedReferences(id, expected, undefined)) return;
       pluginConfigs.delete(key(namespace, id));
       return send(res, 204);
     }

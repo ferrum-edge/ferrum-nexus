@@ -403,12 +403,28 @@ export interface FerrumAdminClient {
       subject?: string,
       options?: { preserveLabels: true },
     ): Promise<EdgePluginConfig>;
-    replace(id: string, body: EdgePluginConfigWrite, subject?: string): Promise<EdgePluginConfig>;
+    /**
+     * `expectedProxyIds` is Edge's association precondition (forge-ops
+     * #569): every proxy the caller expects to reference this config and
+     * accepts the write detaching. Required on `PUT`/`DELETE` — a missing
+     * or stale set is refused (`400`/`412`) rather than silently detaching
+     * a proxy another writer attached after Nexus read the namespace.
+     */
+    replace(
+      id: string,
+      body: EdgePluginConfigWrite,
+      subject: string | undefined,
+      expectedProxyIds: readonly string[],
+    ): Promise<EdgePluginConfig>;
     /**
      * Already gone counts as deleted only on Edge's own `Plugin config not
      * found` answer; any other `404` is a protocol error (issue #548).
      */
-    delete(id: string, subject?: string): Promise<void>;
+    delete(
+      id: string,
+      subject: string | undefined,
+      expectedProxyIds: readonly string[],
+    ): Promise<void>;
   };
 
   /**
@@ -2603,18 +2619,25 @@ export function createFerrumAdminClient(
       async replace(
         id: string,
         body: EdgePluginConfigWrite,
-        subject?: string,
+        subject: string | undefined,
+        expectedProxyIds: readonly string[],
       ): Promise<EdgePluginConfig> {
         return callRequired<EdgePluginConfig>('PUT', `/plugins/config/${encodeURIComponent(id)}`, {
           body,
           subject,
+          query: { expected_proxy_ids: expectedProxyIds.join(',') },
         });
       },
-      async delete(id: string, subject?: string): Promise<void> {
+      async delete(
+        id: string,
+        subject: string | undefined,
+        expectedProxyIds: readonly string[],
+      ): Promise<void> {
         await call('DELETE', `/plugins/config/${encodeURIComponent(id)}`, {
           subject,
           allow404: true,
           absentError: PLUGIN_CONFIG_NOT_FOUND,
+          query: { expected_proxy_ids: expectedProxyIds.join(',') },
         });
       },
     },

@@ -427,13 +427,18 @@ describe('ferrum admin client', () => {
         assert.equal(request.claims?.sub, 'replay-actor');
       }
       // CRUD PUT preserves an omitted label map.
-      await client.pluginConfigs.replace(plugin.id, {
-        plugin_name: plugin.plugin_name,
-        scope: plugin.scope,
-        proxy_id: proxy.id,
-        enabled: plugin.enabled,
-        config: plugin.config,
-      });
+      await client.pluginConfigs.replace(
+        plugin.id,
+        {
+          plugin_name: plugin.plugin_name,
+          scope: plugin.scope,
+          proxy_id: proxy.id,
+          enabled: plugin.enabled,
+          config: plugin.config,
+        },
+        undefined,
+        [proxy.id],
+      );
       assert.deepEqual((await client.pluginConfigs.get(plugin.id))?.labels, labels);
       await client.proxies.replace(proxy.id, {
         id: proxy.id,
