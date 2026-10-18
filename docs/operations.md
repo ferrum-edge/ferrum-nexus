@@ -1846,7 +1846,9 @@ gateway recovery records unreadable and signs everyone out
 
 The checkout ignores `/nexus.env` because it contains deployment secrets.
 Keep it out of version control; an ignore rule does not remove a file that
-Git already tracks. If it was committed and exposed, rotate its credentials
+Git already tracks. If it is already tracked, run `git rm --cached -- nexus.env`
+from the checkout root to stop tracking it while keeping the local file.
+If it was committed and exposed, rotate its credentials
 and follow the master-key rotation procedure in §7 while retaining the key
 needed for existing backups.
 
