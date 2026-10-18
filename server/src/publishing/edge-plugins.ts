@@ -493,7 +493,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
     undoAttachLocked(proxyId, configId, subject) {
       return async () => {
         await binder.disassociateLocked(proxyId, [configId], subject);
-        await edge.pluginConfigs.delete(configId, subject);
+        await edge.pluginConfigs.delete(configId, subject, []);
       };
     },
 
@@ -581,7 +581,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
         if (!existing) return null;
         undo.push(binder.undoRemovalLocked(proxyId, existing, subject));
         await binder.disassociateLocked(proxyId, [existing.id], subject);
-        await edge.pluginConfigs.delete(existing.id, subject);
+        await edge.pluginConfigs.delete(existing.id, subject, []);
         return null;
       }
 
@@ -609,12 +609,14 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
               existing,
             ),
             subject,
+            [proxyId],
           );
         });
         const replaced = await edge.pluginConfigs.replace(
           existing.id,
           writeBody(proxyId, pluginName, pluginSettings, options, existing),
           subject,
+          [proxyId],
         );
         await binder.mutateProxyLocked(
           proxyId,

@@ -427,13 +427,18 @@ describe('ferrum admin client', () => {
         assert.equal(request.claims?.sub, 'replay-actor');
       }
       // CRUD PUT preserves an omitted label map.
-      await client.pluginConfigs.replace(plugin.id, {
-        plugin_name: plugin.plugin_name,
-        scope: plugin.scope,
-        proxy_id: proxy.id,
-        enabled: plugin.enabled,
-        config: plugin.config,
-      });
+      await client.pluginConfigs.replace(
+        plugin.id,
+        {
+          plugin_name: plugin.plugin_name,
+          scope: plugin.scope,
+          proxy_id: proxy.id,
+          enabled: plugin.enabled,
+          config: plugin.config,
+        },
+        undefined,
+        [proxy.id],
+      );
       assert.deepEqual((await client.pluginConfigs.get(plugin.id))?.labels, labels);
       await client.proxies.replace(proxy.id, {
         id: proxy.id,
@@ -442,6 +447,28 @@ describe('ferrum admin client', () => {
       });
       assert.deepEqual((await client.proxies.get(proxy.id))?.labels, labels);
     }
+  });
+
+  it('mock refuses malformed expected_proxy_ids like Edge, before the 404', async () => {
+    const token = await createAdminTokenMinter(configFor(edgeUrl)).getToken('mock-contract-test');
+    for (const query of [
+      '',
+      '?expected_proxy_ids=bad%2Fid',
+      '?expected_proxy_ids=ok,ok',
+      '?expected_proxy_ids=ok&expected_proxy_ids=ok',
+      `?expected_proxy_ids=${'a'.repeat(255)}`,
+    ]) {
+      const response = await fetch(`${edgeUrl}/plugins/config/absent${query}`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${token}`, 'x-ferrum-namespace': 'nexus' },
+      });
+      assert.equal(response.status, 400, query || '(absent)');
+    }
+    const wellFormed = await fetch(`${edgeUrl}/plugins/config/absent?expected_proxy_ids=`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${token}`, 'x-ferrum-namespace': 'nexus' },
+    });
+    assert.equal(wellFormed.status, 404);
   });
 
   it('finds a consumer by username by scanning the list endpoint', async () => {

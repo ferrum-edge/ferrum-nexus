@@ -3403,7 +3403,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           }
           if (strandedProxyId === null) {
             for (const pluginId of created.pluginIds) {
-              await edge.pluginConfigs.delete(pluginId, owner.id).catch(() => undefined);
+              await edge.pluginConfigs.delete(pluginId, owner.id, []).catch(() => undefined);
             }
           }
           await audit
@@ -3959,7 +3959,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 undoRemoval(proxyId, previous, actor.id),
               );
               await disassociate(proxyId, [previous.id], actor.id);
-              await edge.pluginConfigs.delete(previous.id, actor.id);
+              await edge.pluginConfigs.delete(previous.id, actor.id, []);
             }
             update.auth_plugin = patch.auth_plugin;
             changed.push('auth_plugin');
@@ -3999,7 +3999,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               if (acl) {
                 pushUndo('the access control plugin', undoRemoval(proxyId, acl, actor.id));
                 await disassociate(proxyId, [acl.id], actor.id);
-                await edge.pluginConfigs.delete(acl.id, actor.id);
+                await edge.pluginConfigs.delete(acl.id, actor.id, []);
               }
               nextOwned.access_control = null;
             }
@@ -5647,7 +5647,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           await edge.proxies.delete(api.ferrum_proxy_id, actor.id);
           for (const plugin of attached) {
             if (!owned.has(plugin.id)) continue;
-            await edge.pluginConfigs.delete(plugin.id, actor.id).catch(() => undefined);
+            await edge.pluginConfigs.delete(plugin.id, actor.id, []).catch(() => undefined);
           }
         }
 

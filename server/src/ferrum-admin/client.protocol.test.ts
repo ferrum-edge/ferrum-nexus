@@ -308,7 +308,7 @@ describe('Edge response contracts over HTTP sockets', () => {
     [
       'plugin config delete',
       'Plugin config not found',
-      (client) => client.pluginConfigs.delete('plugin-1'),
+      (client) => client.pluginConfigs.delete('plugin-1', undefined, []),
     ],
     ['API spec delete', 'API spec not found', (client) => client.apiSpecs.delete('spec-1')],
     [
@@ -322,6 +322,34 @@ describe('Edge response contracts over HTTP sockets', () => {
       (client) => client.pluginConfigs.get('plugin-1', { confirmedAbsence: true }),
     ],
   ];
+
+  it('sends expected_proxy_ids on plugin config replace and delete', async (t) => {
+    const { client, reply, requests } = await fixture(t);
+    reply.body = JSON.stringify(plugin);
+    await client.pluginConfigs.replace(
+      'plugin-1',
+      {
+        plugin_name: plugin.plugin_name,
+        scope: 'proxy',
+        proxy_id: 'proxy-1',
+        enabled: plugin.enabled,
+        config: plugin.config,
+      },
+      undefined,
+      ['proxy-1'],
+    );
+    reply.status = 204;
+    reply.body = '';
+    await client.pluginConfigs.delete('plugin-1', undefined, []);
+    assert.ok(
+      requests.includes('PUT /plugins/config/plugin-1?expected_proxy_ids=proxy-1'),
+      requests.join(' | '),
+    );
+    assert.ok(
+      requests.includes('DELETE /plugins/config/plugin-1?expected_proxy_ids='),
+      requests.join(' | '),
+    );
+  });
 
   for (const [name, expected, settle] of confirmedAbsences) {
     it(`counts a ${name} as absent only from the Edge not-found answer`, async (t) => {
@@ -577,7 +605,7 @@ describe('Edge response contracts over HTTP sockets', () => {
       () => client.consumers.delete('consumer-1'),
       () => client.consumers.deleteCredentialType('consumer-1', 'keyauth'),
       () => client.proxies.delete('proxy-1'),
-      () => client.pluginConfigs.delete('plugin-1'),
+      () => client.pluginConfigs.delete('plugin-1', undefined, []),
       () => client.apiSpecs.delete('spec-1'),
     ];
     for (const remove of deletes) {
@@ -603,7 +631,7 @@ describe('Edge response contracts over HTTP sockets', () => {
     // Already gone is a completed delete, but only on Edge's own answer.
     for (const [remove, error] of [
       [() => client.proxies.delete('proxy-1'), 'Proxy not found'],
-      [() => client.pluginConfigs.delete('plugin-1'), 'Plugin config not found'],
+      [() => client.pluginConfigs.delete('plugin-1', undefined, []), 'Plugin config not found'],
       [() => client.apiSpecs.delete('spec-1'), 'API spec not found'],
     ] as const) {
       Object.assign(reply, { status: 404, body: JSON.stringify({ error }) });
@@ -738,7 +766,10 @@ describe('Edge response contracts over HTTP sockets', () => {
     assert.equal(await client.consumers.get('consumer-1'), null);
     assert.equal(await client.live(), false);
     // Not Edge's own `Plugin config not found`, so not a completed delete.
-    await assert.rejects(() => client.pluginConfigs.delete('plugin-1'), protocolFailure);
+    await assert.rejects(
+      () => client.pluginConfigs.delete('plugin-1', undefined, []),
+      protocolFailure,
+    );
     reply.status = 405;
     assert.equal(await client.version(), null);
 

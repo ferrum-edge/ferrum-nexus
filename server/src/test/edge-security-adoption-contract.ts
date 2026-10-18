@@ -229,6 +229,7 @@ export function runEdgeSecurityAdoptionContract(
             labels: { ...plugin.labels, operator: 'concurrent' },
           },
           actor.id,
+          [proxyId],
         );
         return `/plugins/config/${plugin.id}`;
       }
@@ -479,15 +480,20 @@ export function runEdgeSecurityAdoptionContract(
         (plugin) => plugin.plugin_name === 'openapi_validator',
       );
       assert.ok(validator);
-      const generated = await harness.edgeClient.pluginConfigs.replace(validator.id, {
-        plugin_name: validator.plugin_name,
-        scope: validator.scope,
-        proxy_id: proxyId,
-        enabled: validator.enabled,
-        config: { ...validator.config, request_content_types: ['application/problem+json'] },
-        labels: { operator: 'complete-large-replay' },
-        priority_override: 2_900,
-      });
+      const generated = await harness.edgeClient.pluginConfigs.replace(
+        validator.id,
+        {
+          plugin_name: validator.plugin_name,
+          scope: validator.scope,
+          proxy_id: proxyId,
+          enabled: validator.enabled,
+          config: { ...validator.config, request_content_types: ['application/problem+json'] },
+          labels: { operator: 'complete-large-replay' },
+          priority_override: 2_900,
+        },
+        undefined,
+        [proxyId],
+      );
       await enlargeNamespace();
       const original = await harness.edgeClient.deployments.snapshot(actor.id);
       const key = `gateway_recovery:nexus:${published.api.id}`;
@@ -894,6 +900,7 @@ export function runEdgeSecurityAdoptionContract(
               labels,
             },
             actor.id,
+            [proxyId],
           );
         }
         const original = await harness.edgeClient.deployments.snapshot(actor.id);
@@ -942,13 +949,18 @@ export function runEdgeSecurityAdoptionContract(
       );
       assert.ok(plugin);
       assert.ok(plugin.labels?.['provisioned-by']);
-      await harness.edgeClient.pluginConfigs.replace(plugin.id, {
-        plugin_name: plugin.plugin_name,
-        scope: plugin.scope,
-        proxy_id: proxyId,
-        enabled: false,
-        config: plugin.config,
-      });
+      await harness.edgeClient.pluginConfigs.replace(
+        plugin.id,
+        {
+          plugin_name: plugin.plugin_name,
+          scope: plugin.scope,
+          proxy_id: proxyId,
+          enabled: false,
+          config: plugin.config,
+        },
+        undefined,
+        [proxyId],
+      );
       const state = gatewayState();
       const offset = harness.edge.requests.length;
       await assert.rejects(
@@ -992,6 +1004,7 @@ export function runEdgeSecurityAdoptionContract(
             ...(plugin.trigger ? { trigger: plugin.trigger } : {}),
           },
           actor.id,
+          [proxyId],
         );
       }
       const original = (await harness.edgeClient.pluginConfigs.listByProxy(proxyId)).filter(
@@ -1449,16 +1462,21 @@ export function runEdgeSecurityAdoptionContract(
             { method: 'GET', path_template: '/foreign', path_regex: '^/foreign$' },
           ];
         }
-        await harness.edgeClient.pluginConfigs.replace(validator.id, {
-          plugin_name: validator.plugin_name,
-          scope: validator.scope,
-          proxy_id: proxyId,
-          enabled: true,
-          config,
-          ...(changed === 'trigger'
-            ? { trigger: { when: { match: { path: { exact: ['/foreign'] } } } } }
-            : {}),
-        });
+        await harness.edgeClient.pluginConfigs.replace(
+          validator.id,
+          {
+            plugin_name: validator.plugin_name,
+            scope: validator.scope,
+            proxy_id: proxyId,
+            enabled: true,
+            config,
+            ...(changed === 'trigger'
+              ? { trigger: { when: { match: { path: { exact: ['/foreign'] } } } } }
+              : {}),
+          },
+          undefined,
+          [proxyId],
+        );
         const state = gatewayState();
         const offset = harness.edge.requests.length;
         await assert.rejects(
@@ -1482,15 +1500,20 @@ export function runEdgeSecurityAdoptionContract(
         (plugin) => plugin.plugin_name === 'openapi_validator',
       );
       assert.ok(validator);
-      const original = await harness.edgeClient.pluginConfigs.replace(validator.id, {
-        plugin_name: validator.plugin_name,
-        scope: validator.scope,
-        proxy_id: proxyId,
-        enabled: validator.enabled,
-        config: { ...validator.config, request_content_types: ['application/problem+json'] },
-        labels: { operator: 'preserve' },
-        priority_override: 2_900,
-      });
+      const original = await harness.edgeClient.pluginConfigs.replace(
+        validator.id,
+        {
+          plugin_name: validator.plugin_name,
+          scope: validator.scope,
+          proxy_id: proxyId,
+          enabled: validator.enabled,
+          config: { ...validator.config, request_content_types: ['application/problem+json'] },
+          labels: { operator: 'preserve' },
+          priority_override: 2_900,
+        },
+        undefined,
+        [proxyId],
+      );
       harness.edge.queueFailure(503, { error: 'creation refused' }, '/proxies', 'POST');
       await assert.rejects(
         harness.services.publishing.update(actor, published.api.id, {
@@ -1800,7 +1823,7 @@ export function runEdgeSecurityAdoptionContract(
         );
         assert.equal(harness.edge.callsTo('DELETE', `/proxies/${proxyId}`).length, deletes);
         assert.ok(harness.edge.pluginConfigs.has(`nexus/${unknown.id}`));
-        await harness.edgeClient.pluginConfigs.delete(unknown.id);
+        await harness.edgeClient.pluginConfigs.delete(unknown.id, undefined, [proxyId]);
         const revisionOffset = harness.edge.requests.length;
         await harness.services.publishing.updateSpec(
           actor,
@@ -2850,14 +2873,19 @@ export function runEdgeSecurityAdoptionContract(
             });
           } else if (resource === 'plugin') {
             const plugin = (await harness.edgeClient.pluginConfigs.listByProxy(proxyId))[0]!;
-            await harness.edgeClient.pluginConfigs.replace(plugin.id, {
-              plugin_name: plugin.plugin_name,
-              scope: plugin.scope,
-              proxy_id: proxyId,
-              enabled: plugin.enabled,
-              config: plugin.config,
-              labels: { operator: 'concurrent' },
-            });
+            await harness.edgeClient.pluginConfigs.replace(
+              plugin.id,
+              {
+                plugin_name: plugin.plugin_name,
+                scope: plugin.scope,
+                proxy_id: proxyId,
+                enabled: plugin.enabled,
+                config: plugin.config,
+                labels: { operator: 'concurrent' },
+              },
+              undefined,
+              [proxyId],
+            );
           } else {
             const spec = harness.edge.apiSpecForProxy(proxyId)!;
             await harness.edgeClient.apiSpecs.replace(spec.id, {
@@ -3360,14 +3388,19 @@ export function runEdgeSecurityAdoptionContract(
             });
           } else if (resource === 'plugin') {
             const plugin = (await harness.edgeClient.pluginConfigs.listByProxy(proxyId))[0]!;
-            await harness.edgeClient.pluginConfigs.replace(plugin.id, {
-              plugin_name: plugin.plugin_name,
-              scope: plugin.scope,
-              proxy_id: proxyId,
-              enabled: plugin.enabled,
-              config: plugin.config,
-              labels: { operator: 'interleaved' },
-            });
+            await harness.edgeClient.pluginConfigs.replace(
+              plugin.id,
+              {
+                plugin_name: plugin.plugin_name,
+                scope: plugin.scope,
+                proxy_id: proxyId,
+                enabled: plugin.enabled,
+                config: plugin.config,
+                labels: { operator: 'interleaved' },
+              },
+              undefined,
+              [proxyId],
+            );
           } else {
             const spec = harness.edge.apiSpecForProxy(proxyId)!;
             await harness.edgeClient.apiSpecs.replace(spec.id, {
