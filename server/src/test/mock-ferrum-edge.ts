@@ -3364,8 +3364,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       const expected = new Set<string>();
       if (values[0] === '') return expected;
       for (const entry of (values[0] as string).split(',')) {
-        if (entry === '' || expected.has(entry)) {
-          fail(res, 400, `expected_proxy_ids: invalid entry '${entry}'`);
+        // Edge applies validate_resource_id to every entry.
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry) || entry.length > 254) {
+          fail(
+            res,
+            400,
+            `expected_proxy_ids: ID '${entry}' is invalid: must start with an alphanumeric character and contain only alphanumeric characters, dots, underscores, or hyphens`,
+          );
+          return null;
+        }
+        if (expected.has(entry)) {
+          fail(res, 400, `expected_proxy_ids lists proxy '${entry}' more than once`);
           return null;
         }
         expected.add(entry);
@@ -3527,10 +3536,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         );
         if (composition) return fail(res, 400, composition);
       }
-      const kept =
-        (body.scope ?? existing.scope) === 'proxy'
-          ? (body.proxy_id ?? existing.proxy_id)
-          : undefined;
+      // The kept target comes from the replacement alone: Edge rejects a
+      // proxy-scoped replace without proxy_id, so falling back to the
+      // stored row would exempt a target the replacement does not keep.
+      const kept = body.scope === 'proxy' ? body.proxy_id : undefined;
       if (refuseUnexpectedReferences(id, expected, kept)) {
         return;
       }
