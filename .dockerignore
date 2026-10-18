@@ -1,0 +1,2 @@
+# Generated deployment credentials (see docs/operations.md) must never enter the build context.
+/nexus.env
