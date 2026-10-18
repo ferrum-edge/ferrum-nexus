@@ -3527,13 +3527,11 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         );
         if (composition) return fail(res, 400, composition);
       }
-      if (
-        refuseUnexpectedReferences(
-          id,
-          expected,
-          updated.scope === 'proxy' ? updated.proxy_id : undefined,
-        )
-      ) {
+      const kept =
+        (body.scope ?? existing.scope) === 'proxy'
+          ? (body.proxy_id ?? existing.proxy_id)
+          : undefined;
+      if (refuseUnexpectedReferences(id, expected, kept)) {
         return;
       }
       pluginConfigs.set(key(namespace, id), updated);
