@@ -234,7 +234,7 @@ them. The tree mirrors [ferrum-edge](https://github.com/ferrum-edge/ferrum-edge)
 | `muse-agents`            | `muse-wonder-full-1.0`                      | `muse`         | `low` to `max`, `ultra` (passed through); no fast tier            |
 | `composer-agents`        | `composer-2.5`                              | `cursor-agent` | ignored; `--fast` selects `composer-2.5-fast`                     |
 | `opencode-laguna-agents` | `opencode/laguna-s-2.1-free` (default)      | `opencode`     | ignored; `--model opencode/<model>` overrides the model           |
-| `deepseek-pro-agents`    | `alibaba-token-plan/deepseek-v4.1-flash`    | `opencode`     | ignored                                                           |
+| `deepseek-pro-agents`    | `alibaba-token-plan/deepseek-v4.1-flash-1017`    | `opencode`     | ignored                                                           |
 | `deepseek-flash-agents`  | `alibaba-token-plan/deepseek-v4-flash-0731` | `opencode`     | ignored                                                           |
 | `qwen-agents`            | `alibaba-token-plan/qwen3.8-max`            | `opencode`     | ignored                                                           |
 
