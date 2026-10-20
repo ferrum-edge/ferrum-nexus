@@ -98,6 +98,12 @@ function withAttemptSignal<T extends { signal?: AbortSignal | null }>(init: T): 
  * abandoned at the deadline. Every attempt is aborted as soon as it ends, so
  * a response it left unread (a `503` poll, or a `200` checked by status only)
  * does not stay open. A success reported after the deadline does not count.
+ *
+ * The pause that runs to the deadline is the last: no attempt starts after it.
+ * Node's timers keep a coarser clock than `Date.now()`, so that pause can end a
+ * millisecond or two short of the deadline, and an attempt started in the
+ * sliver left over would be aborted before its request was even sent (issue
+ * #625).
  */
 export async function waitFor(
   what: string,
@@ -108,13 +114,14 @@ export async function waitFor(
   // A wait inside another wait's check ends with the outer attempt too.
   const parent = attemptSignal.getStore();
   let lastError: unknown;
+  const timedOut = (): Error => {
+    const because = lastError instanceof Error ? `: ${lastError.message}` : '';
+    return new Error(`Timed out after ${timeoutMs}ms waiting for ${what}${because}`);
+  };
   for (;;) {
     if (parent?.aborted) throw parent.reason;
     const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      const because = lastError instanceof Error ? `: ${lastError.message}` : '';
-      throw new Error(`Timed out after ${timeoutMs}ms waiting for ${what}${because}`);
-    }
+    if (remaining <= 0) throw timedOut();
     const attempt = new AbortController();
     const timer = setTimeout(
       () => attempt.abort(new Error('the last check did not finish before the deadline')),
@@ -150,8 +157,12 @@ export async function waitFor(
       if (!attempt.signal.aborted) attempt.abort(new Error('attempt ended'));
     }
     if (parent?.aborted) throw parent.reason;
-    const pause = Math.min(POLL_INTERVAL_MS, deadline - Date.now());
+    const left = deadline - Date.now();
+    const pause = Math.min(POLL_INTERVAL_MS, left);
     if (pause > 0) await delay(pause, undefined, parent ? { signal: parent } : {});
+    // A pause that ran to the deadline ends the wait, even if the timer fired
+    // before `Date.now()` got there.
+    if (pause >= left) throw timedOut();
   }
 }
 

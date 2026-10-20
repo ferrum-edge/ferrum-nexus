@@ -29,9 +29,10 @@ describe('waitFor', { timeout: 30_000 }, () => {
   let harness: Harness;
   const closed = new Map<string, number>();
 
-  async function closedOn(path: string): Promise<number> {
+  /** How many requests to `path` the server saw closed, once `atLeast` have been or time is up. */
+  async function closedOn(path: string, atLeast = 1): Promise<number> {
     const deadline = Date.now() + TOLERANCE_MS;
-    while ((closed.get(path) ?? 0) === 0 && Date.now() < deadline) {
+    while ((closed.get(path) ?? 0) < atLeast && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     return closed.get(path) ?? 0;
@@ -234,7 +235,28 @@ describe('waitFor', { timeout: 30_000 }, () => {
       /Timed out after 300ms waiting for a 503/,
     );
     assert.ok(attempts >= 1);
-    assert.ok((await closedOn('/unready')) >= attempts, 'no unread body was left open');
+    assert.ok((await closedOn('/unready', attempts)) >= attempts, 'no unread body was left open');
+  });
+
+  it('starts no attempt in the sliver the final pause leaves before the deadline', async () => {
+    // Shorter than the poll interval, so the one pause runs to the deadline.
+    // Node's timer clock can end it a millisecond early (issue #625); a second
+    // attempt then would be aborted before its request was even sent.
+    for (let run = 0; run < 5; run += 1) {
+      let calls = 0;
+      await assert.rejects(
+        harness.waitFor(
+          'a check that never passes',
+          async () => {
+            calls += 1;
+            return false;
+          },
+          50,
+        ),
+        /Timed out after 50ms waiting for a check that never passes/,
+      );
+      assert.equal(calls, 1, `run ${run} made ${calls} attempts`);
+    }
   });
 
   it('bounds the mail read, message body included', async () => {
