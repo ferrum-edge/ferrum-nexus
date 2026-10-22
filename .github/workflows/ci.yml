@@ -256,6 +256,10 @@ jobs:
             docker logs --tail 60 nexus-mongo 2>&1
             exit 1
           fi
+          # usingPerCPUCaches=false means mongod skipped the kernel gate.
+          echo "runner kernel: $(uname -r)"
+          docker exec nexus-mongo mongosh --quiet --eval \
+            'const s = db.serverStatus({ tcmalloc: 1 }); print(`mongod ${s.version}, usingPerCPUCaches=${s.tcmalloc.usingPerCPUCaches}`)'
           docker exec nexus-mongo mongosh --quiet --eval \
             'rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] })'
           docker exec nexus-mongo mongosh --quiet --eval \
