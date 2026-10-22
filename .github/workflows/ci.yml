@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # PR runs execute main's ci.yml (trusted required workflows), so a change
+  # to this file is proved by dispatching it on the branch.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -220,18 +223,21 @@ jobs:
           cache: npm
       - name: Start MongoDB replica set
         if: ${{ matrix.backend == 'mongodb' }}
-        # MongoDB 7.0, not 9.0, until GitHub finishes rolling out ubuntu-26.04
-        # runner image 20261012+. `mongo:9` 9.0.4 (sha256:f9050790...) starts on
-        # that image's kernel (7.0.0-1017-azure) but exits on 20260927's
-        # (7.0.0-1012-azure) with "Linux kernel versions 6.19.0 through 7.0.13
-        # have a known incompatibility" (SERVER-121912 / SERVER-136272), so jobs
-        # pass or fail by which image they draw. 7.0 has no such check. Retry
-        # 9.0 once every runner is on 20261012+, a mongo:9 build drops the
-        # kernel gate, or the runner kernel is 7.0.14 or later; the push run
-        # on main proves it (PR runs use main's ci.yml). This step prints the
-        # kernel on failure.
+        # GLIBC_TUNABLES=glibc.pthread.rseq=1 lets mongo:9 start on the
+        # ubuntu-26.04 runners (ferrum-edge/ferrum-edge#6589). Their kernel
+        # reports 7.0.0, inside MongoDB's 6.19-7.0.13 tcmalloc/rseq startup gate
+        # (SERVER-121912), which 9.0.4 still enforces. mongod checks that gate
+        # only while tcmalloc's per-CPU caches are active
+        # (startup_check_rseq.cpp), and those need rseq, which the image frees
+        # by setting rseq=0. Letting glibc keep rseq leaves tcmalloc on
+        # per-thread caches, so mongod starts. Drop the override once the
+        # runner kernel reaches 7.0.14+. This step prints the kernel on
+        # failure.
         run: |
-          docker run -d --name nexus-mongo -p 27017:27017 mongo:7@sha256:1f995ad6fdb93244a1addab1b58f934a0bc2f5643c38e02f5e9d7f0c7d227a7b --replSet rs0 --bind_ip_all
+          docker run -d --name nexus-mongo -p 27017:27017 \
+            -e GLIBC_TUNABLES=glibc.pthread.rseq=1 \
+            mongo:9@sha256:dc28ed5a9d0fc616903c3f463bb1e53b92b49f441721b91926e87d90bf957ce8 \
+            --replSet rs0 --bind_ip_all
           ready=""
           for attempt in $(seq 1 60); do
             if docker exec nexus-mongo mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'; then
@@ -250,6 +256,10 @@ jobs:
             docker logs --tail 60 nexus-mongo 2>&1
             exit 1
           fi
+          # usingPerCPUCaches=false means mongod skipped the kernel gate.
+          echo "runner kernel: $(uname -r)"
+          docker exec nexus-mongo mongosh --quiet --eval \
+            'const s = db.serverStatus({ tcmalloc: 1 }); print(`mongod ${s.version}, usingPerCPUCaches=${s.tcmalloc.usingPerCPUCaches}`)'
           docker exec nexus-mongo mongosh --quiet --eval \
             'rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] })'
           docker exec nexus-mongo mongosh --quiet --eval \

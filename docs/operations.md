@@ -1739,14 +1739,22 @@ NEXUS_DB_URL=mongodb://mongo-a:27017,mongo-b:27017/nexus?replicaSet=rs0
 **Supported servers: MongoDB 4.4.2 through 9.0.** The `mongodb` 7.7 Node.js
 driver rejects servers older than 4.4 (wire version 9), and `init()` sends the
 `hello` command, which MongoDB added in 4.4.2. CI runs the store contracts on
-MongoDB 7.0 and the standalone-refusal check on 4.4.29. Azure Cosmos DB for
+MongoDB 9.0 and the standalone-refusal check on 4.4.29. Azure Cosmos DB for
 MongoDB accounts on server version 4.2 or older and AWS DocumentDB 3.6/4.0 are
 below that floor. MongoDB 8.0.21+, 8.3 and 9.0 refuse to start on Linux
-kernels 6.19 through 7.0.13 (SERVER-125742), which includes hosts whose kernel
-reports 7.0.0 such as Ubuntu 26.04. 9.0.4 relaxes that for Ubuntu kernels that
-carry the fix (SERVER-136272): it starts on `7.0.0-1017-azure` but still
-refuses `7.0.0-1012-azure`, so check the exact kernel build before running
-9.0 on Ubuntu 26.04.
+kernels 6.19 through 7.0.13 (SERVER-125742, SERVER-121912), which includes
+hosts whose kernel reports 7.0.0 such as Ubuntu 26.04. 9.0.4 relaxes that for
+Ubuntu kernels that carry the fix (SERVER-136272): it starts on
+`7.0.0-1017-azure` but still refuses `7.0.0-1012-azure`. mongod checks the
+kernel only while tcmalloc's per-CPU caches are active, and those need the
+`rseq` registration that the official image frees by setting
+`GLIBC_TUNABLES=glibc.pthread.rseq=0`. CI overrides it with
+`GLIBC_TUNABLES=glibc.pthread.rseq=1`: glibc keeps `rseq`, tcmalloc falls back
+to per-thread caches, and mongod starts on any kernel, at some cost in
+allocator throughput. `db.serverStatus({ tcmalloc: 1 }).tcmalloc.usingPerCPUCaches`
+reports `false` when the override is in effect. In production, prefer a
+kernel with the fix; the override suits hosts where that throughput cost is
+acceptable.
 
 **A replica set or sharded cluster is required.** `init()` checks with `hello`
 and refuses to start against a standalone `mongod`:
