@@ -1382,10 +1382,12 @@ export function runMcpMembershipContract(
       const acquire = peer.store.leases.acquire.bind(peer.store.leases);
       let competing = false;
       let blocked = false;
+      let inherited: string[] | undefined;
       peer.store.leases.acquire = async (...args) => {
         const acquired = await acquire(...args);
         if (competing && args[0] === key && !blocked) {
           assert.equal(acquired, false, 'repair still owns the lifecycle lease');
+          inherited = heldLeaseFences().map((lease) => lease.key);
           blocked = true;
           signal();
         }
@@ -1394,18 +1396,24 @@ export function runMcpMembershipContract(
       patches.push(() => {
         peer.store.leases.acquire = acquire;
       });
-      let disabled: ReturnType<TestApp['authed']> | undefined;
+      let disabled: Promise<Awaited<ReturnType<TestApp['authed']>>> | undefined;
       const consumers = harness.edgeClient.consumers;
       const ensure = consumers.ensure.bind(consumers);
       consumers.ensure = async (...args) => {
         const result = await ensure(...args);
         if (result.created) {
           competing = true;
-          disabled = peer.authed(founder, {
-            method: 'PATCH',
-            url: `/api/users/${f.client.user.id}`,
-            payload: { status: 'disabled' },
-          });
+          // A separate process does not inherit the repair's fences. Started
+          // inside the repair's keys, the disable fenced its transactions on
+          // them too, and one still open when the repair released them was
+          // refused with CONFLICT.
+          disabled = outsideHeldLeases(() =>
+            peer.authed(founder, {
+              method: 'PATCH',
+              url: `/api/users/${f.client.user.id}`,
+              payload: { status: 'disabled' },
+            }),
+          );
           await attempted;
           assert.equal((await target.store.users.findById(f.client.user.id))?.status, 'active');
           assert.equal(await countAudit(AuditAction.USER_DISABLE, f.client.user.id), 0);
@@ -1418,6 +1426,7 @@ export function runMcpMembershipContract(
       const [repaired] = await repair(f.client.user.id);
       assert.equal(repaired?.error, null);
       assert.ok(blocked, 'the real lease acquisition refused the competing disable');
+      assert.deepEqual(inherited, [], "the competing disable holds none of the repair's fences");
       assert.ok(disabled, 'the peer attempted a disable while recreation held the keys');
       const response = await disabled;
       assert.equal(response.statusCode, 200, response.body);

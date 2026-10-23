@@ -233,6 +233,13 @@ jobs:
         # per-thread caches, so mongod starts. Drop the override once the
         # runner kernel reaches 7.0.14+. This step prints the kernel on
         # failure.
+        #
+        # mongosh runs with HOME=/tmp. The image sets HOME=/data/db, so a
+        # probe that starts before the entrypoint's root
+        # `find /data/db ... -exec chown` writes its .mongodb state there; a
+        # lock file mongosh deletes between find and chown fails the chown,
+        # and the entrypoint exits 1 before mongod starts ("chown: cannot
+        # access '/data/db/.mongodb/mongosh/...'").
         run: |
           docker run -d --name nexus-mongo -p 27017:27017 \
             -e GLIBC_TUNABLES=glibc.pthread.rseq=1 \
@@ -240,7 +247,7 @@ jobs:
             --replSet rs0 --bind_ip_all
           ready=""
           for attempt in $(seq 1 60); do
-            if docker exec nexus-mongo mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'; then
+            if docker exec -e HOME=/tmp nexus-mongo mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'; then
               ready=1
               break
             fi
@@ -258,11 +265,11 @@ jobs:
           fi
           # usingPerCPUCaches=false means mongod skipped the kernel gate.
           echo "runner kernel: $(uname -r)"
-          docker exec nexus-mongo mongosh --quiet --eval \
+          docker exec -e HOME=/tmp nexus-mongo mongosh --quiet --eval \
             'const s = db.serverStatus({ tcmalloc: 1 }); print(`mongod ${s.version}, usingPerCPUCaches=${s.tcmalloc.usingPerCPUCaches}`)'
-          docker exec nexus-mongo mongosh --quiet --eval \
+          docker exec -e HOME=/tmp nexus-mongo mongosh --quiet --eval \
             'rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] })'
-          docker exec nexus-mongo mongosh --quiet --eval \
+          docker exec -e HOME=/tmp nexus-mongo mongosh --quiet --eval \
             'for (let i = 0; i < 60; i++) { if (db.hello().isWritablePrimary) quit(0); sleep(1000); } quit(1);'
       - run: npm ci
       - run: npm run build --workspace shared
