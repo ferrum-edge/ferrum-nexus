@@ -2769,9 +2769,10 @@ a mixed-version rollout.
 Another per-account key, `users:recovery:<user_id>`, is held around the
 transaction of a password reset that queues an account recovery, and around a
 failed grant revocation's rollback transaction, which reads that recovery before
-it restores a tool request the revocation cancelled. It is always the innermost
-key: the reset takes it inside its password-change lease and the rollback
-inside `users:lifecycle:<user_id>`. During a mixed-version rollout, an older
+it restores a tool request the revocation cancelled. It is the innermost key
+but one: the reset takes it inside its password-change lease and the rollback
+inside `users:lifecycle:<user_id>`, and only `auth:registration-policy` is
+taken inside it, by the reset. During a mixed-version rollout, an older
 instance redeems resets without this key, so the race it closes stays open
 until every instance runs the lease-aware version.
 
@@ -2780,8 +2781,10 @@ provider's links (a first-time link or a provisioned account) and every save of
 the single sign-on settings take `sso:provider:<id>`; returning sign-ins do not.
 Every settings save first takes the deployment-wide `sso:settings` key, then
 the affected provider keys in sorted order, and commits under
-`auth:registration-policy` (the key registration commits under, so `sso_only`
-cannot land mid-registration). A sign-in into an existing account
+`auth:registration-policy` (the key registration, password sign-in sessions
+and reset redemptions commit under, so `sso_only` or a provider's
+`disable_local_password_for_linked` cannot land between their final policy
+read and their commit). A sign-in into an existing account
 takes its `users:lifecycle:<user_id>` key; a callback that also writes a new
 link takes the provider key first, so a claims promotion and an automatic link
 at another provider never miss each other's write.

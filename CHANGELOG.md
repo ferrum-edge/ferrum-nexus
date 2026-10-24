@@ -29,6 +29,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   through an identity or provider no longer outlive it; unlinking signs
   the account out everywhere, like a password change.
 
+- Password sign-in and password-reset redemption re-check eligibility in
+  the transaction that commits them. A sign-in re-reads the login policy
+  and break-glass, the local-password block and the email-verification
+  rule before issuing its session; a reset re-reads the local-password
+  block before writing the new password. Both commit under the
+  `auth:registration-policy` lease that single sign-on and registration
+  policy saves commit under, so a tightening saved while the password was
+  being checked or hashed refuses the operation: no session is issued, and
+  a refused reset leaves the password, address proof, link and sessions
+  unchanged. Super-admin exceptions are unchanged.
+
 ### Added
 
 - **Separate credentials for the gateway's fleet-wide metrics reads**

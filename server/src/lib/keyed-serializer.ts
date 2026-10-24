@@ -141,11 +141,12 @@ export function userMailHandoffLockKey(userId: string): string {
  * commits, and puts the request back after the reset found nothing to cancel.
  * With the key, whichever commits second sees the other.
  *
- * Always the **innermost** key, taken immediately around one transaction: the
- * reset takes it inside the password-change lease, the rollback inside
- * {@link userLifecycleLockKey}, and nothing is taken inside it. The reset does
- * not take the lifecycle key itself, so a disable that holds it never queues
- * a reset's redemption.
+ * The **innermost** key but one, taken immediately around one transaction:
+ * the reset takes it inside the password-change lease, the rollback inside
+ * {@link userLifecycleLockKey}. Only {@link REGISTRATION_POLICY_LOCK_KEY} is
+ * taken inside it, by the reset, and a holder of that key never waits for
+ * another. The reset does not take the lifecycle key itself, so a disable that
+ * holds it never queues a reset's redemption.
  */
 export function accountRecoveryLockKey(userId: string): string {
   return `users:recovery:${userId}`;
@@ -195,9 +196,20 @@ export const SSO_SETTINGS_LOCK_KEY = 'sso:settings';
  * policies and commits its account under it, and every writer of either
  * policy (the admin settings save of `registration`, every single sign-on
  * settings save) commits under it too, so a registration either commits
- * before a withdrawal or sees it. Always the innermost key: it is taken after
- * `users:super-admins` and after `sso:settings` and the provider keys, never
- * before them.
+ * before a withdrawal or sees it.
+ *
+ * The password flows commit under it for the same reason. A password sign-in
+ * re-reads its whole eligibility (the login policy and break-glass, the
+ * local-password block, the verification rule) in the transaction that issues
+ * its session, and a reset redemption re-reads the local-password block in the
+ * transaction that replaces the password. Both decided before ~100 ms of
+ * scrypt, so a policy tightened in between either commits before that re-read
+ * or waits until the sign-in's session or the reset exists.
+ *
+ * Always the innermost key: it is taken after `users:super-admins`, after
+ * `sso:settings` and the provider keys, after `users:password:<id>` and after
+ * {@link accountRecoveryLockKey}, never before them, and nothing is taken
+ * inside it.
  */
 export const REGISTRATION_POLICY_LOCK_KEY = 'auth:registration-policy';
 

@@ -366,6 +366,15 @@ built to reveal nothing:
   account at the write itself, so a concurrent disable that wins that write
   prevents the reset and rolls back its token burn. `email_verification`
   tokens are left alone.
+- **Redemption re-checks local-password eligibility when it commits.** The
+  check before the new password is hashed runs again inside the redeeming
+  transaction, as issuance re-checks it in its mint, under the
+  `auth:registration-policy` lease that every single sign-on settings save
+  commits under. An account that became password-locked, linked to a provider
+  with `disable_local_password_for_linked`, or whose provider turned that flag
+  on while the reset was hashing or waiting is refused with the bad-link
+  answer before the first write: its password, address proof, reset link and
+  sessions are left as they were.
 - **The link is unreadable in the outbox.** The token is stored only as an
   HMAC, and the queued message that carries it is sealed (AES-256-GCM under a
   key derived from `NEXUS_SECRET_KEY`, bound to the row id and recipient), so
@@ -715,6 +724,16 @@ a portal gets its first administrator whatever the policy.
 password under `sso_only`, audited with `break_glass: true`. Anyone else gets
 the answer a wrong password gets. It is environment-only for the reason
 `NEXUS_CAPTCHA_ENFORCEMENT` is.
+
+**A password sign-in is authorized again when its session commits.** The
+checks before the password is verified (the login policy and break-glass, the
+local-password block, the account's status, the verification rule) are
+repeated in the transaction that issues the session, together with the
+password-hash re-read, under the `auth:registration-policy` lease. Every
+single sign-on settings save and every save of the registration policy commit
+under that lease, so a tightening either commits before the re-read and the
+sign-in is refused with no session, or waits until the session exists. A
+session issued before a policy change is not ended by it.
 
 `sso_only` cannot be saved without an enabled provider. It also cannot be saved
 before the super admin saving it has a link of their own to an enabled
@@ -1235,9 +1254,13 @@ Every ordinary registration commits under the cross-instance
 `auth:registration-policy` lease, re-reading both policies inside its
 transaction. The admin settings save that changes `registration` and every
 single sign-on settings save commit under the same lease, so no policy change
-lands between a registration's final policy read and its account. It is always
-the innermost key: taken after `users:super-admins`, and after `sso:settings`
-and the provider keys.
+lands between a registration's final policy read and its account. A password
+sign-in's session transaction and a reset redemption's transaction run under
+the same lease for the same reason
+([Login policy](#single-sign-on-openid-connect),
+[Password recovery](#password-recovery)). It is always the innermost key:
+taken after `users:super-admins`, after `sso:settings` and the provider keys,
+and after `users:password:<user_id>` and `users:recovery:<user_id>`.
 
 **The last active `super_admin` cannot be demoted, disabled or removed** →
 `409 LAST_SUPER_ADMIN`. The count excludes the target. It is enforced in both
