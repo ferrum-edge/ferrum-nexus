@@ -1109,6 +1109,7 @@ class SqliteStore implements NexusStore {
         .add(expected.role, 'role = ?', expected.role ?? null)
         .add(expected.status, 'status = ?', expected.status ?? null)
         .add(expected.email, 'email = ?', expected.email?.trim().toLowerCase() ?? null)
+        .add(expected.password_hash, 'password_hash = ?', expected.password_hash ?? null)
         .build();
       const set = setParts(userUpdateColumns(patch));
       if (!set) {

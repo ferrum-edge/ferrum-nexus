@@ -470,7 +470,11 @@ Errors: `401 UNAUTHORIZED` (wrong email _or_ password — indistinguishable by
 design), `403 USER_DISABLED`, `403 EMAIL_NOT_VERIFIED`, `400 CAPTCHA_FAILED`,
 `429 RATE_LIMITED`, `403 FORBIDDEN` under the `sso_only` login policy. With
 `NEXUS_SSO_BREAK_GLASS_LOCAL_LOGIN=true` a `super_admin` may still sign in
-there, and any other account gets the `401` a wrong password gets.
+there, and any other account gets the `401` a wrong password gets. Every one of
+these is decided again when the session commits, so a policy or account change
+made while the password was being checked is honoured.
+`409 CONFLICT` means the sign-in contended with a concurrent change to the
+account or the sign-in policies and no session was created; retry.
 
 ```bash
 curl -sS -c cookies.txt -X POST http://127.0.0.1:8787/api/auth/login \
@@ -557,8 +561,11 @@ to still be active; if a concurrent disable wins, the reset rolls back. Sign
 in again afterwards.
 
 Errors: `400 VALIDATION_FAILED` for a token that is unknown, expired or spent
-(one message for all three) or a password below the minimum (checked before the
-token is spent); `403 USER_DISABLED`.
+(one message for all three), for an account that may no longer use a local
+password (re-checked when the reset commits), or a password below the minimum
+(checked before the token is spent); `403 USER_DISABLED`; `409 CONFLICT` when
+the reset contended with a concurrent password change or sign-in policy save —
+nothing was changed and the link is still live; retry.
 
 ### `GET /api/auth/captcha`
 

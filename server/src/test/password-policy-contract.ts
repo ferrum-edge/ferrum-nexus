@@ -1,17 +1,22 @@
 /**
  * The password flows decide eligibility at commit, not only up front.
  *
- * A password sign-in checks the login policy, the local-password block and the
- * verification rule, then spends ~100 ms on scrypt and waits for the
- * password-change lease before its session transaction. A reset redemption
- * checks the local-password block, then hashes the new password and waits for
- * its leases. A policy tightened in either window must refuse the operation,
- * and leave nothing behind: no session for a sign-in, and for a reset the old
- * password, proof, link and sessions untouched.
+ * A password sign-in verifies the password (~100 ms of scrypt), then checks
+ * the login policy, the local-password block, the account's status and the
+ * verification rule, and only then takes its leases and opens the session
+ * transaction. A reset redemption checks the local-password block, then hashes
+ * the new password and takes its leases. A tightening in either window must
+ * refuse the operation and leave nothing behind: no session and no
+ * `auth.login` row for a sign-in, and for a reset the old password, proof,
+ * link and sessions untouched.
  *
- * Each case commits the tightening from inside the stubbed `verifyPassword`
- * or `hashPassword`, i.e. after the up-front checks passed and before the
- * committing transaction opened.
+ * The sign-in cases commit the tightening at the first attempt to take the
+ * account's `users:password:<id>` lease ({@link atPasswordLease}): every
+ * up-front check has passed by then, so only the re-check in the session
+ * transaction can refuse. The `sso_only` case and the reset case use the
+ * stubbed `verifyPassword` / `hashPassword` instead, which is after the
+ * up-front check that matters to them. The lease-wait cases hold a key with a
+ * separate serializer and tighten while the operation waits for it.
  *
  * Cross-adapter because the re-reads go through each adapter's transaction
  * (a MySQL REPEATABLE READ or MongoDB snapshot must start after the policy
@@ -27,9 +32,13 @@ import { AuditAction } from '../audit/service.js';
 import { REGISTRATION_SETTINGS_KEY } from '../auth/service.js';
 import { isNexusError } from '../lib/errors.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
-import { createKeyedSerializer, REGISTRATION_POLICY_LOCK_KEY } from '../lib/keyed-serializer.js';
+import {
+  createKeyedSerializer,
+  REGISTRATION_POLICY_LOCK_KEY,
+  userLifecycleLockKey,
+} from '../lib/keyed-serializer.js';
 import { SSO_SETTINGS_KEY } from '../sso/settings.js';
-import type { NexusStore } from '../db/store.js';
+import type { LeaseRepo, NexusStore } from '../db/store.js';
 import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './helpers.js';
 
 const NEW_PASSWORD = 'a-password-set-mid-tightening';
@@ -60,7 +69,9 @@ function strictProvider(strict: boolean): Record<string, unknown> {
 
 /**
  * Run `during` once, the first time `method` of the app's crypto is called
- * with `password` — after the up-front checks, before the commit.
+ * with `password`, after the call itself. For `verifyPassword` that is before
+ * the sign-in's policy, block, status and verification checks; for
+ * `hashPassword` in a reset, after its up-front eligibility check.
  */
 function interleave(
   t: TestContext,
@@ -92,6 +103,41 @@ function interleave(
       return hash;
     });
   }
+}
+
+/**
+ * Run `during` once, at the first attempt to take `users:password:<userId>`:
+ * a sign-in has finished verifying the password and every up-front check by
+ * then, and has not opened its session transaction.
+ */
+function atPasswordLease(
+  t: TestContext,
+  leases: LeaseRepo,
+  userId: string,
+  during: () => Promise<void>,
+): void {
+  const acquire = leases.acquire.bind(leases);
+  const key = `users:password:${userId}`;
+  let pending = true;
+  t.mock.method(leases, 'acquire', async (...args: Parameters<LeaseRepo['acquire']>) => {
+    if (pending && args[0] === key) {
+      pending = false;
+      await during();
+    }
+    return acquire(...args);
+  });
+}
+
+/** Resolve the returned promise when an attempt to take `key` is refused. */
+function onRefusal(t: TestContext, leases: LeaseRepo, key: string): Promise<void> {
+  const acquire = leases.acquire.bind(leases);
+  return new Promise<void>((resolve) => {
+    t.mock.method(leases, 'acquire', async (...args: Parameters<LeaseRepo['acquire']>) => {
+      const acquired = await acquire(...args);
+      if (args[0] === key && !acquired) resolve();
+      return acquired;
+    });
+  });
 }
 
 async function signIn(harness: TestApp, email: string): Promise<{ status: number; code?: string }> {
@@ -185,7 +231,7 @@ export function runPasswordPolicyContract(
       await saveStrictProvider(false);
       const session = await freshAccount(true);
       // The policy-only settings writer, through its own route and keys.
-      interleave(t, harness, 'verifyPassword', TEST_PASSWORD, () => saveStrictProvider(true));
+      atPasswordLease(t, target.store.leases, session.user.id, () => saveStrictProvider(true));
       try {
         assert.deepEqual(await signIn(harness, session.user.email), {
           status: 401,
@@ -200,7 +246,7 @@ export function runPasswordPolicyContract(
 
     it('refuses a sign-in when the account is password-locked in the same gap', async (t) => {
       const session = await freshAccount();
-      interleave(t, harness, 'verifyPassword', TEST_PASSWORD, () =>
+      atPasswordLease(t, target.store.leases, session.user.id, () =>
         harness.store.passwordLocks.create(session.user.id, STRICT_PROVIDER_ID, nowIso()),
       );
       assert.deepEqual(await signIn(harness, session.user.email), {
@@ -208,18 +254,21 @@ export function runPasswordPolicyContract(
         code: 'UNAUTHORIZED',
       });
       assert.equal(await harness.store.sessions.deleteForUser(session.user.id), 0);
+      assert.equal(await loginAudits(harness, session.user.id), 0);
     });
 
     it('refuses an unverified sign-in when verification becomes mandatory in the gap', async (t) => {
       const session = await freshAccount();
       await harness.store.users.update(session.user.id, { email_verified: false });
       const prior = await harness.store.settings.get(REGISTRATION_SETTINGS_KEY);
-      interleave(t, harness, 'verifyPassword', TEST_PASSWORD, async () => {
-        await harness.store.settings.set(REGISTRATION_SETTINGS_KEY, {
-          open_registration: true,
-          require_email_verification: true,
-          allowed_roles: ['client', 'provider'],
+      // Through the real registration-policy writer.
+      atPasswordLease(t, target.store.leases, session.user.id, async () => {
+        const saved = await harness.authed(founder, {
+          method: 'PUT',
+          url: '/api/admin/settings',
+          payload: { registration: { require_email_verification: true } },
         });
+        assert.equal(saved.statusCode, 200, saved.body);
       });
       try {
         assert.deepEqual(await signIn(harness, session.user.email), {
@@ -231,6 +280,60 @@ export function runPasswordPolicyContract(
         else await harness.store.settings.delete(REGISTRATION_SETTINGS_KEY);
       }
       assert.equal(await harness.store.sessions.deleteForUser(session.user.id), 0);
+      assert.equal(await loginAudits(harness, session.user.id), 0);
+    });
+
+    it('refuses a sign-in when the account is disabled after the up-front checks', async (t) => {
+      const session = await freshAccount();
+      atPasswordLease(t, target.store.leases, session.user.id, async () => {
+        const disabled = await harness.authed(founder, {
+          method: 'PATCH',
+          url: `/api/users/${session.user.id}`,
+          payload: { status: 'disabled' },
+        });
+        assert.equal(disabled.statusCode, 200, disabled.body);
+      });
+      assert.deepEqual(await signIn(harness, session.user.email), {
+        status: 403,
+        code: 'USER_DISABLED',
+      });
+      assert.equal(await harness.store.sessions.deleteForUser(session.user.id), 0);
+      assert.equal(await loginAudits(harness, session.user.id), 0);
+    });
+
+    it('orders a sign-in after an identity link committed under the lifecycle key', async (t) => {
+      await saveStrictProvider(true);
+      const session = await freshAccount();
+      const key = userLifecycleLockKey(session.user.id);
+      const waiting = onRefusal(t, target.store.leases, key);
+      const holder = createKeyedSerializer({ leases: harness.store.leases });
+      let attempt: Promise<{ status: number; code?: string }> | undefined;
+      try {
+        await holder(key, async () => {
+          // The link writer holds the account's key, as a callback does.
+          const started = signIn(harness, session.user.email);
+          attempt = started;
+          await Promise.race([
+            waiting,
+            started.then(() => {
+              throw new Error('the sign-in never waited for the lifecycle lease');
+            }),
+          ]);
+          await harness.store.userIdentities.create({
+            user_id: session.user.id,
+            provider_id: STRICT_PROVIDER_ID,
+            issuer: STRICT_ISSUER,
+            subject: newId(),
+            email: session.user.email,
+            provisioned: false,
+          });
+        });
+        assert.deepEqual(await attempt, { status: 401, code: 'UNAUTHORIZED' });
+      } finally {
+        await saveStrictProvider(false);
+      }
+      assert.equal(await harness.store.sessions.deleteForUser(session.user.id), 0);
+      assert.equal(await loginAudits(harness, session.user.id), 0);
     });
 
     it('holds the session commit until a policy writer holding the key has finished', async (t) => {
@@ -348,7 +451,7 @@ export function runPasswordPolicyContract(
     it('refuses anyone but a super admin when sso_only commits in the gap', async (t) => {
       const client = await harness.registerUser();
       await harness.store.sessions.deleteForUser(client.user.id);
-      interleave(t, harness, 'verifyPassword', TEST_PASSWORD, () =>
+      atPasswordLease(t, target.store.leases, client.user.id, () =>
         setLoginPolicy(harness, 'sso_only'),
       );
       try {
@@ -365,7 +468,7 @@ export function runPasswordPolicyContract(
 
     it('admits a super admin, audited as break-glass, when sso_only commits in the gap', async (t) => {
       // A password lock in the same gap does not bind a super admin either.
-      interleave(t, harness, 'verifyPassword', TEST_PASSWORD, async () => {
+      atPasswordLease(t, target.store.leases, founder.user.id, async () => {
         await setLoginPolicy(harness, 'sso_only');
         await harness.store.passwordLocks.create(founder.user.id, 'any-provider', nowIso());
       });

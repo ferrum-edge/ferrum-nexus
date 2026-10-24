@@ -2016,6 +2016,7 @@ class MongoStore implements NexusStore {
       if (expected.role !== undefined) guard.role = expected.role;
       if (expected.status !== undefined) guard.status = expected.status;
       if (expected.email !== undefined) guard.email = expected.email.trim().toLowerCase();
+      if (expected.password_hash !== undefined) guard.password_hash = expected.password_hash;
       const query = guard as Filter<NexusDoc>;
 
       const set = setDoc(userUpdateFields(patch));

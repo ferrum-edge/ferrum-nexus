@@ -2784,7 +2784,9 @@ the affected provider keys in sorted order, and commits under
 `auth:registration-policy` (the key registration, password sign-in sessions
 and reset redemptions commit under, so `sso_only` or a provider's
 `disable_local_password_for_linked` cannot land between their final policy
-read and their commit). A sign-in into an existing account
+read and their commit). A password sign-in also commits its session under the
+account's `users:lifecycle:<user_id>` key, taken inside its password-change
+lease, so an identity link, role change or disable is ordered against it. A sign-in into an existing account
 takes its `users:lifecycle:<user_id>` key; a callback that also writes a new
 link takes the provider key first, so a claims promotion and an automatic link
 at another provider never miss each other's write.

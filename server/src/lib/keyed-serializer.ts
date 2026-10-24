@@ -103,12 +103,22 @@ export const SUPER_ADMIN_LOCK_CONFLICT_MESSAGE =
  * A disable cannot miss a delayed mint, and a holder whose lease changed hands
  * cannot insert its old capability after a disable and re-enable.
  *
+ * A password sign-in commits its session under it, so the role, status and
+ * identity links it re-reads at commit cannot change before the session
+ * exists: a disable, a demotion or a link to a provider that refuses local
+ * passwords either committed before that re-read or waits for the session,
+ * and a disable then ends it with the rest. The sign-in takes it inside its
+ * `users:password:<id>` lease and outside {@link REGISTRATION_POLICY_LOCK_KEY}.
+ * No holder of this key takes a password lease, so that nesting cannot
+ * invert.
+ *
  * Per account rather than portal-wide: the invariant is a property of one
  * account, and two different accounts never need to wait for each other. It is
  * always taken **inside** {@link SUPER_ADMIN_LOCK_KEY} and
  * {@link ssoProviderLockKey} when both are needed, and a caller that holds a
- * gateway consumer key or a proxy lease may take it — never the reverse —
- * which is what keeps the keys free of lock-order inversion.
+ * gateway consumer key, a proxy lease or the account's password lease may take
+ * it — never the reverse — which is what keeps the keys free of lock-order
+ * inversion.
  */
 export function userLifecycleLockKey(userId: string): string {
   return `users:lifecycle:${userId}`;
@@ -207,9 +217,9 @@ export const SSO_SETTINGS_LOCK_KEY = 'sso:settings';
  * or waits until the sign-in's session or the reset exists.
  *
  * Always the innermost key: it is taken after `users:super-admins`, after
- * `sso:settings` and the provider keys, after `users:password:<id>` and after
- * {@link accountRecoveryLockKey}, never before them, and nothing is taken
- * inside it.
+ * `sso:settings` and the provider keys, after `users:password:<id>`,
+ * {@link userLifecycleLockKey} and {@link accountRecoveryLockKey}, never before
+ * them, and nothing is taken inside it.
  */
 export const REGISTRATION_POLICY_LOCK_KEY = 'auth:registration-policy';
 

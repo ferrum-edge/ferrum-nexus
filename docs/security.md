@@ -368,13 +368,20 @@ built to reveal nothing:
   tokens are left alone.
 - **Redemption re-checks local-password eligibility when it commits.** The
   check before the new password is hashed runs again inside the redeeming
-  transaction, as issuance re-checks it in its mint, under the
-  `auth:registration-policy` lease that every single sign-on settings save
-  commits under. An account that became password-locked, linked to a provider
-  with `disable_local_password_for_linked`, or whose provider turned that flag
-  on while the reset was hashing or waiting is refused with the bad-link
-  answer before the first write: its password, address proof, reset link and
-  sessions are left as they were.
+  transaction, as issuance re-checks it in its mint. An account that became
+  password-locked, linked to a provider with
+  `disable_local_password_for_linked`, or whose provider turned that flag on
+  while the reset was hashing or waiting is refused with the bad-link answer
+  before the first write: its password, address proof, reset link and sessions
+  are left as they were. The transaction runs under the
+  `auth:registration-policy` lease, so a single sign-on settings save is
+  ordered against the re-read on every backend. The reset deliberately does
+  not take the account's lifecycle lease, so a new identity link that commits
+  between the re-read and the reset's commit is ordered only by the single
+  serving instance running its transactions one at a time
+  ([supported topologies](operations.md#supported-topologies)). Across
+  independent store objects such a reset could still commit, and its
+  password still could not sign in while the link exists.
 - **The link is unreadable in the outbox.** The token is stored only as an
   HMAC, and the queued message that carries it is sealed (AES-256-GCM under a
   key derived from `NEXUS_SECRET_KEY`, bound to the row id and recipient), so
@@ -727,13 +734,29 @@ the answer a wrong password gets. It is environment-only for the reason
 
 **A password sign-in is authorized again when its session commits.** The
 checks before the password is verified (the login policy and break-glass, the
-local-password block, the account's status, the verification rule) are
-repeated in the transaction that issues the session, together with the
-password-hash re-read, under the `auth:registration-policy` lease. Every
-single sign-on settings save and every save of the registration policy commit
-under that lease, so a tightening either commits before the re-read and the
-sign-in is refused with no session, or waits until the session exists. A
-session issued before a policy change is not ended by it.
+local-password block, the account's role and status, the verification rule)
+are repeated in the transaction that issues the session, together with the
+password-hash re-read. What orders each writer against that re-read, on every
+backend:
+
+- **Policies.** Every single sign-on settings save and every save of the
+  registration policy commit under `auth:registration-policy`, which the
+  session transaction holds.
+- **The account.** Role and status changes, single sign-on links, claims syncs
+  and deprovisioning commit under `users:lifecycle:<user_id>`, which the
+  sign-in takes inside its password-change lease. A password lock is written
+  only in the transaction that provisions a new account, so it never races a
+  sign-in.
+- **The row.** The session is issued only after a conditional write that still
+  finds the account `active` with the hash that was verified. A disable or
+  password change that commits after the re-read makes it match nothing, and
+  the sign-in is refused.
+
+So a tightening either commits before the re-read and the sign-in is refused
+with no session, or waits until the session exists. A session issued before a
+change is not ended by a policy save; a disable ends it with the rest. A
+sign-in that waits out one of those leases gets `409 CONFLICT` and nothing is
+issued.
 
 `sso_only` cannot be saved without an enabled provider. It also cannot be saved
 before the super admin saving it has a link of their own to an enabled
@@ -1260,7 +1283,8 @@ the same lease for the same reason
 ([Login policy](#single-sign-on-openid-connect),
 [Password recovery](#password-recovery)). It is always the innermost key:
 taken after `users:super-admins`, after `sso:settings` and the provider keys,
-and after `users:password:<user_id>` and `users:recovery:<user_id>`.
+and after `users:password:<user_id>`, `users:lifecycle:<user_id>` and
+`users:recovery:<user_id>`.
 
 **The last active `super_admin` cannot be demoted, disabled or removed** →
 `409 LAST_SUPER_ADMIN`. The count excludes the target. It is enforced in both
