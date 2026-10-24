@@ -200,13 +200,28 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
     assert.match(relay.messages[0]!, /^To: <"user@other\.test"@example\.test>\r?$/m);
   });
 
+  it('accepts a colon inside a quoted display name', async () => {
+    await transport.send({ ...MAIL, to: '"Reader: One" <reader@example.test>' });
+    assert.deepEqual(
+      relay.commands.filter((line) => line.startsWith('RCPT TO:')),
+      ['RCPT TO:<reader@example.test>'],
+    );
+    assert.equal(relay.messages.length, 1);
+  });
+
   it('bounds nested recipient parsing and remains usable after rejection', async () => {
     // This lower-level boundary deliberately bypasses Nexus's single-address
-    // HTTP schema. The old parser would flatten all 80 groups and deliver.
-    await assert.rejects(
-      transport.send({ ...MAIL, to: `${'group: '.repeat(80)}reader@example.test;` }),
-      { code: 'EENVELOPE' },
-    );
+    // HTTP schema. Nexus rejects address groups itself, whatever the installed
+    // Nodemailer does with nesting (older parsers flattened or capped them,
+    // newer ones parse any depth in linear time and would deliver).
+    for (const to of [
+      `${'group: '.repeat(80)}reader@example.test;`,
+      'group: reader@example.test;',
+      `${'a'.repeat(1000)}@example.test`,
+      '"unterminated@example.test',
+    ]) {
+      await assert.rejects(transport.send({ ...MAIL, to }), { code: 'EENVELOPE' });
+    }
     assert.equal(
       relay.commands.some((line) => line.startsWith('RCPT TO:')),
       false,

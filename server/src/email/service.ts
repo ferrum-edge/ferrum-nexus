@@ -199,6 +199,52 @@ function classifySendFailure(error: unknown, phase: SendPhase): unknown {
   return error;
 }
 
+/** RFC 5322 line limit; no single-mailbox recipient needs more. */
+const MAX_RECIPIENT_LENGTH = 998;
+
+/**
+ * Nexus addresses one mailbox per message. Refuse anything else before it
+ * reaches the MIME renderer instead of relying on how the installed Nodemailer
+ * parses (or caps) address groups: group syntax (`name: addr;`, nested or not)
+ * and oversized values are rejected here with a single bounded linear scan.
+ * Quoted strings and comments may legitimately hold `:` and `;`, so they are
+ * skipped; an unterminated quote or comment fails closed. The error carries
+ * `code: 'EENVELOPE'` and is thrown before any SMTP I/O, so the attempt stays
+ * retryable and never claims delivery.
+ */
+function assertSingleMailboxRecipient(to: string): void {
+  let reason: string | null = null;
+  if (to.length > MAX_RECIPIENT_LENGTH) {
+    reason = 'recipient is too long';
+  } else {
+    let quoted = false;
+    let commentDepth = 0;
+    for (let i = 0; i < to.length && reason === null; i++) {
+      const chr = to.charAt(i);
+      if (quoted) {
+        if (chr === '\\') i++;
+        else if (chr === '"') quoted = false;
+      } else if (commentDepth > 0) {
+        if (chr === '\\') i++;
+        else if (chr === '(') commentDepth++;
+        else if (chr === ')') commentDepth--;
+      } else if (chr === '"') {
+        quoted = true;
+      } else if (chr === '(') {
+        commentDepth = 1;
+      } else if (chr === ':' || chr === ';') {
+        reason = 'recipient must be a single mailbox, not an address group';
+      }
+    }
+    if (reason === null && (quoted || commentDepth > 0)) {
+      reason = 'recipient has an unterminated quoted string or comment';
+    }
+  }
+  if (reason !== null) {
+    throw Object.assign(new Error(`Invalid SMTP recipient: ${reason}`), { code: 'EENVELOPE' });
+  }
+}
+
 /** Build a Nodemailer MIME renderer and an explicitly cancellable SMTP connection. */
 export function createSmtpTransport(
   settings: ResolvedSmtpSettings,
@@ -244,6 +290,7 @@ export function createSmtpTransport(
     cancelCurrent = cancel;
     const work = (async (): Promise<void> => {
       checkDeadline();
+      assertSingleMailboxRecipient(mail.to);
       const compiled = await renderer.sendMail({
         from: settings.from,
         to: mail.to,
