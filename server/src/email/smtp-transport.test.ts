@@ -213,11 +213,16 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
       ['Reader (ops (west: a;b), east) <reader@example.test>', 'reader@example.test'],
       ['Reader (note \\) x: y) <reader@example.test>', 'reader@example.test'],
       ['"read:er;x,y"@example.test', '"read:er;x,y"@example.test'],
+      ['"read er"@example.test', '"read er"@example.test'],
       ['reader@[IPv6:2001:db8::1]', 'reader@[ipv6:2001:db8::1]'],
       ['reader@[IPv6:2001:db8::192.0.2.1]', 'reader@[ipv6:2001:db8::192.0.2.1]'],
       ['Reader <reader@[IPv6:2001:db8::1]>', 'reader@[ipv6:2001:db8::1]'],
       ['Reader <reader@[IPv6:2001:db8::192.0.2.1]>', 'reader@[ipv6:2001:db8::192.0.2.1]'],
       ['reader@[192.0.2.1]', 'reader@[192.0.2.1]'],
+      ['reader@(relay)[IPv6:2001:db8::192.0.2.1]', 'reader@[ipv6:2001:db8::192.0.2.1]'],
+      ['reader@ [IPv6:2001:db8::1]', 'reader@[ipv6:2001:db8::1]'],
+      ['Reader <reader@(relay)[IPv6:2001:db8::192.0.2.1]>', 'reader@[ipv6:2001:db8::192.0.2.1]'],
+      ['Reader <reader@ (a (b)) [IPv6:2001:db8::1]>', 'reader@[ipv6:2001:db8::1]'],
       [padded(998), 'reader@example.test'],
     ];
     for (const [to, rcpt] of cases) {
@@ -245,6 +250,11 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
       'reader@[IPv6:2001:db8::1',
       'reader@[IPv6:2001:db8::1,two@example.test]',
       'reader@[IPv6:2001:db8::1"]',
+      // Nodemailer leaves the folding space in the parsed bare address; refused.
+      'reader@ (relay) [IPv6:2001:db8::1]',
+      'reader(x)[IPv6:2001:db8::1]',
+      'reader@"x"[IPv6:2001:db8::1]',
+      'reader@(relay)[IPv6:2001:db8::1,two@example.test]',
       '<@relay.example:reader@example.test>',
       'one@example.test,two@example.test',
       'one@example.test, two@example.test',

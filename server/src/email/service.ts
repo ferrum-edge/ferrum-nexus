@@ -213,8 +213,9 @@ const MAX_RECIPIENT_LENGTH = 998;
  * drops; it is deliberately unsupported).
  *
  * Quoted strings and comments may legitimately hold `:`, `;` and `,`, so they
- * are skipped. A bracketed domain literal is recognised only directly after an
- * `@`, as Nodemailer does (`user@[IPv6:2001:db8::1]`); its colons are data, its
+ * are skipped. A bracketed domain literal is recognised only when the last
+ * significant token was an `@` (comments and whitespace in between are
+ * transparent), as Nodemailer does (`user@[IPv6:2001:db8::1]`); its colons are data, its
  * content is limited to letters, digits, `.`, `:` and `-`, and an unterminated
  * or malformed literal fails closed. An unterminated quote or comment also
  * fails closed. The error carries `code: 'EENVELOPE'` and is thrown before any
@@ -229,6 +230,10 @@ function assertSingleMailboxRecipient(to: string): void {
   } else {
     let quoted = false;
     let literal = false;
+    // True while the last significant token was an unquoted '@'. Comments and
+    // folding whitespace do not clear it (Nodemailer keeps the same state), so
+    // `user@(relay)[IPv6:...]` still opens a literal.
+    let afterAt = false;
     let commentDepth = 0;
     for (let i = 0; i < to.length && reason === null; i++) {
       const chr = to.charAt(i);
@@ -242,16 +247,22 @@ function assertSingleMailboxRecipient(to: string): void {
       } else if (literal) {
         if (chr === ']') literal = false;
         else if (!/[A-Za-z0-9.:-]/.test(chr)) reason = 'recipient has a malformed domain literal';
-      } else if (chr === '"') {
-        quoted = true;
       } else if (chr === '(') {
         commentDepth = 1;
-      } else if (chr === '[' && i > 0 && to.charAt(i - 1) === '@') {
-        literal = true;
-      } else if (chr === ':' || chr === ';') {
-        reason = 'recipient must be a single mailbox, not an address group';
-      } else if (chr === ',') {
-        reason = 'recipient must be a single mailbox, not an address list';
+      } else if (chr === ' ' || chr === '\t' || chr === '\r' || chr === '\n') {
+        // Folding whitespace: leaves `afterAt` as it was.
+      } else {
+        const wasAfterAt = afterAt;
+        afterAt = chr === '@';
+        if (chr === '"') {
+          quoted = true;
+        } else if (chr === '[' && wasAfterAt) {
+          literal = true;
+        } else if (chr === ':' || chr === ';') {
+          reason = 'recipient must be a single mailbox, not an address group';
+        } else if (chr === ',') {
+          reason = 'recipient must be a single mailbox, not an address list';
+        }
       }
     }
     if (reason === null && (quoted || literal || commentDepth > 0)) {
@@ -320,7 +331,14 @@ export function createSmtpTransport(
       checkDeadline();
       // Defence in depth: whatever the scan let through, Nodemailer's own parse
       // must yield exactly one envelope recipient before any SMTP I/O.
-      if (compiled.envelope.to.length !== 1) {
+      const envelopeTo = compiled.envelope.to;
+      // A parsed domain that still holds whitespace or angle brackets (for
+      // example `user@ (c) [IPv6:...]`, where Nodemailer leaves the folding
+      // space in place) would put a malformed RCPT on the wire: refuse it. Only
+      // the domain is checked; a quoted local part may hold spaces.
+      const envelopeAddress = envelopeTo[0] ?? '';
+      const envelopeDomain = envelopeAddress.slice(envelopeAddress.lastIndexOf('@') + 1);
+      if (envelopeTo.length !== 1 || /[\s<>]/.test(envelopeDomain)) {
         throw Object.assign(new Error('Invalid SMTP recipient: expected exactly one mailbox'), {
           code: 'EENVELOPE',
         });
