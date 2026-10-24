@@ -29,6 +29,21 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   through an identity or provider no longer outlive it; unlinking signs
   the account out everywhere, like a password change.
 
+- Password sign-in and password-reset redemption re-check eligibility in
+  the transaction that commits them. A sign-in re-reads the login policy
+  and break-glass, the local-password block, the account's role and status
+  and the email-verification rule before issuing its session, under the
+  account's `users:lifecycle` lease and the `auth:registration-policy`
+  lease that single sign-on and registration policy saves commit under,
+  and issues the session only after a conditional write that still finds
+  the account active with the verified password. A reset re-reads the
+  local-password block before writing the new password. A tightening saved
+  while the password was being checked or hashed refuses the operation: no
+  session is issued, and a refused reset leaves the password, address
+  proof, link and sessions unchanged. A sign-in or reset that waits out
+  one of these leases answers `409 CONFLICT` in its own words. Super-admin
+  exceptions are unchanged.
+
 ### Added
 
 - **Separate credentials for the gateway's fleet-wide metrics reads**

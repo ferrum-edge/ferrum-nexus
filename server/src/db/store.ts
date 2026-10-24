@@ -813,11 +813,13 @@ export interface UserRepo {
    * call belong inside the same {@link NexusStore.transaction} body: the
    * transaction makes the check-then-write atomic against another demotion, and
    * the predicate here makes the write refuse a target that changed underneath
-   * it anyway.
+   * it anyway. A password sign-in uses it with `password_hash` as the write
+   * guard of its session: the account must still be active with the hash it
+   * verified.
    */
   updateIfMatches(
     id: Uuid,
-    expected: { role?: Role; status?: UserStatus; email?: string },
+    expected: { role?: Role; status?: UserStatus; email?: string; password_hash?: string },
     patch: UpdateInput<UserRecord>,
   ): Promise<UserRecord | null>;
   /** Record a successful sign-in without rewriting the rest of the row. */

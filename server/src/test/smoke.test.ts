@@ -92,6 +92,7 @@ import { runMailLifecycleContract } from './mail-lifecycle-contract.js';
 import { runOutboxFencingContract } from './outbox-fencing-contract.js';
 import { runOutboxPriorityContract } from './outbox-priority-contract.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
+import { runPasswordPolicyContract } from './password-policy-contract.js';
 import { runPrivilegedAuditContract } from './privileged-audit-contract.js';
 import { runRecoveryThrottleContract } from './recovery-throttle-contract.js';
 import { runResetLifecycleContract } from './reset-lifecycle-contract.js';
@@ -376,6 +377,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
   runOutboxFencingContract(label, makeStore);
   runOutboxPriorityContract(label, makeStore);
   runPasswordChangeContract(label, makeStore);
+  runPasswordPolicyContract(label, makeStore);
   runPrivilegedAuditContract(label, makeStore);
   runRecoveryThrottleContract(label, makeStore);
   runResetLifecycleContract(label, makeStore);
@@ -518,6 +520,22 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         null,
         'a missing row is a loss, not a throw',
       );
+      assert.equal(
+        await store.users.updateIfMatches(
+          user.id,
+          { status: 'active', password_hash: `${user.password_hash}-replaced` },
+          { last_login_at: nowIso() },
+        ),
+        null,
+        'a replaced password hash is a stale expectation too',
+      );
+      assert.equal((await store.users.findById(user.id))?.last_login_at, user.last_login_at);
+      const touched = await store.users.updateIfMatches(
+        user.id,
+        { status: 'active', password_hash: user.password_hash },
+        { last_login_at: '2030-01-01T00:00:00.000Z' },
+      );
+      assert.equal(touched?.last_login_at, '2030-01-01T00:00:00.000Z', 'the current hash matches');
 
       const won = await store.users.updateIfMatches(
         user.id,
