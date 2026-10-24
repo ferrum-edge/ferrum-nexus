@@ -199,6 +199,81 @@ function classifySendFailure(error: unknown, phase: SendPhase): unknown {
   return error;
 }
 
+/** RFC 5322 line limit; no single-mailbox recipient needs more. */
+const MAX_RECIPIENT_LENGTH = 998;
+
+/**
+ * Nexus addresses one mailbox per message. Refuse anything else before it
+ * reaches the MIME renderer instead of relying on how the installed Nodemailer
+ * parses (or caps) address groups and lists. One bounded linear scan rejects
+ * oversized values and, outside quoted strings, comments and domain literals,
+ * group syntax (`name: addr;`, nested or not), list separators (`,` and `;`)
+ * and the obsolete route-addr form (`<@relay:user@host>`, whose `:` is
+ * indistinguishable from a group delimiter here and which Nodemailer itself
+ * drops; it is deliberately unsupported).
+ *
+ * Quoted strings and comments may legitimately hold `:`, `;` and `,`, so they
+ * are skipped. A bracketed domain literal is recognised only when the last
+ * significant token was an `@` (comments and whitespace in between are
+ * transparent), as Nodemailer does (`user@[IPv6:2001:db8::1]`); its colons are data, its
+ * content is limited to letters, digits, `.`, `:` and `-`, and an unterminated
+ * or malformed literal fails closed. An unterminated quote or comment also
+ * fails closed. The error carries `code: 'EENVELOPE'` and is thrown before any
+ * SMTP I/O, so the attempt stays retryable and never claims delivery. The
+ * renderer's parsed envelope is additionally required to hold exactly one
+ * recipient (see `attempt`), so the guarantee does not rest on this scan alone.
+ */
+function assertSingleMailboxRecipient(to: string): void {
+  let reason: string | null = null;
+  if (to.length > MAX_RECIPIENT_LENGTH) {
+    reason = 'recipient is too long';
+  } else {
+    let quoted = false;
+    let literal = false;
+    // True while the last significant token was an unquoted '@'. Comments and
+    // folding whitespace do not clear it (Nodemailer keeps the same state), so
+    // `user@(relay)[IPv6:...]` still opens a literal.
+    let afterAt = false;
+    let commentDepth = 0;
+    for (let i = 0; i < to.length && reason === null; i++) {
+      const chr = to.charAt(i);
+      if (quoted) {
+        if (chr === '\\') i++;
+        else if (chr === '"') quoted = false;
+      } else if (commentDepth > 0) {
+        if (chr === '\\') i++;
+        else if (chr === '(') commentDepth++;
+        else if (chr === ')') commentDepth--;
+      } else if (literal) {
+        if (chr === ']') literal = false;
+        else if (!/[A-Za-z0-9.:-]/.test(chr)) reason = 'recipient has a malformed domain literal';
+      } else if (chr === '(') {
+        commentDepth = 1;
+      } else if (chr === ' ' || chr === '\t' || chr === '\r' || chr === '\n') {
+        // Folding whitespace: leaves `afterAt` as it was.
+      } else {
+        const wasAfterAt = afterAt;
+        afterAt = chr === '@';
+        if (chr === '"') {
+          quoted = true;
+        } else if (chr === '[' && wasAfterAt) {
+          literal = true;
+        } else if (chr === ':' || chr === ';') {
+          reason = 'recipient must be a single mailbox, not an address group';
+        } else if (chr === ',') {
+          reason = 'recipient must be a single mailbox, not an address list';
+        }
+      }
+    }
+    if (reason === null && (quoted || literal || commentDepth > 0)) {
+      reason = 'recipient has an unterminated quoted string, comment or domain literal';
+    }
+  }
+  if (reason !== null) {
+    throw Object.assign(new Error(`Invalid SMTP recipient: ${reason}`), { code: 'EENVELOPE' });
+  }
+}
+
 /** Build a Nodemailer MIME renderer and an explicitly cancellable SMTP connection. */
 export function createSmtpTransport(
   settings: ResolvedSmtpSettings,
@@ -244,6 +319,7 @@ export function createSmtpTransport(
     cancelCurrent = cancel;
     const work = (async (): Promise<void> => {
       checkDeadline();
+      assertSingleMailboxRecipient(mail.to);
       const compiled = await renderer.sendMail({
         from: settings.from,
         to: mail.to,
@@ -253,6 +329,20 @@ export function createSmtpTransport(
       });
       // Compilation can finish after cancellation. It cannot start SMTP then.
       checkDeadline();
+      // Defence in depth: whatever the scan let through, Nodemailer's own parse
+      // must yield exactly one envelope recipient before any SMTP I/O.
+      const envelopeTo = compiled.envelope.to;
+      // A parsed domain that still holds whitespace or angle brackets (for
+      // example `user@ (c) [IPv6:...]`, where Nodemailer leaves the folding
+      // space in place) would put a malformed RCPT on the wire: refuse it. Only
+      // the domain is checked; a quoted local part may hold spaces.
+      const envelopeAddress = envelopeTo[0] ?? '';
+      const envelopeDomain = envelopeAddress.slice(envelopeAddress.lastIndexOf('@') + 1);
+      if (envelopeTo.length !== 1 || /[\s<>]/.test(envelopeDomain)) {
+        throw Object.assign(new Error('Invalid SMTP recipient: expected exactly one mailbox'), {
+          code: 'EENVELOPE',
+        });
+      }
       if (!Buffer.isBuffer(compiled.message)) {
         throw new Error('SMTP MIME renderer returned no buffer');
       }

@@ -200,13 +200,69 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
     assert.match(relay.messages[0]!, /^To: <"user@other\.test"@example\.test>\r?$/m);
   });
 
-  it('bounds nested recipient parsing and remains usable after rejection', async () => {
+  it('delivers single mailboxes whose syntax holds group or list punctuation as data', async () => {
+    const padded = (length: number): string => {
+      const suffix = '" <reader@example.test>';
+      return `"${'a'.repeat(length - suffix.length - 1)}${suffix}`;
+    };
+    // Nodemailer lowercases the domain part, including the `ipv6:` literal tag.
+    const cases: Array<[string, string]> = [
+      ['"Reader: One" <reader@example.test>', 'reader@example.test'],
+      ['"Reader, One; Two" <reader@example.test>', 'reader@example.test'],
+      ['"Reader: \\"One\\"" <reader@example.test>', 'reader@example.test'],
+      ['Reader (ops (west: a;b), east) <reader@example.test>', 'reader@example.test'],
+      ['Reader (note \\) x: y) <reader@example.test>', 'reader@example.test'],
+      ['"read:er;x,y"@example.test', '"read:er;x,y"@example.test'],
+      ['"read er"@example.test', '"read er"@example.test'],
+      ['reader@[IPv6:2001:db8::1]', 'reader@[ipv6:2001:db8::1]'],
+      ['reader@[IPv6:2001:db8::192.0.2.1]', 'reader@[ipv6:2001:db8::192.0.2.1]'],
+      ['Reader <reader@[IPv6:2001:db8::1]>', 'reader@[ipv6:2001:db8::1]'],
+      ['Reader <reader@[IPv6:2001:db8::192.0.2.1]>', 'reader@[ipv6:2001:db8::192.0.2.1]'],
+      ['reader@[192.0.2.1]', 'reader@[192.0.2.1]'],
+      ['reader@(relay)[IPv6:2001:db8::192.0.2.1]', 'reader@[ipv6:2001:db8::192.0.2.1]'],
+      ['reader@ [IPv6:2001:db8::1]', 'reader@[ipv6:2001:db8::1]'],
+      ['Reader <reader@(relay)[IPv6:2001:db8::192.0.2.1]>', 'reader@[ipv6:2001:db8::192.0.2.1]'],
+      ['Reader <reader@ (a (b)) [IPv6:2001:db8::1]>', 'reader@[ipv6:2001:db8::1]'],
+      [padded(998), 'reader@example.test'],
+    ];
+    for (const [to, rcpt] of cases) {
+      const before = relay.messages.length;
+      await transport.send({ ...MAIL, to });
+      assert.equal(relay.messages.length, before + 1, to);
+      const rcpts = relay.commands.filter((line) => line.startsWith('RCPT TO:'));
+      assert.equal(rcpts.length, before + 1, to);
+      assert.equal(rcpts.at(-1), `RCPT TO:<${rcpt}>`, to);
+    }
+  });
+
+  it('bounds nested, grouped and listed recipients and remains usable after rejection', async () => {
     // This lower-level boundary deliberately bypasses Nexus's single-address
-    // HTTP schema. The old parser would flatten all 80 groups and deliver.
-    await assert.rejects(
-      transport.send({ ...MAIL, to: `${'group: '.repeat(80)}reader@example.test;` }),
-      { code: 'EENVELOPE' },
-    );
+    // HTTP schema. Nexus rejects address groups itself, whatever the installed
+    // Nodemailer does with nesting (older parsers flattened or capped them,
+    // newer ones parse any depth in linear time and would deliver).
+    for (const to of [
+      `${'group: '.repeat(80)}reader@example.test;`,
+      'group: reader@example.test;',
+      `${'a'.repeat(1000)}@example.test`,
+      `"${'a'.repeat(999 - '" <reader@example.test>'.length - 1)}" <reader@example.test>`,
+      '"unterminated@example.test',
+      'Reader (a: b <reader@example.test>',
+      'reader@[IPv6:2001:db8::1',
+      'reader@[IPv6:2001:db8::1,two@example.test]',
+      'reader@[IPv6:2001:db8::1"]',
+      // Nodemailer leaves the folding space in the parsed bare address; refused.
+      'reader@ (relay) [IPv6:2001:db8::1]',
+      'reader(x)[IPv6:2001:db8::1]',
+      'reader@"x"[IPv6:2001:db8::1]',
+      'reader@(relay)[IPv6:2001:db8::1,two@example.test]',
+      '<@relay.example:reader@example.test>',
+      'one@example.test,two@example.test',
+      'one@example.test, two@example.test',
+      'Reader <one@example.test>, Two <two@example.test>',
+      'one@example.test;two@example.test',
+    ]) {
+      await assert.rejects(transport.send({ ...MAIL, to }), { code: 'EENVELOPE' });
+    }
     assert.equal(
       relay.commands.some((line) => line.startsWith('RCPT TO:')),
       false,
