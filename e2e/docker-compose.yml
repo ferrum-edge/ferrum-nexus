@@ -47,7 +47,7 @@ services:
   # The mail sink. Verification mail is part of the journey under test, so it
   # has to be delivered somewhere a test can read it — not stubbed out.
   mail:
-    image: axllent/mailpit:v1.31@sha256:23fe39e81bde596a918000b3135c0f85dc8bb4c9ea6be274b051143f3e300387
+    image: axllent/mailpit:v1.32@sha256:0790692be935ea4420d085694f7985b1f692ca6a8771ab0e0bd8ba75ac180498
     environment:
       MP_SMTP_AUTH_ACCEPT_ANY: '1'
       MP_SMTP_AUTH_ALLOW_INSECURE: '1'
@@ -70,7 +70,7 @@ services:
   dex:
     # Dex v2.45.1, the current stable release, pinned by its multi-arch index
     # digest like everything else here.
-    image: ghcr.io/dexidp/dex:v2.46.0@sha256:933fcd3f523338c847b88ef84a7145fb2fcb7b9917f08418612afeaaa2001777
+    image: ghcr.io/dexidp/dex:v2.46.1@sha256:65b72ca0f4b0bf6d4ada84ec21da8851782563404ac7b8f926923d27ceced9ab
     command: ['dex', 'serve', '/etc/dex/e2e.yaml']
     environment:
       DEX_PORT: ${DEX_PORT:-5556}
@@ -122,7 +122,7 @@ services:
   # copy the gateway's database to and from `/backup`: a separate volume, so
   # wiping `/data` cannot take the backup with it.
   ferrum-edge-init:
-    image: alpine:3@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+    image: alpine:3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
     command: ['chown', '65532:65532', '/data']
     volumes:
       - ferrumdata:/data
