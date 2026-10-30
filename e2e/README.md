@@ -7,8 +7,10 @@ meant to send. It cannot tell you whether a real gateway would then let the requ
 This suite answers that question. It runs the **production container image** against a **pinned
 Ferrum Edge release**, PostgreSQL, a deterministic upstream, a real SMTP sink (Mailpit), and a real
 OpenID Connect provider (Dex). Every access assertion sends a request to the gateway's
-**data-plane listener** and checks whether it reached the backend. The Admin API is called exactly
-once: to delete a proxy, the operator mistake the restore test recovers from.
+**data-plane listener** and checks whether it reached the backend. The Admin API is called directly
+only to stage what the portal must survive: reading deployment snapshots to check preservation,
+verifying stale-token and invalid-mode refusals, editing an operator plugin config, and deleting a
+proxy, the operator mistake the restore test recovers from.
 
 ## Running it
 
@@ -16,7 +18,7 @@ once: to delete a proxy, the operator mistake the restore test recovers from.
 ./e2e/run.sh              # everything
 ./e2e/run.sh dataplane    # the gateway matrix only
 ./e2e/run.sh sso          # single sign-on through Dex only
-./e2e/run.sh browser      # the portal journey only
+./e2e/run.sh browser      # the browser specs only (journey and CSP)
 E2E_KEEP=1 ./e2e/run.sh   # leave the stack up afterwards
 ```
 
@@ -60,7 +62,7 @@ Dex is pinned by digest in [`docker-compose.yml`](docker-compose.yml), with its 
 alongside. Its configuration is [`dex/config.yaml`](dex/config.yaml): in-memory storage, one static
 client, and two static password users, one in the `nexus-providers` group.
 
-## The three parts
+## What each suite asserts
 
 **`src/dataplane.test.ts`** — what the gateway permits:
 
@@ -79,6 +81,24 @@ client, and two static password users, one in the `nexus-providers` group.
 - The Nexus and Edge databases are backed up together, both lost, and both restored from that
   backup ([runbook](../docs/operations.md#5-backup-and-restore)). An approved client's pre-backup
   credential still works, and a client revoked before the backup is still refused.
+- MCP tool subsets, for API-key/basic accounts and JWT applications: subset list and call, approval
+  that cannot broaden the request, and unapproved tools hidden and denied while REST remains
+  usable. Explicit empty and omitted subsets, rename/re-add, a spec revision that leaves the
+  approved tool's definition alone (which an explicit subset survives), disable/re-enable,
+  revocation and deletion are exercised through production portal routes. The independent
+  account/application tool-call budget proof uses read-tool subsets.
+- Refused MCP probes (unapproved, revoked, unsupported-version, unselected-destructive, shielded,
+  malformed, invalid-argument and quota-denied) are bracketed by full snapshots of the deterministic
+  upstream's per-method, per-raw-URL request counts, read through a separate approved REST API at
+  the gateway, so strict equality proves no request reached that upstream; exact increments prove
+  the admitted calls. Only `GET /health` and the snapshot read itself are excluded, reads never
+  reset the counters, and more than 1,024 distinct pairs fails the assertion. The proof covers
+  only the tested requests and this fixture.
+- Actual PostgreSQL triggers force grant and policy persistence failures after Edge mutations;
+  compensation is asserted through the live listener and full upstream snapshots.
+- A shared v1 service-manifest preview case runs against the packaged schema asset, checks
+  namespace/null rejection and redaction, and proves no request reaches the upstream for declared
+  references. Contract fixture/integrity checks run in the server suite.
 
 **`src/sso.test.ts`** — single sign-on through a real OpenID Connect provider. An HTTP client that
 keeps cookies starts at `GET /api/auth/sso/dex/start`, follows the portal's redirect to Dex, submits
@@ -123,23 +143,6 @@ responses and never logged.
 Put portal setup in `src/fixtures.ts` and assertions in the suite. Arrange state through the
 portal's **public API**. If a test has to reach around the product to set something up, that setup
 is part of what is being tested, and the assertion is worth less than it looks.
-
-## MCP subsets and shared manifest preview
-
-The packaged-image data-plane suite extends the pinned v0.9.15 qualification with
-API-key/basic-account and JWT-application subset list/call cases. Approval cannot
-broaden the request; unapproved tools are hidden and denied while REST remains usable.
-Explicit empty and omitted subsets, rename/re-add, a spec revision that leaves the
-approved tool's definition alone (which an explicit subset survives), disable/re-enable, revocation and deletion are exercised through
-production portal routes. Actual
-PostgreSQL triggers force grant and policy persistence failures after Edge mutations;
-compensation is asserted through the live listener and full upstream snapshots.
-The independent account/application tool-call budget proof uses read-tool subsets.
-
-A shared v1 service-manifest preview case runs against the packaged schema asset,
-checks namespace/null rejection and redaction, and proves no request reaches the
-upstream for declared references. Contract fixture/integrity checks run in the server
-suite. These are hosted CI gates; adding cases does not claim they have passed.
 
 ## Public-only pairing fixture
 

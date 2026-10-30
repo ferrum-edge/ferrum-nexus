@@ -969,7 +969,7 @@ export function metricsScrapeFailure(status: number, bearerConfigured: boolean):
       code: 'refused',
       reason: refusedReason('request metrics'),
       hint:
-        "Ferrum Edge v0.9.16 and later refuse the portal's namespace-scoped admin token on " +
+        "Ferrum Edge v0.9.17 and later refuse the portal's namespace-scoped admin token on " +
         "GET /metrics. Set FERRUM_METRICS_BEARER_TOKEN on the portal to the gateway's.",
     };
   }
@@ -1011,7 +1011,7 @@ export function backendStateFailure(
     return {
       reason: refusedReason('runtime metrics'),
       hint:
-        "Ferrum Edge v0.9.16 and later refuse the portal's namespace-scoped admin token on " +
+        "Ferrum Edge v0.9.17 and later refuse the portal's namespace-scoped admin token on " +
         'GET /admin/metrics. FERRUM_ADMIN_FLEET_READ_JWT_SECRET restores the read; see the ' +
         'operations guide for what that key can read.',
     };
@@ -1421,7 +1421,7 @@ export function createFerrumAdminClient(
       if (!versionRefused) {
         logger.warn(
           { path: '/version', status: 403 },
-          'Ferrum Edge refused GET /version. Edge v0.9.16 and later refuse it to the ' +
+          'Ferrum Edge refused GET /version. Edge v0.9.17 and later refuse it to the ' +
             "portal's namespace-scoped admin token, which is expected; on an earlier gateway " +
             'it means the admin credential itself was refused',
         );

@@ -14,8 +14,10 @@ registered in [`server/src/index.ts`](../server/src/index.ts) and live in
   [Users](#users) · [Organizations](#organizations) · [Threads](#threads) ·
   [Notifications](#notifications) · [Admin](#admin) · [Catalog](#catalog) ·
   [APIs (publishing)](#apis-publishing) · [Plugin palette](#plugin-palette) ·
-  [Access requests](#access-requests) · [Grants](#grants) ·
-  [Credentials](#credentials) · [Applications](#applications)
+  [Access requests](#access-requests) ·
+  [Optional MCP access subsets](#optional-mcp-access-subsets) · [Grants](#grants) ·
+  [Credentials](#credentials) · [Applications](#applications) ·
+  [Service manifests](#service-manifests)
 
 ---
 
@@ -2118,6 +2120,7 @@ the Edge proxy and plugins, then stores the API.
 | `timeouts`         | `{ connect_ms, read_ms, write_ms }` \| null | each 100–300 000 ms; all three required together                                                                                                       |
 | `circuit_breaker`  | boolean                                     | default `false`                                                                                                                                        |
 | `spec_enforcement` | `docs_only` \| `routes`                     | default `docs_only`; `routes` creates the proxy through Edge's API-spec importer. See [the provider guide](guides/provider-guide.md#enforcement-level) |
+| `agents`           | `ApiAgents` \| null                         | default `null` (MCP off). See [AI agent settings](#ai-agent-settings)                                                                                  |
 
 **Document limits** (also applied to spec revisions), each `400 SPEC_INVALID`:
 
@@ -2297,6 +2300,7 @@ restores the gateway default).
 | `timeouts`                       | replaces all three timeouts; `null` writes the gateway defaults explicitly                                                                                                                       |
 | `circuit_breaker`                | attaches or removes Edge's default breaker                                                                                                                                                       |
 | `spec_enforcement`               | **rebuilds the proxy** from the current revision (see below)                                                                                                                                     |
+| `agents`                         | replaces the MCP selection, or `null` turns agents off. See [AI agent settings](#ai-agent-settings)                                                                                              |
 | `confirm_access_disruption`      | `true` confirms an `auth_plugin` change that would lock grantees out                                                                                                                             |
 
 → `{ "api": Api, "outgoing_auth_configs_remaining"?: string[] }` — the second
@@ -2830,7 +2834,8 @@ _session_ → `201 { "access_request": AccessRequest }`
 
 Body: `api_id`, `justification` (1–2000 chars), optional `application_id` (one
 of the caller's own active applications; absent or `null` means the account
-itself).
+itself), optional `requested_tools` (`string[] | null`, at most 256 exposure
+IDs; see [Optional MCP access subsets](#optional-mcp-access-subsets)).
 
 **Limits.** 10 a minute per account, and
 `NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY` (default 20, `0` disables) in a
@@ -2864,7 +2869,9 @@ _session_, **requester only** → `{ "access_request": AccessRequest }`. No body
 ### `POST /api/access-requests/:id/approve`
 
 _session_, **API owner with the provider role, or admin**. Body
-`{ "decision_note"?: string | null }` (≤ 2000), or no body.
+`{ "decision_note"?: string | null, "approved_tools"?: string[] | null }`
+(note ≤ 2000; tools per
+[Optional MCP access subsets](#optional-mcp-access-subsets)), or no body.
 
 ```json
 { "access_request": { …, "status": "approved" }, "grant": { …, "acl_group": "nexus:api:2b1c…:approved" } }
@@ -2895,6 +2902,53 @@ failure.
 _session_, **API owner with the provider role, or admin** →
 `{ "access_request": AccessRequest }`. Body `{ "decision_note"?: string | null }`,
 optional. Nothing changes on the gateway. `409 CONFLICT` when already decided.
+
+### Optional MCP access subsets
+
+`POST /api/access-requests` accepts `requested_tools?: string[] | null`.
+`POST /api/access-requests/:id/approve` accepts `approved_tools?: string[] | null`.
+Both arrays contain unique currently published `AgentTool.id` UUIDs, at most 256.
+Unknown/expired IDs return `400 VALIDATION_FAILED`; exposure published before tool
+subsets, without IDs, requires provider republish (`409 CONFLICT`) before subset
+admission. Omitted/null requests mean all published tools, including future tools; `[]`
+means no MCP tools. An omitted approval defaults to the request. Null approval cannot
+broaden an explicit request; an explicit approval must be contained in the request.
+Request and approval admission share the publishing proxy lease. Ordinary REST access
+is granted in every case. Request rows return both subset fields; grants return
+`approved_tools`. Historical IDs remain visible as expired coverage, never new tools.
+
+Each tool carries a server-owned `definition_hash`, a SHA-256 of the
+reference-resolved definition Edge publishes for it (description, operation summary
+and description, parameters, request body, 2xx JSON schemas, OpenAPI version), bound
+to the tool's ID; the hashing and fallback rules are in
+[agent-marketplace.md](agent-marketplace.md#optional-subsets-and-cross-repository-follow-up).
+A tool ID persists across spec revisions, rollbacks and agents edits only while its
+method, path, name and `definition_hash` are unchanged, so explicit subsets carry across
+whitespace, `info` edits and changes to other operations or unreferenced components. Any
+definition change, description-only edits included, mints a new ID, as do rename,
+path/method changes, removing/re-adding exposure and disable/re-enable. The write that
+does so removes the old IDs from every explicit subset (`access.tools_prune`, `reason`
+`definition_changed`, `tool_renamed` or `tool_removed`), which keeps REST access and its
+other tools; a holder does not regain a tool if its old name or definition returns. A
+revision's change report lists redefined tools by name in `agent_tools_changed`; an
+agents edit that redefines or renames a tool sends each affected subset holder an
+in-app notice naming it (old and new name for a rename). A holder gets such a tool back
+with [`POST /api/grants/:id/tool-requests`](#post-apigrantsidtool-requests) on the
+grant it already holds. `id` and `definition_hash` are accepted on input and ignored.
+Omitted/null grants continue to cover all published tools, renamed and redefined ones
+included.
+
+Revocation, deletion and bulk teardown remove both the REST and the MCP groups;
+re-enable rebuilds only active grants, preserving operator groups. All-tools grantees
+approved while agents were enabled receive the MCP-all group with their approval, and
+account re-enable and consumer repair rebuild it. Only a change that turns agents on,
+or that gives a selection published before tool subsets its exposure IDs, enrolls
+existing all-tools grantees, committing an `access.mcp_enroll` intent row before each
+consumer write. Enrollment skips disabled grantees (their grant rows remain, and
+re-enable rebuilds their groups) and consumers missing from the gateway, so no
+grantee's state can fail a provider's build. Ordinary spec revisions, rollbacks, agents
+edits, restores and conversions read no grantee consumer from the gateway. See the
+[migration notes](mcp-subsets-migration-draft.md).
 
 ---
 
@@ -3273,48 +3327,13 @@ and records `resumed: true`.
 
 ---
 
-## See also
+## Service manifests
 
-- [`getting-started.md`](getting-started.md) — end-to-end walkthrough from an
-  empty database to a call through the gateway.
-- [`guides/client-guide.md`](guides/client-guide.md) ·
-  [`guides/provider-guide.md`](guides/provider-guide.md) ·
-  [`guides/admin-guide.md`](guides/admin-guide.md)
-- [`security.md`](security.md) — RBAC matrix and the audit event catalog.
+Registered under `/api/service-manifests`.
 
-## Optional MCP access subsets
+### `POST /api/service-manifests/preview`
 
-`POST /api/access-requests` accepts `requested_tools?: string[] | null`.
-`POST /api/access-requests/:id/approve` accepts `approved_tools?: string[] | null`.
-Both arrays contain unique currently published `AgentTool.id` UUIDs, at most 256.
-Unknown/expired IDs return `400 VALIDATION_FAILED`; legacy phase-1 exposure without IDs
-requires provider republish (`409 CONFLICT`) before subset admission. Omitted/null
-requests mean all published tools, including future tools; `[]` means no MCP tools.
-An omitted approval defaults to the request. Null approval cannot broaden an explicit
-request; an explicit approval must be contained in the request. Ordinary REST access
-is granted in every case. Request rows return both subset fields; grants return
-`approved_tools`. Historical IDs remain visible as expired coverage, never new tools.
-
-Each tool carries a server-owned `definition_hash`, a SHA-256 of the
-reference-resolved definition Edge publishes for it (description, operation summary
-and description, parameters, request body, 2xx JSON schemas, OpenAPI version), bound
-to the tool's ID. A tool ID persists across spec revisions, rollbacks and agents edits only while its
-method, path, name and `definition_hash` are unchanged. Any definition change,
-description-only edits included, mints a new ID, as do rename, path/method changes,
-removing/re-adding exposure and disable/re-enable. The write that does so removes the
-old IDs from every explicit subset (`access.tools_prune`, `reason` `definition_changed`,
-`tool_renamed` or `tool_removed`), which keeps REST access and its other tools. A
-revision's change report lists redefined tools by name in `agent_tools_changed`; an
-agents edit that redefines or renames a tool sends each affected subset holder an
-in-app notice naming it (old and new name for a rename). A holder gets such a tool back
-with [`POST /api/grants/:id/tool-requests`](#post-apigrantsidtool-requests) on the
-grant it already holds. `id` and `definition_hash` are accepted on input and ignored.
-Omitted/null grants continue to cover all published tools, renamed and redefined ones
-included. See the [migration notes](mcp-subsets-migration-draft.md).
-
-## Service-manifest preview
-
-`POST /api/service-manifests/preview` accepts JSON:
+_provider_ — accepts JSON:
 
 ```json
 {
@@ -3340,3 +3359,14 @@ or coerced. The result has `preview_only: true`, `contract_status: "implemented"
 immutable contract commit, service/public-path/protocol/auth/agent hints and redacted
 reference-presence flags. No upstream/file/TLS/telemetry values or free-form text
 are echoed. No apply, publishing, fetch or diagnostic-import endpoint exists.
+
+---
+
+## See also
+
+- [`getting-started.md`](getting-started.md) — end-to-end walkthrough from an
+  empty database to a call through the gateway.
+- [`guides/client-guide.md`](guides/client-guide.md) ·
+  [`guides/provider-guide.md`](guides/provider-guide.md) ·
+  [`guides/admin-guide.md`](guides/admin-guide.md)
+- [`security.md`](security.md) — RBAC matrix and the audit event catalog.

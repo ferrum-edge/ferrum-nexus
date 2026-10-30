@@ -2,7 +2,8 @@
 
 Issue [#446](https://github.com/ferrum-edge/ferrum-nexus/issues/446) exposes explicitly
 selected API operations as MCP tools. Agents are off by default. This document
-records the published Edge dependency and what the test suites cover.
+records the published Edge dependency and the configuration Nexus writes; the
+[acceptance suite](../e2e/README.md) lists what is tested against a real gateway.
 
 ## Published dependency
 
@@ -11,8 +12,8 @@ governance) was first published in
 [Edge v0.9.10](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.10), whose
 tag resolves to `ee040d5e3281fde424aa65f5b18004852c5b53b0`; the source links below
 point at that release. Nexus `v0.5.2` pins Edge v0.9.15 (Nexus `v0.5.0` and `v0.5.1`
-pinned Edge v0.9.14, and `v0.4.0` Edge v0.9.13) in
-[`release/compatibility.env`](../release/compatibility.env); the packaged acceptance suite
+pinned Edge v0.9.14, and `v0.4.0` Edge v0.9.13); `main` pins v0.9.17 in
+[`release/compatibility.env`](../release/compatibility.env). The packaged acceptance suite
 runs the agent journeys against the pinned image.
 
 From Edge v0.9.15 an agent-enabled API serves MCP and its REST operations over HTTP
@@ -108,55 +109,16 @@ and their initial sessions are arranged before exhaustion; no policy replacement
 restart or rotation occurs during the budget proof, which must finish within
 60 seconds.
 
-The deterministic fixture records the total and the full per-route request counts
-for every HTTP method and raw URL it receives. Repeated requests increment their
-counts; unknown paths, query strings, wrong routes and other methods are retained.
-Only exact **`GET /health`** (Compose's health probe) and exact
-**`GET /__e2e/requests`** (the snapshot read) are excluded. The snapshot is read
-through a separate approved, routes-enforced REST API at the real gateway, not
-through Edge's Admin API or a mocked data plane. The fixture retains up to 1,024
-distinct method/raw-URL pairs; overflow makes the acceptance assertion fail,
-rather than permitting an incomplete comparison. Reading a snapshot never resets
-the counters.
-
-Strict full-snapshot equality around unapproved, revoked, unsupported-version,
-unselected-destructive, shielded, malformed, invalid-argument and quota-denied
-probes establishes zero requests received by this configured upstream between
-the snapshot reads, including dispatches to unintended methods or paths. Exact
-snapshot increments also require one opted-in DELETE, 60 admitted account GETs,
-the REST probe after exhaustion and one same-account application GET. This proof
-covers the tested requests and this fixture; it does not establish behavior at
-other destinations or for untested inputs. A gateway-authored error without the
-upstream marker alone cannot prove that no backend request was made.
-
-## Test coverage
-
-- Shared/server/web typecheck, build, format and tests, including the accessible
-  operation picker and credential-placeholder connection recipe tests.
-- Server publishing tests for extension stripping, closed request keys,
-  route/endpoint/method collisions, explicit selection across revisions, owner
-  and CSRF checks, audit intent/completion, lost acknowledgements, recorded
-  ownership and compensated store failures with operator resource fields retained.
-- `store-contracts` on all four adapters, including retained baseline upgrade,
-  default-off migration `010`, subset migration `011`, selection/subset round-trip,
-  production publishing/access mutations and transaction rollback.
-- Packaged-image acceptance against the pinned Edge image: normal keyauth,
-  basicauth and JWT credentials; account/application isolation; public/private
-  approval; tools/list and tools/call;
-  unapproved and revoked refusals with the same session/credential; read-only
-  defaults, destructive opt-in, argument shielding, endpoint/REST bypass negative
-  controls, tool-call-only consumer budgets and settings audit.
-
-Mock config tests do not prove real gateway execution or authorization; the
-packaged acceptance suite does that against the pinned gateway.
+The deterministic fixture's full upstream-snapshot proof, and what it does not cover,
+is described in the [acceptance suite](../e2e/README.md#what-each-suite-asserts).
 
 ## Optional subsets and cross-repository follow-up
 
 Optional consumer `requested_tools` and provider `approved_tools` contain server-owned
-exposure IDs from the catalog. Omission/null means all published tools, including future
-ones; explicit `[]` means REST access only. Approval defaults to the requested selection
-and may narrow it, never broaden it. Only currently published IDs can be requested or
-approved. Request and approval admission share the publishing proxy lease.
+exposure IDs from the catalog: omission/null means all published tools, including future
+ones, and explicit `[]` means REST access only. Approval may narrow a request, never
+broaden it. The request, approval, pruning and tool-request rules are in
+[`api.md`](api.md#optional-mcp-access-subsets).
 
 An ID names one published tool definition. Each tool stores a `definition_hash`, a
 SHA-256 over the canonical, reference-resolved definition Edge publishes for it: name,
@@ -183,67 +145,68 @@ parameters, schemas and examples hashed) before it is read, plus every key and p
 before it is parsed and every character as it is hashed. Nothing is copied out of the
 document, and each selected Path Item, Request Body or Response reference, Content map
 and acyclic schema reference target is read once per build however many tools and
-statuses reach it, so a legitimate document stays far below the budget. A budget
+statuses reach it, so a legitimate document stays far below the budget. One build
+therefore costs work proportional to the budget (the charge that crosses it being at
+most one collection or string of the document) plus a constant per selected tool;
+sorting each object's keys adds a log factor. A fallback first makes one shallow
+top-level copy without `info`, then takes one canonical pass over the document. A budget
 fallback is recorded as `tool_hash_fallback: true` in the `api.publish`, `api.update`,
 `api.spec_update` or `api.spec_rollback` audit row that commits the change, which
 explains a later mass rotation: once every tool hashes the whole document, any change
 outside `info` re-ids all of them. A
 `$ref: "#"` names the whole document, `info` included. Each fallback only folds in more
 than Edge publishes, so it can cost a re-approval but never carries a changed tool.
-Selections are validated (existing, unique operations and names) before any hashing.
+Selections are validated (existing, unique operations and names, at most 256) before
+any hashing; validation reads each Path Item in place, resolving each reference node
+once, and cuts an operation's name and description to their limits before cleaning
+them.
 
-A spec revision, rollback or agents edit keeps a tool's ID only while its method,
-path, name and hash are unchanged, so explicit subsets carry across whitespace, `info`
-edits and changes to other operations or unreferenced components. Any change to the
-definition mints a new ID, including a description-only edit in the spec or in agent
-settings, because descriptions are prompt text an agent acts on. Rename, method/path
-changes, removing and re-adding exposure, or disabling and re-enabling agents also mint
-new IDs. A revision cannot drop a selected operation.
-
-The write that retires an ID drops it from every explicit subset in the same transaction
-and records `access.tools_prune` per grant, with `reason` `definition_changed`,
-`tool_renamed` or `tool_removed`. Those holders keep REST access and their remaining
-tools, and do not regain a tool if its old name or definition returns. A revision that
-changes a tool's definition names it in the change summary (`agent_tools_changed`) and
-the grantee notice; an agents edit that redefines or renames a tool sends the affected
-subset holders an in-app notice, naming a renamed tool by its old and new name. Without
-it a renamed tool would just vanish from an explicit subset, while an all-tools grant
-keeps it under the new name.
-
-Getting a changed or renamed tool back takes a tool request on the grant the holder
-already has (`POST /api/grants/:id/tool-requests`): a pending request with `grant_id`
-set, decided through the ordinary approve, deny and cancel endpoints under the same
-review check, proxy lease, application key and daily budget as a request for access.
-Approval rewrites the identity's consumer once with the REST group and the widened tool
-groups, then commits the grant's new subset inside the consumer key, so REST access and
-the tools already held never lapse (`access.tools_request`, `access.tools_approve`). A
-failure after the gateway write takes back only the added tool groups, or every group of
-the API if the grant was revoked meanwhile and no other active grant needs them. Denial
-changes nothing. An API's owner cannot file one. Revoking a grant cancels its pending tool
-request.
-
-Null grants retain their all-published-tools meaning, changed tools included. Revocation,
-deletion and bulk teardown remove both REST and MCP groups; re-enable rebuilds only
-active grants, preserving operator groups.
-
-All-tools grantees approved while agents were enabled receive the MCP-all group with
-their approval, and account re-enable and consumer repair rebuild it. Only a change that
-turns agents on, or that gives a retained phase-1 selection its exposure IDs, enrolls
-existing all-tools grantees (`access.mcp_enroll`); ordinary spec revisions, rollbacks,
-agents edits, restores and conversions read no grantee consumer from the gateway.
-
-Existing phase-1 APIs require an authenticated provider republish before accepting a
-subset, including empty subsets. See the [upgrade tradeoff](mcp-subsets-migration-draft.md).
-Acceptance adds subset discovery/calls for keyauth, basicauth and JWT applications,
-empty/omitted subsets, lifecycle changes and actual PostgreSQL-induced approval/policy
-rollback. The independent-budget proof now uses explicit read-tool subsets.
-
-Anvil, Alloy and Foundry tracking work is cross-repository follow-up and is
-not required to use this phase with an ordinary MCP client. No transcript sink UI
-or arbitrary provider policy editor is introduced.
+APIs published before tool subsets require an authenticated provider republish before
+accepting a subset, including empty subsets. See the
+[upgrade tradeoff](mcp-subsets-migration-draft.md).
 
 Connection recipes follow the primary client documentation for
 [VS Code MCP configuration](https://code.visualstudio.com/docs/agents/reference/mcp-configuration)
 and [Claude Code HTTP MCP](https://code.claude.com/docs/en/mcp). They contain only
 header placeholders and the gateway public URL. Credentials stay in the client's
 protected configuration, outside URLs and portal session cookies.
+
+## Agent document bounds
+
+The document submitted for an agent API cannot keep a path's Path Item reference: each
+operation carries its own `x-ferrum-mcp` mark, and two paths sharing one Path Item expose
+different tools. So every path holds a copy of the Path Item it resolves to, and 2,000
+paths referencing one large Path Item would otherwise stamp to gigabytes on every
+publish. Every request that rebuilds that document (publish, spec revision, rollback,
+restore, and a PATCH that edits the agents or converts the enforcement level) bounds it
+before it builds anything or writes to the gateway: an upper bound on its compact JSON
+size is charged to a work meter with a budget of `MAX_AGENT_DOCUMENT_BYTES` (8 MiB, twice
+the expanded upload limit). It charges every root member, every path's reference chain
+and resolved Path Item in full, a route per operation at the longer of the real and
+staging listen paths, and every selected tool. Each object of the document is measured
+once and remembered, so the check reads the document about once however much the stamp
+would copy, plus each path's reference chain and operation slots. It stops at the first
+charge past the budget with `400 SPEC_INVALID` (`reason: "agent_document_too_large"`).
+
+An agent selection is admitted only if the document has at most 3,000
+(`MAX_SPEC_OPERATIONS`) operations after Path Item references resolve. Each path counts
+every operation its resolved Path Item holds, so a Path Item that 2,000 paths reference
+counts 2,000 times. The upload limit uses the same number but counts differently: only
+the method keys each path declares itself, so a path that is a `$ref` counts none. A
+document can therefore pass the upload and still be refused for agents with
+`400 SPEC_INVALID`. The resolved count is checked:
+
+- on publish, spec revision, rollback and restore of an agent API;
+- on a PATCH that edits the agents or converts the enforcement level;
+- by the provider's operation picker, which will not enable agents past it.
+
+Checking a live deployment's routes is not capped (restore, enforcement conversion and
+their recovery all do this). That check reads every operation, however many the document
+resolves to, so a routes API without agents is never refused for it.
+
+Compensation rebuilds the document the gateway already holds, so neither bound refuses
+it. A PATCH that leaves the agents and the enforcement level alone (visibility, status,
+name, description and the other catalog or proxy settings) is not bounded either. So an
+agent API published before the bounds, whose document is larger or resolves to more
+operations, can still be edited and retired. Turning its agents off submits the document
+without copies, and is the way to revise it again.

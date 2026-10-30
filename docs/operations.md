@@ -108,7 +108,7 @@ See the README for a two-stack example.
 | `NEXUS_ALLOW_ENV_OVERRIDE`                   | `false`                               | Allow the process environment to override `.env` for `FERRUM_NAMESPACE`/`FERRUM_ADMIN_URL` outside production (see above). No effect in production.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `NEXUS_WEB_DIST`                             | _(unset)_                             | Directory of the built SPA. Nexus uses the first of this, `../../web/dist` relative to the server, and `./web/dist` under the working directory that contains an `index.html`; with none, only the API is served.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `NEXUS_BOOTSTRAP_TOKEN`                      | _(unset)_                             | Token the founding registration must present. At least 16 characters. When unset, each process generates one. Set it for any multi-instance deployment. See [First run](#first-run-and-the-bootstrap-token).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`        | `900000` (15 min)                     | How often Nexus checks that the gateway still holds the consumer and proxy ids it stored, 0 – 86 400 000. A pass also runs at startup. `0` disables the timer. See [§13](#13-retargeting-or-rebuilding-ferrum-edge).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`        | `900000` (15 min)                     | How often Nexus checks that the gateway still holds the consumer and proxy ids it stored, 0 – 86 400 000. A positive interval also runs a pass at startup. `0` disables both the startup pass and the timer: `edge.reconciliation.status` then stays `unknown` until an on-demand pass (`POST /api/admin/gateway/reconcile`, or `POST /api/admin/gateway/repair`, which scans first). See [§13](#13-retargeting-or-rebuilding-ferrum-edge).                                                                                                                                                                                                                                                                                                                                                       |
 | `NEXUS_GATEWAY_RECONCILE_SAMPLE`             | `200`                                 | Most stored references of each kind one pass checks, 1–100 000. A pass that hits the bound reports `complete: false`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 ### Database
@@ -128,7 +128,7 @@ See the README for a two-stack example.
 | `FERRUM_ADMIN_JWT_TTL`               | `60`                    | Admin JWT lifetime in seconds, 5–3600.                                                                                                                                                                                                                                    |
 | `FERRUM_ADMIN_JWT_ISSUER`            | `ferrum-edge`           | The `iss` claim. Must equal the gateway's configured issuer.                                                                                                                                                                                                              |
 | `FERRUM_ADMIN_JWT_AUDIENCE`          | _(unset)_               | Set only if the gateway configures an audience; otherwise `aud` is omitted.                                                                                                                                                                                               |
-| `FERRUM_METRICS_BEARER_TOKEN`        | _(unset)_               | The gateway's own `FERRUM_METRICS_BEARER_TOKEN` (at least 32 characters). Presented on `GET /metrics` instead of the admin JWT, which Ferrum Edge v0.9.16 refuses there. See [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0917).         |
+| `FERRUM_METRICS_BEARER_TOKEN`        | _(unset)_               | The gateway's own `FERRUM_METRICS_BEARER_TOKEN` (at least 32 characters). Presented on `GET /metrics` instead of the admin JWT, which Ferrum Edge v0.9.17 refuses there. See [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0917).         |
 | `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` | _(unset)_               | Optional separate key for `GET /admin/metrics` only: `viewer` tokens without an `ns` claim. Set it to the gateway's `FERRUM_ADMIN_JWT_VIEWER_SECRET`; never `FERRUM_ADMIN_JWT_SECRET` (refused). **A fleet-wide read credential**; see the trade-off below.               |
 | `FERRUM_NAMESPACE`                   | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` and as the `ns` claim. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, at most 128 characters. Also the first segment of every listen path (`/<namespace>/<slug>`). See [Namespace routability](#namespace-routability). |
 | `FERRUM_GATEWAY_PUBLIC_URL`          | _(unset)_               | Public origin of the gateway's **proxy listener**, used for each API's `invoke_url`. The `gateway.public_url` admin setting overrides it; with neither, `invoke_url` is `null`.                                                                                           |
@@ -282,7 +282,7 @@ Usage card reports its counts unavailable.
 
 Adding the portal's IP to the gateway's `FERRUM_METRICS_ALLOWED_CIDRS` does not
 restore `GET /metrics`. Nexus always presents a credential on the scrape, its
-namespace-scoped admin JWT when no bearer token is set, and Edge v0.9.16 refuses
+namespace-scoped admin JWT when no bearer token is set, and Edge v0.9.17 refuses
 that JWT from an allowlisted address too. Set the bearer token instead.
 
 **The metrics bearer token is a fleet-wide observability credential; treat it
@@ -344,7 +344,7 @@ route. While the namespace is unrouted:
   `PATCH`es and deletes still work, so you can clean up.
 - The startup check logs `MISCONFIGURED NAMESPACE: …` at `error`.
 
-To see the gateway's side (on Ferrum Edge v0.9.16, with an admin JWT that
+To see the gateway's side (on Ferrum Edge v0.9.17, with an admin JWT that
 carries no `ns` claim; the portal's own token sees `active: null` whenever its
 claim does not cover the active namespace):
 
@@ -364,7 +364,7 @@ The released namespace-routing policy accepts a control plane with
 `data_plane_single_namespace: false` and `active: null`; a missing namespace
 block is unknown, not a mismatch. A block that stops appearing ends an earlier
 "served" verdict; it becomes unknown. An earlier "unserved" verdict stays until
-the gateway reports the namespace as served. On Ferrum Edge v0.9.16 the
+the gateway reports the namespace as served. On Ferrum Edge v0.9.17 the
 portal's namespace-scoped token gets the block with `active` withheld (`null`)
 whenever its claim does not cover the gateway's active namespace (see
 [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0917)).
@@ -388,62 +388,8 @@ exact allowed/blocked class arrays, evaluation order and cross-field consistency
 Unknown/missing/malformed metadata, auth/network/timeout failures, cached answers,
 a control plane without a qualifying attestation, unserved/no data plane, mode `both`
 and any allow-CIDR overlay refuse writes. Preflight precedes destructive conversions, staging and ACL building;
-compensation repeats admission and records repair-required failures. Before
-teardown, conversion atomically seals its original baseline, retains its proxy
-reference, sets `gateway_state=repair_required` and records an intent audit. The
-condition survives staging, cutover and catalog commit refusal. Completion clears
-the journal with the catalog, ownership and audit in one lease-fenced transaction.
-Successful rollback also clears repair state and the journal atomically.
-The encrypted `gateway_recovery:<namespace>:<api_id>` setting records original
-operator fields, plugin ids and partial rebuild paths/spec ownership. It uses the
-existing settings repository on all four stores; no schema migration is needed.
-Large journals use an encrypted manifest at that key and individually encrypted
-`gateway_recovery_chunk:<generation>:<index>` rows. Each chunk stays below 1 MiB,
-including encryption and encoding overhead, so growing namespace evidence cannot
-cross [MongoDB's 16 MiB document limit](https://www.mongodb.com/docs/manual/reference/limits/#bson-document-size).
-The complete generation, manifest and old
-chunk retirement commit in one atomic transaction (MongoDB requires a replica set).
-Existing inline legacy journals require the same atomic admission. Updating or deleting
-an API with a journal, enforcement conversion and restore rebuilds refuse opted-in
-standalone MongoDB before catalog, audit or gateway effects. Ordinary catalog revisions,
-live reconciliation and deletion without a journal retain their standalone behavior.
-Reads authenticate identity, order and complete content in a coherent transaction;
-missing/substituted chunks refuse replay and completion. Failed publication retains
-the previous generation, including every original credential, raw row, spec and
-token. Treat these rows as one journal in paired backups and writer-drain procedures;
-never manually trim or remove chunks. Existing single-row journals remain readable,
-and normal encrypted-setting key rotation includes each manifest and chunk.
-Journals this release writes carry `authorityFormat: 2`: every deployment snapshot
-they hold is authority in the Edge v0.9.13 format, which Edge v0.9.14 keeps (snapshot
-v2 and `deployment_snapshot.v2` tokens). Older journals carry no marker and stay
-readable, but Edge v0.9.12 authority in them is refused before any request (see
-[Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913)); an unknown marker is refused.
-The `gateway_restore_cleanup:<namespace>:<api_id>` cutover/cleanup journal uses the
-same format and custody rules.
-`POST /api/apis/:id/restore-gateway` repeats admission, takes the API and proxy
-leases, and verifies resources against that record before rebuilding an absent
-identity. Live selected removal and API-spec replacement use the conditional
-deployment API released in Edge v0.9.13 and unchanged in v0.9.14: a complete encrypted original snapshot and its strong
-`deployment-v1` token, never a backup/row token or namespace replacement. Stored spec
-documents appear in the snapshot evidence only as `{sha256, len}`; Nexus reads their
-bytes from `api_spec_contents` and verifies each against that digest. Each
-pending operation is durable before HTTP. Only HTTP 200 with the expected profile
-and target, committed/applied acknowledgement, explicit cleanup authorization and
-applicable covering cursor allows dependent recovery or journal removal. CP/unserved
-durable-only results, unknown fields, lost replies and cancellation retain the
-journal and attempted identity with `withdrawn: false`; no fresh-token retry or
-unconditional cleanup follows. The owner task may still settle after transport loss.
-Unknown or changed target state refuses mutation. Frozen external-reference replay,
-unrepresentable associations and unsupported write fields require operator
-resolution. Generated validator resource/config fields are preserved; operation
-schemas remain owner-generated. Corrected uploads preserve immutable original replay
-resources and atomically bind the new catalog shape and current revision. Original
-staging replay precedes corrected replacement and cutover under their own retained
-authority. See the [released protocol and qualification limits](edge-conversion-recovery-blocker.md).
-Only a deployment matching the catalog clears the condition; recovery checks it
-on staging before cutover, then again before the fenced completion transaction.
-Reconciliation takes the same proxy lease and retains conversion-owned references
-through missing-resource gaps, so repair cannot release those identities.
+compensation repeats admission and records repair-required failures. A conversion's
+recovery state is kept in [gateway recovery journals](#gateway-recovery-journals).
 
 Two opt-outs relax different checks, and each one relaxes only its own:
 
@@ -693,29 +639,79 @@ under the protocol reason `unsupported_egress_policy_schema` rather than reinter
 it, health reads `degraded`, and an admin's `edge.error` names the unsupported schema.
 Every backend write is then refused in every profile. The same holds for any newer
 schema. Nexus also requires the v0.9.13 deployment snapshot (`api_spec_contents`), so
-Nexus `v0.4.0` pairs with Edge `v0.9.13` only: upgrade Edge and Nexus together, as
-described in [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913). Nexus `v0.5.0`
-and `v0.5.1` pair with Edge `v0.9.14`, the version their acceptance suite tests: they read the
-control-plane attestation within schema 2 and Edge's narrower `durable` outcomes, and
-the snapshot and token formats are unchanged (see
-[Upgrading to Edge v0.9.14](#upgrading-to-edge-v0914)). Nexus `v0.5.2` pairs with
-Edge `v0.9.15`, a security release that keeps every one of these contracts (see
-[Upgrading to Edge v0.9.15](#upgrading-to-edge-v0915)). The next release pairs
-with Edge `v0.9.17`, which fixes the published QUIC advisories affecting
-v0.9.15 and keeps every one of these contracts (see
-[Upgrading to Edge v0.9.17](#upgrading-to-edge-v0917)). The guarantee
+from `v0.4.0` Nexus cannot pair with an Edge older than `v0.9.13`: upgrade Edge and
+Nexus together, as described in [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913).
+Each Nexus release's Edge pairing is listed under
+[Compatible versions](#compatible-versions), and each later Edge upgrade has its
+own procedure below. The guarantee
 still requires `enforcement_scope=local-data-plane` explicitly, not schema 2's
 narrowed `public_only_guaranteed` alone.
 
-[`release/compatibility.env`](../release/compatibility.env) pins the published Edge
-`v0.9.17` default image, and Nexus vendors `contracts-edge-0.9.17` at
-`f7ba1a9b9885900d1e110f76d38e37a02eda13c8`. See [the adoption facts](edge-0.9.11-adoption.md)
-and the separate [packaged public-only fixture](../e2e/public-only/README.md).
+[`release/compatibility.env`](../release/compatibility.env) pins the Edge image and
+`contracts/ferrum-contracts/PIN` the vendored contracts. See
+[the adoption facts](edge-0.9.11-adoption.md) and the separate
+[packaged public-only fixture](../e2e/public-only/README.md).
 
 **Fixing a mismatch.** Set the portal's `FERRUM_NAMESPACE` to the gateway's
 `active` value, or restart the gateway with the portal's value, then restart
 the portal. Changing the portal's namespace changes every listen path, so APIs
 published under the old one must be republished.
+
+### Gateway recovery journals
+
+Before teardown, a conversion atomically seals its original baseline, retains
+its proxy reference, sets `gateway_state=repair_required` and records an intent
+audit. The condition survives staging, cutover and catalog commit refusal. Only
+a deployment matching the catalog clears it: recovery checks it on staging
+before cutover, then again before the lease-fenced transaction that clears the
+journal with the catalog, ownership and audit. Successful rollback also clears
+repair state and the journal atomically. `POST /api/apis/:id/restore-gateway`
+repeats admission, takes the API and proxy leases, and verifies resources
+against the journal before rebuilding an absent identity. Reconciliation takes
+the same proxy lease and retains conversion-owned references through
+missing-resource gaps, so repair cannot release those identities.
+
+The journal is the encrypted `gateway_recovery:<namespace>:<api_id>` setting:
+original operator fields, plugin ids and partial rebuild paths/spec ownership.
+The `gateway_restore_cleanup:<namespace>:<api_id>` cutover/cleanup journal uses
+the same format and custody rules. Both use the existing settings repository on
+all four stores; no schema migration is needed.
+
+- **One journal, several rows.** A large journal is an encrypted manifest at
+  that key plus individually encrypted `gateway_recovery_chunk:<generation>:<index>`
+  rows. Each chunk stays below 1 MiB, including encryption and encoding
+  overhead, so growing namespace evidence cannot cross
+  [MongoDB's 16 MiB document limit](https://www.mongodb.com/docs/manual/reference/limits/#bson-document-size).
+  Treat the rows as one journal in paired backups and writer-drain procedures;
+  never manually trim or remove chunks. Normal encrypted-setting key rotation
+  includes each manifest and chunk, and existing single-row journals remain
+  readable.
+- **Atomic custody.** The complete generation, manifest and old chunk
+  retirement commit in one atomic transaction, so MongoDB requires a replica
+  set. Existing inline legacy journals require the same atomic admission.
+  Updating or deleting an API with a journal, enforcement conversion and restore
+  rebuilds refuse opted-in standalone MongoDB before catalog, audit or gateway
+  effects; ordinary catalog revisions, live reconciliation and deletion without
+  a journal keep their standalone behavior. A failed publication retains the
+  previous generation, including every original credential, raw row, spec and
+  token.
+- **Verified reads.** Reads authenticate identity, order and complete content
+  in a coherent transaction; missing or substituted chunks refuse replay and
+  completion.
+- **Authority format.** Journals this release writes carry `authorityFormat: 2`:
+  every deployment snapshot they hold is authority in the Edge v0.9.13 format,
+  which later Edge releases keep (snapshot v2 and `deployment_snapshot.v2`
+  tokens). Older journals carry no marker and stay readable, but Edge v0.9.12
+  authority in them is refused before any request (see
+  [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913)); an unknown marker is
+  refused.
+
+Replay and cleanup use only Edge's conditional deployment API with the journal's
+complete encrypted original snapshot and its strong `deployment-v1` token: no
+fresh-token retry, unconditional cleanup or namespace replacement. The
+acknowledgement rules and replay limits are in the
+[released protocol and qualification limits](edge-conversion-recovery-blocker.md);
+resolve an unconfirmed outcome with the runbook below.
 
 ### Resolving an unconfirmed gateway deployment mutation
 
@@ -1099,22 +1095,8 @@ Registration may be open, so a signed-up account is semi-trusted. These bounds
 limit what one account can consume.
 
 **Rate limiters** (installed when `NEXUS_RATE_LIMIT_ENABLED=true`, answer
-`429 RATE_LIMITED`):
-
-| Routes                                                                                                                                                                                                                                                                                | Limit           | Keyed on |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | -------- |
-| `/api/auth` register, login, logout, verify-email, resend-verification, forgot-password, reset-password                                                                                                                                                                               | 20/min          | IP       |
-| `GET /api/auth/me`, `GET /api/auth/captcha` (shared)                                                                                                                                                                                                                                  | 120/min         | IP       |
-| `/api/health*`                                                                                                                                                                                                                                                                        | 120/min         | IP       |
-| `GET /api/branding`                                                                                                                                                                                                                                                                   | 120/min         | IP       |
-| `/api/apis` writes: `POST /`, `PATCH /:id`, `DELETE /:id`, `PUT /:id/spec`, `PUT`/`DELETE /:id/plugins/:name`, `POST`/`DELETE /:id/viewers…`, `POST /:id/spec/diff`, `GET /:id/revisions/:revisionId/diff`, `POST …/rollback`, `POST /:id/restore-gateway`, `POST /:id/test-consumer` | 30/min          | account  |
-| `GET /api/apis/:id/usage`                                                                                                                                                                                                                                                             | 30/min          | IP       |
-| `GET /api/catalog/:slug/spec`, `GET /api/catalog/:slug/changes`, `GET /api/catalog/:slug/changes/:revisionId`, per route                                                                                                                                                              | 60/min          | account  |
-| `/api/applications` create, update, delete                                                                                                                                                                                                                                            | 30/min          | account  |
-| `PATCH /api/users/me`                                                                                                                                                                                                                                                                 | 10/min          | account  |
-| `PATCH /api/users/me/notification-preferences`                                                                                                                                                                                                                                        | 10/min          | account  |
-| `POST /api/threads` / `POST /api/threads/:id/messages`                                                                                                                                                                                                                                | 10 / 30 per min | account  |
-| `POST /api/access-requests` / `POST /api/access-requests/:id/cancel`                                                                                                                                                                                                                  | 10 / 30 per min | account  |
+`429 RATE_LIMITED`): the per-route limits and keys are listed once, in
+[security.md, "Rate limiting"](security.md#rate-limiting).
 
 "Account" limiters fall back to the client IP for anonymous requests. All
 counters are in memory, **per process**: with N instances the effective limit is
@@ -1161,17 +1143,18 @@ more in the worst case. Size the database for your provider count.
 
 Each message writes a message row and an audit row. A **platform thread** (no
 `recipient_user_id`) also notifies and emails every active `admin` and
-`super_admin`. Broadcasts and mass email fan out further. The bounds:
+`super_admin`. Broadcasts and mass email fan out further. The bounds (defaults for
+the variables are in the [server table](#server)):
 
 | Bound                             | Value                                               | Where                                 |
 | --------------------------------- | --------------------------------------------------- | ------------------------------------- |
 | New threads / replies             | 10 / 30 per minute per account                      | Rate limiter                          |
-| Messages per account              | 200 per rolling 24 h (`0` = unlimited)              | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` |
-| Broadcast recipients              | 5 000 per broadcast (`0` = unlimited)               | `NEXUS_MAX_BROADCAST_RECIPIENTS`      |
-| Broadcasts per admin              | 20 per rolling 24 h (`0` = unlimited)               | `NEXUS_MAX_BROADCASTS_PER_DAY`        |
-| Mass-email recipients             | 5 000 per campaign (`0` = unlimited)                | `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`     |
-| Mass-email size                   | 64 MiB per campaign (`0` = unlimited)               | `NEXUS_MAX_MASS_EMAIL_BYTES`          |
-| Mass-email campaigns per admin    | 5 per rolling 24 h (`0` = unlimited)                | `NEXUS_MAX_MASS_EMAILS_PER_DAY`       |
+| Messages per account              | per rolling 24 h (`0` = unlimited)                  | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` |
+| Broadcast recipients              | per broadcast (`0` = unlimited)                     | `NEXUS_MAX_BROADCAST_RECIPIENTS`      |
+| Broadcasts per admin              | per rolling 24 h (`0` = unlimited)                  | `NEXUS_MAX_BROADCASTS_PER_DAY`        |
+| Mass-email recipients             | per campaign (`0` = unlimited)                      | `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`     |
+| Mass-email size                   | rendered bytes per campaign (`0` = unlimited)       | `NEXUS_MAX_MASS_EMAIL_BYTES`          |
+| Mass-email campaigns per admin    | per rolling 24 h (`0` = unlimited)                  | `NEXUS_MAX_MASS_EMAILS_PER_DAY`       |
 | SMTP tests per admin              | 10 per rolling hour; 3 per minute                   | Fixed; rate limiter                   |
 | `message_received` email          | 1 per recipient per thread per 10 minutes           | Outbox idempotency key; fixed         |
 | `spec_updated` email              | 1 per recipient per API per clock hour              | Outbox idempotency key; fixed         |
@@ -1265,10 +1248,10 @@ read by the cross-adapter tests, not by the server. See
 ### First run and the bootstrap token
 
 While the portal has no active `super_admin`, the next registration becomes one,
-and it must present the bootstrap token. The account, its role and the
-`bootstrap.super_admin_claimed` audit record are written in one transaction
-under the cross-instance super-admin lock, so a failed attempt leaves nothing
-behind.
+and it must present the bootstrap token. The account, its role, the
+`bootstrap.super_admin_claimed` settings record and the `auth.register` audit
+row are written in one transaction under the cross-instance super-admin lock,
+so a failed attempt leaves nothing behind.
 
 - **`NEXUS_BOOTSTRAP_TOKEN` set:** that value is the token. It is never logged.
 - **Unset:** each process generates a 32-byte random token and logs it at `warn`
@@ -1720,9 +1703,11 @@ NEXUS_DB_URL=mysql://nexus:secret@db.internal:3306/nexus
 ### Retrying interrupted MySQL initialization
 
 MySQL DDL commits outside the migration ledger. Released migrations use
-`CREATE TABLE IF NOT EXISTS` with indexes and constraints inline. Pending
+`CREATE TABLE IF NOT EXISTS` with indexes and constraints inline. Released
 `007` and `008` add string columns: the runner checks `information_schema.COLUMNS`
-and skips only an exact matching definition after an interrupted ALTER.
+and skips only an exact matching definition after an interrupted ALTER (later
+replay cases for `009` and `014` are covered under
+[Schema versioning and upgrades](#schema-versioning-and-upgrades)).
 Re-running finishes an interrupted initialization or upgrade without replacing
 tables or changing retained rows. A database-scoped advisory lock
 (`GET_LOCK`) serializes migrators across instances, and a migration is recorded
@@ -1903,9 +1888,8 @@ docker compose up -d
 
 The four secrets and `FERRUM_EDGE_IMAGE` are required (`${VAR:?…}`); keep the
 secrets stable across restarts. [`release/compatibility.env`](../release/compatibility.env)
-pins the Edge image by digest: Ferrum Edge `v0.9.15` for Nexus `v0.5.2`, and Edge
-`v0.9.17` for the next release on `main`. That is the
-release the acceptance suite ([`e2e/`](../e2e/README.md)) tests against;
+pins the Edge image by digest (see [Compatible versions](#compatible-versions)). That
+is the release the acceptance suite ([`e2e/`](../e2e/README.md)) tests against;
 other Edge versions are unverified.
 
 The quickstart pins its PostgreSQL and Alpine images by multi-architecture
@@ -1918,50 +1902,14 @@ including private Redis URLs. Under the public profile, any allow-CIDR override
 removes the public-only guarantee and refuses backend writes (see
 [backend egress admission](#backend-egress-admission-and-the-public-only-guarantee)).
 
-Dependabot proposes digest updates for Compose and Dockerfile images, which are
-reviewed with the source change. GitHub Actions workflow service images and
-images in workflow `docker run` commands are not tracked by Dependabot; refresh
-those digests manually when updating their readable tags. The required `checks`
-job runs `ci/check-image-pins.sh` on every PR. The checker scans tracked
-Dockerfiles (`FROM` and external `COPY --from`), Compose and workflow YAML image
-fields, workflow `docker://` actions and Docker `run`, `create` and `pull`
-commands, including shell continuations, plus `FERRUM_EDGE_IMAGE` and `NEXUS_IMAGE` assignments in
-`.env`, `.env.*` and `*.env` files. It handles `docker container` commands,
-`docker image pull`, Docker global options before the command, and known
-image-option values such as `--label`, `-e` and `--name`, inside `$(...)` or
-backtick substitutions, quoted `bash -c` strings and `;`/`&&`/`|` chains. A
-workflow `env:` value for either variable, at workflow, job or step level, must
-be a pinned literal or a local build image; a `${{ … }}` expression fails closed.
-An unquoted `$(...)` or backtick substitution inside an option value, as in
-`-v $(pwd):/src`, stays with that value so the image after it is found. Unsupported
-Docker options, and any `docker ... run|create|pull` segment the scanner cannot
-resolve to an image, fail closed. Quoted and flow-style image keys that the simple field
-scanner recognizes are checked; malformed or empty image fields fail closed.
-Dockerfile comment-only lines inside a continued instruction are ignored as
-Docker ignores them. Dockerfile syntax frontends and external images in
-`RUN --mount` are checked too. A tracked YAML file with a top-level `services:`
-key is scanned as Compose even when its name does not contain `compose`.
-
-Literal image references require their own full `@sha256:` digest of 64
-lowercase hexadecimal characters. Version tags can remain before the digest.
-Runtime `${FERRUM_EDGE_IMAGE:?...}` and `${NEXUS_IMAGE:?...}` required-variable
-references are allowed in Compose files and workflow `image:`/`container:` fields;
-workflow `env:` values and env files must assign a pinned image. The acceptance fallback `${NEXUS_IMAGE:-ferrum-nexus:e2e}`
-is allowed as a local image; `e2e/.env.example` uses the same local Nexus image
-exception. Exact-tag exceptions and their reasons are listed in
-`ci/check_image_pins.py`.
-
-This is a bounded static scan of tracked operational files, not a full YAML or
-shell interpreter. It does not execute files, scan shell scripts, expand
-variables, or resolve computed command names, shell aliases, sourced files or
-values assembled indirectly. Workflow Docker commands are checked on individual
-lines, including quoted `run:` scalars and backslash continuations. The checker
-can only cover image references represented in the tracked file forms it
-recognizes.
-The local `ferrum-nexus:ci` image in `.github/workflows/ci.yml` and
-`ferrum-nexus:e2e` images in `e2e/docker-compose.yml` and
-`e2e/.env.example` remain allowed because those are locally built acceptance
-images rather than registry references.
+The required `checks` job enforces digest pins for registry-image references in
+the tracked operational file forms described in
+[image-pin-check.md](image-pin-check.md), with explicit local-build exceptions;
+that page lists its scope, exceptions and parser limits. Dependabot proposes the
+configured Compose and Dockerfile digest updates, which are reviewed with the
+source change; GitHub Actions workflow service images and images in workflow
+`docker run` commands need a manual digest refresh when their readable tags
+change.
 
 The portal is on `http://127.0.0.1:8787` and the gateway proxy listener on
 `http://127.0.0.1:8000`, both bound to loopback. Before adapting it:
@@ -2098,11 +2046,9 @@ never accepted by verification; an invalid hidden Basic shape reports
 Nexus has no namespace Admin restore caller. Its API gateway restore rebuilds
 individual resources and repeats egress admission. Conditional Edge backup does not
 make Nexus and Edge backups jointly atomic; keep the writer-drain and paired-backup
-procedure below. Nexus `v0.5.2` pairs with Edge `v0.9.15` and vendors
-`contracts-edge-0.9.15`; `main` pairs with Edge `v0.9.17` and vendors
-`contracts-edge-0.9.17`. Nexus `v0.5.0` and `v0.5.1` paired with Edge `v0.9.14` and
-vendored `contracts-edge-0.9.14`, and Nexus `v0.4.0` paired with Edge `v0.9.13` and
-vendored `contracts-edge-0.9.13`. See [the adoption facts](edge-0.9.11-adoption.md).
+procedure below. The Edge release and contracts each Nexus release pairs with are
+listed under [Compatible versions](#compatible-versions); see also
+[the adoption facts](edge-0.9.11-adoption.md).
 
 ### Ordering and consistency
 
@@ -2141,6 +2087,16 @@ rotated in that window ([§12](#12-the-credential-mirror)).
   `release/compatibility.env`.
 - **Same driver:** moving between database engines is a migration, not a
   restore.
+
+Each Nexus release is validated against one Edge release and vendors that release's
+contracts (`contracts/ferrum-contracts/PIN`):
+
+| Nexus release         | Ferrum Edge | Vendored contracts      |
+| --------------------- | ----------- | ----------------------- |
+| `v0.4.0`              | `v0.9.13`   | `contracts-edge-0.9.13` |
+| `v0.5.0`, `v0.5.1`    | `v0.9.14`   | `contracts-edge-0.9.14` |
+| `v0.5.2`              | `v0.9.15`   | `contracts-edge-0.9.15` |
+| `main` (next release) | `v0.9.17`   | `contracts-edge-0.9.17` |
 
 ### Restoring
 
@@ -2370,15 +2326,15 @@ and no transaction approaches MongoDB's 16 MB cap.
   costs no campaign.
 - **The campaign is bounded** before anything is written, each refusal a
   `429 QUOTA_EXCEEDED` whose `details.setting` names the variable:
-  - `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5 000): the audience.
-  - `NEXUS_MAX_MASS_EMAIL_BYTES` (default 64 MiB): an upper bound on one
+  - `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`: the audience.
+  - `NEXUS_MAX_MASS_EMAIL_BYTES`: an upper bound on one
     rendered message (subject, HTML and text, for the longest recipient name
     and address after HTML escaping, however often the template repeats them)
     times the recipients. The body limits alone allow about 200 KB per message,
     so 5 000 recipients could otherwise queue about a gigabyte. A single
     message too large for a 4 MiB chunk is refused with `400 VALIDATION_FAILED`
     whatever this is set to.
-  - `NEXUS_MAX_MASS_EMAILS_PER_DAY` (default 5): campaigns per administrator
+  - `NEXUS_MAX_MASS_EMAILS_PER_DAY`: campaigns per administrator
     per rolling 24 hours, counted under a per-administrator lease. The default
     keeps a day's campaign backlog to about 320 MiB per administrator. Claim
     priority does not reduce campaign storage, so the cap remains unchanged.
@@ -2716,7 +2672,7 @@ so alert on each:
 | `api.plugin_rollback`         | A palette plugin change failed. `restored: true` needs nothing. `restored: false` means the config in `details.plugin_config_id` may still hold the attempted change; `details.step_errors` says which step failed. |
 
 ```sql
-SELECT created_at, action, target_id AS api_id, details
+SELECT created_at, action, target_id AS api_id, details_json
   FROM audit_logs
   WHERE action IN ('api.gateway_repair_required', 'api.publish_rollback', 'api.plugin_rollback')
   ORDER BY created_at DESC;
@@ -2832,8 +2788,9 @@ replica-set database. SQLite cannot be shared, so SQLite means one instance.
 
 ### Other multi-instance notes
 
-- **The outbox and teardown workers are safe on several instances.** Claims are
-  atomic, and any instance's stale sweep recovers another's abandoned claims.
+- **The outbox, teardown and account-recovery workers are safe on several
+  instances.** Claims are atomic, and any instance's stale sweep recovers
+  another's abandoned claims.
 - **Sessions live in the database**, so any instance serves any session.
 - **Rate limiters are per process** (N instances allow N × the limit).
 - **The admin-JWT cache is per process.** Harmless.
@@ -2899,8 +2856,10 @@ The `edge.reconciliation` block reports the last reconciliation pass:
   unreachable.
 - The count fields are `null` for callers below `admin`. Error details and the
   gateway's `mode` are also admin-only.
-- Health requests never run a pass. Passes run at startup and every
-  `NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`.
+- Health requests never run a pass. A positive
+  `NEXUS_GATEWAY_RECONCILE_INTERVAL_MS` runs one at startup and on that
+  interval; `0` disables both, so `status` stays `unknown` until an on-demand
+  pass (`POST /api/admin/gateway/reconcile`, or the repair, which scans first).
 
 **Caching and rate limits.** Each dependency is probed at most once per
 `NEXUS_HEALTH_CACHE_MS` (default 5 s) and concurrent callers share the probe. A
@@ -2936,10 +2895,10 @@ mean the gateway is down.
 ### Shutdown
 
 `SIGINT`/`SIGTERM` shut down gracefully: the outbox, gateway-teardown,
-expiry-sweep and reconciliation workers stop, the Admin API client closes,
-Fastify drains, and the store closes. Allow a few seconds of termination grace.
-Anything a worker had claimed but not finished is recovered by a stale sweep five
-minutes after the claim.
+account-recovery, expiry-sweep and reconciliation workers stop, the Admin API
+client closes, Fastify drains, and the store closes. Allow a few seconds of
+termination grace. Anything a worker had claimed but not finished is recovered
+by a stale sweep five minutes after the claim.
 
 ---
 
@@ -2968,7 +2927,7 @@ They authenticate differently:
   CIDR list do not open it; the portal uses its optional fleet-read `viewer`
   JWT (`FERRUM_ADMIN_FLEET_READ_JWT_SECRET`) there.
 
-From Ferrum Edge v0.9.16 an admin JWT with an `ns` claim, like the portal's
+From Ferrum Edge v0.9.17 an admin JWT with an `ns` claim, like the portal's
 ordinary one, is refused on both, even from an allowed address. Prometheus
 scrapes `/metrics`; give it the bearer token or a CIDR entry:
 
@@ -2994,7 +2953,7 @@ traffic after the plugin is enabled is counted.
 An API with no `ferrum_requests_total` series for its own `proxy_id` shows
 `available: false` with an `unavailable_reason` instead of zero counters. The
 portal's own reads of both endpoints need extra credentials on Ferrum Edge
-v0.9.16; see
+v0.9.17; see
 [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0917).
 
 To match a dashboard to a portal API, use the `proxy_id` label: it is the
@@ -3151,6 +3110,53 @@ repeats mean self-service recovery is silently broken.
 runs it at once, returning `gateway_teardown: "ok"` if Edge accepted or
 `"pending"` if not. It is audited as `user.gateway_teardown_retry` and is the
 **Retry** button on the Users page. Do not edit the table by hand.
+
+### Account recovery revocations
+
+A password reset that records an account's first trusted proof of its address
+owes a revocation of every credential the account and its applications hold
+(see [`security.md`](security.md#2-session-security)). The reset writes an
+`account_recovery_jobs` row in the same transaction, tries the revocation at
+once, and leaves the row for the account-recovery worker if Edge refuses.
+
+- `pending` is owed at `next_attempt_at`; `sending` is claimed (claiming
+  increments `attempts`). Success deletes the row. There is no failed state.
+- Retries back off `10 s × 2^attempts`, capped at five minutes, plus up to 10%
+  jitter. A `sending` row untouched for five minutes returns to `pending`.
+- While the row is outstanding, the account's credential issuance is refused
+  (`409 CONFLICT`). After 8 failed attempts the worker stamps `unblocked_at`,
+  stops refusing issuance, audits `credential.recovery_stalled`, and keeps
+  retrying. When the job lands it revokes only credentials created before
+  `unblocked_at`, so keys the owner issued afterwards survive.
+
+```sql
+SELECT user_id, status, attempts, last_error, next_attempt_at, unblocked_at, updated_at
+  FROM account_recovery_jobs
+  ORDER BY updated_at DESC LIMIT 20;
+```
+
+**Alert on** `credential.recovery_stalled` audit rows and on repeats of these
+`warn` lines: an outstanding row means the previous holder's keys may still be
+live. The first two carry `user_id` and `error`.
+
+```
+Account recovery revocation failed; credential issuance stays blocked
+Account recovery revocation failed again; it is retried, but no longer blocks issuance
+Account recovery tick failed
+```
+
+The worker also logs `Account recovery revocation completed`,
+`Released stale account recovery claims`,
+`Could not release stale account recovery claims` and
+`Account recovery job was abandoned mid-flight; the stale sweep recovers it`.
+
+To repair, read `last_error` and restore what it names (usually Edge
+reachability or the admin JWT). The worker keeps retrying and needs no
+re-driving. Intervene only when a delete cannot be placed: then
+[reconcile the pair](#reconciling-one) with `POST /api/admin/credentials/reconcile`.
+That is destructive: it deletes every credential of the selected type on the
+consumer, newer keys included, and they must be re-issued. The job completes on
+its next attempt. Do not edit the table by hand.
 
 ---
 
@@ -3413,7 +3419,7 @@ entries nobody holds, including suspected ones (`suspected: true`) where an
 append's `POST` failed and Nexus could not prove whether it applied:
 
 ```sql
-SELECT created_at, target_id AS consumer_id, details
+SELECT created_at, target_id AS consumer_id, details_json
   FROM audit_logs
   WHERE action = 'credential.append_rollback'
   ORDER BY created_at DESC;
@@ -3436,8 +3442,11 @@ those ids point at nothing. New accounts and new publishes work, but:
 
 ### The signal
 
-A reconciliation pass asks Edge about each stored reference. It runs at startup,
-every `NEXUS_GATEWAY_RECONCILE_INTERVAL_MS` (15 min default), and on demand. The
+A reconciliation pass asks Edge about each stored reference. A positive
+`NEXUS_GATEWAY_RECONCILE_INTERVAL_MS` (15 min default) runs one at startup and on
+that interval; `0` disables both. Passes also run on demand
+(`POST /api/admin/gateway/reconcile`; `POST /api/admin/gateway/repair` scans
+before it repairs), and with `0` they are the only ones. The
 result appears as `edge.reconciliation` on both health endpoints
 ([§9](#9-health-checks)); `status: "orphaned"` degrades the portal, and the
 server logs `The gateway no longer holds references the portal stored; run the
@@ -3827,36 +3836,31 @@ list still applies. This is how administrators link: no provider can link an
 `admin` or `super_admin` account by address.
 
 An explicit link needs the same **recorded trusted proof** of the account's
-address as an automatic one: a completed password reset, or an earlier
-provider-verified provisioning or automatic link. A redeemed registration
-verification link does not count. Without it the
-link is refused with `address_unproven`, even when the provider asserts
-`email_verified: true` for that very address. Otherwise whoever registered an
-address first could link an identity they control and keep signing in through
-it after the rightful holder resets the password. Accepting an explicit link
-records no proof of its own. The one exception is the **founding
-`super_admin`**, the account seated with the bootstrap token: the token already
-proves the operator owns it, so it links without a proof.
+address as an automatic one (a completed password reset, or an earlier
+provider-verified provisioning or automatic link), and is refused with
+`address_unproven` without it. The **founding `super_admin`**, seated with the
+bootstrap token, links without one. Why the provider's `email_verified` is not
+enough is explained in
+[security.md, "Single sign-on"](security.md#single-sign-on-openid-connect).
 
 With no SMTP configured, a locally registered account cannot earn a trusted
 proof (reset mail stays queued), so such an account without one can link
 explicitly only if it is the founder. Accounts a provider provisioned with
 `email_verified: true`, and accounts that already hold a password-reset or
-provider proof from before, keep that proof and can still link. To offer single
-sign-on to such accounts, configure SMTP: holders, new registrations included,
-then prove their address with **Forgot password** (redeeming the registration
-verification link is not enough). Otherwise let the provider create the accounts
+provider proof, keep it and can still link. To offer single sign-on to such
+accounts, configure SMTP: holders, new registrations included, then prove their
+address with **Forgot password** (redeeming the registration verification link
+is not enough). Otherwise let the provider create the accounts
 (`jit_provisioning`), or link them automatically once their address is proven.
 The founder's exemption keeps the `sso_only` setup below open on a portal
 without mail.
 
 **Passwords of linked accounts.** A pre-existing account keeps its password
-when it is linked, so the provider's offboarding and MFA do not bind it: it
-can still sign in with the password. Set `disable_local_password_for_linked`
-on the provider, or use `sso_only`, where that matters. With the flag on,
-password sign-in and reset are refused for every account linked at that
-provider while the link exists. A `super_admin` is exempt from all of this, so
-break-glass sign-in and password reset always work for one.
+when it is linked, outside the provider's offboarding and MFA. Set
+`disable_local_password_for_linked` on the provider, or use `sso_only`, where
+that matters: with the flag on, password sign-in and reset are refused for
+every account linked at that provider while the link exists. A `super_admin` is
+exempt, so break-glass sign-in and password reset always work for one.
 
 Administrators see and remove an account's links with
 `GET /api/users/:id/identities` and

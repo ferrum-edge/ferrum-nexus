@@ -87,7 +87,7 @@ docker/    Dockerfile + docker-compose.example.yml
 | `index.ts`                                     | Composition root: `buildServer(config, deps)` + `main()`. No business logic.                                                                                           |
 | `config/index.ts`                              | The **only** reader of `process.env`. zod-validated into `NexusConfig`.                                                                                                |
 | `lib/`                                         | `crypto.ts`, `errors.ts` (`NexusError`), `keyed-serializer.ts` + `lease-fence.ts` (§5.2), `ids.ts`, `logger.ts`.                                                       |
-| `db/store.ts`                                  | The `NexusStore` interface: 29 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                                                 |
+| `db/store.ts`                                  | The `NexusStore` interface: 30 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                                                 |
 | `db/adapters/{sqlite,postgres,mysql,mongodb}/` | The four implementations.                                                                                                                                              |
 | `db/adapters/sql-common.ts`, `sql-repos.ts`    | Dialect shims and the repository bodies shared by PostgreSQL and MySQL.                                                                                                |
 | `db/migrations/`                               | SQL migrations per dialect: `.sql` (SQLite), `.pg.sql`, `.mysql.sql`. MongoDB declares its indexes in code.                                                            |
@@ -103,11 +103,12 @@ docker/    Dockerfile + docker-compose.example.yml
 | `publishing/`                                  | `service.ts` (proxy lifecycle), `edge-plugins.ts` (the binder), `spec-document.ts`, `oas.ts`, `viewers.ts`.                                                            |
 | `plugins/`                                     | The provider plugin palette: `service.ts`, `schema.ts` (§5.7).                                                                                                         |
 | `access/service.ts`                            | request → approve/deny → grant → revoke, and the ACL-group writes.                                                                                                     |
-| `credentials/`                                 | `service.ts` (show-once issue/rotate/revoke), `consumers.ts` (the provisioner), `teardown-worker.ts`.                                                                  |
+| `credentials/`                                 | `service.ts` (show-once issue/rotate/revoke), `consumers.ts` (the provisioner), `teardown-worker.ts`, `account-recovery.ts` (§7.2).                                    |
 | `usage/service.ts`                             | Per-API usage and backend health, read from Edge's metrics.                                                                                                            |
 | `messaging/service.ts`                         | 1:1 threads and the platform inbox.                                                                                                                                    |
 | `notifications/service.ts`                     | The header bell and inbox. A courtesy channel, never the record.                                                                                                       |
 | `email/`                                       | `service.ts` (render/enqueue, SMTP transport and inline SMTP diagnostics), `outbox-worker.ts` (queued sends), `templates.ts`.                                          |
+| `service-manifest/`                            | `service.ts` and `schema.ts`: the read-only shared v1 service-manifest preview (`POST /api/service-manifests/preview`).                                                |
 | `admin/`                                       | `settings-service.ts`, `mass-email-service.ts`, `smtp-test-service.ts`, `god-service.ts`, `gateway-reconciliation.ts`, `rotate-key.ts`.                                |
 | `routes/`                                      | One plugin per domain. Routes validate shapes and delegate to the services they are handed.                                                                            |
 | `test/`                                        | `helpers.ts` boots the real app on in-memory SQLite; `mock-ferrum-edge.ts` is a real HTTP server.                                                                      |
@@ -160,12 +161,13 @@ Why this shape:
   once and passed to each. That puts every consumer write behind the same
   per-consumer lock (§5.2).
 
-Four background pollers start after `app.ready()` and stop on `onClose`: the
-email outbox (§7), gateway teardown (§7.1), the hourly session/token expiry
-sweep (§8.1), and the periodic gateway-reference reconciliation
+Five background pollers start after `app.ready()` and stop on `onClose`: the
+email outbox (§7), gateway teardown (§7.1), account-recovery revocation (§7.2),
+the hourly session/token expiry sweep (§8.1), and the periodic gateway-reference
+reconciliation
 (`NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`, see
 [`operations.md`](operations.md#13-retargeting-or-rebuilding-ferrum-edge)). All
-four are off under `NEXUS_ENV=test`, where tests call `tick()` / `scan()`
+five are off under `NEXUS_ENV=test`, where tests call `tick()` / `scan()`
 directly.
 
 ---
@@ -412,44 +414,6 @@ never put a stale body under a fresh tag. Verification error bodies are suppress
 like credential writes. Dedicated append/delete and show-once paths are unchanged.
 Leases still order Nexus's multi-step operations and fence its store transactions.
 
-Fresh closed `GET /backend-egress-policy` admission lives at every proxy/spec create
-and replacement, including plugin binding and undo; service preflight precedes staging,
-destructive conversion and spec ACL enrollment. Conversion commits
-`repair_required`, the original owned proxy id, an intent audit and an encrypted
-recovery journal in `app_settings` before resource teardown. Deliberate restore
-takes both API and proxy leases and binds complete original deployment-v1 authority
-to conditional selected removal/replacement in released Edge v0.9.13. Explicit
-commit, applicable local application and recovery-cleanup authorization are required
-before dependent recovery. Uncertain writes retain the journal and block replay;
-no fresh-token retry or unconditional fallback is used. The rebuilt path,
-configuration, plugins and spec are validated before cutover and completion.
-The journal is removed only with catalog, ownership and completion audit in one
-fenced transaction. Successful rollback reconciles the catalog and journal together.
-See the [released protocol and remaining qualification](edge-conversion-recovery-blocker.md).
-Health caches observations only.
-The public profile requires namespace-matched local serving/public-only metadata and
-operator-established Admin/traffic singleton identity, or a control plane whose Edge
-data-plane attestation (Edge v0.9.14) proves every data plane connected to it
-public-only while at least `NEXUS_EXPECTED_DATA_PLANES` distinct data planes
-(`node_id`) are connected. Each Edge data-plane process reports its own random
-`node_id` for its lifetime, so the count is of running data-plane processes. Nexus
-counts distinct `node_id`s, not streams, so a reconnect overlap of one process counts
-once; a process that restarts without closing its stream returns under a new
-`node_id`, so Nexus counts a `node_id` only once it has existed longer than Edge takes
-to drop the stale stream it may have replaced. That count is
-the operator's inventory across every control plane, and the only evidence that the
-connected set is the whole fleet: a control plane never sees a data plane that uses
-another one, so the guarantee holds only when the control plane Nexus reads sees
-every data plane. Multiple control plane replicas, load-balanced Admin endpoints and
-data-plane failover between control planes are not attested; there the count falls
-short and the guarantee is withheld. Process evidence alone cannot attest CPs, remote
-DPs or fleets, so without a qualifying attestation Nexus reports those pairings as
-not guaranteed and admits their writes only under the explicit private opt-in. See the
-[topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)
-and [packaged fixture](../e2e/public-only/README.md). Source authority is Edge
-`669c574c1d1e88e84dccb26a8159939e6694644d` (`v0.9.17`). Nexus adopts its
-[published image and canonical contracts](edge-0.9.11-adoption.md).
-
 **Leases.** One row per key with an owner token and expiry: 60 s TTL renewed at
 half that, a 30 s wait for a contended key, then `409 CONFLICT` asking the user
 to retry. A crashed holder blocks the key only until its lease expires. Every
@@ -486,6 +450,25 @@ through `mutateProxy`: `GET /proxies/{id}`, overwrite only the changing fields,
 Without it, an auth change and a plugin change on different instances could
 leave a proxy running the plugin with no authentication.
 
+### Backend egress admission and conversion recovery
+
+Every proxy/spec create and replacement, including plugin binding, undo and
+compensation, first reads a fresh, closed `GET /backend-egress-policy`; service
+preflight precedes staging, destructive conversion and spec ACL enrollment.
+Conversion commits `repair_required`, the original owned proxy id, an intent audit
+and an encrypted recovery journal before any teardown. Replay binds the journal's
+complete original `deployment-v1` authority to Edge's conditional selected
+removal/replacement, and dependent cleanup needs a committed, applied and
+cleanup-authorized acknowledgement; uncertain writes keep the journal, with no
+fresh-token retry or unconditional fallback. The journal is removed only with the
+catalog, ownership and completion audit in one fenced transaction. The public
+profile admits writes only for a local data plane with operator-established
+Admin/traffic identity, or a control plane whose data-plane attestation covers at
+least `NEXUS_EXPECTED_DATA_PLANES` settled data planes. See
+[`operations.md`](operations.md#backend-egress-admission-and-the-public-only-guarantee)
+for the topology and [gateway recovery journals](operations.md#gateway-recovery-journals),
+and the [released recovery protocol](edge-conversion-recovery-blocker.md).
+
 ### 5.3 The plugin naming trap
 
 Edge's _plugin_ names and _credential-type_ keys differ. Mixing them up
@@ -516,10 +499,16 @@ Plugin configs are closed key sets; a typo is a `400`. What Nexus sends:
 - **`rate_limiting`** — `limit_by: 'consumer'`, `expose_headers: true`, and one
   `limits` entry with `scope: "default"` using `window_seconds` +
   `max_requests`. Edge's preset keys (`requests_per_second|minute|hour`) cannot
-  be mixed with the custom pair, so Nexus uses only the custom pair.
-- **`cors`** — `{ allowed_origins, allow_credentials }` only. Edge's other CORS
-  keys keep their native defaults; sending a key the provider cannot change
-  would only freeze that default.
+  be mixed with the custom pair, so Nexus uses only the custom pair. In `redis`
+  sync mode (`FERRUM_RATE_LIMIT_SYNC_MODE=redis`) it also stamps `sync_mode`,
+  `redis_url` and `redis_tls`.
+- **`cors`** — `allowed_origins`, `allow_credentials`, `allowed_headers` (a fixed
+  base set, `X-API-Key` for `key_auth`, plus the provider's extra headers) and
+  `allowed_methods` (the API's method list plus `OPTIONS`, or
+  `GET`/`HEAD`/`POST`/`PUT`/`PATCH`/`DELETE`/`OPTIONS` when the API allows all
+  methods). Edge's other CORS keys keep their native defaults on creation; an
+  update merges these keys over the live config, so an operator's other settings
+  and additional headers survive.
 - **`openapi_validator`** — **Nexus never creates one by hand.** Edge refuses a
   hand-built validator on a proxy with no attached API spec, so `routes`
   enforcement submits the _document_ and lets Edge generate the plugin (see
@@ -1233,6 +1222,24 @@ disable(tx) ──> gateway_teardown_jobs(pending) ──claim──> sending �
 
 See [`security.md`](security.md#disabling-an-account) for why the disable may
 commit ahead of the revocation.
+
+### 7.2 Account recovery jobs
+
+A password reset that records an account's first trusted proof of its address
+owes a revocation of every credential the account and its applications hold.
+The reset writes an `account_recovery_jobs` row in the same transaction, makes
+one inline attempt, and leaves failures to `credentials/account-recovery.ts`.
+
+- One row per account. Success deletes it; failure returns it to `pending` with
+  `10s · 2^attempts` backoff, capped at five minutes, plus jitter.
+- **There is no `failed` state**, as in §7.1. Credential issuance is refused
+  while the row blocks it. After 8 failed attempts
+  (`ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS`) the job stamps `unblocked_at` with a
+  `credential.recovery_stalled` audit row and stops blocking issuance; the
+  worker keeps retrying. When it finally lands it revokes only credentials
+  created before `unblocked_at`, so keys the owner issued afterwards survive.
+
+See [`operations.md`](operations.md#account-recovery-revocations) for monitoring.
 
 ---
 

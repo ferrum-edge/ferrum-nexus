@@ -214,12 +214,14 @@ definition alone (an `info.version` bump, another operation, an unreferenced sch
 keeps its ID, so subsets carry; a bump of the document's `openapi` version rotates every
 tool. Grantees are told which tools changed, after a spec update or an edit in Settings,
 including the new name of a tool you renamed.
-Historical request/grant coverage marks expired IDs explicitly.
+Older requests and grants show tool IDs that no longer exist as expired.
 
-Existing phase-1 APIs must be republished once before accepting subsets. Review the
-[upgrade tradeoff](../mcp-subsets-migration-draft.md) before rollout.
+APIs published before tool subsets must be republished once before accepting subsets.
+Review the [upgrade tradeoff](../mcp-subsets-migration-draft.md) before rollout.
 
-See the [published contract and test coverage](../agent-marketplace.md).
+The complete subset rules are in the
+[API reference](../api.md#optional-mcp-access-subsets); see also the
+[published contract](../agent-marketplace.md).
 
 ### Require an approved access request
 

@@ -8,16 +8,9 @@ that the compatibility record pins for the next Nexus release. Canonical
 byte-for-byte. See [adoption facts](../../docs/edge-0.9.11-adoption.md). It needs a
 packaged Nexus image and runs on demand; it is not part of the required CI checks. The
 fixture exercises the local data-plane profile, the only pairing Nexus grants the
-public-only guarantee. Nexus uses Edge's released selected
-conditional removal and API-spec replacement: full original deployment authority
-is durable before HTTP, and committed/applied acknowledgement with explicit cleanup
-authorization is required before dependent recovery. Uncertain results retain the
-encrypted journal and attempted identity without fresh-token retry or unconditional
-cleanup. Large journals preserve complete evidence in authenticated encrypted chunks
-committed atomically with their manifest. This DNS fixture does not cover conversion
-custody, native-store boundaries or recovery interleavings; the store contracts and
-the acceptance suite cover Nexus-side recovery, and owner-side store behaviour is
-covered by Edge's own tests.
+public-only guarantee. It does not cover conversion custody, native-store
+boundaries or recovery interleavings; the acceptance suite and store contracts
+cover Nexus-side recovery, and Edge's own tests cover owner-side store behaviour.
 
 This stack is separate from the private-opt-in acceptance stack. It admits
 `rebind.fixture.test` while DNS returns `11.203.0.10`, proves real authenticated
