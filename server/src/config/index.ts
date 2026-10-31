@@ -189,7 +189,7 @@ export interface EdgeConfig {
    * The gateway's `FERRUM_METRICS_BEARER_TOKEN`, presented on `GET /metrics`
    * instead of the admin JWT (`FERRUM_METRICS_BEARER_TOKEN` on the portal).
    *
-   * Edge v0.9.16 refuses an admin JWT that carries an `ns` claim on every
+   * Edge v0.9.17 refuses an admin JWT that carries an `ns` claim on every
    * fleet-global route, `/metrics` included, and every token Nexus mints
    * carries one. Unset, the scrape keeps using the admin JWT, which an older
    * gateway accepts; a refusal then reads "metrics unavailable" with the

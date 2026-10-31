@@ -52,7 +52,7 @@ services:
       FERRUM_ADMIN_JWT_SECRET: ${FERRUM_ADMIN_JWT_SECRET:?set FERRUM_ADMIN_JWT_SECRET}
       FERRUM_ADMIN_ALLOW_INSECURE_HTTP: 'true' # in-network compose traffic only
       FERRUM_NAMESPACE: nexus
-      # Ferrum Edge v0.9.16 and later refuse the portal's namespace-scoped admin
+      # Ferrum Edge v0.9.17 and later refuse the portal's namespace-scoped admin
       # token on its fleet-wide metrics reads, so the Usage card reads them as
       # unavailable. Each optional credential restores one; see docs/operations.md,
       # "Namespace-bounded admin tokens", for what each one can read before

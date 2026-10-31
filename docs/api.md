@@ -2927,8 +2927,9 @@ method, path, name and `definition_hash` are unchanged, so explicit subsets carr
 whitespace and `info` edits, and usually across changes to other operations or
 unreferenced components. The exception is a tool whose hash falls back to the whole
 document (an unresolvable or external reference, or a document past the hashing work
-budget, recorded as `tool_hash_fallback`): any change outside `info` re-ids it, and its
-subset holders must ask for it again. Any
+or depth budget): any change outside `info` re-ids it, and its subset holders must ask
+for it again. Only the budget fallback is recorded, as `tool_hash_fallback: true` in the
+audit row that commits the change. Any
 definition change, description-only edits included, mints a new ID, as do rename,
 path/method changes, removing/re-adding exposure and disable/re-enable. The write that
 does so removes the old IDs from every explicit subset (`access.tools_prune`, `reason`

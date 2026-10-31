@@ -153,7 +153,7 @@ export interface MockFerrumEdgeOptions {
    */
   requireNamespaceClaim?: boolean;
   /**
-   * Stand in for Ferrum Edge v0.9.16 (ferrum-edge#6093), where a token carrying
+   * Stand in for Ferrum Edge v0.9.17 (ferrum-edge#6093), where a token carrying
    * an `ns` claim is a tenant credential whatever `requireNamespaceClaim` says:
    *
    * - the claim bounds every namespace-scoped route and `GET /namespaces`
@@ -163,7 +163,7 @@ export interface MockFerrumEdgeOptions {
    *   reference lookup) answers `403`: `/metrics`, `/admin/metrics`,
    *   `/version` and any unknown path among them;
    * - `/health` and `/status` answer one of three tiers:
-   *   - `'tenant'`, the shape v0.9.16 ships: `status`, `ready`, `mode`,
+   *   - `'tenant'`, the shape v0.9.17 ships: `status`, `ready`, `mode`,
    *     `admin_writes_enabled` and the `namespace` block. When the claim does
    *     not cover the block's `active`, the block stays with `active: null`
    *     (`serving_scope` and `data_plane_single_namespace` unchanged) and
@@ -489,7 +489,7 @@ export interface MockFerrumEdge {
 const DEFAULT_NAMESPACE = 'ferrum';
 
 /**
- * Edge v0.9.16's `ns_claim_global_route_is_allowed`: the global routes a token
+ * Edge v0.9.17's `ns_claim_global_route_is_allowed`: the global routes a token
  * with an `ns` claim may still reach. Everything else global is `403`.
  */
 function nsClaimGlobalRouteAllowed(method: string, segments: string[]): boolean {
@@ -2206,7 +2206,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     claims: Record<string, unknown> | null,
     namespace: string,
   ): boolean {
-    // From Edge v0.9.16 a present claim bounds the token whatever the flag says.
+    // From Edge v0.9.17 a present claim bounds the token whatever the flag says.
     const bounded = nsClaimBound !== undefined && claims?.ns !== undefined;
     if (!requireNamespaceClaim && !bounded) return true;
     const allowed = namespacesInClaim(claims?.ns);
@@ -2214,7 +2214,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   }
 
   /**
-   * What Edge v0.9.16 answers a token with an `ns` claim on `/health` and
+   * What Edge v0.9.17 answers a token with an `ns` claim on `/health` and
    * `/status`: the bounded tenant tier, or only `status` and `ready`. The
    * `namespace` block names `active` only when the claim covers it; otherwise
    * it is sent with `active: null`, or dropped under `'tenant-without-block'`.
@@ -3571,7 +3571,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         const derived = new Set<string>(namespaces.keys());
         for (const consumer of consumers.values()) derived.add(consumer.namespace);
         for (const proxy of proxies.values()) derived.add(String(proxy.namespace));
-        // Edge v0.9.16 lists only what a present `ns` claim names.
+        // Edge v0.9.17 lists only what a present `ns` claim names.
         const claimed = nsClaimBound === undefined ? null : namespacesInClaim(claims?.ns);
         const listed = [...derived].filter((entry) => claimed === null || claimed.includes(entry));
         return send(res, 200, paginate(listed.sort(), query));
@@ -3860,7 +3860,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     if (scopedNamespace !== null && !claimAuthorizesNamespace(claims, scopedNamespace)) {
       return fail(res, 403, `Token is not authorized for namespace '${scopedNamespace}'`);
     }
-    // Edge v0.9.16: a token with an `ns` claim reaches no global route outside
+    // Edge v0.9.17: a token with an `ns` claim reaches no global route outside
     // its allowlist, unknown paths included.
     if (
       nsClaimBound !== undefined &&

@@ -211,7 +211,9 @@ it on the grant they already hold; the request appears in your Requests tab mark
 without interrupting the access it already gives. Denying it leaves the grant as it is.
 A spec update that leaves a tool's
 definition alone (an `info.version` bump, another operation, an unreferenced schema)
-keeps its ID, so subsets carry; a bump of the document's `openapi` version rotates every
+usually keeps its ID, so subsets carry. The exception is a tool whose definition Nexus
+cannot hash on its own (an external or unresolvable reference, or a very large document):
+it is hashed with the whole document, so any change outside `info` rotates it. A bump of the document's `openapi` version rotates every
 tool. Grantees are told which tools changed, after a spec update or an edit in Settings,
 including the new name of a tool you renamed.
 Older requests and grants show tool IDs that no longer exist as expired.

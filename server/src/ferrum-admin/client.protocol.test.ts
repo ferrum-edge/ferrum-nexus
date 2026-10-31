@@ -679,7 +679,7 @@ describe('Edge response contracts over HTTP sockets', () => {
     assert.equal(await client.version(), null);
     reply.status = 405;
     assert.equal(await client.version(), null);
-    // Edge v0.9.16 answers an unknown global path 403 to a token with an `ns` claim.
+    // Edge v0.9.17 answers an unknown global path 403 to a token with an `ns` claim.
     Object.assign(reply, { status: 403, body: '{"error":"global route denied"}' });
     assert.equal(await client.version(), null);
     Object.assign(reply, { status: 200, body: 'null' });

@@ -334,7 +334,7 @@ describe('ferrum admin metrics', () => {
 });
 
 /**
- * Ferrum Edge v0.9.16 (ferrum-edge#6093) refuses an admin JWT carrying an `ns`
+ * Ferrum Edge v0.9.17 (ferrum-edge#6093) refuses an admin JWT carrying an `ns`
  * claim on every fleet-global route, `/metrics` and `/admin/metrics` among
  * them, and every token Nexus mints carries one. Each read has its own
  * optional credential; without it the refusal must read as unavailable with
