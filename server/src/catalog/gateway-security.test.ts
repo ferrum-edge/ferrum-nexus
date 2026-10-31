@@ -54,6 +54,10 @@ describe('gatewaySecurityScheme', () => {
       assert.match(description, /^Ferrum Edge gateway credential: /);
       assert.doesNotMatch(description, /[0-9a-f]{8}-[0-9a-f]{4}/, 'no consumer or key is named');
     }
+    // Edge's jwt_auth requires `exp` by default (`require_exp`), and the
+    // consumer is matched on `sub`.
+    assert.match(String(gatewaySecurityScheme('jwt_auth').description), /sub claim .* exp claim/);
+    assert.match(String(gatewaySecurityScheme('basic_auth').description), /not the portal email/);
   });
 });
 
@@ -268,6 +272,77 @@ describe('stampGatewaySecurity', () => {
     });
     const stamped = stamp(document, 'jwt_auth');
     assert.deepEqual((stamped.webhooks as Doc).Orders, { get: { security: [{ [GW]: [] }] } });
+  });
+
+  it('follows reference chains of any length and Path Items kept under a `paths` extension', () => {
+    const chain = Object.fromEntries(
+      Array.from({ length: 20 }, (_, i) => [
+        `A${i}`,
+        i === 19 ? { get: { security: [] } } : { $ref: `#/components/pathItems/A${i + 1}` },
+      ]),
+    );
+    const document = base({
+      paths: {
+        '/orders': { $ref: '#/components/pathItems/A0' },
+        '/template': { $ref: '#/paths/x-template' },
+        'x-template': { get: {} },
+        'x-unused': { get: {} },
+      },
+      components: { pathItems: chain },
+    });
+    const stamped = stamp(document, 'key_auth');
+    const pathItems = (stamped.components as Doc).pathItems as Record<string, Doc>;
+    assert.deepEqual(pathItems.A19, { get: { security: [{ [GW]: [] }] } });
+    const paths = stamped.paths as Record<string, Doc>;
+    assert.deepEqual(paths['x-template'], { get: { security: [{ [GW]: [] }] } });
+    assert.equal(paths['x-unused'], (document.paths as Doc)['x-unused']);
+  });
+
+  it('reads `%2F` in a reference as a separator too, as RFC 6901 decodes it first', () => {
+    const document = base({
+      paths: { '/orders': { $ref: '#/components%2FpathItems/Orders' } },
+      components: {
+        pathItems: { Orders: { get: { security: [{ alias: [] }] } } },
+        securitySchemes: {
+          alias: { $ref: '#/components%2FsecuritySchemes/key' },
+          key: { type: 'apiKey', in: 'header', name: 'X-API-Key' },
+        },
+      },
+    });
+    const pathItems = (stamp(document, 'key_auth').components as Doc).pathItems as Doc;
+    assert.deepEqual(pathItems.Orders, { get: { security: [{ [GW]: [] }] } });
+  });
+
+  it('leaves the document unchanged when repeating the root security would outgrow the limit', () => {
+    const paths = Object.fromEntries(
+      Array.from({ length: 100 }, (_, i) => [`/p${i}`, { get: { responses: {} } }]),
+    );
+    const document = base({
+      paths,
+      security: [{ oauth: ['x'.repeat(64 * 1024)] }],
+      components: { securitySchemes: { oauth: { type: 'oauth2', flows: {} } } },
+    });
+    assert.equal(stamp(document, 'key_auth'), document);
+
+    const small = base({ paths, security: [{ oauth: ['orders:read'] }] });
+    const stamped = stamp(small, 'key_auth');
+    assert.notEqual(stamped, small);
+    assert.equal(
+      opSecurity(stamped, '/p0'),
+      opSecurity(stamped, '/p99'),
+      'one shared inherited requirement',
+    );
+  });
+
+  it('computes the inherited requirement once and stops early when it fans out', () => {
+    const paths = Object.fromEntries(
+      Array.from({ length: 3_000 }, (_, i) => [`/p${i}`, { get: { responses: {} } }]),
+    );
+    const security = Array.from({ length: 10_000 }, (_, i) => ({ [`s${i}`]: [] }));
+    const document = base({ paths, security });
+    const started = performance.now();
+    assert.equal(stamp(document, 'key_auth'), document);
+    assert.ok(performance.now() - started < 5_000, 'bounded by the document, not its fan-out');
   });
 
   it('decodes percent-encoding and JSON Pointer escapes in path item references', () => {

@@ -57,7 +57,13 @@
  *   gateway scheme can be defined.
  */
 
-import { resolveOpenApiPointer, type AuthPluginType } from '@ferrum-nexus/shared';
+import {
+  MAX_OPENAPI_REF_HOPS,
+  MAX_SPEC_EXPANDED_BYTES,
+  OPENAPI_OPERATION_METHODS,
+  resolveOpenApiPointer,
+  type AuthPluginType,
+} from '@ferrum-nexus/shared';
 
 /**
  * Name the gateway's scheme is registered under, when the provider's document
@@ -68,14 +74,6 @@ export const GATEWAY_SECURITY_SCHEME_NAME = 'ferrum_gateway';
 /** The header `key_auth` reads with the empty config Nexus sends it. */
 const KEY_AUTH_HEADER = 'X-API-Key';
 
-/** Path Item keys that hold an Operation Object. */
-const OPERATION_KEYS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'];
-
-/**
- * Longest `$ref` chain followed from a security scheme entry to its definition,
- * or from a path to the Path Item it is served from.
- */
-const MAX_REF_HOPS = 8;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -144,16 +142,25 @@ function schemeHeader(scheme: Record<string, unknown>): string | null {
 
 /**
  * Follow a scheme entry's local `$ref` chain to its definition, if it ends at
- * one. References resolve against the whole document, percent-decoded and
- * RFC 6901-unescaped, as an OpenAPI client resolves them.
+ * one, reading each reference both ways {@link pointerReadings} describes.
  */
 function resolveScheme(document: unknown, entry: unknown): Record<string, unknown> | null {
   let current = entry;
-  for (let hop = 0; hop <= MAX_REF_HOPS; hop += 1) {
+  for (let hop = 0; hop <= MAX_OPENAPI_REF_HOPS; hop += 1) {
     if (!isRecord(current)) return null;
     const ref = current.$ref;
     if (typeof ref !== 'string') return current;
-    current = resolveOpenApiPointer(document, ref);
+    current = undefined;
+    for (const segments of pointerReadings(ref)) {
+      const pointer =
+        '#/' + segments.map((x) => x.replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
+      // Re-encode `%` so the resolver's own percent-decoding is a no-op.
+      const target = resolveOpenApiPointer(document, pointer.replace(/%/g, '%25'));
+      if (target !== undefined) {
+        current = target;
+        break;
+      }
+    }
   }
   return null;
 }
@@ -215,35 +222,75 @@ function withGatewayRequirement(
 /** Where a Path Item `$ref` points: one entry of `paths`, `webhooks` or `components.pathItems`. */
 type PathItemRegistry = 'paths' | 'webhooks' | 'pathItems';
 
-/** Percent-decode and RFC 6901-unescape one pointer segment, or `null` if malformed. */
-function pointerSegment(raw: string): string | null {
-  let decoded: string;
+/** `decodeURIComponent`, or `null` for a malformed escape. */
+function percentDecode(text: string): string | null {
   try {
-    decoded = decodeURIComponent(raw);
+    return decodeURIComponent(text);
   } catch {
     return null;
   }
-  return decoded.replace(/~1/g, '/').replace(/~0/g, '~');
 }
 
-/** The registry entry a Path Item `$ref` names, or `null` for anything else. */
-function pathItemTarget(ref: string): { registry: PathItemRegistry; key: string } | null {
-  if (!ref.startsWith('#/')) return null;
-  const segments = ref.slice(2).split('/').map(pointerSegment);
-  if (segments.some((segment) => segment === null)) return null;
-  const [first, second, third] = segments as string[];
-  if (segments.length === 2 && first === 'paths') return { registry: 'paths', key: second! };
-  if (segments.length === 2 && first === 'webhooks') return { registry: 'webhooks', key: second! };
-  if (segments.length === 3 && first === 'components' && second === 'pathItems') {
-    return { registry: 'pathItems', key: third! };
-  }
-  return null;
+/** RFC 6901-unescape one pointer segment. */
+function unescapeSegment(segment: string): string {
+  return segment.replace(/~1/g, '/').replace(/~0/g, '~');
 }
+
+/**
+ * The segment lists a local `$ref` can mean. RFC 6901 §6 percent-decodes the
+ * whole fragment before splitting it, so `%2F` separates segments; resolvers
+ * that split first (this repository's `resolveOpenApiPointer` among them)
+ * read it as a `/` inside one segment. Both readings are returned, so a
+ * reference either kind of client follows is followed here.
+ */
+function pointerReadings(ref: string): string[][] {
+  if (!ref.startsWith('#/')) return [];
+  const readings: string[][] = [];
+  const decodedFirst = percentDecode(ref.slice(2));
+  if (decodedFirst !== null) readings.push(decodedFirst.split('/').map(unescapeSegment));
+  const segments = ref.slice(2).split('/').map(percentDecode);
+  if (segments.every((segment): segment is string => segment !== null)) {
+    const splitFirst = segments.map(unescapeSegment);
+    if (
+      !readings.some(
+        (r) => r.length === splitFirst.length && r.every((x, i) => x === splitFirst[i]),
+      )
+    ) {
+      readings.push(splitFirst);
+    }
+  }
+  return readings;
+}
+
+/** The registry entries a Path Item `$ref` can name. */
+function pathItemTargets(ref: string): { registry: PathItemRegistry; key: string }[] {
+  const targets: { registry: PathItemRegistry; key: string }[] = [];
+  for (const [first, second, third, ...rest] of pointerReadings(ref)) {
+    if (rest.length > 0 || first === undefined || second === undefined) continue;
+    if (third === undefined && first === 'paths') targets.push({ registry: 'paths', key: second });
+    if (third === undefined && first === 'webhooks') {
+      targets.push({ registry: 'webhooks', key: second });
+    }
+    if (third !== undefined && first === 'components' && second === 'pathItems') {
+      targets.push({ registry: 'pathItems', key: third });
+    }
+  }
+  return targets;
+}
+
+/** Thrown when the requirements written would outgrow the catalog size limit. */
+class StampTooLarge extends Error {}
 
 /**
  * The document with the gateway's credential declared on every operation the
  * gateway serves; see the module comment. The input is not modified: changed
  * nodes are copied, everything else is shared.
+ *
+ * Every operation that inherits the root `security` gets a copy of it, so a
+ * large root requirement repeated on many operations could grow the document
+ * far past what it was measured at on upload. The requirements are measured
+ * as they are written, and past {@link MAX_SPEC_EXPANDED_BYTES} the document
+ * is returned unchanged (served without the declaration) instead of built.
  */
 export function stampGatewaySecurity(
   document: Record<string, unknown>,
@@ -253,18 +300,38 @@ export function stampGatewaySecurity(
   const schemes = isRecord(components.securitySchemes) ? components.securitySchemes : {};
   const name = freeSchemeName(schemes);
   const colliding = collidingSchemes(document, schemes, authPlugin);
-  const rootSecurity = document.security;
+
+  let written = 0;
+  const charge = (requirement: unknown[]): void => {
+    written += JSON.stringify(requirement).length;
+    if (written > MAX_SPEC_EXPANDED_BYTES) throw new StampTooLarge();
+  };
+  // One shared, never-mutated value for every operation that inherits the root.
+  let inherited: Record<string, unknown>[] | null = null;
+  let inheritedBytes = 0;
 
   /** A Path Item with an explicit, gateway-stamped `security` on every operation. */
   const stampPathItem = (item: unknown): unknown => {
     if (!isRecord(item)) return item;
     let copy: Record<string, unknown> | null = null;
-    for (const method of OPERATION_KEYS) {
+    for (const method of OPENAPI_OPERATION_METHODS) {
       const operation = item[method];
       if (!isRecord(operation)) continue;
-      const own = Object.hasOwn(operation, 'security') ? operation.security : rootSecurity;
+      let security: Record<string, unknown>[];
+      if (Object.hasOwn(operation, 'security')) {
+        security = withGatewayRequirement(operation.security, name, colliding);
+        charge(security);
+      } else {
+        if (inherited === null) {
+          inherited = withGatewayRequirement(document.security, name, colliding);
+          inheritedBytes = JSON.stringify(inherited).length;
+        }
+        security = inherited;
+        written += inheritedBytes;
+        if (written > MAX_SPEC_EXPANDED_BYTES) throw new StampTooLarge();
+      }
       copy ??= { ...item };
-      copy[method] = { ...operation, security: withGatewayRequirement(own, name, colliding) };
+      copy[method] = { ...operation, security };
     }
     return copy ?? item;
   };
@@ -274,62 +341,69 @@ export function stampGatewaySecurity(
     webhooks: document.webhooks,
     pathItems: components.pathItems,
   };
-  // Registry entries a path is served from through its `$ref` chain. An entry
-  // of `paths` is stamped as a path anyway, so only the other two are kept.
-  const referenced: Record<'webhooks' | 'pathItems', Set<string>> = {
+  // Registry entries a path is served from through its `$ref` chain, however
+  // long. Each entry is visited once, so cycles end and the work is bounded
+  // by the size of the three registries.
+  const referenced: Record<PathItemRegistry, Set<string>> = {
+    paths: new Set(),
     webhooks: new Set(),
     pathItems: new Set(),
   };
   const follow = (item: unknown): void => {
-    let current = item;
-    const seen = new Set<string>();
-    for (let hop = 0; hop < MAX_REF_HOPS; hop += 1) {
-      if (!isRecord(current) || typeof current.$ref !== 'string') return;
-      const target = pathItemTarget(current.$ref);
-      if (target === null) return;
-      const id = `${target.registry}\n${target.key}`;
-      if (seen.has(id)) return;
-      seen.add(id);
-      if (target.registry !== 'paths') referenced[target.registry].add(target.key);
-      const registry = registries[target.registry];
-      if (!isRecord(registry) || !Object.hasOwn(registry, target.key)) return;
-      current = registry[target.key];
+    const pending = [item];
+    while (pending.length > 0) {
+      const current = pending.pop();
+      if (!isRecord(current) || typeof current.$ref !== 'string') continue;
+      for (const target of pathItemTargets(current.$ref)) {
+        const registry = registries[target.registry];
+        if (!isRecord(registry) || !Object.hasOwn(registry, target.key)) continue;
+        if (referenced[target.registry].has(target.key)) continue;
+        referenced[target.registry].add(target.key);
+        pending.push(registry[target.key]);
+      }
     }
   };
 
-  const copy: Record<string, unknown> = {
-    ...document,
-    components: {
-      ...components,
-      securitySchemes: { ...schemes, [name]: gatewaySecurityScheme(authPlugin) },
-    },
-  };
-  // `Object.fromEntries` defines own properties, so a provider key such as
-  // `__proto__` stays a key instead of reaching the prototype.
-  if (isRecord(document.paths)) {
-    copy.paths = Object.fromEntries(
-      Object.entries(document.paths).map(([template, item]) => {
-        if (!template.startsWith('/')) return [template, item];
+  try {
+    const copy: Record<string, unknown> = {
+      ...document,
+      components: {
+        ...components,
+        securitySchemes: { ...schemes, [name]: gatewaySecurityScheme(authPlugin) },
+      },
+    };
+    const stampReferenced = (registry: Record<string, unknown>, keys: ReadonlySet<string>) =>
+      // `Object.fromEntries` defines own properties, so a provider key such as
+      // `__proto__` stays a key instead of reaching the prototype.
+      Object.fromEntries(
+        Object.entries(registry).map(([key, item]) => [
+          key,
+          keys.has(key) ? stampPathItem(item) : item,
+        ]),
+      );
+    if (isRecord(document.paths)) {
+      const served = new Set<string>();
+      for (const [template, item] of Object.entries(document.paths)) {
+        if (!template.startsWith('/')) continue;
+        served.add(template);
         follow(item);
-        return [template, stampPathItem(item)];
-      }),
-    );
+      }
+      // An extension under `paths` is data unless a path is served from it.
+      for (const key of referenced.paths) served.add(key);
+      copy.paths = stampReferenced(document.paths, served);
+    }
+    if (referenced.pathItems.size > 0 && isRecord(components.pathItems)) {
+      (copy.components as Record<string, unknown>).pathItems = stampReferenced(
+        components.pathItems,
+        referenced.pathItems,
+      );
+    }
+    if (referenced.webhooks.size > 0 && isRecord(document.webhooks)) {
+      copy.webhooks = stampReferenced(document.webhooks, referenced.webhooks);
+    }
+    return copy;
+  } catch (error) {
+    if (error instanceof StampTooLarge) return document;
+    throw error;
   }
-  const stampReferenced = (registry: Record<string, unknown>, keys: ReadonlySet<string>) =>
-    Object.fromEntries(
-      Object.entries(registry).map(([key, item]) => [
-        key,
-        keys.has(key) ? stampPathItem(item) : item,
-      ]),
-    );
-  if (referenced.pathItems.size > 0 && isRecord(components.pathItems)) {
-    (copy.components as Record<string, unknown>).pathItems = stampReferenced(
-      components.pathItems,
-      referenced.pathItems,
-    );
-  }
-  if (referenced.webhooks.size > 0 && isRecord(document.webhooks)) {
-    copy.webhooks = stampReferenced(document.webhooks, referenced.webhooks);
-  }
-  return copy;
 }

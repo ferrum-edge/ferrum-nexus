@@ -516,7 +516,9 @@ export interface CatalogSpecResponse {
   version: string;
   /**
    * JSON or YAML text normalized to use gateway servers throughout, with the
-   * gateway credential declared as a security scheme on every served operation.
+   * gateway credential declared as a security scheme on every served operation
+   * (unless the declaration would push the document past the size limit; see
+   * `docs/api.md`).
    */
   raw_spec: string;
   /** `application/json` or `application/yaml`, matching `raw_spec`. */

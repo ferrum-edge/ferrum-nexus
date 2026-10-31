@@ -203,7 +203,11 @@ export function renderCatalogDocument(
   authPlugin: AuthPluginType,
   fits: (serialized: string) => boolean = catalogSpecFitsLimit,
 ): string {
-  const stamped = renderCatalogSpec(stampGatewaySecurity(document, authPlugin), contentType);
+  const declared = stampGatewaySecurity(document, authPlugin);
+  // The stamp hands back the document itself when the requirements it would
+  // write already outgrow the limit.
+  if (declared === document) return renderCatalogSpec(document, contentType);
+  const stamped = renderCatalogSpec(declared, contentType);
   return fits(stamped) ? stamped : renderCatalogSpec(document, contentType);
 }
 

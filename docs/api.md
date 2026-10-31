@@ -1829,7 +1829,10 @@ identical are merged. Its definition stays, and a scheme whose reference cannot
 be resolved is kept. A `components` or `components.securitySchemes` that is not
 an object is replaced. A document that the declaration would push past the
 size limit is served without it. The declaration is documentation; the
-gateway's auth plugin is what enforces it.
+gateway's auth plugin is what enforces it. Path item references are followed
+when they point at an entry of `paths`, `webhooks` or `components.pathItems` in
+the same document; a path served from anywhere else (another file, or another
+part of the document) is not stamped and keeps the provider's security.
 
 The result is cached in process per revision, gateway address and auth plugin
 (at most 64 documents / 32 MiB), after the visibility check.
