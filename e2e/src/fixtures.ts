@@ -163,6 +163,54 @@ export function authHeadersFor(
   return { authorization: `Bearer ${signJwt(subject, secret)}` };
 }
 
+/**
+ * The one header the catalog document's security says carries the gateway
+ * credential, filled with the value {@link authHeadersFor} produced.
+ *
+ * Reads the `security` of one operation of the document
+ * `GET /api/catalog/:slug/spec` serves (its own, else the root's) and the
+ * scheme it names, as an OpenAPI client (an importer, a code generator) would: an `apiKey` header keeps its declared name, and `http`
+ * `basic` / `bearer` use `Authorization` with that prefix. It throws when the
+ * document names no single scheme, or one the issued credential cannot fill,
+ * so a gateway call made with the result tests the document, not this helper.
+ */
+export function headersFromCatalogSecurity(
+  document: unknown,
+  path: string,
+  method: string,
+  issued: Record<string, string>,
+): Record<string, string> {
+  const doc = document as {
+    security?: Record<string, unknown>[];
+    paths?: Record<string, Record<string, { security?: Record<string, unknown>[] }>>;
+    components?: { securitySchemes?: Record<string, Record<string, unknown>> };
+  };
+  const operation = doc.paths?.[path]?.[method];
+  const security = operation && 'security' in operation ? operation.security : doc.security;
+  const names = Object.keys(security?.[0] ?? {});
+  if (security?.length !== 1 || names.length !== 1) {
+    throw new Error(`expected exactly one gateway requirement, got ${JSON.stringify(security)}`);
+  }
+  const scheme = doc.components?.securitySchemes?.[names[0]!];
+  const valueOf = (header: string): string | undefined =>
+    Object.entries(issued).find(([name]) => name.toLowerCase() === header.toLowerCase())?.[1];
+  if (scheme?.type === 'apiKey' && scheme.in === 'header' && typeof scheme.name === 'string') {
+    const value = valueOf(scheme.name);
+    if (value === undefined) throw new Error(`the credential has no ${scheme.name} header`);
+    return { [scheme.name]: value };
+  }
+  const httpScheme = typeof scheme?.scheme === 'string' ? scheme.scheme.toLowerCase() : null;
+  if (scheme?.type === 'http' && (httpScheme === 'basic' || httpScheme === 'bearer')) {
+    const prefix = httpScheme === 'basic' ? 'Basic ' : 'Bearer ';
+    const value = valueOf('authorization');
+    if (value === undefined || !value.startsWith(prefix)) {
+      throw new Error(`the credential is not a ${prefix.trim()} Authorization header`);
+    }
+    return { authorization: value };
+  }
+  throw new Error(`unexpected gateway security scheme ${JSON.stringify(scheme)}`);
+}
+
 /** A minimal HS256 token — no dependency, so the contract is the only input. */
 export function signJwt(subject: string, secret: string): string {
   const encode = (value: object): string =>

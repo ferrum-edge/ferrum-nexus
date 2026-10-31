@@ -108,7 +108,11 @@ Open an API and choose the **Documentation** tab for the rendered OpenAPI
 document: operations, parameters, and request and response schemas. **You do
 not need access to read the docs**, so you can judge an API before you ask for
 it. For your own tooling, `GET /api/catalog/<slug>/spec` returns the document
-as uploaded (`raw_spec`).
+(`raw_spec`) with its servers pointing at the gateway and the gateway's
+credential declared as the `ferrum_gateway` security scheme, so an API client
+that imports OpenAPI (Anvil, Postman, a code generator) asks you for the right
+header. Fill it with a credential of the API's type; see
+[Calling an API](#calling-an-api).
 
 Large documents show 200 operation entries at first; **Show 200 more** adds
 the next batch. An operation listed under several tags counts once per tag.

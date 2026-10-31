@@ -1767,12 +1767,28 @@ export function parseStoredSpecStructure(text: string): Record<string, unknown> 
 export function renderCatalogSpec(
   document: Record<string, unknown>,
   contentType: ParsedSpec['contentType'],
-): string {
+): string;
+/**
+ * With `aliases: false`, `null` instead of an aliased YAML rendering: the
+ * catalog's gateway-security declaration is only served written out in full,
+ * so it never turns a document served without aliases into one with them.
+ */
+export function renderCatalogSpec(
+  document: Record<string, unknown>,
+  contentType: ParsedSpec['contentType'],
+  options: { aliases: false },
+): string | null;
+export function renderCatalogSpec(
+  document: Record<string, unknown>,
+  contentType: ParsedSpec['contentType'],
+  options: { aliases?: boolean } = {},
+): string | null {
   if (contentType === 'application/json') return JSON.stringify(document, null, 2);
+  const fallback = (aliased: string): string | null => (options.aliases === false ? null : aliased);
   const aliased = stringifyYaml(document, { lineWidth: 0 });
-  if (estimateUnaliasedYamlBytes(aliased) > MAX_SPEC_EXPANDED_BYTES) return aliased;
+  if (estimateUnaliasedYamlBytes(aliased) > MAX_SPEC_EXPANDED_BYTES) return fallback(aliased);
   const unaliased = stringifyYaml(document, { lineWidth: 0, aliasDuplicateObjects: false });
-  return byteLength(unaliased) > MAX_SPEC_EXPANDED_BYTES ? aliased : unaliased;
+  return byteLength(unaliased) > MAX_SPEC_EXPANDED_BYTES ? fallback(aliased) : unaliased;
 }
 
 /**

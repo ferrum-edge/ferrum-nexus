@@ -15,13 +15,19 @@ import { parse as parseYaml } from 'yaml';
 import type { ApiErrorBody, CatalogSpecResponse, PublishApiResponse } from '@ferrum-nexus/shared';
 
 import {
+  GATEWAY_SECURITY_SCHEME_NAME,
+  gatewaySecurityScheme,
+} from '../catalog/gateway-security.js';
+import {
   createCatalogService,
+  renderCatalogDocument,
   type CatalogService,
   type CatalogSpecRendering,
 } from '../catalog/service.js';
 import type { UserRecord } from '../db/store.js';
 import { isNexusError } from '../lib/errors.js';
 import { LruCache } from '../lib/lru-cache.js';
+import { renderCatalogSpec } from '../publishing/oas.js';
 import { CATALOG_SPEC_RATE_LIMIT } from '../routes/catalog.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -175,6 +181,38 @@ describe('catalog spec cache', () => {
     assert.equal(cache.stats().hits, 1, 'the original address is still cached');
   });
 
+  it('misses when the auth plugin changes, and declares the new credential', async () => {
+    fresh();
+    const schemesOf = (body: CatalogSpecResponse): unknown =>
+      (parseYaml(body.raw_spec) as { components: { securitySchemes: unknown } }).components
+        .securitySchemes;
+    const before = await catalog.spec(outsider, 'spec-cache-public');
+    assert.deepEqual(schemesOf(before), {
+      [GATEWAY_SECURITY_SCHEME_NAME]: gatewaySecurityScheme('key_auth'),
+    });
+
+    const changed = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${publicId}`,
+      payload: { auth_plugin: 'jwt_auth', confirm_access_disruption: true },
+    });
+    assert.equal(changed.statusCode, 200, changed.body);
+    try {
+      const after = await catalog.spec(outsider, 'spec-cache-public');
+      assert.deepEqual(schemesOf(after), {
+        [GATEWAY_SECURITY_SCHEME_NAME]: gatewaySecurityScheme('jwt_auth'),
+      });
+      assert.equal(cache.stats().misses, 2, 'the auth plugin is part of the key');
+    } finally {
+      const restored = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${publicId}`,
+        payload: { auth_plugin: 'key_auth', confirm_access_disruption: true },
+      });
+      assert.equal(restored.statusCode, 200, restored.body);
+    }
+  });
+
   it('serves a new revision as soon as it is current', async () => {
     fresh();
     const original = await catalog.spec(outsider, 'spec-cache-public');
@@ -215,6 +253,54 @@ describe('catalog spec cache', () => {
     }
     assert.equal(cache.stats().misses, 1);
     assert.equal(cache.stats().hits, 1, 'the refusal is cached, not re-parsed');
+  });
+
+  it('serializes without the declaration a document it would push past the limit', () => {
+    const document = {
+      openapi: '3.1.0',
+      info: { title: 'Big', version: '1.0.0' },
+      paths: { '/a': { get: { responses: {} } } },
+    };
+    const declared = renderCatalogDocument(document, 'application/json', 'key_auth');
+    assert.match(declared, /ferrum_gateway/);
+    const checked: string[] = [];
+    const fallback = renderCatalogDocument(document, 'application/yaml', 'key_auth', (text) => {
+      checked.push(text);
+      return text.length < 0;
+    });
+    assert.deepEqual(parseYaml(fallback), document, 'the document as it was served before');
+    assert.equal(checked.length, 1, 'only the declared rendering is measured here');
+    assert.match(checked[0]!, /ferrum_gateway/);
+  });
+
+  it('never serves the declaration as aliased YAML', () => {
+    // A shared node that only fits aliased: written out at each of its 100
+    // uses it is far past the limit.
+    const shared = { description: 'x'.repeat(64 * 1024) };
+    const document = {
+      openapi: '3.1.0',
+      info: { title: 'Wide', version: '1.0.0' },
+      paths: Object.fromEntries(
+        Array.from({ length: 100 }, (_, i) => [
+          `/p${i}`,
+          { get: { responses: { '200': shared } } },
+        ]),
+      ),
+    };
+    const aliased = renderCatalogSpec(document, 'application/yaml');
+    assert.match(aliased, /\*a1/, 'the existing rendering aliases the shared node');
+    assert.equal(renderCatalogSpec(document, 'application/yaml', { aliases: false }), null);
+
+    const served = renderCatalogDocument(document, 'application/yaml', 'key_auth');
+    assert.equal(served, aliased, 'served exactly as before, without the declaration');
+
+    const small = renderCatalogDocument(
+      { ...document, paths: { '/a': { get: {} }, '/b': { get: {} } } },
+      'application/yaml',
+      'key_auth',
+    );
+    assert.match(small, /ferrum_gateway/);
+    assert.doesNotMatch(small, /[&*]a\d/, 'the shared requirement is written out in full');
   });
 
   it('keeps the entries it holds within the configured bounds', async () => {

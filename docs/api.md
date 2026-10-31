@@ -1809,8 +1809,33 @@ callbacks, and Link Object `server` — is replaced with the API's `invoke_url`
 and extensions are untouched. The Documentation tab renders this same
 document; the provider's original is only at `GET /api/apis/:id/spec`.
 
-The result is cached in process per revision and gateway address (at most 64
-documents / 32 MiB), after the visibility check.
+The document also declares the gateway credential, so tools that read
+`security` (importers such as Anvil's, code generators) send it. A
+`ferrum_gateway` security scheme (`_2`, `_3`, … when the provider already uses
+that name) is added under `components.securitySchemes`: `apiKey` in header
+`X-API-Key` for `key_auth`, `http` `basic` for `basic_auth`, and `http`
+`bearer` with `bearerFormat: JWT` for `jwt_auth`. It describes the credential
+type only, never a consumer or key. Every operation under `paths`, inline or
+reached through a chain of path item `$ref`s, gets an explicit `security`: its
+own, or the root's when it has none, with the gateway scheme added to every
+alternative. An operation that requires nothing (`security` absent, `[]` or
+`[{}]`) then requires the gateway scheme alone. The root `security` is left as
+uploaded, so webhook and callback operations, which describe requests the
+provider's service makes, keep their meaning; only a reusable path item or
+webhook that a path references is stamped. A provider scheme sent in the
+header the gateway reads (`X-API-Key` for `key_auth`; `Authorization`, so every
+`http`, `oauth2` and `openIdConnect` scheme, for the other two) is dropped from
+those requirements, because a request cannot carry both, and alternatives left
+identical are merged. Its definition stays, and a scheme whose reference cannot
+be resolved is kept. A `components` or `components.securitySchemes` that is not
+an object is replaced. A document that the declaration would push past the size limit, or a YAML document it would leave fitting only with aliases, is served without it. The declaration is documentation; the
+gateway's auth plugin is what enforces it. Path item references are followed
+when they point at an entry of `paths`, `webhooks` or `components.pathItems` in
+the same document; a path served from anywhere else (another file, or another
+part of the document) is not stamped and keeps the provider's security.
+
+The result is cached in process per revision, gateway address and auth plugin
+(at most 64 documents / 32 MiB), after the visibility check.
 
 Errors: `404 NOT_FOUND` (not viewable, or no spec), `400 SPEC_INVALID` (the
 stored document cannot be normalized; no contents or parser output are

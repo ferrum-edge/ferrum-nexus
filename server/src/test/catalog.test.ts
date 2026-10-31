@@ -13,6 +13,10 @@ import type {
   PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
+import {
+  GATEWAY_SECURITY_SCHEME_NAME,
+  gatewaySecurityScheme,
+} from '../catalog/gateway-security.js';
 import { createCatalogService } from '../catalog/service.js';
 import {
   SAMPLE_SPEC_JSON,
@@ -21,6 +25,37 @@ import {
   type TestApp,
   type TestSession,
 } from './helpers.js';
+
+/**
+ * A document with no security as the catalog serves it for a `key_auth` API:
+ * the gateway scheme defined, and required on every operation under `paths`.
+ */
+function withKeyAuthSecurity(document: Record<string, unknown>): Record<string, unknown> {
+  const security = [{ [GATEWAY_SECURITY_SCHEME_NAME]: [] }];
+  const paths = Object.fromEntries(
+    Object.entries(document.paths as Record<string, Record<string, unknown>>).map(
+      ([template, item]) => [
+        template,
+        Object.fromEntries(
+          Object.entries(item).map(([key, value]) => [
+            key,
+            ['get', 'put', 'post', 'delete', 'patch'].includes(key)
+              ? { ...(value as Record<string, unknown>), security }
+              : value,
+          ]),
+        ),
+      ],
+    ),
+  );
+  return {
+    ...document,
+    paths,
+    components: {
+      ...(document.components as Record<string, unknown> | undefined),
+      securitySchemes: { [GATEWAY_SECURITY_SCHEME_NAME]: gatewaySecurityScheme('key_auth') },
+    },
+  };
+}
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
@@ -336,10 +371,13 @@ describe('catalog visibility', () => {
       assert.equal(yaml.statusCode, 200);
       const yamlBody = yaml.json<CatalogSpecResponse>();
       assert.equal(yamlBody.content_type, 'application/yaml');
-      assert.deepEqual(parseYaml(yamlBody.raw_spec), {
-        ...parseYaml(SAMPLE_SPEC_YAML),
-        servers: [{ url: 'https://gateway.example.test/nexus/cat-public' }],
-      });
+      assert.deepEqual(
+        parseYaml(yamlBody.raw_spec),
+        withKeyAuthSecurity({
+          ...parseYaml(SAMPLE_SPEC_YAML),
+          servers: [{ url: 'https://gateway.example.test/nexus/cat-public' }],
+        }),
+      );
       assert.equal(yamlBody.parsed_title, 'Billing API');
 
       await publish(provider, 'cat-json', { spec: SAMPLE_SPEC_JSON });
@@ -410,10 +448,8 @@ describe('catalog visibility', () => {
           assert.equal(body.content_type, `application/${format}`);
           const normalized: unknown =
             format === 'json' ? JSON.parse(body.raw_spec) : parseYaml(body.raw_spec);
-          assert.deepEqual(
-            normalized,
-            makeDocument({ url: `https://gateway.example.test/nexus/${slug}` }),
-          );
+          const expected = makeDocument({ url: `https://gateway.example.test/nexus/${slug}` });
+          assert.deepEqual(normalized, withKeyAuthSecurity(expected));
 
           for (const viewer of [provider, founder]) {
             const original = await harness.authed(viewer, {
@@ -434,6 +470,66 @@ describe('catalog visibility', () => {
           }
         });
       }
+    }
+
+    for (const plugin of ['key_auth', 'basic_auth', 'jwt_auth'] as const) {
+      it(`declares the ${plugin} gateway credential next to the provider's own`, async () => {
+        const document = {
+          openapi: '3.1.0',
+          info: { title: 'Secured', version: '1.0.0' },
+          servers: [{ url: 'https://origin.example.test' }],
+          security: [{ upstreamBearer: [] }, { partnerKey: [] }],
+          paths: {
+            '/invoices': {
+              get: { responses: { '200': { description: 'OK' } } },
+              post: { security: [], responses: { '201': { description: 'Created' } } },
+            },
+          },
+          components: {
+            securitySchemes: {
+              upstreamBearer: { type: 'http', scheme: 'bearer' },
+              partnerKey: { type: 'apiKey', in: 'header', name: 'X-Partner-Key' },
+            },
+          },
+        };
+        const raw = JSON.stringify(document);
+        const slug = `cat-security-${plugin.replace('_', '-')}`;
+        const id = await publish(provider, slug, { spec: raw, auth_plugin: plugin });
+        const response = await harness.authed(client, {
+          method: 'GET',
+          url: `/api/catalog/${slug}/spec`,
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        const served = JSON.parse(response.json<CatalogSpecResponse>().raw_spec) as {
+          security: unknown;
+          components: { securitySchemes: Record<string, unknown> };
+          paths: { '/invoices': { get: { security: unknown }; post: { security: unknown } } };
+        };
+        const gateway = { [GATEWAY_SECURITY_SCHEME_NAME]: [] };
+        assert.deepEqual(served.components.securitySchemes, {
+          ...document.components.securitySchemes,
+          [GATEWAY_SECURITY_SCHEME_NAME]: gatewaySecurityScheme(plugin),
+        });
+        assert.deepEqual(served.security, document.security, 'the root is left as uploaded');
+        // The gateway reads `Authorization` for basic and JWT credentials, so
+        // the provider's bearer cannot be sent beside it; X-API-Key leaves it.
+        assert.deepEqual(
+          served.paths['/invoices'].get.security,
+          plugin === 'key_auth'
+            ? [
+                { upstreamBearer: [], ...gateway },
+                { partnerKey: [], ...gateway },
+              ]
+            : [gateway, { partnerKey: [], ...gateway }],
+        );
+        assert.deepEqual(served.paths['/invoices'].post.security, [gateway]);
+
+        const original = await harness.authed(provider, {
+          method: 'GET',
+          url: `/api/apis/${id}/spec`,
+        });
+        assert.equal(original.json<GetApiSpecResponse>().raw_spec, raw, 'the stored original');
+      });
     }
 
     it('uses only the listen path when the public gateway origin is unset', async () => {
