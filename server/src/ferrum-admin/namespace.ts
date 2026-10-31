@@ -31,7 +31,7 @@
  * absence is never a positive assertion that the namespace *is* served.
  *
  * **Health tiers.** Edge v0.9.15 gives the portal's admin token its detailed
- * `/health` tier, block included. Edge v0.9.16 bounds a token with an `ns`
+ * `/health` tier, block included. Edge v0.9.17 bounds a token with an `ns`
  * claim to a tenant tier that keeps the block but withholds `active` (sends
  * `null`, naming no other namespace) when the claim does not cover the
  * gateway's active namespace. A block that says the data plane is

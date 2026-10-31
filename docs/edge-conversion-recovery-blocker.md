@@ -68,14 +68,17 @@ the expected target id, `durable=committed`, `live=applied`, explicit
 `recovery_cleanup_authorized=true` and the applicable local covering cursor.
 A CP/unserved durable-only 200 (`live=not_applicable`, authorization false) is
 insufficient. Wrong/missing fields, lost transport, cancellation and failed owner
-audit/lease release retain the journal; the original owner task may still settle.
+audit/lease release retain the journal and the attempted identity with
+`withdrawn: false`; the original owner task may still settle.
 This proof does not attest every remote data plane.
 
 Acknowledged staging resources are compared before their own operation authority
 is recorded. Unknown or changed proxy/spec/plugin state refuses mutation. The
 original replay data remains immutable through corrected catalog upload and staged
-replacement. Agent enrollment precedes initial namespace-token capture; admitted
-replacement/cutover does not repeat that consumer mutation. Existing API/proxy
+replacement. Original staging replay precedes corrected replacement and cutover,
+each under its own retained authority. Agent enrollment precedes initial
+namespace-token capture; admitted replacement/cutover does not repeat that
+consumer mutation. Existing API/proxy
 leases, transaction fences, transactional audits, cancellation/drain and consumer
 credential row verification remain in place. Final catalog mode, current revision,
 ownership, completion audit and journal deletion share one Nexus transaction.

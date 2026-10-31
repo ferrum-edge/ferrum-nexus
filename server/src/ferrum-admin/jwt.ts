@@ -14,7 +14,7 @@
  *   the request. A gateway started with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`
  *   also refuses a token without it, so stamping it is what makes a
  *   locked-down control plane work at all.
- * - From Ferrum Edge v0.9.16 (ferrum-edge#6093) a token carrying `ns` is a
+ * - From Ferrum Edge v0.9.17 (ferrum-edge#6093) a token carrying `ns` is a
  *   **tenant credential whatever that flag says**: it reaches only
  *   namespace-scoped routes plus a short allowlist (`/health`, `/status`,
  *   `/live`, `/overload`, `GET /plugins`, the namespace registry). Every

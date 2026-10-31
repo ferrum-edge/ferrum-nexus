@@ -21,7 +21,7 @@ Related: [`architecture.md`](architecture.md) · [`operations.md`](operations.md
 | Password hashes                                              | `users.password_hash` (scrypt)                                                               | Credential stuffing elsewhere if cracked.                                                                                                                 |
 | Encrypted settings                                           | `app_settings` (`smtp.password`, `captcha.secret_key`, `sso.client_secret.<id>`)             | Relay abuse; disabling bot protection; posing as the portal to an IdP.                                                                                    |
 | Single-use links in queued mail                              | `email_outbox` (sealed: AES-256-GCM)                                                         | Account takeover through a password-reset link.                                                                                                           |
-| Master secret                                                | `NEXUS_SECRET_KEY`                                                                           | Derives the settings-encryption, outbox-sealing and session-HMAC keys.                                                                                    |
+| Master secret                                                | `NEXUS_SECRET_KEY`                                                                           | Derives the settings-encryption, outbox-sealing, session-HMAC and single sign-on attempt keys.                                                            |
 | Audit log                                                    | `audit_logs`                                                                                 | The record of who did what.                                                                                                                               |
 | Access decisions                                             | `access_requests`, `grants`                                                                  | Who may call which API.                                                                                                                                   |
 | Unpublished API documentation                                | `api_specs`                                                                                  | Business-sensitive interface detail.                                                                                                                      |
@@ -110,119 +110,66 @@ publish, or moving the gateway, is invisible to Nexus. That gap is covered at
 request time by Ferrum Edge's own egress screening (`FERRUM_BACKEND_ALLOW_IPS`)
 and the request-time hop/`Via` loop guard filed as a ferrum-edge issue.
 
-**Gateway egress admission.** Since `v0.4.0` the
-public-upstream profile requires a fresh authenticated, namespace-matched
-`GET /backend-egress-policy` before each proxy/spec create or replacement,
-including staging, rebuilds, plugin association writes and compensation. Service
-preflight runs before destructive conversion and spec ACL enrollment. Schema 2
-(Edge v0.9.13) must be complete and closed, with exact class arrays and evaluation order; only
-`enforcement_scope=local-data-plane` and `public_only_guaranteed=true`, or a control plane
-whose data-plane attestation (Edge v0.9.14) proves every connected data plane public-only
-with at least `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`) connected,
-counting only those that did not just start, authorize public-profile writes.
-Missing capability, timeouts, authentication failures,
-unknown/inconsistent responses, cache evidence, a control plane without that attestation,
-unserved/no local plane, default `both` and any allow-CIDR override refuse the mutation.
-The dangerous-range baseline alone is insufficient. A refused compensation uses
-existing repair-required reporting; it does not bypass the policy.
+**Gateway egress admission.** Since `v0.4.0` the public-upstream profile
+requires a fresh, authenticated, namespace-matched `GET /backend-egress-policy`
+(schema 2, Edge v0.9.13 and later) before every proxy or spec create or
+replacement, including staging, rebuilds, plugin association writes and
+compensation. Only two answers authorize a public-profile write:
+`enforcement_scope=local-data-plane` with `public_only_guaranteed=true`, or a
+control plane whose data-plane attestation (Edge v0.9.14 and later) proves every
+connected data plane public-only with at least `NEXUS_EXPECTED_DATA_PLANES`
+settled data planes (`node_id`) connected. Missing, stale, unreadable or weaker
+metadata, default `both` mode (the dangerous-range baseline alone) and any
+allow-CIDR override refuse the mutation; a refused compensation is reported as
+repair-required and never bypasses the policy. Schema 1 is refused, not
+reinterpreted. Health reports the verdict to admins as
+`edge.public_egress_guaranteed`. The mechanics, timing constants and full pairing
+table are in
+[Backend egress admission and the public-only guarantee](operations.md#backend-egress-admission-and-the-public-only-guarantee)
+and [CP/DP pairings and data-plane attestation](operations.md#cpdp-pairings-and-data-plane-attestation).
 
-Two opt-outs relax different checks. The existing private opt-in still skips Nexus
-DNS admission and permits internal or unresolvable upstreams; Edge decides
-reachability, so it also accepts all recognized, consistent process-policy
-modes/scopes/overlays. `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` waives only the
-gateway attestation and keeps all three Nexus checks above. It still requires
-`public_only_guaranteed=true`, which schema 2 reports only for `local-data-plane`, so
-against Edge v0.9.13 it admits no pairing the public profile refuses. Under either, missing,
-malformed or unsupported-schema metadata still refuses backend writes, the pairing
-is never represented as public-only, startup logs a warning naming the variable,
-and each publish, update and restore audit row records its `egress_profile` and
-`enforcement_scope`. Public mode also screens private plugin dependencies, and any
-allow override needed for Redis removes public-only certification. Edge's
-`rediss://` hostname limitation remains: TLS Redis hostnames are screened then
-re-resolved by the Redis client; use a literal-IP TLS endpoint or the owner-documented
-plaintext hostname path where appropriate. Metadata does not expand this coverage.
+Two opt-outs relax different checks. `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` skips
+Nexus's DNS admission and permits internal or unresolvable upstreams; Edge
+decides reachability, so any recognized, consistent policy is accepted.
+`NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` waives only the gateway attestation and
+keeps all three Nexus checks above. It still requires
+`public_only_guaranteed=true`, which schema 2 reports only for
+`local-data-plane`, so it admits no pairing the public profile refuses; a CP/DP
+pairing without the attestation (Edge v0.9.13) publishes only under the private
+opt-in. Under either, unreadable metadata still refuses backend writes, the
+pairing is never represented as public-only, startup logs a warning naming the
+variable, and each publish, update and restore audit row records its
+`egress_profile` and `enforcement_scope`. Public mode also screens private plugin
+dependencies, and any allow override needed for Redis removes public-only
+certification. Edge's `rediss://` hostname limitation remains: TLS Redis
+hostnames are screened then re-resolved by the Redis client; use a literal-IP TLS
+endpoint or the owner-documented plaintext hostname path where appropriate.
+Metadata does not expand this coverage.
 
-Local-data-plane metadata is process evidence only. Operators must establish that a
-direct singleton's Admin endpoint and traffic listener belong to the same serving
-process. Remote/fleet/load-balanced Admin pairings cannot acquire that proof from this
-API, and a control plane can prove only what its connected data planes report.
-Health is sampled, cached and observational, never mutation authorization. Replacing
-or reconfiguring Edge, retargeting Admin or traffic endpoints, and existing traffic
-require operator enforcement and requalification; a startup/sample success does not
-secure future fleet traffic.
+What the guarantee rests on:
 
-**Topology decision.** Nexus grants the verified public-only guarantee only to
-`enforcement_scope=local-data-plane` with `public_only_guaranteed=true`, or to a control
-plane whose data-plane attestation proves every connected data plane public-only with
-at least `NEXUS_EXPECTED_DATA_PLANES` distinct data planes (`node_id`) connected,
-counting only those that did not just start, and health reports it to admins as
-`edge.public_egress_guaranteed`. Edge source authority is
-`669c574c1d1e88e84dccb26a8159939e6694644d` (`v0.9.17`); the Edge and canonical
-releases are published and pinned. Nexus reads egress policy schema 2 only. Schema 1
-(Edge `v0.9.12` and earlier) reported the policy-only value of the same field and is
-refused rather than reinterpreted (see
-[the compatibility notes](operations.md#backend-egress-admission-and-the-public-only-guarantee)).
-
-**Operator guidance for control-plane/data-plane pairings.** A control plane's own
-policy describes admission, not the remote data planes that connect to backends, so
-on its own it never proves public-only egress. From Edge v0.9.14 the control plane
-also relays the egress policy each connected data plane reported when it subscribed.
-Nexus grants the guarantee from that attestation only when `NEXUS_EXPECTED_DATA_PLANES`
-is set and at least that many distinct data-plane processes (`node_id`) are connected,
-counting each only once it has been listed long enough that a restarted one cannot
-count twice, at least one data plane is connected for the namespace, every connected data plane reported, every
-report is `public` mode without allow CIDRs, and the aggregate matches the listed
-reports. Anything else, including the count unset or short, too few data planes
-connected long enough to count, a `connected_at` that contradicts the clocks, no connected data
-plane, an unknown or weaker data plane, or Edge v0.9.13 (which sends no attestation),
-reads "not guaranteed". A malformed or inconsistent attestation, or one on anything
-but a control plane, is set aside with a logged warning: that answer reads "not
-guaranteed", and an opt-out still admits writes by its own rules. The verdict is re-read for
-every backend write and every health probe, with no caching or grace period. The only
-state Nexus keeps across reads is when it first saw each `node_id`, which can settle a
-data plane but never adds one to the count. See
-[CP/DP pairings and data-plane attestation](operations.md#cpdp-pairings-and-data-plane-attestation).
-
-The attestation is self-reported by authenticated data planes running the control
-plane's build, not host attestation, and it covers only the data planes connected at
-the moment of the read: one that disconnected but keeps serving cached configuration
-is not listed. A control plane also never sees a data plane that uses another control
-plane, so `NEXUS_EXPECTED_DATA_PLANES` must be the number of running data-plane
-processes (`node_id`) across every control plane, and the guarantee is available only when the control plane at `FERRUM_ADMIN_URL` sees
-every data plane. With several control plane replicas, a load balancer in front of them
-or data-plane failover between control planes, the count falls short and the guarantee
-is withheld; Nexus does not combine answers from several control planes. A value set
-below the real inventory defeats this check. Enforce `FERRUM_BACKEND_ALLOW_IPS=public`
-without allow CIDRs on every data plane, keep the expected count equal to the real
-inventory, and requalify whenever a data plane is added, replaced or reconfigured.
-Each Edge data-plane process reports its own random `node_id` for its lifetime,
-whatever CP/DP credential it uses, so set the count to the number of running
-data-plane processes (replicas or pods). Nexus counts distinct `node_id`s rather than
-streams, so a reconnect overlap of one process counts once. A process that restarts
-without closing its stream returns under a new `node_id`, and until Edge's stream
-liveness detection drops the stale stream that data plane would count twice (#540).
-Nexus therefore counts a `node_id` only once it has existed for 60 seconds, longer
-than Edge v0.9.14 takes to drop a dead stream, so a stale stream and its replacement
-never count together: this Nexus process saw it listed that long ago on its monotonic
-clock, or the answer carries the gateway's `Date` header and the `node_id`'s earliest
-`connected_at` is 90 seconds old on both Nexus's clock and that header. Without the
-header only the first applies, so a control-plane clock behind Nexus's cannot settle a
-data plane early. The 60 seconds assume the control plane terminates each data plane's
-HTTP/2 connection itself, directly or through an L4 pass-through: behind a proxy that
-terminates HTTP/2, a dead data plane's stream can stay listed for minutes, and a
-restarted data plane can count twice. While fewer than `NEXUS_EXPECTED_DATA_PLANES` count, and when
-a `connected_at` contradicts those clocks, the guarantee is withheld. A newer data
-plane must still attest public-only, but more connected data planes than the value
-never withhold it, so a scale-up or a rolling update keeps the guarantee while the
-settled ones reach the value. Edge reports no
-stream liveness, so a data plane whose restarted process subscribes to another
-control plane can still be covered by its stale stream for that window; alert on
-health transitions.
-Without the attestation
-(Edge v0.9.13), `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` does not admit such a pairing
-either (Edge reports `public_only_guaranteed=false` for a control plane, and Nexus
-does not reinterpret that), so it publishes only under
-`NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which also skips Nexus's upstream screening.
+- **A local data plane** is process evidence only. Operators must establish that
+  a direct singleton's Admin endpoint and traffic listener belong to the same
+  serving process; remote, fleet or load-balanced Admin pairings cannot acquire
+  that proof from this API.
+- **A control plane** proves only what its connected data planes report, at the
+  moment of the read. The attestation is self-reported by authenticated data
+  planes running the control plane's build, not host attestation. A data plane
+  that disconnected but keeps serving cached configuration is not listed, and
+  one on another control plane is never seen, so `NEXUS_EXPECTED_DATA_PLANES`
+  must be the real number of running data-plane processes across every control
+  plane, and the control plane at `FERRUM_ADMIN_URL` must see all of them. A
+  value below the real inventory defeats the check.
+- **Restart counting** assumes the control plane terminates each data plane's
+  HTTP/2 connection itself, directly or through an L4 pass-through. Behind a
+  proxy that terminates HTTP/2, a dead data plane's stream can stay listed for
+  minutes and a restarted data plane can count twice. Edge reports no stream
+  liveness, so alert on health transitions.
+- **Health is observational**, never mutation authorization; the verdict is
+  re-read for every backend write. Replacing or reconfiguring Edge, retargeting
+  its Admin or traffic endpoints, and existing traffic need operator enforcement
+  and requalification: enforce `FERRUM_BACKEND_ALLOW_IPS=public` without allow
+  CIDRs on every data plane.
 
 ### Out of scope
 
@@ -848,21 +795,18 @@ Environment secrets stay in the environment. No token, code, verifier, `state`,
   none of those old cookies may inherit a subsequent promotion.
 - An address a lower-trust provider provisioned first leaves its rightful,
   admin-mapped holder refused with `privileged_account`, and with no password
-  to sign in and link. A `super_admin` disables that account and removes its
-  links. In **Admin → Users → Release address**, a `super_admin` reviews and
-  removes every link, waits for gateway revocation to complete (use **Retry**
-  if needed), then releases the address with
-  `POST /api/users/:id/release-address` and `{ "email": "the-current-address" }`.
-  The operation requires a session and CSRF and commits `user.address_release`
-  with the email change, session/token revocation and cancellation of pending
-  mail. It refuses active, linked or `super_admin` accounts, an incomplete or
+  to sign in and link. A `super_admin` can release the address once the account
+  is disabled, unlinked and its gateway revocation complete; the steps are in
+  [the recovery runbook](operations.md#how-accounts-are-matched).
+  `POST /api/users/:id/release-address` requires a session and CSRF and commits
+  `user.address_release` with the email change, session/token revocation and
+  cancellation of pending mail. It refuses active, linked or `super_admin` accounts, an incomplete or
   missing teardown, live credential metadata, and any mail delivery already in progress. The retained
   user ID and history move to a unique address under `released.nexus.invalid`;
   that domain cannot be registered or provisioned and the account stays
   disabled permanently. The rightful holder's next admin-mapped sign-in
   creates a separate account with none of the old account's grants, credentials,
-  links or sessions. See [the recovery runbook](operations.md#how-accounts-are-matched).
-  Recovery requires atomic transactions (MongoDB replica set) and every
+  links or sessions. Recovery requires atomic transactions (MongoDB replica set) and every
   sender instance must be upgraded first: account mail now carries its original
   recipient ID, so stale work cannot deliver to a replacement account.
 
@@ -1081,94 +1025,33 @@ account and application approvals remain separate. Revocation removes both group
 so the next call with the same credential/session fails. MCP sessions do not cache Nexus
 approval. Explicit subsets cannot be broadened by approval, by tool lifecycle changes or
 by a changed tool definition. Omitted/null grants intentionally cover future published
-tools, changed ones included; `[]` grants none. An exposure ID names one published tool
-definition: each tool stores a SHA-256 `definition_hash` over the canonical,
-reference-resolved definition Edge publishes (name, method, path and Nexus description;
-the operation's summary, which is the tool title, and description; parameters; the
-request body's `required`, `description` and JSON schemas; the 2xx JSON response
-schemas; the OpenAPI version), each `$ref` hashed as its own text and its target's
-digest, and the result bound to the tool's ID. A selection is validated (existing,
-unique operations and names, at most 256) before anything is hashed; validation reads
-each Path Item in place, resolving each reference node once, and cuts an operation's
-name and description to their limits before cleaning them. Reading and hashing one
-document's tools is charged to one work meter per build, shared by its tools, with a
-fixed budget of 16 Mi units. Every iteration over a collection the document controls is
-charged before it runs: a unit per Path Item, Request Body or Response reference hop,
-per key of a Responses or Content map, and per key and array element of the
-parameters, schemas (properties, items, compositions) and examples hashed; so is every
-key and pointer before it is parsed, and every character as it is hashed. Nothing is
-copied out of the document, and each selected Path Item, Request Body or Response
-reference, Content map and acyclic schema reference target is read once per build,
-however many tools and statuses reach it. A reference Nexus cannot resolve from the
-document root (a Request Body or Response chain that does not end at an object within
-32 acyclic local hops included), an unresolvable selected Path Item, or a document that
-passes the budget folds in the whole document except `info`, hashed as text without
-following references. So one build costs work proportional to the budget (the charge
-that crosses it being at most one collection or string of the document), plus a
-constant per selected tool. Sorting each object's keys adds a log factor to the
-collection sizes. A fallback first makes one shallow top-level copy without `info`,
-then takes one canonical pass over the document and sorts each object's keys. A budget
-fallback is recorded as `tool_hash_fallback` in
-the `api.publish`, `api.update`, `api.spec_update` or `api.spec_rollback` audit row that
-commits the change
-(cases in [agent-marketplace.md](agent-marketplace.md#optional-subsets-and-cross-repository-follow-up)).
-A spec revision, rollback or agents edit keeps the ID only while the tool's
+tools, changed ones included; `[]` grants none.
+
+An exposure ID names one published tool definition: it is bound to a SHA-256
+`definition_hash` of the reference-resolved definition Edge publishes, descriptions
+included. A spec revision, rollback or agents edit keeps the ID only while the tool's
 method, path, name and hash are unchanged. Any other change mints a new ID, including a
 description-only edit, since descriptions are prompt text an agent acts on (the tool
 poisoning, or rug-pull, pattern). The same transaction drops retired IDs from every
-explicit subset (`access.tools_prune`, `reason` `definition_changed`, `tool_renamed` or
-`tool_removed`), and a revision names redefined tools in its change summary and grantee
-notice (an agents edit notifies the affected subset holders directly, naming a renamed
-tool by its old and new name), so a
-consumer never runs a changed tool on an approval given for the old one. The holder asks
-for it again on its existing grant (`POST /api/grants/:id/tool-requests`), which only
-the grantee's own account may do; the provider decides it under the same owner check,
-proxy lease and audit as an access request, and an approval only ever adds the tools it
-names to that grant, never broadening the request or touching its REST access. Providers
-must still explicitly select mutations. A change that turns agents on, or gives a
-retained phase-1 selection its IDs, enrolls all-tools grantees that hold the REST group
-but not the MCP-all group, committing an `access.mcp_enroll` intent row before each
-consumer write; other builds read no grantee consumer. Enrollment skips disabled
-grantees (their grant rows remain, and re-enable rebuilds their groups) and consumers
-missing from the gateway, so no grantee's state can fail a provider's build.
+explicit subset (`access.tools_prune`), so a consumer never runs a changed tool on an
+approval given for the old one. The holder asks for it again on its existing grant
+(`POST /api/grants/:id/tool-requests`), which only the grantee's own account may do, and
+an approval only ever adds the tools it names. A definition that cannot be hashed within
+a fixed work budget folds in the whole document instead (`tool_hash_fallback` in the
+audit row), which can cost a re-approval but never carries a changed tool. Providers
+must still explicitly select mutations. The subset rules are in
+[`api.md`](api.md#optional-mcp-access-subsets), the hashing and budget mechanics in
+[agent-marketplace.md](agent-marketplace.md#optional-subsets-and-cross-repository-follow-up).
 
-The document submitted for an agent API cannot keep a path's Path Item reference: each
-operation carries its own `x-ferrum-mcp` mark, and two paths sharing one Path Item expose
-different tools. So every path holds a copy of the Path Item it resolves to, and 2,000
-paths referencing one large Path Item would otherwise stamp to gigabytes on every publish.
-Every request that rebuilds that document (publish, spec revision, rollback, restore, and
-a PATCH that edits the agents or converts the enforcement level) bounds it before it builds
-anything or writes to the gateway: an upper bound on its compact JSON size is charged to a work meter with a budget of
-`MAX_AGENT_DOCUMENT_BYTES` (8 MiB, twice the expanded upload limit). It charges every
-root member, every path's reference chain and resolved Path Item in full, a route per
-operation at the longer of the real and staging listen paths, and every selected tool.
-Each object of the document is measured once and remembered, so the check reads the
-document about once however much the stamp would copy, plus each path's reference chain
-and operation slots. It stops at the first charge past the budget with `400 SPEC_INVALID`
-(`reason: "agent_document_too_large"`).
-
-An agent selection is admitted only if the document has at most 3,000
-(`MAX_SPEC_OPERATIONS`) operations after Path Item references resolve. Each path counts
-every operation its resolved Path Item holds, so a Path Item that 2,000 paths reference
-counts 2,000 times. The upload limit uses the same number but counts differently. It
-counts only the method keys each path declares itself, so a path that is a `$ref` counts
-none. A document can therefore pass the upload and still be refused for agents with
-`400 SPEC_INVALID`. The resolved count is checked:
-
-- on publish, spec revision, rollback and restore of an agent API;
-- on a PATCH that edits the agents or converts the enforcement level;
-- by the provider's operation picker, which will not enable agents past it.
-
-Checking a live deployment's routes is not capped (restore, enforcement conversion and
-their recovery all do this). That check reads every operation, however many the document
-resolves to, so a routes API without agents is never refused for it.
-
-Compensation rebuilds the document the gateway already holds, so neither bound refuses
-it. A PATCH that leaves the agents and the enforcement level alone (visibility, status,
-name, description and the other catalog or proxy settings) is not bounded either. So an
-agent API published before the bounds, whose document is larger or resolves to more
-operations, can still be edited and retired. Turning its agents off submits the document
-without copies, and is the way to revise it again.
+Documents are bounded on every build that admits or rebuilds agents (publish, spec
+revision, rollback, restore, and a PATCH that edits the agents or converts the
+enforcement level), before anything is built or written to the gateway. A conservative
+upper estimate of the document Nexus submits, with each path's Path Item copied in, must
+stay within 8 MiB (`MAX_AGENT_DOCUMENT_BYTES`), and the document may resolve to at most
+3,000 operations (`MAX_SPEC_OPERATIONS`); either refusal is `400 SPEC_INVALID`.
+Compensation and a PATCH that leaves the agents and the enforcement level alone are
+exempt, so an older agent API can still be edited and retired. See
+[Agent document bounds](agent-marketplace.md#agent-document-bounds).
 
 Provider `x-ferrum-*` extensions cannot override endpoint, selection, grants or
 governance. Endpoint paths are derived from the namespace/slug and reserve a
@@ -1551,7 +1434,7 @@ password. See
 
 Verification, re-sent verification and password-reset messages are sealed
 before they are written to `email_outbox`, because the rendered message is a
-second copy of a token `verification_tokens` stores only as an HMAC:
+second copy of a token `email_verification_tokens` stores only as an HMAC:
 
 | Property  | Value                                                                          |
 | --------- | ------------------------------------------------------------------------------ |
@@ -1616,22 +1499,26 @@ Two crash windows remain:
 `@fastify/rate-limit` is registered per route group so unrelated surfaces do not
 share counters. Every group answers `429 RATE_LIMITED`.
 
-| Routes                                                                                                         | Limit            | Keyed on |
-| -------------------------------------------------------------------------------------------------------------- | ---------------- | -------- |
-| `/api/auth` POSTs: register, login, logout, verify-email, resend-verification, forgot-password, reset-password | 20/min, shared   | IP       |
-| `GET /api/auth/me`, `GET /api/auth/captcha`                                                                    | 120/min, shared  | IP       |
-| `/api/health*`                                                                                                 | 120/min          | IP       |
-| `GET /api/branding`                                                                                            | 120/min          | IP       |
-| `PATCH /api/users/me`                                                                                          | 10/min           | account  |
-| `PATCH /api/users/me/notification-preferences`                                                                 | 10/min           | account  |
-| `POST /api/threads` / `POST /api/threads/:id/messages`                                                         | 10/min / 30/min  | account  |
-| `GET /api/catalog/:slug/spec`, `…/changes`, `…/changes/:revisionId`, per route                                 | 60/min           | account  |
-| `/api/apis` mutations and the two spec-diff routes                                                             | 30/min           | account  |
-| `GET /api/apis/:id/usage`                                                                                      | 30/min           | IP       |
-| `POST /api/access-requests` / `POST /api/access-requests/:id/cancel`                                           | 10/min / 30/min  | account  |
-| `/api/applications` create, update, delete                                                                     | 30/min           | account  |
-| `/api/credentials` issue, rotate, revoke                                                                       | 20/min per route | account  |
-| `POST /api/notifications/read`                                                                                 | 60/min           | account  |
+| Routes                                                                                                                                                                                  | Limit            | Keyed on |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | -------- |
+| `/api/auth` POSTs: register, login, logout, verify-email, resend-verification, forgot-password, reset-password, `sso/:provider/link`; `GET /api/auth/sso/:provider/start`, `…/callback` | 20/min, shared   | IP       |
+| `GET /api/auth/me`, `GET /api/auth/captcha`, `GET /api/auth/sso`                                                                                                                        | 120/min, shared  | IP       |
+| `/api/health*`                                                                                                                                                                          | 120/min          | IP       |
+| `GET /api/branding`                                                                                                                                                                     | 120/min          | IP       |
+| `PATCH /api/users/me`                                                                                                                                                                   | 10/min           | account  |
+| `PATCH /api/users/me/notification-preferences`                                                                                                                                          | 10/min           | account  |
+| `POST /api/threads` / `POST /api/threads/:id/messages`                                                                                                                                  | 10/min / 30/min  | account  |
+| `GET /api/catalog/:slug/spec`, `…/changes`, `…/changes/:revisionId`, per route                                                                                                          | 60/min           | account  |
+| `/api/apis` mutations and the two spec-diff routes                                                                                                                                      | 30/min           | account  |
+| `GET /api/apis/:id/usage`                                                                                                                                                               | 30/min           | IP       |
+| `POST /api/access-requests` / `POST /api/access-requests/:id/cancel`                                                                                                                    | 10/min / 30/min  | account  |
+| `/api/applications` create, update, delete                                                                                                                                              | 30/min           | account  |
+| `/api/credentials` issue, rotate, revoke                                                                                                                                                | 20/min per route | account  |
+| `POST /api/notifications/read`                                                                                                                                                          | 60/min           | account  |
+| `POST /api/grants/:id/tool-requests`                                                                                                                                                    | 10/min           | account  |
+| `POST /api/admin/mass-email`                                                                                                                                                            | 10/min           | account  |
+| `POST /api/admin/settings/smtp-test`                                                                                                                                                    | 3/min            | account  |
+| `POST /api/service-manifests/preview`                                                                                                                                                   | 10/min           | account  |
 
 "Account" means `userOrIpKey`: the signed-in user, falling back to the IP
 without a session. Per-account keys are the thing an attacker cannot cheaply
@@ -1774,31 +1661,31 @@ publish-time ceiling existed.
 
 An authenticated account is not a trusted one. One message writes a message row
 and an audit row, and a _platform_ thread (`recipient_user_id: null`) notifies
-and emails every active `admin` and `super_admin`. Independent bounds:
+and emails every active `admin` and `super_admin`. Independent bounds; the
+environment-backed quotas in items 2–5 are listed with their defaults in the
+[server variables](operations.md#server), and `0` disables each of them:
 
 1. **Burst limits** — 10 thread creations and 30 replies per minute per
    account.
-2. **A rolling 24-hour budget** — `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`
-   (default 200, `0` disables), counted per sender across all threads and
+2. **A rolling 24-hour budget** — `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`,
+   counted per sender across all threads and
    checked before any row is written. Over it is `429 QUOTA_EXCEEDED` with
    `details: { limit, window, setting }`. Admins are subject to it too. The
    count and insert run in one transaction under the `messages:budget:<user>`
    lease, so the budget holds across instances; a sender who waits more than
    30 s for the lease gets `409 CONFLICT`.
-3. **Broadcast recipients** — `NEXUS_MAX_BROADCAST_RECIPIENTS` (default 5,000,
-   `0` disables) per god-mode broadcast, checked before the first row.
+3. **Broadcast recipients** — `NEXUS_MAX_BROADCAST_RECIPIENTS` per god-mode
+   broadcast, checked before the first row.
    Broadcast rows do not draw on the sender's message budget.
-4. **Broadcasts per day** — `NEXUS_MAX_BROADCASTS_PER_DAY` (default 20, `0`
-   disables) per administrator, counted from `god.broadcast` rows under a
-   per-actor lease.
+4. **Broadcasts per day** — `NEXUS_MAX_BROADCASTS_PER_DAY` per administrator,
+   counted from `god.broadcast` rows under a per-actor lease.
 5. **Mass-email campaigns** — admin-only, checked before anything is written:
-   `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5,000) bounds the audience,
-   `NEXUS_MAX_MASS_EMAIL_BYTES` (default 64 MiB) bounds one rendered message,
-   sized as an upper bound that includes HTML escaping of the recipient's name
-   and address, times the audience, and `NEXUS_MAX_MASS_EMAILS_PER_DAY`
-   (default 5) bounds
-   campaigns per administrator per rolling 24 hours, counted from
-   `admin.mass_email` rows under a per-actor lease. `0` disables each. An
+   `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` bounds the audience,
+   `NEXUS_MAX_MASS_EMAIL_BYTES` bounds one rendered message, sized as an upper
+   bound that includes HTML escaping of the recipient's name and address, times
+   the audience, and `NEXUS_MAX_MASS_EMAILS_PER_DAY` bounds campaigns per
+   administrator per rolling 24 hours, counted from `admin.mass_email` rows
+   under a per-actor lease. An
    audience that matches nobody is refused and costs nothing. The campaign row
    commits before the first outbox row, and the fan-out is queued in
    transactions of at most 200 recipients and about 4 MiB, so it never holds
@@ -2018,7 +1905,7 @@ only code that mints it.
 - **`ns`** is always `FERRUM_NAMESPACE` (a single string). An empty namespace
   is refused at signing. It always bounds namespace-scoped routes to that
   namespace, and a gateway with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`
-  refuses a token without it. From Ferrum Edge v0.9.16 the claim also makes the
+  refuses a token without it. From Ferrum Edge v0.9.17 the claim also makes the
   token a tenant credential: every fleet-global route except a short allowlist
   answers `403`, including `GET /metrics` and `GET /admin/metrics`. Nexus keeps
   the claim rather than minting claim-less admin tokens, which would hold
@@ -2238,28 +2125,12 @@ journals without revision identity cannot claim original rollback. These are
 separate current gateway observations, not atomic Edge CAS or external-writer
 fencing. Successful conversion clears its journal with `api.update`, the
 catalog mode and ownership. No credential-bearing resource body enters either
-audit. Corrected agent revisions commit an authorized comparison shape without
-changing the original replay resources. Conversion teardown, selected partial
-cleanup, corrected spec replacement and spec-owned cutover now use the published
-Edge v0.9.13 conditional deployment protocol. Complete original secret-bearing
-namespace evidence, the `api_spec_contents` stored-document copies (each verified
-against the digest the token fences) and its quoted token are durable before each
-HTTP mutation. A `412` (including every token Edge v0.9.12 issued) and a `507` past
-the owner's snapshot bound are definite refusals that keep the journal; journals
-holding Edge v0.9.12 authority stay readable but that authority is refused before
-any request.
-Dependent recovery requires the expected committed/applied acknowledgement,
-explicit cleanup authorization and applicable covering cursor. Stale authority,
-unknown or changed resources, lost replies and uncertain acknowledgements retain
-staging, the journal and operator edits with `withdrawn: false` and no completion
-audit; no fresh-token retry or unconditional fallback is allowed. Large journals
-are stored as individually encrypted chunks whose identity, order and complete
-content are authenticated by an encrypted manifest. Publication and retirement
-commit atomically through `NexusStore`; a failed update retains all prior committed
-custody, and a missing or substituted chunk blocks replay and completion. No raw
-owner evidence or credential is trimmed to fit a database row. Existing single-row
-journals remain readable, and every chunk participates in encrypted-setting key
-rotation. See the [released protocol and replay limits](edge-conversion-recovery-blocker.md).
+audit. Conversion teardown, partial cleanup, corrected spec replacement and
+cutover use Edge's conditional deployment protocol; a `412` or a `507` keeps the
+journal, and no fresh-token retry or unconditional fallback is allowed. Journal
+custody is described in
+[Gateway recovery journals](operations.md#gateway-recovery-journals), the
+protocol in the [released protocol and replay limits](edge-conversion-recovery-blocker.md).
 To resolve an unconfirmed mutation, follow the
 [operator runbook](operations.md#resolving-an-unconfirmed-gateway-deployment-mutation).
 

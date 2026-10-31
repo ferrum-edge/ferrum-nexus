@@ -665,7 +665,7 @@ export interface EdgeNamespaceBlock {
  * token decides which:
  *
  * - **detailed** (Edge v0.9.15 and earlier): every field below.
- * - **tenant** (Edge v0.9.16, for a token with an `ns` claim): `status`,
+ * - **tenant** (Edge v0.9.17, for a token with an `ns` claim): `status`,
  *   `ready`, `mode`, `admin_writes_enabled` and `namespace`, whose `active` is
  *   withheld (`null`) when the claim does not cover the gateway's active
  *   namespace.

@@ -1,5 +1,5 @@
 /**
- * Ferrum Edge v0.9.16 (ferrum-edge#6093) treats an admin JWT that carries an
+ * Ferrum Edge v0.9.17 (ferrum-edge#6093) treats an admin JWT that carries an
  * `ns` claim as a tenant credential: it reaches namespace-scoped routes and a
  * short allowlist, and every fleet-global route answers `403`. Every token
  * Nexus mints carries the claim, so these tests run the whole portal against

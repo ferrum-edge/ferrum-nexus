@@ -25,7 +25,7 @@
  * HTTP `200`. Independent backend state may still be shown; its failure does
  * not discard valid counters, and reads `unavailable` rather than `unknown`.
  *
- * Both reads are fleet-global on the gateway. From Ferrum Edge v0.9.16 the
+ * Both reads are fleet-global on the gateway. From Ferrum Edge v0.9.17 the
  * portal's namespace-scoped admin token is refused on them, which surfaces
  * here as that explicit unavailable state with the cause — never as zero
  * traffic or as a proxy with no circuit breaker.

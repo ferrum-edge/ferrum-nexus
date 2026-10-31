@@ -227,8 +227,9 @@ docker run --rm -p 127.0.0.1:8787:8787 \
   ferrum-nexus
 ```
 
-- Both secrets must be at least 32 characters, and `FERRUM_ADMIN_JWT_SECRET`
-  must match the gateway's, or the server refuses to start.
+- Both secrets must be at least 32 characters, or the server refuses to start.
+  `FERRUM_ADMIN_JWT_SECRET` must also match the gateway's; a mismatch does not
+  prevent startup, but gateway operations fail authentication.
 - `FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true` is required for a plain `http://`
   Admin API URL on any host other than loopback.
 - `NEXUS_COOKIE_SECURE=false` is for plain-http local use only. Behind TLS,

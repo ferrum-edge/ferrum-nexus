@@ -1004,7 +1004,7 @@ export interface ApiUsageResponse {
  *   API's proxy yet.
  * - `unreachable` — the gateway did not answer.
  * - `refused` — the gateway refused the portal's credential on `GET /metrics`.
- *   Ferrum Edge v0.9.16 refuses the portal's namespace-scoped admin token
+ *   Ferrum Edge v0.9.17 refuses the portal's namespace-scoped admin token
  *   there; the operator sets `FERRUM_METRICS_BEARER_TOKEN`.
  * - `gateway_error` — any other status, or a body with no readable samples.
  */
@@ -1056,7 +1056,7 @@ export interface ApiUsageLatency {
  *   that has never been called; it is **not** a claim that the backend is down.
  * - `unavailable` — the portal could not read the gateway's backend state at
  *   all: unreachable, refused, or unreadable. It says nothing about breakers.
- *   Ferrum Edge v0.9.16 refuses the portal's namespace-scoped admin token on
+ *   Ferrum Edge v0.9.17 refuses the portal's namespace-scoped admin token on
  *   `GET /admin/metrics`; `detail` names the cause.
  */
 export interface ApiUsageBackend {
