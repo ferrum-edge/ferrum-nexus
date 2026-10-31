@@ -1827,8 +1827,7 @@ header the gateway reads (`X-API-Key` for `key_auth`; `Authorization`, so every
 those requirements, because a request cannot carry both, and alternatives left
 identical are merged. Its definition stays, and a scheme whose reference cannot
 be resolved is kept. A `components` or `components.securitySchemes` that is not
-an object is replaced. A document that the declaration would push past the
-size limit is served without it. The declaration is documentation; the
+an object is replaced. A document that the declaration would push past the size limit, or a YAML document it would leave fitting only with aliases, is served without it. The declaration is documentation; the
 gateway's auth plugin is what enforces it. Path item references are followed
 when they point at an entry of `paths`, `webhooks` or `components.pathItems` in
 the same document; a path served from anywhere else (another file, or another

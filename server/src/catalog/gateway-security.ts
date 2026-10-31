@@ -299,7 +299,8 @@ function renderedBytes(requirement: unknown[]): number {
   for (let index = pretty.indexOf('\n'); index !== -1; index = pretty.indexOf('\n', index + 1)) {
     lines += 1;
   }
-  return pretty.length + lines * OPERATION_SECURITY_INDENT;
+  // UTF-8 bytes, as the limit is measured, not UTF-16 code units.
+  return Buffer.byteLength(pretty) + lines * OPERATION_SECURITY_INDENT;
 }
 
 /** Thrown when the requirements written would outgrow the catalog size limit. */

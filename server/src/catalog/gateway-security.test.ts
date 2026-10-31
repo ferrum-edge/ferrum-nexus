@@ -84,6 +84,17 @@ describe('stampGatewaySecurity', () => {
     });
   }
 
+  it('stamps every HTTP method a Path Item can hold', () => {
+    const methods = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'];
+    const document = base({
+      paths: { '/all': Object.fromEntries(methods.map((method) => [method, {}])) },
+    });
+    const stamped = stamp(document, 'basic_auth');
+    for (const method of methods) {
+      assert.deepEqual(opSecurity(stamped, '/all', method), [{ [GW]: [] }], method);
+    }
+  });
+
   it('reads `[]`, `[{}]` and invalid values as "nothing required"', () => {
     for (const security of [[], [{}], 'none', [null, 'x']]) {
       const stamped = stamp(base({ security }), 'key_auth');

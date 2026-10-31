@@ -207,8 +207,11 @@ export function renderCatalogDocument(
   // The stamp hands back the document itself when the requirements it would
   // write already outgrow the limit.
   if (declared === document) return renderCatalogSpec(document, contentType);
-  const stamped = renderCatalogSpec(declared, contentType);
-  return fits(stamped) ? stamped : renderCatalogSpec(document, contentType);
+  // YAML that would only fit with aliases is refused too: the stamp shares one
+  // requirement across operations, and an aliased rendering of it can carry
+  // more aliases than YAML readers accept.
+  const stamped = renderCatalogSpec(declared, contentType, { aliases: false });
+  return stamped !== null && fits(stamped) ? stamped : renderCatalogSpec(document, contentType);
 }
 
 /** The cache {@link createCatalogService} builds when it is not handed one. */
