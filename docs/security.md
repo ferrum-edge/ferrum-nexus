@@ -960,7 +960,9 @@ host. Messages already in the outbox before an upgrade are not revalidated.
   inbox for their own APIs; filtering by an `api_id` they do not own is
   `403 FORBIDDEN`. Approve, deny and revoke need ownership plus at least the
   `provider` role, or `admin`. Demotion to `client` removes these powers even if
-  the account still owns APIs.
+  the account still owns APIs. The one grant withdrawal open to every role is
+  relinquish: the account holding a grant may give it up, and nobody else may
+  (`404`, admins included).
 - **Publishing list** always scopes a `provider` to their own APIs. `mine` is an
   admin's opt-in.
 - **Credentials** are always the caller's own unless an `admin` passes

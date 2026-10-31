@@ -1046,6 +1046,56 @@ describe('more agent tools on an existing grant (issue #525)', () => {
     expect(screen.queryByRole('button', { name: 'Request tools' })).not.toBeInTheDocument();
   });
 
+  it('keeps a disabled application’s pending tool request withdrawable, and offers no new one', async () => {
+    const disabledApp = {
+      id: 'app-off',
+      name: 'Old worker',
+      owner_user_id: 'user-1',
+      status: 'disabled' as const,
+    };
+    vi.spyOn(applicationsApi, 'list').mockResolvedValue({
+      items: [
+        {
+          ...disabledApp,
+          description: null,
+          active_grants: 1,
+          active_credentials: 0,
+          created_at: API.created_at,
+          updated_at: API.created_at,
+        },
+      ],
+      total: 1,
+    });
+    const appGrant: Grant = { ...NARROW, application_id: 'app-off', application: disabledApp };
+    const pending: AccessRequest = {
+      ...REQUEST,
+      application_id: 'app-off',
+      grant_id: GRANT.id,
+      requested_tools: ['tool-2'],
+    };
+    identities['app-off'] = { application: disabledApp, grant: appGrant, request: pending };
+    detail = { ...detail, api: catalogEntry({ access_state: 'granted', agents: TOOLS }) };
+    await openDetail('Access');
+    await screen.findByRole('button', { name: 'Request access' });
+    fireEvent.click(screen.getByLabelText('Requesting for'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Old worker (disabled)' }));
+    expect(await screen.findByText(/Access granted to Old worker/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Withdraw tool request' })).toBeVisible();
+
+    identities['app-off'] = { application: disabledApp, grant: appGrant, request: null };
+    vi.spyOn(accessRequestsApi, 'cancel').mockResolvedValue({
+      access_request: { ...pending, status: 'cancelled' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw tool request' }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Withdraw tool request' }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByRole('button', { name: 'Request tools' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Give up access' })).toBeInTheDocument();
+  });
+
   it('offers nothing to an all-tools grant', async () => {
     detail = {
       ...detail,

@@ -355,6 +355,8 @@ function IdentityAccess({
   // A disabled application keeps what it holds and may give it up, but asks
   // for nothing new: the server refuses it, so the page does not offer it.
   const applicationDisabled = access.data.application?.status === 'disabled';
+  const pendingTools =
+    grant && request?.status === 'pending' && request.grant_id === grant.id ? request : null;
 
   let body: ReactElement;
   if (grant && grant.status === 'active') {
@@ -402,7 +404,7 @@ function IdentityAccess({
                 ? 'This API is retired, so you cannot request access to it again.'
                 : 'To use it again you must request access and wait for approval.'}
               {api.visibility === 'private'
-                ? ' This API is private: unless the provider has authorized you as a viewer or another of your identities still holds access, it disappears from your catalog and you will need the provider to let you see it again.'
+                ? ' This API is private: unless the provider has authorized you as a viewer, another of your identities still holds access, or you administer the portal, it disappears from your catalog and you will need the provider to let you see it again.'
                 : ''}
             </>
           }
@@ -418,17 +420,13 @@ function IdentityAccess({
             })
           }
         />
+        {/* A disabled application asks for no more tools, but a tool request it
+            filed before it was disabled stays visible and withdrawable. */}
         {api.agents &&
         grant.approved_tools != null &&
         api.status !== 'retired' &&
-        !applicationDisabled ? (
-          <MoreAgentTools
-            grant={grant}
-            agents={api.agents}
-            pending={
-              request?.status === 'pending' && request.grant_id === grant.id ? request : null
-            }
-          />
+        (!applicationDisabled || pendingTools) ? (
+          <MoreAgentTools grant={grant} agents={api.agents} pending={pendingTools} />
         ) : null}
       </div>
     );

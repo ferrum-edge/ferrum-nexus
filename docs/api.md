@@ -3002,7 +3002,7 @@ The identity may request access again afterwards, unless the API is retired,
 or it is private and the account is no longer allowed to see it: a grant
 admits its account to a private API's catalog page, so giving up the last
 grant held by any of the account's identities leaves only an explicit viewer
-authorization to keep it visible.
+authorization (or ownership, or an admin role) to keep it visible.
 
 ### `POST /api/grants/:id/tool-requests`
 
