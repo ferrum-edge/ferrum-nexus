@@ -308,8 +308,8 @@ describe('provider access pagination', () => {
     await expectPage(2, 1);
     const row = (userId: string): HTMLElement =>
       screen.getByText(userId).closest('li') as HTMLElement;
-    expect(within(row('user-1')).getByText(/given up by the grantee/)).toBeInTheDocument();
-    expect(within(row('user-2')).queryByText(/given up by the grantee/)).not.toBeInTheDocument();
+    expect(within(row('user-1')).getByText(/withdrawn by the grantee/)).toBeInTheDocument();
+    expect(within(row('user-2')).queryByText(/withdrawn by the grantee/)).not.toBeInTheDocument();
     expect(within(row('user-2')).getByText(/· revoked /)).toBeInTheDocument();
   });
 

@@ -188,7 +188,7 @@ leaving it open. Open the API's **Access** tab, choose the identity under
 The gateway stops accepting that identity's calls to that API at once (`403`).
 Its credentials keep working on its other APIs, and your other identities are
 not affected, so you can drop one application's access without deleting the
-application. The provider is not notified, but sees the grant as given up by
+application. The provider is not notified, but sees the grant as withdrawn by
 the grantee. To use the API again, request access and wait for approval; a
 retired API takes no new requests. A disabled application is still listed
 under **Requesting for**, so it can give up access, but it cannot ask for more.

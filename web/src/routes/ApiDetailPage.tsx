@@ -1190,7 +1190,7 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
                       Granted {formatDateTime(grant.created_at)}
                       {grant.revoked_at
                         ? grant.revoked_by === grant.user_id
-                          ? ` · given up by the grantee ${formatDateTime(grant.revoked_at)}`
+                          ? ` · withdrawn by the grantee ${formatDateTime(grant.revoked_at)}`
                           : ` · revoked ${formatDateTime(grant.revoked_at)}`
                         : ''}
                     </p>

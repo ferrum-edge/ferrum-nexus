@@ -35,6 +35,7 @@ function errorCode(body: string): string {
 
 describe('grant relinquish', () => {
   let harness: TestApp;
+  let founder: TestSession;
   let provider: TestSession;
   let client: TestSession;
   let other: TestSession;
@@ -110,7 +111,7 @@ describe('grant relinquish', () => {
 
   beforeEach(async () => {
     harness = await buildTestApp();
-    await harness.registerUser({ email: 'rel-founder@example.test' });
+    founder = await harness.registerUser({ email: 'rel-founder@example.test' });
     provider = await harness.registerUser({ email: 'rel-provider@example.test', role: 'provider' });
     client = await harness.registerUser({ email: 'rel-client@example.test', role: 'client' });
     other = await harness.registerUser({ email: 'rel-other@example.test', role: 'client' });
@@ -196,8 +197,10 @@ describe('grant relinquish', () => {
     const { grantId } = await grant(client, apiId);
     const group = aclGroupForApi(apiId);
 
-    // Another client, and the API's own provider: relinquish is not revoke.
-    for (const session of [other, provider]) {
+    // Another client, the API's own provider and a super admin: relinquish is
+    // not revoke, and no role widens it.
+    assert.equal(founder.user.role, 'super_admin');
+    for (const session of [other, provider, founder]) {
       const refused = await relinquish(session, grantId);
       assert.equal(refused.statusCode, 404, refused.body);
       assert.equal(errorCode(refused.body), 'NOT_FOUND');

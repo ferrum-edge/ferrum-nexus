@@ -2989,8 +2989,9 @@ The grantee gives up access it no longer needs. It is the same withdrawal as a
 revoke: the ACL group comes off the identity's consumer under the API's proxy
 lease, the grant and its originating request move to `revoked` with
 `revoked_by` set to the grantee, a pending tool request on the grant is
-cancelled, and a gateway refusal puts everything back
-(`access.revoke_rollback`). Only that identity's access to that API changes;
+cancelled, and a gateway refusal rolls the claim back exactly as for a revoke
+(`access.revoke_rollback`, which says when a restore was skipped, for example
+because the account was disabled meanwhile). Only that identity's access to that API changes;
 its credentials and other grants are untouched. One `access.revoke` row is
 written with `details.relinquished: true`. Nobody is notified.
 
@@ -3331,7 +3332,8 @@ _session_, owner or admin → `{ "application": Application }`. Body: any of
 approvals, credentials and rotations; everything already issued keeps working,
 and revoking stays allowed. The audit row records
 `details.revoked_existing_access: false`. To stop an integration, delete the
-application or revoke its grants.
+application, have its grants revoked, or give them up as the owner
+([`POST /api/grants/:id/relinquish`](#post-apigrantsidrelinquish)).
 
 Re-enabling is a portal row update only: it makes no Edge call and has no
 consumer-mapping precondition, so it cannot fail with a mapping `502` (that

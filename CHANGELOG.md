@@ -15,7 +15,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   whole application and every credential it held. It runs the same
   lease-held, rollback-safe withdrawal as a revoke, is allowed only to the
   account that holds the grant, records `access.revoke` with
-  `relinquished: true`, and notifies nobody. Providers see the grant as given
+  `relinquished: true`, and notifies nobody. Providers see the grant as withdrawn
   up by the grantee.
 
 ### Changed

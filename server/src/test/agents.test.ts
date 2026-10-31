@@ -1568,6 +1568,30 @@ describe('agent publishing and Nexus authorization', () => {
     assert.equal(again.statusCode, 201, again.body);
   });
 
+  it('cancels a pending tool request and strips tool groups when the grantee gives up its grant', async () => {
+    const f = await narrowFixture();
+    assert.ok(groupsOf(f.grantee).includes(mcpToolGroupForApi(f.api.id, f.listId)));
+    const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);
+    assert.equal(asked.statusCode, 201, asked.body);
+    const pending = asked.json<RequestGrantToolsResponse>().access_request;
+    const given = await harness.authed(f.grantee, {
+      method: 'POST',
+      url: `/api/grants/${f.grant.id}/relinquish`,
+      payload: {},
+    });
+    assert.equal(given.statusCode, 200, given.body);
+    assert.equal(groupsOf(f.grantee).includes(aclGroupForApi(f.api.id)), false);
+    assert.equal(groupsOf(f.grantee).includes(mcpToolGroupForApi(f.api.id, f.listId)), false);
+    assert.equal((await harness.store.accessRequests.findById(pending.id))?.status, 'cancelled');
+    const cancelled = (await harness.auditRows('access.cancel')).filter(
+      (row) => row.target_id === pending.id,
+    );
+    assert.equal(cancelled.length, 1);
+    assert.equal(cancelled[0]?.actor_user_id, f.grantee.user.id);
+    assert.equal(cancelled[0]?.details.reason, 'grant_inactive');
+    assert.equal((await decide(pending.id, 'approve')).statusCode, 409);
+  });
+
   it('clears a tool request whose grant was revoked when the identity asks for access again', async () => {
     const f = await narrowFixture();
     const asked = await requestTools(f.grantee, f.grant.id, [f.removeId]);

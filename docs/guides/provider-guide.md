@@ -750,7 +750,7 @@ Add a **Reason**. It is recorded, shown to the caller and emailed. The original
 request is marked revoked too.
 
 Grantees can also give up access themselves from the API's **Access** tab. You
-are not notified; the grant shows as **given up by the grantee** under
+are not notified; the grant shows as **withdrawn by the grantee** under
 **Revoked**.
 
 ### Who else can act on your API

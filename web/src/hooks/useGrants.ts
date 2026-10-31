@@ -71,6 +71,7 @@ export function useRelinquishGrant(): UseMutationResult<RelinquishGrantResponse,
       void queryClient.invalidateQueries({ queryKey: queryKeys.grants.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.accessRequests.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.applications.all });
     },
   });
