@@ -190,7 +190,13 @@ Its credentials keep working on its other APIs, and your other identities are
 not affected, so you can drop one application's access without deleting the
 application. The provider is not notified, but sees the grant as given up by
 the grantee. To use the API again, request access and wait for approval; a
-retired API takes no new requests.
+retired API takes no new requests. A disabled application is still listed
+under **Requesting for**, so it can give up access, but it cannot ask for more.
+
+On a **private** API your grant may be what lets you see it. Unless the
+provider authorized you as a viewer, or another of your identities still has
+access, giving up the last grant hides the API from you, and you need the
+provider to let you see it again before you can request it.
 
 ### If you are declined
 

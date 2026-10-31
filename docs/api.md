@@ -2997,7 +2997,11 @@ written with `details.relinquished: true`. Nobody is notified.
 `404 NOT_FOUND` for a grant the caller does not hold, including when the
 caller is the API's owner or an admin, who revoke instead. `409 CONFLICT`
 when it is already revoked. A disabled application's grant can be given up.
-The identity may request access again afterwards, unless the API is retired.
+The identity may request access again afterwards, unless the API is retired,
+or it is private and the account is no longer allowed to see it: a grant
+admits its account to a private API's catalog page, so giving up the last
+grant held by any of the account's identities leaves only an explicit viewer
+authorization to keep it visible.
 
 ### `POST /api/grants/:id/tool-requests`
 

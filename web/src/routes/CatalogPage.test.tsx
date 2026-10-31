@@ -707,10 +707,10 @@ describe('per-identity catalog access (issue #314)', () => {
     expect(screen.getByRole('button', { name: 'Withdraw request' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
     expect(catalogApi.identityAccess).toHaveBeenCalledWith('billing', 'app-a');
-    // The picker searches the caller's own active applications on the server.
+    // The picker searches the caller's own applications on the server,
+    // disabled ones included: they keep, and may give up, what they hold.
     expect(applicationsApi.list).toHaveBeenCalledWith({
       mine: true,
-      status: 'active',
       limit: DEFAULT_PAGE_SIZE,
       offset: 0,
     });
@@ -757,6 +757,45 @@ describe('per-identity catalog access (issue #314)', () => {
     expect(screen.queryByText(/Access granted/)).not.toBeInTheDocument();
   });
 
+  it('lets a disabled application give up a grant but not ask for new access', async () => {
+    const disabled = { ...APP_A, status: 'disabled' as const };
+    vi.mocked(applicationsApi.list).mockResolvedValue({ items: [disabled, APP_B], total: 2 });
+    identities['app-a'] = { application: summary(disabled), request: null, grant: grantFor(APP_A) };
+    detail = { ...detail, api: catalogEntry({ access_state: 'granted' }) };
+    vi.spyOn(grantsApi, 'relinquish').mockImplementation(async () => {
+      const revoked = { ...grantFor(APP_A), status: 'revoked' as const };
+      identities['app-a'] = { application: summary(disabled), request: null, grant: null };
+      return { grant: revoked };
+    });
+    await openDetail('Access');
+    await screen.findByRole('button', { name: 'Request access' });
+
+    await chooseIdentity('Application A (disabled)');
+    expect(await screen.findByText(/Access granted to Application A/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Give up access' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Give up access' }));
+    await waitFor(() => expect(grantsApi.relinquish).toHaveBeenCalledWith('grant-app-a'));
+
+    // With nothing left, a disabled application is told why it cannot ask.
+    expect(await screen.findByText(/Application A is disabled/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
+  });
+
+  it('warns that giving up a private API can hide it', async () => {
+    detail = {
+      ...detail,
+      api: catalogEntry({ access_state: 'granted', visibility: 'private' }),
+      my_grant: GRANT,
+    };
+    identities.account = { ...NO_ACCESS, grant: GRANT };
+    await openDetail('Access');
+    await screen.findByText(/Access granted to your account/);
+    fireEvent.click(screen.getByRole('button', { name: 'Give up access' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/This API is private/)).toBeInTheDocument();
+  });
+
   it('describes an account-level grant as reaching every account credential', async () => {
     detail = { ...detail, api: catalogEntry({ access_state: 'granted' }), my_grant: GRANT };
     identities.account = { ...NO_ACCESS, grant: GRANT };
@@ -800,7 +839,6 @@ describe('per-identity catalog access (issue #314)', () => {
     expect(await screen.findByRole('option', { name: 'Integration 29' })).toBeInTheDocument();
     expect(applicationsApi.list).toHaveBeenLastCalledWith({
       mine: true,
-      status: 'active',
       limit: DEFAULT_PAGE_SIZE,
       offset: DEFAULT_PAGE_SIZE,
     });
@@ -811,7 +849,6 @@ describe('per-identity catalog access (issue #314)', () => {
     await waitFor(() =>
       expect(applicationsApi.list).toHaveBeenLastCalledWith({
         mine: true,
-        status: 'active',
         q: 'integration 7',
         limit: DEFAULT_PAGE_SIZE,
         offset: 0,

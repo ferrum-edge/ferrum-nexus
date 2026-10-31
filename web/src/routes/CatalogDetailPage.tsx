@@ -352,6 +352,9 @@ function IdentityAccess({
   // notice says it outright: an application's grant is on that application's
   // gateway consumer only, never the account's.
   const holder = applicationId === null ? 'your account' : name;
+  // A disabled application keeps what it holds and may give it up, but asks
+  // for nothing new: the server refuses it, so the page does not offer it.
+  const applicationDisabled = access.data.application?.status === 'disabled';
 
   let body: ReactElement;
   if (grant && grant.status === 'active') {
@@ -398,6 +401,9 @@ function IdentityAccess({
               {api.status === 'retired'
                 ? 'This API is retired, so you cannot request access to it again.'
                 : 'To use it again you must request access and wait for approval.'}
+              {api.visibility === 'private'
+                ? ' This API is private: unless the provider has authorized you as a viewer or another of your identities still holds access, it disappears from your catalog and you will need the provider to let you see it again.'
+                : ''}
             </>
           }
           confirmLabel="Give up access"
@@ -412,7 +418,10 @@ function IdentityAccess({
             })
           }
         />
-        {api.agents && grant.approved_tools != null && api.status !== 'retired' ? (
+        {api.agents &&
+        grant.approved_tools != null &&
+        api.status !== 'retired' &&
+        !applicationDisabled ? (
           <MoreAgentTools
             grant={grant}
             agents={api.agents}
@@ -449,6 +458,13 @@ function IdentityAccess({
     body = (
       <FormNotice tone="warning">
         This API is retired and is no longer accepting new access requests.
+      </FormNotice>
+    );
+  } else if (applicationDisabled) {
+    body = (
+      <FormNotice tone="warning">
+        {name} is disabled, so it cannot request new access. Re-enable it on the Applications page
+        first.
       </FormNotice>
     );
   } else {
@@ -638,6 +654,7 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
               </p>
               <IdentityPicker
                 label="Access for"
+                includeDisabled
                 value={identity}
                 selectedLabel={identityName}
                 onValueChange={(value, name) => {
@@ -673,6 +690,7 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
             <div className="flex flex-col gap-4">
               <IdentityPicker
                 label="Requesting for"
+                includeDisabled
                 value={identity}
                 selectedLabel={identityName}
                 onValueChange={(value, name) => {
