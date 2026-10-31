@@ -68,7 +68,9 @@ client, and two static password users, one in the `nexus-providers` group.
 
 - API-key, Basic, and JWT authentication: each denied before approval and served after it. The test
   also pins what reaches the backend: the API key and the basic-auth header are stripped; the
-  bearer token is forwarded (Edge's `jwt_auth` cannot hide it).
+  bearer token is forwarded (Edge's `jwt_auth` cannot hide it). A request built only from the
+  security scheme the catalog document declares (header name and `Basic`/`Bearer` prefix) is
+  served too.
 - `routes` enforcement refuses an undeclared path; `docs_only` forwards it.
 - Revocation removes access while the credential still authenticates (the gateway answers `403`,
   not `401`).

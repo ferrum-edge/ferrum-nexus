@@ -969,7 +969,10 @@ host. Messages already in the outbox before an upgrade are not revalidated.
   Catalog objects omit `upstream_url`. Catalog specs replace every OpenAPI
   `servers` entry (root, path item, operation, webhooks, callbacks, and Link
   Object `server`) with the gateway invoke URL, or just the listen path when no
-  public gateway origin is configured. The document is re-serialized in its
+  public gateway origin is configured. They also declare the gateway's
+  credential type (a `ferrum_gateway` security scheme for the API's auth plugin,
+  added to every security requirement) and never a consumer, key or secret, so
+  one rendering serves every viewer. The document is re-serialized in its
   original format (comments and formatting are lost); an invalid stored document
   fails closed. URLs a provider writes in prose or examples are not redacted.
   The original spec is only at `GET /api/apis/:id/spec` (owner or admin). The

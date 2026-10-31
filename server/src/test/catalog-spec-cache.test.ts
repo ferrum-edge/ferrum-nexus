@@ -15,6 +15,10 @@ import { parse as parseYaml } from 'yaml';
 import type { ApiErrorBody, CatalogSpecResponse, PublishApiResponse } from '@ferrum-nexus/shared';
 
 import {
+  GATEWAY_SECURITY_SCHEME_NAME,
+  gatewaySecurityScheme,
+} from '../catalog/gateway-security.js';
+import {
   createCatalogService,
   type CatalogService,
   type CatalogSpecRendering,
@@ -173,6 +177,38 @@ describe('catalog spec cache', () => {
     gatewayUrl = 'https://gateway.example.test';
     assert.deepEqual(await catalog.spec(outsider, 'spec-cache-public'), before);
     assert.equal(cache.stats().hits, 1, 'the original address is still cached');
+  });
+
+  it('misses when the auth plugin changes, and declares the new credential', async () => {
+    fresh();
+    const schemesOf = (body: CatalogSpecResponse): unknown =>
+      (parseYaml(body.raw_spec) as { components: { securitySchemes: unknown } }).components
+        .securitySchemes;
+    const before = await catalog.spec(outsider, 'spec-cache-public');
+    assert.deepEqual(schemesOf(before), {
+      [GATEWAY_SECURITY_SCHEME_NAME]: gatewaySecurityScheme('key_auth'),
+    });
+
+    const changed = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${publicId}`,
+      payload: { auth_plugin: 'jwt_auth', confirm_access_disruption: true },
+    });
+    assert.equal(changed.statusCode, 200, changed.body);
+    try {
+      const after = await catalog.spec(outsider, 'spec-cache-public');
+      assert.deepEqual(schemesOf(after), {
+        [GATEWAY_SECURITY_SCHEME_NAME]: gatewaySecurityScheme('jwt_auth'),
+      });
+      assert.equal(cache.stats().misses, 2, 'the auth plugin is part of the key');
+    } finally {
+      const restored = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${publicId}`,
+        payload: { auth_plugin: 'key_auth', confirm_access_disruption: true },
+      });
+      assert.equal(restored.statusCode, 200, restored.body);
+    }
   });
 
   it('serves a new revision as soon as it is current', async () => {

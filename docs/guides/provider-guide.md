@@ -366,7 +366,12 @@ For a document declaring `GET /invoices` and `GET /invoices/{id}`, published at
 
 In the catalog, clients at either level see the document with its `servers`
 replaced by the gateway address (or the listen path when no gateway address is
-configured).
+configured). The gateway's credential is added as the `ferrum_gateway` security
+scheme to every security requirement, next to your own schemes. One of yours
+sent in the same header as the gateway credential (`X-API-Key` for API keys,
+`Authorization` for Basic and JWT) is left out of the requirements, because a
+request carries only one of that header and the gateway reads it for its own
+credential. Your stored document is not changed.
 
 **CORS preflights need nothing.** The gateway's CORS plugin answers `OPTIONS`
 preflights before the route check, so you do not declare `options`.

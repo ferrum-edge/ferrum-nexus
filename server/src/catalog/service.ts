@@ -78,6 +78,7 @@ import {
   type ApiSpecSummary,
   type ApiVisibility,
   type ApplicationSummary,
+  type AuthPluginType,
   type CatalogAccessState,
   type CatalogApi,
   type CatalogDetailResponse,
@@ -103,6 +104,7 @@ import type {
 import { notFound, specInvalid } from '../lib/errors.js';
 import { LruCache } from '../lib/lru-cache.js';
 import { parseOpenApiSpec, renderCatalogSpec, type ParsedSpec } from '../publishing/oas.js';
+import { stampGatewaySecurity } from './gateway-security.js';
 import { canListApi, canViewApi, resolveReadAccess, type ApiReadAccess } from './read-access.js';
 import { presentApi, type GatewayUrlSource } from '../publishing/present.js';
 import { rewriteSpecServers } from '../publishing/spec-document.js';
@@ -200,7 +202,8 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
   const specCache = deps.specCache ?? defaultSpecCache();
 
   /**
-   * Parse, rewrite and re-serialise one revision for one server address.
+   * Parse, rewrite and re-serialise one revision for one server address and
+   * gateway auth plugin.
    *
    * A spec that passes validation can be ~2 MB, which costs hundreds of
    * milliseconds of synchronous parse and stringify — on the event loop, for
@@ -211,7 +214,9 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
    * servers are rewritten to. The address is itself derived from the gateway
    * origin and the API's listen path (namespace and slug), so all three are
    * in the key by construction: an operator changing the origin, or a slug
-   * change, is a miss rather than a stale document.
+   * change, is a miss rather than a stale document. The auth plugin decides the
+   * gateway security scheme the document declares (`./gateway-security.ts`)
+   * and can change without a new revision, so it is in the key as well.
    *
    * Nothing about the *viewer* is in the key, and nothing needs to be: the
    * document is the same for everyone allowed to read it, and this is only
@@ -222,13 +227,18 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
    * requests for one uncached document parses it once: the first one fills
    * the entry before any other resumes.
    */
-  function renderSpec(revisionId: Uuid, rawSpec: string, serverUrl: string): CatalogSpecRendering {
+  function renderSpec(
+    revisionId: Uuid,
+    rawSpec: string,
+    serverUrl: string,
+    authPlugin: AuthPluginType,
+  ): CatalogSpecRendering {
     // The text digest is defence in depth: revisions are immutable by design,
     // but a restored or hand-edited row must never be answered from a rendering
     // of the text it used to hold. Hashing even a 2 MB document costs a few
     // milliseconds against the hundreds a parse costs.
     const digest = createHash('sha256').update(rawSpec).digest('base64url');
-    const key = `${revisionId}\n${digest}\n${serverUrl}`;
+    const key = `${revisionId}\n${digest}\n${serverUrl}\n${authPlugin}`;
     const cached = specCache.get(key);
     if (cached !== undefined) return cached;
 
@@ -243,7 +253,10 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       specCache.set(key, null, key.length);
       return null;
     }
-    const document = rewriteSpecServers(parsed.document, serverUrl, 'catalog');
+    const document = stampGatewaySecurity(
+      rewriteSpecServers(parsed.document, serverUrl, 'catalog'),
+      authPlugin,
+    );
     const serialized = renderCatalogSpec(document, parsed.contentType);
     // Serialization adds indentation and quoting the parse-time count does not
     // see, so the output is bounded as well. An upload is measured by the same
@@ -557,6 +570,7 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
         record.id,
         record.raw_spec,
         presented.invoke_url ?? presented.listen_path,
+        api.auth_plugin,
       );
       // Stored legacy or corrupt documents must never fall back to raw output
       // or expose parser diagnostics containing provider-authored addresses.

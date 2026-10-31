@@ -24,6 +24,7 @@ import { promisify } from 'node:util';
 import {
   authHeadersFor,
   grantAccess,
+  headersFromCatalogSecurity,
   issueCredential,
   publishApi,
   UPSTREAM_URL,
@@ -476,6 +477,23 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       const approvedBody = await approved.text();
       assert.equal(approved.status, 200, approvedBody);
       assert.ok(reachedUpstream(approved), 'an approved call reaches the real upstream');
+
+      // The catalog document declares the credential this gateway checks, so a
+      // client that takes its auth from the document (Anvil's importer, a code
+      // generator) sends a request the real gateway accepts.
+      const catalogSpec = await portal<{ raw_spec: string }>(
+        'GET',
+        `/api/catalog/${encodeURIComponent(api.slug)}/spec`,
+        { session: client },
+      );
+      const documented = await callGateway(`${api.listen_path}/invoices`, {
+        headers: headersFromCatalogSecurity(
+          JSON.parse(catalogSpec.raw_spec),
+          authHeadersFor(credential, flavour.credential),
+        ),
+      });
+      assert.equal(documented.status, 200, 'the documented scheme authenticates');
+      assert.ok(reachedUpstream(documented));
 
       // What the backend was actually given. The API key and the basic-auth
       // header are stripped at the gateway; the bearer token is not. Pinning
