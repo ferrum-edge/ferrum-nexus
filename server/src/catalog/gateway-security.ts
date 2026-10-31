@@ -74,7 +74,6 @@ export const GATEWAY_SECURITY_SCHEME_NAME = 'ferrum_gateway';
 /** The header `key_auth` reads with the empty config Nexus sends it. */
 const KEY_AUTH_HEADER = 'X-API-Key';
 
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
