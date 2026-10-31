@@ -18,7 +18,7 @@ import { useApproveAccessRequest } from './useAccessRequests';
 import { useDeleteApplication } from './useApplications';
 import { useDeleteCredential, useIssueCredential, useRotateCredential } from './useCredentials';
 import { useGodDisableUser, useGodRevokeGrant } from './useGodMode';
-import { useRevokeGrant } from './useGrants';
+import { useRelinquishGrant, useRevokeGrant } from './useGrants';
 
 /** Cached screens a mutation may or may not have to refresh (issue #336). */
 const cacheKeys = {
@@ -70,6 +70,7 @@ beforeEach(() => {
     grant: GRANT,
   });
   vi.spyOn(godApi, 'revokeGrant').mockResolvedValue({ grant: { ...GRANT, status: 'revoked' } });
+  vi.spyOn(grantsApi, 'relinquish').mockResolvedValue({ grant: { ...GRANT, status: 'revoked' } });
   // Only the invalidations are under test, so the response body is a stub.
   vi.spyOn(godApi, 'disableUser').mockResolvedValue({} as GodDisableUserResponse);
 });
@@ -93,6 +94,14 @@ describe('grant and credential mutations', () => {
     const { result } = renderHook(useRevokeGrant, { wrapper });
     await act(async () => {
       await result.current.mutateAsync({ id: GRANT.id });
+    });
+    expectStale('grants', 'requests', 'catalog', 'apis', 'applications');
+  });
+
+  it('refreshes what a revoke refreshes after the grantee gives up a grant', async () => {
+    const { result } = renderHook(useRelinquishGrant, { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync(GRANT.id);
     });
     expectStale('grants', 'requests', 'catalog', 'apis', 'applications');
   });

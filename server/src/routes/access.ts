@@ -20,6 +20,7 @@ import {
   type DenyAccessRequestResponse,
   type ListAccessRequestsResponse,
   type ListGrantsResponse,
+  type RelinquishGrantResponse,
   type RequestGrantToolsResponse,
   type RevokeGrantResponse,
 } from '@ferrum-nexus/shared';
@@ -78,6 +79,8 @@ const listGrantsQuery = listQuerySchema.extend({
 
 const revokeBody = z.object({ reason: z.string().trim().max(2_000).nullish() });
 
+const relinquishBody = z.object({}).strict();
+
 const toolRequestBody = z
   .object({
     requested_tools: z.array(z.string().uuid()).min(1).max(MAX_AGENT_TOOLS),
@@ -94,6 +97,9 @@ export const ACCESS_REQUEST_CREATE_RATE_LIMIT = { max: 10, timeWindow: '1 minute
 
 /** Per-account burst limit on `POST /api/access-requests/:id/cancel`. */
 export const ACCESS_REQUEST_CANCEL_RATE_LIMIT = { max: 30, timeWindow: '1 minute' } as const;
+
+/** Per-account burst limit on `POST /api/grants/:id/relinquish`. */
+export const GRANT_RELINQUISH_RATE_LIMIT = { max: 30, timeWindow: '1 minute' } as const;
 
 /** `/api/access-requests` route plugin. */
 export const accessRequestRoutes: FastifyPluginAsync<AccessRoutesOptions> = async (
@@ -213,6 +219,19 @@ export const grantRoutes: FastifyPluginAsync<AccessRoutesOptions> = async (app, 
       );
       reply.status(201);
       return { access_request: created };
+    },
+  );
+
+  // The grantee gives up its own access. Authorised by the service — only the
+  // account that holds the grant — like `/:id/tool-requests`.
+  app.post(
+    '/:id/relinquish',
+    { config: { rateLimit: { ...GRANT_RELINQUISH_RATE_LIMIT } } },
+    async (request): Promise<RelinquishGrantResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      parseOrThrow(relinquishBody, request.body ?? {});
+      return { grant: await access.relinquish(user, id, clientIp(request)) };
     },
   );
 

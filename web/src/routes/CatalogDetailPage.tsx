@@ -22,6 +22,7 @@ import {
   useCreateAccessRequest,
   useRequestGrantTools,
 } from '../hooks/useAccessRequests';
+import { useRelinquishGrant } from '../hooks/useGrants';
 import { useAuth } from '../stores/auth';
 import { useToast } from '../stores/toast';
 import { ACCOUNT_IDENTITY, IdentityPicker } from '../components/applications/IdentityPicker';
@@ -39,6 +40,7 @@ import { FormNotice } from '../components/auth/AuthShell';
 import { Badge } from '../components/ui/Badge';
 import { Button, buttonClassName } from '../components/ui/Button';
 import { Card, CardBody, CardHeader, DetailRow, PageHeader } from '../components/ui/Card';
+import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { CopyField } from '../components/ui/CopyField';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Icon, type IconName } from '../components/ui/Icon';
@@ -329,6 +331,8 @@ function IdentityAccess({
   const [requestedTools, setRequestedTools] = useState<string[] | null>(null);
   const createRequest = useCreateAccessRequest();
   const cancelRequest = useCancelAccessRequest();
+  const relinquish = useRelinquishGrant();
+  const [confirmingRelinquish, setConfirmingRelinquish] = useState(false);
   const toast = useToast();
 
   if (access.isLoading) return <LoadingPanel label="Checking access" />;
@@ -348,6 +352,11 @@ function IdentityAccess({
   // notice says it outright: an application's grant is on that application's
   // gateway consumer only, never the account's.
   const holder = applicationId === null ? 'your account' : name;
+  // A disabled application keeps what it holds and may give it up, but asks
+  // for nothing new: the server refuses it, so the page does not offer it.
+  const applicationDisabled = access.data.application?.status === 'disabled';
+  const pendingTools =
+    grant && request?.status === 'pending' && request.grant_id === grant.id ? request : null;
 
   let body: ReactElement;
   if (grant && grant.status === 'active') {
@@ -373,20 +382,51 @@ function IdentityAccess({
           <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge> issued to {holder} — the
           address and the header are below.
         </p>
-        <div>
+        <div className="flex flex-wrap items-center gap-2">
           <Link to="/credentials" className={buttonClassName({ variant: 'secondary', size: 'sm' })}>
             <Icon name="key" />
             Manage your credentials
           </Link>
+          <Button variant="ghost" size="sm" onClick={() => setConfirmingRelinquish(true)}>
+            Give up access
+          </Button>
         </div>
-        {api.agents && grant.approved_tools != null && api.status !== 'retired' ? (
-          <MoreAgentTools
-            grant={grant}
-            agents={api.agents}
-            pending={
-              request?.status === 'pending' && request.grant_id === grant.id ? request : null
-            }
-          />
+        <ConfirmDialog
+          open={confirmingRelinquish}
+          onOpenChange={setConfirmingRelinquish}
+          title={`Give up access to ${api.name}`}
+          description={
+            <>
+              The gateway stops accepting calls to this API from {holder} at once: they get{' '}
+              <code className="font-mono text-xs">403</code>. Credentials and access to other APIs
+              are not affected.{' '}
+              {api.status === 'retired'
+                ? 'This API is retired, so you cannot request access to it again.'
+                : 'To use it again you must request access and wait for approval.'}
+              {api.visibility === 'private'
+                ? ' This API is private: unless the provider has authorized you as a viewer, another of your identities still holds access, or you administer the portal, it disappears from your catalog and you will need the provider to let you see it again.'
+                : ''}
+            </>
+          }
+          confirmLabel="Give up access"
+          danger
+          loading={relinquish.isPending}
+          onConfirm={() =>
+            relinquish.mutate(grant.id, {
+              onSuccess: () => {
+                setConfirmingRelinquish(false);
+                toast.success(`Gave up access to ${api.name}`);
+              },
+            })
+          }
+        />
+        {/* A disabled application asks for no more tools, but a tool request it
+            filed before it was disabled stays visible and withdrawable. */}
+        {api.agents &&
+        grant.approved_tools != null &&
+        api.status !== 'retired' &&
+        (!applicationDisabled || pendingTools) ? (
+          <MoreAgentTools grant={grant} agents={api.agents} pending={pendingTools} />
         ) : null}
       </div>
     );
@@ -416,6 +456,13 @@ function IdentityAccess({
     body = (
       <FormNotice tone="warning">
         This API is retired and is no longer accepting new access requests.
+      </FormNotice>
+    );
+  } else if (applicationDisabled) {
+    body = (
+      <FormNotice tone="warning">
+        {name} is disabled, so it cannot request new access. Re-enable it on the Applications page
+        first.
       </FormNotice>
     );
   } else {
@@ -605,6 +652,7 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
               </p>
               <IdentityPicker
                 label="Access for"
+                includeDisabled
                 value={identity}
                 selectedLabel={identityName}
                 onValueChange={(value, name) => {
@@ -640,6 +688,7 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
             <div className="flex flex-col gap-4">
               <IdentityPicker
                 label="Requesting for"
+                includeDisabled
                 value={identity}
                 selectedLabel={identityName}
                 onValueChange={(value, name) => {

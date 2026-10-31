@@ -297,6 +297,22 @@ describe('provider access pagination', () => {
     },
   );
 
+  it('tells a grant the grantee gave up from one the provider revoked', async () => {
+    const at = '2026-01-02T00:00:00.000Z';
+    grants = [
+      { ...grant(1, 'revoked'), revoked_by: 'user-1', revoked_at: at },
+      { ...grant(2, 'revoked'), revoked_by: 'provider-1', revoked_at: at },
+    ];
+    renderTab(<GrantsTab apiId="api-1" />);
+    await selectStatus('Grant status', 'Revoked');
+    await expectPage(2, 1);
+    const row = (userId: string): HTMLElement =>
+      screen.getByText(userId).closest('li') as HTMLElement;
+    expect(within(row('user-1')).getByText(/withdrawn by the grantee/)).toBeInTheDocument();
+    expect(within(row('user-2')).queryByText(/withdrawn by the grantee/)).not.toBeInTheDocument();
+    expect(within(row('user-2')).getByText(/· revoked /)).toBeInTheDocument();
+  });
+
   it('reaches and revokes an old active grant behind 51 revoked grants', async () => {
     grants = Array.from({ length: 51 }, (_, index) => grant(index, 'revoked'));
     grants.push(grant(51, 'active'));
