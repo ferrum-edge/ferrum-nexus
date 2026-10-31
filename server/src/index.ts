@@ -956,7 +956,7 @@ export async function buildServer(
 
   await app.register(
     async (scope) => {
-      // `global: false`: only `POST /:id/tool-requests` opts in.
+      // `global: false`: only `POST /:id/tool-requests` and `/:id/relinquish` opt in.
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
       }

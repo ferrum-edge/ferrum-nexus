@@ -256,6 +256,13 @@ export interface AccessService {
     ip?: string | null,
     recordWithRevoke?: (tx: NexusStore, grant: GrantRecord) => Promise<void>,
   ): Promise<Grant>;
+  /**
+   * The grantee gives up its own live grant: the same withdrawal as
+   * {@link AccessService.revoke}, but allowed only to the account that holds
+   * it (an application's grant is held by its owner), whatever its role. A
+   * grant it does not hold is `NOT_FOUND`. Nobody is notified.
+   */
+  relinquish(user: UserRecord, grantId: Uuid, ip?: string | null): Promise<Grant>;
   /** Requests the caller may see: their own, their APIs', or all for an admin. */
   listRequests(
     actor: UserRecord,
@@ -1717,6 +1724,192 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     return { access_request: decoratedRequest ?? updated, grant: decoratedGrant ?? widened };
   }
 
+  /**
+   * The relinquish gate: only the account that holds the grant. Checked
+   * before anything about the grant's API is read, and answered as not found,
+   * so a caller cannot tell somebody else's grant from one that does not exist.
+   */
+  function assertCanWithdraw(
+    actor: UserRecord,
+    grant: GrantRecord,
+    mode: 'review' | 'relinquish',
+  ): void {
+    if (mode === 'relinquish' && grant.user_id !== actor.id) throw notFound('Grant', grant.id);
+  }
+
+  /**
+   * Withdraw a live grant: claim it, take its ACL group off the consumer, and
+   * unwind the claim when the gateway will not follow.
+   *
+   * `review` is a provider or admin withdrawing someone's access, and tells
+   * the grantee. `relinquish` is the grantee giving up its own access: only
+   * the account that holds the grant (an application's grant is held by its
+   * owner) may do it, a grant it does not hold reads as not found, and nobody
+   * is notified, because the only person affected is the one who asked.
+   * Both take the same lease, write the same one `access.revoke` row (the
+   * relinquished one with `relinquished: true`) and share every rollback.
+   */
+  async function withdrawGrant(
+    actor: UserRecord,
+    grantId: Uuid,
+    reason: string | null,
+    ip: string | null,
+    mode: 'review' | 'relinquish',
+    recordWithRevoke?: (tx: NexusStore, grant: GrantRecord) => Promise<void>,
+  ): Promise<Grant> {
+    const initial = await store.grants.findById(grantId);
+    if (!initial) throw notFound('Grant', grantId);
+    assertCanWithdraw(actor, initial, mode);
+    const initialApi = await store.apis.findById(initial.api_id);
+    if (!initialApi) throw notFound('API', initial.api_id);
+    if (mode === 'review') assertCanReview(actor, initialApi);
+    if (initial.status !== 'active') throw conflict('This grant is already revoked');
+
+    // The claim, the ACL removal and its ordinary compensation hold the same
+    // `proxy:<id>` lease an approval holds through its claim and ACL add
+    // (issue #341). Without it a revocation that had claimed the grant but
+    // not yet reached the gateway could be overtaken by a re-request and
+    // approval of the same API: the approval added the group and committed
+    // a new active grant, and the delayed removal then stripped it — a
+    // portal showing access the gateway denies. Under one lease the two are
+    // ordered: an approval that goes second adds the group back after this
+    // removal, and one that went first holds a grant this claim never
+    // touches. Lease-loss compensation exits this section before taking a
+    // fresh proxy lease for MCP eligibility.
+    const withdraw = async (): Promise<GrantRecord | (() => Promise<never>)> => {
+      // Re-read under the lease: whatever held it may have revoked this
+      // grant or moved the API, and the snapshot above is from before.
+      const grant = await store.grants.findById(grantId);
+      if (!grant) throw notFound('Grant', grantId);
+      assertCanWithdraw(actor, grant, mode);
+      const api = await store.apis.findById(grant.api_id);
+      if (!api) throw notFound('API', grant.api_id);
+      if (mode === 'review') assertCanReview(actor, api);
+      if (api.ferrum_proxy_id !== initialApi.ferrum_proxy_id) {
+        throw conflict(
+          'The gateway proxy changed while this revocation was waiting; reload and retry',
+        );
+      }
+
+      const grantee = await store.users.findById(grant.user_id);
+
+      // Step 1 — claim the transition before anything reaches the gateway,
+      // for the same reason an approval claims its decision first. The read
+      // above is stale the instant it returns: a second click, god mode
+      // racing the API owner, or the disable-account sweep can all be
+      // revoking this same grant, and a blind write by id let every one of
+      // them past the `status !== 'active'` guard. They each stripped the ACL
+      // group and each wrote an `access.revoke` row, so the trail claimed
+      // one access had been withdrawn several times over. The loser stops
+      // here with a CONFLICT.
+      const revokedAt = nowIso();
+      let movedRequest: AccessRequestRecord | null = null;
+      let cancelledToolRequest: AccessRequestRecord | null = null;
+      const updated = await store.transaction(async (tx) => {
+        // The body may be run again if the adapter retries it, so the only
+        // things it writes outside the store start each attempt cleared:
+        // a request moved by an attempt that rolled back was not moved.
+        movedRequest = null;
+        cancelledToolRequest = null;
+        const result = await tx.grants.updateIfStatus(grant.id, 'active', {
+          status: 'revoked',
+          revoked_by: actor.id,
+          revoked_at: revokedAt,
+        });
+        if (!result) return null;
+        // Keep the originating request's status honest so the requester's
+        // history reads "approved, then revoked" rather than staying
+        // approved.
+        movedRequest = await moveRequestToRevoked(tx, grant, actor.id, revokedAt, reason);
+        cancelledToolRequest = await cancelPendingToolRequest(tx, grant, actor, revokedAt, ip);
+        // The revocation is recorded with the claim that makes it. Written
+        // after the gateway step, a failed insert left the grant revoked and
+        // unaudited behind a `500`, and a repeat found it already revoked
+        // and recorded nothing. Should the gateway then refuse the removal,
+        // `unwindRevocation` puts the grant back and records that too.
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.ACCESS_REVOKE,
+          { type: 'grant', id: grant.id },
+          {
+            api_id: api.id,
+            api_slug: api.slug,
+            user_id: grant.user_id,
+            application_id: grant.application_id,
+            acl_group: grant.acl_group,
+            reason: reason ?? null,
+            ...(mode === 'relinquish' ? { relinquished: true } : {}),
+          },
+          ip,
+        );
+        await recordWithRevoke?.(tx, result);
+        return result;
+      });
+      if (!updated) throw await revocationConflict(grant.id);
+
+      // Step 2 — the gateway, now that exactly one caller is entitled to
+      // touch it. `unwindRevocation` puts the rows back if the group will
+      // not come off: a revocation the gateway did not accept must not stand
+      // as one.
+      try {
+        if (grantee) await setGroupMembership(grantee, api.id, false, grant.application_id);
+      } catch (error) {
+        const resume = await unwindRevocation({
+          actor,
+          claim: updated,
+          request: movedRequest,
+          toolRequest: cancelledToolRequest,
+          cause: error,
+          ip,
+          proxyId: initialApi.ferrum_proxy_id,
+        });
+        if (resume) {
+          return async () => {
+            await resume();
+            throw error;
+          };
+        }
+        throw error;
+      }
+
+      // Inside the lease, as an approval announces inside it: a revocation
+      // and a quick re-approval of the same API are ordered by the lease,
+      // and their notices have to be too, or "approved" could reach the
+      // grantee before the "revoked" it followed. `announce` never throws.
+      // A grantee giving up its own access is told by the response, not by a
+      // notice and an email saying somebody revoked it.
+      if (grantee && mode === 'review') {
+        await announce(
+          grantee,
+          {
+            type: 'access_revoked',
+            title: `Access revoked: ${api.name}`,
+            body: `${actor.display_name} revoked your access to ${api.name}.`,
+            link: `/catalog/${api.slug}`,
+          },
+          {
+            templateKey: 'access_revoked',
+            vars: {
+              api_name: api.name,
+              api_slug: api.slug,
+              revoked_by_name: actor.display_name,
+              reason: reason ?? '',
+            },
+          },
+        );
+      }
+      return updated;
+    };
+
+    const withdrawn = initialApi.ferrum_proxy_id
+      ? await edge.serializePerKey(`proxy:${initialApi.ferrum_proxy_id}`, withdraw)
+      : await withdraw();
+    const updated = typeof withdrawn === 'function' ? await withdrawn() : withdrawn;
+
+    const [decorated] = await decorateGrants([updated]);
+    return decorated ?? updated;
+  }
+
   return {
     async request(
       user,
@@ -2328,152 +2521,11 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     },
 
     async revoke(actor, grantId, reason = null, ip = null, recordWithRevoke): Promise<Grant> {
-      const initial = await store.grants.findById(grantId);
-      if (!initial) throw notFound('Grant', grantId);
-      const initialApi = await store.apis.findById(initial.api_id);
-      if (!initialApi) throw notFound('API', initial.api_id);
-      assertCanReview(actor, initialApi);
-      if (initial.status !== 'active') throw conflict('This grant is already revoked');
+      return withdrawGrant(actor, grantId, reason, ip, 'review', recordWithRevoke);
+    },
 
-      // The claim, the ACL removal and its ordinary compensation hold the same
-      // `proxy:<id>` lease an approval holds through its claim and ACL add
-      // (issue #341). Without it a revocation that had claimed the grant but
-      // not yet reached the gateway could be overtaken by a re-request and
-      // approval of the same API: the approval added the group and committed
-      // a new active grant, and the delayed removal then stripped it — a
-      // portal showing access the gateway denies. Under one lease the two are
-      // ordered: an approval that goes second adds the group back after this
-      // removal, and one that went first holds a grant this claim never
-      // touches. Lease-loss compensation exits this section before taking a
-      // fresh proxy lease for MCP eligibility.
-      const withdraw = async (): Promise<GrantRecord | (() => Promise<never>)> => {
-        // Re-read under the lease: whatever held it may have revoked this
-        // grant or moved the API, and the snapshot above is from before.
-        const grant = await store.grants.findById(grantId);
-        if (!grant) throw notFound('Grant', grantId);
-        const api = await store.apis.findById(grant.api_id);
-        if (!api) throw notFound('API', grant.api_id);
-        assertCanReview(actor, api);
-        if (api.ferrum_proxy_id !== initialApi.ferrum_proxy_id) {
-          throw conflict(
-            'The gateway proxy changed while this revocation was waiting; reload and retry',
-          );
-        }
-
-        const grantee = await store.users.findById(grant.user_id);
-
-        // Step 1 — claim the transition before anything reaches the gateway,
-        // for the same reason an approval claims its decision first. The read
-        // above is stale the instant it returns: a second click, god mode
-        // racing the API owner, or the disable-account sweep can all be
-        // revoking this same grant, and a blind write by id let every one of
-        // them past the `status !== 'active'` guard. They each stripped the ACL
-        // group and each wrote an `access.revoke` row, so the trail claimed
-        // one access had been withdrawn several times over. The loser stops
-        // here with a CONFLICT.
-        const revokedAt = nowIso();
-        let movedRequest: AccessRequestRecord | null = null;
-        let cancelledToolRequest: AccessRequestRecord | null = null;
-        const updated = await store.transaction(async (tx) => {
-          // The body may be run again if the adapter retries it, so the only
-          // things it writes outside the store start each attempt cleared:
-          // a request moved by an attempt that rolled back was not moved.
-          movedRequest = null;
-          cancelledToolRequest = null;
-          const result = await tx.grants.updateIfStatus(grant.id, 'active', {
-            status: 'revoked',
-            revoked_by: actor.id,
-            revoked_at: revokedAt,
-          });
-          if (!result) return null;
-          // Keep the originating request's status honest so the requester's
-          // history reads "approved, then revoked" rather than staying
-          // approved.
-          movedRequest = await moveRequestToRevoked(tx, grant, actor.id, revokedAt, reason);
-          cancelledToolRequest = await cancelPendingToolRequest(tx, grant, actor, revokedAt, ip);
-          // The revocation is recorded with the claim that makes it. Written
-          // after the gateway step, a failed insert left the grant revoked and
-          // unaudited behind a `500`, and a repeat found it already revoked
-          // and recorded nothing. Should the gateway then refuse the removal,
-          // `unwindRevocation` puts the grant back and records that too.
-          await audit.forStore(tx).record(
-            { id: actor.id, role: actor.role },
-            AuditAction.ACCESS_REVOKE,
-            { type: 'grant', id: grant.id },
-            {
-              api_id: api.id,
-              api_slug: api.slug,
-              user_id: grant.user_id,
-              application_id: grant.application_id,
-              acl_group: grant.acl_group,
-              reason: reason ?? null,
-            },
-            ip,
-          );
-          await recordWithRevoke?.(tx, result);
-          return result;
-        });
-        if (!updated) throw await revocationConflict(grant.id);
-
-        // Step 2 — the gateway, now that exactly one caller is entitled to
-        // touch it. `unwindRevocation` puts the rows back if the group will
-        // not come off: a revocation the gateway did not accept must not stand
-        // as one.
-        try {
-          if (grantee) await setGroupMembership(grantee, api.id, false, grant.application_id);
-        } catch (error) {
-          const resume = await unwindRevocation({
-            actor,
-            claim: updated,
-            request: movedRequest,
-            toolRequest: cancelledToolRequest,
-            cause: error,
-            ip,
-            proxyId: initialApi.ferrum_proxy_id,
-          });
-          if (resume) {
-            return async () => {
-              await resume();
-              throw error;
-            };
-          }
-          throw error;
-        }
-
-        // Inside the lease, as an approval announces inside it: a revocation
-        // and a quick re-approval of the same API are ordered by the lease,
-        // and their notices have to be too, or "approved" could reach the
-        // grantee before the "revoked" it followed. `announce` never throws.
-        if (grantee) {
-          await announce(
-            grantee,
-            {
-              type: 'access_revoked',
-              title: `Access revoked: ${api.name}`,
-              body: `${actor.display_name} revoked your access to ${api.name}.`,
-              link: `/catalog/${api.slug}`,
-            },
-            {
-              templateKey: 'access_revoked',
-              vars: {
-                api_name: api.name,
-                api_slug: api.slug,
-                revoked_by_name: actor.display_name,
-                reason: reason ?? '',
-              },
-            },
-          );
-        }
-        return updated;
-      };
-
-      const withdrawn = initialApi.ferrum_proxy_id
-        ? await edge.serializePerKey(`proxy:${initialApi.ferrum_proxy_id}`, withdraw)
-        : await withdraw();
-      const updated = typeof withdrawn === 'function' ? await withdrawn() : withdrawn;
-
-      const [decorated] = await decorateGrants([updated]);
-      return decorated ?? updated;
+    async relinquish(user, grantId, ip = null): Promise<Grant> {
+      return withdrawGrant(user, grantId, null, ip, 'relinquish');
     },
 
     async revokeAllForUser(actor, userId, reason, ip = null): Promise<BulkRevocationResult> {

@@ -449,6 +449,37 @@ describe('catalog access', () => {
     expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
   });
 
+  it('lets the grantee give up its own access after confirming', async () => {
+    detail = {
+      ...detail,
+      api: catalogEntry({ access_state: 'granted' }),
+      my_grant: GRANT,
+    };
+    identities.account = { ...NO_ACCESS, grant: GRANT };
+    vi.spyOn(grantsApi, 'relinquish').mockImplementation(async () => {
+      const revoked = { ...GRANT, status: 'revoked' as const };
+      detail = { ...detail, api: catalogEntry({ access_state: 'revoked' }), my_grant: revoked };
+      identities.account = { ...NO_ACCESS, grant: revoked };
+      return { grant: revoked };
+    });
+    await openDetail('Access');
+    await screen.findByText(/Access granted to your account/);
+    fireEvent.click(screen.getByRole('button', { name: 'Give up access' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(
+      within(dialog).getByText(/stops accepting calls to this API from your account/),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText(/request access and wait for approval/)).toBeInTheDocument();
+    // Nothing is sent until the dialog is confirmed.
+    expect(grantsApi.relinquish).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Give up access' }));
+    await screen.findByText(`Gave up access to ${API.name}`);
+    expect(grantsApi.relinquish).toHaveBeenCalledWith(GRANT.id);
+    await waitFor(() =>
+      expect(screen.queryByText(/Access granted to your account/)).not.toBeInTheDocument(),
+    );
+  });
+
   it('labels a non-requestable API as open access beside the title', async () => {
     detail = {
       ...detail,

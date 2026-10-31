@@ -9,6 +9,7 @@ import {
 import type {
   ListGrantsQuery,
   ListGrantsResponse,
+  RelinquishGrantResponse,
   RevokeGrantRequest,
   RevokeGrantResponse,
 } from '@ferrum-nexus/shared';
@@ -52,6 +53,24 @@ export function useRevokeGrant(): UseMutationResult<
       // made from the Grants tab must refresh its stats too (issue #336), and
       // so does the Applications page for an application's own grant.
       void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.applications.all });
+    },
+  });
+}
+
+/**
+ * Give up one of the caller's own grants: the same gateway withdrawal as a
+ * revoke, for the identity that holds it. Refreshes what a revoke refreshes,
+ * since the catalog's access panel and badges read the same rows.
+ */
+export function useRelinquishGrant(): UseMutationResult<RelinquishGrantResponse, Error, string> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => grantsApi.relinquish(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.grants.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.accessRequests.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.applications.all });
     },
   });

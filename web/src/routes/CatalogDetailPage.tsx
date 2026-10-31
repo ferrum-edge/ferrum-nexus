@@ -22,6 +22,7 @@ import {
   useCreateAccessRequest,
   useRequestGrantTools,
 } from '../hooks/useAccessRequests';
+import { useRelinquishGrant } from '../hooks/useGrants';
 import { useAuth } from '../stores/auth';
 import { useToast } from '../stores/toast';
 import { ACCOUNT_IDENTITY, IdentityPicker } from '../components/applications/IdentityPicker';
@@ -39,6 +40,7 @@ import { FormNotice } from '../components/auth/AuthShell';
 import { Badge } from '../components/ui/Badge';
 import { Button, buttonClassName } from '../components/ui/Button';
 import { Card, CardBody, CardHeader, DetailRow, PageHeader } from '../components/ui/Card';
+import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { CopyField } from '../components/ui/CopyField';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Icon, type IconName } from '../components/ui/Icon';
@@ -329,6 +331,8 @@ function IdentityAccess({
   const [requestedTools, setRequestedTools] = useState<string[] | null>(null);
   const createRequest = useCreateAccessRequest();
   const cancelRequest = useCancelAccessRequest();
+  const relinquish = useRelinquishGrant();
+  const [confirmingRelinquish, setConfirmingRelinquish] = useState(false);
   const toast = useToast();
 
   if (access.isLoading) return <LoadingPanel label="Checking access" />;
@@ -373,12 +377,41 @@ function IdentityAccess({
           <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge> issued to {holder} — the
           address and the header are below.
         </p>
-        <div>
+        <div className="flex flex-wrap items-center gap-2">
           <Link to="/credentials" className={buttonClassName({ variant: 'secondary', size: 'sm' })}>
             <Icon name="key" />
             Manage your credentials
           </Link>
+          <Button variant="ghost" size="sm" onClick={() => setConfirmingRelinquish(true)}>
+            Give up access
+          </Button>
         </div>
+        <ConfirmDialog
+          open={confirmingRelinquish}
+          onOpenChange={setConfirmingRelinquish}
+          title={`Give up access to ${api.name}`}
+          description={
+            <>
+              The gateway stops accepting calls to this API from {holder} at once: they get{' '}
+              <code className="font-mono text-xs">403</code>. Credentials and access to other APIs
+              are not affected.{' '}
+              {api.status === 'retired'
+                ? 'This API is retired, so you cannot request access to it again.'
+                : 'To use it again you must request access and wait for approval.'}
+            </>
+          }
+          confirmLabel="Give up access"
+          danger
+          loading={relinquish.isPending}
+          onConfirm={() =>
+            relinquish.mutate(grant.id, {
+              onSuccess: () => {
+                setConfirmingRelinquish(false);
+                toast.success(`Gave up access to ${api.name}`);
+              },
+            })
+          }
+        />
         {api.agents && grant.approved_tools != null && api.status !== 'retired' ? (
           <MoreAgentTools
             grant={grant}

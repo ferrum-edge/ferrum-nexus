@@ -114,6 +114,7 @@ trust, not from an untrusted forwarded header.
 | `POST /api/credentials`, `POST …/:id/rotate`, `DELETE …/:id`, per route        | 20               | account  |
 | `POST /api/notifications/read`                                                 | 60               | account  |
 | `POST /api/grants/:id/tool-requests`                                           | 10               | account  |
+| `POST /api/grants/:id/relinquish`                                              | 30               | account  |
 | `POST /api/admin/settings/smtp-test`                                           | 3                | account  |
 | `POST /api/admin/mass-email`                                                   | 10               | account  |
 | `POST /api/service-manifests/preview`                                          | 10               | account  |
@@ -2977,6 +2978,26 @@ Removes the ACL group from the grantee's consumer, marks the grant `revoked`,
 and moves the originating access request to `revoked`. The grantee is notified
 and emailed. `409 CONFLICT` when already revoked. Revocation holds the API's
 proxy lease, like approval.
+
+### `POST /api/grants/:id/relinquish`
+
+_session_, **the account that holds the grant only** (an application's grant
+is held by its owner), whatever its role → `{ "grant": Grant }`. Body `{}` or
+none; any key is a `400`.
+
+The grantee gives up access it no longer needs. It is the same withdrawal as a
+revoke: the ACL group comes off the identity's consumer under the API's proxy
+lease, the grant and its originating request move to `revoked` with
+`revoked_by` set to the grantee, a pending tool request on the grant is
+cancelled, and a gateway refusal puts everything back
+(`access.revoke_rollback`). Only that identity's access to that API changes;
+its credentials and other grants are untouched. One `access.revoke` row is
+written with `details.relinquished: true`. Nobody is notified.
+
+`404 NOT_FOUND` for a grant the caller does not hold, including when the
+caller is the API's owner or an admin, who revoke instead. `409 CONFLICT`
+when it is already revoked. A disabled application's grant can be given up.
+The identity may request access again afterwards, unless the API is retired.
 
 ### `POST /api/grants/:id/tool-requests`
 

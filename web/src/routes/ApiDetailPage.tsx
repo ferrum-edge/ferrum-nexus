@@ -1188,7 +1188,11 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
                     </p>
                     <p className="truncate text-xs text-fg-subtle">
                       Granted {formatDateTime(grant.created_at)}
-                      {grant.revoked_at ? ` · revoked ${formatDateTime(grant.revoked_at)}` : ''}
+                      {grant.revoked_at
+                        ? grant.revoked_by === grant.user_id
+                          ? ` · given up by the grantee ${formatDateTime(grant.revoked_at)}`
+                          : ` · revoked ${formatDateTime(grant.revoked_at)}`
+                        : ''}
                     </p>
                     <AgentGrantSummary agents={grant.api?.agents} subset={grant.approved_tools} />
                   </div>

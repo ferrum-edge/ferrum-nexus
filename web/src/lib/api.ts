@@ -135,6 +135,7 @@ import {
   type ReleaseUserAddressRequest,
   type ReleaseUserAddressResponse,
   type RetryGatewayTeardownResponse,
+  type RelinquishGrantResponse,
   type RevokeGrantRequest,
   type RevokeGrantResponse,
   type RequestGrantToolsRequest,
@@ -620,6 +621,8 @@ export const grantsApi = {
     get<ListGrantsResponse>('/grants', { ...query }),
   revoke: (id: string, body: RevokeGrantRequest = {}): Promise<RevokeGrantResponse> =>
     post<RevokeGrantResponse>(`/grants/${encodeURIComponent(id)}/revoke`, body),
+  relinquish: (id: string): Promise<RelinquishGrantResponse> =>
+    post<RelinquishGrantResponse>(`/grants/${encodeURIComponent(id)}/relinquish`, {}),
   requestTools: (id: string, body: RequestGrantToolsRequest): Promise<RequestGrantToolsResponse> =>
     post<RequestGrantToolsResponse>(`/grants/${encodeURIComponent(id)}/tool-requests`, body),
 };

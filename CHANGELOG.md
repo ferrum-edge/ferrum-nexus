@@ -6,6 +6,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Grantees can give up access they no longer need
+  (`POST /api/grants/:id/relinquish`, **Give up access** on an API's Access
+  tab). Before, only the API's owner or an admin could withdraw a grant, so a
+  client could shed an application's access to one API only by deleting the
+  whole application and every credential it held. It runs the same
+  lease-held, rollback-safe withdrawal as a revoke, is allowed only to the
+  account that holds the grant, records `access.revoke` with
+  `relinquished: true`, and notifies nobody. Providers see the grant as given
+  up by the grantee.
+
 ### Changed
 
 - Plugin config updates and deletes send Ferrum Edge's
