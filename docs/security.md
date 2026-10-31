@@ -971,7 +971,7 @@ host. Messages already in the outbox before an upgrade are not revalidated.
   Object `server`) with the gateway invoke URL, or just the listen path when no
   public gateway origin is configured. They also declare the gateway's
   credential type (a `ferrum_gateway` security scheme for the API's auth plugin,
-  added to every security requirement) and never a consumer, key or secret, so
+  required on every operation the gateway serves) and never a consumer, key or secret, so
   one rendering serves every viewer. The document is re-serialized in its
   original format (comments and formatting are lost); an invalid stored document
   fails closed. URLs a provider writes in prose or examples are not redacted.
@@ -1535,7 +1535,7 @@ Notes:
 - `PATCH /api/users/me` has its own limit because it checks
   `current_password`.
 - The catalog spec route is the one read that parses a whole document. Results
-  are cached per revision and server address (after the visibility check), and
+  are cached per revision, server address and auth plugin (after the visibility check), and
   the limit bounds cache misses.
 
 `NEXUS_RATE_LIMIT_ENABLED` (default `true`) turns all of this on; it is forced

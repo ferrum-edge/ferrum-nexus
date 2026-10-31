@@ -17,11 +17,18 @@
  *
  * - one security scheme for the auth plugin, with the header Edge reads for it
  *   ({@link gatewaySecurityScheme}), under `components.securitySchemes`;
- * - that scheme added to every security requirement: the root `security` and
- *   every operation that overrides it. OpenAPI lists alternatives, each one a
- *   set of schemes that must all be present, so the gateway's scheme is added
- *   to each alternative, and a document (or operation) that requires nothing
- *   (no `security`, `[]` or `[{}]`) now requires the gateway's scheme alone.
+ * - an explicit `security` on every operation the gateway serves: each
+ *   operation of a Path Item under `paths`, inline or reached through a chain
+ *   of Path Item `$ref`s. It is the operation's own `security`, or the root's
+ *   when it has none, with the gateway's scheme added. OpenAPI lists
+ *   alternatives, each one a set of schemes that must all be present, so the
+ *   scheme is added to each alternative, and an operation that requires
+ *   nothing (no `security`, `[]` or `[{}]`) now requires the gateway's scheme
+ *   alone.
+ *
+ * The root `security` is left as uploaded. It is also the default of webhook
+ * and callback operations, which describe requests the provider's service
+ * makes, not ones the gateway receives, and those keep their meaning.
  *
  * ## Header collisions
  *
@@ -42,15 +49,15 @@
  * - It is documentation, not enforcement: the gateway's `key_auth`,
  *   `basic_auth` or `jwt_auth` plugin decides. The MCP endpoint of an
  *   agent-enabled API is not an operation of the document and is not described.
- * - Callbacks and webhooks describe requests the provider's service makes, not
- *   ones the gateway receives, so they are left alone unless a path references
- *   one of them as its Path Item.
- * - A document whose `components` or `components.securitySchemes` is present
- *   but not an object has nowhere to define the scheme, so its security is left
- *   as uploaded.
+ * - Webhooks and callbacks are not changed, except a reusable Path Item or
+ *   webhook that a path references: the gateway serves that one, so its
+ *   operations are stamped wherever else it is used.
+ * - A `components` or `components.securitySchemes` that is present but not an
+ *   object is invalid OpenAPI that no tool can read; it is replaced, so the
+ *   gateway scheme can be defined.
  */
 
-import type { AuthPluginType } from '@ferrum-nexus/shared';
+import { resolveOpenApiPointer, type AuthPluginType } from '@ferrum-nexus/shared';
 
 /**
  * Name the gateway's scheme is registered under, when the provider's document
@@ -64,8 +71,11 @@ const KEY_AUTH_HEADER = 'X-API-Key';
 /** Path Item keys that hold an Operation Object. */
 const OPERATION_KEYS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'];
 
-/** Longest `$ref` chain followed between one security scheme entry and its definition. */
-const MAX_SCHEME_REF_HOPS = 8;
+/**
+ * Longest `$ref` chain followed from a security scheme entry to its definition,
+ * or from a path to the Path Item it is served from.
+ */
+const MAX_REF_HOPS = 8;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -103,7 +113,7 @@ export function gatewaySecurityScheme(authPlugin: AuthPluginType): Record<string
         description:
           'Ferrum Edge gateway credential: a short-lived HS256 token signed with the secret ' +
           'of a jwt credential issued in the developer portal. Its sub claim is the gateway ' +
-          'consumer username (nexus-user-<id> or nexus-app-<id>).',
+          'consumer username (nexus-user-<id> or nexus-app-<id>), and it must carry an exp claim.',
       };
   }
 }
@@ -132,34 +142,32 @@ function schemeHeader(scheme: Record<string, unknown>): string | null {
   }
 }
 
-/** Follow a scheme entry's local `$ref` chain to its definition, if it ends at one. */
-function resolveScheme(
-  schemes: Record<string, unknown>,
-  entry: unknown,
-): Record<string, unknown> | null {
-  const prefix = '#/components/securitySchemes/';
+/**
+ * Follow a scheme entry's local `$ref` chain to its definition, if it ends at
+ * one. References resolve against the whole document, percent-decoded and
+ * RFC 6901-unescaped, as an OpenAPI client resolves them.
+ */
+function resolveScheme(document: unknown, entry: unknown): Record<string, unknown> | null {
   let current = entry;
-  for (let hop = 0; hop <= MAX_SCHEME_REF_HOPS; hop += 1) {
+  for (let hop = 0; hop <= MAX_REF_HOPS; hop += 1) {
     if (!isRecord(current)) return null;
     const ref = current.$ref;
     if (typeof ref !== 'string') return current;
-    if (!ref.startsWith(prefix)) return null;
-    const name = ref.slice(prefix.length).replace(/~1/g, '/').replace(/~0/g, '~');
-    if (!Object.hasOwn(schemes, name)) return null;
-    current = schemes[name];
+    current = resolveOpenApiPointer(document, ref);
   }
   return null;
 }
 
 /** Names of the provider's schemes sent in the header the gateway reads. */
 function collidingSchemes(
+  document: Record<string, unknown>,
   schemes: Record<string, unknown>,
   authPlugin: AuthPluginType,
 ): Set<string> {
   const header = gatewayHeader(authPlugin);
   const colliding = new Set<string>();
   for (const [name, entry] of Object.entries(schemes)) {
-    const scheme = resolveScheme(schemes, entry);
+    const scheme = resolveScheme(document, entry);
     if (scheme !== null && schemeHeader(scheme) === header) colliding.add(name);
   }
   return colliding;
@@ -204,32 +212,32 @@ function withGatewayRequirement(
   return result;
 }
 
-/** A Path Item with every operation that overrides `security` rewritten. */
-function stampPathItem(item: unknown, name: string, colliding: ReadonlySet<string>): unknown {
-  if (!isRecord(item)) return item;
-  let copy: Record<string, unknown> | null = null;
-  for (const method of OPERATION_KEYS) {
-    const operation = item[method];
-    if (!isRecord(operation) || !('security' in operation)) continue;
-    copy ??= { ...item };
-    copy[method] = {
-      ...operation,
-      security: withGatewayRequirement(operation.security, name, colliding),
-    };
+/** Where a Path Item `$ref` points: one entry of `paths`, `webhooks` or `components.pathItems`. */
+type PathItemRegistry = 'paths' | 'webhooks' | 'pathItems';
+
+/** Percent-decode and RFC 6901-unescape one pointer segment, or `null` if malformed. */
+function pointerSegment(raw: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return null;
   }
-  return copy ?? item;
+  return decoded.replace(/~1/g, '/').replace(/~0/g, '~');
 }
 
-const PATH_ITEMS_POINTER = '#/components/pathItems/';
-const WEBHOOKS_POINTER = '#/webhooks/';
-
-/**
- * The registry key a `#/<container>/<key>` reference names, or `null` when it
- * reaches below a registry entry (`a/b` names member `b` of entry `a`).
- */
-function registryKey(rest: string): string | null {
-  if (rest.includes('/')) return null;
-  return rest.replace(/~1/g, '/').replace(/~0/g, '~');
+/** The registry entry a Path Item `$ref` names, or `null` for anything else. */
+function pathItemTarget(ref: string): { registry: PathItemRegistry; key: string } | null {
+  if (!ref.startsWith('#/')) return null;
+  const segments = ref.slice(2).split('/').map(pointerSegment);
+  if (segments.some((segment) => segment === null)) return null;
+  const [first, second, third] = segments as string[];
+  if (segments.length === 2 && first === 'paths') return { registry: 'paths', key: second! };
+  if (segments.length === 2 && first === 'webhooks') return { registry: 'webhooks', key: second! };
+  if (segments.length === 3 && first === 'components' && second === 'pathItems') {
+    return { registry: 'pathItems', key: third! };
+  }
+  return null;
 }
 
 /**
@@ -241,43 +249,69 @@ export function stampGatewaySecurity(
   document: Record<string, unknown>,
   authPlugin: AuthPluginType,
 ): Record<string, unknown> {
-  const components = document.components;
-  if (components !== undefined && !isRecord(components)) return document;
-  const existing = isRecord(components) ? components.securitySchemes : undefined;
-  if (existing !== undefined && !isRecord(existing)) return document;
-  const schemes = existing ?? {};
-
+  const components = isRecord(document.components) ? document.components : {};
+  const schemes = isRecord(components.securitySchemes) ? components.securitySchemes : {};
   const name = freeSchemeName(schemes);
-  const colliding = collidingSchemes(schemes, authPlugin);
+  const colliding = collidingSchemes(document, schemes, authPlugin);
+  const rootSecurity = document.security;
+
+  /** A Path Item with an explicit, gateway-stamped `security` on every operation. */
+  const stampPathItem = (item: unknown): unknown => {
+    if (!isRecord(item)) return item;
+    let copy: Record<string, unknown> | null = null;
+    for (const method of OPERATION_KEYS) {
+      const operation = item[method];
+      if (!isRecord(operation)) continue;
+      const own = Object.hasOwn(operation, 'security') ? operation.security : rootSecurity;
+      copy ??= { ...item };
+      copy[method] = { ...operation, security: withGatewayRequirement(own, name, colliding) };
+    }
+    return copy ?? item;
+  };
+
+  const registries: Record<PathItemRegistry, unknown> = {
+    paths: document.paths,
+    webhooks: document.webhooks,
+    pathItems: components.pathItems,
+  };
+  // Registry entries a path is served from through its `$ref` chain. An entry
+  // of `paths` is stamped as a path anyway, so only the other two are kept.
+  const referenced: Record<'webhooks' | 'pathItems', Set<string>> = {
+    webhooks: new Set(),
+    pathItems: new Set(),
+  };
+  const follow = (item: unknown): void => {
+    let current = item;
+    const seen = new Set<string>();
+    for (let hop = 0; hop < MAX_REF_HOPS; hop += 1) {
+      if (!isRecord(current) || typeof current.$ref !== 'string') return;
+      const target = pathItemTarget(current.$ref);
+      if (target === null) return;
+      const id = `${target.registry}\n${target.key}`;
+      if (seen.has(id)) return;
+      seen.add(id);
+      if (target.registry !== 'paths') referenced[target.registry].add(target.key);
+      const registry = registries[target.registry];
+      if (!isRecord(registry) || !Object.hasOwn(registry, target.key)) return;
+      current = registry[target.key];
+    }
+  };
+
   const copy: Record<string, unknown> = {
     ...document,
     components: {
-      ...(components ?? {}),
+      ...components,
       securitySchemes: { ...schemes, [name]: gatewaySecurityScheme(authPlugin) },
     },
-    security: withGatewayRequirement(document.security, name, colliding),
   };
-
-  // Operations that set their own `security` replace the root's, so each is
-  // rewritten too: inline in `paths`, and in the reusable Path Items and
-  // webhooks a path references (the only `$ref` targets Edge serves a path from).
-  const referencedPathItems = new Set<string>();
-  const referencedWebhooks = new Set<string>();
+  // `Object.fromEntries` defines own properties, so a provider key such as
+  // `__proto__` stays a key instead of reaching the prototype.
   if (isRecord(document.paths)) {
     copy.paths = Object.fromEntries(
       Object.entries(document.paths).map(([template, item]) => {
         if (!template.startsWith('/')) return [template, item];
-        if (isRecord(item) && typeof item.$ref === 'string') {
-          const ref = item.$ref;
-          const [registry, prefix] = ref.startsWith(PATH_ITEMS_POINTER)
-            ? [referencedPathItems, PATH_ITEMS_POINTER]
-            : ref.startsWith(WEBHOOKS_POINTER)
-              ? [referencedWebhooks, WEBHOOKS_POINTER]
-              : [null, ''];
-          const key = registry === null ? null : registryKey(ref.slice(prefix.length));
-          if (registry !== null && key !== null) registry.add(key);
-        }
-        return [template, stampPathItem(item, name, colliding)];
+        follow(item);
+        return [template, stampPathItem(item)];
       }),
     );
   }
@@ -285,17 +319,17 @@ export function stampGatewaySecurity(
     Object.fromEntries(
       Object.entries(registry).map(([key, item]) => [
         key,
-        keys.has(key) ? stampPathItem(item, name, colliding) : item,
+        keys.has(key) ? stampPathItem(item) : item,
       ]),
     );
-  if (referencedPathItems.size > 0 && isRecord(components) && isRecord(components.pathItems)) {
+  if (referenced.pathItems.size > 0 && isRecord(components.pathItems)) {
     (copy.components as Record<string, unknown>).pathItems = stampReferenced(
       components.pathItems,
-      referencedPathItems,
+      referenced.pathItems,
     );
   }
-  if (referencedWebhooks.size > 0 && isRecord(document.webhooks)) {
-    copy.webhooks = stampReferenced(document.webhooks, referencedWebhooks);
+  if (referenced.webhooks.size > 0 && isRecord(document.webhooks)) {
+    copy.webhooks = stampReferenced(document.webhooks, referenced.webhooks);
   }
   return copy;
 }

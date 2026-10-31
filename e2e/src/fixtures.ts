@@ -167,26 +167,29 @@ export function authHeadersFor(
  * The one header the catalog document's security says carries the gateway
  * credential, filled with the value {@link authHeadersFor} produced.
  *
- * Reads the root `security` of the document `GET /api/catalog/:slug/spec`
- * serves and the scheme it names, as an OpenAPI client (an importer, a code
- * generator) would: an `apiKey` header keeps its declared name, and `http`
+ * Reads the `security` of one operation of the document
+ * `GET /api/catalog/:slug/spec` serves (its own, else the root's) and the
+ * scheme it names, as an OpenAPI client (an importer, a code generator) would: an `apiKey` header keeps its declared name, and `http`
  * `basic` / `bearer` use `Authorization` with that prefix. It throws when the
  * document names no single scheme, or one the issued credential cannot fill,
  * so a gateway call made with the result tests the document, not this helper.
  */
 export function headersFromCatalogSecurity(
   document: unknown,
+  path: string,
+  method: string,
   issued: Record<string, string>,
 ): Record<string, string> {
   const doc = document as {
     security?: Record<string, unknown>[];
+    paths?: Record<string, Record<string, { security?: Record<string, unknown>[] }>>;
     components?: { securitySchemes?: Record<string, Record<string, unknown>> };
   };
-  const names = Object.keys(doc.security?.[0] ?? {});
-  if (doc.security?.length !== 1 || names.length !== 1) {
-    throw new Error(
-      `expected exactly one gateway requirement, got ${JSON.stringify(doc.security)}`,
-    );
+  const operation = doc.paths?.[path]?.[method];
+  const security = operation && 'security' in operation ? operation.security : doc.security;
+  const names = Object.keys(security?.[0] ?? {});
+  if (security?.length !== 1 || names.length !== 1) {
+    throw new Error(`expected exactly one gateway requirement, got ${JSON.stringify(security)}`);
   }
   const scheme = doc.components?.securitySchemes?.[names[0]!];
   const valueOf = (header: string): string | undefined =>
@@ -196,8 +199,9 @@ export function headersFromCatalogSecurity(
     if (value === undefined) throw new Error(`the credential has no ${scheme.name} header`);
     return { [scheme.name]: value };
   }
-  if (scheme?.type === 'http' && typeof scheme.scheme === 'string') {
-    const prefix = scheme.scheme.toLowerCase() === 'basic' ? 'Basic ' : 'Bearer ';
+  const httpScheme = typeof scheme?.scheme === 'string' ? scheme.scheme.toLowerCase() : null;
+  if (scheme?.type === 'http' && (httpScheme === 'basic' || httpScheme === 'bearer')) {
+    const prefix = httpScheme === 'basic' ? 'Basic ' : 'Bearer ';
     const value = valueOf('authorization');
     if (value === undefined || !value.startsWith(prefix)) {
       throw new Error(`the credential is not a ${prefix.trim()} Authorization header`);

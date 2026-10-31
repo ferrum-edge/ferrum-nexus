@@ -9,15 +9,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 ### Changed
 
 - The catalog document (`GET /api/catalog/:slug/spec`) declares the gateway
-  credential. It adds a `ferrum_gateway` security
-  scheme for the API's auth plugin (`X-API-Key` header, HTTP Basic or a JWT
-  bearer token) to every security requirement. Before, the document carried
-  only the provider's own security, often none (for example, a Ferrum Alloy
+  credential. It adds a `ferrum_gateway` security scheme for the API's auth
+  plugin (`X-API-Key` header, HTTP Basic or a JWT bearer token) and requires
+  it on every operation the gateway serves. Before, the document carried only
+  the provider's own security, often none (for example, a Ferrum Alloy
   `openapi export`). A client that imported it, such as Anvil's OpenAPI
   importer, sent requests the gateway refused with `401`. A provider scheme in
-  the same header as the gateway credential is dropped from the requirements,
-  because a request cannot carry both. The catalog cache key now includes the
-  auth plugin.
+  the same header as the gateway credential is dropped from those
+  requirements, because a request cannot carry both. Root security, webhooks
+  and callbacks keep the provider's meaning. The catalog cache key now includes
+  the auth plugin.
 
 - Plugin config updates and deletes send Ferrum Edge's
   `expected_proxy_ids` association precondition (forge-ops #569): the

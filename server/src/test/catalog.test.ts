@@ -26,14 +26,34 @@ import {
   type TestSession,
 } from './helpers.js';
 
-/** What the catalog adds for a `key_auth` API to a document with no security. */
-function keyAuthSecurity(components: Record<string, unknown> = {}): Record<string, unknown> {
+/**
+ * A document with no security as the catalog serves it for a `key_auth` API:
+ * the gateway scheme defined, and required on every operation under `paths`.
+ */
+function withKeyAuthSecurity(document: Record<string, unknown>): Record<string, unknown> {
+  const security = [{ [GATEWAY_SECURITY_SCHEME_NAME]: [] }];
+  const paths = Object.fromEntries(
+    Object.entries(document.paths as Record<string, Record<string, unknown>>).map(
+      ([template, item]) => [
+        template,
+        Object.fromEntries(
+          Object.entries(item).map(([key, value]) => [
+            key,
+            ['get', 'put', 'post', 'delete', 'patch'].includes(key)
+              ? { ...(value as Record<string, unknown>), security }
+              : value,
+          ]),
+        ),
+      ],
+    ),
+  );
   return {
+    ...document,
+    paths,
     components: {
-      ...components,
+      ...(document.components as Record<string, unknown> | undefined),
       securitySchemes: { [GATEWAY_SECURITY_SCHEME_NAME]: gatewaySecurityScheme('key_auth') },
     },
-    security: [{ [GATEWAY_SECURITY_SCHEME_NAME]: [] }],
   };
 }
 
@@ -351,11 +371,13 @@ describe('catalog visibility', () => {
       assert.equal(yaml.statusCode, 200);
       const yamlBody = yaml.json<CatalogSpecResponse>();
       assert.equal(yamlBody.content_type, 'application/yaml');
-      assert.deepEqual(parseYaml(yamlBody.raw_spec), {
-        ...parseYaml(SAMPLE_SPEC_YAML),
-        servers: [{ url: 'https://gateway.example.test/nexus/cat-public' }],
-        ...keyAuthSecurity(),
-      });
+      assert.deepEqual(
+        parseYaml(yamlBody.raw_spec),
+        withKeyAuthSecurity({
+          ...parseYaml(SAMPLE_SPEC_YAML),
+          servers: [{ url: 'https://gateway.example.test/nexus/cat-public' }],
+        }),
+      );
       assert.equal(yamlBody.parsed_title, 'Billing API');
 
       await publish(provider, 'cat-json', { spec: SAMPLE_SPEC_JSON });
@@ -427,7 +449,7 @@ describe('catalog visibility', () => {
           const normalized: unknown =
             format === 'json' ? JSON.parse(body.raw_spec) : parseYaml(body.raw_spec);
           const expected = makeDocument({ url: `https://gateway.example.test/nexus/${slug}` });
-          assert.deepEqual(normalized, { ...expected, ...keyAuthSecurity(expected.components) });
+          assert.deepEqual(normalized, withKeyAuthSecurity(expected));
 
           for (const viewer of [provider, founder]) {
             const original = await harness.authed(viewer, {
@@ -481,17 +503,18 @@ describe('catalog visibility', () => {
         const served = JSON.parse(response.json<CatalogSpecResponse>().raw_spec) as {
           security: unknown;
           components: { securitySchemes: Record<string, unknown> };
-          paths: { '/invoices': { get: Record<string, unknown>; post: { security: unknown } } };
+          paths: { '/invoices': { get: { security: unknown }; post: { security: unknown } } };
         };
         const gateway = { [GATEWAY_SECURITY_SCHEME_NAME]: [] };
         assert.deepEqual(served.components.securitySchemes, {
           ...document.components.securitySchemes,
           [GATEWAY_SECURITY_SCHEME_NAME]: gatewaySecurityScheme(plugin),
         });
+        assert.deepEqual(served.security, document.security, 'the root is left as uploaded');
         // The gateway reads `Authorization` for basic and JWT credentials, so
         // the provider's bearer cannot be sent beside it; X-API-Key leaves it.
         assert.deepEqual(
-          served.security,
+          served.paths['/invoices'].get.security,
           plugin === 'key_auth'
             ? [
                 { upstreamBearer: [], ...gateway },
@@ -500,7 +523,6 @@ describe('catalog visibility', () => {
             : [gateway, { partnerKey: [], ...gateway }],
         );
         assert.deepEqual(served.paths['/invoices'].post.security, [gateway]);
-        assert.ok(!('security' in served.paths['/invoices'].get));
 
         const original = await harness.authed(provider, {
           method: 'GET',

@@ -1814,18 +1814,22 @@ The document also declares the gateway credential, so tools that read
 that name) is added under `components.securitySchemes`: `apiKey` in header
 `X-API-Key` for `key_auth`, `http` `basic` for `basic_auth`, and `http`
 `bearer` with `bearerFormat: JWT` for `jwt_auth`. It describes the credential
-type only, never a consumer or key. It is added to every alternative of the
-root `security` and of each operation that overrides it, including those of a
-reusable path item or webhook a path references. A document or operation that
-requires nothing (`security` absent, `[]` or `[{}]`) then requires the gateway
-scheme alone. A provider scheme sent in the header the gateway reads
-(`X-API-Key` for `key_auth`; `Authorization`, so every `http`, `oauth2` and
-`openIdConnect` scheme, for the other two) is dropped from those requirements,
-because a request cannot carry both, and alternatives left identical are merged.
-Its definition stays. Callbacks and unreferenced webhooks are not changed. A
-document whose `components` or `components.securitySchemes` is not an object
-keeps its security as uploaded. The declaration is documentation; the gateway's
-auth plugin is what enforces it.
+type only, never a consumer or key. Every operation under `paths`, inline or
+reached through a chain of path item `$ref`s, gets an explicit `security`: its
+own, or the root's when it has none, with the gateway scheme added to every
+alternative. An operation that requires nothing (`security` absent, `[]` or
+`[{}]`) then requires the gateway scheme alone. The root `security` is left as
+uploaded, so webhook and callback operations, which describe requests the
+provider's service makes, keep their meaning; only a reusable path item or
+webhook that a path references is stamped. A provider scheme sent in the
+header the gateway reads (`X-API-Key` for `key_auth`; `Authorization`, so every
+`http`, `oauth2` and `openIdConnect` scheme, for the other two) is dropped from
+those requirements, because a request cannot carry both, and alternatives left
+identical are merged. Its definition stays, and a scheme whose reference cannot
+be resolved is kept. A `components` or `components.securitySchemes` that is not
+an object is replaced. A document that the declaration would push past the
+size limit is served without it. The declaration is documentation; the
+gateway's auth plugin is what enforces it.
 
 The result is cached in process per revision, gateway address and auth plugin
 (at most 64 documents / 32 MiB), after the visibility check.

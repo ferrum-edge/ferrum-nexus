@@ -489,6 +489,8 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       const documented = await callGateway(`${api.listen_path}/invoices`, {
         headers: headersFromCatalogSecurity(
           JSON.parse(catalogSpec.raw_spec),
+          '/invoices',
+          'get',
           authHeadersFor(credential, flavour.credential),
         ),
       });

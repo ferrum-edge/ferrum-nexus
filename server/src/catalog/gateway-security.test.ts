@@ -57,6 +57,11 @@ describe('gatewaySecurityScheme', () => {
   });
 });
 
+/** The `security` of one operation of a stamped document. */
+function opSecurity(document: Doc, path = '/orders', method = 'get'): unknown {
+  return ((document.paths as Record<string, Doc>)[path]![method] as Doc).security;
+}
+
 describe('stampGatewaySecurity', () => {
   for (const plugin of PLUGINS) {
     it(`requires the ${plugin} credential on a document that declares no security`, () => {
@@ -65,26 +70,27 @@ describe('stampGatewaySecurity', () => {
       assert.deepEqual(stamped, {
         ...document,
         components: { securitySchemes: { [GW]: gatewaySecurityScheme(plugin) } },
-        security: [{ [GW]: [] }],
+        paths: {
+          '/orders': {
+            get: { responses: { '200': { description: 'OK' } }, security: [{ [GW]: [] }] },
+          },
+        },
       });
-      assert.equal(
-        (stamped.paths as Doc)['/orders'],
-        (document.paths as Doc)['/orders'],
-        'path items without an overriding operation are shared',
-      );
+      assert.ok(!('security' in stamped), 'the root security is left as uploaded');
     });
   }
 
   it('reads `[]`, `[{}]` and invalid values as "nothing required"', () => {
     for (const security of [[], [{}], 'none', [null, 'x']]) {
       const stamped = stamp(base({ security }), 'key_auth');
-      assert.deepEqual(stamped.security, [{ [GW]: [] }], JSON.stringify(security));
+      assert.deepEqual(opSecurity(stamped), [{ [GW]: [] }], JSON.stringify(security));
+      assert.deepEqual(stamped.security, security);
     }
     const optional = stamp(base({ security: [{}, { partner: [] }] }), 'key_auth');
-    assert.deepEqual(optional.security, [{ [GW]: [] }, { partner: [], [GW]: [] }]);
+    assert.deepEqual(opSecurity(optional), [{ [GW]: [] }, { partner: [], [GW]: [] }]);
   });
 
-  it('adds the gateway scheme to every alternative and keeps the rest of components', () => {
+  it('adds the gateway scheme to every alternative of the root default', () => {
     const document = base({
       components: {
         schemas: { Order: { type: 'object' } },
@@ -96,10 +102,11 @@ describe('stampGatewaySecurity', () => {
       security: [{ oauth: ['orders:read'] }, { partner: [] }],
     });
     const stamped = stamp(document, 'key_auth');
-    assert.deepEqual(stamped.security, [
+    assert.deepEqual(opSecurity(stamped), [
       { oauth: ['orders:read'], [GW]: [] },
       { partner: [], [GW]: [] },
     ]);
+    assert.equal(stamped.security, document.security);
     const components = stamped.components as Doc;
     assert.equal(components.schemas, (document.components as Doc).schemas);
     assert.deepEqual(Object.keys(schemes(stamped)), ['oauth', 'partner', GW]);
@@ -122,22 +129,18 @@ describe('stampGatewaySecurity', () => {
     const document = base({ components: { securitySchemes }, security: every });
 
     // key_auth reads X-API-Key: only the header-borne `apiKey` collides.
-    const keyAuth = stamp(document, 'key_auth');
     assert.deepEqual(
-      keyAuth.security,
+      opSecurity(stamp(document, 'key_auth')),
       every
         .map((alternative) => ('apiKey' in alternative ? {} : alternative))
-        .map((a) => ({
-          ...a,
-          [GW]: [],
-        })),
+        .map((a) => ({ ...a, [GW]: [] })),
     );
 
     // basic_auth and jwt_auth read Authorization: every Authorization-borne
     // scheme collides, and the alternatives that leaves identical are merged.
     for (const plugin of ['basic_auth', 'jwt_auth'] as const) {
       const stamped = stamp(document, plugin);
-      assert.deepEqual(stamped.security, [
+      assert.deepEqual(opSecurity(stamped), [
         { [GW]: [] },
         { apiKey: [], [GW]: [] },
         { queryKey: [], [GW]: [] },
@@ -153,22 +156,28 @@ describe('stampGatewaySecurity', () => {
       base({ components: { securitySchemes }, security: [{ bearer: [], partner: [] }] }),
       'jwt_auth',
     );
-    assert.deepEqual(combined.security, [{ partner: [], [GW]: [] }]);
+    assert.deepEqual(opSecurity(combined), [{ partner: [], [GW]: [] }]);
   });
 
-  it('follows a scheme reference to decide whether it collides', () => {
+  it('resolves scheme references as a client would to decide whether they collide', () => {
     const document = base({
       components: {
         securitySchemes: {
           alias: { $ref: '#/components/securitySchemes/key' },
+          encoded: { $ref: '#/components/securitySchemes/%6Bey' },
           key: { type: 'apiKey', in: 'header', name: 'X-API-Key' },
           dangling: { $ref: '#/components/securitySchemes/missing' },
           loop: { $ref: '#/components/securitySchemes/loop' },
+          external: { $ref: 'common.yaml#/components/securitySchemes/key' },
         },
       },
-      security: [{ alias: [], dangling: [], loop: [] }],
+      security: [{ alias: [], encoded: [], dangling: [], loop: [], external: [] }],
     });
-    assert.deepEqual(stamp(document, 'key_auth').security, [{ dangling: [], loop: [], [GW]: [] }]);
+    // A scheme that cannot be resolved is kept: dropping it could drop a
+    // credential the upstream needs.
+    assert.deepEqual(opSecurity(stamp(document, 'key_auth')), [
+      { dangling: [], loop: [], external: [], [GW]: [] },
+    ]);
   });
 
   it('picks a free scheme name when the provider already uses the default one', () => {
@@ -180,68 +189,106 @@ describe('stampGatewaySecurity', () => {
     const stamped = stamp(document, 'basic_auth');
     assert.equal(schemes(stamped)[GW], own);
     assert.deepEqual(schemes(stamped)[`${GW}_3`], gatewaySecurityScheme('basic_auth'));
-    assert.deepEqual(stamped.security, [{ [GW]: [], [`${GW}_3`]: [] }]);
+    assert.deepEqual(opSecurity(stamped), [{ [GW]: [], [`${GW}_3`]: [] }]);
   });
 
-  it('rewrites operations that override security, and nothing that does not', () => {
+  it('stamps every operation the gateway serves, and nothing it does not', () => {
     const callback = {
-      '{$request.body#/url}': { post: { security: [], responses: {} } },
+      '{$request.body#/url}': { post: { responses: {} } },
     };
-    const untouched = { get: { responses: {} } };
     const document = base({
+      security: [{ partner: [] }],
       paths: {
         '/public': { get: { security: [], responses: {} }, post: { responses: {} } },
-        '/partner': { put: { security: [{ partner: [] }], callbacks: { done: callback } } },
-        '/plain': untouched,
+        '/partner': { put: { callbacks: { done: callback } } },
         '/reusable': { $ref: '#/components/pathItems/Reusable' },
         '/hook': { $ref: '#/webhooks/linked' },
+        '/alias': { $ref: '#/paths/~1public' },
         'x-note': { get: { security: [] } },
       },
       components: {
         securitySchemes: { partner: { type: 'apiKey', in: 'header', name: 'X-Partner' } },
         pathItems: {
-          Reusable: { delete: { security: [{}] } },
-          Unreferenced: { delete: { security: [] } },
+          Reusable: { delete: { security: [{}] }, summary: 'kept' },
+          Unreferenced: { delete: {} },
         },
+        callbacks: { shared: callback },
       },
       webhooks: {
         linked: { patch: { security: [] } },
-        event: { post: { security: [] } },
+        event: { post: {} },
       },
     });
     const stamped = stamp(document, 'key_auth');
     const paths = stamped.paths as Record<string, Doc>;
     const gatewayOnly = [{ [GW]: [] }];
+    const partnerAndGateway = [{ partner: [], [GW]: [] }];
     assert.deepEqual(paths['/public'], {
       get: { security: gatewayOnly, responses: {} },
-      post: { responses: {} },
+      post: { responses: {}, security: partnerAndGateway },
     });
-    assert.deepEqual((paths['/partner']!.put as Doc).security, [{ partner: [], [GW]: [] }]);
+    assert.deepEqual((paths['/partner']!.put as Doc).security, partnerAndGateway);
     assert.equal(
       (paths['/partner']!.put as Doc).callbacks,
       ((document.paths as Record<string, Doc>)['/partner']!.put as Doc).callbacks,
       'callbacks are requests the provider makes, not ones the gateway serves',
     );
-    assert.equal(paths['/plain'], untouched);
+    assert.deepEqual(paths['/alias'], { $ref: '#/paths/~1public' });
     assert.deepEqual(paths['x-note'], { get: { security: [] } }, 'extensions are data');
 
-    const pathItems = (stamped.components as Doc).pathItems as Record<string, Doc>;
-    assert.deepEqual(pathItems.Reusable, { delete: { security: gatewayOnly } });
-    assert.deepEqual(pathItems.Unreferenced, { delete: { security: [] } });
+    const components = stamped.components as Doc;
+    const pathItems = components.pathItems as Record<string, Doc>;
+    assert.deepEqual(pathItems.Reusable, { delete: { security: gatewayOnly }, summary: 'kept' });
+    assert.equal(
+      pathItems.Unreferenced,
+      (document.components as Doc & { pathItems: Doc }).pathItems.Unreferenced,
+    );
+    assert.equal(components.callbacks, (document.components as Doc).callbacks);
     const webhooks = stamped.webhooks as Record<string, Doc>;
     assert.deepEqual(webhooks.linked, { patch: { security: gatewayOnly } });
-    assert.deepEqual(webhooks.event, { post: { security: [] } });
+    assert.equal(webhooks.event, (document.webhooks as Doc).event);
+    // Webhooks and callbacks keep inheriting the provider's root security.
+    assert.equal(stamped.security, document.security);
   });
 
-  it('decodes JSON Pointer escapes in path item references', () => {
+  it('follows chains of Path Item references, bounded and cycle-safe', () => {
     const document = base({
-      paths: { '/a': { $ref: '#/components/pathItems/a~1b~0c' } },
-      components: { pathItems: { 'a/b~c': { get: { security: [] } } } },
+      paths: {
+        '/orders': { $ref: '#/components/pathItems/Alias' },
+        '/loop': { $ref: '#/components/pathItems/A' },
+      },
+      components: {
+        pathItems: {
+          Alias: { $ref: '#/webhooks/Orders' },
+          A: { $ref: '#/components/pathItems/B' },
+          B: { $ref: '#/components/pathItems/A' },
+        },
+      },
+      webhooks: { Orders: { get: { security: [] } } },
     });
     const stamped = stamp(document, 'jwt_auth');
-    assert.deepEqual(((stamped.components as Doc).pathItems as Doc)['a/b~c'], {
-      get: { security: [{ [GW]: [] }] },
+    assert.deepEqual((stamped.webhooks as Doc).Orders, { get: { security: [{ [GW]: [] }] } });
+  });
+
+  it('decodes percent-encoding and JSON Pointer escapes in path item references', () => {
+    const document = base({
+      paths: {
+        '/a': { $ref: '#/components/pathItems/a~1b~0c' },
+        '/b': { $ref: '#/components/pathItems/%4F%72ders' },
+        '/c': { $ref: '#/components/pathItems/%E0%A4%A' },
+      },
+      components: {
+        pathItems: {
+          'a/b~c': { get: { security: [] } },
+          Orders: { get: { security: [] } },
+          '%E0%A4%A': { get: { security: [] } },
+        },
+      },
     });
+    const pathItems = (stamp(document, 'jwt_auth').components as Doc).pathItems as Doc;
+    assert.deepEqual(pathItems['a/b~c'], { get: { security: [{ [GW]: [] }] } });
+    assert.deepEqual(pathItems.Orders, { get: { security: [{ [GW]: [] }] } });
+    assert.deepEqual(pathItems['%E0%A4%A'], { get: { security: [] } }, 'malformed escape');
 
     const nested = base({
       paths: { '/a': { $ref: '#/components/pathItems/a/b' } },
@@ -265,21 +312,27 @@ describe('stampGatewaySecurity', () => {
     const paths = stamped.paths as Doc;
     assert.ok(Object.hasOwn(paths, '__proto__'));
     assert.equal(Object.getPrototypeOf(paths), Object.prototype);
-    const requirement = ((paths['/a'] as Doc).get as Doc).security as Doc[];
+    const requirement = opSecurity(stamped, '/a') as Doc[];
     assert.ok(Object.hasOwn(requirement[0]!, '__proto__'));
     assert.equal(Object.getPrototypeOf(requirement[0]), Object.prototype);
     assert.ok(Object.hasOwn(schemes(stamped), '__proto__'));
     assert.ok(Object.hasOwn(schemes(stamped), GW));
   });
 
-  it('leaves a document with nowhere to define the scheme as uploaded', () => {
+  it('replaces a `components` or `securitySchemes` that is not an object', () => {
     for (const components of ['text', [], null]) {
-      const document = base({ components });
-      assert.equal(stamp(document, 'key_auth'), document);
+      const stamped = stamp(base({ components }), 'key_auth');
+      assert.deepEqual(stamped.components, {
+        securitySchemes: { [GW]: gatewaySecurityScheme('key_auth') },
+      });
+      assert.deepEqual(opSecurity(stamped), [{ [GW]: [] }]);
     }
     for (const securitySchemes of ['text', [], null]) {
-      const document = base({ components: { securitySchemes } });
-      assert.equal(stamp(document, 'key_auth'), document);
+      const stamped = stamp(base({ components: { securitySchemes, schemas: {} } }), 'key_auth');
+      assert.deepEqual(stamped.components, {
+        securitySchemes: { [GW]: gatewaySecurityScheme('key_auth') },
+        schemas: {},
+      });
     }
   });
 });

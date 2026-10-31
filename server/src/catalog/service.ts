@@ -188,6 +188,25 @@ export interface CatalogServiceDeps {
   specCache?: LruCache<CatalogSpecRendering>;
 }
 
+/**
+ * Serialize a catalog document with the gateway credential declared
+ * (`./gateway-security.ts`).
+ *
+ * An upload is measured without that declaration, so a document close to the
+ * limit can pass at upload and outgrow it here. Such a document is serialized
+ * without the declaration, as it was served before the declaration existed,
+ * rather than refused. The caller still bounds what this returns.
+ */
+export function renderCatalogDocument(
+  document: Record<string, unknown>,
+  contentType: ParsedSpec['contentType'],
+  authPlugin: AuthPluginType,
+  fits: (serialized: string) => boolean = catalogSpecFitsLimit,
+): string {
+  const stamped = renderCatalogSpec(stampGatewaySecurity(document, authPlugin), contentType);
+  return fits(stamped) ? stamped : renderCatalogSpec(document, contentType);
+}
+
 /** The cache {@link createCatalogService} builds when it is not handed one. */
 function defaultSpecCache(): LruCache<CatalogSpecRendering> {
   return new LruCache<CatalogSpecRendering>({
@@ -253,11 +272,11 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       specCache.set(key, null, key.length);
       return null;
     }
-    const document = stampGatewaySecurity(
+    const serialized = renderCatalogDocument(
       rewriteSpecServers(parsed.document, serverUrl, 'catalog'),
+      parsed.contentType,
       authPlugin,
     );
-    const serialized = renderCatalogSpec(document, parsed.contentType);
     // Serialization adds indentation and quoting the parse-time count does not
     // see, so the output is bounded as well. An upload is measured by the same
     // rendering, so this refuses only a row stored before that check existed:

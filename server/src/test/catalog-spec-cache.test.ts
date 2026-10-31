@@ -20,6 +20,7 @@ import {
 } from '../catalog/gateway-security.js';
 import {
   createCatalogService,
+  renderCatalogDocument,
   type CatalogService,
   type CatalogSpecRendering,
 } from '../catalog/service.js';
@@ -251,6 +252,24 @@ describe('catalog spec cache', () => {
     }
     assert.equal(cache.stats().misses, 1);
     assert.equal(cache.stats().hits, 1, 'the refusal is cached, not re-parsed');
+  });
+
+  it('serializes without the declaration a document it would push past the limit', () => {
+    const document = {
+      openapi: '3.1.0',
+      info: { title: 'Big', version: '1.0.0' },
+      paths: { '/a': { get: { responses: {} } } },
+    };
+    const declared = renderCatalogDocument(document, 'application/json', 'key_auth');
+    assert.match(declared, /ferrum_gateway/);
+    const checked: string[] = [];
+    const fallback = renderCatalogDocument(document, 'application/yaml', 'key_auth', (text) => {
+      checked.push(text);
+      return text.length < 0;
+    });
+    assert.deepEqual(parseYaml(fallback), document, 'the document as it was served before');
+    assert.equal(checked.length, 1, 'only the declared rendering is measured here');
+    assert.match(checked[0]!, /ferrum_gateway/);
   });
 
   it('keeps the entries it holds within the configured bounds', async () => {
