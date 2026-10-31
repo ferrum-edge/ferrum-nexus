@@ -1754,8 +1754,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     grantId: Uuid,
     reason: string | null,
     ip: string | null,
-    mode: 'review' | 'relinquish',
-    recordWithRevoke?: (tx: NexusStore, grant: GrantRecord) => Promise<void>,
+    {
+      mode,
+      recordWithRevoke,
+    }: {
+      mode: 'review' | 'relinquish';
+      recordWithRevoke?: (tx: NexusStore, grant: GrantRecord) => Promise<void>;
+    },
   ): Promise<Grant> {
     const initial = await store.grants.findById(grantId);
     if (!initial) throw notFound('Grant', grantId);
@@ -2521,11 +2526,11 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     },
 
     async revoke(actor, grantId, reason = null, ip = null, recordWithRevoke): Promise<Grant> {
-      return withdrawGrant(actor, grantId, reason, ip, 'review', recordWithRevoke);
+      return withdrawGrant(actor, grantId, reason, ip, { mode: 'review', recordWithRevoke });
     },
 
     async relinquish(user, grantId, ip = null): Promise<Grant> {
-      return withdrawGrant(user, grantId, null, ip, 'relinquish');
+      return withdrawGrant(user, grantId, null, ip, { mode: 'relinquish' });
     },
 
     async revokeAllForUser(actor, userId, reason, ip = null): Promise<BulkRevocationResult> {
