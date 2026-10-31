@@ -7,10 +7,12 @@ that the compatibility record pins for the next Nexus release. Canonical
 `contracts-edge-0.9.17` at `f7ba1a9b9885900d1e110f76d38e37a02eda13c8` is adopted
 byte-for-byte. See [adoption facts](../../docs/edge-0.9.11-adoption.md). It needs a
 packaged Nexus image and runs on demand; it is not part of the required CI checks. The
-fixture exercises the local data-plane profile, the only pairing Nexus grants the
-public-only guarantee. It does not cover conversion custody, native-store
-boundaries or recovery interleavings; the acceptance suite and store contracts
-cover Nexus-side recovery, and Edge's own tests cover owner-side store behaviour.
+fixture exercises the local data-plane profile, one of the two pairings Nexus grants
+the public-only guarantee; for the other, an attested control plane, see
+[CP/DP pairings and data-plane attestation](../../docs/operations.md#cpdp-pairings-and-data-plane-attestation).
+It does not cover conversion custody, native-store boundaries or recovery
+interleavings; the acceptance suite and store contracts cover Nexus-side recovery,
+and Edge's own tests cover owner-side store behaviour.
 
 This stack is separate from the private-opt-in acceptance stack. It admits
 `rebind.fixture.test` while DNS returns `11.203.0.10`, proves real authenticated
