@@ -298,6 +298,9 @@ function pathItemTargets(ref: string): { registry: PathItemRegistry; key: string
  */
 const OPERATION_SECURITY_INDENT = 10;
 
+/** The `"security": ` key and the separator before the next member. */
+const SECURITY_KEY_BYTES = '"security": ,'.length;
+
 /**
  * An estimate, at least as large as what the catalog renders, of the bytes one
  * requirement adds to the document: indented JSON (two spaces per level, which
@@ -311,7 +314,7 @@ function renderedBytes(requirement: unknown[]): number {
     lines += 1;
   }
   // UTF-8 bytes, as the limit is measured, not UTF-16 code units.
-  return Buffer.byteLength(pretty) + lines * OPERATION_SECURITY_INDENT;
+  return Buffer.byteLength(pretty) + lines * OPERATION_SECURITY_INDENT + SECURITY_KEY_BYTES;
 }
 
 /** Thrown when the requirements written would outgrow the catalog size limit. */
