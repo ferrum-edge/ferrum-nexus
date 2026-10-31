@@ -59,6 +59,7 @@
 
 import {
   MAX_OPENAPI_REF_HOPS,
+  MAX_OPENAPI_REF_LENGTH,
   MAX_SPEC_EXPANDED_BYTES,
   OPENAPI_OPERATION_METHODS,
   resolveOpenApiPointer,
@@ -143,25 +144,33 @@ function schemeHeader(scheme: Record<string, unknown>): string | null {
  * Follow a scheme entry's local `$ref` chain to its definition, if it ends at
  * one, reading each reference both ways {@link pointerReadings} describes.
  */
-function resolveScheme(document: unknown, entry: unknown): Record<string, unknown> | null {
+function resolveScheme(
+  document: unknown,
+  entry: unknown,
+  resolved: Map<string, unknown>,
+): Record<string, unknown> | null {
   let current = entry;
   for (let hop = 0; hop <= MAX_OPENAPI_REF_HOPS; hop += 1) {
     if (!isRecord(current)) return null;
     const ref = current.$ref;
     if (typeof ref !== 'string') return current;
-    current = undefined;
-    for (const segments of pointerReadings(ref)) {
-      const pointer =
-        '#/' + segments.map((x) => x.replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
-      // Re-encode `%` so the resolver's own percent-decoding is a no-op.
-      const target = resolveOpenApiPointer(document, pointer.replace(/%/g, '%25'));
-      if (target !== undefined) {
-        current = target;
-        break;
-      }
-    }
+    // One lookup per distinct reference, however many schemes share it.
+    if (!resolved.has(ref)) resolved.set(ref, resolveLocalRef(document, ref));
+    current = resolved.get(ref);
   }
   return null;
+}
+
+/** What one local `$ref` names, under the first reading that resolves. */
+function resolveLocalRef(document: unknown, ref: string): unknown {
+  for (const segments of pointerReadings(ref)) {
+    const pointer =
+      '#/' + segments.map((x) => x.replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
+    // Re-encode `%` so the resolver's own percent-decoding is a no-op.
+    const target = resolveOpenApiPointer(document, pointer.replace(/%/g, '%25'));
+    if (target !== undefined) return target;
+  }
+  return undefined;
 }
 
 /** Names of the provider's schemes sent in the header the gateway reads. */
@@ -172,8 +181,9 @@ function collidingSchemes(
 ): Set<string> {
   const header = gatewayHeader(authPlugin);
   const colliding = new Set<string>();
+  const resolved = new Map<string, unknown>();
   for (const [name, entry] of Object.entries(schemes)) {
-    const scheme = resolveScheme(document, entry);
+    const scheme = resolveScheme(document, entry, resolved);
     if (scheme !== null && schemeHeader(scheme) === header) colliding.add(name);
   }
   return colliding;
@@ -243,7 +253,8 @@ function unescapeSegment(segment: string): string {
  * reference either kind of client follows is followed here.
  */
 function pointerReadings(ref: string): string[][] {
-  if (!ref.startsWith('#')) return [];
+  // The bound `resolveOpenApiPointer` applies, checked before any decoding.
+  if (!ref.startsWith('#') || ref.length > MAX_OPENAPI_REF_LENGTH) return [];
   const readings: string[][] = [];
   // The leading `/` may be encoded too (`#%2Fcomponents%2F…`).
   const decodedFirst = percentDecode(ref.slice(1));

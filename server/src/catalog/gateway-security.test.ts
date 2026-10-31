@@ -195,6 +195,18 @@ describe('stampGatewaySecurity', () => {
     ]);
   });
 
+  it('bounds and shares scheme reference resolution', () => {
+    const long = `#/${'a'.repeat(1024 * 1024)}`;
+    const securitySchemes: Record<string, unknown> = { huge: { $ref: long } };
+    for (let i = 0; i < 10_000; i += 1) {
+      securitySchemes[`alias${i}`] = { $ref: '#/components/securitySchemes/huge' };
+    }
+    const document = base({ components: { securitySchemes }, security: [{ alias0: [] }] });
+    const started = performance.now();
+    assert.deepEqual(opSecurity(stamp(document, 'key_auth')), [{ alias0: [], [GW]: [] }]);
+    assert.ok(performance.now() - started < 2_000, 'one bounded lookup per distinct reference');
+  });
+
   it('picks a free scheme name when the provider already uses the default one', () => {
     const own = { type: 'apiKey', in: 'query', name: 'gateway' };
     const document = base({
