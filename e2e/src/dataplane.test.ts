@@ -1821,6 +1821,56 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     assert.equal(reachedUpstream(refused), false);
   });
 
+  it('stops a client that gives up its own access, and keeps its other APIs', async () => {
+    const client = await newClient();
+    const dropped = await publishApi(provider, {
+      name: `E2E relinquish ${RUN}`,
+      slug: `e2e-relinquish-${RUN}`,
+      authPlugin: 'key_auth',
+    });
+    const kept = await publishApi(provider, {
+      name: `E2E relinquish kept ${RUN}`,
+      slug: `e2e-relinquish-kept-${RUN}`,
+      authPlugin: 'key_auth',
+    });
+    const { grantId } = await grantAccess(client, provider, dropped.id);
+    await grantAccess(client, provider, kept.id);
+    const credential = await issueCredential(client, 'keyauth');
+    const headers = authHeadersFor(credential, 'keyauth');
+
+    for (const api of [dropped, kept]) {
+      await waitFor(`the approved call to ${api.slug} to succeed`, async () => {
+        const response = await callGateway(`${api.listen_path}/invoices`, { headers });
+        return response.status === 200;
+      });
+    }
+
+    // Nobody but the holder may give a grant up: not even the API's owner.
+    await portal('POST', `/api/grants/${grantId}/relinquish`, {
+      session: provider,
+      body: {},
+      expect: 404,
+    });
+    await portal('POST', `/api/grants/${grantId}/relinquish`, {
+      session: client,
+      body: {},
+      expect: 200,
+    });
+
+    await waitFor('the gateway to refuse the relinquished API', async () => {
+      const response = await callGateway(`${dropped.listen_path}/invoices`, { headers });
+      return response.status === 403;
+    });
+    const refused = await callGateway(`${dropped.listen_path}/invoices`, { headers });
+    assert.equal(refused.status, 403);
+    assert.equal(reachedUpstream(refused), false);
+
+    // Only that one grant went: the same credential still reaches the other API.
+    const still = await callGateway(`${kept.listen_path}/invoices`, { headers });
+    assert.equal(still.status, 200);
+    assert.equal(reachedUpstream(still), true);
+  });
+
   it('keeps the retiring credential working until the rotation is settled', async () => {
     const client = await newClient();
     const api = await publishApi(provider, {

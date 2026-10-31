@@ -656,7 +656,9 @@ the grant to `revoked` first means the portal never shows access as active
 while the group still opens the door; `unwindRevocation` restores it if the
 gateway write fails. The originating request is also moved to `revoked`, so the
 history reads "approved, then revoked". An identity with no consumer never had
-the group, so there is nothing to remove.
+the group, so there is nothing to remove. A grantee giving up its own grant
+(`POST /api/grants/:id/relinquish`) runs this same withdrawal; only the
+authorization (the holding account, not a reviewer) and the notice differ.
 
 ### 5.6 Publishing: a multi-write sequence with no transaction
 

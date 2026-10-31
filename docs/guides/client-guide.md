@@ -183,6 +183,25 @@ The **Dashboard** lists your access requests and credentials. While a request
 is pending, **Withdraw request** on the Access tab cancels it. Once the provider
 has decided, it can no longer be withdrawn.
 
+### Giving up access you no longer need
+
+When an integration stops using an API, give the access back rather than
+leaving it open. Open the API's **Access** tab, choose the identity under
+**Requesting for**, then **Give up access** and confirm.
+
+The gateway stops accepting that identity's calls to that API at once (`403`).
+Its credentials keep working on its other APIs, and your other identities are
+not affected, so you can drop one application's access without deleting the
+application. The provider is not notified, but sees the grant as withdrawn by
+the grantee. To use the API again, request access and wait for approval; a
+retired API takes no new requests. A disabled application is still listed
+under **Requesting for**, so it can give up access, but it cannot ask for more.
+
+On a **private** API your grant may be what lets you see it. Unless the
+provider authorized you as a viewer, or another of your identities still has
+access, giving up the last grant hides the API from you, and you need the
+provider to let you see it again before you can request it.
+
 ### If you are declined
 
 The provider's note appears under **Last decision** on the Access tab and in
@@ -209,7 +228,8 @@ it under **Requesting for** and under **Identity** when you issue a credential.
 - **A label is not an identity.** Naming a credential "production" changes
   nothing about what it can call. Only the **Identity** field does.
 - **Disable** stops an application getting new access or new credentials. Its
-  existing credentials keep working.
+  existing credentials keep working. To withdraw one API from it instead,
+  [give up that access](#giving-up-access-you-no-longer-need).
 - **Delete** removes its gateway identity. Its credentials stop working at once
   and its approvals are given up. You must type the application's name to
   confirm, and it cannot be undone.
@@ -453,7 +473,8 @@ the new secret.
 **"My integration broke overnight and I changed nothing."** In order of
 likelihood:
 
-- your grant was revoked (check the catalog badge; you were notified);
+- your grant was revoked (check the catalog badge; you were notified unless you
+  gave it up yourself);
 - the provider changed the API's authentication method. Your credential still
   works on your other APIs; issue one of the new type for this one;
 - the API was deleted.

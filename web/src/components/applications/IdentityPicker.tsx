@@ -21,12 +21,18 @@ export interface IdentityPickerProps {
   selectedLabel?: string;
   hint?: ReactNode;
   disabled?: boolean;
+  /**
+   * Also offer disabled applications, labelled as such. For managing access an
+   * identity already holds: a disabled application keeps its grants and may
+   * give them up, though it cannot acquire new ones.
+   */
+  includeDisabled?: boolean;
 }
 
 function toOption(application: Application): SelectOption {
   return {
     value: application.id,
-    label: application.name,
+    label: application.status === 'disabled' ? `${application.name} (disabled)` : application.name,
     ...(application.description ? { description: application.description } : {}),
   };
 }
@@ -48,17 +54,22 @@ export function IdentityPicker({
   selectedLabel,
   hint,
   disabled,
+  includeDisabled = false,
 }: IdentityPickerProps): ReactElement {
   return (
     <AsyncSelect<Application>
       label={label}
       value={value}
       onValueChange={(next, option) => onValueChange(next, option.label)}
-      queryKey={queryKeys.applications.picker}
+      queryKey={
+        includeDisabled
+          ? [...queryKeys.applications.picker, 'include-disabled']
+          : queryKeys.applications.picker
+      }
       fetchPage={({ q, limit, offset }) =>
         applicationsApi.list({
           mine: true,
-          status: 'active',
+          ...(includeDisabled ? {} : { status: 'active' as const }),
           ...(q !== '' ? { q } : {}),
           limit,
           offset,
@@ -69,7 +80,7 @@ export function IdentityPicker({
       selectedLabel={selectedLabel}
       hint={hint}
       searchPlaceholder="Search your applications"
-      emptyLabel="No active application matches."
+      emptyLabel={includeDisabled ? 'No application matches.' : 'No active application matches.'}
       disabled={disabled}
     />
   );

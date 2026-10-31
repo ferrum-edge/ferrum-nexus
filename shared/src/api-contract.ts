@@ -1180,6 +1180,14 @@ export interface RevokeGrantResponse {
   grant: Grant;
 }
 
+/**
+ * `POST /api/grants/:id/relinquish` — the grantee gives up its own access. The
+ * ACL group is removed from the identity's consumer, as on a revoke.
+ */
+export interface RelinquishGrantResponse {
+  grant: Grant;
+}
+
 /* ── Credentials ────────────────────────────────────────────────────────── */
 
 /**
