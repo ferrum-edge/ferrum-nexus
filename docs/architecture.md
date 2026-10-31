@@ -323,7 +323,7 @@ Edge verifies HS256 tokens and rejects one missing any required claim.
 | `exp`          | `iat + FERRUM_ADMIN_JWT_TTL` (default 60 s, range 5–3600)                                                                                                           |
 | `jti`          | fresh UUID                                                                                                                                                          |
 | `role`         | `admin`                                                                                                                                                             |
-| `ns`           | `FERRUM_NAMESPACE`, always — required by a gateway with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`; from Edge v0.9.16 it also bars fleet-global routes (see below) |
+| `ns`           | `FERRUM_NAMESPACE`, always — required by a gateway with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`; from Edge v0.9.17 it also bars fleet-global routes (see below) |
 | `aud`          | **omitted unless** `FERRUM_ADMIN_JWT_AUDIENCE` is set; Edge rejects an unexpected `aud`                                                                             |
 
 Tokens are cached in a 256-entry LRU keyed by a hash of every signing input
@@ -331,7 +331,7 @@ Tokens are cached in a 256-entry LRU keyed by a hash of every signing input
 remain. Every call also sends `X-Ferrum-Namespace`, which overrides any
 `namespace` in the body.
 
-**Fleet-global reads.** From Ferrum Edge v0.9.16 a token with an `ns` claim
+**Fleet-global reads.** From Ferrum Edge v0.9.17 a token with an `ns` claim
 gets `403` on every fleet-global route outside a short allowlist, and the
 bounded tenant tier on `/health`. The client therefore sends two reads with
 other credentials, each optional, and reports a refusal as unavailable with

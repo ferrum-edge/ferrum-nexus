@@ -1661,9 +1661,9 @@ publish-time ceiling existed.
 
 An authenticated account is not a trusted one. One message writes a message row
 and an audit row, and a _platform_ thread (`recipient_user_id: null`) notifies
-and emails every active `admin` and `super_admin`. Independent bounds, each
-configurable as listed in the
-[server variables](operations.md#server) (`0` disables each):
+and emails every active `admin` and `super_admin`. Independent bounds; the
+environment-backed quotas in items 2–5 are listed with their defaults in the
+[server variables](operations.md#server), and `0` disables each of them:
 
 1. **Burst limits** — 10 thread creations and 30 replies per minute per
    account.
@@ -1677,8 +1677,8 @@ configurable as listed in the
 3. **Broadcast recipients** — `NEXUS_MAX_BROADCAST_RECIPIENTS` per god-mode
    broadcast, checked before the first row.
    Broadcast rows do not draw on the sender's message budget.
-4. **Broadcasts per day** — `NEXUS_MAX_BROADCASTS_PER_DAY` per administrator, counted from `god.broadcast` rows under a
-   per-actor lease.
+4. **Broadcasts per day** — `NEXUS_MAX_BROADCASTS_PER_DAY` per administrator,
+   counted from `god.broadcast` rows under a per-actor lease.
 5. **Mass-email campaigns** — admin-only, checked before anything is written:
    `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` bounds the audience,
    `NEXUS_MAX_MASS_EMAIL_BYTES` bounds one rendered message, sized as an upper

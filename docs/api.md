@@ -2268,7 +2268,7 @@ proxy that has one and has been called; `detail` says which. Backend state is
 read independently — it may be filled while `available` is `false`, and
 `unavailable` when only it failed.
 
-On Ferrum Edge v0.9.16 both reads are refused to the portal's namespace-scoped
+On Ferrum Edge v0.9.17 both reads are refused to the portal's namespace-scoped
 admin token unless the operator configures `FERRUM_METRICS_BEARER_TOKEN` (for
 the counts) and `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` (for backend state). The
 refusal reads `unavailable_code: "refused"` and
@@ -2924,7 +2924,11 @@ to the tool's ID; the hashing and fallback rules are in
 [agent-marketplace.md](agent-marketplace.md#optional-subsets-and-cross-repository-follow-up).
 A tool ID persists across spec revisions, rollbacks and agents edits only while its
 method, path, name and `definition_hash` are unchanged, so explicit subsets carry across
-whitespace, `info` edits and changes to other operations or unreferenced components. Any
+whitespace and `info` edits, and usually across changes to other operations or
+unreferenced components. The exception is a tool whose hash falls back to the whole
+document (an unresolvable or external reference, or a document past the hashing work
+budget, recorded as `tool_hash_fallback`): any change outside `info` re-ids it, and its
+subset holders must ask for it again. Any
 definition change, description-only edits included, mints a new ID, as do rename,
 path/method changes, removing/re-adding exposure and disable/re-enable. The write that
 does so removes the old IDs from every explicit subset (`access.tools_prune`, `reason`

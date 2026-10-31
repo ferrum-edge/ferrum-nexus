@@ -225,7 +225,7 @@ export interface FerrumAdminClient {
   /**
    * Best-effort version probe. Edge has **no `/version` endpoint** (none in its
    * `docs/admin_api.md`), so this returns `null` on a 404 rather than
-   * failing; take the real version from your deployment metadata. Edge v0.9.16
+   * failing; take the real version from your deployment metadata. Edge v0.9.17
    * answers an unknown global path `403` to a token with an `ns` claim, which is
    * the same "no endpoint" and also reads `null`; because a `403` can also be a
    * refused credential, it is logged distinctly (once per transition).
@@ -265,7 +265,7 @@ export interface FerrumAdminClient {
   };
 
   /**
-   * `GET /namespaces` — a list of name strings. Edge v0.9.16 lists only the
+   * `GET /namespaces` — a list of name strings. Edge v0.9.17 lists only the
    * namespaces the token's `ns` claim names, so for this portal at most its own.
    */
   listNamespaces(): Promise<string[]>;
@@ -492,7 +492,7 @@ export interface FerrumAdminClient {
    * on a provider's overview card, and a gateway hiccup must not turn that page
    * into an error.
    *
-   * Both endpoints are fleet-global, so Edge v0.9.16 refuses the portal's
+   * Both endpoints are fleet-global, so Edge v0.9.17 refuses the portal's
    * namespace-scoped admin token on them with `403`. Each therefore has its own
    * optional credential, and a refusal reads as unavailable with the cause,
    * never as "no traffic" or "no circuit breakers".
@@ -949,7 +949,7 @@ function refusedReason(what: string): string {
 /**
  * Why a non-2xx `GET /metrics` answer yielded nothing.
  *
- * A `403` to the admin JWT is Edge v0.9.16 refusing a token with an `ns` claim
+ * A `403` to the admin JWT is Edge v0.9.17 refusing a token with an `ns` claim
  * on a fleet-global route, and the log says so, because the fix is a setting
  * on the portal: the gateway's metrics bearer token. With that token
  * configured, a `401`/`403` means the two sides disagree about it.
@@ -1377,7 +1377,7 @@ export function createFerrumAdminClient(
   /**
    * Notice a `GET /health` answer that carries neither `mode` nor
    * `admin_writes_enabled`: the minimal tier, which Edge serves a caller it
-   * does not trust with detail. Edge v0.9.16 serves the portal's
+   * does not trust with detail. Edge v0.9.17 serves the portal's
    * namespace-scoped token its bounded tenant tier instead, which keeps both
    * fields; a gateway that pairs the token bound with no tenant tier leaves the
    * portal blind to its mode, write state and namespace routing, and says so
@@ -1400,7 +1400,7 @@ export function createFerrumAdminClient(
 
   /**
    * `GET /version`, best effort. Edge has no such endpoint and answers `404`
-   * (or `405`), which reads `null`. Edge v0.9.16 answers an unknown global path
+   * (or `405`), which reads `null`. Edge v0.9.17 answers an unknown global path
    * `403` to a token with an `ns` claim, so a `403` reads `null` too. But a
    * `403` is also what a refused admin credential looks like on an earlier
    * gateway, so it is logged on its own, once per transition, rather than
@@ -1985,7 +1985,7 @@ export function createFerrumAdminClient(
    * Presents the gateway's metrics bearer token when one is configured and
    * the admin JWT otherwise. Edge reads either from `Authorization: Bearer`;
    * the bearer token is the one that still works once the admin JWT's `ns`
-   * claim bounds it to namespace routes (Edge v0.9.16).
+   * claim bounds it to namespace routes (Edge v0.9.17).
    *
    * Returns `null` rather than throwing when nothing reached the gateway, and
    * `body: null` when the gateway answered but its body could not be read; the

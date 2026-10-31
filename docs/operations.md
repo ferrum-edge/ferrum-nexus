@@ -2335,8 +2335,9 @@ and no transaction approaches MongoDB's 16 MB cap.
     message too large for a 4 MiB chunk is refused with `400 VALIDATION_FAILED`
     whatever this is set to.
   - `NEXUS_MAX_MASS_EMAILS_PER_DAY`: campaigns per administrator
-    per rolling 24 hours, counted under a per-administrator lease. The default
-    keeps a day's campaign backlog to about 320 MiB per administrator. Claim
+    per rolling 24 hours, counted under a per-administrator lease. At the
+    [defaults](#server) (64 MiB × 5) a day's campaign backlog stays at about
+    320 MiB per administrator. Claim
     priority does not reduce campaign storage, so the cap remains unchanged.
 
   **Campaign mail uses the low lane in the shared outbox.** Due security mail
@@ -3123,8 +3124,9 @@ once, and leaves the row for the account-recovery worker if Edge refuses.
   increments `attempts`). Success deletes the row. There is no failed state.
 - Retries back off `10 s × 2^attempts`, capped at five minutes, plus up to 10%
   jitter. A `sending` row untouched for five minutes returns to `pending`.
-- While the row is outstanding, the account's credential issuance is refused
-  (`409 CONFLICT`). After 8 failed attempts the worker stamps `unblocked_at`,
+- While the row blocks issuance (`unblocked_at` is unset), the account's
+  credential issuance is refused (`409 CONFLICT`). After 8 failed attempts the
+  worker stamps `unblocked_at`,
   stops refusing issuance, audits `credential.recovery_stalled`, and keeps
   retrying. When the job lands it revokes only credentials created before
   `unblocked_at`, so keys the owner issued afterwards survive.
