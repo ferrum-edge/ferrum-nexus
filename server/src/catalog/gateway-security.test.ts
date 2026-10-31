@@ -345,6 +345,31 @@ describe('stampGatewaySecurity', () => {
     assert.ok(performance.now() - started < 5_000, 'bounded by the document, not its fan-out');
   });
 
+  it('charges indentation, so nested requirement values cannot amplify the rendering', () => {
+    const paths = Object.fromEntries(
+      Array.from({ length: 1_000 }, (_, i) => [`/p${i}`, { get: { responses: {} } }]),
+    );
+    let scopes: unknown = Array.from({ length: 1_000 }, () => '');
+    for (let depth = 0; depth < 100; depth += 1) scopes = [scopes];
+    const document = base({ paths, security: [{ oauth: scopes }] });
+    assert.ok(JSON.stringify(document.security).length * 1_000 < 4 * 1024 * 1024);
+    assert.equal(stamp(document, 'key_auth'), document);
+  });
+
+  it('follows a reference whose leading slash is percent-encoded', () => {
+    const document = base({
+      paths: { '/orders': { $ref: '#/components/pathItems/A' } },
+      components: {
+        pathItems: {
+          A: { $ref: '#%2Fcomponents%2FpathItems%2FB' },
+          B: { get: { security: [] } },
+        },
+      },
+    });
+    const pathItems = (stamp(document, 'key_auth').components as Doc).pathItems as Doc;
+    assert.deepEqual(pathItems.B, { get: { security: [{ [GW]: [] }] } });
+  });
+
   it('decodes percent-encoding and JSON Pointer escapes in path item references', () => {
     const document = base({
       paths: {

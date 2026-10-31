@@ -243,11 +243,14 @@ function unescapeSegment(segment: string): string {
  * reference either kind of client follows is followed here.
  */
 function pointerReadings(ref: string): string[][] {
-  if (!ref.startsWith('#/')) return [];
+  if (!ref.startsWith('#')) return [];
   const readings: string[][] = [];
-  const decodedFirst = percentDecode(ref.slice(2));
-  if (decodedFirst !== null) readings.push(decodedFirst.split('/').map(unescapeSegment));
-  const segments = ref.slice(2).split('/').map(percentDecode);
+  // The leading `/` may be encoded too (`#%2Fcomponents%2F…`).
+  const decodedFirst = percentDecode(ref.slice(1));
+  if (decodedFirst !== null && decodedFirst.startsWith('/')) {
+    readings.push(decodedFirst.slice(1).split('/').map(unescapeSegment));
+  }
+  const segments = ref.startsWith('#/') ? ref.slice(2).split('/').map(percentDecode) : [null];
   if (segments.every((segment): segment is string => segment !== null)) {
     const splitFirst = segments.map(unescapeSegment);
     if (
@@ -277,6 +280,28 @@ function pathItemTargets(ref: string): { registry: PathItemRegistry; key: string
   return targets;
 }
 
+/**
+ * Indentation of an operation's `security` in the rendered catalog document
+ * (`paths` → template → method → `security` is four levels of two spaces),
+ * plus room for its own key.
+ */
+const OPERATION_SECURITY_INDENT = 10;
+
+/**
+ * An estimate, at least as large as what the catalog renders, of the bytes one
+ * requirement adds to the document: indented JSON (two spaces per level, which
+ * YAML does not exceed) plus the indentation of the operation it sits in on
+ * every line. Nested values make indentation, not text, the dominant cost.
+ */
+function renderedBytes(requirement: unknown[]): number {
+  const pretty = JSON.stringify(requirement, null, 2);
+  let lines = 1;
+  for (let index = pretty.indexOf('\n'); index !== -1; index = pretty.indexOf('\n', index + 1)) {
+    lines += 1;
+  }
+  return pretty.length + lines * OPERATION_SECURITY_INDENT;
+}
+
 /** Thrown when the requirements written would outgrow the catalog size limit. */
 class StampTooLarge extends Error {}
 
@@ -301,8 +326,8 @@ export function stampGatewaySecurity(
   const colliding = collidingSchemes(document, schemes, authPlugin);
 
   let written = 0;
-  const charge = (requirement: unknown[]): void => {
-    written += JSON.stringify(requirement).length;
+  const charge = (bytes: number): void => {
+    written += bytes;
     if (written > MAX_SPEC_EXPANDED_BYTES) throw new StampTooLarge();
   };
   // One shared, never-mutated value for every operation that inherits the root.
@@ -319,15 +344,14 @@ export function stampGatewaySecurity(
       let security: Record<string, unknown>[];
       if (Object.hasOwn(operation, 'security')) {
         security = withGatewayRequirement(operation.security, name, colliding);
-        charge(security);
+        charge(renderedBytes(security));
       } else {
         if (inherited === null) {
           inherited = withGatewayRequirement(document.security, name, colliding);
-          inheritedBytes = JSON.stringify(inherited).length;
+          inheritedBytes = renderedBytes(inherited);
         }
         security = inherited;
-        written += inheritedBytes;
-        if (written > MAX_SPEC_EXPANDED_BYTES) throw new StampTooLarge();
+        charge(inheritedBytes);
       }
       copy ??= { ...item };
       copy[method] = { ...operation, security };
