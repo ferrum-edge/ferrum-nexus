@@ -20,8 +20,11 @@ import type {
   ListNotificationsResponse,
   ListThreadMessagesResponse,
   ListThreadsResponse,
+  Notification,
 } from '@ferrum-nexus/shared';
 
+import type { NexusStore } from '../db/store.js';
+import { createNotificationsService } from '../notifications/service.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 import { overlapProbe, type OverlapProbe } from './overlap-probe.js';
 
@@ -82,6 +85,8 @@ describe('hot-path reads overlap', () => {
       payload: {
         subject: 'Overlap probe',
         recipient_user_id: provider.user.id,
+        // About an API, so the thread list's API join is exercised too.
+        api_id: api.id,
         body: 'the opening message',
       },
     });
@@ -131,9 +136,10 @@ describe('hot-path reads overlap', () => {
     assert.equal(grant?.user?.id, client.user.id);
   });
 
-  it('joins participants and latest messages onto the thread list together', async () => {
+  it('joins participants, APIs and latest messages onto the thread list together', async () => {
     const overlap = probe.expectOverlap([
       { repo: 'users', method: 'findManyByIds' },
+      { repo: 'apis', method: 'findManyByIds' },
       { repo: 'messages', method: 'findLatestByThreads' },
     ]);
     const response = await harness.authed(client, { method: 'GET', url: '/api/threads' });
@@ -141,6 +147,7 @@ describe('hot-path reads overlap', () => {
     assert.equal(response.statusCode, 200, response.body);
     const [thread] = response.json<ListThreadsResponse>().items;
     assert.equal(thread?.id, threadId);
+    assert.equal(thread?.api?.slug, 'overlap-api');
   });
 
   it('counts a thread transcript alongside the sender lookup', async () => {
@@ -199,5 +206,32 @@ describe('hot-path reads overlap', () => {
     assert.equal(response.statusCode, 200, response.body);
     const body = response.json<BrandingResponse>();
     assert.equal(typeof body.registration.open_registration, 'boolean');
+  });
+});
+
+describe('notification unread floor', () => {
+  it('never reports fewer unread than the page it returns', async () => {
+    // The count settled before a notification inserted mid-request reached the
+    // page: the badge must still cover the unread row the caller is shown.
+    const unread: Notification = {
+      id: '00000000-0000-4000-8000-000000000001',
+      user_id: '00000000-0000-4000-8000-000000000002',
+      type: 'system',
+      title: 'Inserted mid-request',
+      body: 'raced the unread count',
+      link: null,
+      read_at: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const store = {
+      notifications: {
+        list: () => Promise.resolve({ items: [unread], total: 1 }),
+        countUnread: () => Promise.resolve(0),
+      },
+    } as unknown as NexusStore;
+    const service = createNotificationsService({ store });
+    const body = await service.list(unread.user_id);
+    assert.equal(body.unread_count, 1);
   });
 });
