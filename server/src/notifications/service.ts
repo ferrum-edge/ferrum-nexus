@@ -82,12 +82,13 @@ export function createNotificationsService(deps: NotificationsServiceDeps): Noti
         ...(filter.unread !== undefined ? { unread: filter.unread } : {}),
         ...(filter.type !== undefined ? { type: filter.type } : {}),
       };
-      const page = await store.notifications.list(storeFilter, options);
-      return {
-        items: page.items,
-        total: page.total,
-        unread_count: await store.notifications.countUnread(userId),
-      };
+      // Independent reads on the root store, and the header bell polls this
+      // route, so they share one round trip instead of two.
+      const [page, unreadCount] = await Promise.all([
+        store.notifications.list(storeFilter, options),
+        store.notifications.countUnread(userId),
+      ]);
+      return { items: page.items, total: page.total, unread_count: unreadCount };
     },
 
     countUnread: async (userId) => store.notifications.countUnread(userId),

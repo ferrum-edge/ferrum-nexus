@@ -173,11 +173,17 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
   const { config, settings, captcha, auth } = options;
 
   const assembleBranding = async (): Promise<CachedBrandingPayload> => {
-    const branding = await settings.getBranding();
-    const policy = await auth.getRegistrationPolicy();
+    // Three independent settings rows. The memo already tolerates them being
+    // read at different instants (it caches only when no revision moved), so
+    // they go out together.
+    const [branding, policy, captchaConfig] = await Promise.all([
+      settings.getBranding(),
+      auth.getRegistrationPolicy(),
+      captcha.getPublicConfig(),
+    ]);
     return {
       ...branding,
-      captcha: await captcha.getPublicConfig(),
+      captcha: captchaConfig,
       // Narrowed to the self-selectable roles: the register route only accepts
       // those, so an elevated role left in the stored policy is not something
       // the sign-up form could ever offer.

@@ -446,21 +446,16 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
   async function decorateRequests(rows: AccessRequestRecord[]): Promise<AccessRequest[]> {
     if (rows.length === 0) return [];
-    const apis = new Map(
-      (await store.apis.findManyByIds([...new Set(rows.map((row) => row.api_id))])).map((api) => [
-        api.id,
-        api,
-      ]),
-    );
-    const users = new Map(
-      (await store.users.findManyByIds([...new Set(rows.map((row) => row.user_id))])).map(
-        (user) => [user.id, user],
-      ),
-    );
-    const [gatewayUrl, applications] = await Promise.all([
+    // Every join keys off ids already in `rows`, and `store` is the root store
+    // (never a transaction-scoped one), so the reads go out together.
+    const [apiRows, userRows, gatewayUrl, applications] = await Promise.all([
+      store.apis.findManyByIds([...new Set(rows.map((row) => row.api_id))]),
+      store.users.findManyByIds([...new Set(rows.map((row) => row.user_id))]),
       settings.getGatewayPublicUrl(),
       applicationsFor(rows),
     ]);
+    const apis = new Map(apiRows.map((api) => [api.id, api]));
+    const users = new Map(userRows.map((user) => [user.id, user]));
     return rows.map((row) => {
       const api = apis.get(row.api_id);
       const requester = users.get(row.user_id);
@@ -476,21 +471,16 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
   async function decorateGrants(rows: GrantRecord[]): Promise<Grant[]> {
     if (rows.length === 0) return [];
-    const apis = new Map(
-      (await store.apis.findManyByIds([...new Set(rows.map((row) => row.api_id))])).map((api) => [
-        api.id,
-        api,
-      ]),
-    );
-    const users = new Map(
-      (await store.users.findManyByIds([...new Set(rows.map((row) => row.user_id))])).map(
-        (user) => [user.id, user],
-      ),
-    );
-    const [gatewayUrl, applications] = await Promise.all([
+    // Every join keys off ids already in `rows`, and `store` is the root store
+    // (never a transaction-scoped one), so the reads go out together.
+    const [apiRows, userRows, gatewayUrl, applications] = await Promise.all([
+      store.apis.findManyByIds([...new Set(rows.map((row) => row.api_id))]),
+      store.users.findManyByIds([...new Set(rows.map((row) => row.user_id))]),
       settings.getGatewayPublicUrl(),
       applicationsFor(rows),
     ]);
+    const apis = new Map(apiRows.map((api) => [api.id, api]));
+    const users = new Map(userRows.map((user) => [user.id, user]));
     return rows.map((row) => {
       const api = apis.get(row.api_id);
       const user = users.get(row.user_id);

@@ -246,22 +246,17 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
       userIds.add(thread.created_by);
       if (thread.api_id) apiIds.add(thread.api_id);
     }
-    const users = new Map(
-      (await store.users.findManyByIds([...userIds])).map((user) => [user.id, user]),
-    );
-    const apis = new Map(
-      (apiIds.size > 0 ? await store.apis.findManyByIds([...apiIds]) : []).map((api) => [
-        api.id,
-        api,
-      ]),
-    );
-
-    const gatewayUrl = await settings.getGatewayPublicUrl();
-    const latestByThread = new Map(
-      (await store.messages.findLatestByThreads(threads.map((thread) => thread.id))).map(
-        (message) => [message.thread_id, message],
-      ),
-    );
+    // Every join keys off ids collected above, and `store` is the root store
+    // (never a transaction-scoped one), so the reads go out together.
+    const [userRows, apiRows, gatewayUrl, latestRows] = await Promise.all([
+      store.users.findManyByIds([...userIds]),
+      apiIds.size > 0 ? store.apis.findManyByIds([...apiIds]) : Promise.resolve([]),
+      settings.getGatewayPublicUrl(),
+      store.messages.findLatestByThreads(threads.map((thread) => thread.id)),
+    ]);
+    const users = new Map(userRows.map((user) => [user.id, user]));
+    const apis = new Map(apiRows.map((api) => [api.id, api]));
+    const latestByThread = new Map(latestRows.map((message) => [message.thread_id, message]));
 
     return threads.map((thread) => {
       const participants: UserSummary[] = [];
@@ -446,13 +441,20 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
     options: MessagePageOptions | undefined,
   ): Promise<MessagePage> {
     const limit = clampPageSize(options?.limit);
-    const before = options?.before ? await resolveCursor(thread.id, options.before) : undefined;
-
-    const window = await store.messages.listByThread(thread.id, {
-      limit,
-      newest_first: true,
-      ...(before ? { before } : {}),
-    });
+    // The transcript count needs only the thread id, so it runs alongside the
+    // cursor resolve and window read instead of after the sender lookup. It is
+    // awaited with them, so a rejected cursor never leaves it floating.
+    const [window, total] = await Promise.all([
+      (async () => {
+        const before = options?.before ? await resolveCursor(thread.id, options.before) : undefined;
+        return store.messages.listByThread(thread.id, {
+          limit,
+          newest_first: true,
+          ...(before ? { before } : {}),
+        });
+      })(),
+      store.messages.countByThread(thread.id),
+    ]);
     // `total` on that read counts what precedes the window's newest end, which
     // is exactly the "is there more history?" question.
     const hasMore = window.total > window.items.length;
@@ -472,7 +474,7 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
 
     return {
       items,
-      total: await store.messages.countByThread(thread.id),
+      total,
       has_more: hasMore,
       next_before: hasMore ? (items[0]?.id ?? null) : null,
     };
