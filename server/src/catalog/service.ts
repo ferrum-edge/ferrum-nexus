@@ -450,7 +450,10 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       // One gateway URL resolve for the whole page, not one per row.
       const [ownerRows, requestRows, gatewayUrl] = await Promise.all([
         store.users.findManyByIds([...new Set(page.map((api) => api.owner_user_id))]),
-        store.accessRequests.listLatestForUser(viewer.id, page.map((api) => api.id)),
+        store.accessRequests.listLatestForUser(
+          viewer.id,
+          page.map((api) => api.id),
+        ),
         settings.getGatewayPublicUrl(),
       ]);
       const owners = new Map(ownerRows.map((user) => [user.id, user]));
@@ -483,10 +486,11 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       // an application's — is the one the detail reports.
       const { grant } = access;
 
-      const [specRecord, owner, request] = await Promise.all([
+      const [specRecord, owner, request, gatewayUrl] = await Promise.all([
         store.apiSpecs.findCurrentByApi(api.id),
         store.users.findById(api.owner_user_id),
         store.accessRequests.findLatestByApiAndUser(api.id, viewer.id),
+        settings.getGatewayPublicUrl(),
       ]);
 
       const spec: ApiSpecSummary | null = specRecord
@@ -494,14 +498,7 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
         : null;
 
       return {
-        api: catalogApi(
-          viewer,
-          api,
-          owner ?? undefined,
-          grant,
-          request,
-          await settings.getGatewayPublicUrl(),
-        ),
+        api: catalogApi(viewer, api, owner ?? undefined, grant, request, gatewayUrl),
         spec,
         my_request: request,
         my_grant: grant,

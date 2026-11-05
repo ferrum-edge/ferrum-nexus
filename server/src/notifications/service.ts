@@ -83,12 +83,20 @@ export function createNotificationsService(deps: NotificationsServiceDeps): Noti
         ...(filter.type !== undefined ? { type: filter.type } : {}),
       };
       // Independent reads on the root store, and the header bell polls this
-      // route, so they share one round trip instead of two.
+      // route, so they share one round trip instead of two. The count can
+      // settle before a notification inserted mid-request reaches the page, so
+      // it is floored at the unread rows the page itself returns: the badge
+      // never reads lower than what the caller is shown.
       const [page, unreadCount] = await Promise.all([
         store.notifications.list(storeFilter, options),
         store.notifications.countUnread(userId),
       ]);
-      return { items: page.items, total: page.total, unread_count: unreadCount };
+      const unreadOnPage = page.items.filter((item) => item.read_at === null).length;
+      return {
+        items: page.items,
+        total: page.total,
+        unread_count: Math.max(unreadCount, unreadOnPage),
+      };
     },
 
     countUnread: async (userId) => store.notifications.countUnread(userId),

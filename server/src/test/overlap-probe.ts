@@ -4,7 +4,8 @@
  * {@link overlapProbe} wraps a {@link NexusStore} so a test can arm a group of
  * repository calls that must be in flight at the same time. The first matching
  * call to each member is held until every member of the group has started; a
- * member still waiting after `timeoutMs` rejects. A request path that awaits
+ * member still waiting after `timeoutMs` rejects, and so does a group none of
+ * whose members starts within a longer arming deadline. A request path that awaits
  * the members one after another therefore fails instead of passing quietly:
  * the first read never returns, so the second is never issued.
  *
@@ -28,7 +29,8 @@ export interface OverlapProbe {
   store: NexusStore;
   /**
    * Arm a group. Resolves once every member has started, and rejects if any
-   * member is left waiting longer than `timeoutMs` for the others.
+   * member is left waiting longer than `timeoutMs` for the others, or if no
+   * member starts within five times `timeoutMs` of arming.
    */
   expectOverlap(calls: readonly ProbeCall[], timeoutMs?: number): Promise<void>;
 }
@@ -38,6 +40,7 @@ interface Group {
   started: boolean[];
   timeoutMs: number;
   timer: NodeJS.Timeout | null;
+  armTimer: NodeJS.Timeout;
   settled: boolean;
   allStarted: Promise<void>;
   resolve: () => void;
@@ -64,11 +67,13 @@ export function overlapProbe(base: NexusStore): OverlapProbe {
       if (group.started.every(Boolean)) {
         group.settled = true;
         if (group.timer) clearTimeout(group.timer);
+        clearTimeout(group.armTimer);
         group.resolve();
       } else if (!group.timer) {
         group.timer = setTimeout(() => {
           if (group.settled) return;
           group.settled = true;
+          clearTimeout(group.armTimer);
           const missing = group.members
             .filter((_, at) => !group.started[at])
             .map((member) => `${member.repo}.${member.method}`);
@@ -76,6 +81,7 @@ export function overlapProbe(base: NexusStore): OverlapProbe {
             new Error(`expected overlapping reads, but ${missing.join(', ')} never started`),
           );
         }, group.timeoutMs);
+        group.timer.unref();
       }
       return group;
     }
@@ -119,16 +125,27 @@ export function overlapProbe(base: NexusStore): OverlapProbe {
       // Held calls chain off `allStarted`; this keeps a rejection the test has
       // not awaited yet from surfacing as an unhandled one.
       allStarted.catch(() => undefined);
-      groups.push({
+      const group: Group = {
         members: calls,
         started: calls.map(() => false),
         timeoutMs,
         timer: null,
+        // A path that never issues any member would otherwise leave the test
+        // waiting on `allStarted` until the suite timeout, with no diagnostic.
+        armTimer: setTimeout(() => {
+          if (group.settled) return;
+          group.settled = true;
+          if (group.timer) clearTimeout(group.timer);
+          const names = calls.map((member) => `${member.repo}.${member.method}`);
+          reject(new Error(`expected overlapping reads, but none of ${names.join(', ')} started`));
+        }, timeoutMs * 5),
         settled: false,
         allStarted,
         resolve,
         reject,
-      });
+      };
+      group.armTimer.unref();
+      groups.push(group);
       return allStarted;
     },
   };

@@ -18,8 +18,8 @@ import type {
   ListAccessRequestsResponse,
   ListGrantsResponse,
   ListNotificationsResponse,
+  ListThreadMessagesResponse,
   ListThreadsResponse,
-  MessageThreadDetail,
 } from '@ferrum-nexus/shared';
 
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
@@ -143,20 +143,31 @@ describe('hot-path reads overlap', () => {
     assert.equal(thread?.id, threadId);
   });
 
-  it('counts a thread transcript alongside reading its window', async () => {
+  it('counts a thread transcript alongside the sender lookup', async () => {
+    // The messages route, not the thread detail: the detail's own decorate
+    // also looks users up, which would satisfy the probe on either code path.
     const overlap = probe.expectOverlap([
-      { repo: 'messages', method: 'listByThread' },
+      { repo: 'users', method: 'findManyByIds' },
       { repo: 'messages', method: 'countByThread' },
     ]);
     const response = await harness.authed(client, {
       method: 'GET',
-      url: `/api/threads/${threadId}`,
+      url: `/api/threads/${threadId}/messages`,
     });
     await overlap;
     assert.equal(response.statusCode, 200, response.body);
-    const detail = response.json<MessageThreadDetail>();
-    assert.equal(detail.messages.total, 1);
-    assert.equal(detail.messages.items.length, 1);
+    const page = response.json<ListThreadMessagesResponse>();
+    assert.equal(page.total, 1);
+    assert.equal(page.items.length, 1);
+    assert.equal(page.items[0]?.sender?.id, client.user.id);
+  });
+
+  it('still reads the window before counting, so a bad cursor fails first', async () => {
+    const response = await harness.authed(client, {
+      method: 'GET',
+      url: `/api/threads/${threadId}/messages?before=00000000-0000-4000-8000-000000000000`,
+    });
+    assert.equal(response.statusCode, 400, response.body);
   });
 
   it('reads the catalog visibility lists, then the page joins, in two rounds', async () => {

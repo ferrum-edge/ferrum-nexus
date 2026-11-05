@@ -441,32 +441,26 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
     options: MessagePageOptions | undefined,
   ): Promise<MessagePage> {
     const limit = clampPageSize(options?.limit);
-    // The transcript count needs only the thread id, so it runs alongside the
-    // cursor resolve and window read instead of after the sender lookup. It is
-    // awaited with them, so a rejected cursor never leaves it floating.
-    const [window, total] = await Promise.all([
-      (async () => {
-        const before = options?.before ? await resolveCursor(thread.id, options.before) : undefined;
-        return store.messages.listByThread(thread.id, {
-          limit,
-          newest_first: true,
-          ...(before ? { before } : {}),
-        });
-      })(),
-      store.messages.countByThread(thread.id),
-    ]);
+    const before = options?.before ? await resolveCursor(thread.id, options.before) : undefined;
+
+    const window = await store.messages.listByThread(thread.id, {
+      limit,
+      newest_first: true,
+      ...(before ? { before } : {}),
+    });
     // `total` on that read counts what precedes the window's newest end, which
     // is exactly the "is there more history?" question.
     const hasMore = window.total > window.items.length;
     const ordered = [...window.items].reverse();
 
-    const senders = new Map(
-      (
-        await store.users.findManyByIds([
-          ...new Set(ordered.map((message) => message.sender_user_id)),
-        ])
-      ).map((record) => [record.id, record]),
-    );
+    // The sender lookup and the whole-thread count both start only once the
+    // window is read, so `total` can never be lower than the messages the
+    // window already returned, and a bad cursor still fails before either.
+    const [senderRows, total] = await Promise.all([
+      store.users.findManyByIds([...new Set(ordered.map((message) => message.sender_user_id))]),
+      store.messages.countByThread(thread.id),
+    ]);
+    const senders = new Map(senderRows.map((record) => [record.id, record]));
     const items: Message[] = ordered.map((message) => {
       const sender = senders.get(message.sender_user_id);
       return sender ? { ...message, sender: toUserSummary(sender) } : { ...message };
