@@ -126,6 +126,20 @@ function pathPrefixError(prefix: string): string | null {
   return null;
 }
 
+/**
+ * What a plugin card is doing. Save and Remove write the same Edge plugin
+ * config, so at most one of them may be in flight: a remove racing a save could
+ * land in either order and leave the card showing a state the gateway does not
+ * hold.
+ */
+type PluginCardBusy = 'idle' | 'saving' | 'removing';
+
+function pluginCardBusy(saving: boolean, removing: boolean): PluginCardBusy {
+  if (removing) return 'removing';
+  if (saving) return 'saving';
+  return 'idle';
+}
+
 /** One palette plugin: its switch, its form, its trigger and its actions. */
 function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
   const setPlugin = useSetApiPlugin();
@@ -152,8 +166,11 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
     setDraft((current) => ({ ...current, [key]: value }));
   };
 
+  const busy = pluginCardBusy(setPlugin.isPending, removePlugin.isPending);
+  const locked = busy !== 'idle';
+
   const save = (): void => {
-    if (invalid) return;
+    if (invalid || locked) return;
     setPlugin.mutate(
       {
         id: api.id,
@@ -172,6 +189,7 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
   };
 
   const remove = (): void => {
+    if (locked) return;
     removePlugin.mutate(
       { id: api.id, name: descriptor.name },
       {
@@ -183,8 +201,6 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
       },
     );
   };
-
-  const busy = setPlugin.isPending || removePlugin.isPending;
 
   return (
     <Card className={saved ? 'border-accent/30' : undefined}>
@@ -236,7 +252,7 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
             draft={draft}
             errors={errors}
             onChange={change}
-            disabled={busy}
+            disabled={locked}
           />
 
           {descriptor.supports_trigger ? (
@@ -245,7 +261,7 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
                 label="Only run on some requests"
                 description="Without this, the plugin applies to every call on this API."
                 checked={trigger.enabled}
-                disabled={busy}
+                disabled={locked}
                 onChange={(event) =>
                   setTrigger((current) => ({ ...current, enabled: event.target.checked }))
                 }
@@ -266,7 +282,7 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
                           key={method}
                           label={method}
                           checked={trigger.methods.includes(method)}
-                          disabled={busy}
+                          disabled={locked}
                           onChange={(event) =>
                             setTrigger((current) => ({
                               ...current,
@@ -291,7 +307,7 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
                       id={`${descriptor.name}-prefix`}
                       value={trigger.pathPrefix}
                       placeholder={`${api.listen_path}/invoices`}
-                      disabled={busy}
+                      disabled={locked}
                       invalid={triggerError !== null}
                       onChange={(event) =>
                         setTrigger((current) => ({ ...current, pathPrefix: event.target.value }))
@@ -313,8 +329,8 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
               variant="primary"
               size="sm"
               onClick={save}
-              disabled={invalid}
-              loading={setPlugin.isPending}
+              disabled={invalid || locked}
+              loading={busy === 'saving'}
             >
               {saved ? 'Save' : 'Turn on'}
             </Button>
@@ -324,7 +340,7 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
                   label="Active"
                   description="Uncheck to pause the plugin without losing these settings."
                   checked={enabled}
-                  disabled={busy}
+                  disabled={locked}
                   onChange={(event) => setEnabled(event.target.checked)}
                 />
                 <Button
@@ -332,7 +348,8 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
                   size="sm"
                   className="ml-auto"
                   onClick={remove}
-                  loading={removePlugin.isPending}
+                  disabled={locked}
+                  loading={busy === 'removing'}
                 >
                   <Icon name="trash" />
                   Remove

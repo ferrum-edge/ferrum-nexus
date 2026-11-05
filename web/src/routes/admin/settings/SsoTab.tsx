@@ -41,7 +41,9 @@ import {
 } from '../../../components/ui/Input';
 import { LabeledSelect, Select } from '../../../components/ui/Select';
 import { LoadingPanel } from '../../../components/ui/Spinner';
+import { QueryErrorState } from '../../../components/ui/QueryErrorState';
 import { useAdminSso, useUpdateAdminSso } from '../../../hooks/useAdminSettings';
+import { queryLoadState } from '../../../lib/query-state';
 import { useAuth } from '../../../stores/auth';
 import { useToast } from '../../../stores/toast';
 
@@ -635,11 +637,30 @@ function ProvidersCard({ settings }: { settings: SsoAdminSettingsResponse }): Re
 /** The single sign-on settings tab. */
 export function SsoTab(): ReactElement {
   const query = useAdminSso();
-  if (query.isLoading || !query.data) return <LoadingPanel label="Loading single sign-on" />;
-  return (
-    <div className="flex flex-col gap-6">
-      <PolicyCard settings={query.data} />
-      <ProvidersCard settings={query.data} />
-    </div>
-  );
+  // `isLoading || !data` used to spin forever when the first load failed.
+  const load = queryLoadState(query);
+  switch (load.kind) {
+    case 'loading':
+      return <LoadingPanel label="Loading single sign-on" />;
+    case 'failed':
+      return (
+        <QueryErrorState
+          title="Single sign-on settings unavailable"
+          description="The single sign-on settings could not be loaded, so they cannot be edited."
+          onRetry={() => query.refetch()}
+          retrying={query.isFetching}
+        />
+      );
+    case 'ready':
+      return (
+        <div className="flex flex-col gap-6">
+          <PolicyCard settings={load.data} />
+          <ProvidersCard settings={load.data} />
+        </div>
+      );
+    default: {
+      const unreachable: never = load;
+      return unreachable;
+    }
+  }
 }

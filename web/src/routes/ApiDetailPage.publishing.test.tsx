@@ -4,20 +4,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_CORS_ORIGINS,
   type Api,
+  type CreateTestConsumerResponse,
   type GetApiSpecResponse,
   type SpecDiff,
   type UpdateApiResponse,
 } from '@ferrum-nexus/shared';
 import { API, CREDENTIAL, RAW_SPEC, SPEC } from '../../test/fixtures';
 import { changeField, clearClients, deferred, renderPage, selectTab } from '../../test/helpers';
+import { queryKeys } from '../hooks/keys';
 import { apisApi } from '../lib/api';
 import { ApiDetailPage } from './ApiDetailPage';
 
 const navigate = vi.hoisted(() => vi.fn());
+/** The `$apiId` route param; a test may move it to open another API in place. */
+const route = vi.hoisted(() => ({ apiId: 'api-1' }));
 
 vi.mock('@tanstack/react-router', async () => {
   const { TestLink } = await import('../../test/helpers');
-  return { Link: TestLink, useParams: () => ({ apiId: 'api-1' }), useNavigate: () => navigate };
+  return {
+    Link: TestLink,
+    useParams: () => ({ apiId: route.apiId }),
+    useNavigate: () => navigate,
+  };
 });
 const viewer = vi.hoisted(() => ({ user: undefined as { id: string } | undefined }));
 vi.mock('../stores/auth', () => ({ useAuth: () => ({ hasRole: () => true, user: viewer.user }) }));
@@ -49,6 +57,7 @@ beforeEach(() => {
   api = { ...API };
   viewer.user = { id: API.owner_user_id };
   rawSpec = RAW_SPEC;
+  route.apiId = API.id;
   navigate.mockReset();
   vi.spyOn(apisApi, 'get').mockImplementation(async () => ({
     api,
@@ -299,6 +308,46 @@ describe('provider API workspace', () => {
     });
   });
 
+  it('asks again for the next authentication swap once one is saved', async () => {
+    await openTab('Settings');
+    changeField('Authentication', 'basic_auth');
+    fireEvent.click(screen.getByLabelText(/Invalidate portal-issued old-method credentials/));
+    save();
+    await screen.findByText('API settings saved');
+    await waitFor(() => {
+      expect(
+        screen.queryByLabelText(/Invalidate portal-issued old-method credentials/),
+      ).not.toBeInTheDocument();
+    });
+
+    // A second swap is a different consequence: the first tick does not carry over.
+    changeField('Authentication', 'jwt_auth');
+    expect(
+      screen.getByLabelText(/Invalidate portal-issued old-method credentials/),
+    ).not.toBeChecked();
+    save();
+    await waitFor(() => expect(apisApi.update).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(apisApi.update).mock.calls[1]?.[1]).toMatchObject({ auth_plugin: 'jwt_auth' });
+    expect(vi.mocked(apisApi.update).mock.calls[1]?.[1]).not.toHaveProperty(
+      'confirm_access_disruption',
+    );
+  });
+
+  it('drops the acknowledgement when the swap target changes', async () => {
+    await openTab('Settings');
+    changeField('Authentication', 'basic_auth');
+    fireEvent.click(screen.getByLabelText(/Invalidate portal-issued old-method credentials/));
+    changeField('Authentication', 'jwt_auth');
+    expect(
+      screen.getByLabelText(/Invalidate portal-issued old-method credentials/),
+    ).not.toBeChecked();
+    save();
+    await screen.findByText('API settings saved');
+    expect(vi.mocked(apisApi.update).mock.calls[0]?.[1]).not.toHaveProperty(
+      'confirm_access_disruption',
+    );
+  });
+
   it('rejects invalid runtime settings without sending an update', async () => {
     await openTab('Settings');
     const form = screen.getByRole('button', { name: 'Save settings' }).closest('form')!;
@@ -535,6 +584,82 @@ describe('provider specification and sandbox credentials', () => {
         ),
       ).not.toContain('test-only-sandbox-key'),
     );
+  });
+
+  it('reveals a test credential created just before switching tab', async () => {
+    const pending = deferred<CreateTestConsumerResponse>();
+    vi.mocked(apisApi.createTestConsumer).mockReturnValueOnce(pending.promise);
+    await openTab('Test consumer');
+    fireEvent.click(screen.getByRole('button', { name: 'Create test credential' }));
+    await waitFor(() => expect(apisApi.createTestConsumer).toHaveBeenCalledTimes(1));
+
+    // The provider moves on while the credential is being minted; the tab that
+    // asked for it unmounts.
+    selectTab('Overview');
+    expect(screen.queryByRole('button', { name: 'Create test credential' })).toBeNull();
+    await act(async () => {
+      pending.resolve({
+        credential: CREDENTIAL,
+        consumer_username: 'nexus-test-api-1',
+        secret: { type: 'keyauth', key: 'late-sandbox-key' },
+      });
+    });
+
+    // The credential exists on the gateway, so its only showing must still happen.
+    const dialog = await screen.findByRole('dialog', { name: 'Save your test credential' });
+    expect(within(dialog).getByText('late-sandbox-key')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('checkbox'));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
+    expect(screen.queryByText('late-sandbox-key')).not.toBeInTheDocument();
+  });
+
+  it('keeps each tab draft with its own API when the route moves to another', async () => {
+    const other: Api = {
+      ...API,
+      id: 'api-2',
+      name: 'Shipping API',
+      slug: 'shipping',
+      version: '3.1.0',
+      auth_plugin: 'jwt_auth',
+    };
+    vi.mocked(apisApi.get).mockImplementation(async (id) => ({
+      api: id === other.id ? other : api,
+      spec: SPEC,
+      stats: { pending_requests: 0, active_grants: 0, total_requests: 0 },
+    }));
+    const { rerender } = renderPage(<ApiDetailPage />);
+    await screen.findByRole('heading', { name: API.name });
+    selectTab('Settings');
+    expect(screen.getByLabelText(/^Name/)).toHaveValue(API.name);
+
+    // Opening another API (say, from a notification) re-renders the same page.
+    route.apiId = other.id;
+    rerender(<ApiDetailPage />);
+    await screen.findByRole('heading', { name: other.name });
+    expect(screen.getByLabelText(/^Name/)).toHaveValue(other.name);
+    save();
+    await screen.findByText('API settings saved');
+    expect(apisApi.update).toHaveBeenCalledWith(
+      other.id,
+      expect.objectContaining({
+        name: other.name,
+        version: other.version,
+        auth_plugin: 'jwt_auth',
+      }),
+    );
+  });
+
+  it('keeps the page and its unsaved edits when a background refetch fails', async () => {
+    const client = await openTab('Settings');
+    changeField(/^Name/, 'Unsaved rename');
+    vi.mocked(apisApi.get).mockRejectedValue(new Error('Bad gateway'));
+    await act(async () => {
+      await client.refetchQueries({ queryKey: queryKeys.apis.detail(API.id) });
+    });
+
+    expect(await screen.findByText(/This API could not be refreshed/)).toBeInTheDocument();
+    expect(screen.queryByText('API not found')).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/^Name/)).toHaveValue('Unsaved rename');
   });
 });
 

@@ -16,6 +16,7 @@ import {
 } from '@ferrum-nexus/shared';
 import { isCatalogDetailTab } from '../lib/catalog-tabs';
 import { formatDateTime } from '../lib/format';
+import { queryLoadState } from '../lib/query-state';
 import { useCatalogApi, useCatalogIdentityAccess, useCatalogSpec } from '../hooks/useCatalog';
 import {
   useCancelAccessRequest,
@@ -46,7 +47,7 @@ import { EmptyState } from '../components/ui/EmptyState';
 import { Icon, type IconName } from '../components/ui/Icon';
 import { LabeledTextarea } from '../components/ui/Input';
 import { LoadingPanel } from '../components/ui/Spinner';
-import { QueryErrorState } from '../components/ui/QueryErrorState';
+import { QueryErrorState, StaleDataNotice } from '../components/ui/QueryErrorState';
 import { StatusPill, visibilityLabel } from '../components/ui/StatusPill';
 import { Tabs } from '../components/ui/Tabs';
 
@@ -557,9 +558,27 @@ function IdentityAccess({
  */
 function identityState(access: CatalogIdentityAccessResponse): CatalogAccessState {
   if (access.grant?.status === 'active') return 'granted';
-  if (access.request?.status === 'pending') return 'pending';
-  if (access.request?.status === 'denied') return 'denied';
-  return 'none';
+  const status = access.request?.status;
+  if (status === undefined) return 'none';
+  // Mirrors the server's `accessState` (server/src/catalog/service.ts), and is
+  // exhaustive so a new request status cannot silently read as "No access".
+  switch (status) {
+    case 'pending':
+      return 'pending';
+    case 'denied':
+      return 'denied';
+    case 'revoked':
+      return 'revoked';
+    // Approved without an active grant (the grant was since revoked), or
+    // withdrawn: nothing is held now.
+    case 'approved':
+    case 'cancelled':
+      return 'none';
+    default: {
+      const unreachable: never = status;
+      return unreachable;
+    }
+  }
 }
 
 function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElement {
@@ -770,25 +789,36 @@ export function CatalogDetailPage(): ReactElement {
   const { canAdmin } = useAuth();
   const query = useCatalogApi(slug);
 
-  if (query.isLoading) return <LoadingPanel label="Loading API" />;
-  if (query.isError || !query.data) {
-    return (
-      <Card>
-        <EmptyState
-          icon="alert"
-          title="API not found"
-          description="It may have been retired, or you may not have permission to view it."
-          action={
-            <Link to="/catalog" className={buttonClassName({ variant: 'secondary' })}>
-              Back to catalog
-            </Link>
-          }
-        />
-      </Card>
-    );
+  // A failed background refetch keeps the page and any half-written access
+  // request; only a first load that failed has nothing to show.
+  const load = queryLoadState(query);
+  switch (load.kind) {
+    case 'loading':
+      return <LoadingPanel label="Loading API" />;
+    case 'failed':
+      return (
+        <Card>
+          <EmptyState
+            icon="alert"
+            title="API not found"
+            description="It may have been retired, or you may not have permission to view it."
+            action={
+              <Link to="/catalog" className={buttonClassName({ variant: 'secondary' })}>
+                Back to catalog
+              </Link>
+            }
+          />
+        </Card>
+      );
+    case 'ready':
+      break;
+    default: {
+      const unreachable: never = load;
+      return unreachable;
+    }
   }
 
-  const detail = query.data;
+  const detail = load.data;
   const { api } = detail;
   // An admin may approve, deny and revoke on any API through the ordinary
   // routes — the guide's non-god-mode remedy — but the only link into the
@@ -833,6 +863,14 @@ export function CatalogDetailPage(): ReactElement {
           </>
         }
       />
+
+      {load.refetchFailed ? (
+        <StaleDataNotice
+          description="This API could not be refreshed. It is shown as last loaded."
+          onRetry={() => query.refetch()}
+          retrying={query.isFetching}
+        />
+      ) : null}
 
       <AtAGlance detail={detail} />
 

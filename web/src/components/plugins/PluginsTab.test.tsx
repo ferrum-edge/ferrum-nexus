@@ -17,6 +17,7 @@ import {
   type Api,
   type ApiPlugin,
 } from '@ferrum-nexus/shared';
+import { apisApi } from '../../lib/api';
 import { ToastProvider } from '../../stores/toast';
 import { PluginsTab } from './PluginsTab';
 
@@ -88,6 +89,33 @@ describe('<PluginsTab>', () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** The saved IP allow-list card, once its saved config has loaded. */
+  async function savedCard(): Promise<ReturnType<typeof within>> {
+    await screen.findByDisplayValue('203.0.113.0/24');
+    const card = screen.getByText('IP allow / deny list').closest('.fx-card');
+    expect(card).not.toBeNull();
+    return within(card as HTMLElement);
+  }
+
+  it('locks Remove while a Save of the same plugin is in flight', async () => {
+    vi.spyOn(apisApi, 'setPlugin').mockReturnValue(new Promise(() => {}));
+    renderTab();
+    const card = await savedCard();
+    fireEvent.click(card.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(apisApi.setPlugin).toHaveBeenCalledTimes(1));
+    expect(card.getByRole('button', { name: 'Remove' })).toBeDisabled();
+  });
+
+  it('locks Save while a Remove of the same plugin is in flight', async () => {
+    vi.spyOn(apisApi, 'removePlugin').mockReturnValue(new Promise(() => {}));
+    renderTab();
+    const card = await savedCard();
+    fireEvent.click(card.getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(apisApi.removePlugin).toHaveBeenCalledTimes(1));
+    expect(card.getByRole('button', { name: 'Save' })).toBeDisabled();
   });
 
   it('renders every palette plugin, grouped under its category heading', async () => {

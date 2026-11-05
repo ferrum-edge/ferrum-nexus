@@ -27,6 +27,7 @@ import {
   catalogEntry,
 } from '../../test/fixtures';
 import { changeField, clearClients, deferred, renderPage, selectTab } from '../../test/helpers';
+import { queryKeys } from '../hooks/keys';
 import { accessRequestsApi, applicationsApi, catalogApi, grantsApi, threadsApi } from '../lib/api';
 import { CatalogDetailPage } from './CatalogDetailPage';
 import { CatalogPage } from './CatalogPage';
@@ -1106,5 +1107,38 @@ describe('more agent tools on an existing grant (issue #525)', () => {
     await openDetail('Access');
     await screen.findByText(/Access granted to your account/);
     expect(screen.queryByRole('button', { name: 'Request tools' })).not.toBeInTheDocument();
+  });
+});
+
+describe('catalog detail state', () => {
+  it('labels a revoked request as revoked on the access card, as the server does', async () => {
+    const revoked: AccessRequest = { ...REQUEST, status: 'revoked' };
+    detail = { ...detail, api: catalogEntry({ access_state: 'revoked' }), my_request: revoked };
+    identities.account = { ...NO_ACCESS, request: revoked };
+    await openDetail('Access');
+
+    await screen.findByText(/Last decision/);
+    // The header (account-wide) and the card (this identity) agree.
+    expect(screen.queryByText('No access')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Revoked').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('keeps the page and a half-written request when a background refetch fails', async () => {
+    const { client } = renderPage(<CatalogDetailPage />);
+    await screen.findByRole('heading', { name: API.name });
+    selectTab('Access');
+    await screen.findByLabelText(/Why do you need access/);
+    changeField(/Why do you need access/, 'Half-written justification');
+
+    vi.mocked(catalogApi.detail).mockRejectedValue(new Error('Bad gateway'));
+    await act(async () => {
+      await client.refetchQueries({ queryKey: queryKeys.catalog.detail('billing') });
+    });
+
+    expect(await screen.findByText(/This API could not be refreshed/)).toBeInTheDocument();
+    expect(screen.queryByText('API not found')).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/Why do you need access/)).toHaveValue(
+      'Half-written justification',
+    );
   });
 });
