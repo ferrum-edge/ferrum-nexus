@@ -348,6 +348,42 @@ describe('provider API workspace', () => {
     );
   });
 
+  it('never revives an acknowledgement once the published method cycles back', async () => {
+    const acknowledgement = (): HTMLElement =>
+      screen.getByLabelText(/Invalidate portal-issued old-method credentials/);
+    const settled = async (calls: number): Promise<void> => {
+      await waitFor(() => expect(apisApi.update).toHaveBeenCalledTimes(calls));
+      await waitFor(() => {
+        expect(
+          screen.queryByLabelText(/Invalidate portal-issued old-method credentials/),
+        ).not.toBeInTheDocument();
+      });
+    };
+    await openTab('Settings');
+
+    // 1. key_auth → basic_auth, acknowledged.
+    changeField('Authentication', 'basic_auth');
+    fireEvent.click(acknowledgement());
+    save();
+    await settled(1);
+    // 2. basic_auth → key_auth without a tick (nobody held a basic credential).
+    changeField('Authentication', 'key_auth');
+    expect(acknowledgement()).not.toBeChecked();
+    save();
+    await settled(2);
+    // 3. key_auth → basic_auth again: the same pair as save 1, not acknowledged.
+    changeField('Authentication', 'basic_auth');
+    expect(acknowledgement()).not.toBeChecked();
+    save();
+    await waitFor(() => expect(apisApi.update).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(apisApi.update).mock.calls[2]?.[1]).toMatchObject({
+      auth_plugin: 'basic_auth',
+    });
+    expect(vi.mocked(apisApi.update).mock.calls[2]?.[1]).not.toHaveProperty(
+      'confirm_access_disruption',
+    );
+  });
+
   it('rejects invalid runtime settings without sending an update', async () => {
     await openTab('Settings');
     const form = screen.getByRole('button', { name: 'Save settings' }).closest('form')!;
@@ -627,15 +663,22 @@ describe('provider specification and sandbox credentials', () => {
       spec: SPEC,
       stats: { pending_requests: 0, active_grants: 0, total_requests: 0 },
     }));
-    const { rerender } = renderPage(<ApiDetailPage />);
+    const { rerender, client } = renderPage(<ApiDetailPage />);
     await screen.findByRole('heading', { name: API.name });
     selectTab('Settings');
-    expect(screen.getByLabelText(/^Name/)).toHaveValue(API.name);
+    changeField(/^Name/, 'Draft for billing');
 
-    // Opening another API (say, from a notification) re-renders the same page.
+    // Opening another API that is already cached (say, from a notification)
+    // re-renders the same page with no loading state in between, so nothing
+    // but the key separates A's form from B's.
+    client.setQueryData(queryKeys.apis.detail(other.id), {
+      api: other,
+      spec: SPEC,
+      stats: { pending_requests: 0, active_grants: 0, total_requests: 0 },
+    });
     route.apiId = other.id;
     rerender(<ApiDetailPage />);
-    await screen.findByRole('heading', { name: other.name });
+    expect(screen.getByRole('heading', { name: other.name })).toBeInTheDocument();
     expect(screen.getByLabelText(/^Name/)).toHaveValue(other.name);
     save();
     await screen.findByText('API settings saved');
@@ -647,6 +690,62 @@ describe('provider specification and sandbox credentials', () => {
         auth_plugin: 'jwt_auth',
       }),
     );
+  });
+
+  it('still shows a credential that resolves while the next API is loading', async () => {
+    const pending = deferred<CreateTestConsumerResponse>();
+    vi.mocked(apisApi.createTestConsumer).mockReturnValueOnce(pending.promise);
+    vi.mocked(apisApi.get).mockImplementation((id) =>
+      id === 'api-2'
+        ? new Promise<never>(() => {})
+        : Promise.resolve({
+            api,
+            spec: SPEC,
+            stats: { pending_requests: 0, active_grants: 0, total_requests: 0 },
+          }),
+    );
+    const { rerender } = renderPage(<ApiDetailPage />);
+    await screen.findByRole('heading', { name: API.name });
+    selectTab('Test consumer');
+    fireEvent.click(screen.getByRole('button', { name: 'Create test credential' }));
+    await waitFor(() => expect(apisApi.createTestConsumer).toHaveBeenCalledTimes(1));
+
+    route.apiId = 'api-2';
+    rerender(<ApiDetailPage />);
+    expect(screen.getByRole('status')).toHaveTextContent('Loading API');
+    await act(async () => {
+      pending.resolve({
+        credential: CREDENTIAL,
+        consumer_username: 'nexus-test-api-1',
+        secret: { type: 'keyauth', key: 'loading-page-key' },
+      });
+    });
+
+    const dialog = await screen.findByRole('dialog', { name: 'Save your test credential' });
+    expect(within(dialog).getByText('loading-page-key')).toBeInTheDocument();
+  });
+
+  it("does not show another API's credential request as this one's", async () => {
+    const other: Api = { ...API, id: 'api-2', name: 'Shipping API', slug: 'shipping' };
+    vi.mocked(apisApi.createTestConsumer).mockReturnValueOnce(new Promise(() => {}));
+    const { rerender, client } = renderPage(<ApiDetailPage />);
+    await screen.findByRole('heading', { name: API.name });
+    selectTab('Test consumer');
+    fireEvent.click(screen.getByRole('button', { name: 'Create test credential' }));
+    await waitFor(() => expect(apisApi.createTestConsumer).toHaveBeenCalledTimes(1));
+
+    client.setQueryData(queryKeys.apis.detail(other.id), {
+      api: other,
+      spec: SPEC,
+      stats: { pending_requests: 0, active_grants: 0, total_requests: 0 },
+    });
+    route.apiId = other.id;
+    rerender(<ApiDetailPage />);
+    expect(screen.getByRole('heading', { name: other.name })).toBeInTheDocument();
+    const button = screen.getByRole('button', { name: 'Create test credential' });
+    // Not spinning for B, but still blocked: the page observes one request.
+    expect(button).not.toHaveAttribute('aria-busy');
+    expect(button).toBeDisabled();
   });
 
   it('keeps the page and its unsaved edits when a background refetch fails', async () => {

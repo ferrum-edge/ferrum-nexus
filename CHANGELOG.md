@@ -151,6 +151,25 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Provider and catalog pages keep their state where it belongs** (#650).
+  - Opening another API in place no longer carries the previous API's Settings,
+    Plugins, Specification or Test consumer drafts over. Before, saving could
+    send API A's settings or spec under API B's id.
+  - The acknowledgement for an authentication-method change belongs to that
+    one change. A later swap, including a return to a method the API used
+    before, asks again. Before, it could arrive pre-ticked and send
+    `confirm_access_disruption` with nobody acknowledging it.
+  - A test-consumer credential created just before the provider switches tab or
+    API is still shown its one time. Before, the credential was created on the
+    gateway and its secret was never displayed.
+  - A failed background refresh keeps the API workspace, the catalog entry and
+    their unsaved edits on screen with a notice and a retry. Before, it replaced
+    the page with "API not found". The single sign-on settings tab reports a
+    failed first load instead of spinning forever.
+  - The catalog Access card shows a revoked request as Revoked, matching the
+    page header, instead of No access.
+  - A palette plugin's Save and Remove can no longer run at the same time.
+
 - **Acceptance readiness waits honour their deadline** (#606). Each check
   gets an abort signal that fires at the deadline, so a listener that stalls
   its headers or body no longer holds the wait past it, and a success that

@@ -1,4 +1,5 @@
 import type { ReactElement } from 'react';
+import { cn } from '../../lib/cn';
 import { Button } from './Button';
 import { EmptyState } from './EmptyState';
 import { Icon } from './Icon';
@@ -41,6 +42,7 @@ export interface StaleDataNoticeProps {
   description: string;
   onRetry: () => unknown;
   retrying?: boolean;
+  className?: string;
 }
 
 /**
@@ -52,11 +54,15 @@ export function StaleDataNotice({
   description,
   onRetry,
   retrying = false,
+  className,
 }: StaleDataNoticeProps): ReactElement {
   return (
     <div
       role="alert"
-      className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/30 bg-warning-soft p-3 text-sm text-fg"
+      className={cn(
+        'flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/30 bg-warning-soft p-3 text-sm text-fg',
+        className,
+      )}
     >
       <span className="flex min-w-0 items-start gap-2.5">
         <Icon name="alert" className="mt-0.5 h-4 w-4 shrink-0 text-warning" />

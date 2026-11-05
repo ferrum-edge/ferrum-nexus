@@ -41,7 +41,7 @@ import {
 } from '../../../components/ui/Input';
 import { LabeledSelect, Select } from '../../../components/ui/Select';
 import { LoadingPanel } from '../../../components/ui/Spinner';
-import { QueryErrorState } from '../../../components/ui/QueryErrorState';
+import { QueryErrorState, StaleDataNotice } from '../../../components/ui/QueryErrorState';
 import { useAdminSso, useUpdateAdminSso } from '../../../hooks/useAdminSettings';
 import { queryLoadState } from '../../../lib/query-state';
 import { useAuth } from '../../../stores/auth';
@@ -654,6 +654,13 @@ export function SsoTab(): ReactElement {
     case 'ready':
       return (
         <div className="flex flex-col gap-6">
+          {load.refetchFailed ? (
+            <StaleDataNotice
+              description="The single sign-on settings could not be refreshed. They are shown as last loaded, and unsaved edits are kept."
+              onRetry={() => query.refetch()}
+              retrying={query.isFetching}
+            />
+          ) : null}
           <PolicyCard settings={load.data} />
           <ProvidersCard settings={load.data} />
         </div>

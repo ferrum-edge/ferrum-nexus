@@ -121,9 +121,10 @@ const CORS_ORIGINS_HINT =
  *
  * The acknowledgement belongs to one specific swap — this published method to
  * that drafted one — so it is derived from the draft rather than held as a
- * free-standing flag: once the swap is saved (the published method moves), or
- * the draft names a different target, the stored acknowledgement no longer
- * matches and the next swap starts unacknowledged.
+ * free-standing flag: once the draft names a different target, the stored
+ * acknowledgement no longer matches. A successful save also consumes it (see
+ * `SettingsTab`), so a published method that cycles back to the same `from`
+ * cannot revive it, and every later swap starts unacknowledged.
  */
 type AuthSwapState =
   | { kind: 'unchanged' }
@@ -150,16 +151,28 @@ function authSwapState(
   };
 }
 
-/** Where a show-once test credential stands, read off its creating mutation. */
+/**
+ * Where a show-once test credential stands, read off its creating mutation.
+ *
+ * `creating` names the API the request is for, so another API's page does not
+ * claim it. `revealed` ends the moment the provider acknowledges: the
+ * acknowledged credential's id is recorded synchronously, because the
+ * mutation's own `reset()` reaches its observers only on a later tick and the
+ * secret must not stay on screen until then.
+ */
 type TestCredentialState =
   | { kind: 'idle' }
-  | { kind: 'creating' }
-  | { kind: 'revealed'; secret: ShowOnceSecret; username: string };
+  | { kind: 'creating'; apiId: string | null }
+  | { kind: 'revealed'; credentialId: string; secret: ShowOnceSecret; username: string };
 
-function testCredentialState(mutation: {
-  status: 'idle' | 'pending' | 'success' | 'error';
-  data: CreateTestConsumerResponse | undefined;
-}): TestCredentialState {
+function testCredentialState(
+  mutation: {
+    status: 'idle' | 'pending' | 'success' | 'error';
+    data: CreateTestConsumerResponse | undefined;
+    variables: { id: string } | undefined;
+  },
+  acknowledgedCredentialId: string | null,
+): TestCredentialState {
   switch (mutation.status) {
     // A failed attempt is reported by the global mutation toast; the tab is
     // simply ready to try again.
@@ -167,11 +180,12 @@ function testCredentialState(mutation: {
     case 'error':
       return { kind: 'idle' };
     case 'pending':
-      return { kind: 'creating' };
+      return { kind: 'creating', apiId: mutation.variables?.id ?? null };
     case 'success':
-      return mutation.data
+      return mutation.data && mutation.data.credential.id !== acknowledgedCredentialId
         ? {
             kind: 'revealed',
+            credentialId: mutation.data.credential.id,
             secret: mutation.data.secret,
             username: mutation.data.consumer_username,
           }
@@ -393,6 +407,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
     const submittedMethodsGeneration = methodsGeneration.current;
     const submittedTimeoutsGeneration = timeoutsGeneration.current;
     const submittedCircuitBreakerGeneration = circuitBreakerGeneration.current;
+    const submittedAcknowledgement = acknowledgedSwap;
 
     update.mutate(
       {
@@ -431,6 +446,11 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
           if (circuitBreakerGeneration.current === submittedCircuitBreakerGeneration) {
             setCircuitBreakerChanged(false);
           }
+          // A saved acknowledgement is spent. Left in place, the same
+          // `{from, to}` pair would match again once the published method
+          // cycled back, and pre-tick a later swap nobody acknowledged. A tick
+          // made while this request was in flight is a new object and stays.
+          setAcknowledgedSwap((current) => (current === submittedAcknowledgement ? null : current));
           toast.success('API settings saved');
         },
       },
@@ -1368,14 +1388,19 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
  */
 function TestConsumerTab({
   api,
-  creating,
+  credential,
   onCreate,
 }: {
   api: Api;
-  creating: boolean;
+  credential: TestCredentialState;
   onCreate: (label: string | null) => void;
 }): ReactElement {
   const [label, setLabel] = useState('');
+  // Only this API's own request shows as in progress here. One started on
+  // another API still blocks a new one: the page observes a single request,
+  // and starting a second would orphan the first one's secret.
+  const creatingHere = credential.kind === 'creating' && credential.apiId === api.id;
+  const creatingElsewhere = credential.kind === 'creating' && !creatingHere;
 
   return (
     <>
@@ -1404,7 +1429,8 @@ function TestConsumerTab({
         <div className="flex flex-wrap items-center gap-3 border-t border-border bg-inset/40 px-5 py-3.5">
           <Button
             variant="primary"
-            loading={creating}
+            loading={creatingHere}
+            disabled={creatingElsewhere}
             onClick={() => onCreate(label.trim() || null)}
           >
             Create test credential
@@ -1639,30 +1665,57 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
   // Held here, above the tabs, so a credential created just before the
   // provider switches tab is still revealed (see `TestConsumerTab`).
   const createTestConsumer = useCreateTestConsumer();
-  const testCredential = testCredentialState(createTestConsumer);
+  const [acknowledgedCredentialId, setAcknowledgedCredentialId] = useState<string | null>(null);
+  const testCredential = testCredentialState(createTestConsumer, acknowledgedCredentialId);
+  // Rendered whatever state the API itself is in: a credential that resolves
+  // while the page shows another, still loading or missing, API must still be
+  // shown its one time.
+  const testCredentialDialog =
+    testCredential.kind === 'revealed' ? (
+      <ShowOnceSecretDialog
+        key={testCredential.credentialId}
+        open
+        secret={testCredential.secret}
+        consumerUsername={testCredential.username}
+        title="Save your test credential"
+        onAcknowledge={() => {
+          setAcknowledgedCredentialId(testCredential.credentialId);
+          // Drop the plaintext from the mutation result too (issue #336).
+          createTestConsumer.reset();
+        }}
+      />
+    ) : null;
 
   // A failed background refetch keeps the page, and every unsaved draft in its
   // tabs; only a first load that failed has nothing to show.
   const load = queryLoadState(query);
   switch (load.kind) {
     case 'loading':
-      return <LoadingPanel label="Loading API" />;
+      return (
+        <>
+          <LoadingPanel label="Loading API" />
+          {testCredentialDialog}
+        </>
+      );
     case 'failed':
       return (
-        <Card>
-          <EmptyState
-            icon="alert"
-            tone="danger"
-            title="API not found"
-            description="It may have been deleted, or you may not own it."
-            action={
-              <Link to="/apis" className={buttonClassName({ variant: 'secondary' })}>
-                <Icon name="arrow-left" />
-                Back to my APIs
-              </Link>
-            }
-          />
-        </Card>
+        <>
+          <Card>
+            <EmptyState
+              icon="alert"
+              tone="danger"
+              title="API not found"
+              description="It may have been deleted, or you may not own it."
+              action={
+                <Link to="/apis" className={buttonClassName({ variant: 'secondary' })}>
+                  <Icon name="arrow-left" />
+                  Back to my APIs
+                </Link>
+              }
+            />
+          </Card>
+          {testCredentialDialog}
+        </>
       );
     case 'ready':
       break;
@@ -1713,6 +1766,7 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
 
       {load.refetchFailed ? (
         <StaleDataNotice
+          className="mb-6"
           description="This API could not be refreshed. It is shown as last loaded, and unsaved edits are kept."
           onRetry={() => query.refetch()}
           retrying={query.isFetching}
@@ -1829,25 +1883,20 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
               <TestConsumerTab
                 key={api.id}
                 api={api}
-                creating={testCredential.kind === 'creating'}
-                onCreate={(label) => createTestConsumer.mutate({ id: api.id, body: { label } })}
+                credential={testCredential}
+                onCreate={(label) => {
+                  // A new request starts with nothing acknowledged, even if the
+                  // server were to hand back the same credential id again.
+                  setAcknowledgedCredentialId(null);
+                  createTestConsumer.mutate({ id: api.id, body: { label } });
+                }}
               />
             ),
           },
         ]}
       />
 
-      {testCredential.kind === 'revealed' ? (
-        <ShowOnceSecretDialog
-          open
-          secret={testCredential.secret}
-          consumerUsername={testCredential.username}
-          title="Save your test credential"
-          // Resetting drops the plaintext from the mutation result (issue
-          // #336), which also returns the state to `idle`.
-          onAcknowledge={() => createTestConsumer.reset()}
-        />
-      ) : null}
+      {testCredentialDialog}
     </>
   );
 }

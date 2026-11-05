@@ -866,6 +866,7 @@ export function CatalogDetailPage(): ReactElement {
 
       {load.refetchFailed ? (
         <StaleDataNotice
+          className="mb-6"
           description="This API could not be refreshed. It is shown as last loaded."
           onRetry={() => query.refetch()}
           retrying={query.isFetching}
