@@ -246,22 +246,17 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
       userIds.add(thread.created_by);
       if (thread.api_id) apiIds.add(thread.api_id);
     }
-    const users = new Map(
-      (await store.users.findManyByIds([...userIds])).map((user) => [user.id, user]),
-    );
-    const apis = new Map(
-      (apiIds.size > 0 ? await store.apis.findManyByIds([...apiIds]) : []).map((api) => [
-        api.id,
-        api,
-      ]),
-    );
-
-    const gatewayUrl = await settings.getGatewayPublicUrl();
-    const latestByThread = new Map(
-      (await store.messages.findLatestByThreads(threads.map((thread) => thread.id))).map(
-        (message) => [message.thread_id, message],
-      ),
-    );
+    // Every join keys off ids collected above, and `store` is the root store
+    // (never a transaction-scoped one), so the reads go out together.
+    const [userRows, apiRows, gatewayUrl, latestRows] = await Promise.all([
+      store.users.findManyByIds([...userIds]),
+      apiIds.size > 0 ? store.apis.findManyByIds([...apiIds]) : Promise.resolve([]),
+      settings.getGatewayPublicUrl(),
+      store.messages.findLatestByThreads(threads.map((thread) => thread.id)),
+    ]);
+    const users = new Map(userRows.map((user) => [user.id, user]));
+    const apis = new Map(apiRows.map((api) => [api.id, api]));
+    const latestByThread = new Map(latestRows.map((message) => [message.thread_id, message]));
 
     return threads.map((thread) => {
       const participants: UserSummary[] = [];
@@ -458,13 +453,14 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
     const hasMore = window.total > window.items.length;
     const ordered = [...window.items].reverse();
 
-    const senders = new Map(
-      (
-        await store.users.findManyByIds([
-          ...new Set(ordered.map((message) => message.sender_user_id)),
-        ])
-      ).map((record) => [record.id, record]),
-    );
+    // The sender lookup and the whole-thread count both start only once the
+    // window is read, so `total` can never be lower than the messages the
+    // window already returned, and a bad cursor still fails before either.
+    const [senderRows, total] = await Promise.all([
+      store.users.findManyByIds([...new Set(ordered.map((message) => message.sender_user_id))]),
+      store.messages.countByThread(thread.id),
+    ]);
+    const senders = new Map(senderRows.map((record) => [record.id, record]));
     const items: Message[] = ordered.map((message) => {
       const sender = senders.get(message.sender_user_id);
       return sender ? { ...message, sender: toUserSummary(sender) } : { ...message };
@@ -472,7 +468,7 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
 
     return {
       items,
-      total: await store.messages.countByThread(thread.id),
+      total,
       has_more: hasMore,
       next_before: hasMore ? (items[0]?.id ?? null) : null,
     };

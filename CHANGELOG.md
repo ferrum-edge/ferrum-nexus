@@ -20,6 +20,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- Hot read paths issue their independent database reads together instead of
+  one after another: the notification list and unread count (the header bell
+  polls it every 20 seconds), the API and user joins on access-request and
+  grant lists, the participant, API and latest-message joins on the thread
+  list, the transcript count on a thread page, the catalog list's grant and
+  viewer lists and its page joins, and the three settings rows behind
+  `GET /api/branding`. Each reads only ids already in hand on the root store,
+  never inside a transaction, so responses are unchanged and a page view pays
+  one round trip per stage rather than one per join.
+
 - The catalog document (`GET /api/catalog/:slug/spec`) declares the gateway
   credential. It adds a `ferrum_gateway` security scheme for the API's auth
   plugin (`X-API-Key` header, HTTP Basic or a JWT bearer token) and requires

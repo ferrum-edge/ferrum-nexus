@@ -400,9 +400,16 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
     async list(viewer, filter = {}, options): Promise<Paginated<CatalogApi>> {
       // The caller's grants are needed either way — they decide the access
       // badge on every row — so handing their ids to the query costs nothing.
-      const grants = new Map(
-        (await store.grants.listActiveByUser(viewer.id)).map((grant) => [grant.api_id, grant]),
-      );
+      const isAdmin = roleAtLeast(viewer.role, 'admin');
+      const [grantRows, authorized] = await Promise.all([
+        store.grants.listActiveByUser(viewer.id),
+        // APIs whose documentation this account was explicitly authorized to
+        // read. Fetched alongside the grants, and for the same reason: both
+        // become bounded id lists in the query, because the predicate has to run
+        // in the database or pagination describes a truncated scan.
+        isAdmin ? Promise.resolve([]) : store.apiViewers.listApiIdsByUser(viewer.id),
+      ]);
+      const grants = new Map(grantRows.map((grant) => [grant.api_id, grant]));
 
       // `canList` as a query predicate, so the caller's offset/limit reach the
       // database instead of slicing an already-truncated scan. Filtering in
@@ -413,15 +420,7 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       // gets "mine, or granted to me, or published and public" — the exact
       // three branches `canList` tests, with `retired` excluded for outsiders
       // because the status half of the openly-listed disjunct fails it.
-      // APIs whose documentation this account was explicitly authorized to
-      // read. Fetched alongside the grants, and for the same reason: both
-      // become bounded id lists in the query, because the predicate has to run
-      // in the database or pagination describes a truncated scan.
-      const authorized = roleAtLeast(viewer.role, 'admin')
-        ? []
-        : await store.apiViewers.listApiIdsByUser(viewer.id);
-
-      const visibleTo: ApiViewerFilter | undefined = roleAtLeast(viewer.role, 'admin')
+      const visibleTo: ApiViewerFilter | undefined = isAdmin
         ? undefined
         : {
             owner_user_id: viewer.id,
@@ -447,22 +446,18 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       const found = await store.apis.list(storeFilter, { limit, offset });
       const page = found.items;
 
-      const owners = new Map(
-        (await store.users.findManyByIds([...new Set(page.map((api) => api.owner_user_id))])).map(
-          (user) => [user.id, user],
+      // The page's joins key off rows already in hand, so they go out together.
+      // One gateway URL resolve for the whole page, not one per row.
+      const [ownerRows, requestRows, gatewayUrl] = await Promise.all([
+        store.users.findManyByIds([...new Set(page.map((api) => api.owner_user_id))]),
+        store.accessRequests.listLatestForUser(
+          viewer.id,
+          page.map((api) => api.id),
         ),
-      );
-      const requests = new Map(
-        (
-          await store.accessRequests.listLatestForUser(
-            viewer.id,
-            page.map((api) => api.id),
-          )
-        ).map((request) => [request.api_id, request]),
-      );
-
-      // One resolve for the whole page, not one per row.
-      const gatewayUrl = await settings.getGatewayPublicUrl();
+        settings.getGatewayPublicUrl(),
+      ]);
+      const owners = new Map(ownerRows.map((user) => [user.id, user]));
+      const requests = new Map(requestRows.map((request) => [request.api_id, request]));
 
       return {
         items: page.map((api) =>
@@ -491,10 +486,11 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       // an application's — is the one the detail reports.
       const { grant } = access;
 
-      const [specRecord, owner, request] = await Promise.all([
+      const [specRecord, owner, request, gatewayUrl] = await Promise.all([
         store.apiSpecs.findCurrentByApi(api.id),
         store.users.findById(api.owner_user_id),
         store.accessRequests.findLatestByApiAndUser(api.id, viewer.id),
+        settings.getGatewayPublicUrl(),
       ]);
 
       const spec: ApiSpecSummary | null = specRecord
@@ -502,14 +498,7 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
         : null;
 
       return {
-        api: catalogApi(
-          viewer,
-          api,
-          owner ?? undefined,
-          grant,
-          request,
-          await settings.getGatewayPublicUrl(),
-        ),
+        api: catalogApi(viewer, api, owner ?? undefined, grant, request, gatewayUrl),
         spec,
         my_request: request,
         my_grant: grant,
