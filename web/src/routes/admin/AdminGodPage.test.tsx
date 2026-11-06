@@ -60,6 +60,7 @@ afterEach(() => {
 });
 
 const oldest = '12345678-1234-4234-8234-123456789abc';
+const OLDEST_ID = new RegExp(oldest);
 
 function renderGodPage(): void {
   vi.spyOn(organizationsApi, 'list').mockResolvedValue({ items: [], total: 0 });
@@ -92,7 +93,7 @@ describe('emergency targets beyond the first page', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: entry.action }));
     const dialog = within(screen.getByRole('dialog'));
-    expect(dialog.getByText(new RegExp(oldest))).toBeInTheDocument();
+    expect(dialog.getByText(OLDEST_ID)).toBeInTheDocument();
     expect(dialog.getByRole('button', { name: entry.action })).toBeDisabled();
     expect(send).not.toHaveBeenCalled();
     fireEvent.change(dialog.getByPlaceholderText(entry.phrase), {
