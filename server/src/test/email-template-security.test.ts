@@ -502,6 +502,9 @@ describe('email template plain-text values', () => {
       env: {
         NEXUS_PUBLIC_URL: 'https://portal.test',
         NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS: 'assets.example.test',
+        // These cases write branding straight to the store, which no memo
+        // sees until its TTL; with none, every render reads the row.
+        NEXUS_BRANDING_CACHE_MS: '0',
       },
     });
     founder = await harness.registerUser({ email: 'text-founder@example.test' });

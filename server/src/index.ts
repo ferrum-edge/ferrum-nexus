@@ -447,6 +447,9 @@ export async function buildServer(
     crypto,
     log: warn,
     ...(deps.mailTransportFactory ? { transportFactory: deps.mailTransportFactory } : {}),
+    // Late-bound: settings is composed below (it needs auth, which needs
+    // email), and nothing renders mail before composition finishes.
+    getBrandingRevision: () => settings.getBrandingRevision(),
   });
   const notifications = createNotificationsService({ store: deps.store });
   let revokeForAccountRecovery: CredentialsService['revokeForAccountRecovery'] | undefined;

@@ -81,6 +81,7 @@ import type {
   ApiPluginTrigger,
   ApiSpec,
   ApiSpecChangeEntry,
+  ApiSpecSummary,
   ApiStatus,
   ApiGatewayState,
   ApiVisibility,
@@ -1048,6 +1049,13 @@ export interface ApiSpecRepo {
   findById(id: Uuid): Promise<ApiSpecRecord | null>;
   /** The revision with `is_current = true` for an API, if any. */
   findCurrentByApi(apiId: Uuid): Promise<ApiSpecRecord | null>;
+  /**
+   * {@link ApiSpecRepo.findCurrentByApi} without the document: the same row,
+   * read without ever selecting `raw_spec` (up to `MAX_SPEC_BYTES`) or
+   * `revision_seq`. For callers that only describe the revision or compare
+   * its id.
+   */
+  findCurrentSummaryByApi(apiId: Uuid): Promise<ApiSpecSummary | null>;
   /** Make one revision current and clear the flag on every other revision of the API. */
   setCurrent(apiId: Uuid, specId: Uuid): Promise<void>;
   /**
@@ -1060,6 +1068,13 @@ export interface ApiSpecRepo {
    * describing the API wrongly.
    */
   list(filter: ApiSpecFilter, options?: ListOptions): Promise<Paginated<ApiSpecRecord>>;
+  /**
+   * {@link ApiSpecRepo.list} without the documents: the same filter, order and
+   * page, read without ever selecting `raw_spec` or `revision_seq`, so a page
+   * of history costs a few hundred bytes a row rather than up to
+   * `MAX_SPEC_BYTES`.
+   */
+  listSummaries(filter: ApiSpecFilter, options?: ListOptions): Promise<Paginated<ApiSpecSummary>>;
   delete(id: Uuid): Promise<boolean>;
   /** Cascade helper for API deletion. Returns the number of revisions removed. */
   deleteByApi(apiId: Uuid): Promise<number>;

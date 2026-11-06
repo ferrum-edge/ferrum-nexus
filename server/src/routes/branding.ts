@@ -32,6 +32,7 @@ import type { SettingsService } from '../admin/settings-service.js';
 import type { CaptchaService } from '../auth/captcha.js';
 import type { AuthService } from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
+import { memoizeByRevision } from '../lib/revision-memo.js';
 
 /**
  * How long a *taken* founder seat is trusted without re-reading the database.
@@ -54,60 +55,6 @@ export interface BrandingRoutesOptions {
  * advertising it for the rest of the TTL after another instance filled it.
  */
 type CachedBrandingPayload = Omit<BrandingResponse, 'bootstrap_required'>;
-
-/** A payload and the moment it was assembled. */
-interface CachedBranding {
-  value: CachedBrandingPayload;
-  /** Epoch milliseconds at which the underlying reads started. */
-  checkedAt: number;
-}
-
-/**
- * Memoise `run` for `ttlMs`, coalescing concurrent callers onto one call.
- *
- * Same shape as the health-route cache: a TTL bounds sustained traffic and a
- * shared in-flight promise bounds simultaneous bursts. `ttlMs <= 0` removes the
- * memo entirely rather than shrinking it to nothing. Committed service writes
- * change the revision immediately, including for callers awaiting an assembly.
- */
-function memoizeBranding(
-  ttlMs: number,
-  getRevision: () => number,
-  run: () => Promise<CachedBrandingPayload>,
-): () => Promise<CachedBranding> {
-  if (ttlMs <= 0) {
-    return async () => {
-      const checkedAt = Date.now();
-      return { value: await run(), checkedAt };
-    };
-  }
-
-  let cached: (CachedBranding & { expiresAt: number; revision: number }) | null = null;
-  let pending: { revision: number; promise: Promise<CachedBranding> } | null = null;
-
-  return async function loadBranding(): Promise<CachedBranding> {
-    const revision = getRevision();
-    if (cached && cached.revision === revision && cached.expiresAt > Date.now()) {
-      return { value: cached.value, checkedAt: cached.checkedAt };
-    }
-    if (!pending || pending.revision !== revision) {
-      const promise: Promise<CachedBranding> = (async () => {
-        const checkedAt = Date.now();
-        const value = await run();
-        // A write during assembly must not repopulate the cache with old data.
-        if (getRevision() === revision) {
-          cached = { value, checkedAt, expiresAt: Date.now() + ttlMs, revision };
-        }
-        return { value, checkedAt };
-      })().finally(() => {
-        if (pending?.promise === promise) pending = null;
-      });
-      pending = { revision, promise };
-    }
-    const result = await pending.promise;
-    return getRevision() === revision ? result : loadBranding();
-  };
-}
 
 /**
  * Coalesce database-backed founder-seat checks, and briefly hold a *taken* seat.
@@ -193,7 +140,7 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
       },
     };
   };
-  const loadBranding = memoizeBranding(
+  const loadBranding = memoizeByRevision(
     config.brandingCacheMs,
     settings.getBrandingRevision,
     assembleBranding,

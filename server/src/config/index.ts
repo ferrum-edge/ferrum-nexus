@@ -358,7 +358,8 @@ export interface NexusConfig {
    * immediately, and an open founder seat (`bootstrap_required: true`) is never
    * cached — only a taken one, and only for a second; the TTL bounds
    * cross-instance staleness of the other fields. Browser/CDN copies retain
-   * their max-age. `0` disables the cache.
+   * their max-age. The email service memoises the templates' `portal_name`
+   * on the same terms. `0` disables the cache.
    */
   brandingCacheMs: number;
   /** Shared deadline for the health route's Edge calls; below the 10 s image healthcheck. */

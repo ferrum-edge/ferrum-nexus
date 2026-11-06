@@ -75,7 +75,6 @@ import {
   roleAtLeast,
   type AccessRequest,
   type ApiSpecChangeEntry,
-  type ApiSpecSummary,
   type ApiVisibility,
   type ApplicationSummary,
   type AuthPluginType,
@@ -486,16 +485,15 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       // an application's — is the one the detail reports.
       const { grant } = access;
 
-      const [specRecord, owner, request, gatewayUrl] = await Promise.all([
-        store.apiSpecs.findCurrentByApi(api.id),
+      // The summary read never selects the document: the detail page reports
+      // only the revision's metadata, the same fields the old `raw_spec` /
+      // `revision_seq` strip left. The document itself is `catalog.spec`.
+      const [spec, owner, request, gatewayUrl] = await Promise.all([
+        store.apiSpecs.findCurrentSummaryByApi(api.id),
         store.users.findById(api.owner_user_id),
         store.accessRequests.findLatestByApiAndUser(api.id, viewer.id),
         settings.getGatewayPublicUrl(),
       ]);
-
-      const spec: ApiSpecSummary | null = specRecord
-        ? (({ raw_spec: _raw, revision_seq: _seq, ...rest }) => rest)(specRecord)
-        : null;
 
       return {
         api: catalogApi(viewer, api, owner ?? undefined, grant, request, gatewayUrl),
