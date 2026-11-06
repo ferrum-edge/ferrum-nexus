@@ -14,6 +14,8 @@ import {
 import { NexusError } from '../lib/errors.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const URL_SCHEME_SLASHES = /https?:[/\\]{2}/i;
+
 function errorBody(body: string): ApiErrorBody['error'] {
   return (JSON.parse(body) as ApiErrorBody).error;
 }
@@ -1171,7 +1173,7 @@ describe('mass email recipient names', () => {
       );
       assert.equal(rows.length, 3, 'every recipient was queued');
       for (const row of rows) {
-        assert.doesNotMatch(row.body_text, /https?:[/\\]{2}/i, 'no explicit link was mailed');
+        assert.doesNotMatch(row.body_text, URL_SCHEME_SLASHES, 'no explicit link was mailed');
       }
       const malloryRow = rows.find((row) => row.to_email === mallory.user.email);
       assert.ok(

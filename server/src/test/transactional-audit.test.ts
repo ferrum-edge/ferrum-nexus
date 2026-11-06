@@ -30,6 +30,9 @@ import {
   type AuditCommitClass,
 } from '../audit/service.js';
 
+const AUDIT_SERVICE_JS = /\/audit\/service(\.js)?$/;
+const MUST_PARSE = /must parse/;
+
 const SOURCE_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const TEST_ROOT = join(SOURCE_ROOT, 'test');
 /** The catalog itself names every action, and is the one file allowed to. */
@@ -655,7 +658,7 @@ function scanParsedSource(label: string, source: ts.SourceFile): Scan {
     if (
       ts.isImportDeclaration(node) &&
       ts.isStringLiteral(node.moduleSpecifier) &&
-      /\/audit\/service(\.js)?$/.test(node.moduleSpecifier.text)
+      AUDIT_SERVICE_JS.test(node.moduleSpecifier.text)
     ) {
       // An alias would hide every use of the catalog, or of the service, from
       // the checks below.
@@ -889,7 +892,7 @@ describe('the transactional audit scan itself', () => {
   }
 
   it('rejects a malformed source instead of scanning a recovered partial tree', () => {
-    assert.throws(() => findingsFor('export async function broken( {'), /must parse/);
+    assert.throws(() => findingsFor('export async function broken( {'), MUST_PARSE);
   });
 
   it('uses native AST positions and literal values, including escaped action strings', () => {
@@ -1406,7 +1409,7 @@ describe('the transactional audit scan itself', () => {
   });
 
   it('rejects missing hook bindings and aliases through elided binding patterns', () => {
-    assert.throws(() => findingsFor('const { recordWithRow: } = input;'), /must parse/);
+    assert.throws(() => findingsFor('const { recordWithRow: } = input;'), MUST_PARSE);
     assertFlags(
       'const { recordWithRow: [,] } = input;',
       'recordWithRow is destructured under another name',

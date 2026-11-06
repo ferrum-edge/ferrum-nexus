@@ -35,6 +35,10 @@ import type { AuditLogRecord, SettingRecord } from '../db/store.js';
 import { isNexusError } from '../lib/errors.js';
 import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './helpers.js';
 
+const PRIVATE_CAPTCHA = /private-captcha/;
+const SECRET_KEY = /secret_key/;
+const CAPTCHA_NOT_FULLY_CONFIGURED = /not fully configured/;
+
 /** A token the stub vendor accepts for any secret. */
 const GOOD_TOKEN = 'solved-challenge';
 
@@ -158,7 +162,7 @@ describe('CAPTCHA activation admission', () => {
       assert.equal(response.json<ApiErrorBody>().error.code, 'VALIDATION_FAILED');
       await assertNothingCommitted(baseline);
       assert.equal((await harness.services.captcha.getPublicConfig()).enabled, false);
-      assert.doesNotMatch(response.body, /private-captcha/);
+      assert.doesNotMatch(response.body, PRIVATE_CAPTCHA);
       // An unusable configuration is refused on its own terms; the vendor is
       // never asked about a site key and secret that cannot both be present.
       assert.deepEqual(calls, []);
@@ -197,7 +201,7 @@ describe('CAPTCHA activation admission', () => {
         sitekey: null,
       },
     ]);
-    assert.doesNotMatch(response.body, /private-captcha/);
+    assert.doesNotMatch(response.body, PRIVATE_CAPTCHA);
   });
 
   it('refuses an activation the vendor could not be reached to confirm', async () => {
@@ -226,7 +230,7 @@ describe('CAPTCHA activation admission', () => {
     const audit = await harness.auditRows('admin.settings_update');
     assert.equal(audit.length, beforeAudit.length + 1);
     assert.equal(audit[0]?.details?.captcha_self_test, 'passed');
-    assert.doesNotMatch(JSON.stringify(audit), /private-captcha/);
+    assert.doesNotMatch(JSON.stringify(audit), PRIVATE_CAPTCHA);
   });
 
   it('proves the secret in the patch rather than the one already stored', async () => {
@@ -302,7 +306,7 @@ describe('CAPTCHA activation admission', () => {
     assert.equal(refused.statusCode, 400, refused.body);
     const body = refused.json<ApiErrorBody>();
     assert.equal(body.error.code, 'VALIDATION_FAILED');
-    assert.match(body.error.message, /secret_key/);
+    assert.match(body.error.message, SECRET_KEY);
     await assertNothingCommitted(baseline);
     // The point of refusing before the self-test: a secret issued by Turnstile
     // is never posted to hCaptcha's `siteverify`, where it would be both
@@ -392,7 +396,7 @@ describe('CAPTCHA activation admission', () => {
     assert.equal((await harness.services.captcha.getPublicConfig()).enabled, true);
     await assert.rejects(
       harness.services.captcha.verify('synthetic-token'),
-      /not fully configured/,
+      CAPTCHA_NOT_FULLY_CONFIGURED,
     );
     // Re-saving the same block cannot repair it: with no readable secret there
     // is nothing to prove the configuration with.
@@ -408,14 +412,14 @@ describe('CAPTCHA activation admission', () => {
     assert.equal((await harness.services.captcha.getPublicConfig()).enabled, false);
     await assert.rejects(
       harness.services.captcha.verify('synthetic-token'),
-      /not fully configured/,
+      CAPTCHA_NOT_FULLY_CONFIGURED,
     );
     await harness.store.settings.set('captcha', { ...legacy, site_key: 'public-site' }, false);
     await harness.store.settings.delete('captcha.secret_key');
     assert.equal((await harness.services.captcha.getPublicConfig()).enabled, false);
     await assert.rejects(
       harness.services.captcha.verify('synthetic-token'),
-      /not fully configured/,
+      CAPTCHA_NOT_FULLY_CONFIGURED,
     );
     assert.deepEqual(calls, []);
   });

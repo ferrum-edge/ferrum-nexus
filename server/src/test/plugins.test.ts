@@ -28,6 +28,13 @@ import {
 import { mockCacheStorageAllowed, mockPaletteCompositionError } from './mock-ferrum-edge.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const COMPRESSION_REQUEST_DEDUPLICATION = /compression.*request_deduplication/;
+const PRIORITY_OVERRIDE = /priority_override/;
+const BACKEND_CACHE_CONTROL = /backend Cache-Control/;
+const DOES_NOT_ACCEPT_EXECUTION = /does not accept an execution trigger/;
+const VALIDATION_FAILED_CODE = /VALIDATION_FAILED/;
+const CORRELATION_ID_CONFIGURATION_NOT = /Correlation ID configuration is not valid/i;
+
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
@@ -341,8 +348,8 @@ describe('provider plugin palette', () => {
       operator.priority_override = 5_000;
       const response = await setPlugin('request_deduplication', { config: {} });
       assert.equal(response.statusCode, 400, response.body);
-      assert.match(errorMessage(response.body), /compression.*request_deduplication/);
-      assert.match(errorMessage(response.body), /priority_override/);
+      assert.match(errorMessage(response.body), COMPRESSION_REQUEST_DEDUPLICATION);
+      assert.match(errorMessage(response.body), PRIORITY_OVERRIDE);
       assert.equal(operator.priority_override, 5_000);
       assert.equal(harness.edge.pluginForProxy(proxyId, 'request_deduplication'), undefined);
     });
@@ -399,7 +406,7 @@ describe('provider plugin palette', () => {
       );
       const response = await setPlugin('response_caching', { config: {} });
       assert.equal(response.statusCode, 400);
-      assert.match(errorMessage(response.body), /backend Cache-Control/);
+      assert.match(errorMessage(response.body), BACKEND_CACHE_CONTROL);
       assert.equal(harness.edge.pluginForProxy(proxyId, 'response_caching'), undefined);
     });
 
@@ -644,7 +651,7 @@ describe('provider plugin palette', () => {
       });
       assert.equal(response.statusCode, 400);
       assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
-      assert.match(errorMessage(response.body), /does not accept an execution trigger/);
+      assert.match(errorMessage(response.body), DOES_NOT_ACCEPT_EXECUTION);
       assert.equal(harness.edge.pluginForProxy(proxyId, 'security_headers'), undefined);
     });
 
@@ -776,7 +783,7 @@ describe('provider plugin palette', () => {
         config: { allow: [], deny: [], mode: 'allow_first' },
       });
       assert.equal(response.statusCode, 400);
-      assert.match(errorCode(response.body), /VALIDATION_FAILED/);
+      assert.match(errorCode(response.body), VALIDATION_FAILED_CODE);
       assert.equal(harness.edge.pluginForProxy(proxyId, 'ip_restriction'), undefined);
     });
 
@@ -805,7 +812,7 @@ describe('provider plugin palette', () => {
         config: { header_name: 'Authorization' },
       });
       assert.equal(response.statusCode, 400);
-      assert.match(errorMessage(response.body), /Correlation ID configuration is not valid/i);
+      assert.match(errorMessage(response.body), CORRELATION_ID_CONFIGURATION_NOT);
     });
 
     it('refuses a header name in the gateway-owned x-consumer-* namespace', async () => {

@@ -12,6 +12,19 @@ import {
   type SpecNode,
 } from './parse';
 
+const DOWNLOAD_SPECIFICATION = /download the specification/;
+const CIRCULAR = /circular →/;
+const TRUNCATED_D = /^d+…$/;
+const TRUNCATED_N = /^n+…$/;
+const TRUNCATED_STRING_FORMAT = /^string <n+…$/;
+const TRUNCATED_X = /^x+…$/;
+const TRUNCATED_CIRCULAR = /^circular → x+…$/;
+const UNRESOLVED_REF_COMPONENTS_SCHEMAS = /^unresolved \$ref #\/components\/schemas\/x+…$/;
+const SHOWING_200_5000_OPERATIONS = /Showing 200 of 5000 operations/;
+const SHOW_200_MORE = /Show 200 more/;
+const SHOWING_400_500_OPERATIONS = /Showing 400 of 500 operations/;
+const SHOWING = /Showing/;
+
 afterEach(cleanup);
 
 /** The table `server/src/publishing/oas.test.ts` checks the server's count against. */
@@ -86,7 +99,7 @@ describe('SchemaView', () => {
 
     expect(container.querySelectorAll('p.text-xs.text-fg-subtle')).toHaveLength(4);
     expect(screen.getAllByText('No schema.')).toHaveLength(3);
-    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
+    expect(screen.getAllByText(DOWNLOAD_SPECIFICATION)).toHaveLength(1);
     expect(budget.remaining).toBe(0);
   });
 
@@ -106,7 +119,7 @@ describe('SchemaView', () => {
     expect(screen.getByText('p0')).toBeInTheDocument();
     expect(screen.getByText('string')).toBeInTheDocument();
     expect(screen.getAllByText('No schema.')).toHaveLength(2);
-    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
+    expect(screen.getAllByText(DOWNLOAD_SPECIFICATION)).toHaveLength(1);
     expect(container.querySelectorAll('p.text-xs.text-fg-subtle')).toHaveLength(3);
     expect(budget.remaining).toBe(0);
   });
@@ -138,7 +151,7 @@ describe('SchemaView', () => {
       />,
     );
     expect(screen.getByText('string')).toBeInTheDocument();
-    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
+    expect(screen.getAllByText(DOWNLOAD_SPECIFICATION)).toHaveLength(1);
     expect(container.querySelectorAll('p.text-xs.text-fg-subtle')).toHaveLength(2);
     expect(refBudget.remaining).toBe(0);
   });
@@ -170,7 +183,7 @@ describe('SchemaView', () => {
         schema={{ $ref: '#/components/schemas/Node' }}
       />,
     );
-    expect(screen.getByText(/circular →/)).toBeInTheDocument();
+    expect(screen.getByText(CIRCULAR)).toBeInTheDocument();
   });
 
   it('cuts a referenced schema description at every $ref to it', () => {
@@ -193,7 +206,7 @@ describe('SchemaView', () => {
       />,
     );
 
-    const shown = screen.getAllByText(/^d+…$/);
+    const shown = screen.getAllByText(TRUNCATED_D);
     expect(shown).toHaveLength(500);
     for (const node of shown) {
       expect(node.textContent).toHaveLength(MAX_DISPLAYED_DESCRIPTION_LENGTH + 1);
@@ -217,7 +230,7 @@ describe('SchemaView', () => {
     );
 
     // The property name and the enum value.
-    const cut = [...screen.getAllByText(/^n+…$/), screen.getByText(/^string <n+…$/)];
+    const cut = [...screen.getAllByText(TRUNCATED_N), screen.getByText(TRUNCATED_STRING_FORMAT)];
     expect(cut).toHaveLength(3);
     for (const node of cut) {
       expect(node.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
@@ -250,7 +263,7 @@ describe('SchemaView', () => {
 
     expect(screen.getAllByText('{…}')).toHaveLength(5);
     expect(budget.remaining).toBe(0);
-    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
+    expect(screen.getAllByText(DOWNLOAD_SPECIFICATION)).toHaveLength(1);
     expect(enumTraversals).toBe(0);
   });
 
@@ -288,7 +301,7 @@ describe('SchemaView', () => {
     );
 
     expect(reads).toBe(1);
-    expect(screen.getAllByText(/download the specification/)).toHaveLength(1);
+    expect(screen.getAllByText(DOWNLOAD_SPECIFICATION)).toHaveLength(1);
   });
 
   it('bounds a combinatorial fan-out document instead of hanging', () => {
@@ -305,7 +318,7 @@ describe('SchemaView', () => {
     expect(Date.now() - started).toBeLessThan(5_000);
     // The budget stops the traversal well before the document is exhausted.
     expect(container.querySelectorAll('code').length).toBeLessThan(20_000);
-    expect(screen.getAllByText(/download the specification/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(DOWNLOAD_SPECIFICATION).length).toBeGreaterThan(0);
   });
 
   it('stops a pure $ref alias chain at the depth limit', () => {
@@ -349,9 +362,9 @@ describe('SchemaView', () => {
     );
 
     const badges = [
-      screen.getByText(/^x+…$/),
-      screen.getByText(/^circular → x+…$/),
-      screen.getByText(/^unresolved \$ref #\/components\/schemas\/x+…$/),
+      screen.getByText(TRUNCATED_X),
+      screen.getByText(TRUNCATED_CIRCULAR),
+      screen.getByText(UNRESOLVED_REF_COMPONENTS_SCHEMAS),
     ];
     for (const badge of badges) expect(badge.textContent?.length).toBeLessThan(250);
   });
@@ -363,7 +376,7 @@ describe('SchemaView', () => {
     const budget = createRenderBudget();
     render(<SchemaView doc={doc} budget={budget} schema={{ $ref: ref }} />);
 
-    const badge = screen.getByText(/^unresolved \$ref #\/components\/schemas\/x+…$/);
+    const badge = screen.getByText(UNRESOLVED_REF_COMPONENTS_SCHEMAS);
     expect(badge.textContent?.length).toBeLessThan(250);
     expect(screen.queryByText('string')).not.toBeInTheDocument();
     expect(MAX_PAGE_NODES - budget.remaining).toBe(1);
@@ -394,7 +407,7 @@ describe('OpenApiView operation paging', () => {
     // The header still reports the true total.
     expect(screen.getByText('5000 operations')).toBeInTheDocument();
     // …but nowhere near that many cards are mounted.
-    expect(screen.getByText(/Showing 200 of 5000 operations/)).toBeInTheDocument();
+    expect(screen.getByText(SHOWING_200_5000_OPERATIONS)).toBeInTheDocument();
     expect(screen.queryByText('Operation 4999')).not.toBeInTheDocument();
   });
 
@@ -402,14 +415,14 @@ describe('OpenApiView operation paging', () => {
     render(<OpenApiView text={manyOperationsSpec(500)} />);
     expect(screen.queryByText('Operation 250')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /Show 200 more/ }));
+    fireEvent.click(screen.getByRole('button', { name: SHOW_200_MORE }));
     expect(screen.getByText('Operation 250')).toBeInTheDocument();
-    expect(screen.getByText(/Showing 400 of 500 operations/)).toBeInTheDocument();
+    expect(screen.getByText(SHOWING_400_500_OPERATIONS)).toBeInTheDocument();
   });
 
   it('shows no paging control for an ordinary spec', () => {
     render(<OpenApiView text={manyOperationsSpec(3)} />);
-    expect(screen.queryByText(/Showing/)).not.toBeInTheDocument();
+    expect(screen.queryByText(SHOWING)).not.toBeInTheDocument();
     expect(screen.getByText('Operation 2')).toBeInTheDocument();
   });
 });
@@ -457,7 +470,7 @@ describe('OpenApiView page budget', () => {
 
       // The first media type spends the page allowance; the other 49 are never
       // walked, which is what a per-call budget used to let them do.
-      expect(screen.getAllByText(/download the specification/).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(DOWNLOAD_SPECIFICATION).length).toBeGreaterThan(0);
       expect(screen.getByText('application/vnd.x0+json')).toBeInTheDocument();
       expect(screen.queryByText('application/vnd.x49+json')).not.toBeInTheDocument();
 
@@ -487,7 +500,7 @@ describe('OpenApiView page budget', () => {
       // each of them, so opening the second one does not double the page.
       expect(twoOpen).toBeLessThan(oneOpen * 1.5);
       expect(twoOpen).toBeLessThan(MAX_PAGE_NODES * 10);
-      expect(screen.getAllByText(/download the specification/).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(DOWNLOAD_SPECIFICATION).length).toBeGreaterThan(0);
     },
     BUDGET_TEST_TIMEOUT_MS,
   );

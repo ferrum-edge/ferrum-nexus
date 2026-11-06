@@ -6,6 +6,9 @@ import { isLegacyDeploymentSnapshot } from '../ferrum-admin/deployment.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { conflict } from '../lib/errors.js';
 
+const GENERATION_SHAPE = /^[a-f0-9]{32}$/;
+const FINGERPRINT_SHAPE = /^[a-f0-9]{64}$/;
+
 // Every encrypted chunk is below 1 MiB, including JSON/base64 expansion, well
 // below MongoDB's 16 MiB BSON document limit and ordinary SQL packet limits.
 const INLINE_BYTES = 512 * 1024;
@@ -39,14 +42,14 @@ function manifestFor(value: unknown, key: string): Manifest | null {
     manifest.format !== FORMAT ||
     manifest.key !== key ||
     typeof manifest.generation !== 'string' ||
-    !/^[a-f0-9]{32}$/.test(manifest.generation) ||
+    !GENERATION_SHAPE.test(manifest.generation) ||
     !Number.isSafeInteger(manifest.count) ||
     manifest.count < 1 ||
     !Number.isSafeInteger(manifest.characters) ||
     manifest.characters < 1 ||
     Math.ceil(manifest.characters / CHUNK_CHARACTERS) !== manifest.count ||
     typeof manifest.fingerprint !== 'string' ||
-    !/^[a-f0-9]{64}$/.test(manifest.fingerprint)
+    !FINGERPRINT_SHAPE.test(manifest.fingerprint)
   ) {
     throw conflict('The encrypted gateway recovery manifest is invalid');
   }

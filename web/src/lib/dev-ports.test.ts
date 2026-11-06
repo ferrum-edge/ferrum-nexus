@@ -7,6 +7,15 @@ import {
   resolveDevServerPorts,
 } from './dev-ports';
 
+const INVALID_WEB_PORT = /NEXUS_WEB_PORT must be an integer between 1 and 65535 \(got "nope"\)/;
+const VITE_DEV_PORT_NAME = /VITE_DEV_PORT/;
+const NEXUS_PORT_NAME = /NEXUS_PORT/;
+const NEXUS_WEB_PORT_NAME = /NEXUS_WEB_PORT/;
+const NOT_A_BARE_ORIGIN = new RegExp(
+  'NEXUS_API_PROXY_TARGET must be an absolute http\\(s\\) URL with no path, ' +
+    'query, credentials, or fragment',
+);
+
 describe('resolveDevServerPorts', () => {
   it('keeps the documented single-stack defaults', () => {
     expect(resolveDevServerPorts({})).toEqual({
@@ -72,12 +81,10 @@ describe('resolveDevServerPorts', () => {
   });
 
   it('names the offending variable when a port is invalid', () => {
-    expect(() => resolveDevServerPorts({ NEXUS_WEB_PORT: 'nope' })).toThrow(
-      /NEXUS_WEB_PORT must be an integer between 1 and 65535 \(got "nope"\)/,
-    );
-    expect(() => resolveDevServerPorts({ VITE_DEV_PORT: '0' })).toThrow(/VITE_DEV_PORT/);
-    expect(() => resolveDevServerPorts({ NEXUS_PORT: '65536' })).toThrow(/NEXUS_PORT/);
-    expect(() => resolveDevServerPorts({ NEXUS_WEB_PORT: '5173.5' })).toThrow(/NEXUS_WEB_PORT/);
+    expect(() => resolveDevServerPorts({ NEXUS_WEB_PORT: 'nope' })).toThrow(INVALID_WEB_PORT);
+    expect(() => resolveDevServerPorts({ VITE_DEV_PORT: '0' })).toThrow(VITE_DEV_PORT_NAME);
+    expect(() => resolveDevServerPorts({ NEXUS_PORT: '65536' })).toThrow(NEXUS_PORT_NAME);
+    expect(() => resolveDevServerPorts({ NEXUS_WEB_PORT: '5173.5' })).toThrow(NEXUS_WEB_PORT_NAME);
   });
 
   it('does not parse NEXUS_PORT when an explicit proxy target is set', () => {
@@ -97,10 +104,6 @@ describe('parseApiProxyTarget', () => {
   });
 
   it('rejects anything that is not a bare origin', () => {
-    const needle = new RegExp(
-      'NEXUS_API_PROXY_TARGET must be an absolute http\\(s\\) URL with no path, ' +
-        'query, credentials, or fragment',
-    );
     for (const value of [
       'not a url',
       'ftp://127.0.0.1:8787',
@@ -109,7 +112,7 @@ describe('parseApiProxyTarget', () => {
       'http://127.0.0.1:8787#frag',
       'http://user:pass@127.0.0.1:8787',
     ]) {
-      expect(() => parseApiProxyTarget(value)).toThrow(needle);
+      expect(() => parseApiProxyTarget(value)).toThrow(NOT_A_BARE_ORIGIN);
     }
   });
 });

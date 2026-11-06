@@ -31,6 +31,10 @@ import { renderCatalogSpec } from '../publishing/oas.js';
 import { CATALOG_SPEC_RATE_LIMIT } from '../routes/catalog.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const FERRUM_GATEWAY = /ferrum_gateway/;
+const ALIAS_A1 = /\*a1/;
+const ALIAS_OR_ANCHOR = /[&*]a\d/;
+
 async function publish(
   harness: TestApp,
   owner: TestSession,
@@ -262,7 +266,7 @@ describe('catalog spec cache', () => {
       paths: { '/a': { get: { responses: {} } } },
     };
     const declared = renderCatalogDocument(document, 'application/json', 'key_auth');
-    assert.match(declared, /ferrum_gateway/);
+    assert.match(declared, FERRUM_GATEWAY);
     const checked: string[] = [];
     const fallback = renderCatalogDocument(document, 'application/yaml', 'key_auth', (text) => {
       checked.push(text);
@@ -270,7 +274,7 @@ describe('catalog spec cache', () => {
     });
     assert.deepEqual(parseYaml(fallback), document, 'the document as it was served before');
     assert.equal(checked.length, 1, 'only the declared rendering is measured here');
-    assert.match(checked[0]!, /ferrum_gateway/);
+    assert.match(checked[0]!, FERRUM_GATEWAY);
   });
 
   it('never serves the declaration as aliased YAML', () => {
@@ -288,7 +292,7 @@ describe('catalog spec cache', () => {
       ),
     };
     const aliased = renderCatalogSpec(document, 'application/yaml');
-    assert.match(aliased, /\*a1/, 'the existing rendering aliases the shared node');
+    assert.match(aliased, ALIAS_A1, 'the existing rendering aliases the shared node');
     assert.equal(renderCatalogSpec(document, 'application/yaml', { aliases: false }), null);
 
     const served = renderCatalogDocument(document, 'application/yaml', 'key_auth');
@@ -299,8 +303,8 @@ describe('catalog spec cache', () => {
       'application/yaml',
       'key_auth',
     );
-    assert.match(small, /ferrum_gateway/);
-    assert.doesNotMatch(small, /[&*]a\d/, 'the shared requirement is written out in full');
+    assert.match(small, FERRUM_GATEWAY);
+    assert.doesNotMatch(small, ALIAS_OR_ANCHOR, 'the shared requirement is written out in full');
   });
 
   it('keeps the entries it holds within the configured bounds', async () => {

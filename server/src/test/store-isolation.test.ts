@@ -5,6 +5,8 @@ import type { User } from '@ferrum-nexus/shared';
 
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const ROLLS_BACK = /A rolls back/;
+
 /**
  * Same-process isolation of ordinary requests from an open SQLite transaction.
  *
@@ -71,7 +73,7 @@ describe('store isolation under an open transaction', () => {
     assert.equal(responded, false, 'B must not answer while A still holds the connection');
 
     gate.open();
-    await assert.rejects(() => a, /A rolls back/);
+    await assert.rejects(() => a, ROLLS_BACK);
 
     const response = await patch;
     assert.equal(response.statusCode, 200, response.body);
@@ -112,7 +114,7 @@ describe('store isolation under an open transaction', () => {
     assert.equal(responded, false, 'the read must wait rather than see uncommitted rows');
 
     gate.open();
-    await assert.rejects(() => a, /A rolls back/);
+    await assert.rejects(() => a, ROLLS_BACK);
 
     const response = await read;
     assert.equal(response.statusCode, 200, response.body);

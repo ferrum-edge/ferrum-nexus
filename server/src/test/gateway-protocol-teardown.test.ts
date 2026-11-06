@@ -8,6 +8,8 @@ import { createTeardownWorker } from '../credentials/teardown-worker.js';
 import { buildTestApp, TEST_EDGE_JWT_SECRET } from './helpers.js';
 import { createMockFerrumEdge } from './mock-ferrum-edge.js';
 
+const INVALID_PROTOCOL_RESPONSE = /invalid protocol response/;
+
 describe('gateway teardown after an invalid HTTP response', () => {
   for (const [status, body] of [
     [302, ''],
@@ -105,7 +107,7 @@ describe('gateway teardown after an invalid HTTP response', () => {
       const pending = await harness.store.gatewayTeardownJobs.findByUser(target.user.id);
       assert.equal(pending?.status, 'pending');
       assert.equal(pending?.completed_at, null);
-      assert.match(pending?.last_error ?? '', /invalid protocol response/);
+      assert.match(pending?.last_error ?? '', INVALID_PROTOCOL_RESPONSE);
       assert.ok(!pending?.last_error?.includes('private-response-canary'));
       assert.ok(await harness.store.gatewayIdentities.findById(identity.id));
       assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'active');

@@ -40,6 +40,15 @@ import { createSpecChangeNotifier } from '../publishing/spec-change-notices.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const REMOVED_POST_INVOICES_REQUESTS =
+  /Removed: POST \/invoices \(requests to removed operations may now fail\)/;
+const REMOVED_POST_INVOICES = /Removed: POST \/invoices/;
+const EARLIER_REVISION_SINCE_YOU = /An earlier revision since you last read included/;
+const URL_SCHEME_SLASHES = /https?:[/\\]{2}/i;
+const NOTIFY_QUICK_SPEC_UPDATED = /^Notify Quick spec updated to 3\.0\.0/;
+const EARLIER_BREAKING_REVISION = /An earlier revision since you last read included breaking/;
+const COULD_NOT_FULLY_COMPARED = /could not be fully compared/;
+
 const HOUR = 60 * 60 * 1000;
 
 function spec(version: string, paths: Record<string, unknown>): string {
@@ -196,10 +205,7 @@ describe('spec change notifications', () => {
     // POST /invoices is gone: a breaking change, and the title says so.
     assert.equal(notice.title, 'Notify Billing spec updated to 2.0.0 (breaking changes)');
     assert.equal(notice.link, '/catalog/notify-billing?tab=changes');
-    assert.match(
-      notice.body,
-      /Removed: POST \/invoices \(requests to removed operations may now fail\)/,
-    );
+    assert.match(notice.body, REMOVED_POST_INVOICES_REQUESTS);
     assert.equal((await notices(bob)).length, 1);
     assert.equal((await notices(admin)).length, 0, 'the publisher is not told');
     assert.equal((await notices(carol)).length, 0, 'nor is an account with no grant');
@@ -211,7 +217,7 @@ describe('spec change notifications', () => {
     assert.equal(mail.subject, 'Notify Billing spec updated to 2.0.0');
     const history = `${harness.config.publicUrl}/catalog/notify-billing?tab=changes`;
     assert.ok(mail.body_text.includes(history), 'it links to the change history');
-    assert.match(mail.body_text, /Removed: POST \/invoices/);
+    assert.match(mail.body_text, REMOVED_POST_INVOICES);
     assert.deepEqual(await mails(bob), [], 'bob never turned email on');
     assert.deepEqual(await mails(admin), []);
 
@@ -232,7 +238,7 @@ describe('spec change notifications', () => {
     // Rewritten with the newest revision, which broke nothing, but still
     // marked breaking: the one before it did, and it was never read.
     assert.equal(unread[0]?.title, 'Notify Billing spec updated to 3.0.0 (breaking changes)');
-    assert.match(unread[0]?.body ?? '', /An earlier revision since you last read included/);
+    assert.match(unread[0]?.body ?? '', EARLIER_REVISION_SINCE_YOU);
     const [adminNotice] = await notices(admin);
     assert.equal(adminNotice?.title, 'Notify Billing spec updated to 3.0.0', 'nothing breaking');
     assert.equal((await notices(bob)).length, 1);
@@ -330,10 +336,9 @@ describe('spec change notifications', () => {
 
     const mail = (await mails(carol)).find((row) => row.subject.startsWith('Docs at'));
     assert.ok(mail, 'the email is sent, not refused');
-    const scheme = /https?:[/\\]{2}/i;
     for (const part of [mail.subject, mail.body_text, mail.body_html]) {
       // The portal's own links are the only URLs left.
-      assert.doesNotMatch(part.replaceAll(harness.config.publicUrl, ''), scheme);
+      assert.doesNotMatch(part.replaceAll(harness.config.publicUrl, ''), URL_SCHEME_SLASHES);
     }
     assert.ok(mail.subject.includes('https[:]//evil.example'));
     assert.ok(mail.body_text.includes('https[:]\\\\evil.example'));
@@ -472,7 +477,7 @@ describe('spec change notifications', () => {
       await harness.services.specChanges.idle();
       const [notice, ...extra] = await quickNotices();
       assert.deepEqual(extra, [], 'one notice, however many revisions');
-      assert.match(notice?.title ?? '', /^Notify Quick spec updated to 3\.0\.0/);
+      assert.match(notice?.title ?? '', NOTIFY_QUICK_SPEC_UPDATED);
     });
 
     it('run one at a time, and only the newest of those waiting', async () => {
@@ -619,7 +624,7 @@ describe('spec change notifications', () => {
       );
       assert.ok(fromC, "C's notice carries B's breaking mark");
       assert.equal(fromC.read_at, null, 'and is new, so unread');
-      assert.match(fromC.body, /An earlier revision since you last read included breaking/);
+      assert.match(fromC.body, EARLIER_BREAKING_REVISION);
       assert.equal(
         all.filter((row) => row.read_at === null).length,
         1,
@@ -672,7 +677,7 @@ describe('spec change notifications', () => {
         unread[0]?.title,
         'Notify Quick spec updated to inc-b (could not fully compare)',
       );
-      assert.match(unread[0]?.body ?? '', /could not be fully compared/);
+      assert.match(unread[0]?.body ?? '', COULD_NOT_FULLY_COMPARED);
     });
   });
 

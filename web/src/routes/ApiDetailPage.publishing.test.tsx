@@ -15,6 +15,23 @@ import { queryKeys } from '../hooks/keys';
 import { apisApi } from '../lib/api';
 import { ApiDetailPage } from './ApiDetailPage';
 
+const CHANGING_REBUILDS = /Changing this rebuilds/;
+const REQUEST_RESPONSE_BODIES_NOT = /Request and response bodies are not validated/;
+const NAME = /^Name/;
+const DESCRIPTION = /^Description/;
+const VERSION = /^Version/;
+const UPSTREAM_URL = /^Upstream URL/;
+const EVERYONE_HOLDING_ACCESS_CREDENTIAL = /Everyone holding access with a credential/;
+const INVALIDATE_PORTAL_ISSUED_OLD = /Invalidate portal-issued old-method credentials/;
+const TYPE_BILLING_CONFIRM = /Type billing to confirm/;
+const OPENAPI_SPECIFICATION = /OpenAPI specification/;
+const WOULD_STOP_BEING_SERVED = /would stop being served/;
+const CANNOT_TELL_YOU_CHANGE = /cannot tell you a change is backward/;
+const EDITOR_CHANGED_AFTER_COMPARISON = /editor changed after this comparison/;
+const REVIEW_ROLL_BACK = /Review & roll back/;
+const API_COULD_NOT_REFRESHED = /This API could not be refreshed/;
+const RESTORE_GATEWAY_DEPLOYMENT = /Restore gateway deployment/;
+
 const navigate = vi.hoisted(() => vi.fn());
 /** The `$apiId` route param; a test may move it to open another API in place. */
 const route = vi.hoisted(() => ({ apiId: 'api-1' }));
@@ -157,12 +174,12 @@ describe('provider API workspace', () => {
   it('warns about a routes-enforcement rebuild and clears the warning when restored', async () => {
     await openTab('Settings');
     expect(screen.getByLabelText('OpenAPI enforcement')).toHaveValue('docs_only');
-    expect(screen.queryByText(/Changing this rebuilds/)).not.toBeInTheDocument();
+    expect(screen.queryByText(CHANGING_REBUILDS)).not.toBeInTheDocument();
     changeField('OpenAPI enforcement', 'routes');
-    expect(screen.getByText(/Changing this rebuilds/)).toHaveTextContent('briefly unreachable');
-    expect(screen.getByText(/Request and response bodies are not validated/)).toBeInTheDocument();
+    expect(screen.getByText(CHANGING_REBUILDS)).toHaveTextContent('briefly unreachable');
+    expect(screen.getByText(REQUEST_RESPONSE_BODIES_NOT)).toBeInTheDocument();
     changeField('OpenAPI enforcement', 'docs_only');
-    expect(screen.queryByText(/Changing this rebuilds/)).not.toBeInTheDocument();
+    expect(screen.queryByText(CHANGING_REBUILDS)).not.toBeInTheDocument();
     changeField('OpenAPI enforcement', 'routes');
     save();
     await screen.findByText('API settings saved');
@@ -171,7 +188,7 @@ describe('provider API workspace', () => {
       expect.objectContaining({ spec_enforcement: 'routes' }),
     );
     await waitFor(() => {
-      expect(screen.queryByText(/Changing this rebuilds/)).not.toBeInTheDocument();
+      expect(screen.queryByText(CHANGING_REBUILDS)).not.toBeInTheDocument();
     });
   });
 
@@ -185,9 +202,9 @@ describe('provider API workspace', () => {
     await openTab('Settings');
     expect(screen.getByLabelText('GET')).toBeChecked();
     expect(screen.getByLabelText('Read timeout (ms)')).toHaveValue(600);
-    changeField(/^Name/, '  Updated billing  ');
-    changeField(/^Description/, '  New description  ');
-    changeField(/^Version/, '2.0.0');
+    changeField(NAME, '  Updated billing  ');
+    changeField(DESCRIPTION, '  New description  ');
+    changeField(VERSION, '2.0.0');
     save();
     await screen.findByText('API settings saved');
     expect(apisApi.update).toHaveBeenCalledWith(API.id, {
@@ -214,7 +231,7 @@ describe('provider API workspace', () => {
     changeField('Read timeout (ms)', '600');
     changeField('Write timeout (ms)', '700');
     fireEvent.click(screen.getByLabelText('Trip a circuit breaker when the backend fails'));
-    changeField(/^Upstream URL/, 'https://new.example.test');
+    changeField(UPSTREAM_URL, 'https://new.example.test');
     changeField('Visibility', 'internal');
     changeField('Status', 'retired');
     fireEvent.click(screen.getByLabelText('Require an approved access request'));
@@ -288,10 +305,8 @@ describe('provider API workspace', () => {
   it('includes the acknowledgement flag when confirming an authentication swap', async () => {
     await openTab('Settings');
     changeField('Authentication', 'basic_auth');
-    expect(screen.getByText(/Everyone holding access with a credential/)).toBeInTheDocument();
-    const acknowledgement = screen.getByLabelText(
-      /Invalidate portal-issued old-method credentials/,
-    );
+    expect(screen.getByText(EVERYONE_HOLDING_ACCESS_CREDENTIAL)).toBeInTheDocument();
+    const acknowledgement = screen.getByLabelText(INVALIDATE_PORTAL_ISSUED_OLD);
     expect(acknowledgement).not.toBeChecked();
     fireEvent.click(acknowledgement);
     save();
@@ -301,9 +316,7 @@ describe('provider API workspace', () => {
       expect.objectContaining({ auth_plugin: 'basic_auth', confirm_access_disruption: true }),
     );
     await waitFor(() => {
-      const acknowledgement = screen.queryByLabelText(
-        /Invalidate portal-issued old-method credentials/,
-      );
+      const acknowledgement = screen.queryByLabelText(INVALIDATE_PORTAL_ISSUED_OLD);
       expect(acknowledgement).not.toBeInTheDocument();
     });
   });
@@ -311,20 +324,16 @@ describe('provider API workspace', () => {
   it('asks again for the next authentication swap once one is saved', async () => {
     await openTab('Settings');
     changeField('Authentication', 'basic_auth');
-    fireEvent.click(screen.getByLabelText(/Invalidate portal-issued old-method credentials/));
+    fireEvent.click(screen.getByLabelText(INVALIDATE_PORTAL_ISSUED_OLD));
     save();
     await screen.findByText('API settings saved');
     await waitFor(() => {
-      expect(
-        screen.queryByLabelText(/Invalidate portal-issued old-method credentials/),
-      ).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(INVALIDATE_PORTAL_ISSUED_OLD)).not.toBeInTheDocument();
     });
 
     // A second swap is a different consequence: the first tick does not carry over.
     changeField('Authentication', 'jwt_auth');
-    expect(
-      screen.getByLabelText(/Invalidate portal-issued old-method credentials/),
-    ).not.toBeChecked();
+    expect(screen.getByLabelText(INVALIDATE_PORTAL_ISSUED_OLD)).not.toBeChecked();
     save();
     await waitFor(() => expect(apisApi.update).toHaveBeenCalledTimes(2));
     expect(vi.mocked(apisApi.update).mock.calls[1]?.[1]).toMatchObject({ auth_plugin: 'jwt_auth' });
@@ -336,11 +345,9 @@ describe('provider API workspace', () => {
   it('drops the acknowledgement when the swap target changes', async () => {
     await openTab('Settings');
     changeField('Authentication', 'basic_auth');
-    fireEvent.click(screen.getByLabelText(/Invalidate portal-issued old-method credentials/));
+    fireEvent.click(screen.getByLabelText(INVALIDATE_PORTAL_ISSUED_OLD));
     changeField('Authentication', 'jwt_auth');
-    expect(
-      screen.getByLabelText(/Invalidate portal-issued old-method credentials/),
-    ).not.toBeChecked();
+    expect(screen.getByLabelText(INVALIDATE_PORTAL_ISSUED_OLD)).not.toBeChecked();
     save();
     await screen.findByText('API settings saved');
     expect(vi.mocked(apisApi.update).mock.calls[0]?.[1]).not.toHaveProperty(
@@ -349,14 +356,11 @@ describe('provider API workspace', () => {
   });
 
   it('never revives an acknowledgement once the published method cycles back', async () => {
-    const acknowledgement = (): HTMLElement =>
-      screen.getByLabelText(/Invalidate portal-issued old-method credentials/);
+    const acknowledgement = (): HTMLElement => screen.getByLabelText(INVALIDATE_PORTAL_ISSUED_OLD);
     const settled = async (calls: number): Promise<void> => {
       await waitFor(() => expect(apisApi.update).toHaveBeenCalledTimes(calls));
       await waitFor(() => {
-        expect(
-          screen.queryByLabelText(/Invalidate portal-issued old-method credentials/),
-        ).not.toBeInTheDocument();
+        expect(screen.queryByLabelText(INVALIDATE_PORTAL_ISSUED_OLD)).not.toBeInTheDocument();
       });
     };
     await openTab('Settings');
@@ -416,9 +420,9 @@ describe('provider API workspace', () => {
     dialog = await screen.findByRole('dialog');
     const confirm = within(dialog).getByRole('button', { name: 'Delete API' });
     expect(confirm).toBeDisabled();
-    changeField(/Type billing to confirm/, 'wrong-api');
+    changeField(TYPE_BILLING_CONFIRM, 'wrong-api');
     expect(confirm).toBeDisabled();
-    changeField(/Type billing to confirm/, 'billing');
+    changeField(TYPE_BILLING_CONFIRM, 'billing');
     fireEvent.click(confirm);
     await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/apis' }));
     expect(apisApi.remove).toHaveBeenCalledWith(API.id);
@@ -435,7 +439,7 @@ describe('provider API workspace', () => {
     const before = loads();
     fireEvent.click(screen.getByRole('button', { name: 'Delete API' }));
     const dialog = await screen.findByRole('dialog');
-    changeField(/Type billing to confirm/, 'billing');
+    changeField(TYPE_BILLING_CONFIRM, 'billing');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete API' }));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/apis' }));
     // Give any refetch a chance to start: a deleted API's detail, spec and
@@ -463,20 +467,20 @@ describe('provider specification and sandbox credentials', () => {
         parsed_version: SPEC.parsed_version,
       });
     });
-    expect(await screen.findByLabelText(/OpenAPI specification/)).toHaveValue(RAW_SPEC);
+    expect(await screen.findByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(RAW_SPEC);
     expect(screen.getByRole('button', { name: 'Review changes' })).toBeDisabled();
-    changeField(/OpenAPI specification/, 'invalid');
+    changeField(OPENAPI_SPECIFICATION, 'invalid');
     fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
     expect(screen.getByText('The OpenAPI document could not be parsed.')).toBeInTheDocument();
     expect(apisApi.diffSpec).not.toHaveBeenCalled();
     expect(apisApi.updateSpec).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
-    expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(RAW_SPEC);
+    expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(RAW_SPEC);
 
     // A revision is reviewed before it replaces anything: the diff is fetched,
     // shown, and only the confirmation publishes.
     const revision = RAW_SPEC.replace('1.0.0', '2.0.0');
-    changeField(/OpenAPI specification/, revision);
+    changeField(OPENAPI_SPECIFICATION, revision);
     fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
     const dialog = await screen.findByRole('dialog', { name: 'Publish this revision' });
     expect(apisApi.diffSpec).toHaveBeenCalledWith(API.id, { spec: revision });
@@ -488,7 +492,7 @@ describe('provider specification and sandbox credentials', () => {
     expect(screen.getByRole('button', { name: 'Review changes' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Discard changes' })).not.toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(revision);
+      expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(revision);
     });
   });
 
@@ -502,23 +506,23 @@ describe('provider specification and sandbox credentials', () => {
       },
     });
     await openTab('Specification');
-    await screen.findByLabelText(/OpenAPI specification/);
-    changeField(/OpenAPI specification/, RAW_SPEC.replace('1.0.0', '2.0.0'));
+    await screen.findByLabelText(OPENAPI_SPECIFICATION);
+    changeField(OPENAPI_SPECIFICATION, RAW_SPEC.replace('1.0.0', '2.0.0'));
     fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
 
     const dialog = await screen.findByRole('dialog', { name: 'Publish this revision' });
-    expect(within(dialog).getByText(/would stop being served/)).toBeInTheDocument();
+    expect(within(dialog).getByText(WOULD_STOP_BEING_SERVED)).toBeInTheDocument();
     expect(within(dialog).getByText('/invoices')).toBeInTheDocument();
     // …and the comparison never claims the rest of the change is safe.
-    expect(within(dialog).getByText(/cannot tell you a change is backward/)).toBeInTheDocument();
+    expect(within(dialog).getByText(CANNOT_TELL_YOU_CHANGE)).toBeInTheDocument();
   });
 
   it('keeps a rejected specification revision editable for retry', async () => {
     vi.mocked(apisApi.updateSpec).mockRejectedValue(new Error('Gateway unavailable'));
     await openTab('Specification');
-    await screen.findByLabelText(/OpenAPI specification/);
+    await screen.findByLabelText(OPENAPI_SPECIFICATION);
     const revision = RAW_SPEC.replace('1.0.0', '2.0.0');
-    changeField(/OpenAPI specification/, revision);
+    changeField(OPENAPI_SPECIFICATION, revision);
     fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
     const dialog = await screen.findByRole('dialog', { name: 'Publish this revision' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Publish revision' }));
@@ -526,7 +530,7 @@ describe('provider specification and sandbox credentials', () => {
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Review changes' })).toBeEnabled(),
     );
-    expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(revision);
+    expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(revision);
     expect(screen.getByRole('button', { name: 'Discard changes' })).toBeEnabled();
     expect(screen.queryByText('Specification updated')).not.toBeInTheDocument();
   });
@@ -535,28 +539,28 @@ describe('provider specification and sandbox credentials', () => {
     const comparison = deferred<{ diff: SpecDiff }>();
     vi.mocked(apisApi.diffSpec).mockImplementationOnce(() => comparison.promise);
     await openTab('Specification');
-    await screen.findByLabelText(/OpenAPI specification/);
+    await screen.findByLabelText(OPENAPI_SPECIFICATION);
     const reviewed = RAW_SPEC.replace('1.0.0', '2.0.0');
     const newer = RAW_SPEC.replace('1.0.0', '3.0.0');
-    changeField(/OpenAPI specification/, reviewed);
+    changeField(OPENAPI_SPECIFICATION, reviewed);
     fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
     await waitFor(() => expect(apisApi.diffSpec).toHaveBeenCalledWith(API.id, { spec: reviewed }));
 
     // The provider keeps typing while the comparison is still in flight.
-    changeField(/OpenAPI specification/, newer);
+    changeField(OPENAPI_SPECIFICATION, newer);
     await act(async () => {
       comparison.resolve({ diff: EMPTY_DIFF });
     });
 
     const dialog = await screen.findByRole('dialog', { name: 'Publish this revision' });
-    expect(within(dialog).getByText(/editor changed after this comparison/)).toBeInTheDocument();
+    expect(within(dialog).getByText(EDITOR_CHANGED_AFTER_COMPARISON)).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Publish revision' }));
 
     await screen.findByText('Specification updated');
     expect(apisApi.updateSpec).toHaveBeenCalledTimes(1);
     expect(apisApi.updateSpec).toHaveBeenCalledWith(API.id, { spec: reviewed });
     // The unreviewed edit is neither published nor discarded.
-    expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(newer);
+    expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(newer);
     expect(screen.getByRole('button', { name: 'Discard changes' })).toBeEnabled();
     expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
   });
@@ -582,12 +586,12 @@ describe('provider specification and sandbox credentials', () => {
     await screen.findByText('Revision history');
     expect(await screen.findByText('v0.9.0')).toBeInTheDocument();
     // The current revision is not offered for rollback.
-    expect(screen.getAllByRole('button', { name: /Review & roll back/ })).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: REVIEW_ROLL_BACK })).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole('button', { name: /Review & roll back/ }));
+    fireEvent.click(screen.getByRole('button', { name: REVIEW_ROLL_BACK }));
     const dialog = await screen.findByRole('dialog', { name: 'Roll back to version 0.9.0' });
     await waitFor(() => expect(apisApi.revisionDiff).toHaveBeenCalledWith(API.id, 'spec-0'));
-    expect(within(dialog).getByText(/would stop being served/)).toBeInTheDocument();
+    expect(within(dialog).getByText(WOULD_STOP_BEING_SERVED)).toBeInTheDocument();
     expect(apisApi.rollbackSpec).not.toHaveBeenCalled();
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Roll back' }));
@@ -666,7 +670,7 @@ describe('provider specification and sandbox credentials', () => {
     const { rerender, client } = renderPage(<ApiDetailPage />);
     await screen.findByRole('heading', { name: API.name });
     selectTab('Settings');
-    changeField(/^Name/, 'Draft for billing');
+    changeField(NAME, 'Draft for billing');
 
     // Opening another API that is already cached (say, from a notification)
     // re-renders the same page with no loading state in between, so nothing
@@ -679,7 +683,7 @@ describe('provider specification and sandbox credentials', () => {
     route.apiId = other.id;
     rerender(<ApiDetailPage />);
     expect(screen.getByRole('heading', { name: other.name })).toBeInTheDocument();
-    expect(screen.getByLabelText(/^Name/)).toHaveValue(other.name);
+    expect(screen.getByLabelText(NAME)).toHaveValue(other.name);
     save();
     await screen.findByText('API settings saved');
     expect(apisApi.update).toHaveBeenCalledWith(
@@ -750,15 +754,15 @@ describe('provider specification and sandbox credentials', () => {
 
   it('keeps the page and its unsaved edits when a background refetch fails', async () => {
     const client = await openTab('Settings');
-    changeField(/^Name/, 'Unsaved rename');
+    changeField(NAME, 'Unsaved rename');
     vi.mocked(apisApi.get).mockRejectedValue(new Error('Bad gateway'));
     await act(async () => {
       await client.refetchQueries({ queryKey: queryKeys.apis.detail(API.id) });
     });
 
-    expect(await screen.findByText(/This API could not be refreshed/)).toBeInTheDocument();
+    expect(await screen.findByText(API_COULD_NOT_REFRESHED)).toBeInTheDocument();
     expect(screen.queryByText('API not found')).not.toBeInTheDocument();
-    expect(screen.getByLabelText(/^Name/)).toHaveValue('Unsaved rename');
+    expect(screen.getByLabelText(NAME)).toHaveValue('Unsaved rename');
   });
 });
 
@@ -781,7 +785,7 @@ describe('restoring a missing gateway deployment', () => {
     // The distinction the banner exists to make: published, and not serving.
     expect(screen.getByText('Not deployed')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /Restore gateway deployment/ }));
+    fireEvent.click(screen.getByRole('button', { name: RESTORE_GATEWAY_DEPLOYMENT }));
     await screen.findByText('Gateway deployment restored');
     expect(apisApi.restoreGateway).toHaveBeenCalledWith(API.id);
     await waitFor(() => {
@@ -795,7 +799,7 @@ describe('restoring a missing gateway deployment', () => {
     vi.mocked(apisApi.restoreGateway).mockRejectedValue(new Error('Gateway unavailable'));
     await renderPage(<ApiDetailPage />);
     await screen.findByRole('heading', { name: 'Gateway deployment missing' });
-    fireEvent.click(screen.getByRole('button', { name: /Restore gateway deployment/ }));
+    fireEvent.click(screen.getByRole('button', { name: RESTORE_GATEWAY_DEPLOYMENT }));
     await screen.findByText('Gateway unavailable');
     expect(screen.getByRole('heading', { name: 'Gateway deployment missing' })).toBeInTheDocument();
   });

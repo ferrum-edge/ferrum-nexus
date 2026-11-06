@@ -66,6 +66,31 @@ import { isDeepStrictEqual } from 'node:util';
 import { jwtVerify } from 'jose';
 import { FERRUM_PROVISIONED_BY_HEADER } from '@ferrum-nexus/shared';
 
+const COMMA_SEPARATOR = /\s*,\s*/;
+const UNCACHEABLE_DIRECTIVE = /^(private|no-store|no-cache)(=|$)/;
+const CACHEABLE_DIRECTIVE = /^(public|must-revalidate)$|^s-maxage=\d+$/;
+const CREDENTIAL_TYPE = /^[A-Za-z0-9_-]{1,64}$/;
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
+const HMAC_PASSWORD_HASH = /^hmac_sha256:[0-9a-f]{64}$/;
+const REGEX_SPECIAL_CHARACTERS = /[\\.+*?()|[\]{}^$#&\-~]/g;
+const PATH_PARAMETER_SPLIT = /(\{[^{}/]+\})/;
+const PATH_PARAMETER_SEGMENT = /^\{[^{}/]+\}$/;
+const TRAILING_SLASHES = /\/+$/;
+const TILDE_ONE = /~1/g;
+const TILDE_ZERO = /~0/g;
+const CONSUMER_HEADER_PREFIX = /^x[-_]consumer[-_]/i;
+const AUTHENTICATED_IDENTITY_HEADER = /^x[-_]authenticated[-_]identity$/i;
+const FERRUM_HOPS_HEADER = /^x[-_]ferrum[-_]hops$/i;
+const BACKSLASH = /\\/g;
+const DOUBLE_QUOTE = /"/g;
+const NEWLINE = /\n/g;
+const RELAXED_RFC3339 =
+  /^\p{White_Space}*([+-]\d+|\d{1,4})\p{White_Space}*-\p{White_Space}*(\d{1,2})\p{White_Space}*-\p{White_Space}*(\d{1,2})[tT ]\p{White_Space}*(\d{1,2})\p{White_Space}*:\p{White_Space}*(\d{1,2})\p{White_Space}*:\p{White_Space}*(\d{1,2})(?:\.\d+)?\p{White_Space}*(?:[zZ]|[uU][tT][cC]|([+−-])(\d{2})[\p{White_Space}:]*(\d{2}))\p{White_Space}*$(?![\s\S])/u;
+const IMPORTED_RESOURCE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$(?![\s\S])/;
+const OPENAPI_3_PREFIX = /^3\./;
+const RESOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const DEPLOYMENT_ROW_TAG = /^"deployment-v1-[0-9a-f]{32}"(?![\s\S])/;
+
 /** One recorded Admin API call. */
 export interface RecordedRequest {
   ifMatch?: string;
@@ -225,12 +250,9 @@ export function mockWebsocketAllowed(proxy: Record<string, unknown>, origin?: st
 
 /** Key partitioning cannot override Edge's authenticated-response storage admission. */
 export function mockCacheStorageAllowed(authenticated: boolean, cacheControl = ''): boolean {
-  const directives = cacheControl.toLowerCase().split(/\s*,\s*/);
-  if (directives.some((value) => /^(private|no-store|no-cache)(=|$)/.test(value))) return false;
-  return (
-    !authenticated ||
-    directives.some((value) => /^(public|must-revalidate)$|^s-maxage=\d+$/.test(value))
-  );
+  const directives = cacheControl.toLowerCase().split(COMMA_SEPARATOR);
+  if (directives.some((value) => UNCACHEABLE_DIRECTIVE.test(value))) return false;
+  return !authenticated || directives.some((value) => CACHEABLE_DIRECTIVE.test(value));
 }
 
 /** Model the compression/deduplication composition rule, including equal priorities. */
@@ -545,7 +567,7 @@ function prepareCredentials(
   const prepared: Record<string, Record<string, unknown>[]> = {};
   for (const [type, entries] of Object.entries(credentials)) {
     if (
-      !/^[A-Za-z0-9_-]{1,64}$/.test(type) ||
+      !CREDENTIAL_TYPE.test(type) ||
       !Array.isArray(entries) ||
       entries.length === 0 ||
       entries.length > maxCredentials
@@ -558,7 +580,7 @@ function prepareCredentials(
       for (const value of Object.values(entry)) {
         if (
           typeof value === 'string' &&
-          ([...value].length > 4096 || /[\u0000-\u001f\u007f-\u009f]/.test(value))
+          ([...value].length > 4096 || CONTROL_CHARACTER.test(value))
         ) {
           return null;
         }
@@ -566,10 +588,7 @@ function prepareCredentials(
       if (type === 'basicauth') {
         if (Object.keys(entry).length !== 1) return null;
         if (typeof entry.password === 'string' && entry.password !== '') {
-          if (
-            [...entry.password].length > 4096 ||
-            /[\u0000-\u001f\u007f-\u009f]/.test(entry.password)
-          ) {
+          if ([...entry.password].length > 4096 || CONTROL_CHARACTER.test(entry.password)) {
             return null;
           }
           result.push({ password_hash: mockBasicPasswordHash(entry.password) });
@@ -577,7 +596,7 @@ function prepareCredentials(
         }
         if (
           typeof entry.password_hash !== 'string' ||
-          !/^hmac_sha256:[0-9a-f]{64}$/.test(entry.password_hash)
+          !HMAC_PASSWORD_HASH.test(entry.password_hash)
         ) {
           return null;
         }
@@ -980,14 +999,14 @@ const OPENAPI_METHOD_KEYS = [
  * `admin/api_specs/extractor.rs`) calls the same function.
  */
 function escapeRegex(literal: string): string {
-  return literal.replace(/[\\.+*?()|[\]{}^$#&\-~]/g, '\\$&');
+  return literal.replace(REGEX_SPECIAL_CHARACTERS, '\\$&');
 }
 
 /** A path template as a regex body, with `{param}` widened to `[^/]+`. */
 function pathTemplateRegex(template: string): string {
   return template
-    .split(/(\{[^{}/]+\})/)
-    .map((part) => (/^\{[^{}/]+\}$/.test(part) ? '[^/]+' : escapeRegex(part)))
+    .split(PATH_PARAMETER_SPLIT)
+    .map((part) => (PATH_PARAMETER_SEGMENT.test(part) ? '[^/]+' : escapeRegex(part)))
     .join('');
 }
 
@@ -1008,7 +1027,7 @@ function serverBases(servers: unknown): string[] {
   for (const entry of servers) {
     if (!isRecord(entry) || typeof entry.url !== 'string') continue;
     const { pathname } = new URL(entry.url, 'http://spec.invalid');
-    const base = pathname.replace(/\/+$/, '');
+    const base = pathname.replace(TRAILING_SLASHES, '');
     if (!bases.includes(base)) bases.push(base);
   }
   return bases.length === 0 ? [''] : bases;
@@ -1029,7 +1048,7 @@ function resolvedPathItem(
   seen.add(reference);
   let target: unknown = document;
   for (const token of decodeURIComponent(reference.slice(2)).split('/')) {
-    const key = token.replace(/~1/g, '/').replace(/~0/g, '~');
+    const key = token.replace(TILDE_ONE, '/').replace(TILDE_ZERO, '~');
     target = isRecord(target) && Object.hasOwn(target, key) ? target[key] : undefined;
   }
   const resolved = resolvedPathItem(document, target, seen);
@@ -1056,7 +1075,7 @@ function generateOperations(document: Record<string, unknown>): Record<string, u
     typeof proxy.listen_path === 'string' && proxy.listen_path.startsWith('/')
       ? proxy.listen_path
       : '';
-  const listenPrefix = literalListenPrefix.replace(/\/+$/, '');
+  const listenPrefix = literalListenPrefix.replace(TRAILING_SLASHES, '');
   const rootBases = serverBases(document.servers);
   const operations: Record<string, unknown>[] = [];
   for (const [template, value] of Object.entries(paths)) {
@@ -1242,7 +1261,7 @@ function literalListenPathProblem(body: Record<string, unknown>): string | null 
 function isConsumerAssertionHeader(name: unknown): boolean {
   if (typeof name !== 'string') return false;
   const trimmed = name.trim();
-  return /^x[-_]consumer[-_]/i.test(trimmed) || /^x[-_]authenticated[-_]identity$/i.test(trimmed);
+  return CONSUMER_HEADER_PREFIX.test(trimmed) || AUTHENTICATED_IDENTITY_HEADER.test(trimmed);
 }
 
 /**
@@ -1251,7 +1270,7 @@ function isConsumerAssertionHeader(name: unknown): boolean {
  * not as a client-supplied `request_deduplication` key.
  */
 function isProxyHopsHeaderName(name: unknown): boolean {
-  return typeof name === 'string' && /^x[-_]ferrum[-_]hops$/i.test(name.trim());
+  return typeof name === 'string' && FERRUM_HOPS_HEADER.test(name.trim());
 }
 
 function nowIso(): string {
@@ -1780,7 +1799,7 @@ function projectCredentials(
           typeof entry.identity === 'string' &&
           entry.identity.trim() !== '' &&
           [...entry.identity].length <= 4096 &&
-          !/[\u0000-\u001f\u007f-\u009f]/.test(entry.identity),
+          !CONTROL_CHARACTER.test(entry.identity),
       );
       if (visible.length > 0) {
         credentials[type] = visible.map((entry) => ({ identity: entry.identity }));
@@ -1937,7 +1956,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
    * against real escaping rather than only against tidy identifiers.
    */
   function escapeLabel(value: string): string {
-    return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+    return value.replace(BACKSLASH, '\\\\').replace(DOUBLE_QUOTE, '\\"').replace(NEWLINE, '\\n');
   }
 
   function renderLabels(labels: Record<string, string>): string {
@@ -2751,9 +2770,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   /** Chrono 0.4.44 DateTime serde uses its relaxed RFC3339 parser before import stamping. */
   function importedTimestamp(value: unknown): boolean {
     if (typeof value !== 'string') return false;
-    const parts = value.match(
-      /^\p{White_Space}*([+-]\d+|\d{1,4})\p{White_Space}*-\p{White_Space}*(\d{1,2})\p{White_Space}*-\p{White_Space}*(\d{1,2})[tT ]\p{White_Space}*(\d{1,2})\p{White_Space}*:\p{White_Space}*(\d{1,2})\p{White_Space}*:\p{White_Space}*(\d{1,2})(?:\.\d+)?\p{White_Space}*(?:[zZ]|[uU][tT][cC]|([+−-])(\d{2})[\p{White_Space}:]*(\d{2}))\p{White_Space}*$(?![\s\S])/u,
-    );
+    const parts = value.match(RELAXED_RFC3339);
     if (!parts) return false;
     const [
       ,
@@ -2814,8 +2831,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       resource.id !== undefined &&
       (typeof resource.id !== 'string' ||
         (resource.id !== '' &&
-          (resource.id.length > 254 ||
-            !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$(?![\s\S])/.test(resource.id))))
+          (resource.id.length > 254 || !IMPORTED_RESOURCE_ID.test(resource.id))))
     ) {
       return 'Invalid imported resource id';
     }
@@ -2853,7 +2869,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       status,
     });
     if (!isRecord(body)) return parseError('InvalidJson', 'Request body must be a JSON object');
-    if (typeof body.openapi !== 'string' || !/^3\./.test(body.openapi)) {
+    if (typeof body.openapi !== 'string' || !OPENAPI_3_PREFIX.test(body.openapi)) {
       return parseError('UnknownVersion', 'unknown spec version (expected openapi: 3.x.y)');
     }
     if (body['x-ferrum-consumers'] !== undefined) {
@@ -3365,7 +3381,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       if (values[0] === '') return expected;
       for (const entry of (values[0] as string).split(',')) {
         // Edge applies validate_resource_id to every entry.
-        if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry) || entry.length > 254) {
+        if (!RESOURCE_ID.test(entry) || entry.length > 254) {
           fail(
             res,
             400,
@@ -3750,7 +3766,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       ) ||
       matches.length !== 1 ||
       typeof token !== 'string' ||
-      !/^"deployment-v1-[0-9a-f]{32}"(?![\s\S])/.test(token)
+      !DEPLOYMENT_ROW_TAG.test(token)
     ) {
       return refusal(400, 'not_started');
     }

@@ -39,6 +39,9 @@ import {
 } from '../sso/settings.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const REQUIRES_CLIENT_SECRET = /requires client_secret/;
+const REQUIRES_SENDING_CAPTCHA_SECRET = /requires sending captcha.secret_key/;
+
 /** `store`, with `onGet` run before each settings read of `key`. */
 function intercepted(store: NexusStore, key: string, onGet: () => Promise<void>): NexusStore {
   const settings = new Proxy(store.settings, {
@@ -376,7 +379,7 @@ describe('settings read as one generation', () => {
     ]) {
       const refused = await put(moved);
       assert.equal(refused.statusCode, 400, refused.body);
-      assert.match(refused.body, /requires client_secret/);
+      assert.match(refused.body, REQUIRES_CLIENT_SECRET);
     }
     const unchanged = await put({ ...first, display_name: 'Renamed' });
     assert.equal(unchanged.statusCode, 200, unchanged.body);
@@ -400,7 +403,7 @@ describe('settings read as one generation', () => {
       payload: { captcha: { enabled: false, provider: 'hcaptcha' } },
     });
     assert.equal(off.statusCode, 400, off.body);
-    assert.match(off.body, /requires sending captcha.secret_key/);
+    assert.match(off.body, REQUIRES_SENDING_CAPTCHA_SECRET);
     // Turning it off without moving to another vendor needs no secret.
     const none = await harness.authed(founder, {
       method: 'PUT',

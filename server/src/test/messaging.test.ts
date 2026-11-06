@@ -12,6 +12,8 @@ import type {
 
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const WHITESPACE_RUN = /\s+/g;
+
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
@@ -403,7 +405,7 @@ describe('messaging list previews', () => {
     // Every preview must match what the per-thread lookup reports.
     for (const [id, text] of expected) {
       const latest = await harness.store.messages.findLatestByThread(id);
-      assert.equal(latest ? latest.body.replace(/\s+/g, ' ').trim() : null, text);
+      assert.equal(latest ? latest.body.replace(WHITESPACE_RUN, ' ').trim() : null, text);
     }
 
     async function previewsFor(

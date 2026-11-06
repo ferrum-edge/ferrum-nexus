@@ -21,6 +21,16 @@ import {
   type PluginDraft,
 } from './PluginForm';
 
+const BETWEEN = /between/;
+const NOT_FORM_GATEWAY_ACCEPTS = /not in a form the gateway accepts/;
+const DOES_NOT_ACCEPT = /does not accept/;
+const GATEWAY_OWNS_AUTHORIZATION = /gateway owns 'AUTHORIZATION'/;
+const CONSUMER_HEADER_WILDCARD = /x-consumer-\*/;
+const X_FERRUM_HOPS = /X-Ferrum-Hops/;
+const RESTRICT_NOBODY = /restrict nobody/;
+const BLOCKS_NOTHING = /blocks nothing/;
+const BETWEEN_1 = /between 1 and/;
+
 afterEach(cleanup);
 
 /** A palette descriptor by name, failing loudly if the catalog moved. */
@@ -113,7 +123,7 @@ describe('validateDraft', () => {
 
   it('reports an integer outside the descriptor bounds', () => {
     const spec = descriptor('request_size_limiting');
-    expect(validateDraft(spec, { max_bytes: '0' }).max_bytes).toMatch(/between/);
+    expect(validateDraft(spec, { max_bytes: '0' }).max_bytes).toMatch(BETWEEN);
     expect(validateDraft(spec, { max_bytes: '1.5' }).max_bytes).toBe('Enter a whole number');
     expect(validateDraft(spec, { max_bytes: '1024' })).toEqual({});
   });
@@ -130,7 +140,7 @@ describe('validateDraft', () => {
       min_content_length: '256',
       content_types: 'application/json\nnot a media type',
     });
-    expect(errors.content_types).toMatch(/not in a form the gateway accepts/);
+    expect(errors.content_types).toMatch(NOT_FORM_GATEWAY_ACCEPTS);
   });
 
   it('reports a string that fails the descriptor pattern', () => {
@@ -138,7 +148,7 @@ describe('validateDraft', () => {
       header_name: 'x request id',
       echo_downstream: true,
     });
-    expect(errors.header_name).toMatch(/does not accept/);
+    expect(errors.header_name).toMatch(DOES_NOT_ACCEPT);
   });
 
   it('reports a reserved correlation header on its field', () => {
@@ -146,7 +156,7 @@ describe('validateDraft', () => {
       header_name: '  AUTHORIZATION  ',
       echo_downstream: true,
     });
-    expect(errors.header_name).toMatch(/gateway owns 'AUTHORIZATION'/);
+    expect(errors.header_name).toMatch(GATEWAY_OWNS_AUTHORIZATION);
   });
 
   it('reports the protocol headers Edge v0.9.9 added to its reserved set', () => {
@@ -164,7 +174,7 @@ describe('validateDraft', () => {
       const spec = descriptor(name);
       for (const header of ['X-Consumer-Trace', 'x_consumer-a', 'X-Authenticated-Identity']) {
         const errors = validateDraft(spec, { ...draftFor(spec, null), header_name: header });
-        expect(errors.header_name).toMatch(/x-consumer-\*/);
+        expect(errors.header_name).toMatch(CONSUMER_HEADER_WILDCARD);
       }
       expect(validateDraft(spec, draftFor(spec, null)).header_name).toBeUndefined();
     }
@@ -177,7 +187,7 @@ describe('validateDraft', () => {
         header_name: header,
         echo_downstream: true,
       });
-      expect(errors.header_name).toMatch(/X-Ferrum-Hops/);
+      expect(errors.header_name).toMatch(X_FERRUM_HOPS);
     }
     const dedup = descriptor('request_deduplication');
     expect(
@@ -191,7 +201,7 @@ describe('validateDraft', () => {
       deny: '',
       mode: 'allow_first',
     });
-    expect(errors[FORM_ERROR_KEY]).toMatch(/restrict nobody/);
+    expect(errors[FORM_ERROR_KEY]).toMatch(RESTRICT_NOBODY);
     expect(errors.allow).toBeUndefined();
   });
 
@@ -203,7 +213,7 @@ describe('validateDraft', () => {
       allow_missing_user_agent: true,
       custom_response_code: '403',
     };
-    expect(validateDraft(spec, draft)[FORM_ERROR_KEY]).toMatch(/blocks nothing/);
+    expect(validateDraft(spec, draft)[FORM_ERROR_KEY]).toMatch(BLOCKS_NOTHING);
     // Rejecting missing-UA requests gives the filter something to do.
     expect(validateDraft(spec, { ...draft, allow_missing_user_agent: false })).toEqual({});
   });
@@ -250,11 +260,11 @@ describe('<PluginForm>', () => {
   it('shows a field message next to the field that caused it', () => {
     renderForm('request_size_limiting', { max_bytes: '0' });
     const alert = screen.getByRole('alert');
-    expect(alert.textContent).toMatch(/between 1 and/);
+    expect(alert.textContent).toMatch(BETWEEN_1);
   });
 
   it('shows a whole-plugin message above the fields', () => {
     renderForm('ip_restriction', { allow: '', deny: '' });
-    expect(screen.getByRole('alert').textContent).toMatch(/restrict nobody/);
+    expect(screen.getByRole('alert').textContent).toMatch(RESTRICT_NOBODY);
   });
 });

@@ -6,6 +6,8 @@ import { Icon } from '../ui/Icon';
 import { NAV_SECTIONS, isNavItemActive, navItemsForSection } from './nav';
 import { useNavPathname } from './navLocation';
 
+const WHITESPACE = /\s+/;
+
 export interface SidebarProps {
   id: string;
   sidebarRef: Ref<HTMLElement>;
@@ -24,7 +26,7 @@ export interface SidebarProps {
 
 /** Initials for an avatar tile: first letters of up to two words. */
 export function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
+  const parts = name.trim().split(WHITESPACE).filter(Boolean);
   if (parts.length === 0) return '?';
   if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
   return `${parts[0]![0] ?? ''}${parts[parts.length - 1]![0] ?? ''}`.toUpperCase();

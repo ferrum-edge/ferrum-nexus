@@ -24,6 +24,10 @@ import {
   type KeyedSerializerOptions,
 } from './index.js';
 
+const ANOTHER_PORTAL_INSTANCE = /another portal instance/i;
+const RETRY = /retry/i;
+const BOOM = /boom/;
+
 const SECRET = 'serializer-lease-test-secret-0123456789';
 
 /** Fast lease settings — the production defaults would make this suite a minute. */
@@ -217,8 +221,8 @@ describe('createKeyedSerializer — cross-instance leases', () => {
       (error: unknown) => {
         assert.ok(isNexusError(error));
         assert.equal(error.code, 'CONFLICT');
-        assert.match(error.message, /another portal instance/i);
-        assert.match(error.message, /retry/i);
+        assert.match(error.message, ANOTHER_PORTAL_INSTANCE);
+        assert.match(error.message, RETRY);
         return true;
       },
     );
@@ -235,7 +239,7 @@ describe('createKeyedSerializer — cross-instance leases', () => {
     await a(key, async () => 'done');
     assert.equal(await b(key, async () => 'free after success'), 'free after success');
 
-    await assert.rejects(() => a(key, () => Promise.reject(new Error('boom'))), /boom/);
+    await assert.rejects(() => a(key, () => Promise.reject(new Error('boom'))), BOOM);
     // `waitMs: 0` gives the lease exactly one attempt, so this only passes if
     // the failed section had already released it.
     assert.equal(await b(key, async () => 'free after throw'), 'free after throw');
@@ -264,7 +268,7 @@ describe('createKeyedSerializer — cross-instance leases', () => {
     // Elapsed TTLs are the behaviour under test here, not overlap. The
     // deferred above is what keeps A from finishing if this timer overruns.
     await sleep(200);
-    await assert.rejects(() => b(key, async () => 'never'), /another portal instance/i);
+    await assert.rejects(() => b(key, async () => 'never'), ANOTHER_PORTAL_INSTANCE);
 
     releaseA.resolve();
     assert.equal(await long, 'finished');
@@ -295,8 +299,8 @@ describe('createKeyedSerializer — cross-instance leases', () => {
   function isLeaseLost(error: unknown): boolean {
     assert.ok(isNexusError(error));
     assert.equal(error.code, 'CONFLICT');
-    assert.match(error.message, /another portal instance/i);
-    assert.match(error.message, /retry/i);
+    assert.match(error.message, ANOTHER_PORTAL_INSTANCE);
+    assert.match(error.message, RETRY);
     return true;
   }
 

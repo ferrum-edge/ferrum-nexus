@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ShowOnceSecret } from '@ferrum-nexus/shared';
 import { ShowOnceSecretDialog } from './ShowOnceSecretDialog';
 
+const SET_SUB_USERNAME = /set sub to this username/;
+
 const writeText = vi.fn<(value: string) => Promise<void>>();
 
 beforeEach(() => {
@@ -65,7 +67,7 @@ describe('ShowOnceSecretDialog', () => {
     );
     expect(screen.getByText('JWT subject (sub) / consumer username')).toBeInTheDocument();
     expect(screen.getByText('JWT signing secret')).toBeInTheDocument();
-    expect(screen.getByText(/set sub to this username/)).toBeInTheDocument();
+    expect(screen.getByText(SET_SUB_USERNAME)).toBeInTheDocument();
   });
 
   it('copies a field to the clipboard', async () => {

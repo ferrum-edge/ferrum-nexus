@@ -14,6 +14,19 @@ import { DEFAULT_EMAIL_TEMPLATES, MASS_RAW_HTML_VARS } from '../email/templates.
 import { TEMPLATE_LINK_HOSTS_SETTING } from '../email/template-links.js';
 import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './helpers.js';
 
+const RESET_TOKEN_LINK = /\/reset-password\?token=([A-Za-z0-9_-]+)/;
+const VERIFY_TOKEN_LINK = /\/verify-email\?token=([A-Za-z0-9_-]+)/;
+const HOST_PLACEHOLDER_SCHEME_CSS = /host|placeholder|scheme|CSS|HTML|credentials/;
+const HOST_ATTACKER_EXAMPLE = /host 'attacker.example'/;
+const NON_WORD_CHARACTERS = /\W/g;
+const ATTACKER_EXAMPLE_CREDENTIALS = /attacker\.example|credentials/;
+const SUBJECT_REFUSES_HOST_ATTACKER = /subject refuses host 'attacker\.example'/;
+const ESCAPED_HOST_ATTACKER_EXAMPLE = /host 'attacker\.example'/;
+const BODY_HTML_REFUSES_MALFORMED = /body_html refuses malformed/;
+const ATTACKER_EXAMPLE = /attacker\.example/;
+const PLACEHOLDER = /placeholder/;
+const BODY_HTML_REFUSES = /body_html refuses/;
+
 const FALLBACK_WARNING =
   'Stored email template refused by the link policy; sending the built-in template';
 
@@ -110,7 +123,7 @@ describe('email template token boundaries', () => {
     await harness.tick();
     const mail = harness.mailbox.sent.find((entry) => entry.to === founder.user.email);
     assert.ok(mail);
-    const token = /\/reset-password\?token=([A-Za-z0-9_-]+)/.exec(mail.text)?.[1];
+    const token = RESET_TOKEN_LINK.exec(mail.text)?.[1];
     assert.ok(token);
     const url = `${harness.config.publicUrl}/reset-password?token=${token}`;
     assert.equal(mail.subject, content.subject);
@@ -190,7 +203,7 @@ describe('email template token boundaries', () => {
       assert.equal(tick.sent, 1, flow);
       const mail = harness.mailbox.sent[0];
       assert.ok(mail);
-      const token = /\/verify-email\?token=([A-Za-z0-9_-]+)/.exec(mail.text)?.[1];
+      const token = VERIFY_TOKEN_LINK.exec(mail.text)?.[1];
       assert.ok(token);
       const url = `${harness.config.publicUrl}/verify-email?token=${token}`;
       assert.deepEqual(mail, {
@@ -268,7 +281,7 @@ describe('email template destination boundaries', () => {
       assert.equal(error.code, 'VALIDATION_FAILED');
       assert.ok(error.message.includes('body_html'), error.message);
       assert.ok(error.message.includes(TEMPLATE_LINK_HOSTS_SETTING), error.message);
-      assert.match(error.message, /host|placeholder|scheme|CSS|HTML|credentials/);
+      assert.match(error.message, HOST_PLACEHOLDER_SCHEME_CSS);
       assert.equal(await harness.store.emailTemplates.get('password_reset'), null);
     }
     assert.equal((await harness.auditRows('admin.template_update')).length, 0);
@@ -438,7 +451,7 @@ describe('email template destination boundaries', () => {
     });
     await assert.rejects(
       harness.services.email.render('password_reset', { portal_url: 'https://attacker.example/' }),
-      /host 'attacker.example'/,
+      HOST_ATTACKER_EXAMPLE,
     );
     await harness.store.emailTemplates.upsert('password_reset', {
       ...safe,
@@ -524,7 +537,7 @@ describe('email template plain-text values', () => {
 
   it('delivers reset mail to display names with a colon or a double slash', async () => {
     for (const display_name of ['Big Data: Ops', 'Bob//Team']) {
-      const email = `${display_name.replace(/\W/g, '').toLowerCase()}@example.test`;
+      const email = `${display_name.replace(NON_WORD_CHARACTERS, '').toLowerCase()}@example.test`;
       await harness.registerUser({ email, display_name });
       harness.mailbox.clear();
       const requested = await harness.app.inject({
@@ -580,7 +593,7 @@ describe('email template plain-text values', () => {
     ]) {
       await assert.rejects(
         harness.services.email.render('verification', { ...actionVars, recipient_name }),
-        /attacker\.example|credentials/,
+        ATTACKER_EXAMPLE_CREDENTIALS,
         recipient_name,
       );
     }
@@ -588,7 +601,7 @@ describe('email template plain-text values', () => {
       harness.services.email.render('mass', { subject: 'Visit https://attacker.example/' }, [
         ...MASS_RAW_HTML_VARS,
       ]),
-      /subject refuses host 'attacker\.example'/,
+      SUBJECT_REFUSES_HOST_ATTACKER,
     );
     // The portal origin and allowlisted hosts are as welcome in text as in links.
     const allowed = await harness.services.email.render('verification', {
@@ -607,7 +620,7 @@ describe('email template plain-text values', () => {
           ...actionVars,
           recipient_name: `Eve https://portal.test/${separator}https://attacker.example/x`,
         }),
-        /host 'attacker\.example'/,
+        ESCAPED_HOST_ATTACKER_EXAMPLE,
         JSON.stringify(separator),
       );
     }
@@ -632,7 +645,7 @@ describe('email template plain-text values', () => {
             { body_html: '<p>Hi</p><a href="', subject, body_text: 'Hi' },
             [...MASS_RAW_HTML_VARS],
           ),
-          /body_html refuses malformed/,
+          BODY_HTML_REFUSES_MALFORMED,
           subject,
         );
       }
@@ -658,7 +671,7 @@ describe('email template plain-text values', () => {
       },
     });
     assert.equal(response.statusCode, 400, response.body);
-    assert.match(response.json<ApiErrorBody>().error.message, /attacker\.example/);
+    assert.match(response.json<ApiErrorBody>().error.message, ATTACKER_EXAMPLE);
     assert.equal(await harness.store.emailTemplates.get('verification'), null);
   });
 
@@ -680,7 +693,7 @@ describe('email template plain-text values', () => {
       assert.equal(response.statusCode, 400, JSON.stringify(payload));
       const { error } = response.json<ApiErrorBody>();
       assert.equal(error.code, 'VALIDATION_FAILED');
-      assert.match(error.message, /placeholder/, error.message);
+      assert.match(error.message, PLACEHOLDER, error.message);
     }
     assert.equal(await harness.store.emailTemplates.get('verification'), null);
 
@@ -714,7 +727,7 @@ describe('email template plain-text values', () => {
     ]) {
       await assert.rejects(
         harness.services.email.render('mass', { body_html, subject: 'News' }, raw),
-        /body_html refuses/,
+        BODY_HTML_REFUSES,
         body_html,
       );
     }

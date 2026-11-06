@@ -11,6 +11,8 @@ import type { EdgeConfig } from '../config/index.js';
 import { isNexusError } from '../lib/errors.js';
 import { createFerrumAdminClient } from './client.js';
 
+const BEARER = /^Bearer /;
+
 const FIXTURES = new URL('../test/fixtures/http1-tls/', import.meta.url);
 const SECRET = 'http1-test-admin-secret-0123456789abcdef';
 
@@ -107,7 +109,7 @@ describe('admin transport after the Undici 8 migration', () => {
     for (const request of requests) {
       assert.equal(request.version, '1.1');
       assert.equal(request.namespace, 'nexus');
-      assert.match(request.authorization, /^Bearer /);
+      assert.match(request.authorization, BEARER);
       const { payload } = await jwtVerify(
         request.authorization.slice('Bearer '.length),
         new TextEncoder().encode(SECRET),

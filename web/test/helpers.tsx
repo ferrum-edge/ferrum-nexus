@@ -10,6 +10,8 @@ import {
 import type { LabeledSelectProps } from '../src/components/ui/Select';
 import { ToastProvider } from '../src/stores/toast';
 
+const ROUTE_PARAMETER = /\$(\w+)/g;
+
 const clients: QueryClient[] = [];
 
 export function renderPage(element: ReactElement): RenderResult & { client: QueryClient } {
@@ -76,7 +78,7 @@ export const TestLink = forwardRef<HTMLAnchorElement, TestLinkProps>(function Te
   { to, params = {}, children, ...anchorProps },
   ref,
 ): ReactElement {
-  const href = to.replace(/\$(\w+)/g, (_match, key: string) => params[key] ?? '');
+  const href = to.replace(ROUTE_PARAMETER, (_match, key: string) => params[key] ?? '');
   return (
     <a {...anchorProps} href={href} ref={ref}>
       {children}

@@ -66,6 +66,12 @@ import {
   type AuthPluginType,
 } from '@ferrum-nexus/shared';
 
+const TILDE = /~/g;
+const SLASH = /\//g;
+const PERCENT = /%/g;
+const TILDE_ONE = /~1/g;
+const TILDE_ZERO = /~0/g;
+
 /**
  * Name the gateway's scheme is registered under, when the provider's document
  * does not already use it. Otherwise `_2`, `_3`, … is appended.
@@ -165,9 +171,9 @@ function resolveScheme(
 function resolveLocalRef(document: unknown, ref: string): unknown {
   for (const segments of pointerReadings(ref)) {
     const pointer =
-      '#/' + segments.map((x) => x.replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
+      '#/' + segments.map((x) => x.replace(TILDE, '~0').replace(SLASH, '~1')).join('/');
     // Re-encode `%` so the resolver's own percent-decoding is a no-op.
-    const target = resolveOpenApiPointer(document, pointer.replace(/%/g, '%25'));
+    const target = resolveOpenApiPointer(document, pointer.replace(PERCENT, '%25'));
     if (target !== undefined) return target;
   }
   return undefined;
@@ -242,7 +248,7 @@ function percentDecode(text: string): string | null {
 
 /** RFC 6901-unescape one pointer segment. */
 function unescapeSegment(segment: string): string {
-  return segment.replace(/~1/g, '/').replace(/~0/g, '~');
+  return segment.replace(TILDE_ONE, '/').replace(TILDE_ZERO, '~');
 }
 
 /**

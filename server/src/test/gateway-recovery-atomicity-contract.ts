@@ -19,6 +19,13 @@ import {
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, TEST_SECRET_KEY, type TestApp } from './helpers.js';
 
+const REPLICA_SET = /replica set/;
+const UNCONFIRMED_JOURNAL = /unconfirmed|journal/;
+const UNRESOLVED_DEPLOYMENT_CLEANUP = /unresolved deployment cleanup/;
+const ATOMIC_UPLOAD_FAULT = /atomic upload fault/;
+const ATOMIC_RECOVERY_COMPLETION_FAULT = /atomic recovery completion fault/;
+const ATOMIC_DELETE_COMPLETION_FAULT = /atomic delete completion fault/;
+
 /** Actual native atomic stores and opted-in standalone MongoDB, never a simulated transaction. */
 export function runGatewayRecoveryAtomicityContract(
   label: string,
@@ -218,7 +225,7 @@ export function runGatewayRecoveryAtomicityContract(
     async function refusesWithoutEffects(
       apiId: string,
       operation: () => Promise<unknown>,
-      message = /replica set/,
+      message = REPLICA_SET,
     ): Promise<void> {
       const beforeCatalog = await catalog(apiId);
       const beforeGateway = gateway();
@@ -270,7 +277,7 @@ export function runGatewayRecoveryAtomicityContract(
           await refusesWithoutEffects(
             apiId,
             () => harness.services.publishing.remove(actor, apiId),
-            atomic ? /unconfirmed|journal/ : /replica set/,
+            atomic ? UNCONFIRMED_JOURNAL : REPLICA_SET,
           );
         });
       }
@@ -303,7 +310,7 @@ export function runGatewayRecoveryAtomicityContract(
           await refusesWithoutEffects(
             apiId,
             () => harness.services.publishing.remove(actor, apiId),
-            atomic ? /unresolved deployment cleanup/ : /replica set/,
+            atomic ? UNRESOLVED_DEPLOYMENT_CLEANUP : REPLICA_SET,
           );
         });
       }
@@ -368,7 +375,7 @@ export function runGatewayRecoveryAtomicityContract(
           );
           await assert.rejects(
             harness.services.publishing.updateSpec(actor, apiId, SAMPLE_SPEC_YAML, '3.0.0'),
-            /atomic upload fault/,
+            ATOMIC_UPLOAD_FAULT,
           );
           assert.deepEqual(await catalog(apiId), beforeCatalog);
           assert.deepEqual(gateway(), beforeGateway);
@@ -397,7 +404,7 @@ export function runGatewayRecoveryAtomicityContract(
         faults.failAfter('auditLogs', 'create', 1, new Error('atomic recovery completion fault'));
         await assert.rejects(
           harness.services.publishing.restoreGateway(actor, apiId),
-          /atomic recovery completion fault/,
+          ATOMIC_RECOVERY_COMPLETION_FAULT,
         );
         const after = await catalog(apiId);
         assert.ok(before.api && after.api);
@@ -465,7 +472,7 @@ export function runGatewayRecoveryAtomicityContract(
             reached = true;
             throw new Error('atomic delete completion fault');
           }),
-          /atomic delete completion fault/,
+          ATOMIC_DELETE_COMPLETION_FAULT,
         );
         assert.ok(reached, 'the fault follows actual catalog and custody deletion');
         // Teardown's intent audit and test credential revocation precede the

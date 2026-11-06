@@ -6,6 +6,8 @@ import { validatedManifest } from '../service-manifest/service.js';
 import { manifestValidator } from '../service-manifest/schema.js';
 import { buildTestApp } from './helpers.js';
 
+const CHECKSUM_LINE = /^sha256: ([a-f0-9]{64})  (.+)$/;
+
 const root = new URL('../../../contracts/ferrum-contracts/', import.meta.url);
 function fixture(path: string): unknown {
   return JSON.parse(readFileSync(new URL(path, root), 'utf8'));
@@ -28,7 +30,7 @@ describe('published immutable service-manifest consumer', () => {
     );
     assert.equal(schema['x-contract'].provenance[0]?.availability, 'unreleased');
     for (const line of pin.split('\n').filter((entry) => entry.startsWith('sha256: '))) {
-      const [, digest, path] = /^sha256: ([a-f0-9]{64})  (.+)$/.exec(line) ?? [];
+      const [, digest, path] = CHECKSUM_LINE.exec(line) ?? [];
       assert.ok(path);
       assert.equal(
         createHash('sha256')

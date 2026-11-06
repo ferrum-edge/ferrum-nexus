@@ -25,6 +25,24 @@ import {
 import { createAdminTokenMinter, type AdminTokenMinter } from './jwt.js';
 import type { EdgeApiSpecDocument, EdgeProxyWrite } from './types.js';
 
+const MORE_CONSUMERS = /more consumers/i;
+const RESTORE_CONSUMER_ID_MAPPING = /restore the consumer id mapping from backup/i;
+const HAS_NOT_APPLIED_YET = /has not applied it yet/;
+const ADMIN_CREDENTIALS = /admin credentials/;
+const LISTEN_PATH_ALREADY_EXISTS = /listen_path already exists/;
+const MAX_REQUESTS = /max_requests/;
+const IPV6_PREFIX = /ipv6_prefix/;
+const ALLOWED_ORIGINS = /allowed_origins/;
+const PROXY_OVERLAPPING_LISTEN_PATH =
+  /proxy: overlapping listen_path; plugin_config: invalid config/;
+const OPENAPI_VALIDATOR_REQUIRES_PROXY =
+  /openapi_validator requires a proxy with an attached api_spec/;
+const PROXY_PROXY_OVERLAPPING_HOSTS = /proxy: A proxy with overlapping hosts and listen_path/;
+const NON_EXISTENT_PLUGIN_CONFIG = /non-existent plugin_config/;
+const SCOPE_GLOBAL = /scope 'global'/;
+const TARGETED_PROXY_ASSOC = /targeted to proxy 'assoc-a'/;
+const MORE_THAN_ONCE = /more than once/;
+
 const SECRET = 'ferrum-admin-client-test-secret-0123456789';
 
 let edge: MockFerrumEdge;
@@ -492,8 +510,8 @@ describe('ferrum admin client', () => {
       (error: unknown) =>
         isNexusError(error) &&
         error.code === 'EDGE_ERROR' &&
-        /more consumers/i.test(error.message) &&
-        /restore the consumer id mapping from backup/i.test(error.message),
+        MORE_CONSUMERS.test(error.message) &&
+        RESTORE_CONSUMER_ID_MAPPING.test(error.message),
     );
     // Exactly the cap is still a complete read.
     edge.consumers.delete('nexus/u-first');
@@ -878,7 +896,7 @@ describe('ferrum admin client', () => {
           assert.ok(isNexusError(error));
           assert.equal(error.code, 'EDGE_ERROR');
           assert.equal(error.statusCode, 502);
-          assert.match(error.message, /has not applied it yet/);
+          assert.match(error.message, HAS_NOT_APPLIED_YET);
           assert.deepEqual(error.details, { status: 503, reason: 'private gateway reason' });
           return true;
         },
@@ -910,7 +928,7 @@ describe('ferrum admin client', () => {
         (error: unknown) =>
           isNexusError(error) &&
           error.code === 'EDGE_ERROR' &&
-          /admin credentials/.test(error.message),
+          ADMIN_CREDENTIALS.test(error.message),
       );
     });
 
@@ -922,7 +940,7 @@ describe('ferrum admin client', () => {
         (error: unknown) => {
           assert.ok(isNexusError(error));
           assert.equal(error.code, 'EDGE_ERROR');
-          assert.match(error.message, /listen_path already exists/);
+          assert.match(error.message, LISTEN_PATH_ALREADY_EXISTS);
           assert.deepEqual(error.details, {
             status: 409,
             gateway_message: 'listen_path already exists in this namespace',
@@ -1177,7 +1195,7 @@ describe('ferrum admin client', () => {
             (error: unknown) => {
               assert.ok(isNexusError(error), label);
               assert.equal(error.code, 'EDGE_ERROR');
-              assert.match(error.message, /admin credentials/);
+              assert.match(error.message, ADMIN_CREDENTIALS);
               return true;
             },
             label,
@@ -1238,7 +1256,7 @@ describe('ferrum admin client', () => {
         (error: unknown) => {
           assert.ok(isNexusError(error));
           assert.equal(error.code, 'EDGE_ERROR');
-          assert.match(error.message, /max_requests/);
+          assert.match(error.message, MAX_REQUESTS);
           return true;
         },
       );
@@ -1273,7 +1291,7 @@ describe('ferrum admin client', () => {
               enabled: true,
               config: { limit_by: 'ip', ipv6_prefix: ipv6Prefix, limits },
             }),
-          (error: unknown) => isNexusError(error) && /ipv6_prefix/.test(error.message),
+          (error: unknown) => isNexusError(error) && IPV6_PREFIX.test(error.message),
           `ipv6_prefix ${String(ipv6Prefix)}`,
         );
       }
@@ -1343,7 +1361,7 @@ describe('ferrum admin client', () => {
             enabled: true,
             config: { allowed_origins: [] },
           }),
-        (error: unknown) => isNexusError(error) && /allowed_origins/.test(error.message),
+        (error: unknown) => isNexusError(error) && ALLOWED_ORIGINS.test(error.message),
       );
 
       const created = await client.pluginConfigs.create({
@@ -1433,10 +1451,7 @@ describe('ferrum admin client', () => {
           (error: unknown) => {
             assert.ok(isNexusError(error));
             assert.equal(error.code, 'EDGE_REJECTED_SPEC');
-            assert.match(
-              error.message,
-              /proxy: overlapping listen_path; plugin_config: invalid config/,
-            );
+            assert.match(error.message, PROXY_OVERLAPPING_LISTEN_PATH);
             assert.ok(!error.message.includes('not echoed'));
             assert.equal(
               (error.details as { gateway_message: string }).gateway_message.length,
@@ -2139,8 +2154,7 @@ describe('ferrum admin client', () => {
             },
           }),
         (error: unknown) =>
-          isNexusError(error) &&
-          /openapi_validator requires a proxy with an attached api_spec/.test(error.message),
+          isNexusError(error) && OPENAPI_VALIDATOR_REQUIRES_PROXY.test(error.message),
       );
     });
 
@@ -2215,7 +2229,7 @@ describe('ferrum admin client', () => {
           assert.ok(isNexusError(error));
           assert.equal(error.code, 'EDGE_REJECTED_SPEC');
           assert.equal(error.statusCode, 400);
-          assert.match(error.message, /proxy: A proxy with overlapping hosts and listen_path/);
+          assert.match(error.message, PROXY_PROXY_OVERLAPPING_HOSTS);
           return true;
         },
       );
@@ -2291,12 +2305,12 @@ describe('ferrum admin client', () => {
         );
       };
 
-      await rejects([{ plugin_config_id: 'nope' }], /non-existent plugin_config/);
-      await rejects([{ plugin_config_id: 'cfg-global' }], /scope 'global'/);
-      await rejects([{ plugin_config_id: onA.id }], /targeted to proxy 'assoc-a'/);
+      await rejects([{ plugin_config_id: 'nope' }], NON_EXISTENT_PLUGIN_CONFIG);
+      await rejects([{ plugin_config_id: 'cfg-global' }], SCOPE_GLOBAL);
+      await rejects([{ plugin_config_id: onA.id }], TARGETED_PROXY_ASSOC);
       await rejects(
         [{ plugin_config_id: 'cfg-on-a' }, { plugin_config_id: 'cfg-on-a' }],
-        /more than once/,
+        MORE_THAN_ONCE,
       );
     });
 

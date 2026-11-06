@@ -5,6 +5,8 @@ import { MAX_SPEC_BYTES, MAX_SPEC_OPERATIONS } from '@ferrum-nexus/shared';
 import { RAW_SPEC } from '../../../test/fixtures';
 import { SpecEditor, isSpecValid, specProblem } from './SpecEditor';
 
+const OPENAPI_SPECIFICATION = /OpenAPI specification/;
+
 function Editor({ initialValue = '' }: { initialValue?: string }): ReactElement {
   const [value, setValue] = useState(initialValue);
   return <SpecEditor value={value} onChange={setValue} />;
@@ -56,7 +58,7 @@ afterEach(() => {
 describe('OpenAPI specification editor', () => {
   it('starts quietly, reports parse errors, and updates the summary when corrected', () => {
     render(<Editor />);
-    const input = screen.getByLabelText(/OpenAPI specification/);
+    const input = screen.getByLabelText(OPENAPI_SPECIFICATION);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByText('Valid')).not.toBeInTheDocument();
     fireEvent.change(input, { target: { value: '{ invalid JSON' } });
@@ -76,7 +78,7 @@ describe('OpenAPI specification editor', () => {
     const yaml = 'openapi: 3.0.3\ninfo:\n  title: YAML API\npaths: {}\n';
     render(<Editor initialValue={yaml} />);
     expect(screen.getByText('YAML API · 0 operations')).toBeInTheDocument();
-    expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(yaml);
+    expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(yaml);
     expect(isSpecValid(yaml)).toBe(true);
     expect(isSpecValid('plain text')).toBe(false);
     expect(isSpecValid('')).toBe(false);
@@ -95,15 +97,15 @@ describe('OpenAPI specification editor', () => {
     Object.defineProperty(file, 'text', { value: text });
     fireEvent.change(picker, { target: { files: [file] } });
     await waitFor(() => {
-      expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(RAW_SPEC);
+      expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(RAW_SPEC);
     });
     expect(picker.value).toBe('');
     fireEvent.change(picker, { target: { files: [] } });
     expect(text).toHaveBeenCalledTimes(1);
-    fireEvent.change(screen.getByLabelText(/OpenAPI specification/), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText(OPENAPI_SPECIFICATION), { target: { value: '' } });
     fireEvent.change(picker, { target: { files: [file] } });
     await waitFor(() => {
-      expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(RAW_SPEC);
+      expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(RAW_SPEC);
     });
     expect(text).toHaveBeenCalledTimes(2);
   });
@@ -167,13 +169,13 @@ describe('OpenAPI specification editor', () => {
     const upload = pendingFile('huge.json', MAX_SPEC_BYTES + 1);
     fireEvent.change(picker, { target: { files: [upload.file] } });
     expect(upload.text).not.toHaveBeenCalled();
-    expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(RAW_SPEC);
+    expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(RAW_SPEC);
     expect(screen.getByRole('alert')).toHaveTextContent(
       'huge.json is 2.00 MB, larger than the 2.00 MB limit. Choose a smaller document.',
     );
     expect(picker.value).toBe('');
     // Editing clears the notice.
-    fireEvent.change(screen.getByLabelText(/OpenAPI specification/), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText(OPENAPI_SPECIFICATION), { target: { value: '' } });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -184,7 +186,7 @@ describe('OpenAPI specification editor', () => {
     fireEvent.change(picker, { target: { files: [upload.file] } });
     expect(upload.text).toHaveBeenCalledTimes(1);
     await act(async () => upload.resolve(RAW_SPEC));
-    expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(RAW_SPEC);
+    expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(RAW_SPEC);
     expect(screen.getByText('Valid')).toBeInTheDocument();
   });
 
@@ -194,9 +196,9 @@ describe('OpenAPI specification editor', () => {
     const upload = pendingFile('old.json');
     fireEvent.change(picker, { target: { files: [upload.file] } });
     const typed = 'openapi: 3.0.3\ninfo:\n  title: Typed\npaths: {}\n';
-    fireEvent.change(screen.getByLabelText(/OpenAPI specification/), { target: { value: typed } });
+    fireEvent.change(screen.getByLabelText(OPENAPI_SPECIFICATION), { target: { value: typed } });
     await act(async () => upload.resolve(RAW_SPEC));
-    expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(typed);
+    expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(typed);
   });
 
   it('keeps the latest selected file when an earlier read finishes last', async () => {
@@ -208,9 +210,9 @@ describe('OpenAPI specification editor', () => {
     fireEvent.change(picker, { target: { files: [second.file] } });
     const latest = 'openapi: 3.0.3\ninfo:\n  title: B\npaths: {}\n';
     await act(async () => second.resolve(latest));
-    expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(latest);
+    expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(latest);
     await act(async () => first.resolve(RAW_SPEC));
-    expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(latest);
+    expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(latest);
   });
 
   it('drops a read superseded by a refused oversized selection', async () => {
@@ -222,7 +224,7 @@ describe('OpenAPI specification editor', () => {
     fireEvent.change(picker, { target: { files: [oversized.file] } });
     await act(async () => first.resolve(RAW_SPEC));
     expect(oversized.text).not.toHaveBeenCalled();
-    expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue('');
+    expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue('');
   });
 
   it('drops a read the parent draft or unmounting superseded', async () => {

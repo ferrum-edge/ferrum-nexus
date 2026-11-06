@@ -12,6 +12,16 @@ import {
   type FerrumAdminClient,
 } from './client.js';
 
+const NO_REQUEST_METRICS_API = /no request metrics for this API/;
+const NO_REQUEST_METRICS = /no request metrics/;
+const REACHED = /reached/;
+const DID_NOT_ALLOW_PORTAL = /did not allow this portal/;
+const FERRUM_VERSION_OR_NAMESPACE_HINT = /FERRUM_|v0\.9|namespace-scoped/;
+const NAMESPACE_SCOPED_ADMIN_TOKEN = /namespace-scoped admin token/;
+const METRICS_TOKEN_MENTION = /FERRUM_METRICS_BEARER_TOKEN/;
+const METRICS_TOKEN_MUST_EQUAL = /FERRUM_METRICS_BEARER_TOKEN must equal/;
+const FLEET_READ_SECRET_MENTION = /FERRUM_ADMIN_FLEET_READ_JWT_SECRET/;
+
 const SECRET = 'ferrum-admin-metrics-test-secret-0123456789';
 
 let edge: MockFerrumEdge;
@@ -148,7 +158,7 @@ describe('ferrum admin metrics', () => {
       const metrics = await freshClient().metrics.scrapeProxy('proxy-a');
 
       assert.equal(metrics.available, false);
-      assert.match(metrics.reason ?? '', /no request metrics for this API/);
+      assert.match(metrics.reason ?? '', NO_REQUEST_METRICS_API);
       assert.equal(metrics.requests.total, 0);
       assert.deepEqual(metrics.latency.buckets, []);
     });
@@ -165,7 +175,7 @@ describe('ferrum admin metrics', () => {
       edge.recordRequests('proxy-a', { method: 'GET', status: 200, count: 96 });
       const metrics = await freshClient().metrics.scrapeProxy('proxy-a');
       assert.equal(metrics.available, false);
-      assert.match(metrics.reason ?? '', /no request metrics/);
+      assert.match(metrics.reason ?? '', NO_REQUEST_METRICS);
     });
 
     it('ignores a matching proxy series in another namespace', async () => {
@@ -253,7 +263,7 @@ describe('ferrum admin metrics', () => {
       assert.equal(metrics.available, false);
       // The gateway answered: an unusable body, not an unreachable gateway.
       assert.equal(metrics.unavailableCode, 'gateway_error');
-      assert.doesNotMatch(metrics.reason ?? '', /reached/);
+      assert.doesNotMatch(metrics.reason ?? '', REACHED);
     });
   });
 
@@ -354,8 +364,8 @@ describe('ferrum admin metrics against a gateway that bounds ns-claim tokens', (
 
   /** A provider reads the reason: no setting names, no gateway versions. */
   function assertGeneric(reason: string | undefined): void {
-    assert.match(reason ?? '', /did not allow this portal/);
-    assert.doesNotMatch(reason ?? '', /FERRUM_|v0\.9|namespace-scoped/);
+    assert.match(reason ?? '', DID_NOT_ALLOW_PORTAL);
+    assert.doesNotMatch(reason ?? '', FERRUM_VERSION_OR_NAMESPACE_HINT);
   }
 
   before(async () => {
@@ -396,8 +406,8 @@ describe('ferrum admin metrics against a gateway that bounds ns-claim tokens', (
       assert.equal(metrics.unavailableCode, 'refused');
       assertGeneric(metrics.reason);
       // The operator's detail goes to the log.
-      assert.match(hintFor(log, '/metrics'), /namespace-scoped admin token/);
-      assert.match(hintFor(log, '/metrics'), /FERRUM_METRICS_BEARER_TOKEN/);
+      assert.match(hintFor(log, '/metrics'), NAMESPACE_SCOPED_ADMIN_TOKEN);
+      assert.match(hintFor(log, '/metrics'), METRICS_TOKEN_MENTION);
       assert.equal(metrics.requests.total, 0);
       const [call] = bounded.callsTo('GET', '/metrics');
       assert.equal(call?.claims?.ns, 'nexus');
@@ -431,7 +441,7 @@ describe('ferrum admin metrics against a gateway that bounds ns-claim tokens', (
       assert.equal(metrics.available, false);
       assert.equal(metrics.unavailableCode, 'refused');
       assertGeneric(metrics.reason);
-      assert.match(hintFor(log, '/metrics'), /FERRUM_METRICS_BEARER_TOKEN must equal/);
+      assert.match(hintFor(log, '/metrics'), METRICS_TOKEN_MUST_EQUAL);
       assert.equal(log.warnings[0]?.fields.credential, 'metrics_bearer');
     } finally {
       await client.close();
@@ -446,7 +456,7 @@ describe('ferrum admin metrics against a gateway that bounds ns-claim tokens', (
 
       assert.equal(state.available, false);
       assertGeneric(state.reason);
-      assert.match(hintFor(log, '/admin/metrics'), /namespace-scoped admin token/);
+      assert.match(hintFor(log, '/admin/metrics'), NAMESPACE_SCOPED_ADMIN_TOKEN);
       assert.deepEqual(state.breakers, []);
       assert.equal(state.uptimeSeconds, null);
     } finally {
@@ -478,7 +488,7 @@ describe('ferrum admin metrics against a gateway that bounds ns-claim tokens', (
 
       assert.equal(state.available, false);
       assertGeneric(state.reason);
-      assert.match(hintFor(log, '/admin/metrics'), /FERRUM_ADMIN_FLEET_READ_JWT_SECRET/);
+      assert.match(hintFor(log, '/admin/metrics'), FLEET_READ_SECRET_MENTION);
     } finally {
       await client.close();
     }

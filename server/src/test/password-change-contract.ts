@@ -20,6 +20,10 @@ import { isoInSeconds } from '../lib/ids.js';
 import { heldLeaseFences } from '../lib/lease-fence.js';
 import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './helpers.js';
 
+const RESET_TOKEN_LINK = /\/reset-password\?token=([A-Za-z0-9_-]+)/;
+const PASSWORD_CHANGED = /password was changed/i;
+const SIGN_AGAIN_YOUR_NEW = /sign in again with your new password/i;
+
 const CHANGED_PASSWORD = 'changed-password-for-the-owner';
 const RESET_PASSWORD = 'password-from-the-reset-link';
 const CONTEXT = { ip: null, userAgent: null };
@@ -94,7 +98,7 @@ export function runPasswordChangeContract(
       });
       assert.equal(response.statusCode, 200);
       const rows = (await harness.outbox()).filter((row) => row.to_email === session.user.email);
-      const match = /\/reset-password\?token=([A-Za-z0-9_-]+)/.exec(rows.at(-1)?.body_text ?? '');
+      const match = RESET_TOKEN_LINK.exec(rows.at(-1)?.body_text ?? '');
       assert.ok(match?.[1], 'a reset message was queued');
       return match[1];
     }
@@ -324,8 +328,8 @@ export function runPasswordChangeContract(
         (error: unknown) => {
           assert.ok(isNexusError(error));
           assert.equal(error.code, 'CONFLICT');
-          assert.match(error.message, /password was changed/i);
-          assert.match(error.message, /sign in again with your new password/i);
+          assert.match(error.message, PASSWORD_CHANGED);
+          assert.match(error.message, SIGN_AGAIN_YOUR_NEW);
           return true;
         },
       );

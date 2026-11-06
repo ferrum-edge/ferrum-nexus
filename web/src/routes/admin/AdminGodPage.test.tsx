@@ -5,6 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { organizationsApi } from '../../lib/api';
 import { AdminGodPage } from './AdminGodPage';
 
+const REASON = /^Reason/;
+const SUBJECT = /^Subject/;
+const MESSAGE = /^Message/;
+const HEX_KEY = /^[0-9a-f]{32}$/;
+
 const { revoke, remove, disable, sendBroadcast, recent } = vi.hoisted(() => ({
   revoke: vi.fn(),
   remove: vi.fn(),
@@ -55,6 +60,7 @@ afterEach(() => {
 });
 
 const oldest = '12345678-1234-4234-8234-123456789abc';
+const OLDEST_ID = new RegExp(oldest);
 
 function renderGodPage(): void {
   vi.spyOn(organizationsApi, 'list').mockResolvedValue({ items: [], total: 0 });
@@ -82,12 +88,12 @@ describe('emergency targets beyond the first page', () => {
     const send = [revoke, remove, disable][entry.index]!;
     expect(recent.some((record) => record.id === oldest)).toBe(false);
     fireEvent.change(screen.getByLabelText(entry.label), { target: { value: ` ${oldest} ` } });
-    fireEvent.change(screen.getAllByLabelText(/^Reason/)[entry.index]!, {
+    fireEvent.change(screen.getAllByLabelText(REASON)[entry.index]!, {
       target: { value: 'Reviewed emergency request' },
     });
     fireEvent.click(screen.getByRole('button', { name: entry.action }));
     const dialog = within(screen.getByRole('dialog'));
-    expect(dialog.getByText(new RegExp(oldest))).toBeInTheDocument();
+    expect(dialog.getByText(OLDEST_ID)).toBeInTheDocument();
     expect(dialog.getByRole('button', { name: entry.action })).toBeDisabled();
     expect(send).not.toHaveBeenCalled();
     fireEvent.change(dialog.getByPlaceholderText(entry.phrase), {
@@ -106,8 +112,8 @@ describe('broadcast email campaign identity', () => {
     vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) });
     renderGodPage();
     const compose = () => {
-      fireEvent.change(screen.getByLabelText(/^Subject/), { target: { value: 'Maintenance' } });
-      fireEvent.change(screen.getByLabelText(/^Message/), { target: { value: 'Sunday window' } });
+      fireEvent.change(screen.getByLabelText(SUBJECT), { target: { value: 'Maintenance' } });
+      fireEvent.change(screen.getByLabelText(MESSAGE), { target: { value: 'Sunday window' } });
       fireEvent.click(screen.getByRole('button', { name: 'Broadcast' }));
       const dialog = within(screen.getByRole('dialog'));
       fireEvent.change(dialog.getByPlaceholderText('BROADCAST'), {
@@ -117,7 +123,7 @@ describe('broadcast email campaign identity', () => {
     };
     compose();
     const firstKey = sendBroadcast.mock.calls[0]![0].idempotency_key;
-    expect(firstKey).toMatch(/^[0-9a-f]{32}$/);
+    expect(firstKey).toMatch(HEX_KEY);
     // A failed mutation leaves the dialog open and the form intact.
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Broadcast' }));
     expect(sendBroadcast.mock.calls[1]![0].idempotency_key).toBe(firstKey);
@@ -148,8 +154,8 @@ describe('broadcast audience', () => {
     renderGodPage();
     fireEvent.click(screen.getByLabelText('Filtered'));
     fireEvent.click(screen.getByRole('button', { name: 'All administrative roles' }));
-    fireEvent.change(screen.getByLabelText(/^Subject/), { target: { value: 'Rotate now' } });
-    fireEvent.change(screen.getByLabelText(/^Message/), { target: { value: 'Within an hour' } });
+    fireEvent.change(screen.getByLabelText(SUBJECT), { target: { value: 'Rotate now' } });
+    fireEvent.change(screen.getByLabelText(MESSAGE), { target: { value: 'Within an hour' } });
     fireEvent.click(screen.getByRole('button', { name: 'Broadcast' }));
     const dialog = within(screen.getByRole('dialog'));
     fireEvent.change(dialog.getByPlaceholderText('BROADCAST'), { target: { value: 'BROADCAST' } });

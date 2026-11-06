@@ -93,6 +93,8 @@ import { messageBudgetLockKey, type KeyedSerializer } from '../lib/keyed-seriali
 import type { NotificationsService } from '../notifications/service.js';
 import { presentApiSummary, type GatewayUrlSource } from '../publishing/present.js';
 
+const WHITESPACE_RUN = /\s+/g;
+
 /** Characters of the newest message shown in list previews and emails. */
 export const MESSAGE_PREVIEW_LENGTH = 160;
 
@@ -229,7 +231,7 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
   }
 
   function preview(body: string): string {
-    const flat = body.replace(/\s+/g, ' ').trim();
+    const flat = body.replace(WHITESPACE_RUN, ' ').trim();
     return flat.length <= MESSAGE_PREVIEW_LENGTH
       ? flat
       : `${flat.slice(0, MESSAGE_PREVIEW_LENGTH - 1)}…`;

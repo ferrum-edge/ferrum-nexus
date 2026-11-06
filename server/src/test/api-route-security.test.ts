@@ -20,13 +20,18 @@ import {
 import { CSRF_EXEMPT_PATHS } from '../middleware/auth-plugin.js';
 import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './helpers.js';
 
+const NONCE_ATTRIBUTE = /nonce="([^"]+)"/;
+const APPLICATION_JSON = /^application\/json/;
+const JAVASCRIPT = /javascript/;
+const ROUTE_PARAMETER = /:[^/]+/g;
+
 const API_PREFIXES = ['/api', '/%61pi', '/a%70i', '/ap%69', '/%61%70%69'];
 const SPA_TITLE = '<title>Nexus test shell</title>';
 const SPA = `<!doctype html><meta property="csp-nonce" nonce="${CSP_NONCE_PLACEHOLDER}">${SPA_TITLE}`;
 
 /** `body` is the test shell, templated with some per-response nonce. */
 function assertShell(body: string, path: string): void {
-  const nonce = /nonce="([^"]+)"/.exec(body)?.[1];
+  const nonce = NONCE_ATTRIBUTE.exec(body)?.[1];
   assert.ok(nonce && nonce !== CSP_NONCE_PLACEHOLDER, `${path} carries a nonce`);
   assert.equal(body, SPA.replace(CSP_NONCE_PLACEHOLDER, nonce), path);
 }
@@ -94,7 +99,7 @@ function socketRequest(
 function assertError(response: SocketResponse, status: number, code: string): void {
   assert.equal(response.statusCode, status, response.body);
   assert.equal((JSON.parse(response.body) as ApiErrorBody).error.code, code);
-  assert.match(String(response.headers['content-type']), /^application\/json/);
+  assert.match(String(response.headers['content-type']), APPLICATION_JSON);
   assert.equal(response.headers['cache-control'], 'no-store');
 }
 
@@ -166,7 +171,7 @@ describe('API route security over a listening socket', () => {
       const asset = await socketRequest(port, 'GET', '/assets/app-test.js?v=1', headers);
       assert.equal(asset.statusCode, 200);
       assert.equal(asset.body, ASSET);
-      assert.match(String(asset.headers['content-type']), /javascript/);
+      assert.match(String(asset.headers['content-type']), JAVASCRIPT);
       assert.equal(asset.headers['cache-control'], 'public, max-age=0');
       assert.equal(asset.headers['set-cookie'], undefined);
       assert.ok(asset.headers.etag);
@@ -305,7 +310,7 @@ describe('API route security over a listening socket', () => {
     const before = await snapshot();
     for (const { method, url } of protectedRoutes) {
       assert.ok(url.startsWith('/api/'), `mutation outside the API scope: ${method} ${url}`);
-      const path = url.replace(/:[^/]+/g, '00000000-0000-4000-8000-000000000001');
+      const path = url.replace(ROUTE_PARAMETER, '00000000-0000-4000-8000-000000000001');
       for (const prefix of API_PREFIXES) {
         const response = await socketRequest(
           port,

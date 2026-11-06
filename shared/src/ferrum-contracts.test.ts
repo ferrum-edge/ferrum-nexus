@@ -19,6 +19,9 @@ import {
   RETIRED_RESPONSE_CACHING,
 } from './plugins.js';
 
+const PIN_FILE_LINE = /^sha256: ([a-f0-9]{64})  ([\w./-]+)$/;
+const PIN_FILE_PREFIX = /^sha256: [a-f0-9]{64}  /;
+
 interface PluginCatalogContract {
   plugins: { name: string }[];
   removed_plugins: { name: string }[];
@@ -50,7 +53,7 @@ describe('pinned Ferrum contracts', () => {
     const digestLines = lines.slice(2);
     assert.ok(digestLines.length > 0, 'PIN must list the vendored contract file digests');
     for (const line of digestLines) {
-      const match = /^sha256: ([a-f0-9]{64})  ([\w./-]+)$/.exec(line);
+      const match = PIN_FILE_LINE.exec(line);
       assert.ok(match, `Invalid digest line in PIN: ${line}`);
       const expectedDigest = match[1];
       const relativePath = match[2];
@@ -66,7 +69,7 @@ describe('pinned Ferrum contracts', () => {
     }
 
     assert.deepEqual(
-      digestLines.map((line) => line.replace(/^sha256: [a-f0-9]{64}  /, '')).sort(),
+      digestLines.map((line) => line.replace(PIN_FILE_PREFIX, '')).sort(),
       [
         'fixtures/admin-deployment-mutation-acknowledgement/invalid/cleanup-not-boolean.json',
         'fixtures/admin-deployment-mutation-acknowledgement/invalid/durable-only-cleanup.json',

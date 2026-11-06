@@ -87,6 +87,8 @@ import { GATEWAY_PUBLIC_URL_RULE, normalizeGatewayPublicUrl } from '../lib/gatew
 import { newId, nowIso } from '../lib/ids.js';
 import { REGISTRATION_POLICY_LOCK_KEY, type KeyedSerializer } from '../lib/keyed-serializer.js';
 
+const HTTP_SCHEME = /^https?:\/\//i;
+
 /**
  * Sections of {@link UpdateSettingsRequest} that only a `super_admin` may touch.
  *
@@ -239,7 +241,7 @@ function readFooterLinks(value: unknown): BrandingLink[] {
     const record = asRecord(entry);
     const label = str(record.label);
     const url = str(record.url);
-    if (label === null || url === null || !/^https?:\/\//i.test(url)) continue;
+    if (label === null || url === null || !HTTP_SCHEME.test(url)) continue;
     links.push({ label, url });
     if (links.length >= MAX_BRANDING_FOOTER_LINKS) break;
   }

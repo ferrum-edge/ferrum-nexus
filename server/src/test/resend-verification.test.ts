@@ -16,6 +16,8 @@ import { type RegisterResponse, type ResendVerificationResponse } from '@ferrum-
 import { REGISTRATION_SETTINGS_KEY } from '../auth/service.js';
 import { buildTestApp, TEST_PASSWORD, type TestApp } from './helpers.js';
 
+const VERIFY_TOKEN_LINK = /\/verify-email\?token=([A-Za-z0-9_-]+)/;
+
 /** The body every `resend-verification` call must produce. */
 const OK_BODY = { ok: true };
 
@@ -82,7 +84,7 @@ describe('verification resend', () => {
     await harness.tick();
     const first = harness.mailbox.sent.find((mail) => mail.to === 'lost-the-link@example.test');
     assert.ok(first);
-    const firstToken = /\/verify-email\?token=([A-Za-z0-9_-]+)/.exec(first.text)?.[1] ?? '';
+    const firstToken = VERIFY_TOKEN_LINK.exec(first.text)?.[1] ?? '';
     assert.ok(firstToken);
 
     // Age the registration token past the throttle window so the resend runs
@@ -113,7 +115,7 @@ describe('verification resend', () => {
       .filter((mail) => mail.to === 'lost-the-link@example.test')
       .at(-1);
     assert.ok(second);
-    const secondToken = /\/verify-email\?token=([A-Za-z0-9_-]+)/.exec(second.text)?.[1] ?? '';
+    const secondToken = VERIFY_TOKEN_LINK.exec(second.text)?.[1] ?? '';
     assert.notEqual(secondToken, firstToken, 'the resend minted a new token');
 
     // Superseded: only one verification link for an address is ever live.

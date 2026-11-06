@@ -44,6 +44,12 @@ import {
 
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const RECONCILE_CONSUMER = /reconcile this consumer/;
+const RECONCILE_STEER = /reconcile/;
+const NO_LONGER_HOLDS = /no longer holds it/;
+const COULD_NOT_TAKEN_BACK = /could not be taken back/;
+const HMAC_PASSWORD_HASH = /^hmac_sha256:[0-9a-f]{64}$/;
+
 function errorOf(body: string): ApiErrorBody['error'] {
   return (JSON.parse(body) as ApiErrorBody).error;
 }
@@ -334,10 +340,10 @@ describe('credential durability across a lost gateway write', () => {
 
     const rotated = await rotate(user, second.credential.id);
     assert.equal(rotated.statusCode, 502, rotated.body);
-    assert.match(errorOf(rotated.body).message, /reconcile this consumer/);
+    assert.match(errorOf(rotated.body).message, RECONCILE_CONSUMER);
     const revoked = await revoke(user, second.credential.id);
     assert.equal(revoked.statusCode, 502, revoked.body);
-    assert.match(errorOf(revoked.body).message, /reconcile this consumer/);
+    assert.match(errorOf(revoked.body).message, RECONCILE_CONSUMER);
     assert.equal(await statusOf(first.credential.id), 'active');
     assert.equal(await statusOf(second.credential.id), 'active');
   });
@@ -358,7 +364,7 @@ describe('credential durability across a lost gateway write', () => {
     // every remaining position out by one.
     const revoked = await revoke(user, second.credential.id);
     assert.equal(revoked.statusCode, 502, revoked.body);
-    assert.match(errorOf(revoked.body).message, /reconcile this consumer/);
+    assert.match(errorOf(revoked.body).message, RECONCILE_CONSUMER);
     assert.equal(await statusOf(first.credential.id), 'retiring');
     assert.equal(await statusOf(second.credential.id), 'retiring');
     assert.equal(liveKeys(user.user.id).length, 1, 'nothing was deleted');
@@ -471,10 +477,10 @@ describe('credential durability across a lost gateway write', () => {
     const error = errorOf(rotated.body);
     assert.doesNotMatch(
       error.message,
-      /reconcile/,
+      RECONCILE_STEER,
       'no destructive steer for a self-healing state',
     );
-    assert.match(error.message, /no longer holds it/);
+    assert.match(error.message, NO_LONGER_HOLDS);
     const details = error.details as Record<string, unknown> | undefined;
     const stranded = details?.stranded_credential_id;
     assert.ok(typeof stranded === 'string', 'the error names the credential to revoke');
@@ -505,7 +511,7 @@ describe('credential durability across a lost gateway write', () => {
     const rotated = await rotate(user, original.credential.id);
     assert.equal(rotated.statusCode, 502, rotated.body);
     const error = errorOf(rotated.body);
-    assert.match(error.message, /could not be taken back/);
+    assert.match(error.message, COULD_NOT_TAKEN_BACK);
     const details = error.details as Record<string, unknown> | undefined;
     const stranded = details?.stranded_credential_id;
     assert.ok(typeof stranded === 'string', 'the error names the credential to clean up');
@@ -596,7 +602,7 @@ describe('credential durability across a lost gateway write', () => {
       .callsTo('POST', `/consumers/${consumerId}/credentials/basicauth`)
       .at(-1);
     const password = (append?.body as { password: string }).password;
-    assert.match(passwords[1]!, /^hmac_sha256:[0-9a-f]{64}$/);
+    assert.match(passwords[1]!, HMAC_PASSWORD_HASH);
     assert.equal(rollback[0]?.details.last4, password.slice(-4));
     assert.equal(rollback[0]?.ip, '127.0.0.1', 'and the address that caused it');
     const stranded = rollback[0]?.details.stranded_credential_id;

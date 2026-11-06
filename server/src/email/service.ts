@@ -55,6 +55,9 @@ import {
   type TemplateVars,
 } from './templates.js';
 
+const DOMAIN_CHARACTER = /[A-Za-z0-9.:-]/;
+const WHITESPACE_OR_ANGLE_BRACKET = /[\s<>]/;
+
 /* ── Transport abstraction ──────────────────────────────────────────────── */
 
 /** One outbound message handed to a {@link MailTransport}. */
@@ -247,7 +250,7 @@ function assertSingleMailboxRecipient(to: string): void {
         else if (chr === ')') commentDepth--;
       } else if (literal) {
         if (chr === ']') literal = false;
-        else if (!/[A-Za-z0-9.:-]/.test(chr)) reason = 'recipient has a malformed domain literal';
+        else if (!DOMAIN_CHARACTER.test(chr)) reason = 'recipient has a malformed domain literal';
       } else if (chr === '(') {
         commentDepth = 1;
       } else if (chr === ' ' || chr === '\t' || chr === '\r' || chr === '\n') {
@@ -339,7 +342,7 @@ export function createSmtpTransport(
       // the domain is checked; a quoted local part may hold spaces.
       const envelopeAddress = envelopeTo[0] ?? '';
       const envelopeDomain = envelopeAddress.slice(envelopeAddress.lastIndexOf('@') + 1);
-      if (envelopeTo.length !== 1 || /[\s<>]/.test(envelopeDomain)) {
+      if (envelopeTo.length !== 1 || WHITESPACE_OR_ANGLE_BRACKET.test(envelopeDomain)) {
         throw Object.assign(new Error('Invalid SMTP recipient: expected exactly one mailbox'), {
           code: 'EENVELOPE',
         });

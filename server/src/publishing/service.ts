@@ -353,6 +353,9 @@ import {
   writeRecoveryJournal,
 } from './recovery-storage.js';
 
+const SCHEME_ORIGIN = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^*\s]+$/;
+const REGEX_SPECIAL_CHARACTERS = /[\\.+*?()|[\]{}^$#&\-~]/g;
+
 /** What a spec revision's gateway-and-store step committed. */
 interface AppliedRevision {
   spec: ApiSpecRecord;
@@ -803,9 +806,7 @@ export function proxyAllowedMethods(
 export function wsOriginsFor(cors: CorsConfig | null): string[] {
   if (!cors || cors.enforce_websocket_origins === false) return [];
   if (cors.allowed_origins.includes('*')) return [];
-  return cors.allowed_origins.filter((origin) =>
-    /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^*\s]+$/.test(origin),
-  );
+  return cors.allowed_origins.filter((origin) => SCHEME_ORIGIN.test(origin));
 }
 
 /** The proxy fields the three timeout settings map onto. */
@@ -1850,7 +1851,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     document: Record<string, unknown>,
     listenPath: string,
   ): Record<string, unknown>[] {
-    const escape = (literal: string): string => literal.replace(/[\\.+*?()|[\]{}^$#&\-~]/g, '\\$&');
+    const escape = (literal: string): string => literal.replace(REGEX_SPECIAL_CHARACTERS, '\\$&');
     return agentOperations(document).map(({ method, path }) => {
       const tail = path === '/' ? '' : path;
       let regex = '^' + escape(listenPath);

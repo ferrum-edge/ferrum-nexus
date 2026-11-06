@@ -9,6 +9,10 @@ import { createCrypto, deriveKey, encryptJsonWithKey, SETTINGS_KEY_INFO } from '
 import { createKeyedSerializer } from '../lib/keyed-serializer.js';
 import { bindLegacyEncryptedSettings, rotateEncryptedSettings } from './rotate-key.js';
 
+const DO_NOT_OPEN_NEXUS = /do not open with NEXUS_SECRET_KEY_PREVIOUS/;
+const NOTHING_CHANGED = /nothing was changed/;
+const SMTP_PASSWORD = /smtp\.password/;
+
 const OLD_KEY = 'old-master-key-0123456789abcdef0123456789abcdef';
 const NEW_KEY = 'new-master-key-fedcba9876543210fedcba9876543210';
 
@@ -73,8 +77,8 @@ describe('rotateEncryptedSettings', () => {
   it('refuses to run twice, and changes nothing when the previous key is wrong', async () => {
     const before = await store.settings.get('smtp.password');
     await assert.rejects(rotateEncryptedSettings(store, previous, next), (error: Error) => {
-      assert.match(error.message, /do not open with NEXUS_SECRET_KEY_PREVIOUS/);
-      assert.match(error.message, /nothing was changed/);
+      assert.match(error.message, DO_NOT_OPEN_NEXUS);
+      assert.match(error.message, NOTHING_CHANGED);
       return true;
     });
     assert.deepEqual(await store.settings.get('smtp.password'), before);
@@ -143,7 +147,7 @@ describe('bindLegacyEncryptedSettings', () => {
     await assert.rejects(
       bindLegacyEncryptedSettings(store, createCrypto(NEW_KEY), audit, locksFor(store)),
       (error: Error) => {
-        assert.match(error.message, /smtp\.password/);
+        assert.match(error.message, SMTP_PASSWORD);
         return true;
       },
     );
@@ -184,7 +188,7 @@ describe('bindLegacyEncryptedSettings', () => {
     await assert.rejects(
       rotateEncryptedSettings(store, crypto, createCrypto(NEW_KEY)),
       (error: Error) => {
-        assert.match(error.message, /smtp\.password/);
+        assert.match(error.message, SMTP_PASSWORD);
         return true;
       },
     );

@@ -6,6 +6,10 @@ import { after, before, describe, it } from 'node:test';
 
 import { assertEnvFileKeyConsistent } from './rotate-key-cli.js';
 
+const ENV_FILE = /\.env file at /;
+const NEXUS_SECRET_KEY_MENTION = /NEXUS_SECRET_KEY/;
+const ALLOW_ENV_MISMATCH = /--allow-env-mismatch/;
+
 const KEY_A = 'a'.repeat(32);
 const KEY_B = 'b'.repeat(32);
 
@@ -29,9 +33,9 @@ describe('rotate-key-cli — .env key consistency guard', () => {
       assert.fail('expected the guard to refuse the key mismatch');
     } catch (error) {
       assert.ok(error instanceof Error, 'expected an Error');
-      assert.match(error.message, /\.env file at /);
-      assert.match(error.message, /NEXUS_SECRET_KEY/);
-      assert.match(error.message, /--allow-env-mismatch/);
+      assert.match(error.message, ENV_FILE);
+      assert.match(error.message, NEXUS_SECRET_KEY_MENTION);
+      assert.match(error.message, ALLOW_ENV_MISMATCH);
     }
   });
 

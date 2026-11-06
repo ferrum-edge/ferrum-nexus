@@ -9,6 +9,8 @@ import { isNexusError } from '../lib/errors.js';
 import { isoInSeconds, nowIso } from '../lib/ids.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp } from './helpers.js';
 
+const MAPPING_UNAVAILABLE = /mapping unavailable/;
+
 function barrier() {
   let release!: () => void;
   const promise = new Promise<void>((resolve) => {
@@ -141,7 +143,7 @@ it('adopts the same remote identity after local mapping persistence fails', asyn
     h.store.consumers.create = async () => {
       throw new Error('mapping unavailable');
     };
-    await assert.rejects(provisioner.ensureConsumer(user.user), /mapping unavailable/);
+    await assert.rejects(provisioner.ensureConsumer(user.user), MAPPING_UNAVAILABLE);
     const remote = h.edge.consumerByUsername(consumerUsernameForUser(user.user.id));
     assert.ok(remote);
     assert.equal(await provisioner.findConsumer(user.user.id), null);

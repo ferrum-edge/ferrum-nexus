@@ -15,6 +15,11 @@ import { CSRF_COOKIE, SESSION_COOKIE } from '@ferrum-nexus/shared';
 
 import { buildTestApp, TEST_BOOTSTRAP_TOKEN, TEST_PASSWORD, type TestApp } from './helpers.js';
 
+const SECURE_ATTRIBUTE = /; Secure/;
+const HTTPONLY_ATTRIBUTE = /; HttpOnly/;
+const HTTPONLY_MENTION = /HttpOnly/;
+const ONE_YEAR_MAX_AGE = /max-age=31536000/;
+
 /** Raw `Set-Cookie` headers of a response, as strings. */
 function setCookies(headers: Record<string, unknown>): string[] {
   const raw = headers['set-cookie'];
@@ -252,10 +257,10 @@ describe('cookie policy', () => {
 
       const session = cookieHeaderFor(response.headers, SESSION_COOKIE);
       const csrf = cookieHeaderFor(response.headers, CSRF_COOKIE);
-      assert.match(session, /; Secure/);
-      assert.match(session, /; HttpOnly/);
-      assert.match(csrf, /; Secure/);
-      assert.ok(!/HttpOnly/.test(csrf), 'the double-submit token has to be readable');
+      assert.match(session, SECURE_ATTRIBUTE);
+      assert.match(session, HTTPONLY_ATTRIBUTE);
+      assert.match(csrf, SECURE_ATTRIBUTE);
+      assert.ok(!HTTPONLY_MENTION.test(csrf), 'the double-submit token has to be readable');
     } finally {
       await harness.close();
     }
@@ -280,8 +285,8 @@ describe('cookie policy', () => {
         },
       });
       assert.equal(response.statusCode, 201, response.body);
-      assert.ok(!/; Secure/.test(cookieHeaderFor(response.headers, SESSION_COOKIE)));
-      assert.ok(!/; Secure/.test(cookieHeaderFor(response.headers, CSRF_COOKIE)));
+      assert.ok(!SECURE_ATTRIBUTE.test(cookieHeaderFor(response.headers, SESSION_COOKIE)));
+      assert.ok(!SECURE_ATTRIBUTE.test(cookieHeaderFor(response.headers, CSRF_COOKIE)));
     } finally {
       await harness.close();
     }
@@ -311,10 +316,10 @@ describe('cookie policy', () => {
         },
       });
       assert.equal(response.statusCode, 201, response.body);
-      assert.match(cookieHeaderFor(response.headers, SESSION_COOKIE), /; Secure/);
+      assert.match(cookieHeaderFor(response.headers, SESSION_COOKIE), SECURE_ATTRIBUTE);
       assert.match(
         String(response.headers['strict-transport-security'] ?? ''),
-        /max-age=31536000/,
+        ONE_YEAR_MAX_AGE,
         'HSTS follows the cookie decision',
       );
     } finally {

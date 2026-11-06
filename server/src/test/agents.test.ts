@@ -19,6 +19,15 @@ import type { EdgePluginConfigWrite } from '../ferrum-admin/types.js';
 import { stampAgentDocument } from '../publishing/agents.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const ALREADY_HAS_GATEWAY_PROXY = /already has a gateway proxy/;
+const AGENT_TOOL_CHANGED_LIST = /agent tool changed \(list_items\)/;
+const TWO_AGENT_TOOLS_CHANGED = /2 agent tools changed \(list_items, remove\)/;
+const CHANGED_AGENT_TOOLS = /changed its agent tools/;
+const ONE_AGENT_TOOL_CHANGED = /1 agent tool changed \(list_items\)\./;
+const REQUEST_YOUR_EXISTING_GRANT = /request it on your existing grant/;
+const RENAMED_1_AGENT_TOOL = /renamed 1 agent tool \(list_items to items_list\)/;
+const OVER_OPERATION_LIMIT = new RegExp(`more than ${MAX_SPEC_OPERATIONS} operations`);
+
 const AGENTS: ApiAgents = {
   operations: [{ path: '/items', method: 'GET', name: 'list_items', description: 'List items' }],
 };
@@ -316,7 +325,7 @@ describe('agent publishing and Nexus authorization', () => {
     });
     assert.equal(refused.statusCode, 400, refused.body);
     assert.equal(refused.json<{ error: { code: string } }>().error.code, 'SPEC_INVALID');
-    assert.match(refused.body, new RegExp(`more than ${MAX_SPEC_OPERATIONS} operations`));
+    assert.match(refused.body, OVER_OPERATION_LIMIT);
 
     // Without agents the document is admitted, and every check of the live
     // deployment reads all of its routes: none of them is capped.
@@ -327,7 +336,7 @@ describe('agent publishing and Nexus authorization', () => {
       payload: {},
     });
     assert.equal(restored.statusCode, 409, restored.body);
-    assert.match(restored.body, /already has a gateway proxy/);
+    assert.match(restored.body, ALREADY_HAS_GATEWAY_PROXY);
     const converted = await harness.authed(provider, {
       method: 'PATCH',
       url: `/api/apis/${routes.id}`,
@@ -1192,7 +1201,7 @@ describe('agent publishing and Nexus authorization', () => {
       type: 'api_spec_updated',
     });
     assert.equal(notices.total, 1);
-    assert.match(notices.items[0]?.body ?? '', /agent tool changed \(list_items\)/);
+    assert.match(notices.items[0]?.body ?? '', AGENT_TOOL_CHANGED_LIST);
   });
 
   it('treats a description-only revision as a changed tool definition', async () => {
@@ -1232,7 +1241,7 @@ describe('agent publishing and Nexus authorization', () => {
       type: 'api_spec_updated',
     });
     assert.equal(notices.total, 1);
-    assert.match(notices.items[0]?.body ?? '', /2 agent tools changed \(list_items, remove\)/);
+    assert.match(notices.items[0]?.body ?? '', TWO_AGENT_TOOLS_CHANGED);
   });
 
   it('keeps the ids of tools a revision leaves alone, and redefines on a description edit', async () => {
@@ -1293,10 +1302,10 @@ describe('agent publishing and Nexus authorization', () => {
       user_id: f.grantee.user.id,
       type: 'system',
     });
-    const told = notices.items.filter((notice) => /changed its agent tools/.test(notice.title));
+    const told = notices.items.filter((notice) => CHANGED_AGENT_TOOLS.test(notice.title));
     assert.equal(told.length, 1);
-    assert.match(told[0]?.body ?? '', /1 agent tool changed \(list_items\)\./);
-    assert.match(told[0]?.body ?? '', /request it on your existing grant/);
+    assert.match(told[0]?.body ?? '', ONE_AGENT_TOOL_CHANGED);
+    assert.match(told[0]?.body ?? '', REQUEST_YOUR_EXISTING_GRANT);
   });
 
   it('compares a tool stored without a hash against the revision it was published with', async () => {
@@ -1843,12 +1852,12 @@ describe('agent publishing and Nexus authorization', () => {
         user_id: subject.user.id,
         type: 'system',
       });
-      return notices.items.filter((notice) => /changed its agent tools/.test(notice.title));
+      return notices.items.filter((notice) => CHANGED_AGENT_TOOLS.test(notice.title));
     }
     const notices = await told(f.grantee);
     assert.equal(notices.length, 1);
-    assert.match(notices[0]?.body ?? '', /renamed 1 agent tool \(list_items to items_list\)/);
-    assert.match(notices[0]?.body ?? '', /request it on your existing grant/);
+    assert.match(notices[0]?.body ?? '', RENAMED_1_AGENT_TOOL);
+    assert.match(notices[0]?.body ?? '', REQUEST_YOUR_EXISTING_GRANT);
     // An all-tools grant keeps the tool under its new name, so it is not told.
     assert.equal((await harness.store.grants.findById(wholeGrant.id))?.approved_tools, null);
     assert.deepEqual(await told(whole), []);

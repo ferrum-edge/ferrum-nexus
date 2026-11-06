@@ -38,6 +38,25 @@ import {
   publicEgressPolicy,
 } from './mock-ferrum-edge.js';
 
+const TRAILING_BRACE = /}\s*$/;
+const SERVERS_0_URL_NESTING = /servers\[0\]\.url|nesting limit/;
+const UNKNOWN_FIELD_UPSTREAM_URL = /unknown field upstream_url/;
+const X_API_KEY = /X-API-Key/;
+const AUTHORIZATION = /Authorization/;
+const X_TENANT = /X-Tenant/;
+const ALLOWED_ORIGINS_ORIGINS = /allowed_origins|origins/;
+const FERRUM_BASIC_AUTH_HMAC = /FERRUM_BASIC_AUTH_HMAC_SECRET/;
+const X_OPERATOR = /X-Operator/;
+const X_PORTAL = /X-Portal/;
+const SECURITY_HEADERS = /security_headers/;
+const OPENAPI_VALIDATOR_REQUIRES_PROXY =
+  /openapi_validator requires a proxy with an attached api_spec/;
+const NEXUS_STAGE_INVOKE = /\/nexus\/stage-invoke$/;
+const DELETE_API_ADMINISTRATOR = /Delete an API|administrator/;
+const BILLING_V2_UPSTREAM = /billing\.example\.com:8443\/v2/;
+/** `/nexus/.staging/<128 bits of hex>` — see `stagingListenPath`. */
+const STAGING_PATH = /^\/nexus\/\.staging\/[0-9a-f]{32}$/;
+
 const CORS_HEADERS = [
   'Accept',
   'Authorization',
@@ -270,7 +289,7 @@ describe('publishing', () => {
 
     it('refuses oversized derived URLs and excessive nesting before any gateway call', async () => {
       const deep = SAMPLE_SPEC_JSON.replace(
-        /}\s*$/,
+        TRAILING_BRACE,
         `,"x-deep":${'{"child":'.repeat(MAX_SPEC_DEPTH)}0${'}'.repeat(MAX_SPEC_DEPTH)}}`,
       );
       const expanded = JSON.parse(SAMPLE_SPEC_JSON) as Record<string, unknown>;
@@ -295,7 +314,7 @@ describe('publishing', () => {
           });
           assert.equal(response.statusCode, 400, response.body);
           assert.equal(errorCode(response.body), 'SPEC_INVALID');
-          assert.match(response.body, /servers\[0\]\.url|nesting limit/);
+          assert.match(response.body, SERVERS_0_URL_NESTING);
         }
       }
       assert.equal(harness.edge.requests.length, before);
@@ -304,7 +323,7 @@ describe('publishing', () => {
     it('publishes at the nesting boundary and converts the document to routes', async () => {
       const levels = MAX_SPEC_DEPTH - 1;
       const spec = SAMPLE_SPEC_JSON.replace(
-        /}\s*$/,
+        TRAILING_BRACE,
         `,"x-deep":${'{"child":'.repeat(levels)}0${'}'.repeat(levels)}}`,
       );
       const published = await harness.authed(provider, {
@@ -342,7 +361,7 @@ describe('publishing', () => {
       assert.equal(response.statusCode, 400, response.body);
       const body = response.json<ApiErrorBody>();
       assert.equal(body.error.code, 'EDGE_REJECTED_SPEC');
-      assert.match(body.error.message, /unknown field upstream_url/);
+      assert.match(body.error.message, UNKNOWN_FIELD_UPSTREAM_URL);
       assert.equal(
         (body.error.details as { gateway_code: string }).gateway_code,
         'MalformedExtension',
@@ -420,10 +439,7 @@ describe('publishing', () => {
       // …and the proxy was *created* on a staging path, not this one. The
       // deterministic path is taken by the last write of the publish, once
       // every plugin above is associated — see the staged-cutover suite.
-      assert.match(
-        String((writes[0]?.body as Record<string, unknown>).listen_path),
-        /^\/nexus\/\.staging\/[0-9a-f]{32}$/,
-      );
+      assert.match(String((writes[0]?.body as Record<string, unknown>).listen_path), STAGING_PATH);
 
       const audit = await harness.auditRows('api.publish');
       const row = audit.find((entry) => entry.target_id === body.api.id);
@@ -627,9 +643,9 @@ describe('publishing', () => {
         const preflight = mockCorsPreflight(plugin?.config as Record<string, unknown>);
         assert.match(
           preflight['access-control-allow-headers'] ?? '',
-          authPlugin === 'key_auth' ? /X-API-Key/ : /Authorization/,
+          authPlugin === 'key_auth' ? X_API_KEY : AUTHORIZATION,
         );
-        assert.match(preflight['access-control-allow-headers'] ?? '', /X-Tenant/);
+        assert.match(preflight['access-control-allow-headers'] ?? '', X_TENANT);
         assert.equal(preflight['access-control-allow-methods'], 'GET, OPTIONS');
         assert.equal(mockWebsocketAllowed(storedProxy(harness, proxyId)), false);
         assert.equal(
@@ -655,7 +671,7 @@ describe('publishing', () => {
     }
 
     it('models native CORS defaults and absence independently of Nexus derivation', () => {
-      assert.doesNotMatch(mockCorsPreflight({})['access-control-allow-headers'] ?? '', /X-API-Key/);
+      assert.doesNotMatch(mockCorsPreflight({})['access-control-allow-headers'] ?? '', X_API_KEY);
       assert.equal(mockCorsPreflight({})['access-control-allow-methods'], CORS_METHODS.join(', '));
       assert.deepEqual(mockCorsPreflight(undefined), {});
     });
@@ -1166,7 +1182,7 @@ describe('publishing', () => {
             (issue) =>
               issue.path.startsWith('cors.allowed_origins') ||
               issue.path.startsWith('cors.origins') ||
-              /allowed_origins|origins/.test(issue.message),
+              ALLOWED_ORIGINS_ORIGINS.test(issue.message),
           ),
           response.body,
         );
@@ -1247,7 +1263,7 @@ describe('publishing', () => {
 
       const body = JSON.parse(response.body) as ApiErrorBody;
       assert.equal(body.error.code, 'EDGE_ERROR');
-      assert.match(body.error.message, /FERRUM_BASIC_AUTH_HMAC_SECRET/);
+      assert.match(body.error.message, FERRUM_BASIC_AUTH_HMAC);
       const details = body.error.details as { status: number; gateway_message: string };
       assert.equal(details.status, 400);
       assert.equal(details.gateway_message, gatewayText);
@@ -2084,7 +2100,7 @@ describe('publishing', () => {
       assert.match(
         mockCorsPreflight(authConfig as Record<string, unknown>)['access-control-allow-headers'] ??
           '',
-        /X-API-Key/,
+        X_API_KEY,
       );
 
       const cleared = await harness.authed(provider, {
@@ -2097,8 +2113,8 @@ describe('publishing', () => {
       assert.equal(cleared.statusCode, 200, cleared.body);
       const live = harness.edge.pluginForProxy(proxyId, 'cors');
       const headers = mockCorsPreflight(live?.config as Record<string, unknown>);
-      assert.match(headers['access-control-allow-headers'] ?? '', /X-Operator/);
-      assert.doesNotMatch(headers['access-control-allow-headers'] ?? '', /X-Portal/);
+      assert.match(headers['access-control-allow-headers'] ?? '', X_OPERATOR);
+      assert.doesNotMatch(headers['access-control-allow-headers'] ?? '', X_PORTAL);
       assert.equal((live?.config as Record<string, unknown>).max_age, 600);
       assert.equal(live?.priority_override, 90);
     });
@@ -3261,7 +3277,7 @@ describe('publishing', () => {
       >;
       assert.match(
         String((imported['x-ferrum-proxy'] as Record<string, unknown>).listen_path),
-        /^\/nexus\/\.staging\/[0-9a-f]{32}$/,
+        STAGING_PATH,
       );
       assert.deepEqual(imported.servers, [{ url: '/' }]);
 
@@ -3639,7 +3655,7 @@ describe('publishing', () => {
         url: `/api/apis/${apiId}/plugins`,
       });
       assert.equal(listed.statusCode, 200, listed.body);
-      assert.match(listed.body, /security_headers/);
+      assert.match(listed.body, SECURITY_HEADERS);
     });
 
     it("keeps an operator's hand-edit to the auth plugin across both conversions", async () => {
@@ -3923,10 +3939,7 @@ describe('publishing', () => {
       // One proxy, under the same id, still parked on its staging path: the
       // real path answers 404 rather than open.
       assert.equal(harness.edge.proxies.size, 1);
-      assert.match(
-        String(storedProxy(harness, proxyId).listen_path),
-        /^\/nexus\/\.staging\/[0-9a-f]{32}$/,
-      );
+      assert.match(String(storedProxy(harness, proxyId).listen_path), STAGING_PATH);
       assert.equal(harness.edge.proxyServing(`/nexus/${slug}`), undefined);
       assert.ok(effectiveNames(harness, proxyId).includes('key_auth'));
 
@@ -4382,10 +4395,7 @@ describe('publishing', () => {
               ],
             },
           }),
-        (error: unknown) =>
-          /openapi_validator requires a proxy with an attached api_spec/.test(
-            (error as Error).message,
-          ),
+        (error: unknown) => OPENAPI_VALIDATOR_REQUIRES_PROXY.test((error as Error).message),
       );
     });
   });
@@ -4406,9 +4416,6 @@ describe('publishing', () => {
    * is never taken by a proxy that is not finished.
    */
   describe('staged listen-path cutover', () => {
-    /** `/nexus/.staging/<128 bits of hex>` — see `stagingListenPath`. */
-    const STAGING_PATH = /^\/nexus\/\.staging\/[0-9a-f]{32}$/;
-
     /** One recorded gateway write that put a proxy on a listen path. */
     interface PathWrite {
       /** Index in `harness.edge.requests`, so writes can be ordered. */
@@ -4789,7 +4796,7 @@ describe('publishing', () => {
       assert.equal(api.listen_path, '/nexus/stage-invoke');
       // `invoke_url`, when the deployment has a gateway URL configured, is the
       // real path too — a staging path must never escape into the portal.
-      if (api.invoke_url !== null) assert.match(api.invoke_url, /\/nexus\/stage-invoke$/);
+      if (api.invoke_url !== null) assert.match(api.invoke_url, NEXUS_STAGE_INVOKE);
 
       const detail = await harness.authed(provider, {
         method: 'GET',
@@ -5265,7 +5272,7 @@ describe('per-owner API quota', () => {
       setting: 'NEXUS_MAX_APIS_PER_OWNER',
     });
     // A provider has to be able to act on it without reading the source.
-    assert.match(body.error.message, /Delete an API|administrator/);
+    assert.match(body.error.message, DELETE_API_ADMINISTRATOR);
 
     // Refused before the first gateway write, so there is nothing to roll back
     // and nothing half-created — not a proxy, not a plugin, not a slug.
@@ -5555,7 +5562,7 @@ describe('spec upstream following', () => {
         'https://billing.example.com:8443/v2',
       );
       const current = await harness.store.apiSpecs.findCurrentByApi(apiId);
-      assert.match(String(current?.raw_spec), /billing\.example\.com:8443\/v2/);
+      assert.match(String(current?.raw_spec), BILLING_V2_UPSTREAM);
 
       // The next revision still follows: the rollback did not pin anything.
       await revise(apiId, 'https://billing.example.com:8443/v3');

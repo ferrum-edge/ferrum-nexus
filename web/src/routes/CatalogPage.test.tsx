@@ -32,6 +32,44 @@ import { accessRequestsApi, applicationsApi, catalogApi, grantsApi, threadsApi }
 import { CatalogDetailPage } from './CatalogDetailPage';
 import { CatalogPage } from './CatalogPage';
 
+const BILLING_API = /Billing API/;
+const NOT_PUBLISHED_ASK_YOUR = /Not published — ask your administrator/;
+const REPLACED_V2_0_0 = /replaced v2\.0\.0/;
+const NO_STRUCTURAL_DIFFERENCES_FOUND = /No structural differences found/;
+const STRUCTURAL_COMPARISON = /structural comparison/;
+const COMPARISON_INCOMPLETE = /This comparison is incomplete/;
+const WHY_DO_YOU_NEED_ACCESS = /Why do you need access/;
+const ACCESS_GRANTED_YOUR_ACCOUNT = /Access granted to your account/;
+const MANAGE_YOUR_CREDENTIALS = /Manage your credentials/;
+const STOPS_ACCEPTING_CALLS_API = /stops accepting calls to this API from your account/;
+const REQUEST_ACCESS_WAIT_APPROVAL = /request access and wait for approval/;
+const NO_APPROVAL_NEEDED = /No approval needed/;
+const PORTAL_HAS_NO_GATEWAY = /This portal has no gateway address configured/;
+const EXPLAIN_YOUR_USE_CASE = /Explain your use case/;
+const RETIRED_NO_LONGER_ACCEPTING = /retired and is no longer accepting new access requests/i;
+const ACCESS_GRANTED_APPLICATION = /Access granted to Application A/;
+const SUBJECT = /Subject/;
+const MESSAGE = /Message/;
+const REQUEST_APPLICATION_AWAITING_REVIEW = /The request for Application A is awaiting review/;
+const ONLY_APPLICATION_GATEWAY_CONSUMER = /Only Application A’s gateway consumer carries/;
+const CREDENTIALS_ISSUED_YOUR_ACCOUNT =
+  /credentials issued to your account or your other applications cannot/;
+const ACCESS_GRANTED = /Access granted/;
+const APPLICATION_DISABLED = /Application A is disabled/;
+const API_PRIVATE = /This API is private/;
+const EVERY_CREDENTIAL_ISSUED_YOUR = /every credential issued to your account can call this API/;
+const APPROVAL_ADDS_API_APPLICATION = /Approval adds this API to that application only/;
+const BASE64_ENCODE_NEXUS_APP = /Base64-encode nexus-app-app-a/;
+const CLAIM_MUST = /claim must be/;
+const APPLICATION_CREDENTIALS_PAGE = /to Application A from the credentials page/;
+const ACCESS_GRANTED_APPLICATION_B = /Access granted to Application B/;
+const LIST_OPERATION = /list \(GET/;
+const CREATE_OPERATION = /create \(POST \/invoices\)/;
+const WHY_DO_YOU_NEED_TOOLS = /Why do you need these tools/;
+const ACCESS_GRANTED_OLD_WORKER = /Access granted to Old worker/;
+const LAST_DECISION = /Last decision/;
+const API_COULD_NOT_REFRESHED = /This API could not be refreshed/;
+
 const session = vi.hoisted(() => ({ canAdmin: false }));
 const navigate = vi.hoisted(() => vi.fn());
 /** The detail route's search params, e.g. `{ tab: 'changes' }` from a notification link. */
@@ -108,7 +146,7 @@ describe('catalog browsing', () => {
     await act(async () => {
       first.resolve({ items: [catalogEntry()], total: DEFAULT_PAGE_SIZE + 1 });
     });
-    expect(await screen.findByRole('link', { name: /Billing API/ })).toHaveAttribute(
+    expect(await screen.findByRole('link', { name: BILLING_API })).toHaveAttribute(
       'href',
       '/catalog/billing',
     );
@@ -163,7 +201,7 @@ describe('catalog browsing', () => {
       total: 1,
     });
     renderPage(<CatalogPage />);
-    const card = await screen.findByRole('link', { name: /Billing API/ });
+    const card = await screen.findByRole('link', { name: BILLING_API });
     expect(within(card).getByText('Open access')).toBeInTheDocument();
     expect(within(card).getByText('Open')).toBeInTheDocument();
     expect(within(card).queryByText('No access')).not.toBeInTheDocument();
@@ -175,7 +213,7 @@ describe('catalog browsing', () => {
       total: 1,
     });
     renderPage(<CatalogPage />);
-    const card = await screen.findByRole('link', { name: /Billing API/ });
+    const card = await screen.findByRole('link', { name: BILLING_API });
     expect(within(card).getByText('Retired')).toBeInTheDocument();
     expect(within(card).queryByText('Requestable')).not.toBeInTheDocument();
   });
@@ -222,7 +260,7 @@ describe('catalog browsing', () => {
   it('explains a missing document without fetching it', async () => {
     detail = { ...detail, spec: null, api: catalogEntry({ invoke_url: null, description: null }) };
     await openDetail();
-    expect(screen.getByText(/Not published — ask your administrator/)).toBeInTheDocument();
+    expect(screen.getByText(NOT_PUBLISHED_ASK_YOUR)).toBeInTheDocument();
     expect(screen.getByText('None published')).toBeInTheDocument();
     selectTab('Documentation');
     expect(screen.getByText('No specification published')).toBeInTheDocument();
@@ -319,7 +357,7 @@ describe('catalog change history (issue #448)', () => {
     const panel = await screen.findByRole('tabpanel');
     await within(panel).findByText('Rollback');
     expect(within(panel).getByText('Update')).toBeInTheDocument();
-    expect(within(panel).getByText(/replaced v2\.0\.0/)).toBeInTheDocument();
+    expect(within(panel).getByText(REPLACED_V2_0_0)).toBeInTheDocument();
     expect(
       within(panel).getByText('Operation removed: requests to it may now fail'),
     ).toBeInTheDocument();
@@ -334,8 +372,8 @@ describe('catalog change history (issue #448)', () => {
     expect(within(panel).getByText(hostilePath)).toBeInTheDocument();
     expect(panel.querySelector('img')).toBeNull();
     // The unchanged revision says so, and the caveat is always there.
-    expect(within(panel).getByText(/No structural differences found/)).toBeInTheDocument();
-    expect(within(panel).getByText(/structural comparison/)).toBeInTheDocument();
+    expect(within(panel).getByText(NO_STRUCTURAL_DIFFERENCES_FOUND)).toBeInTheDocument();
+    expect(within(panel).getByText(STRUCTURAL_COMPARISON)).toBeInTheDocument();
   });
 
   it('says when a comparison is incomplete instead of claiming nothing changed', async () => {
@@ -345,8 +383,8 @@ describe('catalog change history (issue #448)', () => {
     });
     await openDetail('Changes');
     const panel = await screen.findByRole('tabpanel');
-    expect(await within(panel).findByText(/This comparison is incomplete/)).toBeInTheDocument();
-    expect(within(panel).queryByText(/No structural differences found/)).not.toBeInTheDocument();
+    expect(await within(panel).findByText(COMPARISON_INCOMPLETE)).toBeInTheDocument();
+    expect(within(panel).queryByText(NO_STRUCTURAL_DIFFERENCES_FOUND)).not.toBeInTheDocument();
   });
 
   it('pages through a long history', async () => {
@@ -388,13 +426,13 @@ describe('catalog access', () => {
     });
     await openDetail('Access');
     expect(await screen.findByRole('button', { name: 'Request access' })).toBeDisabled();
-    expect(screen.getByLabelText(/Why do you need access/)).toHaveAttribute(
+    expect(screen.getByLabelText(WHY_DO_YOU_NEED_ACCESS)).toHaveAttribute(
       'maxlength',
       String(MAX_JUSTIFICATION_LENGTH),
     );
-    changeField(/Why do you need access/, '   ');
+    changeField(WHY_DO_YOU_NEED_ACCESS, '   ');
     expect(screen.getByRole('button', { name: 'Request access' })).toBeDisabled();
-    changeField(/Why do you need access/, '  Reconcile invoices  ');
+    changeField(WHY_DO_YOU_NEED_ACCESS, '  Reconcile invoices  ');
     fireEvent.click(screen.getByRole('button', { name: 'Request access' }));
     await screen.findByRole('button', { name: 'Withdraw request' });
     expect(accessRequestsApi.create).toHaveBeenCalledWith({
@@ -416,13 +454,13 @@ describe('catalog access', () => {
     vi.spyOn(accessRequestsApi, 'create').mockRejectedValue(new Error('Gateway unavailable'));
     await openDetail('Access');
     await screen.findByRole('button', { name: 'Request access' });
-    changeField(/Why do you need access/, 'Reconcile invoices');
+    changeField(WHY_DO_YOU_NEED_ACCESS, 'Reconcile invoices');
     fireEvent.click(screen.getByRole('button', { name: 'Request access' }));
     await waitFor(() => expect(accessRequestsApi.create).toHaveBeenCalledTimes(1));
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Request access' })).toBeEnabled(),
     );
-    expect(screen.getByLabelText(/Why do you need access/)).toHaveValue('Reconcile invoices');
+    expect(screen.getByLabelText(WHY_DO_YOU_NEED_ACCESS)).toHaveValue('Reconcile invoices');
     expect(screen.queryByText('Access request submitted')).not.toBeInTheDocument();
   });
 
@@ -438,12 +476,12 @@ describe('catalog access', () => {
     };
     identities.account = { ...NO_ACCESS, grant: GRANT };
     await openDetail('Access');
-    await screen.findByText(/Access granted to your account/);
+    await screen.findByText(ACCESS_GRANTED_YOUR_ACCOUNT);
     expect(screen.getByText('Call this API')).toBeInTheDocument();
     expect(exampleRequest()).toContain(recipe);
     expect(exampleRequest()).not.toContain('base64(');
     expect(screen.getByText(GRANT.acl_group)).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /Manage your credentials/ })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: MANAGE_YOUR_CREDENTIALS })).toHaveAttribute(
       'href',
       '/credentials',
     );
@@ -464,20 +502,18 @@ describe('catalog access', () => {
       return { grant: revoked };
     });
     await openDetail('Access');
-    await screen.findByText(/Access granted to your account/);
+    await screen.findByText(ACCESS_GRANTED_YOUR_ACCOUNT);
     fireEvent.click(screen.getByRole('button', { name: 'Give up access' }));
     const dialog = await screen.findByRole('dialog');
-    expect(
-      within(dialog).getByText(/stops accepting calls to this API from your account/),
-    ).toBeInTheDocument();
-    expect(within(dialog).getByText(/request access and wait for approval/)).toBeInTheDocument();
+    expect(within(dialog).getByText(STOPS_ACCEPTING_CALLS_API)).toBeInTheDocument();
+    expect(within(dialog).getByText(REQUEST_ACCESS_WAIT_APPROVAL)).toBeInTheDocument();
     // Nothing is sent until the dialog is confirmed.
     expect(grantsApi.relinquish).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Give up access' }));
     await screen.findByText(`Gave up access to ${API.name}`);
     expect(grantsApi.relinquish).toHaveBeenCalledWith(GRANT.id);
     await waitFor(() =>
-      expect(screen.queryByText(/Access granted to your account/)).not.toBeInTheDocument(),
+      expect(screen.queryByText(ACCESS_GRANTED_YOUR_ACCOUNT)).not.toBeInTheDocument(),
     );
   });
 
@@ -498,8 +534,8 @@ describe('catalog access', () => {
       api: catalogEntry({ requestable: false, access_state: 'open', invoke_url: null }),
     };
     await openDetail('Access');
-    expect(screen.getByText(/No approval needed/)).toBeInTheDocument();
-    expect(screen.getByText(/This portal has no gateway address configured/)).toBeInTheDocument();
+    expect(screen.getByText(NO_APPROVAL_NEEDED)).toBeInTheDocument();
+    expect(screen.getByText(PORTAL_HAS_NO_GATEWAY)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Copy Invoke URL' })).not.toBeInTheDocument();
     expect(screen.queryByText('No access')).not.toBeInTheDocument();
   });
@@ -510,7 +546,7 @@ describe('catalog access', () => {
       api: catalogEntry({ status: 'retired', requestable: false, access_state: 'open' }),
     };
     await openDetail('Access');
-    expect(screen.getByText(/No approval needed/)).toBeInTheDocument();
+    expect(screen.getByText(NO_APPROVAL_NEEDED)).toBeInTheDocument();
     expect(screen.getByLabelText('Calling as')).toBeInTheDocument();
     expect(screen.getByText('Call this API')).toBeInTheDocument();
     expect(exampleRequest()).toContain("-H 'X-API-Key: <your key>'");
@@ -529,7 +565,7 @@ describe('catalog access', () => {
       request: { ...REQUEST, status: 'denied', decision_note: 'Explain your use case' },
     };
     await openDetail('Access');
-    expect(await screen.findByText(/Explain your use case/)).toBeInTheDocument();
+    expect(await screen.findByText(EXPLAIN_YOUR_USE_CASE)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Request access' })).toBeDisabled();
     expect(screen.queryByText('Call this API')).not.toBeInTheDocument();
   });
@@ -546,10 +582,8 @@ describe('catalog access', () => {
       request: { ...REQUEST, status: 'denied', decision_note: 'Explain your use case' },
     };
     await openDetail('Access');
-    expect(
-      await screen.findByText(/retired and is no longer accepting new access requests/i),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Explain your use case/)).toBeInTheDocument();
+    expect(await screen.findByText(RETIRED_NO_LONGER_ACCEPTING)).toBeInTheDocument();
+    expect(screen.getByText(EXPLAIN_YOUR_USE_CASE)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
     const accessLabel = screen.getByText('Access', { selector: 'span' });
     expect(within(accessLabel.parentElement!).getByText('Retired')).toBeInTheDocument();
@@ -600,7 +634,7 @@ describe('catalog access', () => {
     await openDetail('Access');
     fireEvent.click(screen.getByLabelText('Access for'));
     fireEvent.click(await screen.findByRole('option', { name: 'Application A' }));
-    await screen.findByText(/Access granted to Application A/);
+    await screen.findByText(ACCESS_GRANTED_APPLICATION);
     expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
   });
 
@@ -625,8 +659,8 @@ describe('catalog access', () => {
     expect(screen.queryByRole('link', { name: 'Manage API' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Message provider' }));
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByLabelText(/Subject/)).toHaveValue('Question about Billing API');
-    changeField(/Message/, '  Please explain invoice exports  ');
+    expect(within(dialog).getByLabelText(SUBJECT)).toHaveValue('Question about Billing API');
+    changeField(MESSAGE, '  Please explain invoice exports  ');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Send' }));
     await waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
     expect(threadsApi.create).toHaveBeenCalledWith({
@@ -702,9 +736,7 @@ describe('per-identity catalog access (issue #314)', () => {
     expect(catalogApi.identityAccess).toHaveBeenCalledWith('billing', null);
 
     await chooseIdentity('Application A');
-    expect(
-      await screen.findByText(/The request for Application A is awaiting review/),
-    ).toBeVisible();
+    expect(await screen.findByText(REQUEST_APPLICATION_AWAITING_REVIEW)).toBeVisible();
     expect(screen.getByRole('button', { name: 'Withdraw request' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
     expect(catalogApi.identityAccess).toHaveBeenCalledWith('billing', 'app-a');
@@ -717,7 +749,7 @@ describe('per-identity catalog access (issue #314)', () => {
     });
 
     await chooseIdentity('Application B');
-    fireEvent.change(await screen.findByLabelText(/Why do you need access/), {
+    fireEvent.change(await screen.findByLabelText(WHY_DO_YOU_NEED_ACCESS), {
       target: { value: 'Second integration' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Request access' }));
@@ -743,19 +775,17 @@ describe('per-identity catalog access (issue #314)', () => {
 
     // The account itself is not the grantee, so it may still ask.
     expect(await screen.findByRole('button', { name: 'Request access' })).toBeInTheDocument();
-    expect(screen.queryByText(/Access granted to your account/)).not.toBeInTheDocument();
+    expect(screen.queryByText(ACCESS_GRANTED_YOUR_ACCOUNT)).not.toBeInTheDocument();
 
     await chooseIdentity('Application A');
-    expect(await screen.findByText(/Access granted to Application A/)).toBeInTheDocument();
-    expect(screen.getByText(/Only Application A’s gateway consumer carries/)).toBeInTheDocument();
-    expect(
-      screen.getByText(/credentials issued to your account or your other applications cannot/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(ACCESS_GRANTED_APPLICATION)).toBeInTheDocument();
+    expect(screen.getByText(ONLY_APPLICATION_GATEWAY_CONSUMER)).toBeInTheDocument();
+    expect(screen.getByText(CREDENTIALS_ISSUED_YOUR_ACCOUNT)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
 
     await chooseIdentity('Application B');
     expect(await screen.findByRole('button', { name: 'Request access' })).toBeInTheDocument();
-    expect(screen.queryByText(/Access granted/)).not.toBeInTheDocument();
+    expect(screen.queryByText(ACCESS_GRANTED)).not.toBeInTheDocument();
   });
 
   it('lets a disabled application give up a grant but not ask for new access', async () => {
@@ -772,14 +802,14 @@ describe('per-identity catalog access (issue #314)', () => {
     await screen.findByRole('button', { name: 'Request access' });
 
     await chooseIdentity('Application A (disabled)');
-    expect(await screen.findByText(/Access granted to Application A/)).toBeInTheDocument();
+    expect(await screen.findByText(ACCESS_GRANTED_APPLICATION)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Give up access' }));
     const dialog = await screen.findByRole('dialog');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Give up access' }));
     await waitFor(() => expect(grantsApi.relinquish).toHaveBeenCalledWith('grant-app-a'));
 
     // With nothing left, a disabled application is told why it cannot ask.
-    expect(await screen.findByText(/Application A is disabled/)).toBeInTheDocument();
+    expect(await screen.findByText(APPLICATION_DISABLED)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
   });
 
@@ -791,10 +821,10 @@ describe('per-identity catalog access (issue #314)', () => {
     };
     identities.account = { ...NO_ACCESS, grant: GRANT };
     await openDetail('Access');
-    await screen.findByText(/Access granted to your account/);
+    await screen.findByText(ACCESS_GRANTED_YOUR_ACCOUNT);
     fireEvent.click(screen.getByRole('button', { name: 'Give up access' }));
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText(/This API is private/)).toBeInTheDocument();
+    expect(within(dialog).getByText(API_PRIVATE)).toBeInTheDocument();
   });
 
   it('describes an account-level grant as reaching every account credential', async () => {
@@ -803,10 +833,8 @@ describe('per-identity catalog access (issue #314)', () => {
     identities['app-a'] = { ...NO_ACCESS, application: summary(APP_A) };
     await openDetail('Access');
 
-    expect(await screen.findByText(/Access granted to your account/)).toBeInTheDocument();
-    expect(
-      screen.getByText(/every credential issued to your account can call this API/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(ACCESS_GRANTED_YOUR_ACCOUNT)).toBeInTheDocument();
+    expect(screen.getByText(EVERY_CREDENTIAL_ISSUED_YOUR)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
 
     // An application does not inherit the account's grant; it asks on its own.
@@ -856,9 +884,7 @@ describe('per-identity catalog access (issue #314)', () => {
       }),
     );
     fireEvent.click(await screen.findByRole('option', { name: 'Integration 7' }));
-    expect(
-      await screen.findByText(/Approval adds this API to that application only/),
-    ).toBeVisible();
+    expect(await screen.findByText(APPROVAL_ADDS_API_APPLICATION)).toBeVisible();
     expect(catalogApi.identityAccess).toHaveBeenLastCalledWith('billing', 'app-7');
   });
   describe('call instructions follow the selected identity (issue #374)', () => {
@@ -888,12 +914,12 @@ describe('per-identity catalog access (issue #314)', () => {
         screen.getByRole('region', { name: 'Tools available after approval' }),
       ).toBeInTheDocument();
       await chooseIdentity('Application A');
-      await screen.findByText(/Access granted to Application A/);
+      await screen.findByText(ACCESS_GRANTED_APPLICATION);
       expect(screen.getByText('Connect an agent')).toBeInTheDocument();
       expect(
         screen.getByRole('region', { name: 'Tools covered by this grant' }),
       ).toBeInTheDocument();
-      expect(screen.getByText(/Base64-encode nexus-app-app-a/)).toBeInTheDocument();
+      expect(screen.getByText(BASE64_ENCODE_NEXUS_APP)).toBeInTheDocument();
       await chooseIdentity('My account');
       await screen.findByRole('button', { name: 'Request access' });
       expect(screen.queryByText('Connect an agent')).not.toBeInTheDocument();
@@ -901,7 +927,7 @@ describe('per-identity catalog access (issue #314)', () => {
 
     /** The JWT `sub` the note tells the caller to sign. */
     function jwtSubject(): string {
-      return screen.getByText(/claim must be/).querySelectorAll('code')[1]?.textContent ?? '';
+      return screen.getByText(CLAIM_MUST).querySelectorAll('code')[1]?.textContent ?? '';
     }
 
     it('calls as the account when only the account is approved', async () => {
@@ -914,7 +940,7 @@ describe('per-identity catalog access (issue #314)', () => {
       identities['app-a'] = { ...NO_ACCESS, application: summary(APP_A) };
       await openDetail('Access');
 
-      await screen.findByText(/Access granted to your account/);
+      await screen.findByText(ACCESS_GRANTED_YOUR_ACCOUNT);
       expect(exampleRequest()).toContain(`--user '${ACCOUNT_CONSUMER}:<your password>'`);
 
       // The account's grant does not reach the application, so there is
@@ -939,13 +965,13 @@ describe('per-identity catalog access (issue #314)', () => {
       expect(screen.getByText('No access')).toBeInTheDocument();
 
       await chooseIdentity('Application A');
-      await screen.findByText(/Access granted to Application A/);
+      await screen.findByText(ACCESS_GRANTED_APPLICATION);
       const example = exampleRequest();
       expect(example).toContain(
         `--user '${consumerUsernameForApplication('app-a')}:<your password>'`,
       );
       expect(example).not.toContain(ACCOUNT_CONSUMER);
-      expect(screen.getByText(/to Application A from the credentials page/)).toBeInTheDocument();
+      expect(screen.getByText(APPLICATION_CREDENTIALS_PAGE)).toBeInTheDocument();
     });
 
     it('switches the JWT subject between approved applications', async () => {
@@ -960,11 +986,11 @@ describe('per-identity catalog access (issue #314)', () => {
       await screen.findByRole('button', { name: 'Request access' });
 
       await chooseIdentity('Application A');
-      await screen.findByText(/Access granted to Application A/);
+      await screen.findByText(ACCESS_GRANTED_APPLICATION);
       expect(jwtSubject()).toBe(consumerUsernameForApplication('app-a'));
 
       await chooseIdentity('Application B');
-      await screen.findByText(/Access granted to Application B/);
+      await screen.findByText(ACCESS_GRANTED_APPLICATION_B);
       expect(jwtSubject()).toBe(consumerUsernameForApplication('app-b'));
     });
 
@@ -1028,13 +1054,13 @@ describe('more agent tools on an existing grant (issue #525)', () => {
       return { access_request: pending };
     });
     await openDetail('Access');
-    await screen.findByText(/Access granted to your account/);
+    await screen.findByText(ACCESS_GRANTED_YOUR_ACCOUNT);
     // Only the tool the grant lacks is offered.
-    expect(screen.queryByRole('checkbox', { name: /list \(GET/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: LIST_OPERATION })).not.toBeInTheDocument();
     const submit = screen.getByRole('button', { name: 'Request tools' });
     expect(submit).toBeDisabled();
-    fireEvent.click(screen.getByRole('checkbox', { name: /create \(POST \/invoices\)/ }));
-    changeField(/Why do you need these tools/, '  Create invoices  ');
+    fireEvent.click(screen.getByRole('checkbox', { name: CREATE_OPERATION }));
+    changeField(WHY_DO_YOU_NEED_TOOLS, '  Create invoices  ');
     fireEvent.click(submit);
     await waitFor(() =>
       expect(requestTools).toHaveBeenCalledWith(GRANT.id, {
@@ -1043,7 +1069,7 @@ describe('more agent tools on an existing grant (issue #525)', () => {
       }),
     );
     expect(await screen.findByRole('button', { name: 'Withdraw tool request' })).toBeVisible();
-    expect(screen.getByText(/Access granted to your account/)).toBeInTheDocument();
+    expect(screen.getByText(ACCESS_GRANTED_YOUR_ACCOUNT)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Request tools' })).not.toBeInTheDocument();
   });
 
@@ -1080,7 +1106,7 @@ describe('more agent tools on an existing grant (issue #525)', () => {
     await screen.findByRole('button', { name: 'Request access' });
     fireEvent.click(screen.getByLabelText('Requesting for'));
     fireEvent.click(await screen.findByRole('option', { name: 'Old worker (disabled)' }));
-    expect(await screen.findByText(/Access granted to Old worker/)).toBeInTheDocument();
+    expect(await screen.findByText(ACCESS_GRANTED_OLD_WORKER)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Withdraw tool request' })).toBeVisible();
 
     identities['app-off'] = { application: disabledApp, grant: appGrant, request: null };
@@ -1105,7 +1131,7 @@ describe('more agent tools on an existing grant (issue #525)', () => {
     };
     identities.account = { ...NO_ACCESS, grant: GRANT };
     await openDetail('Access');
-    await screen.findByText(/Access granted to your account/);
+    await screen.findByText(ACCESS_GRANTED_YOUR_ACCOUNT);
     expect(screen.queryByRole('button', { name: 'Request tools' })).not.toBeInTheDocument();
   });
 });
@@ -1117,7 +1143,7 @@ describe('catalog detail state', () => {
     identities.account = { ...NO_ACCESS, request: revoked };
     await openDetail('Access');
 
-    await screen.findByText(/Last decision/);
+    await screen.findByText(LAST_DECISION);
     // The header (account-wide) and the card (this identity) agree.
     expect(screen.queryByText('No access')).not.toBeInTheDocument();
     expect(screen.getAllByText('Revoked').length).toBeGreaterThanOrEqual(2);
@@ -1127,18 +1153,16 @@ describe('catalog detail state', () => {
     const { client } = renderPage(<CatalogDetailPage />);
     await screen.findByRole('heading', { name: API.name });
     selectTab('Access');
-    await screen.findByLabelText(/Why do you need access/);
-    changeField(/Why do you need access/, 'Half-written justification');
+    await screen.findByLabelText(WHY_DO_YOU_NEED_ACCESS);
+    changeField(WHY_DO_YOU_NEED_ACCESS, 'Half-written justification');
 
     vi.mocked(catalogApi.detail).mockRejectedValue(new Error('Bad gateway'));
     await act(async () => {
       await client.refetchQueries({ queryKey: queryKeys.catalog.detail('billing') });
     });
 
-    expect(await screen.findByText(/This API could not be refreshed/)).toBeInTheDocument();
+    expect(await screen.findByText(API_COULD_NOT_REFRESHED)).toBeInTheDocument();
     expect(screen.queryByText('API not found')).not.toBeInTheDocument();
-    expect(screen.getByLabelText(/Why do you need access/)).toHaveValue(
-      'Half-written justification',
-    );
+    expect(screen.getByLabelText(WHY_DO_YOU_NEED_ACCESS)).toHaveValue('Half-written justification');
   });
 });

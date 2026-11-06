@@ -107,6 +107,8 @@ import {
 
 import { compactSpecKey, createKeyTextCharge } from './spec-keys.js';
 
+const SUCCESS_STATUS = /^2/;
+
 /**
  * The way a schema travels. `parameter` and `request` are sent by the caller,
  * `response` is read by it; see {@link sends}.
@@ -1067,7 +1069,7 @@ export function compareSpecRevisions(
       if (to.has(status)) continue;
       // A caller handling a success it will no longer get is broken; one that
       // handled an error it will no longer get is not.
-      const success = /^2/.test(status);
+      const success = SUCCESS_STATUS.test(status);
       record(
         { operation, section: 'response', location: status },
         'response_removed',

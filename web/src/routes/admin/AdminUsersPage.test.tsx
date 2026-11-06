@@ -8,6 +8,9 @@ import { organizationsApi, usersApi } from '../../lib/api';
 import { TooltipProvider } from '../../components/ui/Tooltip';
 import { AdminUsersPage } from './AdminUsersPage';
 
+const GATEWAY_REVOCATION = /^Gateway revocation/;
+const DISPLAY_NAME = /^Display name/;
+
 vi.mock('../../components/layout/RoleGuard', () => ({
   RoleGuard: ({ children }: { children: ReactNode }) => children,
 }));
@@ -155,7 +158,7 @@ describe('gateway revocation visibility', () => {
     renderUsers();
     await screen.findByText(user.email);
     await waitFor(() => expect(detail).toHaveBeenCalledWith(user.id));
-    expect(screen.queryByText(/^Gateway revocation/)).not.toBeInTheDocument();
+    expect(screen.queryByText(GATEWAY_REVOCATION)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
   });
 
@@ -174,7 +177,7 @@ describe('gateway revocation visibility', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
-      expect(screen.queryByText(/^Gateway revocation/)).not.toBeInTheDocument();
+      expect(screen.queryByText(GATEWAY_REVOCATION)).not.toBeInTheDocument();
     });
   });
 });
@@ -249,7 +252,7 @@ describe('organization and status management', () => {
     await waitFor(() =>
       expect(dialog.getByRole('button', { name: 'Organization' })).toHaveTextContent(ACME.name),
     );
-    fireEvent.change(dialog.getByLabelText(/^Display name/), { target: { value: 'Ada Lovelace' } });
+    fireEvent.change(dialog.getByLabelText(DISPLAY_NAME), { target: { value: 'Ada Lovelace' } });
     fireEvent.click(dialog.getByRole('button', { name: 'Organization' }));
     fireEvent.change(dialog.getByRole('searchbox', { name: 'Search Organization' }), {
       target: { value: GLOBEX.name },

@@ -17,6 +17,8 @@ import { userLifecycleLockKey } from '../lib/keyed-serializer.js';
 import { heldLeaseFences } from '../lib/lease-fence.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const RESET_TOKEN_LINK = /\/reset-password\?token=([A-Za-z0-9_-]+)/;
+
 interface LifecycleTarget {
   store: NexusStore;
   teardown: () => Promise<void>;
@@ -248,7 +250,7 @@ export function runResetLifecycleContract(
                 });
                 const messages = await resetMail(subject.user.email);
                 assert.equal(messages.length, 1, 'a fresh request still queues a usable link');
-                const fresh = /\/reset-password\?token=([A-Za-z0-9_-]+)/.exec(messages[0] ?? '');
+                const fresh = RESET_TOKEN_LINK.exec(messages[0] ?? '');
                 assert.ok(fresh?.[1]);
                 assert.notEqual(fresh[1], token);
                 assert.equal((await redeem(fresh[1])).statusCode, 200);

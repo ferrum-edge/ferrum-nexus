@@ -142,6 +142,8 @@ jobs:
           const registry = (name) => `https://registry.npmjs.org/${name}/-/${name}-`;
           const floor = ['jsdom', 'undici'];
           const floorCopy = /(?:^|\/)node_modules\/(jsdom|undici)$/;
+          const vitestCopy = /(?:^|\/)node_modules\/@vitest\/([^/]+)$/;
+          const sha512Integrity = /^sha512-[A-Za-z0-9+/]{86}==$/;
           const floorCopies = (lock) =>
             Object.fromEntries(
               Object.entries(lock.packages)
@@ -174,7 +176,7 @@ jobs:
               for (const [name, version] of Object.entries(versions)) {
                 if (path.endsWith(`node_modules/${name}`)) assert.equal(pkg.version, version, path);
               }
-              const vitestPackage = path.match(/(?:^|\/)node_modules\/@vitest\/([^/]+)$/)?.[1];
+              const vitestPackage = path.match(vitestCopy)?.[1];
               if (vitestPackage && !vitestPackage.startsWith('istanbul-lib-')) {
                 assert.equal(pkg.version, vitest, path);
               }
@@ -182,7 +184,7 @@ jobs:
               if (!pinned) continue;
               found.add(pinned);
               assert.ok(pkg.resolved?.startsWith(registry(pinned)), `${path}: resolved`);
-              assert.match(pkg.integrity ?? '', /^sha512-[A-Za-z0-9+/]{86}==$/, `${path}: integrity`);
+              assert.match(pkg.integrity ?? '', sha512Integrity, `${path}: integrity`);
               const engines = pkg.engines?.node;
               assert.equal(typeof engines, 'string', `${path}: engines`);
               for (const range of supported) {

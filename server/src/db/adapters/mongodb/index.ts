@@ -207,6 +207,8 @@ import {
   transactionContentionError,
 } from '../transaction-retry.js';
 
+const REGEX_SPECIAL_CHARACTERS = /[.*+?^${}()|[\]\\]/g;
+
 /* ── Collection names (identical to the SQL table names) ────────────────── */
 
 const COLLECTIONS = {
@@ -294,7 +296,7 @@ function normalizeJson<T>(value: T): T {
 
 /** Escape a user-supplied term for use inside a regular expression. */
 function escapeRegex(term: string): string {
-  return term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return term.replace(REGEX_SPECIAL_CHARACTERS, '\\$&');
 }
 
 /** Case-insensitive substring match — the Mongo spelling of the SQL `q` filters. */

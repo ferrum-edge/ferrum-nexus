@@ -42,6 +42,8 @@ import { QueryErrorState } from '../../components/ui/QueryErrorState';
 import { queryKeys } from '../../hooks/keys';
 import { organizationsApi } from '../../lib/api';
 
+const WHITESPACE = /\s+/;
+
 /**
  * Sentinel for "no organization". A select item's value may not be the empty
  * string, so the absence of an organization needs a value of its own.
@@ -50,7 +52,7 @@ const NO_ORG = '__none__';
 
 /** One or two letters standing in for an account, used by the directory rows. */
 function initials(displayName: string): string {
-  const words = displayName.trim().split(/\s+/).filter(Boolean);
+  const words = displayName.trim().split(WHITESPACE).filter(Boolean);
   if (words.length === 0) return '?';
   const first = words[0]?.[0] ?? '';
   const last = words.length > 1 ? (words[words.length - 1]?.[0] ?? '') : '';

@@ -38,6 +38,9 @@ import { createCrypto } from '../lib/crypto.js';
 import { newId } from '../lib/ids.js';
 import { buildTestApp, createTestMailbox, TEST_PASSWORD, type TestApp } from './helpers.js';
 
+const RESET_TOKEN_LINK = /\/reset-password\?token=([A-Za-z0-9_-]+)/;
+const VERIFY_TOKEN_LINK = /\/verify-email\?token=([A-Za-z0-9_-]+)/;
+
 /** The password a redeemed reset link sets. */
 const NEW_PASSWORD = 'sealed-outbox-new-passphrase';
 
@@ -137,7 +140,7 @@ export function runSealedOutboxContract(
 
       await drain();
       const [text] = deliveredTo(email);
-      const token = /\/reset-password\?token=([A-Za-z0-9_-]+)/.exec(text ?? '')?.[1];
+      const token = RESET_TOKEN_LINK.exec(text ?? '')?.[1];
       assert.ok(token, 'the delivered message carries the reset link');
       for (const stored of await storedFor(email)) {
         assert.ok(!storedText(stored).includes(token), 'the delivered token is stored nowhere');
@@ -202,7 +205,7 @@ export function runSealedOutboxContract(
         await drain();
         const delivered = deliveredTo(email);
         assert.equal(delivered.length, 2, 'both links were delivered');
-        const token = /\/verify-email\?token=([A-Za-z0-9_-]+)/.exec(delivered.at(-1) ?? '')?.[1];
+        const token = VERIFY_TOKEN_LINK.exec(delivered.at(-1) ?? '')?.[1];
         assert.ok(token, 'the delivered resend carries the verification link');
         for (const stored of await storedFor(email)) {
           assert.ok(!storedText(stored).includes(token), 'the delivered token is stored nowhere');

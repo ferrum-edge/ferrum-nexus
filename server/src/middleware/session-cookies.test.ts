@@ -22,6 +22,8 @@ import {
   setSessionCookies,
 } from './session-cookies.js';
 
+const COOKIE = /(^|,\s*)Cookie$/;
+
 const config = loadConfig({
   NEXUS_SECRET_KEY: 'synthetic-secret-key-0123456789abcdef',
   FERRUM_ADMIN_JWT_SECRET: 'synthetic-admin-secret-0123456789abcdef',
@@ -91,7 +93,7 @@ async function buildApp(): Promise<FastifyInstance> {
 function assertUncacheable(response: LightMyRequestResponse, label: string): void {
   assert.ok(response.headers['set-cookie'] !== undefined, `${label}: the response sets cookies`);
   assert.equal(response.headers['cache-control'], COOKIE_RESPONSE_CACHE_CONTROL, label);
-  assert.match(String(response.headers.vary ?? ''), /(^|,\s*)Cookie$/, label);
+  assert.match(String(response.headers.vary ?? ''), COOKIE, label);
 }
 
 describe('responses that set cookies are never shared-cacheable', () => {

@@ -42,6 +42,8 @@ import {
   type PluginFieldDraft,
 } from './PluginForm';
 
+const WHITESPACE_PERCENT_OR_BACKSLASH = /[\s%\\]/;
+
 /** Methods the trigger editor offers. Matches Edge's `PluginTriggerMatch`. */
 const TRIGGER_METHODS: HttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 
@@ -112,7 +114,7 @@ function pathPrefixError(prefix: string): string | null {
   const value = prefix.trim();
   if (value === '') return null;
   if (!value.startsWith('/')) return 'A path prefix must start with /';
-  if (/[\s%\\]/.test(value)) {
+  if (WHITESPACE_PERCENT_OR_BACKSLASH.test(value)) {
     return 'No whitespace, percent escapes or backslashes — the gateway compares the canonical path, which never contains them';
   }
   // Edge judges a segment by its text before any `;` path parameter.

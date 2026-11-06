@@ -108,6 +108,21 @@ import { runTeardownFencingContract } from './teardown-fencing-contract.js';
 import { runTeardownTransitionContract } from './teardown-transition-contract.js';
 import { runTransactionContentionContract } from './transaction-contention-contract.js';
 
+const HYPHENS = /-/g;
+const ROLLBACK_AGENT_SELECTION = /rollback agent selection/;
+const ABANDON = /abandon/;
+const ROLLBACK_SUBSETS = /rollback subsets/;
+const SETTLEMENT_INTERRUPTED = /settlement interrupted/;
+const ROLL_BACK = /roll back/;
+const LEASE_KEY = /Lease key/;
+const BOOM = /boom/;
+const INNER_BOOM = /inner boom/;
+const INJECTED_FAILURE = /injected failure/;
+const BIGINT = /BigInt/;
+const STANDALONE = /standalone/i;
+const ALLOW_STANDALONE_MENTION = /NEXUS_DB_ALLOW_STANDALONE/;
+const IX_MESSAGES_THREAD_LATEST = /ix_messages_thread_latest/;
+
 const SECRET = 'cross-adapter-smoke-secret-0123456789ab';
 
 /** `NEXUS_BOOTSTRAP_TOKEN` the bootstrap cases run with. */
@@ -228,7 +243,7 @@ function testConfig(driver: DbDriver, url = testDbUrl(driver)): ReturnType<typeo
 
 /** A fresh, syntactically safe database name for a throwaway database. */
 function throwawayDbName(): string {
-  return `nexus_smoke_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  return `nexus_smoke_${randomUUID().replace(HYPHENS, '').slice(0, 16)}`;
 }
 
 /** Replace the database component of a connection URL. */
@@ -864,7 +879,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
           await tx.apis.update(reference.id, { agents: null });
           throw new Error('rollback agent selection');
         }),
-        /rollback agent selection/,
+        ROLLBACK_AGENT_SELECTION,
       );
       assert.deepEqual((await store.apis.findById(reference.id))?.agents, agents);
       await store.apis.update(reference.id, { agents: null });
@@ -2141,7 +2156,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
           await tx.apiGatewayPlugins.replace(api.id, { auth: 'edge-auth-rolled-back' });
           throw new Error('abandon');
         }),
-        /abandon/,
+        ABANDON,
       );
       const afterRollback = await store.apiGatewayPlugins.listByApi(api.id);
       assert.deepEqual(
@@ -2231,7 +2246,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
             await tx.accessRequests.update(requestId, { requested_tools: [], approved_tools: [] });
             throw new Error('rollback subsets');
           }),
-          /rollback subsets/,
+          ROLLBACK_SUBSETS,
         );
         assert.deepEqual((await store.grants.findById(grant.id))?.approved_tools, [id]);
         assert.deepEqual((await store.accessRequests.findById(requestId))?.requested_tools, [id]);
@@ -3004,7 +3019,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
             });
             throw new Error('settlement interrupted');
           }),
-        /settlement interrupted/,
+        SETTLEMENT_INTERRUPTED,
       );
       assert.equal((await store.credentials.findById(row.id))?.status, 'retiring');
       assert.equal(
@@ -4046,7 +4061,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
           });
           throw new Error('roll back');
         }),
-        /roll back/,
+        ROLL_BACK,
       );
       assert.equal(await store.userIdentities.findBySubject(provider, issuer, rolledBack), null);
 
@@ -5195,7 +5210,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       await assert.rejects(
         () => store.leases.acquire('k'.repeat(256), 'instance-a', future, now),
         (error: unknown) =>
-          isNexusError(error) && error.code === 'INTERNAL' && /Lease key/.test(error.message),
+          isNexusError(error) && error.code === 'INTERNAL' && LEASE_KEY.test(error.message),
       );
     });
 
@@ -5232,7 +5247,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
             assert.ok(await tx.users.findByEmail(email), 'visible inside the transaction');
             throw new Error('boom');
           }),
-        /boom/,
+        BOOM,
       );
       assert.equal(await store.users.findByEmail(email), null);
     });
@@ -5271,7 +5286,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
               throw new Error('inner boom');
             }),
           ),
-        /inner boom/,
+        INNER_BOOM,
       );
       assert.equal(await store.users.findByEmail(email), null);
     });
@@ -5314,7 +5329,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
           faults.failNext(repo, method);
           await assert.rejects(
             () => auth.register(candidate('founder@example.test'), ANONYMOUS_REQUEST),
-            /injected failure/,
+            INJECTED_FAILURE,
           );
           assert.deepEqual(faults.pending(), [], `${repo}.${method} was reached`);
           assert.equal(await fresh.store.users.count(), 0, `${repo}.${method}: rolled back`);
@@ -5577,7 +5592,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         { key: firstKey, value: { saved: true } },
         { key: `atomic-bad-${newId().slice(0, 8)}`, value: 1n },
       ]);
-      await assert.rejects(attempt, /BigInt/);
+      await assert.rejects(attempt, BIGINT);
       assert.equal(await store.settings.get(firstKey), null, 'the earlier entry was rolled back');
     });
   });
@@ -5641,8 +5656,8 @@ describe('mongodb standalone rule', () => {
         (error: unknown) =>
           isNexusError(error) &&
           error.code === 'INTERNAL' &&
-          /standalone/i.test(error.message) &&
-          /NEXUS_DB_ALLOW_STANDALONE/.test(error.message),
+          STANDALONE.test(error.message) &&
+          ALLOW_STANDALONE_MENTION.test(error.message),
       );
     } finally {
       await store.close();
@@ -5861,7 +5876,7 @@ describe('mongodb newest-message index', () => {
         .limit(1)
         .explain('executionStats');
       assert.equal(plan.executionStats?.totalDocsExamined, 1);
-      assert.match(JSON.stringify(plan.queryPlanner?.winningPlan), /ix_messages_thread_latest/);
+      assert.match(JSON.stringify(plan.queryPlanner?.winningPlan), IX_MESSAGES_THREAD_LATEST);
     } finally {
       try {
         await mongo.connect();

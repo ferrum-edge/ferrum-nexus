@@ -38,6 +38,11 @@ import {
 } from './helpers.js';
 import { createMockFerrumEdge, type MockFerrumEdge } from './mock-ferrum-edge.js';
 
+const FERRUM = /'ferrum'/;
+const DID_NOT_ALLOW_PORTAL = /did not allow this portal/;
+const FERRUM_OR_VERSION_HINT = /FERRUM_|v0\.9/;
+const NO_CIRCUIT_BREAKER = /No circuit breaker/;
+
 const METRICS_BEARER = 'nexus-test-metrics-bearer-token-0123456789';
 const VIEWER_SECRET = 'nexus-test-admin-viewer-key-0123456789abcd';
 
@@ -133,7 +138,7 @@ describe('a gateway that bounds ns-claim admin tokens', () => {
       });
       assert.equal(refused.statusCode, 409, refused.body);
       assert.equal(refused.json<ApiErrorBody>().error.code, 'EDGE_NAMESPACE_UNSERVED');
-      assert.doesNotMatch(refused.body, /'ferrum'/, 'a withheld name is not invented');
+      assert.doesNotMatch(refused.body, FERRUM, 'a withheld name is not invented');
       assert.equal(edge.requests.length, before, 'refused before any gateway write');
       assert.equal(edge.proxies.size, 0);
     });
@@ -251,13 +256,13 @@ describe('a gateway that bounds ns-claim admin tokens', () => {
       assert.equal(usage.available, false);
       assert.equal(usage.unavailable_code, 'refused');
       // A provider reads both: generic, with the operator detail in the log.
-      assert.match(usage.unavailable_reason ?? '', /did not allow this portal/);
-      assert.doesNotMatch(usage.unavailable_reason ?? '', /FERRUM_|v0\.9/);
+      assert.match(usage.unavailable_reason ?? '', DID_NOT_ALLOW_PORTAL);
+      assert.doesNotMatch(usage.unavailable_reason ?? '', FERRUM_OR_VERSION_HINT);
       assert.equal(usage.requests.total, 0);
       assert.equal(usage.backend.status, 'unavailable');
-      assert.match(String(usage.backend.detail), /did not allow this portal/);
-      assert.doesNotMatch(String(usage.backend.detail), /FERRUM_|v0\.9/);
-      assert.doesNotMatch(String(usage.backend.detail), /No circuit breaker/);
+      assert.match(String(usage.backend.detail), DID_NOT_ALLOW_PORTAL);
+      assert.doesNotMatch(String(usage.backend.detail), FERRUM_OR_VERSION_HINT);
+      assert.doesNotMatch(String(usage.backend.detail), NO_CIRCUIT_BREAKER);
     });
 
     it('reads both again with the metrics bearer token and the fleet-read key', async (t) => {

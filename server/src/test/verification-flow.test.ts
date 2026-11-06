@@ -7,6 +7,8 @@ import { REGISTRATION_SETTINGS_KEY } from '../auth/service.js';
 import type { UserRepo } from '../db/store.js';
 import { buildTestApp, cookieValue, TEST_PASSWORD, type TestApp } from './helpers.js';
 
+const VERIFY_TOKEN_LINK = /\/verify-email\?token=([A-Za-z0-9_-]+)/;
+
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
@@ -75,7 +77,7 @@ describe('register to verified, end to end through the outbox', () => {
     const delivered = harness.mailbox.sent.find((mail) => mail.to === 'newcomer@example.test');
     assert.ok(delivered, 'the transport received the verification mail');
 
-    const link = /\/verify-email\?token=([A-Za-z0-9_-]+)/.exec(delivered.text);
+    const link = VERIFY_TOKEN_LINK.exec(delivered.text);
     assert.ok(link, 'the text body carries the verification link');
     assert.ok(
       delivered.html.includes(`${harness.config.publicUrl}/verify-email?token=`),
@@ -120,7 +122,7 @@ describe('register to verified, end to end through the outbox', () => {
     await harness.tick();
     const delivered = harness.mailbox.sent.find((mail) => mail.to === email);
     assert.ok(delivered, 'the verification mail was delivered');
-    const token = /\/verify-email\?token=([A-Za-z0-9_-]+)/.exec(delivered.text)?.[1] ?? '';
+    const token = VERIFY_TOKEN_LINK.exec(delivered.text)?.[1] ?? '';
     assert.ok(token);
 
     // Fail the account update exactly once, after the token has been burned.

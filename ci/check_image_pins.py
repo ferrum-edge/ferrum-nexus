@@ -86,33 +86,44 @@ def _unquote(value):
     return value
 
 
+DOCKERFILE_SYNTAX = re.compile(r'^\s*#\s*syntax\s*=\s*([^\s]+)', re.I)
+LINE_CONTINUATION = re.compile(r'\\\n\s*')
+FROM_INSTRUCTION = re.compile(r'FROM\s+(?:--\S+\s+)*([^\s]+)(?:\s+AS\s+(\S+))?', re.I)
+FROM_OPTION = re.compile(r'--from(?:=|\s+)([^\s]+)', re.I)
+MOUNT_OPTION = re.compile(r'--mount=([^\s]+)', re.I)
+MOUNT_FROM = re.compile(r'(?:^|,)from=([^,]+)', re.I)
+CONTAINER_BLOCK = re.compile(r'^(\s*)container\s*:\s*(?:#.*)?$')
+BLOCK_IMAGE = re.compile(r'^\s+image\s*:\s*(.*?)\s*$')
+DOCKER_USES = re.compile(r'\buses\s*:\s*["\']?docker://([^\s"\']+)')
+
+
 def image_fields(path, source):
     name = path.name.lower()
     if name == 'dockerfile' or name.startswith('dockerfile.') or name.endswith('.dockerfile'):
         for line_no, line in enumerate(source.splitlines(), 1):
-            match = re.match(r'^\s*#\s*syntax\s*=\s*([^\s]+)', line, re.I)
+            match = DOCKERFILE_SYNTAX.match(line)
             if match:
                 yield line_no, match.group(1)
         # Docker ignores comment-only lines between continued instructions.
         source = '\n'.join(
             line for line in source.splitlines() if not line.lstrip().startswith('#')
         )
-        logical = re.sub(r'\\\n\s*', ' ', source)
+        logical = LINE_CONTINUATION.sub(' ', source)
         stages = set()
         for line_no, line in enumerate(logical.splitlines(), 1):
             line = line.split('#', 1)[0].strip()
-            match = re.match(r'FROM\s+(?:--\S+\s+)*([^\s]+)(?:\s+AS\s+(\S+))?', line, re.I)
+            match = FROM_INSTRUCTION.match(line)
             if match:
                 ref, stage = match.groups()
                 if ref.lower() != 'scratch' and ref.lower() not in stages:
                     yield line_no, ref
                 if stage:
                     stages.add(stage.lower())
-            for ref in re.findall(r'--from(?:=|\s+)([^\s]+)', line, re.I):
+            for ref in FROM_OPTION.findall(line):
                 if not ref.isdigit() and ref.lower() not in stages:
                     yield line_no, ref
-            for mount in re.findall(r'--mount=([^\s]+)', line, re.I):
-                match = re.search(r'(?:^|,)from=([^,]+)', mount, re.I)
+            for mount in MOUNT_OPTION.findall(line):
+                match = MOUNT_FROM.search(mount)
                 if match:
                     ref = match.group(1)
                     if not ref.isdigit() and ref.lower() not in stages:
@@ -125,7 +136,7 @@ def image_fields(path, source):
     block_container_lines = set()
     if path.parts[:2] == ('.github', 'workflows'):
         for index, (line_no, line) in enumerate(lines):
-            container = re.match(r'^(\s*)container\s*:\s*(?:#.*)?$', line)
+            container = CONTAINER_BLOCK.match(line)
             if not container:
                 continue
             parent_indent = len(container.group(1))
@@ -133,7 +144,7 @@ def image_fields(path, source):
                 child_no, child = lines[child_index]
                 if child.strip() and len(child) - len(child.lstrip()) <= parent_indent:
                     break
-                image = re.match(r'^\s+image\s*:\s*(.*?)\s*$', child)
+                image = BLOCK_IMAGE.match(child)
                 if image:
                     block_container_lines.add(index)
                     block_image_lines.add(child_index)
@@ -148,7 +159,7 @@ def image_fields(path, source):
                 ref = '<empty image field>'
             yield line_no, ref
         if path.parts[:2] == ('.github', 'workflows'):
-            match = re.search(r'\buses\s*:\s*["\']?docker://([^\s"\']+)', line)
+            match = DOCKER_USES.search(line)
             if match:
                 yield line_no, match.group(1)
             for ref in workflow_docker_images(line):
@@ -261,8 +272,11 @@ def workflow_lines(lines):
         yield first_line, pending
 
 
+RUN_STEP = re.compile(r'^\s*-?\s*run\s*:\s*(.*)$')
+
+
 def _workflow_run_text(line):
-    match = re.match(r'^\s*-?\s*run\s*:\s*(.*)$', line)
+    match = RUN_STEP.match(line)
     if not match:
         return line
     text = match.group(1).strip()
@@ -365,10 +379,14 @@ def _docker_images_in_words(words, glued, quoted, depth=0):
     return images
 
 
+SHELL_COMMENT = re.compile(r'(?:^|\s)#.*$')
+ESCAPED_QUOTE = re.compile(r"\\[\"']")
+
+
 def workflow_docker_images(line):
     line = _workflow_run_text(line)
-    expected = len(DOCKER_COMMAND.findall(re.sub(r'(?:^|\s)#.*$', '', line)))
-    if expected and re.search(r"\\[\"']", line):
+    expected = len(DOCKER_COMMAND.findall(SHELL_COMMENT.sub('', line)))
+    if expected and ESCAPED_QUOTE.search(line):
         return ['<escaped quote in docker command>']
     try:
         words, glued, quoted = _lex(line)
@@ -406,11 +424,14 @@ def files(root):
             yield path
 
 
+ENV_IMAGE_VARIABLE = re.compile(
+    r'^\s*(?:export\s+)?(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)\s*=\s*(.*?)\s*$'
+)
+
+
 def env_image_fields(path, source):
     for line_no, line in enumerate(source.splitlines(), 1):
-        match = re.match(
-            r'^\s*(?:export\s+)?(FERRUM_EDGE_IMAGE|NEXUS_IMAGE)\s*=\s*(.*?)\s*$', line
-        )
+        match = ENV_IMAGE_VARIABLE.match(line)
         if not match:
             continue
         image = match.group(2).strip().strip("'\"")

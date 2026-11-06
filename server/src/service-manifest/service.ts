@@ -8,6 +8,10 @@ import type { UserRecord } from '../db/store.js';
 import { forbidden, validationFailed } from '../lib/errors.js';
 import { manifestDefaults, manifestSchema, manifestValidator } from './schema.js';
 
+const RESERVED_PATH_CHARACTER = /[{}*~ ?#;%\\]/;
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+const TRAILING_SLASHES = /\/+$/;
+
 const CONTRACT_COMMIT = 'f7ba1a9b9885900d1e110f76d38e37a02eda13c8';
 
 interface Manifest {
@@ -33,7 +37,7 @@ interface Manifest {
 function literalPath(value: string): boolean {
   return (
     value.startsWith('/') &&
-    !/[{}*~ ?#;%\\]/.test(value) &&
+    !RESERVED_PATH_CHARACTER.test(value) &&
     !value.includes('//') &&
     !value.split('/').some((part) => part === '.' || part === '..')
   );
@@ -49,7 +53,7 @@ export function validatedManifest(body: unknown): Manifest {
       throw validationFailed('Manifest budget exceeded');
     }
     const { value, depth } = entry;
-    if (typeof value === 'string' && (value.length > 2048 || /[\u0000-\u001f\u007f]/.test(value))) {
+    if (typeof value === 'string' && (value.length > 2048 || CONTROL_CHARACTER.test(value))) {
       throw validationFailed('Manifest presentation string is invalid');
     }
     if (value && typeof value === 'object') {
@@ -85,7 +89,7 @@ export function validatedManifest(body: unknown): Manifest {
     throw validationFailed('Manifest resource reference exceeds the limit');
   }
   if (agents?.endpoint_path) {
-    const prefix = `${api.public_path.replace(/\/+$/, '')}/`;
+    const prefix = `${api.public_path.replace(TRAILING_SLASHES, '')}/`;
     if (
       !literalPath(agents.endpoint_path) ||
       !agents.endpoint_path.startsWith(prefix) ||
@@ -131,7 +135,8 @@ export function createServiceManifestService(namespace: string): ServiceManifest
         agents: agents
           ? {
               enabled: agents.enabled,
-              endpoint_path: agents.endpoint_path ?? `${api.public_path.replace(/\/+$/, '')}/mcp`,
+              endpoint_path:
+                agents.endpoint_path ?? `${api.public_path.replace(TRAILING_SLASHES, '')}/mcp`,
               namespace: agents.namespace ?? service.name,
             }
           : null,

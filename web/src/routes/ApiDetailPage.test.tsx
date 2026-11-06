@@ -14,6 +14,12 @@ import { ApiError, accessRequestsApi, grantsApi, threadsApi } from '../lib/api';
 import { ToastProvider } from '../stores/toast';
 import { GrantsTab, RequestsTab } from './ApiDetailPage';
 
+const USER_ID = /^user-\d+$/;
+const WITHDRAWN_GRANTEE = /withdrawn by the grantee/;
+const REVOKED_STATUS = /· revoked /;
+const GOES_ADA_CLIENT = /goes to Ada Client/;
+const MESSAGE = /^Message/;
+
 // Starting a conversation navigates to it; these tabs are rendered without a
 // router, so the two hooks the module reaches for are stood in here.
 vi.mock('@tanstack/react-router', () => ({
@@ -145,7 +151,7 @@ async function expectPage(total: number, page: number): Promise<void> {
 }
 
 function visibleUsers(): string[] {
-  return screen.getAllByText(/^user-\d+$/).map((el) => el.textContent!);
+  return screen.getAllByText(USER_ID).map((el) => el.textContent!);
 }
 
 async function confirm(action: string, userId: string): Promise<void> {
@@ -308,9 +314,9 @@ describe('provider access pagination', () => {
     await expectPage(2, 1);
     const row = (userId: string): HTMLElement =>
       screen.getByText(userId).closest('li') as HTMLElement;
-    expect(within(row('user-1')).getByText(/withdrawn by the grantee/)).toBeInTheDocument();
-    expect(within(row('user-2')).queryByText(/withdrawn by the grantee/)).not.toBeInTheDocument();
-    expect(within(row('user-2')).getByText(/· revoked /)).toBeInTheDocument();
+    expect(within(row('user-1')).getByText(WITHDRAWN_GRANTEE)).toBeInTheDocument();
+    expect(within(row('user-2')).queryByText(WITHDRAWN_GRANTEE)).not.toBeInTheDocument();
+    expect(within(row('user-2')).getByText(REVOKED_STATUS)).toBeInTheDocument();
   });
 
   it('reaches and revokes an old active grant behind 51 revoked grants', async () => {
@@ -412,8 +418,8 @@ describe('provider-initiated conversations', () => {
   async function sendFrom(button: string): Promise<void> {
     fireEvent.click(await screen.findByRole('button', { name: button }));
     const dialog = within(await screen.findByRole('dialog'));
-    expect(dialog.getByText(/goes to Ada Client/)).toBeInTheDocument();
-    fireEvent.change(dialog.getByLabelText(/^Message/), {
+    expect(dialog.getByText(GOES_ADA_CLIENT)).toBeInTheDocument();
+    fireEvent.change(dialog.getByLabelText(MESSAGE), {
       target: { value: 'Which integration needs this?' },
     });
     fireEvent.click(dialog.getByRole('button', { name: 'Send' }));

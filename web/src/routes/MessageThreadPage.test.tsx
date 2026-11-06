@@ -31,6 +31,9 @@ import {
   mergeMessages,
 } from './MessageThreadPage';
 
+const SHOWING_10_20_MESSAGES = /Showing 10 of 20 messages/;
+const SHOWING = /^Showing /;
+
 const route = vi.hoisted(() => ({ threadId: 'thread-1' }));
 
 vi.mock('@tanstack/react-router', () => ({
@@ -330,7 +333,7 @@ describe('MessageThreadPage', () => {
     await client.invalidateQueries({ queryKey: queryKeys.threads.detail('thread-1') });
 
     await waitFor(() => {
-      expect(screen.getByText(/Showing 10 of 20 messages/)).toBeInTheDocument();
+      expect(screen.getByText(SHOWING_10_20_MESSAGES)).toBeInTheDocument();
     });
 
     for (let click = 0; click < 10; click += 1) {
@@ -348,7 +351,7 @@ describe('MessageThreadPage', () => {
       expect(screen.getByText(entry.body)).toBeInTheDocument();
     }
     // Everything is on screen, so there is nothing left to count.
-    expect(screen.queryByText(/^Showing /)).not.toBeInTheDocument();
+    expect(screen.queryByText(SHOWING)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Load older messages' })).not.toBeInTheDocument();
   });
 
@@ -376,7 +379,7 @@ describe('MessageThreadPage', () => {
 
     expect(threadsApi.get).toHaveBeenCalledTimes(1);
     expect(vi.mocked(threadsApi.messages)).toHaveBeenCalledTimes(2);
-    expect(screen.queryByText(/^Showing /)).not.toBeInTheDocument();
+    expect(screen.queryByText(SHOWING)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Load older messages' })).not.toBeInTheDocument();
   });
 
@@ -399,7 +402,7 @@ describe('MessageThreadPage', () => {
     route.threadId = 'thread-2';
     rerenderThread();
     await screen.findByText('body other');
-    expect(screen.queryByText(/^Showing /)).not.toBeInTheDocument();
+    expect(screen.queryByText(SHOWING)).not.toBeInTheDocument();
     expect(screen.queryByText('body m12')).not.toBeInTheDocument();
     expect(screen.queryByText('body m20')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Load older messages' })).not.toBeInTheDocument();

@@ -50,6 +50,10 @@ import { isNexusError } from '../lib/errors.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 import type { RecordedRequest } from './mock-ferrum-edge.js';
 
+const DISABLED = /disabled/i;
+const NO_LONGER_DISABLED = /no longer disabled/i;
+const PREVIOUS_CREDENTIAL_REMOVED = /previous credential was removed/i;
+
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
@@ -401,7 +405,7 @@ describe('credential lifecycle across identities', () => {
 
     await assert.rejects(
       () => harness.services.publishing.createTestConsumer(stale, api.id),
-      (error: Error) => /disabled/i.test(error.message),
+      (error: Error) => DISABLED.test(error.message),
     );
     assert.equal(
       harness.edge.consumerByUsername(`nexus-test-${api.id}`)?.credentials.keyauth?.length ?? 0,
@@ -471,7 +475,7 @@ describe('credential lifecycle across identities', () => {
     );
     await assert.rejects(
       () => harness.services.credentials.disableGatewayAccess(victim.user.id, admin.user.id),
-      (error: Error) => /no longer disabled/i.test(error.message),
+      (error: Error) => NO_LONGER_DISABLED.test(error.message),
     );
     assert.equal(
       (await harness.store.credentials.findById(restored.credential.id))?.status,
@@ -551,7 +555,7 @@ describe('credential lifecycle across identities', () => {
       });
       assert.equal(rotated.statusCode, 502, rotated.body);
       assert.equal(errorCode(rotated.body), 'EDGE_ERROR');
-      assert.match(rotated.body, /previous credential was removed/i);
+      assert.match(rotated.body, PREVIOUS_CREDENTIAL_REMOVED);
 
       assert.equal(
         (await harness.store.credentials.findById(first.credential.id))?.status,

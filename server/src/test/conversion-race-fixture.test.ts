@@ -7,6 +7,14 @@ import type { PublishApiResponse } from '@ferrum-nexus/shared';
 import { createConversionRaceFixture, createOwnedOperation } from './conversion-race-fixture.js';
 import { buildTestApp, specWithServer, testOperationSignal, type TestApp } from './helpers.js';
 
+const CONDITIONAL_PROXY_CASCADE = /conditional_proxy_cascade/;
+const REQUEST_COMPLETED_BEFORE_FIRST = /Request completed before first gateway mutation/;
+const TIMED_OUT_WAITING_SECOND = /Timed out waiting for second proxy lease contention/;
+const PENDING_REQUESTS_DURING_CLEANUP = /pending requests during cleanup/;
+const APP_CLEANUP = /app cleanup/;
+const TEST_ABORTED_WHILE_WAITING = /Test aborted while waiting for first gateway mutation/;
+const INJECTED_ASSERTION_FAILURE = /injected assertion failure/;
+
 function neverAnnounced(): Promise<void> {
   return new Promise(() => {});
 }
@@ -54,14 +62,14 @@ test('conversion fixture requires the first mutation and closes both apps', asyn
       name: 'AssertionError',
       actual: 409,
       expected: 200,
-      message: /conditional_proxy_cascade/,
+      message: CONDITIONAL_PROXY_CASCADE,
     });
     const premature = fixture.own(
       createOwnedOperation(async () => ({ statusCode: 200, body: '' })),
     );
     await assert.rejects(
       fixture.waitFor(neverAnnounced(), premature, 'first gateway mutation'),
-      /Request completed before first gateway mutation/,
+      REQUEST_COMPLETED_BEFORE_FIRST,
     );
   } finally {
     await fixture.cleanup(recordClose(closed, 'two'), recordClose(closed, 'one'));
@@ -113,7 +121,7 @@ test('conversion fixture bounds missing contention and drains a late rejection',
   try {
     await assert.rejects(
       fixture.waitFor(neverAnnounced(), request, 'second proxy lease contention'),
-      /Timed out waiting for second proxy lease contention/,
+      TIMED_OUT_WAITING_SECOND,
     );
   } finally {
     await assert.rejects(
@@ -153,7 +161,7 @@ test('conversion fixture cancels a delayed request and joins its late rejection'
       error.errors.includes(failure) &&
       error.errors.some(
         (cause: unknown) =>
-          cause instanceof Error && /pending requests during cleanup/.test(cause.message),
+          cause instanceof Error && PENDING_REQUESTS_DURING_CLEANUP.test(cause.message),
       ),
   );
   try {
@@ -217,7 +225,7 @@ for (const rejects of [false, true]) {
         error.errors.length === (rejects ? 2 : 1) &&
         error.errors.includes(failure) === rejects &&
         error.errors.some(
-          (cause: unknown) => cause instanceof Error && /app cleanup/.test(cause.message),
+          (cause: unknown) => cause instanceof Error && APP_CLEANUP.test(cause.message),
         ),
     );
     try {
@@ -338,7 +346,7 @@ test(
           error.errors.length === 1 &&
           error.errors.some(
             (cause: unknown) =>
-              cause instanceof Error && /pending requests during cleanup/.test(cause.message),
+              cause instanceof Error && PENDING_REQUESTS_DURING_CLEANUP.test(cause.message),
           ),
       );
       await fixture.within(cancelled.promise, 'handler cancellation');
@@ -378,7 +386,7 @@ test('conversion fixture abort releases requests and still closes both apps', as
   try {
     const waiting = fixture.waitFor(neverAnnounced(), request, 'first gateway mutation');
     controller.abort(new Error('test timeout'));
-    await assert.rejects(waiting, /Test aborted while waiting for first gateway mutation/);
+    await assert.rejects(waiting, TEST_ABORTED_WHILE_WAITING);
   } finally {
     await fixture.cleanup(recordClose(events, 'two closed'), recordClose(events, 'one closed'));
   }
@@ -413,6 +421,6 @@ test('conversion fixture releases on assertion failure and attempts both closes'
         (error: unknown) => error instanceof AggregateError && error.errors.includes(failure),
       );
     }
-  }, /injected assertion failure/);
+  }, INJECTED_ASSERTION_FAILURE);
   assert.deepEqual(events, ['request settled', 'two closed', 'one closed']);
 });

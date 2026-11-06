@@ -8,6 +8,10 @@ import {
   agentCredentialHeader,
 } from './ConnectAgentPanel';
 
+const CREDENTIAL_ISSUED_ORDERS_APP = /credential issued to Orders app/;
+const APPROVED_TOOLS_READ = /Approved tools: Read/;
+const EMPTY_GRANT_NONE_REST = /Empty grant: none; REST access only/;
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -37,7 +41,7 @@ describe('agent connection guidance', () => {
     };
     expect(config.servers.items.url).toBe('https://gateway.example.test/nexus/items/mcp');
     expect(config.servers.items.headers).toEqual({ 'X-API-Key': '<your key>' });
-    expect(screen.getByText(/credential issued to Orders app/)).toBeInTheDocument();
+    expect(screen.getByText(CREDENTIAL_ISSUED_ORDERS_APP)).toBeInTheDocument();
   });
 
   it('does not invent a host when no public gateway origin is configured', () => {
@@ -104,8 +108,8 @@ describe('agent connection guidance', () => {
     );
     expect(change).toHaveBeenLastCalledWith(null);
     render(<AgentGrantSummary agents={agents} subset={['read-id', 'expired-id']} />);
-    expect(screen.getByText(/Approved tools: Read/)).toHaveTextContent('1 expired exposure');
+    expect(screen.getByText(APPROVED_TOOLS_READ)).toHaveTextContent('1 expired exposure');
     render(<AgentGrantSummary agents={agents} subset={[]} label="Empty grant" />);
-    expect(screen.getByText(/Empty grant: none; REST access only/)).toBeInTheDocument();
+    expect(screen.getByText(EMPTY_GRANT_NONE_REST)).toBeInTheDocument();
   });
 });

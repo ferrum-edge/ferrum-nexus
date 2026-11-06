@@ -23,6 +23,10 @@ import {
   type ReleasedMigrationBackend,
 } from './released-migrations.js';
 
+const CRLF = /\r\n/g;
+const RELEASE_TAG = /^v\d+\.\d+\.\d+$/;
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
 const BACKENDS: readonly ReleasedMigrationBackend[] = ['sqlite', 'pg', 'mysql', 'mongodb'];
 
 const SQL_SUFFIX = { sqlite: '.sql', pg: '.pg.sql', mysql: '.mysql.sql' } as const;
@@ -39,7 +43,7 @@ function artifactPath(id: string, backend: ReleasedMigrationBackend): string {
 
 /** SHA-256 of a text file with CRLF normalised to LF. */
 function checksum(path: string): string {
-  const text = readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+  const text = readFileSync(path, 'utf8').replace(CRLF, '\n');
   return createHash('sha256').update(text).digest('hex');
 }
 
@@ -134,10 +138,10 @@ describe('released migrations', () => {
         pendingSeen = true;
       } else {
         assert.ok(!pendingSeen, `${entry.id} is released after an unreleased migration`);
-        assert.match(entry.release, /^v\d+\.\d+\.\d+$/, `${entry.id} names a release tag`);
+        assert.match(entry.release, RELEASE_TAG, `${entry.id} names a release tag`);
       }
       for (const backend of BACKENDS) {
-        assert.match(entry.sha256[backend], /^[0-9a-f]{64}$/, `${entry.id} ${backend} checksum`);
+        assert.match(entry.sha256[backend], SHA256_HEX, `${entry.id} ${backend} checksum`);
       }
     });
   });

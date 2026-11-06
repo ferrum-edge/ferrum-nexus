@@ -19,6 +19,8 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 /** Claims as the ID token carried them. */
 export type Claims = Readonly<Record<string, unknown>>;
 
@@ -137,7 +139,7 @@ export function normalizeEmailClaim(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const email = value.trim().toLowerCase();
   if (email.length === 0 || email.length > MAX_EMAIL_LENGTH) return null;
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
+  return EMAIL_SHAPE.test(email) ? email : null;
 }
 
 /**

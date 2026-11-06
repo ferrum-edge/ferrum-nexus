@@ -51,6 +51,15 @@ import {
 import type { AuditLogRecord } from '../db/store.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
+const WOULD_LOCK_1_ACCOUNT = /would lock 1 account holding access out of it/;
+const CONFIRM_ACCESS_DISRUPTION = /confirm_access_disruption/;
+const BASICAUTH_CREDENTIAL = /basicauth credential/;
+const STILL_VALID_YOUR_OTHER = /still valid for your other APIs/;
+const STILL_ACCEPTS_KEYAUTH_CREDENTIALS = /still accepts keyauth credentials here/;
+const YOU_NEED_ISSUE_ONE = /you need to issue one of the new kind/;
+const LOCK = /lock/;
+const OUTSIDE_PORTAL_OP_REFUSAL = /outside the portal \(op-refusal-key-auth\)/;
+
 function errorBody(body: string): ApiErrorBody['error'] {
   return (JSON.parse(body) as ApiErrorBody).error;
 }
@@ -195,8 +204,8 @@ describe('auth_plugin swaps and the access they disrupt', () => {
       affected_grantees: 1,
       confirm_field: 'confirm_access_disruption',
     });
-    assert.match(error.message, /would lock 1 account holding access out of it/, error.message);
-    assert.match(error.message, /confirm_access_disruption/);
+    assert.match(error.message, WOULD_LOCK_1_ACCOUNT, error.message);
+    assert.match(error.message, CONFIRM_ACCESS_DISRUPTION);
 
     // Nothing moved: not the row, not the gateway, not the credential.
     assert.equal((await harness.store.apis.findById(api.id))?.auth_plugin, 'key_auth');
@@ -332,8 +341,8 @@ describe('auth_plugin swaps and the access they disrupt', () => {
     const listed = notifications.json<ListNotificationsResponse>().items;
     const announced = listed.find((item) => item.title.includes('authentication method'));
     assert.ok(announced, 'the grantee is told, not left to discover a 401');
-    assert.match(announced.body, /basicauth credential/);
-    assert.match(announced.body, /still valid for your other APIs/);
+    assert.match(announced.body, BASICAUTH_CREDENTIAL);
+    assert.match(announced.body, STILL_VALID_YOUR_OTHER);
     assert.equal(announced.link, '/credentials');
   });
 
@@ -385,8 +394,8 @@ describe('auth_plugin swaps and the access they disrupt', () => {
     const listed = notifications.json<ListNotificationsResponse>().items;
     const announced = listed.find((item) => item.title.includes('authentication method'));
     assert.ok(announced, 'the grantee is still told about the change');
-    assert.match(announced.body, /still accepts keyauth credentials here/);
-    assert.doesNotMatch(announced.body, /you need to issue one of the new kind/);
+    assert.match(announced.body, STILL_ACCEPTS_KEYAUTH_CREDENTIALS);
+    assert.doesNotMatch(announced.body, YOU_NEED_ISSUE_ONE);
   });
 
   /** Put a key_auth config the portal does not own on the proxy, as an operator would. */
@@ -425,9 +434,9 @@ describe('auth_plugin swaps and the access they disrupt', () => {
     assert.deepEqual((error.details as AccessDisruptionDetails).outgoing_auth_configs_remaining, [
       'op-refusal-key-auth',
     ]);
-    assert.doesNotMatch(error.message, /lock/, error.message);
-    assert.match(error.message, /outside the portal \(op-refusal-key-auth\)/, error.message);
-    assert.match(error.message, /confirm_access_disruption/);
+    assert.doesNotMatch(error.message, LOCK, error.message);
+    assert.match(error.message, OUTSIDE_PORTAL_OP_REFUSAL, error.message);
+    assert.match(error.message, CONFIRM_ACCESS_DISRUPTION);
     assert.equal((await harness.store.apis.findById(api.id))?.auth_plugin, 'key_auth');
   });
 
@@ -501,7 +510,7 @@ describe('auth_plugin swaps and the access they disrupt', () => {
       .json<ListNotificationsResponse>()
       .items.find((item) => item.title.includes('authentication method'));
     assert.ok(announced, 'the application’s owner is told, not left to discover a 401');
-    assert.match(announced.body, /basicauth credential/);
+    assert.match(announced.body, BASICAUTH_CREDENTIAL);
   });
 
   it('leaves the credentials alone when the gateway refuses the swap', async () => {

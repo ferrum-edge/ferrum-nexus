@@ -7,6 +7,10 @@ import { NotificationsBell } from '../components/layout/NotificationsBell';
 import { notificationsApi } from '../lib/api';
 import { NotificationsPage } from './NotificationsPage';
 
+const FIRST_MESSAGE = /^Message 1 /;
+const ELEVENTH_MESSAGE = /^Message 11 /;
+const YOUR_REQUEST_APPROVED = /^Your request was approved\. /;
+
 const navigate = vi.hoisted(() => vi.fn());
 
 vi.mock('@tanstack/react-router', async () => {
@@ -66,14 +70,14 @@ describe('notifications inbox', () => {
     renderPage(<NotificationsPage />);
     const first = await screen.findByRole('button', { name: 'Notification 1 Open' });
     expect(first).toBeVisible();
-    expect(first).toHaveAccessibleDescription(/^Message 1 /);
+    expect(first).toHaveAccessibleDescription(FIRST_MESSAGE);
     expect(within(first).getByText('Notification 1')).toBeVisible();
     expect(within(first).getByText('Message 1')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Notification 11 Open' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
     const older = await screen.findByRole('button', { name: 'Notification 11 Open' });
     expect(older).toBeVisible();
-    expect(older).toHaveAccessibleDescription(/^Message 11 /);
+    expect(older).toHaveAccessibleDescription(ELEVENTH_MESSAGE);
     expect(notificationsApi.list).toHaveBeenLastCalledWith({ limit: 10, offset: 10 });
     expect(screen.getByText('11–12')).toBeInTheDocument();
     fireEvent.click(older);
@@ -135,7 +139,7 @@ describe('notifications inbox', () => {
     renderPage(<NotificationsPage />);
     const unread = await screen.findByRole('button', { name: 'Approval received Mark read' });
     expect(unread).toBeVisible();
-    expect(unread).toHaveAccessibleDescription(/^Your request was approved\. /);
+    expect(unread).toHaveAccessibleDescription(YOUR_REQUEST_APPROVED);
     expect(within(unread).getByText('Approval received')).toBeVisible();
     expect(within(unread).getByText('Mark read')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Earlier approval Read' })).toBeVisible();

@@ -20,6 +20,8 @@ import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { Icon } from '../../components/ui/Icon';
 import { LabeledInput, LabeledTextarea } from '../../components/ui/Input';
 
+const NEWLINE = /\n/g;
+
 /** What the last completed send reached, kept so the page can report it. */
 interface SendSummary {
   enqueued: number;
@@ -95,7 +97,7 @@ function Composer(): ReactElement {
     const request = {
       subject: subject.trim(),
       body_text: bodyText,
-      body_html: bodyHtml.trim() || `<p>${escapeHtml(bodyText).replace(/\n/g, '<br />')}</p>`,
+      body_html: bodyHtml.trim() || `<p>${escapeHtml(bodyText).replace(NEWLINE, '<br />')}</p>`,
       audience: audienceFrom(audience),
     };
     // Keep the failed submission's ID until its content changes or it succeeds.

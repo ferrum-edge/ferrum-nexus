@@ -29,6 +29,8 @@ import { buildTestApp, type TestApp } from './helpers.js';
 
 const ENVIRONMENT_PASSWORD = 'relay-a-environment-password';
 const STORED_PASSWORD = 'relay-b-stored-password';
+const ENVIRONMENT_PASSWORD_PATTERN = new RegExp(ENVIRONMENT_PASSWORD);
+const STORED_PASSWORD_PATTERN = new RegExp(STORED_PASSWORD);
 /** A different `NEXUS_SECRET_KEY`, standing in for the one before a rotation. */
 const PREVIOUS_SECRET_KEY = 'previous-secret-key-that-is-long-enough-to-be-real-0123456789';
 
@@ -105,8 +107,8 @@ describe('SMTP password source', () => {
   /** No log line may carry a password, whichever one was in play. */
   function assertNoSecretLogged(): void {
     const serialised = JSON.stringify(logged);
-    assert.doesNotMatch(serialised, new RegExp(ENVIRONMENT_PASSWORD));
-    assert.doesNotMatch(serialised, new RegExp(STORED_PASSWORD));
+    assert.doesNotMatch(serialised, ENVIRONMENT_PASSWORD_PATTERN);
+    assert.doesNotMatch(serialised, STORED_PASSWORD_PATTERN);
   }
 
   it('presents the environment password to the environment relay', async () => {

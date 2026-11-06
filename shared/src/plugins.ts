@@ -54,6 +54,10 @@
 import type { HttpMethod } from './constants.js';
 import type { IsoTimestamp } from './entities.js';
 
+const CONSUMER_HEADER_PREFIX = /^x[-_]consumer[-_]/i;
+const AUTHENTICATED_IDENTITY_HEADER = /^x[-_]authenticated[-_]identity$/i;
+const FERRUM_HOPS_HEADER = /^x[-_]ferrum[-_]hops$/i;
+
 /* ── Field specs ────────────────────────────────────────────────────────── */
 
 /** A checkbox. */
@@ -303,7 +307,7 @@ export const CORRELATION_ID_RESERVED_HEADERS: readonly string[] = [
  */
 export function isGatewayOwnedConsumerHeader(name: string): boolean {
   const trimmed = name.trim();
-  return /^x[-_]consumer[-_]/i.test(trimmed) || /^x[-_]authenticated[-_]identity$/i.test(trimmed);
+  return CONSUMER_HEADER_PREFIX.test(trimmed) || AUTHENTICATED_IDENTITY_HEADER.test(trimmed);
 }
 
 /**
@@ -315,7 +319,7 @@ export function isGatewayOwnedConsumerHeader(name: string): boolean {
  * `-` are equivalent, as in Edge's field-name equivalence.
  */
 export function isProxyHopsHeader(name: string): boolean {
-  return /^x[-_]ferrum[-_]hops$/i.test(name.trim());
+  return FERRUM_HOPS_HEADER.test(name.trim());
 }
 
 /* ── The palette ────────────────────────────────────────────────────────── */

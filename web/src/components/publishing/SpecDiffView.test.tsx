@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { SpecDiff } from '@ferrum-nexus/shared';
 import { SpecDiffView } from './SpecDiffView';
 
+const CHANGED_OPERATIONS_NOT_LISTED = /changed operations are not listed/;
+
 afterEach(cleanup);
 
 /** A complete comparison that found nothing. */
@@ -45,7 +47,7 @@ describe('SpecDiffView', () => {
       />,
     );
     expect(screen.getByText(INCOMPLETE)).toBeInTheDocument();
-    expect(screen.getByText(/changed operations are not listed/)).toBeInTheDocument();
+    expect(screen.getByText(CHANGED_OPERATIONS_NOT_LISTED)).toBeInTheDocument();
     expect(screen.queryByText(SAME)).not.toBeInTheDocument();
     // What it could still find is shown.
     expect(screen.getAllByText('/receipts').length).toBeGreaterThan(0);

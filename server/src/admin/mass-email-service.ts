@@ -82,6 +82,8 @@ import { NexusError, isNexusError, quotaExceeded, validationFailed } from '../li
 import { newId } from '../lib/ids.js';
 import { massEmailLockKey, type KeyedSerializer } from '../lib/keyed-serializer.js';
 
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/g;
+
 /** Most recipients whose outbox rows one fan-out transaction inserts. */
 export const MASS_EMAIL_CHUNK_RECIPIENTS = 200;
 
@@ -186,9 +188,7 @@ export const RECIPIENT_NAME_FALLBACK = 'there';
  * removing the link keeps the policy and contains the failure.
  */
 export function neutralRecipientName(name: string): string {
-  return name
-    .replace(/[\u0000-\u001f\u007f]/g, ' ')
-    .replace(TEXT_URL, RECIPIENT_NAME_URL_PLACEHOLDER);
+  return name.replace(CONTROL_CHARACTERS, ' ').replace(TEXT_URL, RECIPIENT_NAME_URL_PLACEHOLDER);
 }
 
 /** Whether `error` is the link policy refusing a rendered message. */

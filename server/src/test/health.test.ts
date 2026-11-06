@@ -14,6 +14,15 @@ import type { NexusError } from '../lib/errors.js';
 import { OPAQUE_ERROR } from '../routes/health.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const HEALTHCHECK_TIMEOUT = /HEALTHCHECK[^\n]*--timeout=(\d+)s/;
+const NOT_EVERY_CONNECTED_DATA = /not every connected data plane attests public-only egress/;
+const CONNECTED_TOO_RECENTLY = /connected too recently/;
+const CONNECTED_IMPLAUSIBLE = /connected_at is implausible/;
+const EXPECTED_DATA_PLANES_UNSET = /NEXUS_EXPECTED_DATA_PLANES is not set/;
+const FEWER_DISTINCT_DATA_PLANES =
+  /fewer distinct data planes \(node_id\) are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES/;
+const EDGE_VERSION_FLOOR = /Ferrum Edge v0\.9\.13 or later/;
+
 describe('health probe deadline', () => {
   it('bounds a hung version lookup and preserves normal admin deadlines', async (t) => {
     const gateway = createHttpServer((request, response) => {
@@ -91,7 +100,7 @@ describe('health probe deadline', () => {
         new URL('../../../docker/Dockerfile', import.meta.url),
         'utf8',
       );
-      const timeout = /HEALTHCHECK[^\n]*--timeout=(\d+)s/.exec(dockerfile);
+      const timeout = HEALTHCHECK_TIMEOUT.exec(dockerfile);
       assert.ok(timeout);
       assert.ok(5_000 < Number(timeout[1]) * 1_000, 'maximum probe budget needs headroom');
     });
@@ -331,10 +340,7 @@ describe('health endpoints', () => {
       assert.equal(unproven.json<EdgeHealth>().status, 'degraded');
       assert.equal(unproven.json<EdgeHealth>().reason, 'backend_egress_unverified');
       assert.equal(unproven.json<EdgeHealth>().public_egress_guaranteed, false);
-      assert.match(
-        unproven.json<EdgeHealth>().error ?? '',
-        /not every connected data plane attests public-only egress/,
-      );
+      assert.match(unproven.json<EdgeHealth>().error ?? '', NOT_EVERY_CONNECTED_DATA);
     }
   });
 
@@ -352,17 +358,17 @@ describe('health endpoints', () => {
     assert.equal(health.status, 'degraded');
     assert.equal(health.reason, 'backend_egress_unverified');
     assert.equal(health.public_egress_guaranteed, false);
-    assert.match(health.error ?? '', /connected too recently/);
-    await assert.rejects(portal.edgeClient.assertBackendEgress(), /connected too recently/);
+    assert.match(health.error ?? '', CONNECTED_TOO_RECENTLY);
+    await assert.rejects(portal.edgeClient.assertBackendEgress(), CONNECTED_TOO_RECENTLY);
   });
 
   it('reads stream age against the control plane Date header, and waits without one', async (t) => {
     const fleet = attestedControlPlanePolicy([{ mode: 'public' }, { mode: 'public' }]);
     const cases: [string | null, RegExp][] = [
       // The gateway's clock an hour behind: streams ten minutes old are in its future.
-      [new Date(Date.now() - 3_600_000).toUTCString(), /connected_at is implausible/],
+      [new Date(Date.now() - 3_600_000).toUTCString(), CONNECTED_IMPLAUSIBLE],
       // Without a Date, only this process's own sightings can settle a data plane.
-      [null, /connected too recently/],
+      [null, CONNECTED_TOO_RECENTLY],
     ];
     for (const [date, why] of cases) {
       const portal = await buildTestApp({ env: { NEXUS_EXPECTED_DATA_PLANES: '2' } });
@@ -383,11 +389,8 @@ describe('health endpoints', () => {
   it('tells an admin why the expected data-plane count withholds the guarantee', async (t) => {
     const fleet = attestedControlPlanePolicy([{ mode: 'public' }, { mode: 'public' }]);
     const cases: [string | undefined, RegExp | null][] = [
-      [undefined, /NEXUS_EXPECTED_DATA_PLANES is not set/],
-      [
-        '3',
-        /fewer distinct data planes \(node_id\) are connected to the control plane than NEXUS_EXPECTED_DATA_PLANES/,
-      ],
+      [undefined, EXPECTED_DATA_PLANES_UNSET],
+      ['3', FEWER_DISTINCT_DATA_PLANES],
       ['2', null],
       ['1', null],
     ];
@@ -438,7 +441,7 @@ describe('health endpoints', () => {
     const detailed = await portal.authed(operator, { method: 'GET', url: '/api/health/edge' });
     assert.equal(detailed.json<EdgeHealth>().status, 'degraded');
     assert.equal(detailed.json<EdgeHealth>().reason, 'backend_egress_unverified');
-    assert.match(detailed.json<EdgeHealth>().error ?? '', /Ferrum Edge v0\.9\.13 or later/);
+    assert.match(detailed.json<EdgeHealth>().error ?? '', EDGE_VERSION_FLOOR);
     const anonymous = await portal.app.inject({ method: 'GET', url: '/api/health/edge' });
     assert.equal(anonymous.json<EdgeHealth>().reason, 'unspecified');
     assert.equal(anonymous.json<EdgeHealth>().error, null);

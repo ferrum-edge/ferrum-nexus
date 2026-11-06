@@ -35,6 +35,14 @@ import {
   type DataPlaneFreshness,
 } from './egress-policy.js';
 
+const REQUIRED_LOCAL_PUBLIC_EGRESS = /required local public egress policy/;
+const INVALID_PROTOCOL = /invalid protocol/;
+const NEXUS_ALLOW_OVERRIDE = /NEXUS_ALLOW_[A-Z_]+=true/;
+const CONNECTED_TOO_RECENTLY = /connected too recently/;
+const CLOCK = /clock/;
+const ATTESTATION_UNREADABLE = /attestation is unreadable/;
+const NOT_EVERY_CONNECTED_DATA = /not every connected data plane attests/;
+
 /** The vendored canonical `backend-egress-policy` v2 fixtures (contracts-edge-0.9.17). */
 const EGRESS_FIXTURES = new URL(
   '../../../contracts/ferrum-contracts/fixtures/backend-egress-policy/v2/',
@@ -315,7 +323,7 @@ describe('closed owner egress contract', () => {
       () => edge.apiSpecs.create({}),
       () => edge.apiSpecs.replace('spec', {}),
     ]) {
-      await assert.rejects(write, /required local public egress policy/);
+      await assert.rejects(write, REQUIRED_LOCAL_PUBLIC_EGRESS);
     }
     const requests = harness.edge.requests.slice(before);
     assert.equal(requests.length, 4);
@@ -379,7 +387,7 @@ describe('closed owner egress contract', () => {
       ...publicEgressPolicy(),
       extra: 'x'.repeat(EGRESS_POLICY_MAX_BYTES),
     });
-    await assert.rejects(harness.edgeClient.assertBackendEgress(), /invalid protocol/);
+    await assert.rejects(harness.edgeClient.assertBackendEgress(), INVALID_PROTOCOL);
     harness.edge.setBackendEgressPolicy(publicEgressPolicy());
     harness.edge.delay('/backend-egress-policy', 500, 'GET');
     await assert.rejects(harness.edgeClient.assertBackendEgress());
@@ -477,7 +485,7 @@ describe('closed owner egress contract', () => {
       t.after(() => harness.close());
       const warned = logLines
         .filter((line) => line.includes('BACKEND EGRESS NOT GUARANTEED'))
-        .map((line) => /NEXUS_ALLOW_[A-Z_]+=true/.exec(line)?.[0]);
+        .map((line) => NEXUS_ALLOW_OVERRIDE.exec(line)?.[0]);
       assert.deepEqual(warned, expected);
     }
   });
@@ -905,7 +913,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
       );
       assert.match(
         describeDataPlaneAttestation('data_plane_recently_connected') ?? '',
-        /connected too recently/,
+        CONNECTED_TOO_RECENTLY,
       );
     });
 
@@ -1092,7 +1100,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
         skewed({ readAt: READ_AT - 3_600_000, settledNodeIds: new Set(['dp-a']) }),
         'data_plane_clock_skew',
       );
-      assert.match(describeDataPlaneAttestation('data_plane_clock_skew') ?? '', /clock/);
+      assert.match(describeDataPlaneAttestation('data_plane_clock_skew') ?? '', CLOCK);
     });
   });
 
@@ -1421,7 +1429,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
     );
     await assert.rejects(harness.edgeClient.assertBackendEgress(), (error: NexusError) => {
       assert.equal(error.code, 'EDGE_ERROR');
-      assert.match(error.message, /attestation is unreadable/);
+      assert.match(error.message, ATTESTATION_UNREADABLE);
       assert.deepEqual(error.details, {
         kind: 'backend_egress_unverified',
         data_plane_attestation: 'attestation_unreadable',
@@ -1431,7 +1439,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
     const probe = await harness.edgeClient.probe();
     assert.equal(probe.publicEgressGuaranteed, false);
     assert.equal(probe.backendEgressVerified, false);
-    assert.match(probe.backendEgressDetail ?? '', /attestation is unreadable/);
+    assert.match(probe.backendEgressDetail ?? '', ATTESTATION_UNREADABLE);
     // The same answer, consistent again, is guaranteed on the very next read.
     harness.edge.setBackendEgressPolicy(attested);
     assert.equal((await harness.edgeClient.probe()).publicEgressGuaranteed, true);
@@ -1455,7 +1463,7 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
     const unproven: (DataPlaneReport | null)[][] = [[PUBLIC, null], [PUBLIC, { mode: 'both' }], []];
     for (const reports of unproven) {
       harness.edge.setBackendEgressPolicy(attestedControlPlanePolicy(reports));
-      await assert.rejects(edge.assertBackendEgress(), /not every connected data plane attests/);
+      await assert.rejects(edge.assertBackendEgress(), NOT_EVERY_CONNECTED_DATA);
       const degraded = await edge.probe();
       assert.equal(degraded.publicEgressGuaranteed, false);
       assert.equal(degraded.backendEgressVerified, false);

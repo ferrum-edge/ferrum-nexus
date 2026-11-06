@@ -33,6 +33,32 @@ import {
   type OidcClient,
 } from './oidc.js';
 
+const BASE64URL_43 = /^[A-Za-z0-9_-]{43}$/;
+const HTTPS_MENTION = /https/;
+const LOOPBACK = /loopback/;
+const QUERY = /query/;
+const CREDENTIALS = /credentials/;
+const ABSOLUTE = /absolute/;
+const BASE64URL_22 = /^[A-Za-z0-9_-]{22}$/;
+const AZP = /azp/;
+const NONCE_MENTION = /nonce/;
+const AT_HASH = /at_hash/;
+const MOCK_PROVIDER_ISSUER_HOSTNAME =
+  /mock provider issuer hostname must be 127.0.0.1 or localhost/;
+const ISSUER = /issuer/;
+const S256_MENTION = /S256/;
+const RS256_MENTION = /RS256/;
+const TOKEN_ENDPOINT = /token_endpoint/;
+const REQUEST_FAILED = /request failed/;
+const TOO_LARGE = /too large/;
+const TIMED_OUT = /timed out/;
+const NON_PUBLIC = /non-public/;
+const NOT_PUBLIC_ADDRESS = /not a public address/;
+const INVALID_GRANT = /invalid_grant/;
+const NOT_PROVIDERS_AUTHORIZATION_ENDPOINT = /not this provider's authorization endpoint/;
+const REQUEST_FAILED_CONNECTION_REFUSED =
+  /request failed: connection refused, host resolves to a non-public address/;
+
 const CLIENT_ID = 'nexus-portal';
 const NONCE = 'nonce-for-this-attempt';
 
@@ -58,7 +84,7 @@ describe('PKCE, state and URLs', () => {
     const a = randomUrlToken();
     const b = randomUrlToken();
     assert.notEqual(a, b);
-    assert.match(a, /^[A-Za-z0-9_-]{43}$/);
+    assert.match(a, BASE64URL_43);
     assert.equal(tokensEqual(a, a), true);
     assert.equal(tokensEqual(a, b), false);
     assert.equal(tokensEqual(a, `${a}x`), false);
@@ -97,27 +123,27 @@ describe('PKCE, state and URLs', () => {
 
   it('accepts HTTPS issuers, and plain HTTP only on loopback when allowed', () => {
     assert.equal(issuerProblem('https://idp.example.com/realms/corp', false), null);
-    assert.match(issuerProblem('http://idp.example.com', false) ?? '', /https/);
-    assert.match(issuerProblem('http://idp.example.com', true) ?? '', /loopback/);
-    assert.match(issuerProblem('http://127.0.0.1:8080', false) ?? '', /https/);
+    assert.match(issuerProblem('http://idp.example.com', false) ?? '', HTTPS_MENTION);
+    assert.match(issuerProblem('http://idp.example.com', true) ?? '', LOOPBACK);
+    assert.match(issuerProblem('http://127.0.0.1:8080', false) ?? '', HTTPS_MENTION);
     assert.equal(issuerProblem('http://127.0.0.1:8080', true), null);
     assert.equal(issuerProblem('http://localhost:5556/dex', true), null);
-    assert.match(issuerProblem('https://idp.example.com?x=1', false) ?? '', /query/);
-    assert.match(issuerProblem('https://user:pw@idp.example.com', false) ?? '', /credentials/);
-    assert.match(issuerProblem('ftp://idp.example.com', true) ?? '', /https/);
-    assert.match(oidcUrlProblem('not a url', false) ?? '', /absolute/);
+    assert.match(issuerProblem('https://idp.example.com?x=1', false) ?? '', QUERY);
+    assert.match(issuerProblem('https://user:pw@idp.example.com', false) ?? '', CREDENTIALS);
+    assert.match(issuerProblem('ftp://idp.example.com', true) ?? '', HTTPS_MENTION);
+    assert.match(oidcUrlProblem('not a url', false) ?? '', ABSOLUTE);
     assert.equal(isLoopbackHostname('[::1]'), true);
     assert.equal(isLoopbackHostname('localhost'), true);
     // Only the literals: no name a resolver could point elsewhere.
     assert.equal(isLoopbackHostname('app.localhost'), false);
     assert.equal(isLoopbackHostname('127.0.0.2'), false);
     assert.equal(isLoopbackHostname('10.0.0.1'), false);
-    assert.match(issuerProblem('http://idp.localhost:5556', true) ?? '', /loopback/);
+    assert.match(issuerProblem('http://idp.localhost:5556', true) ?? '', LOOPBACK);
   });
 
   it('hashes an access token the way at_hash is defined for RS256 and ES256', () => {
     // The left half of SHA-256, base64url: 16 bytes, 22 characters.
-    assert.match(accessTokenHash('access-token'), /^[A-Za-z0-9_-]{22}$/);
+    assert.match(accessTokenHash('access-token'), BASE64URL_22);
     assert.notEqual(accessTokenHash('access-token'), accessTokenHash('other-token'));
   });
 });
@@ -188,13 +214,13 @@ for (const alg of ['RS256', 'ES256'] as const) {
 
     it('refuses several audiences unless azp names this client', async () => {
       const shared = claims({ aud: [CLIENT_ID, 'another-client'] });
-      await rejectsWith(validate(await idp.sign(shared)), 'token_invalid', /azp/);
+      await rejectsWith(validate(await idp.sign(shared)), 'token_invalid', AZP);
       const named = await validate(await idp.sign({ ...shared, azp: CLIENT_ID }));
       assert.equal(named.sub, 'subject-1');
       await rejectsWith(
         validate(await idp.sign(claims({ azp: 'another-client' }))),
         'token_invalid',
-        /azp/,
+        AZP,
       );
     });
 
@@ -238,10 +264,10 @@ for (const alg of ['RS256', 'ES256'] as const) {
       await rejectsWith(
         validate(await idp.sign(claims({ nonce: 'someone-elses-nonce' }))),
         'token_invalid',
-        /nonce/,
+        NONCE_MENTION,
       );
       const { nonce: _nonce, ...withoutNonce } = claims();
-      await rejectsWith(validate(await idp.sign(withoutNonce)), 'token_invalid', /nonce/);
+      await rejectsWith(validate(await idp.sign(withoutNonce)), 'token_invalid', NONCE_MENTION);
     });
 
     it('requires a subject', async () => {
@@ -252,7 +278,7 @@ for (const alg of ['RS256', 'ES256'] as const) {
     it('checks at_hash against the access token when both are present', async () => {
       const token = await idp.sign(claims({ at_hash: accessTokenHash('the-access-token') }));
       assert.equal((await validate(token, 'the-access-token')).sub, 'subject-1');
-      await rejectsWith(validate(token, 'a-different-token'), 'token_invalid', /at_hash/);
+      await rejectsWith(validate(token, 'a-different-token'), 'token_invalid', AT_HASH);
     });
 
     it('picks up a rotated provider key, refetching at most once per cooldown', async () => {
@@ -305,7 +331,7 @@ describe('discovery', () => {
             // Exercise the runtime guard for a caller outside the typed fixture contract.
             issuerHostname: hostname as 'localhost',
           }),
-        /mock provider issuer hostname must be 127.0.0.1 or localhost/,
+        MOCK_PROVIDER_ISSUER_HOSTNAME,
       );
     }
   });
@@ -315,7 +341,7 @@ describe('discovery', () => {
     await rejectsWith(
       createOidcClient({ allowHttpLoopback: false }).discover(idp.issuer),
       'provider_unavailable',
-      /https/,
+      HTTPS_MENTION,
     );
   });
 
@@ -324,7 +350,7 @@ describe('discovery', () => {
     await rejectsWith(
       createOidcClient({ allowHttpLoopback: true }).discover(idp.issuer),
       'provider_unavailable',
-      /issuer/,
+      ISSUER,
     );
   });
 
@@ -333,7 +359,7 @@ describe('discovery', () => {
     await rejectsWith(
       createOidcClient({ allowHttpLoopback: true }).discover(idp.issuer),
       'provider_unavailable',
-      /S256/,
+      S256_MENTION,
     );
   });
 
@@ -342,7 +368,7 @@ describe('discovery', () => {
     await rejectsWith(
       createOidcClient({ allowHttpLoopback: true }).discover(idp.issuer),
       'provider_unavailable',
-      /RS256/,
+      RS256_MENTION,
     );
   });
 
@@ -351,7 +377,7 @@ describe('discovery', () => {
     await rejectsWith(
       createOidcClient({ allowHttpLoopback: true }).discover(idp.issuer),
       'provider_unavailable',
-      /token_endpoint/,
+      TOKEN_ENDPOINT,
     );
   });
 
@@ -373,7 +399,7 @@ describe('discovery', () => {
       await rejectsWith(
         createOidcClient({ allowHttpLoopback: true }).discover(idp.issuer),
         'provider_unavailable',
-        /request failed/,
+        REQUEST_FAILED,
       );
     } finally {
       idp.discoveryFault = null;
@@ -386,7 +412,7 @@ describe('discovery', () => {
       await rejectsWith(
         createOidcClient({ allowHttpLoopback: true }).discover(idp.issuer),
         'provider_unavailable',
-        /too large/,
+        TOO_LARGE,
       );
     } finally {
       idp.discoveryFault = null;
@@ -400,7 +426,7 @@ describe('discovery', () => {
       await rejectsWith(
         createOidcClient({ allowHttpLoopback: true, timeoutMs: 200 }).discover(idp.issuer),
         'provider_unavailable',
-        /timed out/,
+        TIMED_OUT,
       );
       assert.ok(Date.now() - started < 5_000, 'the deadline, not the socket, ended it');
     } finally {
@@ -434,13 +460,13 @@ describe('discovery', () => {
     await rejectsWith(
       client.discover('https://idp.corp.example'),
       'provider_unavailable',
-      /non-public/,
+      NON_PUBLIC,
     );
     const literal = createOidcClient({ allowHttpLoopback: false });
     await rejectsWith(
       literal.discover('https://192.168.1.10/realms/corp'),
       'provider_unavailable',
-      /not a public address/,
+      NOT_PUBLIC_ADDRESS,
     );
     // With private addresses allowed the request is made (and here fails on
     // the network instead).
@@ -455,7 +481,7 @@ describe('discovery', () => {
     await rejectsWith(
       allowed.discover('https://idp.corp.example'),
       'provider_unavailable',
-      /request failed/,
+      REQUEST_FAILED,
     );
   });
 
@@ -485,7 +511,7 @@ describe('discovery', () => {
         codeVerifier: randomUrlToken(),
       }),
       'provider_unavailable',
-      /invalid_grant/,
+      INVALID_GRANT,
     );
 
     const right = idp.authorize(request(pkceChallenge(verifier)), { sub: 'subject-1' });
@@ -520,7 +546,7 @@ describe('discovery', () => {
         codeVerifier: verifier,
       }),
       'provider_unavailable',
-      /invalid_grant/,
+      INVALID_GRANT,
     );
   });
 
@@ -563,13 +589,13 @@ describe('discovery', () => {
       wrongOrigin.hostname = '127.0.0.1';
       assert.throws(
         () => provider.authorize(wrongOrigin.href, { sub: 'subject-1' }),
-        /not this provider's authorization endpoint/,
+        NOT_PROVIDERS_AUTHORIZATION_ENDPOINT,
       );
       const wrongPath = new URL(request);
       wrongPath.pathname = '/elsewhere';
       assert.throws(
         () => provider.authorize(wrongPath.href, { sub: 'subject-1' }),
-        /not this provider's authorization endpoint/,
+        NOT_PROVIDERS_AUTHORIZATION_ENDPOINT,
       );
       const authorized = provider.authorize(request, { sub: 'subject-1' });
       const tokens = await client.exchangeCode({
@@ -626,7 +652,7 @@ describe('discovery', () => {
     await rejectsWith(
       nonLoopback.discover(issuer),
       'provider_unavailable',
-      /request failed: connection refused, host resolves to a non-public address/,
+      REQUEST_FAILED_CONNECTION_REFUSED,
     );
   });
 });
@@ -687,7 +713,7 @@ describe('connection-time destination vetting', () => {
       await rejectsWith(
         client.discover(`https://idp.rebind.example:${port}`),
         'provider_unavailable',
-        /request failed: connection refused, host resolves to a non-public address/,
+        REQUEST_FAILED_CONNECTION_REFUSED,
       );
       assert.deepEqual(
         resolved,

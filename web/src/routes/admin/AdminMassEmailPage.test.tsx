@@ -6,6 +6,11 @@ import type { MassEmailRequest, MassEmailResponse } from '@ferrum-nexus/shared';
 import { adminApi, ApiError, organizationsApi, usersApi } from '../../lib/api';
 import { AdminMassEmailPage } from './AdminMassEmailPage';
 
+const SUBJECT = /^Subject/;
+const PLAIN_TEXT_BODY = /^Plain-text body/;
+const HEX_KEY = /^[0-9a-f]{32}$/;
+const HTML_BODY = /^HTML body/;
+
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), push: vi.fn() }));
 
 vi.mock('../../stores/toast', () => ({ useToast: () => toast }));
@@ -24,8 +29,8 @@ function renderComposer(subject = 'Announcement'): void {
       <AdminMassEmailPage />
     </QueryClientProvider>,
   );
-  fireEvent.change(screen.getByLabelText(/^Subject/), { target: { value: subject } });
-  fireEvent.change(screen.getByLabelText(/^Plain-text body/), {
+  fireEvent.change(screen.getByLabelText(SUBJECT), { target: { value: subject } });
+  fireEvent.change(screen.getByLabelText(PLAIN_TEXT_BODY), {
     target: { value: 'First announcement' },
   });
 }
@@ -50,10 +55,10 @@ describe('mass email campaign IDs', () => {
     });
     const subject = 'S'.repeat(300);
     renderComposer(subject);
-    expect(screen.getByLabelText(/^Subject/)).toHaveAttribute('maxlength', '300');
+    expect(screen.getByLabelText(SUBJECT)).toHaveAttribute('maxlength', '300');
     await submit();
     await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
-    fireEvent.change(screen.getByLabelText(/^Plain-text body/), {
+    fireEvent.change(screen.getByLabelText(PLAIN_TEXT_BODY), {
       target: { value: 'Second announcement' },
     });
     await submit();
@@ -65,7 +70,7 @@ describe('mass email campaign IDs', () => {
     const requests = send.mock.calls.map(([request]) => request);
     expect(new Set(requests.map((request) => request.idempotency_key)).size).toBe(3);
     for (const request of requests) {
-      expect(request.idempotency_key).toMatch(/^[0-9a-f]{32}$/);
+      expect(request.idempotency_key).toMatch(HEX_KEY);
       expect(request.subject).toBe(subject);
       expect(request.audience).toEqual({ scope: 'all' });
     }
@@ -210,7 +215,7 @@ describe('mass email HTML fallback', () => {
     });
     const bodyText = 'Use <api_key> literally.\nKeep &copy; and &amp; as written.';
     renderComposer();
-    fireEvent.change(screen.getByLabelText(/^Plain-text body/), { target: { value: bodyText } });
+    fireEvent.change(screen.getByLabelText(PLAIN_TEXT_BODY), { target: { value: bodyText } });
 
     await submit();
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
@@ -229,7 +234,7 @@ describe('mass email HTML fallback', () => {
     });
     const bodyHtml = '<p>Use <strong>custom HTML</strong>.</p>';
     renderComposer();
-    fireEvent.change(screen.getByLabelText(/^HTML body/), { target: { value: bodyHtml } });
+    fireEvent.change(screen.getByLabelText(HTML_BODY), { target: { value: bodyHtml } });
 
     await submit();
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));

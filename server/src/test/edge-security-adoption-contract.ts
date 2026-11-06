@@ -25,6 +25,38 @@ import { faultInjectingStore, type FaultInjectingStore } from './fault-injection
 import { buildTestApp, SAMPLE_SPEC_YAML, specWithServer, type TestApp } from './helpers.js';
 import { mockBasicPasswordHash, publicEgressPolicy } from './mock-ferrum-edge.js';
 
+const JOURNAL_PUBLICATION_REFUSED = /journal publication refused/;
+const OLD_GENERATION_RETIREMENT_REFUSED = /old generation retirement refused/;
+const CHUNK_READ_REFUSED = /chunk read refused/;
+const COMPLETION_CUSTODY_REFUSED = /completion custody refused/;
+const CHUNK_DOES_NOT_MATCH_MANIFEST = /chunk does not match its manifest/;
+const CHUNK_UNAVAILABLE = /chunk is unavailable/;
+const RESTORE_OWNERSHIP_COMMIT_REFUSED = /restore ownership commit refused/;
+const LARGE_AUTHORITY_ADMISSION_REFUSED = /large authority admission refused/;
+const MUTATION_UNCONFIRMED = /mutation is unconfirmed/;
+const DOES_NOT_MATCH_CATALOG = /does not match its catalog revision/;
+const LACKS_ACKNOWLEDGED_DEPLOYMENT_AUTHORITY = /lacks acknowledged deployment authority/;
+const REQUIRED_LOCAL_PUBLIC_EGRESS = /required local public egress policy/;
+const DOES_NOT_MATCH_API = /does not match the API deployment/;
+const UNKNOWN_CHANGED_PLUGIN_STATE = /unknown or changed plugin state/;
+const PARTIAL_CONVERSION_CHANGED_AFTER =
+  /partial conversion changed after its acknowledged snapshot|original gateway deployment authority was refused/;
+const INJECTED_INTERRUPTION = /injected interruption/;
+const CATALOG_COMPLETION_REFUSED = /catalog completion refused/;
+const GATEWAY_DEPLOYMENT_AUTHORITY_UNAVAILABLE = /gateway deployment authority is unavailable/;
+const ORIGINAL_CONVERSION_HAS_NO = /original conversion has no deployment-v1 replacement authority/;
+const DID_NOT_COMMIT_DEPLOYMENT = /did not commit the deployment mutation; nothing was applied/;
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+const DEPLOYMENT_V1_REPLACEMENT_AUTHORITY =
+  /deployment-v1 replacement authority|did not commit the deployment mutation/;
+const STAGING_SEGMENT = /\/\.staging\//;
+const ORIGINAL_RECONCILIATION_AUDIT_INSERT = /original reconciliation audit insert refused/;
+const STAGED_CONVERSION_CHANGED = /staged conversion changed/;
+const PARTIAL_CONVERSION_PROXY_CONFIGURATION = /partial conversion proxy configuration changed/;
+const PARTIAL_CONVERSION_HAS_UNKNOWN = /partial conversion has unknown or changed plugin state/;
+const PARTIAL_CONVERSION_SPECIFICATION_CHANGED = /partial conversion specification changed/;
+const RESTORE_CATALOG_COMPLETION_REFUSED = /restore catalog completion refused/;
+
 /**
  * Bounds every contract test. The slowest one takes about 22 seconds on a CI
  * runner, so a lease or lock cycle across a pooled store's connections fails
@@ -373,7 +405,7 @@ export function runEdgeSecurityAdoptionContract(
         faults.failAfter('settings', 'set', boundary, new Error('journal publication refused'));
         await assert.rejects(
           writeRecoveryJournal(harness.store, crypto, key, next),
-          /journal publication refused/,
+          JOURNAL_PUBLICATION_REFUSED,
         );
         assert.deepEqual(await journalRows(key), rows);
         assert.deepEqual(await readLargeJournal(key), journal);
@@ -381,16 +413,16 @@ export function runEdgeSecurityAdoptionContract(
       faults.failAfter('settings', 'delete', 1, new Error('old generation retirement refused'));
       await assert.rejects(
         writeRecoveryJournal(harness.store, crypto, key, next),
-        /old generation retirement refused/,
+        OLD_GENERATION_RETIREMENT_REFUSED,
       );
       assert.deepEqual(await journalRows(key), rows);
       faults.failAfter('settings', 'get', 2, new Error('chunk read refused'));
-      await assert.rejects(readLargeJournal(key), /chunk read refused/);
+      await assert.rejects(readLargeJournal(key), CHUNK_READ_REFUSED);
       assert.deepEqual(await journalRows(key), rows);
       faults.failAfter('settings', 'delete', 1, new Error('completion custody refused'));
       await assert.rejects(
         deleteRecoveryJournal(harness.store, crypto, key),
-        /completion custody refused/,
+        COMPLETION_CUSTODY_REFUSED,
       );
       assert.deepEqual(await journalRows(key), rows);
       assert.deepEqual(await readLargeJournal(key), journal);
@@ -414,11 +446,11 @@ export function runEdgeSecurityAdoptionContract(
       const corrupted = await journalRows(key);
       await assert.rejects(
         readRecoveryJournal(harness.store, crypto, key),
-        /chunk does not match its manifest/,
+        CHUNK_DOES_NOT_MATCH_MANIFEST,
       );
       await assert.rejects(
         deleteRecoveryJournal(harness.store, crypto, key),
-        /chunk does not match its manifest/,
+        CHUNK_DOES_NOT_MATCH_MANIFEST,
       );
       assert.deepEqual(await journalRows(key), corrupted);
       await harness.store.settings.set(first.key, first.value, true);
@@ -426,7 +458,7 @@ export function runEdgeSecurityAdoptionContract(
       const incomplete = await journalRows(key);
       await assert.rejects(
         writeRecoveryJournal(harness.store, crypto, key, { changed: true }),
-        /chunk is unavailable/,
+        CHUNK_UNAVAILABLE,
       );
       assert.deepEqual(await journalRows(key), incomplete);
       await harness.store.settings.set(second.key, second.value, true);
@@ -643,7 +675,7 @@ export function runEdgeSecurityAdoptionContract(
       );
       await assert.rejects(
         harness.services.publishing.restoreGateway(actor, published.api.id),
-        /restore ownership commit refused/,
+        RESTORE_OWNERSHIP_COMMIT_REFUSED,
       );
       assert.ok(cutover && cleanup, 'native cleanup retained its acknowledged cutover authority');
       assert.deepEqual(await journalRows(key), []);
@@ -676,7 +708,7 @@ export function runEdgeSecurityAdoptionContract(
       const offset = harness.edge.requests.length;
       await assert.rejects(
         harness.services.publishing.update(actor, published.api.id, { spec_enforcement: 'routes' }),
-        /large authority admission refused/,
+        LARGE_AUTHORITY_ADMISSION_REFUSED,
       );
       assert.equal(retained.length, 1, 'the committed baseline preceded authority admission');
       assert.deepEqual(await journalRows(key), retained);
@@ -733,7 +765,7 @@ export function runEdgeSecurityAdoptionContract(
         const retryOffset = harness.edge.requests.length;
         await assert.rejects(
           harness.services.publishing.restoreGateway(actor, published.api.id),
-          /mutation is unconfirmed/,
+          MUTATION_UNCONFIRMED,
         );
         assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
         assert.deepEqual(await journalRows(key), rows);
@@ -968,7 +1000,7 @@ export function runEdgeSecurityAdoptionContract(
           spec_enforcement: 'docs_only',
           agents: null,
         }),
-        /does not match its catalog revision/,
+        DOES_NOT_MATCH_CATALOG,
       );
       assert.deepEqual(gatewayState(), state);
       assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
@@ -1086,7 +1118,7 @@ export function runEdgeSecurityAdoptionContract(
         const retryOffset = harness.edge.requests.length;
         await assert.rejects(
           harness.services.publishing.restoreGateway(actor, published.api.id),
-          /mutation is unconfirmed/,
+          MUTATION_UNCONFIRMED,
         );
         assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
         assert.deepEqual(gatewayState(), operatorState);
@@ -1149,7 +1181,7 @@ export function runEdgeSecurityAdoptionContract(
       const retryOffset = harness.edge.requests.length;
       await assert.rejects(
         harness.services.publishing.restoreGateway(actor, published.api.id),
-        /mutation is unconfirmed/,
+        MUTATION_UNCONFIRMED,
       );
       assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
       assert.deepEqual(await harness.store.settings.get(key), sealed);
@@ -1214,7 +1246,7 @@ export function runEdgeSecurityAdoptionContract(
       const retryOffset = harness.edge.requests.length;
       await assert.rejects(
         harness.services.publishing.restoreGateway(actor, published.api.id),
-        /mutation is unconfirmed/,
+        MUTATION_UNCONFIRMED,
       );
       assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
       assert.deepEqual(await harness.store.settings.get(key), sealed);
@@ -1277,7 +1309,7 @@ export function runEdgeSecurityAdoptionContract(
         const retryOffset = harness.edge.requests.length;
         await assert.rejects(
           harness.services.publishing.restoreGateway(actor, published.api.id),
-          /mutation is unconfirmed/,
+          MUTATION_UNCONFIRMED,
         );
         assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
         assert.deepEqual(await harness.store.settings.get(key), sealed);
@@ -1438,7 +1470,7 @@ export function runEdgeSecurityAdoptionContract(
       const retryOffset = harness.edge.requests.length;
       await assert.rejects(
         harness.services.publishing.restoreGateway(actor, published.api.id),
-        /lacks acknowledged deployment authority/,
+        LACKS_ACKNOWLEDGED_DEPLOYMENT_AUTHORITY,
       );
       assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
       assert.deepEqual(gatewayState(), state);
@@ -1483,7 +1515,7 @@ export function runEdgeSecurityAdoptionContract(
           harness.services.publishing.update(actor, published.api.id, {
             spec_enforcement: 'docs_only',
           }),
-          /does not match its catalog revision/,
+          DOES_NOT_MATCH_CATALOG,
         );
         assert.deepEqual(gatewayState(), state);
         assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
@@ -1646,7 +1678,7 @@ export function runEdgeSecurityAdoptionContract(
             harness.services.publishing.rollbackSpec(actor, published.api.id, published.spec.id),
           () => harness.services.publishing.restoreGateway(actor, published.api.id),
         ]) {
-          await assert.rejects(operation, /required local public egress policy/);
+          await assert.rejects(operation, REQUIRED_LOCAL_PUBLIC_EGRESS);
         }
         assert.ok(harness.edge.requests.slice(offset).every((request) => request.method === 'GET'));
         assert.equal(JSON.stringify([...harness.edge.proxies]), beforeProxies);
@@ -1688,7 +1720,7 @@ export function runEdgeSecurityAdoptionContract(
           const offset = harness.edge.requests.length;
           await assert.rejects(
             harness.services.publishing.restoreGateway(actor, published.api.id),
-            /does not match the API deployment/,
+            DOES_NOT_MATCH_API,
           );
           assert.equal(
             (await harness.store.apis.findById(published.api.id))?.gateway_state,
@@ -1711,7 +1743,7 @@ export function runEdgeSecurityAdoptionContract(
           const offset = harness.edge.requests.length;
           await assert.rejects(
             harness.services.publishing.restoreGateway(actor, published.api.id),
-            /does not match the API deployment/,
+            DOES_NOT_MATCH_API,
           );
           assert.ok(
             harness.edge.requests.slice(offset).every((request) => request.method === 'GET'),
@@ -1774,7 +1806,7 @@ export function runEdgeSecurityAdoptionContract(
           harness.services.publishing.update(actor, published.api.id, {
             spec_enforcement: level === 'routes' ? 'docs_only' : 'routes',
           }),
-          /required local public egress policy/,
+          REQUIRED_LOCAL_PUBLIC_EGRESS,
         );
         const failed = (await harness.store.apis.findById(published.api.id))!;
         assert.equal(failed.gateway_state, 'repair_required');
@@ -1819,7 +1851,7 @@ export function runEdgeSecurityAdoptionContract(
         const deletes = harness.edge.callsTo('DELETE', `/proxies/${proxyId}`).length;
         await assert.rejects(
           harness.services.publishing.restoreGateway(actor, published.api.id),
-          /unknown or changed plugin state/,
+          UNKNOWN_CHANGED_PLUGIN_STATE,
         );
         assert.equal(harness.edge.callsTo('DELETE', `/proxies/${proxyId}`).length, deletes);
         assert.ok(harness.edge.pluginConfigs.has(`nexus/${unknown.id}`));
@@ -1836,7 +1868,7 @@ export function runEdgeSecurityAdoptionContract(
         );
         await assert.rejects(
           harness.services.publishing.restoreGateway(actor, published.api.id),
-          /partial conversion changed after its acknowledged snapshot|original gateway deployment authority was refused/,
+          PARTIAL_CONVERSION_CHANGED_AFTER,
         );
         assert.equal(harness.edge.callsTo('DELETE', `/proxies/${proxyId}`).length, deletes);
         // Explicit operator reconciliation, not a Nexus recovery fallback.
@@ -1940,7 +1972,7 @@ export function runEdgeSecurityAdoptionContract(
             harness.services.publishing.update(actor, apiId, {
               spec_enforcement: level === 'routes' ? 'docs_only' : 'routes',
             }),
-            /injected interruption/,
+            INJECTED_INTERRUPTION,
           );
           assert.ok(interrupted);
           assert.equal(
@@ -1994,7 +2026,7 @@ export function runEdgeSecurityAdoptionContract(
             harness.services.publishing.update(actor, apiId, {
               spec_enforcement: level === 'routes' ? 'docs_only' : 'routes',
             }),
-            /catalog completion refused/,
+            CATALOG_COMPLETION_REFUSED,
           );
           harness.edgeClient.deployments.remove = remove;
           assert.deepEqual(faults.pending(), [], 'the completion commit consumed the fault');
@@ -2283,7 +2315,7 @@ export function runEdgeSecurityAdoptionContract(
           spec_enforcement: 'docs_only',
           agents: null,
         }),
-        /required local public egress policy/,
+        REQUIRED_LOCAL_PUBLIC_EGRESS,
       );
       assert.equal(stagingCreates, 1, 'the intended staging-create method was reached once');
       assert.equal(stagingAcknowledgements, 1, 'the real staging creation was acknowledged');
@@ -2404,7 +2436,7 @@ export function runEdgeSecurityAdoptionContract(
         (error: unknown) => {
           assert.ok(isNexusError(error));
           assert.equal(error.code, 'EDGE_ERROR');
-          assert.match(error.message, /gateway deployment authority is unavailable/);
+          assert.match(error.message, GATEWAY_DEPLOYMENT_AUTHORITY_UNAVAILABLE);
           assert.deepEqual(error.details, { status: 503 });
           return true;
         },
@@ -2501,10 +2533,7 @@ export function runEdgeSecurityAdoptionContract(
         (error: unknown) => {
           assert.ok(isNexusError(error));
           assert.equal(error.code, 'CONFLICT');
-          assert.match(
-            error.message,
-            /original conversion has no deployment-v1 replacement authority/,
-          );
+          assert.match(error.message, ORIGINAL_CONVERSION_HAS_NO);
           assert.equal(error.details, undefined);
           return true;
         },
@@ -2563,7 +2592,7 @@ export function runEdgeSecurityAdoptionContract(
       // uncertain acknowledgement.
       await assert.rejects(
         harness.services.publishing.restoreGateway(actor, apiId),
-        /did not commit the deployment mutation; nothing was applied/,
+        DID_NOT_COMMIT_DEPLOYMENT,
       );
       assert.equal(proxyCreates, 0, 'routes reconstruction uses the real spec importer');
       assert.equal(specCreates, 1, 'exactly one original reconstruction was attempted');
@@ -2640,7 +2669,7 @@ export function runEdgeSecurityAdoptionContract(
       assert.equal(attempt.proxy.id, proxyId);
       assert.ok(attempt.proxy.listen_path.includes('/.staging/'));
       assert.equal(attempt.documentDigests.length, 2);
-      assert.match(attempt.documentDigests[0]!, /^[a-f0-9]{64}$/);
+      assert.match(attempt.documentDigests[0]!, SHA256_HEX);
       const stagedSpec = await harness.edgeClient.apiSpecs.findByProxy(proxyId);
       assert.ok(stagedSpec);
       assert.equal(attempt.specId, stagedSpec.id);
@@ -2658,10 +2687,7 @@ export function runEdgeSecurityAdoptionContract(
       for (const failure of failures) {
         assert.equal(failure.details.withdrawn, false);
         assert.equal(failure.details.proxy_id, proxyId);
-        assert.match(
-          String(failure.details.error),
-          /deployment-v1 replacement authority|did not commit the deployment mutation/,
-        );
+        assert.match(String(failure.details.error), DEPLOYMENT_V1_REPLACEMENT_AUTHORITY);
       }
     });
 
@@ -2726,7 +2752,7 @@ export function runEdgeSecurityAdoptionContract(
           };
           harness.edgeClient.proxies.replace = async (...args) => {
             if (boundary === 'association' && args[0] === proxyId && !injected) {
-              assert.match(String(args[1].listen_path), /\/\.staging\//);
+              assert.match(String(args[1].listen_path), STAGING_SEGMENT);
               assert.equal(created.length, originalPlugins.length);
               await inject(`/proxies/${proxyId}`, 'PUT');
             }
@@ -2838,7 +2864,7 @@ export function runEdgeSecurityAdoptionContract(
         });
         await assert.rejects(
           harness.services.publishing.update(actor, apiId, { spec_enforcement: 'routes' }),
-          /required local public egress policy/,
+          REQUIRED_LOCAL_PUBLIC_EGRESS,
         );
         assert.ok(created, 'conversion actually created the partial spec-owned deployment');
         harness.edgeClient.apiSpecs.create = createSpec;
@@ -2965,7 +2991,7 @@ export function runEdgeSecurityAdoptionContract(
         refuseDeploymentSnapshot();
         await assert.rejects(
           harness.services.publishing.update(actor, apiId, { spec_enforcement: target }),
-          /gateway deployment authority is unavailable/,
+          GATEWAY_DEPLOYMENT_AUTHORITY_UNAVAILABLE,
         );
         assert.ok((await harness.store.settings.get(key))?.encrypted);
         assert.deepEqual(await completionRows(apiId), { restore: [], rollback: [] });
@@ -3004,7 +3030,7 @@ export function runEdgeSecurityAdoptionContract(
         refuseDeploymentSnapshot();
         await assert.rejects(
           harness.services.publishing.update(actor, apiId, { spec_enforcement: target }),
-          /gateway deployment authority is unavailable/,
+          GATEWAY_DEPLOYMENT_AUTHORITY_UNAVAILABLE,
         );
         // Explicit operator removal supplies absence; Nexus never performs an
         // unfenced live cleanup to obtain replay authorization.
@@ -3039,7 +3065,7 @@ export function runEdgeSecurityAdoptionContract(
         refuseDeploymentSnapshot();
         await assert.rejects(
           harness.services.publishing.update(actor, apiId, { spec_enforcement: 'docs_only' }),
-          /gateway deployment authority is unavailable/,
+          GATEWAY_DEPLOYMENT_AUTHORITY_UNAVAILABLE,
         );
         const journal = await harness.store.settings.get(key);
         assert.ok(journal?.encrypted);
@@ -3082,7 +3108,7 @@ export function runEdgeSecurityAdoptionContract(
         const restoreStartedAt = Date.now();
         await assert.rejects(
           harness.services.publishing.restoreGateway(actor, apiId),
-          /original reconciliation audit insert refused/,
+          ORIGINAL_RECONCILIATION_AUDIT_INSERT,
         );
         assert.ok(witnessed, 'the actual transactional completion audit insert was reached');
         assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
@@ -3120,7 +3146,7 @@ export function runEdgeSecurityAdoptionContract(
         refuseDeploymentSnapshot();
         await assert.rejects(
           harness.services.publishing.update(actor, apiId, { spec_enforcement: 'routes' }),
-          /gateway deployment authority is unavailable/,
+          GATEWAY_DEPLOYMENT_AUTHORITY_UNAVAILABLE,
         );
         if (change === 'corrected-catalog') {
           await harness.services.publishing.updateSpec(actor, apiId, SAMPLE_SPEC_YAML);
@@ -3173,7 +3199,7 @@ export function runEdgeSecurityAdoptionContract(
         refuseDeploymentSnapshot();
         await assert.rejects(
           harness.services.publishing.update(actor, apiId, { spec_enforcement: 'docs_only' }),
-          /gateway deployment authority is unavailable/,
+          GATEWAY_DEPLOYMENT_AUTHORITY_UNAVAILABLE,
         );
         if (boundary === 'corrected-spec') {
           await harness.services.publishing.updateSpec(
@@ -3250,7 +3276,7 @@ export function runEdgeSecurityAdoptionContract(
         const offset = harness.edge.requests.length;
         await assert.rejects(
           harness.services.publishing.restoreGateway(actor, apiId),
-          /staged conversion changed/,
+          STAGED_CONVERSION_CHANGED,
         );
         assert.ok(edited, 'the operator edit interleaves at the intended replacement boundary');
         assert.ok(operatorPath, 'the admitted Admin mutation completed');
@@ -3324,10 +3350,10 @@ export function runEdgeSecurityAdoptionContract(
         await assert.rejects(
           harness.services.publishing.restoreGateway(actor, apiId),
           resource === 'proxy'
-            ? /partial conversion proxy configuration changed/
+            ? PARTIAL_CONVERSION_PROXY_CONFIGURATION
             : resource === 'plugin'
-              ? /partial conversion has unknown or changed plugin state/
-              : /partial conversion specification changed/,
+              ? PARTIAL_CONVERSION_HAS_UNKNOWN
+              : PARTIAL_CONVERSION_SPECIFICATION_CHANGED,
         );
         assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
         assert.deepEqual(state(), operatorState);
@@ -3355,7 +3381,7 @@ export function runEdgeSecurityAdoptionContract(
         refuseDeploymentSnapshot();
         await assert.rejects(
           harness.services.publishing.update(actor, apiId, { spec_enforcement: 'docs_only' }),
-          /gateway deployment authority is unavailable/,
+          GATEWAY_DEPLOYMENT_AUTHORITY_UNAVAILABLE,
         );
         assert.deepEqual(originalState(), before, 'initial refusal preserves every Edge field');
         assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
@@ -3417,7 +3443,7 @@ export function runEdgeSecurityAdoptionContract(
         const recoveryOffset = harness.edge.requests.length;
         await assert.rejects(
           harness.services.publishing.restoreGateway(actor, apiId),
-          /original conversion has no deployment-v1 replacement authority/,
+          ORIGINAL_CONVERSION_HAS_NO,
         );
         assert.ok(edited, 'the edit interleaves after the captured spec baseline read');
         assert.deepEqual(originalState(), operatorState);
@@ -3476,7 +3502,7 @@ export function runEdgeSecurityAdoptionContract(
       const offset = harness.edge.requests.length;
       await assert.rejects(
         harness.services.publishing.restoreGateway(actor, apiId),
-        /restore catalog completion refused/,
+        RESTORE_CATALOG_COMPLETION_REFUSED,
       );
       assert.ok(strandedId);
       assert.deepEqual(
@@ -3534,7 +3560,7 @@ export function runEdgeSecurityAdoptionContract(
             ],
           },
         }),
-        /required local public egress policy/,
+        REQUIRED_LOCAL_PUBLIC_EGRESS,
       );
       assert.deepEqual(consumer, before);
       assert.deepEqual(await harness.store.grants.findById(grant.id), grant);

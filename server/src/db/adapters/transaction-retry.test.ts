@@ -36,6 +36,8 @@ import {
   transactionRetryDelayMs,
 } from './transaction-retry.js';
 
+const UNKNOWN = /unknown/i;
+
 /* ── Error fixtures ─────────────────────────────────────────────────────── */
 
 /** What mysql2 raises when InnoDB picks this connection as the deadlock victim. */
@@ -181,7 +183,7 @@ describe('transaction retry — the terminal CONFLICT message', () => {
       !error.message.includes('Nothing was saved'),
       'the commit may have applied, so the message must not assert a rollback',
     );
-    assert.match(error.message, /unknown/i);
+    assert.match(error.message, UNKNOWN);
     assert.deepEqual(error.details, {
       reason: 'transaction_commit_unknown',
       driver: 'mongodb',

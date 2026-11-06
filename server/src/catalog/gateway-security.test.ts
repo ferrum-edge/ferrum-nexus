@@ -9,6 +9,11 @@ import {
   stampGatewaySecurity,
 } from './gateway-security.js';
 
+const FERRUM_EDGE_GATEWAY_CREDENTIAL = /^Ferrum Edge gateway credential: /;
+const UUID_PREFIX = /[0-9a-f]{8}-[0-9a-f]{4}/;
+const SUB_CLAIM_EXP_CLAIM = /sub claim .* exp claim/;
+const NOT_PORTAL_EMAIL = /not the portal email/;
+
 type Doc = Record<string, unknown>;
 
 const PLUGINS: AuthPluginType[] = ['key_auth', 'basic_auth', 'jwt_auth'];
@@ -51,13 +56,13 @@ describe('gatewaySecurityScheme', () => {
     );
     for (const plugin of PLUGINS) {
       const description = String(gatewaySecurityScheme(plugin).description);
-      assert.match(description, /^Ferrum Edge gateway credential: /);
-      assert.doesNotMatch(description, /[0-9a-f]{8}-[0-9a-f]{4}/, 'no consumer or key is named');
+      assert.match(description, FERRUM_EDGE_GATEWAY_CREDENTIAL);
+      assert.doesNotMatch(description, UUID_PREFIX, 'no consumer or key is named');
     }
     // Edge's jwt_auth requires `exp` by default (`require_exp`), and the
     // consumer is matched on `sub`.
-    assert.match(String(gatewaySecurityScheme('jwt_auth').description), /sub claim .* exp claim/);
-    assert.match(String(gatewaySecurityScheme('basic_auth').description), /not the portal email/);
+    assert.match(String(gatewaySecurityScheme('jwt_auth').description), SUB_CLAIM_EXP_CLAIM);
+    assert.match(String(gatewaySecurityScheme('basic_auth').description), NOT_PORTAL_EMAIL);
   });
 });
 

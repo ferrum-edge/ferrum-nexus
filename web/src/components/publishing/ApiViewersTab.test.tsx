@@ -6,6 +6,14 @@ import { changeField, clearClients, deferred, renderPage } from '../../../test/h
 import { apisApi } from '../../lib/api';
 import { ApiViewersTab } from './ApiViewersTab';
 
+const LET_THEM_CALL = /let them call it/;
+const AUTHORIZE = /Authorize/;
+const REGISTER_FIRST = /register first/;
+const ACCESS_GRANT_THEY_HOLD = /access grant they hold is left alone/;
+const PAGE_1_2 = /Page 1 of 2/;
+const PAGE_2_2 = /Page 2 of 2/;
+const UNLISTED_NOT_PRIVATE = /Unlisted is not private/;
+
 /**
  * The tab has one job beyond CRUD: never letting a provider believe that
  * authorizing a viewer let them call the API (issue #288).
@@ -50,7 +58,7 @@ describe('private API viewers', () => {
     expect(screen.getByText('Docs only')).toBeInTheDocument();
     // The sentence is broken by the emphasised "not", so match the fragment
     // that lives in one text node.
-    expect(screen.getByText(/let them call it/)).toBeInTheDocument();
+    expect(screen.getByText(LET_THEM_CALL)).toBeInTheDocument();
   });
 
   it('authorizes by email address', async () => {
@@ -58,7 +66,7 @@ describe('private API viewers', () => {
     await screen.findByText('Partner Inc');
     changeField('Email address', '  new-partner@example.test  ');
     changeField('Note (optional)', 'Second partner');
-    fireEvent.click(screen.getByRole('button', { name: /Authorize/ }));
+    fireEvent.click(screen.getByRole('button', { name: AUTHORIZE }));
     await screen.findByText('Viewer authorized');
     expect(apisApi.authorizeViewer).toHaveBeenCalledWith(API.id, {
       email: 'new-partner@example.test',
@@ -73,8 +81,8 @@ describe('private API viewers', () => {
     await renderPage(<ApiViewersTab api={api} />);
     await screen.findByText('Partner Inc');
     changeField('Email address', 'nobody@example.test');
-    fireEvent.click(screen.getByRole('button', { name: /Authorize/ }));
-    expect(await screen.findByText(/register first/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: AUTHORIZE }));
+    expect(await screen.findByText(REGISTER_FIRST)).toBeInTheDocument();
   });
 
   it('says a revoke leaves the account’s grant alone', async () => {
@@ -82,7 +90,7 @@ describe('private API viewers', () => {
     await screen.findByText('Partner Inc');
     fireEvent.click(screen.getByRole('button', { name: 'Revoke' }));
     const dialog = await screen.findByRole('dialog', { name: 'Revoke documentation access' });
-    expect(within(dialog).getByText(/access grant they hold is left alone/)).toBeInTheDocument();
+    expect(within(dialog).getByText(ACCESS_GRANT_THEY_HOLD)).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke' }));
     await screen.findByText('Documentation access revoked');
     expect(apisApi.revokeViewer).toHaveBeenCalledWith(API.id, 'user-partner');
@@ -105,7 +113,7 @@ describe('private API viewers', () => {
     });
     await renderPage(<ApiViewersTab api={api} />);
     await screen.findByText('viewer-0@example.test');
-    expect(screen.getByText(/Page 1 of 2/)).toBeInTheDocument();
+    expect(screen.getByText(PAGE_1_2)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     await screen.findByText('viewer-20@example.test');
 
@@ -158,7 +166,7 @@ describe('private API viewers', () => {
     changeField('Email address', 'viewer-99@example.test');
     fireEvent.click(screen.getByRole('button', { name: 'Authorize' }));
     await screen.findByText('Viewer authorized');
-    expect(await screen.findByText(/Page 1 of 2/)).toBeInTheDocument();
+    expect(await screen.findByText(PAGE_1_2)).toBeInTheDocument();
     held = deferred<void>();
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     await waitFor(() =>
@@ -168,7 +176,7 @@ describe('private API viewers', () => {
       held?.resolve();
     });
     expect(await screen.findByText('viewer-99@example.test')).toBeInTheDocument();
-    expect(screen.getByText(/Page 2 of 2/)).toBeInTheDocument();
+    expect(screen.getByText(PAGE_2_2)).toBeInTheDocument();
   });
 
   it('keeps paging when the last page empties and several pages remain', async () => {
@@ -199,18 +207,18 @@ describe('private API viewers', () => {
     await screen.findByText('Documentation access revoked');
 
     expect(await screen.findByText('viewer-20@example.test')).toBeInTheDocument();
-    expect(screen.getByText(/Page 2 of 2/)).toBeInTheDocument();
+    expect(screen.getByText(PAGE_2_2)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Previous' })).toBeEnabled();
   });
 
   it('warns that the list enforces nothing while the API is unlisted', async () => {
     await renderPage(<ApiViewersTab api={{ ...API, visibility: 'internal' }} />);
-    await waitFor(() => expect(screen.getByText(/Unlisted is not private/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(UNLISTED_NOT_PRIVATE)).toBeInTheDocument());
   });
 
   it('says nothing of the sort once the API is private', async () => {
     await renderPage(<ApiViewersTab api={api} />);
     await screen.findByText('Partner Inc');
-    expect(screen.queryByText(/Unlisted is not private/)).not.toBeInTheDocument();
+    expect(screen.queryByText(UNLISTED_NOT_PRIVATE)).not.toBeInTheDocument();
   });
 });

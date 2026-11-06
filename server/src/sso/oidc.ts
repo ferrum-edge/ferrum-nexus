@@ -58,6 +58,10 @@ import {
 } from '../publishing/oas.js';
 import { isLoopbackHostname, oidcUrlProblem } from './config.js';
 
+const IPV6_BRACKETS = /^\[|\]$/g;
+const TRAILING_SLASHES = /\/+$/;
+const OAUTH_ERROR_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
+
 /** ID token signature algorithms the portal accepts. Nothing else ever verifies. */
 export const ID_TOKEN_ALGORITHMS = ['RS256', 'ES256'] as const;
 
@@ -420,7 +424,7 @@ export function createOidcClient(options: OidcClientOptions): OidcClient {
    */
   async function assertPublicDestination(url: string, label: string): Promise<void> {
     if (options.allowPrivateAddresses === true) return;
-    const host = new URL(url).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    const host = new URL(url).hostname.replace(IPV6_BRACKETS, '').toLowerCase();
     if (options.allowHttpLoopback && isLoopbackHostname(host)) return;
     try {
       await resolvePublicDestination(host, resolveHost);
@@ -512,7 +516,7 @@ export function createOidcClient(options: OidcClientOptions): OidcClient {
   }
 
   async function fetchDiscovery(issuer: string): Promise<DiscoveryDocument> {
-    const url = `${issuer.replace(/\/+$/, '')}/.well-known/openid-configuration`;
+    const url = `${issuer.replace(TRAILING_SLASHES, '')}/.well-known/openid-configuration`;
     const { status, body } = await requestJson(url, 'Discovery', {
       method: 'GET',
       headers: { accept: 'application/json' },
@@ -644,7 +648,7 @@ export function createOidcClient(options: OidcClientOptions): OidcClient {
       // Only the registered error code, and only when it looks like one: the
       // description is free text a provider may fill with anything.
       const code =
-        typeof record.error === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(record.error)
+        typeof record.error === 'string' && OAUTH_ERROR_CODE.test(record.error)
           ? record.error
           : 'unknown';
       throw new OidcError('provider_unavailable', `Token endpoint answered ${status} (${code})`);

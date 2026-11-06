@@ -30,6 +30,10 @@ import type {
 
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const BILLING_EXAMPLE_COM_PROVIDER =
+  /billing\.example\.com|PROVIDER-ONLY|raw_spec|upstream|created_by|revision_seq/;
+const PROVIDER_ONLY_BILLING_EXAMPLE = /PROVIDER-ONLY|billing\.example\.com|receipts/;
+
 /** A document whose description and servers the catalog must never echo. */
 function spec(version: string, paths: Record<string, unknown>): string {
   return JSON.stringify({
@@ -194,10 +198,7 @@ describe('specification change history in the catalog', () => {
       url: '/api/catalog/changes-public/changes',
     });
     assert.equal(response.statusCode, 200, response.body);
-    assert.doesNotMatch(
-      response.body,
-      /billing\.example\.com|PROVIDER-ONLY|raw_spec|upstream|created_by|revision_seq/,
-    );
+    assert.doesNotMatch(response.body, BILLING_EXAMPLE_COM_PROVIDER);
   });
 
   it('labels a rollback, and records an identical re-upload as no change', async () => {
@@ -338,7 +339,7 @@ describe('specification change history in the catalog', () => {
           response.json<ApiErrorBody>().error.code,
           missing.json<ApiErrorBody>().error.code,
         );
-        assert.doesNotMatch(response.body, /PROVIDER-ONLY|billing\.example\.com|receipts/);
+        assert.doesNotMatch(response.body, PROVIDER_ONLY_BILLING_EXAMPLE);
       }
     });
 

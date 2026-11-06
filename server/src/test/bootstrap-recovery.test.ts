@@ -32,6 +32,8 @@ import {
   type TestApp,
 } from './helpers.js';
 
+const BOOTSTRAP_TOKEN = /bootstrap token/;
+
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
@@ -199,7 +201,7 @@ describe('bootstrap recovery of a stranded portal', () => {
     const plain = await register(harness, 'joiner@example.test');
     assert.equal(plain.statusCode, 403, plain.body);
     assert.equal(errorCode(plain.body), 'FORBIDDEN');
-    assert.match(plain.body, /bootstrap token/);
+    assert.match(plain.body, BOOTSTRAP_TOKEN);
 
     const wrong = await register(harness, 'guesser@example.test', {
       bootstrap_token: `${TEST_BOOTSTRAP_TOKEN}x`,

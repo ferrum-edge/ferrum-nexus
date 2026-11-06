@@ -26,6 +26,8 @@ import { AuditAction } from '../audit/service.js';
 import { canonicalConsumerLockKey } from '../credentials/consumers.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
+const NO_ORPHANED_GATEWAY_CONSUMER = /no orphaned gateway consumer/;
+
 describe('gateway reference reconciliation', () => {
   let harness: TestApp;
   let superAdmin: TestSession;
@@ -373,6 +375,6 @@ describe('gateway reference reconciliation', () => {
     const body = response.json<RepairGatewayReferencesResponse>();
     assert.equal(body.consumers.length, 1);
     assert.equal(body.consumers[0]?.ferrum_consumer_id, null);
-    assert.match(body.consumers[0]?.error ?? '', /no orphaned gateway consumer/);
+    assert.match(body.consumers[0]?.error ?? '', NO_ORPHANED_GATEWAY_CONSUMER);
   });
 });

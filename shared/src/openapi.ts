@@ -17,6 +17,11 @@
 
 import { MAX_SPEC_DEPTH } from './constants.js';
 
+const TILDE_ONE = /~1/g;
+const TILDE_ZERO = /~0/g;
+const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
+const MAJOR_MINOR_VERSION = /^(\d+)\.(\d+)/;
+
 /** Longest `$ref` → `$ref` chain followed before giving up. */
 export const MAX_OPENAPI_REF_HOPS = 32;
 
@@ -128,9 +133,9 @@ function walkPointer(
     } catch {
       return undefined;
     }
-    const segment = decoded.replace(/~1/g, '/').replace(/~0/g, '~');
+    const segment = decoded.replace(TILDE_ONE, '/').replace(TILDE_ZERO, '~');
     if (Array.isArray(current)) {
-      if (!/^(0|[1-9][0-9]*)$/.test(segment)) return undefined;
+      if (!ARRAY_INDEX.test(segment)) return undefined;
       const index = Number(segment);
       if (index >= current.length) return undefined;
       current = current[index];
@@ -157,7 +162,7 @@ export function openApiRefOf(value: unknown): string | null {
  */
 export function openApiRefSiblingsApply(specVersion: string | null): boolean {
   if (specVersion === null) return false;
-  const match = /^(\d+)\.(\d+)/.exec(specVersion.trim());
+  const match = MAJOR_MINOR_VERSION.exec(specVersion.trim());
   if (!match) return false;
   const major = Number(match[1]);
   const minor = Number(match[2]);

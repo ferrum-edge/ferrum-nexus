@@ -38,6 +38,8 @@ import { AuditAction } from '../audit/service.js';
 import type { NexusStore, TransactionOptions } from '../db/store.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
+const RESTORE = /Restore it/;
+
 const NAMESPACE = 'nexus';
 
 describe('restoring a missing gateway deployment', () => {
@@ -430,7 +432,7 @@ describe('restoring a missing gateway deployment', () => {
       payload: { rate_limit: { limit: 7, window_seconds: 60 } },
     });
     assert.equal(gateway.statusCode, 409, gateway.body);
-    assert.match(gateway.json<{ error: { message: string } }>().error.message, /Restore it/);
+    assert.match(gateway.json<{ error: { message: string } }>().error.message, RESTORE);
 
     // Catalog-only fields have nothing to do with the gateway and still work.
     const catalog = await harness.authed(provider, {

@@ -17,6 +17,13 @@ import { assertEnvOverridesAllowed, envOverrideBanner } from '../index.js';
 import { isNexusError } from '../lib/errors.js';
 import { TEST_SECRET_KEY, TEST_EDGE_JWT_SECRET } from './helpers.js';
 
+const FERRUM_NAMESPACE_MENTION = /FERRUM_NAMESPACE/;
+const SRV_NEXUS_ENV_NEXUS = /\/srv\/nexus\/\.env: nexus/;
+const WINNING_ENVIRONMENT_VALUE = /environment: {2}ferrum-foundry-demo {3}<-- wins/;
+const ENV_NEXUS = /\.env: nexus/;
+const FERRUM_FOUNDRY_DEMO = /ferrum-foundry-demo/;
+const ENV_OVERRIDE_HINT = /NEXUS_ALLOW_ENV_OVERRIDE=true/;
+
 const NAMESPACE_OVERRIDE: EnvOverride = {
   key: 'FERRUM_NAMESPACE',
   fromFile: 'nexus',
@@ -35,13 +42,13 @@ function config(env: EnvRecord = {}): NexusConfig {
 describe('startup env-override guard', () => {
   it('names the variable, both values, and which one won', () => {
     const banner = envOverrideBanner([NAMESPACE_OVERRIDE], '/srv/nexus/.env');
-    assert.match(banner, /FERRUM_NAMESPACE/);
-    assert.match(banner, /\/srv\/nexus\/\.env: nexus/);
-    assert.match(banner, /environment: {2}ferrum-foundry-demo {3}<-- wins/);
+    assert.match(banner, FERRUM_NAMESPACE_MENTION);
+    assert.match(banner, SRV_NEXUS_ENV_NEXUS);
+    assert.match(banner, WINNING_ENVIRONMENT_VALUE);
   });
 
   it('falls back to `.env` when no file path is known', () => {
-    assert.match(envOverrideBanner([NAMESPACE_OVERRIDE], null), /\.env: nexus/);
+    assert.match(envOverrideBanner([NAMESPACE_OVERRIDE], null), ENV_NEXUS);
   });
 
   it('refuses to start in development', () => {
@@ -53,9 +60,9 @@ describe('startup env-override guard', () => {
     }
     assert.ok(isNexusError(error));
     assert.equal(error.code, 'VALIDATION_FAILED');
-    assert.match(error.message, /FERRUM_NAMESPACE/);
-    assert.match(error.message, /ferrum-foundry-demo/);
-    assert.match(error.message, /NEXUS_ALLOW_ENV_OVERRIDE=true/);
+    assert.match(error.message, FERRUM_NAMESPACE_MENTION);
+    assert.match(error.message, FERRUM_FOUNDRY_DEMO);
+    assert.match(error.message, ENV_OVERRIDE_HINT);
     assert.deepEqual(error.details, { overrides: ['FERRUM_NAMESPACE'] });
   });
 

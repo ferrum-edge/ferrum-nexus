@@ -2,6 +2,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CallApiPanel, exampleRequest, shellQuote } from './CallApiPanel';
 
+const CLAIM_MUST = /claim must be/;
+const BILLING_WORKER_CREDENTIALS_PAGE = /to Billing worker from the credentials page/;
+
 const writeText = vi.fn<(value: string) => Promise<void>>();
 
 beforeEach(() => {
@@ -131,9 +134,7 @@ describe('CallApiPanel', () => {
         holder="Billing worker"
       />,
     );
-    expect(screen.getByText(/claim must be/).querySelectorAll('code')[1]).toHaveTextContent(
-      CONSUMER,
-    );
-    expect(screen.getByText(/to Billing worker from the credentials page/)).toBeInTheDocument();
+    expect(screen.getByText(CLAIM_MUST).querySelectorAll('code')[1]).toHaveTextContent(CONSUMER);
+    expect(screen.getByText(BILLING_WORKER_CREDENTIALS_PAGE)).toBeInTheDocument();
   });
 });

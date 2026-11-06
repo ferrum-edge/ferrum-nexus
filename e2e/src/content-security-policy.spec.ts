@@ -15,6 +15,14 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { ADMIN_EMAIL, ADMIN_PASSWORD, waitForStack } from './harness.js';
 
+const CONTENT_SECURITY_POLICY = /content security policy/i;
+const EMAIL = /email/i;
+const PASSWORD = /password/i;
+const SIGN_IN_OR_LOG_IN = /sign in|log in/i;
+const MY_APIS = /my apis/i;
+const NONCE_SOURCE = /'nonce-([^']+)'/;
+const EDIT_PREFIX = /^Edit /;
+
 type ViolationWindow = Window & { __cspViolations?: string[] };
 
 /** The style-src directive of a response's policy. */
@@ -55,23 +63,20 @@ test("Radix's runtime styles apply under a style-src with no unsafe-inline", asy
   });
   const consoleViolations: string[] = [];
   page.on('console', (message) => {
-    if (/content security policy/i.test(message.text())) consoleViolations.push(message.text());
+    if (CONTENT_SECURITY_POLICY.test(message.text())) consoleViolations.push(message.text());
   });
 
   await page.goto('/login');
-  await page.getByLabel(/email/i).first().fill(ADMIN_EMAIL);
-  await page
-    .getByLabel(/password/i)
-    .first()
-    .fill(ADMIN_PASSWORD);
-  await page.getByRole('button', { name: /sign in|log in/i }).click();
-  await expect(page.getByRole('link', { name: /my apis/i })).toBeVisible({ timeout: 30_000 });
+  await page.getByLabel(EMAIL).first().fill(ADMIN_EMAIL);
+  await page.getByLabel(PASSWORD).first().fill(ADMIN_PASSWORD);
+  await page.getByRole('button', { name: SIGN_IN_OR_LOG_IN }).click();
+  await expect(page.getByRole('link', { name: MY_APIS })).toBeVisible({ timeout: 30_000 });
 
   const response = await page.goto('/admin/users');
   expect(response?.status()).toBe(200);
   const policy = styleSrc(response?.headers()['content-security-policy']);
   expect(policy).not.toContain("'unsafe-inline'");
-  const nonce = /'nonce-([^']+)'/.exec(policy)?.[1];
+  const nonce = NONCE_SOURCE.exec(policy)?.[1];
   expect(nonce, 'style-src names a per-response nonce').toBeTruthy();
   // The shell hands the app the same nonce the header names.
   await expect
@@ -102,10 +107,7 @@ test("Radix's runtime styles apply under a style-src with no unsafe-inline", asy
   await expect(page.getByRole('listbox')).toHaveCount(0);
 
   // Dialog: a user's edit dialog, closed without saving.
-  await page
-    .getByRole('button', { name: /^Edit / })
-    .first()
-    .click();
+  await page.getByRole('button', { name: EDIT_PREFIX }).first().click();
   await expect(page.getByRole('dialog')).toBeVisible();
   await expectScrollLockApplied(page);
   await page.keyboard.press('Escape');

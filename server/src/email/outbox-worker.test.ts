@@ -15,6 +15,8 @@ import {
 } from './outbox-worker.js';
 import { MailDeliveredUnacknowledgedError } from './service.js';
 
+const DATABASE_CONNECTION_RESET = /database connection reset/;
+
 /** Make the next `emailOutbox.markSent(...)` reject, then restore the real one. */
 function failNextMarkSent(harness: TestApp, message: string): void {
   const real = harness.store.emailOutbox.markSent.bind(harness.store.emailOutbox);
@@ -202,7 +204,7 @@ describe('outbox worker', () => {
       stored?.last_error?.startsWith(OUTBOX_DELIVERED_UNACKNOWLEDGED),
       `an operator can tell it apart from mail that never left: ${String(stored?.last_error)}`,
     );
-    assert.match(stored?.last_error ?? '', /database connection reset/);
+    assert.match(stored?.last_error ?? '', DATABASE_CONNECTION_RESET);
 
     // The decisive difference: the row is out of the retry loop for good, so
     // no later tick can hand the relay a second copy. Before the fix it went
