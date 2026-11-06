@@ -207,7 +207,6 @@ import {
 } from '../transaction-retry.js';
 
 const REGEX_SPECIAL_CHARACTERS = /[.*+?^${}()|[\]\\]/g;
-const VERIFY_OR_RESET_KEY = /^(verify:|reset:)/;
 
 /* ── Collection names (identical to the SQL table names) ────────────────── */
 
@@ -1569,7 +1568,7 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
       // Match only the durable namespaces, never subject/body text. Both
       // updates are replayable without changing delivery state or claim tokens.
       await outbox.updateMany(
-        { priority: OUTBOX_PRIORITY.normal, idempotency_key: VERIFY_OR_RESET_KEY },
+        { priority: OUTBOX_PRIORITY.normal, idempotency_key: /^(verify:|reset:)/ },
         { $set: { priority: OUTBOX_PRIORITY.high } },
       );
       await createIndexes(db, EMAIL_OUTBOX_PRIORITY_INDEXES);
