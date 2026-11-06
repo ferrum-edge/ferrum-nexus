@@ -105,8 +105,7 @@ const AUDIT_DOTS: Readonly<Record<AuditTone, string>> = {
  * falling off a hard-coded list.
  */
 function auditTone(action: string): AuditTone {
-  if (DANGER_ACTION.test(action))
-    return 'danger';
+  if (DANGER_ACTION.test(action)) return 'danger';
   if (SUCCESS_ACTION.test(action)) return 'success';
   return 'neutral';
 }

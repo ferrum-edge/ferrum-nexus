@@ -134,9 +134,7 @@ describe('CallApiPanel', () => {
         holder="Billing worker"
       />,
     );
-    expect(screen.getByText(CLAIM_MUST).querySelectorAll('code')[1]).toHaveTextContent(
-      CONSUMER,
-    );
+    expect(screen.getByText(CLAIM_MUST).querySelectorAll('code')[1]).toHaveTextContent(CONSUMER);
     expect(screen.getByText(BILLING_WORKER_CREDENTIALS_PAGE)).toBeInTheDocument();
   });
 });

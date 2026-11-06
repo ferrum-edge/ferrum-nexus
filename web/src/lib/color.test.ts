@@ -185,8 +185,7 @@ function themeTokens(selector: string): Record<string, string> {
   if (start === -1) throw new Error(`No ${selector} block in globals.css`);
   const body = globalsCss.slice(start, globalsCss.indexOf('\n}', start));
   const tokens: Record<string, string> = {};
-  for (const match of body.matchAll(CUSTOM_PROPERTY))
-    tokens[match[1]!] = match[2]!.trim();
+  for (const match of body.matchAll(CUSTOM_PROPERTY)) tokens[match[1]!] = match[2]!.trim();
   return tokens;
 }
 

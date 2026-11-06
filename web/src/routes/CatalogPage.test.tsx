@@ -1163,8 +1163,6 @@ describe('catalog detail state', () => {
 
     expect(await screen.findByText(API_COULD_NOT_REFRESHED)).toBeInTheDocument();
     expect(screen.queryByText('API not found')).not.toBeInTheDocument();
-    expect(screen.getByLabelText(WHY_DO_YOU_NEED_ACCESS)).toHaveValue(
-      'Half-written justification',
-    );
+    expect(screen.getByLabelText(WHY_DO_YOU_NEED_ACCESS)).toHaveValue('Half-written justification');
   });
 });

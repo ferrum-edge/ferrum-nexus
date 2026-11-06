@@ -4395,10 +4395,7 @@ describe('publishing', () => {
               ],
             },
           }),
-        (error: unknown) =>
-          OPENAPI_VALIDATOR_REQUIRES_PROXY.test(
-            (error as Error).message,
-          ),
+        (error: unknown) => OPENAPI_VALIDATOR_REQUIRES_PROXY.test((error as Error).message),
       );
     });
   });
