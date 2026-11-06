@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
+import BetterSqlite3 from 'better-sqlite3';
+
 import { loadConfig } from '../../../config/index.js';
 import { isNexusError } from '../../../lib/errors.js';
 import { isoInSeconds, newId, nowIso } from '../../../lib/ids.js';
@@ -437,6 +439,44 @@ describe('sqlite store', () => {
 
       const all = await store.apiSpecs.list({ api_id: api.id });
       assert.equal(all.total, 2);
+    });
+
+    it('reads spec summaries without ever selecting the document', async (t) => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await store.apis.create({
+        name: 'Spec summaries',
+        slug: `summaries-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: '1',
+        spec_format: 'openapi',
+        requestable: false,
+        auth_plugin: 'key_auth',
+        status: 'published',
+        visibility: 'public',
+      });
+      await store.apiSpecs.create({
+        api_id: api.id,
+        version: '1',
+        raw_spec: `openapi: 3.1.0 # ${'x'.repeat(4096)}`,
+        is_current: true,
+      });
+
+      const prepare = t.mock.method(BetterSqlite3.prototype, 'prepare');
+      const summary = await store.apiSpecs.findCurrentSummaryByApi(api.id);
+      const page = await store.apiSpecs.listSummaries({ api_id: api.id });
+      const statements = prepare.mock.calls.map((call) => String(call.arguments[0]));
+      prepare.mock.restore();
+
+      assert.equal(summary?.version, '1');
+      assert.equal(page.total, 1);
+      assert.ok(summary && !('raw_spec' in summary) && !('revision_seq' in summary));
+      const reads = statements.filter((sql) => /FROM api_specs/.test(sql));
+      assert.equal(reads.length, 3, statements.join('\n'));
+      for (const sql of reads) {
+        assert.doesNotMatch(sql, /raw_spec/, sql);
+        assert.doesNotMatch(sql, /SELECT\s+\*/i, sql);
+      }
     });
 
     it('upserts one palette plugin row per (api, plugin) and cascades on delete', async () => {

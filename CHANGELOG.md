@@ -20,6 +20,21 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- Spec-summary reads no longer fetch the OpenAPI document. The catalog detail
+  page (`GET /api/catalog/:slug`), the provider API page (`GET /api/apis/:id`)
+  and revision history (`GET /api/apis/:id/revisions`) read `api_specs`
+  without `raw_spec` (up to 2 MiB a revision) on every backend, a MongoDB
+  projection included, where they used to read it and discard it. The
+  publish, recovery and restore checks that only compare the current
+  revision's id do the same. Responses are unchanged.
+
+- Templated email reads the portal name through the same revision-checked
+  memo as `GET /api/branding`, instead of reading and decoding the whole
+  `branding` row (logo included) on every enqueue. A branding save shows in
+  mail at once on the instance that made it and within
+  `NEXUS_BRANDING_CACHE_MS` on others; `0` reads the row every time, as
+  before.
+
 - Hot read paths issue their independent database reads together instead of
   one after another: the notification list and unread count (the header bell
   polls it every 20 seconds), the API and user joins on access-request and

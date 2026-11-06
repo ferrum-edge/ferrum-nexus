@@ -38,6 +38,7 @@ import {
 import type { NexusConfig } from '../config/index.js';
 import { OUTBOX_PRIORITY, type EmailOutboxRecord, type NexusStore } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
+import { memoizeByRevision } from '../lib/revision-memo.js';
 import { readBoundToSetting } from '../lib/setting-generation.js';
 import { isBearerTemplate, sealedEnqueueInput } from './sealed-outbox.js';
 import {
@@ -521,6 +522,13 @@ export interface EmailServiceDeps {
   log?: (obj: Record<string, unknown>, message: string) => void;
   /** Override the transport used by {@link EmailService.sendTest}. */
   transportFactory?: MailTransportFactory;
+  /**
+   * `SettingsService.getBrandingRevision`: the counter a committed branding
+   * save bumps. When given, the `portal_name` every template gets is memoised
+   * for `NEXUS_BRANDING_CACHE_MS` exactly as `GET /api/branding` memoises its
+   * payload; without it, every render reads the `branding` row as before.
+   */
+  getBrandingRevision?: () => number;
 }
 
 /** Build the email service. */
@@ -623,11 +631,22 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
     return DEFAULT_EMAIL_TEMPLATES[key];
   }
 
+  /**
+   * The portal name, through the same revision-checked memo `/api/branding`
+   * uses: a save on this instance shows at once, one on another instance
+   * within the TTL. It spares each enqueue a read and decode of the whole
+   * `branding` row (a logo data URL of up to 512 Ki characters) for one field.
+   */
+  const loadPortalName = memoizeByRevision(
+    deps.getBrandingRevision ? config.brandingCacheMs : 0,
+    deps.getBrandingRevision ?? ((): number => 0),
+    async () => (await readBranding(store)).portal_name,
+  );
+
   /** Variables every template gets for free. */
   async function commonVars(): Promise<TemplateVars> {
-    const branding = await readBranding(store);
     return {
-      portal_name: branding.portal_name,
+      portal_name: (await loadPortalName()).value,
       portal_url: config.publicUrl,
       year: new Date().getUTCFullYear(),
     };

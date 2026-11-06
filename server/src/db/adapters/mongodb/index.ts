@@ -69,6 +69,7 @@ import {
 import type {
   AccessRequestStatus,
   ApiPluginTrigger,
+  ApiSpecSummary,
   ApiStatus,
   ApiTimeouts,
   ApiGatewayState,
@@ -377,6 +378,13 @@ const SPEC_REVISIONS_ORDER: Sort = { is_current: -1, revision_seq: -1 };
 const SPEC_HISTORY_ORDER: Sort = { revision_seq: -1 };
 
 /**
+ * What a spec summary read leaves on the server: the document (up to
+ * `MAX_SPEC_BYTES`) and the store-internal sequence. Sorting by
+ * `revision_seq` still works, because a sort runs before the projection.
+ */
+const SPEC_SUMMARY_PROJECTION: Document = { raw_spec: 0, revision_seq: 0 };
+
+/**
  * Outbox claim order: earliest scheduled attempt first.
  *
  * BSON sorts `null` before every string, so rows with no `next_attempt_at` come
@@ -585,6 +593,25 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     parsed_version: strOrNull(row.parsed_version),
     is_current: flag(row.is_current),
     revision_seq: num(row.revision_seq),
+    created_by: strOrNull(row.created_by),
+    rolled_back_from_id: strOrNull(row.rolled_back_from_id),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
+/**
+ * {@link mapApiSpec} for a {@link SPEC_SUMMARY_PROJECTION} document, in the
+ * same key order the presenters' `raw_spec`/`revision_seq` strip used to leave.
+ */
+function mapApiSpecSummary(row: Row): ApiSpecSummary {
+  return {
+    id: str(row._id),
+    api_id: str(row.api_id),
+    version: str(row.version),
+    parsed_title: strOrNull(row.parsed_title),
+    parsed_version: strOrNull(row.parsed_version),
+    is_current: flag(row.is_current),
     created_by: strOrNull(row.created_by),
     rolled_back_from_id: strOrNull(row.rolled_back_from_id),
     created_at: str(row.created_at),
@@ -1767,19 +1794,23 @@ class MongoStore implements NexusStore {
     return this.session ? { session: this.session } : {};
   }
 
-  /** Shared `{ items, total }` list implementation. */
+  /**
+   * Shared `{ items, total }` list implementation. `projection`, when given,
+   * is applied on the server, so the fields it drops are never sent.
+   */
   private async paginate<T>(
     name: string,
     filter: Filter<NexusDoc>,
     sort: Sort,
     options: ListOptions | undefined,
     map: (row: Row) => T,
+    projection?: Document,
   ): Promise<{ items: T[]; total: number }> {
     const { limit, offset } = page(options);
     const collection = this.col(name);
     const total = await collection.countDocuments(filter, this.opts);
     const docs = await collection
-      .find(filter, this.opts)
+      .find(filter, projection ? { ...this.opts, projection } : this.opts)
       .sort(sort)
       .skip(offset)
       .limit(limit)
@@ -2649,6 +2680,17 @@ class MongoStore implements NexusStore {
       return row ? mapApiSpec(row) : null;
     },
 
+    // The same document as `findCurrentByApi`, minus the spec nobody here reads.
+    findCurrentSummaryByApi: async (apiId) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.apiSpecs).findOne(
+          { api_id: apiId, is_current: true },
+          { ...this.opts, projection: SPEC_SUMMARY_PROJECTION },
+        ),
+      );
+      return row ? mapApiSpecSummary(row) : null;
+    },
+
     setCurrent: async (apiId, specId) => {
       const at = nowIso();
       // One transaction around the whole swap; see `create` above.
@@ -2680,6 +2722,20 @@ class MongoStore implements NexusStore {
         SPEC_REVISIONS_ORDER,
         options,
         mapApiSpec,
+      );
+    },
+
+    listSummaries: async (filter, options) => {
+      const query: Record<string, unknown> = {};
+      if (filter.api_id !== undefined) query.api_id = filter.api_id;
+      if (filter.is_current !== undefined) query.is_current = filter.is_current;
+      return this.paginate(
+        COLLECTIONS.apiSpecs,
+        query as Filter<NexusDoc>,
+        SPEC_REVISIONS_ORDER,
+        options,
+        mapApiSpecSummary,
+        SPEC_SUMMARY_PROJECTION,
       );
     },
 

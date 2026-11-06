@@ -576,7 +576,9 @@ describe('API deletion and god mode', () => {
         settings.get = originalSetting;
       }
       assert.equal(templateReads, 1);
-      assert.equal(brandingReads, 1);
+      // At most once: the portal name is memoised for NEXUS_BRANDING_CACHE_MS,
+      // so an earlier send in this suite may already have it.
+      assert.ok(brandingReads <= 1, `branding read ${brandingReads} times`);
 
       // Each recipient still gets their own rendering.
       const queued = (await harness.outbox()).filter((row) =>

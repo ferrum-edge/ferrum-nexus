@@ -31,7 +31,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { after, before, describe, it } from 'node:test';
 
-import { MongoClient, type Document } from 'mongodb';
+import { Collection, MongoClient, type Document } from 'mongodb';
 import mysql from 'mysql2/promise';
 import pg from 'pg';
 
@@ -46,6 +46,7 @@ import {
   type CreateAccessRequestResponse,
   type ApproveAccessRequestResponse,
   type RequestGrantToolsResponse,
+  type ApiSpecSummary,
   type DbDriver,
   type SpecChangeReport,
 } from '@ferrum-nexus/shared';
@@ -65,6 +66,7 @@ import { loadConfig } from '../config/index.js';
 import { latestMessagesPipeline } from '../db/adapters/mongodb/index.js';
 import { createStore } from '../db/index.js';
 import type {
+  ApiSpecRecord,
   EnqueueEmailInput,
   LeaseRepo,
   NexusStore,
@@ -1774,6 +1776,95 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         (await store.apiSpecs.list({ api_id: api.id })).items.map((spec) => spec.version),
         ['6', '5', '4', '3'],
       );
+    });
+
+    it('apiSpecs: summary reads are the full reads without the document', async (t) => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+      const document = `openapi: 3.1.0 # ${'x'.repeat(4096)}`;
+      const v1 = await store.apiSpecs.create({
+        api_id: api.id,
+        version: '1',
+        raw_spec: document,
+        parsed_title: 'V1',
+        is_current: true,
+        created_by: owner.id,
+      });
+      const v2 = await store.apiSpecs.create({
+        api_id: api.id,
+        version: '2',
+        raw_spec: document,
+        parsed_version: '2.0.0',
+        is_current: true,
+      });
+      await store.apiSpecs.create({
+        api_id: api.id,
+        version: '1',
+        raw_spec: document,
+        is_current: true,
+        rolled_back_from_id: v1.id,
+      });
+      // A rollback of the flag, so the current revision is not the newest.
+      await store.apiSpecs.setCurrent(api.id, v2.id);
+
+      // Exactly what the presenters used to send: the record minus the two
+      // store-only fields, key order included.
+      const strip = ({ raw_spec: _raw, revision_seq: _seq, ...rest }: ApiSpecRecord) => rest;
+      const sameShape = (actual: ApiSpecSummary | undefined, expected: ApiSpecSummary): void => {
+        assert.ok(actual);
+        assert.deepEqual(actual, expected);
+        assert.deepEqual(Object.keys(actual), Object.keys(expected));
+      };
+
+      const pages = [
+        [{ api_id: api.id }, undefined],
+        [{ api_id: api.id }, { limit: 2, offset: 1 }],
+        [{ api_id: api.id, is_current: false }, undefined],
+      ] as const;
+      const full = await store.apiSpecs.findCurrentByApi(api.id);
+      assert.ok(full);
+      const expectedPages = await Promise.all(
+        pages.map(([filter, options]) => store.apiSpecs.list(filter, options)),
+      );
+
+      // Only the summary reads run under the spies, so on MongoDB every driver
+      // read of this API's revisions below must carry the projection (`findOne`
+      // may delegate to `find`; both are watched).
+      const findOne = t.mock.method(Collection.prototype, 'findOne');
+      const find = t.mock.method(Collection.prototype, 'find');
+      const summary = await store.apiSpecs.findCurrentSummaryByApi(api.id);
+      const summaryPages = await Promise.all(
+        pages.map(([filter, options]) => store.apiSpecs.listSummaries(filter, options)),
+      );
+      const driverReads = [...findOne.mock.calls, ...find.mock.calls]
+        .map((call) => call.arguments as unknown[])
+        .filter((args) => (args[0] as { api_id?: unknown } | undefined)?.api_id === api.id);
+      findOne.mock.restore();
+      find.mock.restore();
+
+      sameShape(summary ?? undefined, strip(full));
+      assert.equal(summary?.id, v2.id);
+      assert.equal(await store.apiSpecs.findCurrentSummaryByApi(newId()), null);
+      expectedPages.forEach((expected, n) => {
+        const page = summaryPages[n];
+        assert.ok(page);
+        assert.equal(page.total, expected.total);
+        assert.equal(page.items.length, expected.items.length);
+        expected.items.forEach((record, index) => sameShape(page.items[index], strip(record)));
+      });
+      assert.deepEqual(
+        summaryPages[0]?.items.map((row) => row.version),
+        ['2', '1', '1'],
+        'the current revision leads, then history newest-first',
+      );
+
+      if (store.driver === 'mongodb') {
+        assert.ok(driverReads.length >= 4, 'one current read and three pages reached the driver');
+        for (const args of driverReads) {
+          const projection = (args[1] as { projection?: Document } | undefined)?.projection;
+          assert.equal(projection?.raw_spec, 0, 'the document is projected out on the server');
+        }
+      }
     });
 
     /* ── api plugins ──────────────────────────────────────────────────── */

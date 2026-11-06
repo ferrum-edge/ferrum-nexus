@@ -1435,7 +1435,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         }
         if (
           recovery.catalogSpecId &&
-          (await tx.apiSpecs.findCurrentByApi(api.id))?.id !== recovery.catalogSpecId
+          (await tx.apiSpecs.findCurrentSummaryByApi(api.id))?.id !== recovery.catalogSpecId
         ) {
           throw conflict('The API specification changed before gateway recovery admission');
         }
@@ -1602,7 +1602,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       }
       if (
         recovery.catalogSpecId !== undefined &&
-        (await tx.apiSpecs.findCurrentByApi(api.id))?.id !== recovery.catalogSpecId
+        (await tx.apiSpecs.findCurrentSummaryByApi(api.id))?.id !== recovery.catalogSpecId
       ) {
         throw conflict('The API specification changed since its deletion custody was recorded');
       }
@@ -3073,15 +3073,17 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     async get(actor, apiId) {
       const api = await loadApi(apiId);
       assertCanAdminister(actor, api);
+      // A summary read: the page shows the revision's metadata only, so the
+      // document (up to `MAX_SPEC_BYTES`) is never selected.
       const [spec, pending, active, total] = await Promise.all([
-        store.apiSpecs.findCurrentByApi(api.id),
+        store.apiSpecs.findCurrentSummaryByApi(api.id),
         store.accessRequests.count({ api_id: api.id, status: 'pending' }),
         store.grants.count({ api_id: api.id, status: 'active' }),
         store.accessRequests.count({ api_id: api.id }),
       ]);
       return {
         api: presentApi(api, await settings.getGatewayPublicUrl()),
-        spec: spec ? specSummary(spec) : null,
+        spec,
         stats: { pending_requests: pending, active_grants: active, total_requests: total },
       };
     },
@@ -4384,7 +4386,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 }
                 assertRecoveryAcknowledged(recovery);
                 if (
-                  (await tx.apiSpecs.findCurrentByApi(api.id))?.id !==
+                  (await tx.apiSpecs.findCurrentSummaryByApi(api.id))?.id !==
                   (recovery.catalogSpecId ?? recovery.originalSpecId)
                 ) {
                   throw conflict('The catalog revision changed before its conversion could commit');
@@ -4632,8 +4634,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     async revisions(actor, apiId, options): Promise<Paginated<ApiSpecSummary>> {
       const api = await loadApi(apiId);
       assertCanAdminister(actor, api);
-      const page = await store.apiSpecs.list({ api_id: api.id }, options);
-      return { items: page.items.map(specSummary), total: page.total };
+      // Same filter, order and page as `list`, without a page of documents
+      // (up to `MAX_SPEC_BYTES` each) that `specSummary` used to discard.
+      return store.apiSpecs.listSummaries({ api_id: api.id }, options);
     },
 
     async revision(actor, apiId, revisionId): Promise<GetApiSpecResponse> {
@@ -5235,7 +5238,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                       !latest ||
                       latest.ferrum_proxy_id !== null ||
                       !isDeepStrictEqual(deploymentShape(latest), journal.catalogShape) ||
-                      (await tx.apiSpecs.findCurrentByApi(api.id))?.id !== current.id ||
+                      (await tx.apiSpecs.findCurrentSummaryByApi(api.id))?.id !== current.id ||
                       (start && (await tx.settings.get(cleanupKey)))
                     ) {
                       throw conflict('The restore changed before conditional cutover admission');
@@ -6655,7 +6658,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             !latest ||
             latest.ferrum_proxy_id !== proxyId ||
             !isDeepStrictEqual(deploymentShape(latest), recovery.shape) ||
-            (await tx.apiSpecs.findCurrentByApi(api.id))?.id !== originalSpec.id
+            (await tx.apiSpecs.findCurrentSummaryByApi(api.id))?.id !== originalSpec.id
           ) {
             throw conflict('The API changed before its conversion rollback could commit');
           }

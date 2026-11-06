@@ -24,6 +24,7 @@
 import type {
   AccessRequestStatus,
   ApiPluginTrigger,
+  ApiSpecSummary,
   ApiStatus,
   ApiTimeouts,
   ApiGatewayState,
@@ -360,6 +361,34 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     parsed_version: textOrNull(row.parsed_version),
     is_current: bool(row.is_current),
     revision_seq: int(row.revision_seq),
+    created_by: textOrNull(row.created_by),
+    rolled_back_from_id: textOrNull(row.rolled_back_from_id),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+/**
+ * The `api_specs` columns an {@link ApiSpecSummary} is read from: every one
+ * but `raw_spec` (the document, up to `MAX_SPEC_BYTES`) and `revision_seq`
+ * (store-internal; it only orders, and `ORDER BY` needs no selected column).
+ */
+const API_SPEC_SUMMARY_COLUMNS =
+  'id, api_id, version, parsed_title, parsed_version, is_current, created_by, ' +
+  'rolled_back_from_id, created_at, updated_at';
+
+/**
+ * {@link mapApiSpec} for a {@link API_SPEC_SUMMARY_COLUMNS} row, in the same
+ * key order the presenters' `raw_spec`/`revision_seq` strip used to leave.
+ */
+function mapApiSpecSummary(row: Row): ApiSpecSummary {
+  return {
+    id: text(row.id),
+    api_id: text(row.api_id),
+    version: text(row.version),
+    parsed_title: textOrNull(row.parsed_title),
+    parsed_version: textOrNull(row.parsed_version),
+    is_current: bool(row.is_current),
     created_by: textOrNull(row.created_by),
     rolled_back_from_id: textOrNull(row.rolled_back_from_id),
     created_at: text(row.created_at),
@@ -1554,6 +1583,42 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
   /* ── apiSpecs ───────────────────────────────────────────────────────── */
 
+  /**
+   * One page of revisions as `columns` select and `map` decodes them: the one
+   * filter, count and order behind both `list` and `listSummaries`.
+   */
+  async function listSpecRows<T>(
+    filter: Parameters<ApiSpecRepo['list']>[0],
+    options: Parameters<ApiSpecRepo['list']>[1],
+    columns: string,
+    map: (row: Row) => T,
+  ): Promise<{ items: T[]; total: number }> {
+    const where = new SqlWhereBuilder()
+      .add(filter.api_id, 'api_id = ?', filter.api_id ?? null)
+      .add(
+        filter.is_current,
+        'is_current = ?',
+        filter.is_current === undefined ? null : encodeBool(filter.is_current),
+      )
+      .build();
+    const { limit, offset } = page(options);
+    const total = await queryCount(
+      exec,
+      `SELECT COUNT(*) AS cnt FROM api_specs${where.sql}`,
+      where.params,
+    );
+    // The current revision leads, then history newest-first by publication
+    // order; see the sqlite adapter for why the flag sorts first.
+    const rows = await queryAll(
+      exec,
+      `SELECT ${columns} FROM api_specs${where.sql}
+        ORDER BY is_current DESC, revision_seq DESC
+        LIMIT ? OFFSET ?`,
+      [...where.params, limit, offset],
+    );
+    return { items: rows.map(map), total };
+  }
+
   const apiSpecs: ApiSpecRepo = {
     create: async (input) => {
       const meta = stamps(input);
@@ -1617,6 +1682,16 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return row ? mapApiSpec(row) : null;
     },
 
+    // The same row as `findCurrentByApi`, minus the document nobody here reads.
+    findCurrentSummaryByApi: async (apiId) => {
+      const row = await queryOne(
+        exec,
+        `SELECT ${API_SPEC_SUMMARY_COLUMNS} FROM api_specs WHERE api_id = ? AND is_current = 1`,
+        [apiId],
+      );
+      return row ? mapApiSpecSummary(row) : null;
+    },
+
     setCurrent: async (apiId, specId) => {
       await inTransaction(async (tx) => {
         const at = nowIso();
@@ -1633,32 +1708,10 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       });
     },
 
-    list: async (filter, options) => {
-      const where = new SqlWhereBuilder()
-        .add(filter.api_id, 'api_id = ?', filter.api_id ?? null)
-        .add(
-          filter.is_current,
-          'is_current = ?',
-          filter.is_current === undefined ? null : encodeBool(filter.is_current),
-        )
-        .build();
-      const { limit, offset } = page(options);
-      const total = await queryCount(
-        exec,
-        `SELECT COUNT(*) AS cnt FROM api_specs${where.sql}`,
-        where.params,
-      );
-      // The current revision leads, then history newest-first by publication
-      // order; see the sqlite adapter for why the flag sorts first.
-      const rows = await queryAll(
-        exec,
-        `SELECT * FROM api_specs${where.sql}
-          ORDER BY is_current DESC, revision_seq DESC
-          LIMIT ? OFFSET ?`,
-        [...where.params, limit, offset],
-      );
-      return { items: rows.map(mapApiSpec), total };
-    },
+    list: async (filter, options) => listSpecRows(filter, options, '*', mapApiSpec),
+
+    listSummaries: async (filter, options) =>
+      listSpecRows(filter, options, API_SPEC_SUMMARY_COLUMNS, mapApiSpecSummary),
 
     delete: async (id) => (await execute(exec, 'DELETE FROM api_specs WHERE id = ?', [id])) > 0,
 

@@ -3,6 +3,7 @@ import { after, before, describe, it } from 'node:test';
 
 import { EMAIL_TEMPLATE_KEYS } from '@ferrum-nexus/shared';
 
+import { BRANDING_SETTINGS_KEY } from '../admin/settings-service.js';
 import { buildTestApp, type TestApp } from '../test/helpers.js';
 import {
   DEFAULT_EMAIL_TEMPLATES,
@@ -120,10 +121,63 @@ describe('template resolution', () => {
   });
 
   it('picks up branding changes in the common variables', async () => {
-    await harness.store.settings.set('branding', { portal_name: 'Acme Gateway' }, false);
+    // Through the settings service, the writer: its committed save is what
+    // invalidates the memoised portal name (a raw row write models another
+    // instance, which catches up within `NEXUS_BRANDING_CACHE_MS`).
+    const founder = await harness.registerUser({ email: 'templates-founder@example.test' });
+    const saved = await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: { branding: { portal_name: 'Acme Gateway' } },
+    });
+    assert.equal(saved.statusCode, 200, saved.body);
     const rendered = await harness.services.email.render('access_approved', {
       api_name: 'Billing',
     });
     assert.ok(rendered.html.includes('Acme Gateway'));
+  });
+});
+
+describe('portal name in the common variables', () => {
+  const brandingReads = (calls: readonly { arguments: readonly unknown[] }[]): number =>
+    calls.filter((call) => call.arguments[0] === BRANDING_SETTINGS_KEY).length;
+
+  it('is read once per NEXUS_BRANDING_CACHE_MS window, and again after a save', async (t) => {
+    const harness = await buildTestApp({ env: { NEXUS_BRANDING_CACHE_MS: '60000' } });
+    t.after(() => harness.close());
+    const founder = await harness.registerUser({ email: 'memo-founder@example.test' });
+    const render = (): Promise<{ html: string }> =>
+      harness.services.email.render('access_approved', { api_name: 'Billing' });
+
+    await render();
+    const get = t.mock.method(harness.store.settings, 'get');
+    for (let n = 0; n < 3; n += 1) assert.ok((await render()).html.includes('Ferrum Nexus'));
+    assert.equal(brandingReads(get.mock.calls), 0, 'within the window no render reads the row');
+
+    const saved = await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: { branding: { portal_name: 'Renamed Portal' } },
+    });
+    assert.equal(saved.statusCode, 200, saved.body);
+    get.mock.resetCalls();
+    assert.ok((await render()).html.includes('Renamed Portal'), 'a save shows at once');
+    assert.ok((await render()).html.includes('Renamed Portal'));
+    assert.equal(brandingReads(get.mock.calls), 1, 'one read refills the memo');
+  });
+
+  it('is read on every render when NEXUS_BRANDING_CACHE_MS=0', async (t) => {
+    const harness = await buildTestApp({ env: { NEXUS_BRANDING_CACHE_MS: '0' } });
+    t.after(() => harness.close());
+    const render = (): Promise<{ html: string }> =>
+      harness.services.email.render('access_approved', { api_name: 'Billing' });
+
+    const get = t.mock.method(harness.store.settings, 'get');
+    await render();
+    await render();
+    assert.equal(brandingReads(get.mock.calls), 2);
+
+    await harness.store.settings.set(BRANDING_SETTINGS_KEY, { portal_name: 'Raw Write' }, false);
+    assert.ok((await render()).html.includes('Raw Write'), 'no memo: even a raw write shows');
   });
 });
