@@ -9,6 +9,17 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, describe, it } from 'node:test';
 
+const STALLED_CHECK_TIMEOUT =
+  /Timed out after 200ms waiting for a stalled check: the last check did not finish/;
+const LATE_CHECK_TIMEOUT = /Timed out after 150ms waiting for a late check/;
+const STALLED_BODY_TIMEOUT = /Timed out after 300ms waiting for a stalled body/;
+const STALLED_200_BODY_TIMEOUT = /Timed out after 300ms waiting for a stalled 200 body/;
+const COMBINED_SIGNAL_TIMEOUT = /Timed out after 300ms waiting for a combined signal/;
+const OUTER_WAIT_TIMEOUT = /Timed out after 300ms waiting for an outer wait/;
+const STALLED_503_TIMEOUT = /Timed out after 300ms waiting for a 503/;
+const NEVER_PASSING_CHECK_TIMEOUT = /Timed out after 50ms waiting for a check that never passes/;
+const WAITING_MAIL_DELIVERED = /waiting for mail delivered to/;
+
 type Harness = typeof import('./harness.js');
 
 /** How far past the deadline a rejection may land on a loaded CI runner. */
@@ -111,7 +122,7 @@ describe('waitFor', { timeout: 30_000 }, () => {
           },
           200,
         ),
-        /Timed out after 200ms waiting for a stalled check: the last check did not finish/,
+        STALLED_CHECK_TIMEOUT,
       ),
     );
     assert.ok(took < 200 + TOLERANCE_MS, `rejected after ${took}ms`);
@@ -125,7 +136,7 @@ describe('waitFor', { timeout: 30_000 }, () => {
         () => new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 400)),
         150,
       ),
-      /Timed out after 150ms waiting for a late check/,
+      LATE_CHECK_TIMEOUT,
     );
   });
 
@@ -141,7 +152,7 @@ describe('waitFor', { timeout: 30_000 }, () => {
           },
           300,
         ),
-        /Timed out after 300ms waiting for a stalled body/,
+        STALLED_BODY_TIMEOUT,
       ),
     );
     assert.ok(took < 300 + TOLERANCE_MS, `rejected after ${took}ms`);
@@ -162,7 +173,7 @@ describe('waitFor', { timeout: 30_000 }, () => {
           },
           300,
         ),
-        /Timed out after 300ms waiting for a stalled 200 body/,
+        STALLED_200_BODY_TIMEOUT,
       ),
     );
     assert.ok(took < 300 + TOLERANCE_MS, `rejected after ${took}ms`);
@@ -192,7 +203,7 @@ describe('waitFor', { timeout: 30_000 }, () => {
           },
           300,
         ),
-        /Timed out after 300ms waiting for a combined signal/,
+        COMBINED_SIGNAL_TIMEOUT,
       ),
     );
     assert.ok(took < 300 + TOLERANCE_MS, `rejected after ${took}ms`);
@@ -214,7 +225,7 @@ describe('waitFor', { timeout: 30_000 }, () => {
           },
           300,
         ),
-        /Timed out after 300ms waiting for an outer wait/,
+        OUTER_WAIT_TIMEOUT,
       ),
     );
     assert.ok(took < 300 + TOLERANCE_MS, `rejected after ${took}ms`);
@@ -232,7 +243,7 @@ describe('waitFor', { timeout: 30_000 }, () => {
         },
         300,
       ),
-      /Timed out after 300ms waiting for a 503/,
+      STALLED_503_TIMEOUT,
     );
     assert.ok(attempts >= 1);
     assert.ok((await closedOn('/unready', attempts)) >= attempts, 'no unread body was left open');
@@ -253,7 +264,7 @@ describe('waitFor', { timeout: 30_000 }, () => {
           },
           50,
         ),
-        /Timed out after 50ms waiting for a check that never passes/,
+        NEVER_PASSING_CHECK_TIMEOUT,
       );
       assert.equal(calls, 1, `run ${run} made ${calls} attempts`);
     }
@@ -261,7 +272,7 @@ describe('waitFor', { timeout: 30_000 }, () => {
 
   it('bounds the mail read, message body included', async () => {
     const took = await elapsed(() =>
-      assert.rejects(harness.latestMailTo('a@example.test'), /waiting for mail delivered to/),
+      assert.rejects(harness.latestMailTo('a@example.test'), WAITING_MAIL_DELIVERED),
     );
     assert.ok(took < READY_MS + TOLERANCE_MS, `rejected after ${took}ms`);
     assert.ok((await closedOn('/api/v1/message/m1')) > 0, 'the stalled detail read was cancelled');

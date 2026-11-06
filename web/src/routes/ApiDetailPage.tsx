@@ -88,6 +88,8 @@ import { Tabs } from '../components/ui/Tabs';
 import { parseWholeNumber } from '../lib/numbers';
 import { queryLoadState } from '../lib/query-state';
 
+const NAME_SEPARATORS = /[\s@._-]+/;
+
 const WINDOW_OPTIONS = [
   { value: '1', label: 'per second' },
   { value: '60', label: 'per minute' },
@@ -264,10 +266,7 @@ function GlanceTile({
 
 /** Initials for the avatar disc on an access-request or grant row. */
 function initialsOf(label: string): string {
-  const words = label
-    .trim()
-    .split(/[\s@._-]+/)
-    .filter(Boolean);
+  const words = label.trim().split(NAME_SEPARATORS).filter(Boolean);
   const letters = words.slice(0, 2).map((word) => word[0] ?? '');
   return (letters.join('') || '?').toUpperCase();
 }

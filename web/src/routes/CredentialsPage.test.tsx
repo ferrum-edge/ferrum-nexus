@@ -16,6 +16,17 @@ import { queryKeys } from '../hooks/keys';
 import { ApiError, applicationsApi, credentialsApi, grantsApi } from '../lib/api';
 import { CredentialsPage } from './CredentialsPage';
 
+const I_HAVE_SAVED_THESE_VALUES = /I have saved these values/;
+const REVOKES_PREVIOUS_VALUE_PART = /revokes the previous value as part of the same operation/;
+const WINDOW_SWITCH_OVER = /window to switch over/;
+const REVOKED_PART_OPERATION = /revoked as part of this operation/;
+const KEEPS_WORKING_UNTIL_ROTATION = /keeps working until the rotation is finalized/;
+const IMMEDIATE_401_RESPONSES = /401 responses immediately/;
+const EVERY_HTTP_BASIC = /every HTTP Basic/;
+const REMOVES_EVERY_HTTP_BASIC = /removes every HTTP Basic password/;
+const GATEWAY_ADDRESS_NOT_PUBLISHED = /Gateway address not published/;
+const EVERY_API_YOUR_ACTIVE = /Every API your active grants cover/;
+
 vi.mock('../components/ui/Select', async () => {
   const { NativeLabeledSelect } = await import('../../test/helpers');
   return { LabeledSelect: NativeLabeledSelect };
@@ -101,7 +112,7 @@ function mutationCacheText(client: QueryClient): string {
 function acknowledge(): void {
   const dialog = screen.getByRole('dialog');
   expect(within(dialog).getByRole('button', { name: 'Done' })).toBeDisabled();
-  fireEvent.click(within(dialog).getByRole('checkbox', { name: /I have saved these values/ }));
+  fireEvent.click(within(dialog).getByRole('checkbox', { name: I_HAVE_SAVED_THESE_VALUES }));
   fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
 }
 
@@ -239,7 +250,7 @@ describe('credential management', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Issue' }));
     const next = await screen.findByRole('dialog', { name: 'Save your new credential' });
     expect(
-      within(next).getByRole('checkbox', { name: /I have saved these values/ }),
+      within(next).getByRole('checkbox', { name: I_HAVE_SAVED_THESE_VALUES }),
     ).not.toBeChecked();
     expect(within(next).getByRole('button', { name: 'Done' })).toBeDisabled();
   });
@@ -262,16 +273,12 @@ describe('credential management', () => {
   it('explains that rotation revokes the old secret as part of the operation', async () => {
     credentials = [CREDENTIAL];
     renderPage(<CredentialsPage />);
-    expect(
-      await screen.findByText(/revokes the previous value as part of the same operation/),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/window to switch over/)).not.toBeInTheDocument();
+    expect(await screen.findByText(REVOKES_PREVIOUS_VALUE_PART)).toBeInTheDocument();
+    expect(screen.queryByText(WINDOW_SWITCH_OVER)).not.toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: 'Rotate' }));
     const dialog = await screen.findByRole('dialog', { name: 'Rotate credential' });
-    expect(within(dialog).getByText(/revoked as part of this operation/)).toBeInTheDocument();
-    expect(
-      within(dialog).queryByText(/keeps working until the rotation is finalized/),
-    ).not.toBeInTheDocument();
+    expect(within(dialog).getByText(REVOKED_PART_OPERATION)).toBeInTheDocument();
+    expect(within(dialog).queryByText(KEEPS_WORKING_UNTIL_ROTATION)).not.toBeInTheDocument();
   });
 
   it('requires a fresh acknowledgement for rotation', async () => {
@@ -317,7 +324,7 @@ describe('credential management', () => {
     renderPage(<CredentialsPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Revoke' }));
     let dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText(/401 responses immediately/)).toBeInTheDocument();
+    expect(within(dialog).getByText(IMMEDIATE_401_RESPONSES)).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(credentialsApi.remove).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Revoke' }));
@@ -334,7 +341,7 @@ describe('credential management', () => {
     renderPage(<CredentialsPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Revoke' }));
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).queryByText(/every HTTP Basic/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(EVERY_HTTP_BASIC)).not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke' }));
     await screen.findByText('Credential revoked');
     expect(credentialsApi.remove).toHaveBeenCalledTimes(1);
@@ -363,7 +370,7 @@ describe('credential management', () => {
     const second = await screen.findByRole('dialog', {
       name: 'Revoke all HTTP Basic credentials?',
     });
-    expect(within(second).getByText(/removes every HTTP Basic password/)).toBeInTheDocument();
+    expect(within(second).getByText(REMOVES_EVERY_HTTP_BASIC)).toBeInTheDocument();
     expect(credentialsApi.remove).toHaveBeenCalledWith(CREDENTIAL.id);
     expect(screen.queryByText('Credential revoked')).not.toBeInTheDocument();
 
@@ -434,7 +441,7 @@ describe('credential management', () => {
       offset: 0,
     });
     expect(screen.getByText(API.invoke_url!)).toBeInTheDocument();
-    expect(screen.getByText(/Gateway address not published/)).toBeInTheDocument();
+    expect(screen.getByText(GATEWAY_ADDRESS_NOT_PUBLISHED)).toBeInTheDocument();
     expect(screen.getByText('api-without-details')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
     await screen.findByText(`••••${String(DEFAULT_PAGE_SIZE).padStart(4, '0')}`);
@@ -585,7 +592,7 @@ describe('your API access', () => {
     renderPage(<CredentialsPage />);
     expect(await screen.findByText('API 0')).toBeInTheDocument();
     expect(screen.getByText('Billing worker')).toBeInTheDocument();
-    expect(screen.queryByText(/Every API your active grants cover/)).not.toBeInTheDocument();
+    expect(screen.queryByText(EVERY_API_YOUR_ACTIVE)).not.toBeInTheDocument();
     expect(screen.queryByText(`API ${DEFAULT_PAGE_SIZE + 1}`)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Next page' }));

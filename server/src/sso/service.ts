@@ -141,6 +141,9 @@ import {
   type StoredSsoSettings,
 } from './settings.js';
 
+const CONTROL_OR_BACKSLASH = /[\u0000-\u001f\u007f\\]/;
+const QUERY_OR_FRAGMENT = /[?#]/;
+
 /** What one sign-in attempt seals into the `nexus_sso` cookie. */
 interface SsoTransaction {
   v: 1;
@@ -253,8 +256,8 @@ export interface SsoServiceDeps {
 export function safeReturnPath(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 512) return '/';
   if (!value.startsWith('/') || value.startsWith('//')) return '/';
-  if (/[\u0000-\u001f\u007f\\]/.test(value)) return '/';
-  const path = value.split(/[?#]/, 1)[0] ?? '';
+  if (CONTROL_OR_BACKSLASH.test(value)) return '/';
+  const path = value.split(QUERY_OR_FRAGMENT, 1)[0] ?? '';
   if (path === '/api' || path.startsWith('/api/')) return '/';
   if (path === '/login' || path.startsWith('/login/')) return '/';
   return value;

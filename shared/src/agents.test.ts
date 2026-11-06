@@ -3,6 +3,9 @@ import { describe, it } from 'node:test';
 import { MAX_SPEC_OPERATIONS } from './constants.js';
 import { agentOperations, agentPathItems, agentToolName } from './agents.js';
 
+const LOCAL_PATH_ITEM_REFERENCE = /local Path Item reference/;
+const OVER_OPERATION_LIMIT = new RegExp(`more than ${MAX_SPEC_OPERATIONS} operations`);
+
 describe('agent operation metadata', () => {
   it('resolves chained local Path Items with sibling overlays and descriptive defaults', () => {
     const document = {
@@ -88,7 +91,7 @@ describe('agent operation metadata', () => {
     // One more hop, through a path already resolved, passes the bound.
     assert.throws(
       () => agentOperations({ ...document, paths: { ...paths, '/q': { $ref: '#/paths/~1p0' } } }),
-      /local Path Item reference/,
+      LOCAL_PATH_ITEM_REFERENCE,
     );
   });
 
@@ -100,7 +103,7 @@ describe('agent operation metadata', () => {
     ]) {
       assert.throws(
         () => agentOperations({ paths: { '/items': { $ref: reference } } }),
-        /local Path Item reference/,
+        LOCAL_PATH_ITEM_REFERENCE,
       );
     }
   });
@@ -121,10 +124,7 @@ describe('agent operation metadata', () => {
 
     assert.equal(agentOperations(document, capped).length, MAX_SPEC_OPERATIONS);
     const over = { ...document, paths: { ...paths, '/one-more': { get: OK } } };
-    assert.throws(
-      () => agentOperations(over, capped),
-      new RegExp(`more than ${MAX_SPEC_OPERATIONS} operations`),
-    );
+    assert.throws(() => agentOperations(over, capped), OVER_OPERATION_LIMIT);
     // Without a cap, a document already on the gateway is read in full.
     assert.equal(agentOperations(over).length, MAX_SPEC_OPERATIONS + 1);
   });

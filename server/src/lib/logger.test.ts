@@ -8,6 +8,8 @@ import { loadConfig } from '../config/index.js';
 import { parseOrThrow, registerErrorHandler } from '../middleware/error-handler.js';
 import { buildLoggerOptions } from './logger.js';
 
+const TEXT_HTML = /text\/html/;
+
 interface LogRecord {
   msg: string;
   req?: { method: string; url: string };
@@ -66,7 +68,7 @@ describe('structured request logs', () => {
           });
           assert.equal(response.statusCode, status);
           if (status === 200) {
-            assert.match(response.headers['content-type'] ?? '', /text\/html/);
+            assert.match(response.headers['content-type'] ?? '', TEXT_HTML);
             assert.equal(response.body, '<html>SPA</html>');
           }
           assert.ok(lines.length > 0);

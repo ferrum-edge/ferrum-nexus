@@ -103,6 +103,12 @@ export { slugify } from '@ferrum-nexus/shared';
 
 import { isNexusError, specInvalid, type NexusError } from '../lib/errors.js';
 
+const IPV6_BRACKETS = /^\[|\]$/g;
+const TRAILING_SLASHES = /\/+$/;
+const TRAILING_DOT = /\.$/;
+const IPV6_GROUP = /^[0-9a-f]{1,4}$/;
+const OPENAPI_3_VERSION = /^3\.\d+(\.\d+)?/;
+
 /** Upstream a proxy should forward to, decomposed into Edge's proxy fields. */
 export interface SpecUpstream {
   /** The absolute URL after template expansion (or as explicitly supplied). */
@@ -196,13 +202,13 @@ export function parseUpstreamUrl(raw: string): SpecUpstream | null {
   if (!url) return null;
 
   // `URL.hostname` keeps IPv6 literals in brackets; Edge wants the bare form.
-  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const host = url.hostname.replace(IPV6_BRACKETS, '').toLowerCase();
 
   const scheme = url.protocol === 'https:' ? 'https' : 'http';
   const port = url.port === '' ? (scheme === 'https' ? 443 : 80) : Number(url.port);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) return null;
 
-  const path = url.pathname.replace(/\/+$/, '');
+  const path = url.pathname.replace(TRAILING_SLASHES, '');
   return {
     url: trimmed,
     scheme,
@@ -545,7 +551,7 @@ async function assertNotGatewayOrigin(
   for (const origin of gatewayOrigins) {
     let gatewayHost: string;
     try {
-      gatewayHost = new URL(origin).hostname.replace(/^\[|\]$/g, '');
+      gatewayHost = new URL(origin).hostname.replace(IPV6_BRACKETS, '');
     } catch {
       // A malformed stored origin is rejected on write; skip it rather than
       // fail every publish over a value this guard cannot read.
@@ -594,7 +600,7 @@ async function addressesForHost(
   resolve: UpstreamResolver,
   required: boolean,
 ): Promise<string[]> {
-  const normalized = normalizeHost(host).replace(/^\[|\]$/g, '');
+  const normalized = normalizeHost(host).replace(IPV6_BRACKETS, '');
   if (isIP(normalized) !== 0) return [canonicalAddress(normalized)];
   // `localhost` and its subdomains are loopback by definition (RFC 6761),
   // whatever a resolver that skips the hosts file says about them.
@@ -619,7 +625,7 @@ async function addressesForHost(
  * `::ffff:5db8:d822` — produce the same value.
  */
 function canonicalHost(host: string): string {
-  const bare = host.replace(/^\[|\]$/g, '');
+  const bare = host.replace(IPV6_BRACKETS, '');
   return isIP(bare) === 0 ? normalizeHost(bare) : canonicalAddress(bare);
 }
 
@@ -633,7 +639,7 @@ function canonicalHost(host: string): string {
  * so the several textual forms of one address compare equal.
  */
 function canonicalAddress(address: string): string {
-  const bare = address.replace(/^\[|\]$/g, '').toLowerCase();
+  const bare = address.replace(IPV6_BRACKETS, '').toLowerCase();
   const version = isIP(bare);
   if (version === 4) return bare;
   if (version !== 6) return bare;
@@ -666,7 +672,7 @@ export function isPublicResolvedAddress(entry: ResolvedAddress): boolean {
  * slip past the rule that refuses `api.internal`.
  */
 function normalizeHost(host: string): string {
-  return host.replace(/\.$/, '').toLowerCase();
+  return host.replace(TRAILING_DOT, '').toLowerCase();
 }
 
 /**
@@ -926,7 +932,7 @@ function ipv6Hextets(address: string): number[] | null {
 function parseHextets(part: string): number[] | null {
   if (part === '') return [];
   const groups = part.split(':');
-  if (!groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) return null;
+  if (!groups.every((group) => IPV6_GROUP.test(group))) return null;
   return groups.map((group) => Number.parseInt(group, 16));
 }
 
@@ -1653,7 +1659,7 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
   if (typeof openapiVersion !== 'string' || openapiVersion.trim() === '') {
     throw specInvalid("The document is missing the 'openapi' version field", { field: 'openapi' });
   }
-  if (!/^3\.\d+(\.\d+)?/.test(openapiVersion.trim())) {
+  if (!OPENAPI_3_VERSION.test(openapiVersion.trim())) {
     throw specInvalid('Only OpenAPI 3.x documents are supported', {
       field: 'openapi',
       value: openapiVersion,

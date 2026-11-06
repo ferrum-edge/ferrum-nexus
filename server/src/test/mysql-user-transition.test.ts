@@ -12,6 +12,8 @@ import type { NexusStore, UserRecord } from '../db/store.js';
 import { nowIso } from '../lib/ids.js';
 import { buildTestApp, type TestApp, TEST_SECRET_KEY } from './helpers.js';
 
+const HYPHENS = /-/g;
+
 const adminUrl = process.env.NEXUS_TEST_MYSQL_URL;
 
 /** Two independent pools and transaction queues, sharing only a disposable database. */
@@ -19,7 +21,7 @@ async function fixture(
   body: (a: NexusStore, b: NexusStore) => Promise<void>,
   disableFoundRowsInUri = false,
 ): Promise<void> {
-  const database = `nexus_transition_${randomUUID().replace(/-/g, '')}`;
+  const database = `nexus_transition_${randomUUID().replace(HYPHENS, '')}`;
   const admin = await mysql.createConnection(adminUrl!);
   const url = new URL(adminUrl!);
   url.pathname = `/${database}`;

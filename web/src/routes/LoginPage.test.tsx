@@ -12,6 +12,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ERROR_CODES, type SsoPublicConfigResponse } from '@ferrum-nexus/shared';
 import { SSO_ERROR_MESSAGES } from '../lib/sso-errors';
 
+const CONTINUE_WITH_CORPORATE_SSO = /Continue with Corporate SSO/;
+const PASSWORD = /^Password/;
+const OPEN_SUPER_ADMINS_ONLY = /open to super admins only/;
+
 const CAPTCHA = { enabled: false, provider: 'none', site_key: null };
 
 function json(body: unknown, status = 200): Response {
@@ -76,9 +80,9 @@ describe('LoginPage single sign-on', () => {
       registration_enabled: true,
       providers: PROVIDERS,
     });
-    const button = await screen.findByRole('link', { name: /Continue with Corporate SSO/ });
+    const button = await screen.findByRole('link', { name: CONTINUE_WITH_CORPORATE_SSO });
     expect(button).toHaveAttribute('href', '/api/auth/sso/corp/start');
-    expect(screen.getByLabelText(/^Password/)).toBeInTheDocument();
+    expect(screen.getByLabelText(PASSWORD)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Register' })).toBeInTheDocument();
   });
 
@@ -90,9 +94,9 @@ describe('LoginPage single sign-on', () => {
       providers: PROVIDERS,
     });
     expect(
-      await screen.findByRole('link', { name: /Continue with Corporate SSO/ }),
+      await screen.findByRole('link', { name: CONTINUE_WITH_CORPORATE_SSO }),
     ).toBeInTheDocument();
-    expect(screen.queryByLabelText(/^Password/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(PASSWORD)).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Register' })).not.toBeInTheDocument();
   });
 
@@ -106,10 +110,10 @@ describe('LoginPage single sign-on', () => {
     const reveal = await screen.findByRole('button', {
       name: 'Administrator sign-in with a password',
     });
-    expect(screen.queryByLabelText(/^Password/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(PASSWORD)).not.toBeInTheDocument();
     fireEvent.click(reveal);
-    expect(await screen.findByLabelText(/^Password/)).toBeInTheDocument();
-    expect(screen.getByText(/open to super admins only/)).toBeInTheDocument();
+    expect(await screen.findByLabelText(PASSWORD)).toBeInTheDocument();
+    expect(screen.getByText(OPEN_SUPER_ADMINS_ONLY)).toBeInTheDocument();
   });
 
   it('explains a refused single sign-on', async () => {
@@ -135,7 +139,7 @@ describe('LoginPage single sign-on', () => {
       },
       '/login?sso_error=not-a-reason',
     );
-    await screen.findByRole('link', { name: /Continue with Corporate SSO/ });
+    await screen.findByRole('link', { name: CONTINUE_WITH_CORPORATE_SSO });
     for (const message of Object.values(SSO_ERROR_MESSAGES)) {
       expect(screen.queryByText(message)).not.toBeInTheDocument();
     }

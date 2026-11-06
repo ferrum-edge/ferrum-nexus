@@ -47,6 +47,9 @@ import { queryLoadState } from '../../../lib/query-state';
 import { useAuth } from '../../../stores/auth';
 import { useToast } from '../../../stores/toast';
 
+const SCOPE_SEPARATORS = /[\s,]+/;
+const WHITESPACE = /\s+/;
+
 const POLICY_LABELS: Readonly<Record<LoginPolicy, string>> = {
   local_and_sso: 'Passwords and single sign-on',
   local_only: 'Passwords only',
@@ -140,14 +143,14 @@ function newDraft(): ProviderDraft {
 /** Domains typed one per line (or comma-separated), as the API takes them. */
 function parseDomains(text: string): string[] {
   return text
-    .split(/[\s,]+/)
+    .split(SCOPE_SEPARATORS)
     .map((domain) => domain.trim())
     .filter((domain) => domain.length > 0);
 }
 
 /** The wire shape of one draft: the secret only when it changes. */
 function toInput(draft: ProviderDraft): SsoProviderInput {
-  const scopes = draft.scopesText.split(/\s+/).filter((scope) => scope.length > 0);
+  const scopes = draft.scopesText.split(WHITESPACE).filter((scope) => scope.length > 0);
   const secret = draft.secret.trim();
   const domains = parseDomains(draft.domainsText);
   const input: SsoProviderInput = { ...draft.settings, scopes, allowed_email_domains: domains };

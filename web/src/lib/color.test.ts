@@ -11,6 +11,10 @@ import {
   type Rgb,
 } from './color';
 
+const ACCENT_RGB_WITH_ALPHA = /^rgb\(79 70 229 \/ 0\.\d+\)$/;
+const RGB_WITH_ALPHA = /^rgb\((\d+) (\d+) (\d+) \/ ([\d.]+)\)$/;
+const CUSTOM_PROPERTY = /--([\w-]+):\s*([^;]+);/g;
+
 describe('parseHex', () => {
   it('accepts 3- and 6-digit hex and rejects everything else', () => {
     expect(parseHex('#fff')).toEqual({ r: 255, g: 255, b: 255 });
@@ -53,8 +57,8 @@ describe('deriveAccentScale', () => {
     expect(dark['--accent-hover'] > dark['--accent']).toBe(true);
     expect(light['--accent-hover'] < light['--accent']).toBe(true);
     // Tints are translucent versions of the brand colour, not the built-in ember.
-    expect(dark['--accent-soft']).toMatch(/^rgb\(79 70 229 \/ 0\.\d+\)$/);
-    expect(dark['--accent-ring']).toMatch(/^rgb\(79 70 229 \/ 0\.\d+\)$/);
+    expect(dark['--accent-soft']).toMatch(ACCENT_RGB_WITH_ALPHA);
+    expect(dark['--accent-ring']).toMatch(ACCENT_RGB_WITH_ALPHA);
     expect(dark['--accent-fg']).toBe('#ffffff');
   });
 });
@@ -79,7 +83,7 @@ describe('deriveInfoScale', () => {
 
 /** Composite the emitted CSS tint in sRGB, as rendered over a solid surface. */
 function compositeTint(tint: string, surface: string): Rgb {
-  const match = /^rgb\((\d+) (\d+) (\d+) \/ ([\d.]+)\)$/.exec(tint);
+  const match = RGB_WITH_ALPHA.exec(tint);
   if (!match) throw new Error(`Unexpected tint: ${tint}`);
   const alpha = Number(match[4]);
   const background = parseHex(surface)!;
@@ -181,7 +185,7 @@ function themeTokens(selector: string): Record<string, string> {
   if (start === -1) throw new Error(`No ${selector} block in globals.css`);
   const body = globalsCss.slice(start, globalsCss.indexOf('\n}', start));
   const tokens: Record<string, string> = {};
-  for (const match of body.matchAll(/--([\w-]+):\s*([^;]+);/g))
+  for (const match of body.matchAll(CUSTOM_PROPERTY))
     tokens[match[1]!] = match[2]!.trim();
   return tokens;
 }

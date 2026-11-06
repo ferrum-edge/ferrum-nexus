@@ -28,6 +28,15 @@ import { NexusError } from '../lib/errors.js';
 import { GATEWAY_PUBLIC_URL_RULE, normalizeGatewayPublicUrl } from '../lib/gateway-url.js';
 import { parseEnvSsoProviders, type SsoEnvConfig } from '../sso/config.js';
 
+const CIDR_PREFIX_LENGTH = /^\d{1,3}$/;
+const DIGITS = /^\d+$/;
+const IPV6_BRACKETS = /^\[|\]$/g;
+const IPV4_LOOPBACK = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+const TRAILING_SLASHES = /\/+$/;
+const QUERY_OR_FRAGMENT = /[?#]/;
+const HOST_WITH_PORT = /^(?:[a-z0-9][a-z0-9.-]*|\[[0-9a-f:]+\])(?::[0-9]+)?$/;
+const REDIS_URL = /^rediss?:\/\/[^\s]+$/;
+
 /** Raw environment shape accepted by {@link loadConfig}. */
 export type EnvRecord = Record<string, string | undefined>;
 
@@ -156,7 +165,7 @@ function trustedProxyEntry(entry: string): string | null {
   if (slash === -1) return entry;
 
   const prefix = entry.slice(slash + 1);
-  if (!/^\d{1,3}$/.test(prefix)) return null;
+  if (!CIDR_PREFIX_LENGTH.test(prefix)) return null;
   const bits = Number(prefix);
   return bits >= 1 && bits <= (family === 4 ? 32 : 128) ? entry : null;
 }
@@ -581,7 +590,7 @@ const intish = (
       // `1e3`, `0b11` and `+5`, so a typo could silently become a different
       // port or quota (#339). Every range starts at 0, so no sign is needed.
       const digits = raw.trim();
-      const value = /^\d+$/.test(digits) ? Number(digits) : Number.NaN;
+      const value = DIGITS.test(digits) ? Number(digits) : Number.NaN;
       if (!Number.isSafeInteger(value) || value < min || value > max) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -614,7 +623,7 @@ const optionalPositiveInt = (max: number): z.ZodType<number | undefined, string 
       if (raw === undefined || raw.trim() === '') return undefined;
       // Plain decimal digits only, as for `intish`.
       const digits = raw.trim();
-      const value = /^\d+$/.test(digits) ? Number(digits) : Number.NaN;
+      const value = DIGITS.test(digits) ? Number(digits) : Number.NaN;
       if (!Number.isSafeInteger(value) || value < 1 || value > max) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -627,10 +636,10 @@ const optionalPositiveInt = (max: number): z.ZodType<number | undefined, string 
 
 /** Hosts that never need `FERRUM_ADMIN_ALLOW_INSECURE_HTTP` to be spoken to over plaintext. */
 function isLoopbackHost(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const host = hostname.replace(IPV6_BRACKETS, '').toLowerCase();
   if (host === 'localhost' || host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
   if (host.endsWith('.localhost')) return true;
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+  return IPV4_LOOPBACK.test(host);
 }
 
 const envSchema = z.object({
@@ -819,7 +828,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
           'use https:// or set FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true',
       );
     }
-    adminUrl = adminParsed.origin + adminParsed.pathname.replace(/\/+$/, '');
+    adminUrl = adminParsed.origin + adminParsed.pathname.replace(TRAILING_SLASHES, '');
   }
 
   // ── Public URL ───────────────────────────────────────────────────────────
@@ -839,10 +848,10 @@ export function loadConfig(env: EnvRecord): NexusConfig {
       problems.push('NEXUS_PUBLIC_URL must use http:// or https://');
     } else if (publicParsed.username || publicParsed.password) {
       problems.push('NEXUS_PUBLIC_URL must not contain a username or password');
-    } else if (publicParsed.search || publicParsed.hash || /[?#]/.test(publicUrl)) {
+    } else if (publicParsed.search || publicParsed.hash || QUERY_OR_FRAGMENT.test(publicUrl)) {
       problems.push('NEXUS_PUBLIC_URL must not contain a query string or fragment');
     }
-    publicUrl = publicParsed.toString().replace(/\/+$/, '');
+    publicUrl = publicParsed.toString().replace(TRAILING_SLASHES, '');
   }
 
   const emailTemplateAllowedLinkHosts: string[] = [];
@@ -851,10 +860,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     if (!host) continue;
     try {
       const parsed = new URL(`https://${host}`);
-      if (
-        !/^(?:[a-z0-9][a-z0-9.-]*|\[[0-9a-f:]+\])(?::[0-9]+)?$/.test(host) ||
-        parsed.host !== host
-      ) {
+      if (!HOST_WITH_PORT.test(host) || parsed.host !== host) {
         throw new Error('not an exact host');
       }
       emailTemplateAllowedLinkHosts.push(host);
@@ -912,7 +918,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
   if (raw.FERRUM_RATE_LIMIT_SYNC_MODE === 'redis' && redisUrl === undefined) {
     problems.push('FERRUM_RATE_LIMIT_REDIS_URL is required when FERRUM_RATE_LIMIT_SYNC_MODE=redis');
   }
-  if (redisUrl !== undefined && !/^rediss?:\/\/[^\s]+$/.test(redisUrl)) {
+  if (redisUrl !== undefined && !REDIS_URL.test(redisUrl)) {
     problems.push(
       'FERRUM_RATE_LIMIT_REDIS_URL must be a redis:// or rediss:// URL, e.g. redis://127.0.0.1:6379/0',
     );
@@ -1114,7 +1120,7 @@ function parseTrustedProxies(
   const value = raw?.trim() ?? '';
   if (value === '') return legacyTrustProxy ? 1 : false;
 
-  if (/^\d+$/.test(value)) {
+  if (DIGITS.test(value)) {
     const hops = Number(value);
     if (!Number.isSafeInteger(hops) || hops < 1 || hops > 32) {
       problems.push('NEXUS_TRUSTED_PROXIES hop count must be an integer between 1 and 32');

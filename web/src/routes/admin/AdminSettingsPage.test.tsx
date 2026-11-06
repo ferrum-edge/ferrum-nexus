@@ -21,6 +21,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AdminSettingsResponse, CaptchaAdminSettings, Role } from '@ferrum-nexus/shared';
 import { CaptchaCard, RegistrationCard } from './AdminSettingsPage';
 
+const CANNOT_COMPLETE_ALL = /cannot complete at all/;
+const TEST_CAPTCHA = /Test this CAPTCHA/;
+const CHALLENGE_SOLVED = /Challenge solved/;
+const SECRET_KEY_NEW_PROVIDER = /secret key for the new provider/;
+const NEXUS_CAPTCHA_ENFORCEMENT_DISABLED = /NEXUS_CAPTCHA_ENFORCEMENT=disabled/;
+
 const update = vi.hoisted(() => vi.fn());
 
 // The page pulls every settings hook; only the card under test is rendered, so
@@ -176,7 +182,7 @@ describe('registration policy card', () => {
   it('warns when the policy would leave nobody able to register', () => {
     render(<RegistrationCard settings={settingsWith(['client'])} />);
     fireEvent.click(screen.getByLabelText('Client'));
-    expect(screen.getByRole('alert')).toHaveTextContent(/cannot complete at all/);
+    expect(screen.getByRole('alert')).toHaveTextContent(CANNOT_COMPLETE_ALL);
   });
 });
 
@@ -186,12 +192,12 @@ describe('CAPTCHA activation card', () => {
   it('will not save an activation until the challenge has been solved', () => {
     render(<CaptchaCard settings={settingsWith(['client'], READY_TO_ENABLE)} />);
     // Nothing is changing yet, so no self-test is asked for.
-    expect(screen.queryByRole('button', { name: /Test this CAPTCHA/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: TEST_CAPTCHA })).toBeNull();
 
     fireEvent.click(screen.getByLabelText('Require a CAPTCHA challenge'));
     expect(save()).toBeDisabled();
 
-    fireEvent.click(screen.getByRole('button', { name: /Test this CAPTCHA/ }));
+    fireEvent.click(screen.getByRole('button', { name: TEST_CAPTCHA }));
     fireEvent.click(screen.getByRole('button', { name: 'solve the challenge' }));
     expect(save()).toBeEnabled();
 
@@ -212,20 +218,20 @@ describe('CAPTCHA activation card', () => {
   it('drops a token whose configuration the form has moved away from', () => {
     render(<CaptchaCard settings={settingsWith(['client'], READY_TO_ENABLE)} />);
     fireEvent.click(screen.getByLabelText('Require a CAPTCHA challenge'));
-    fireEvent.click(screen.getByRole('button', { name: /Test this CAPTCHA/ }));
+    fireEvent.click(screen.getByRole('button', { name: TEST_CAPTCHA }));
     fireEvent.click(screen.getByRole('button', { name: 'solve the challenge' }));
     expect(save()).toBeEnabled();
 
     fireEvent.change(screen.getByLabelText('Site key'), { target: { value: 'another-site' } });
     expect(save()).toBeDisabled();
-    expect(screen.getByRole('button', { name: /Test this CAPTCHA/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: TEST_CAPTCHA })).toBeInTheDocument();
     expect(update).not.toHaveBeenCalled();
   });
 
   it('needs no challenge to re-save a configuration that is not moving', () => {
     const stored = { ...READY_TO_ENABLE, enabled: true };
     render(<CaptchaCard settings={settingsWith(['client'], stored)} />);
-    expect(screen.queryByRole('button', { name: /Test this CAPTCHA/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: TEST_CAPTCHA })).toBeNull();
     fireEvent.click(save());
     expect(update).toHaveBeenCalledWith(
       { captcha: { enabled: true, provider: 'turnstile', site_key: 'public-site' } },
@@ -236,7 +242,7 @@ describe('CAPTCHA activation card', () => {
   it('offers a fresh challenge after a save that spent the token and failed', () => {
     render(<CaptchaCard settings={settingsWith(['client'], READY_TO_ENABLE)} />);
     fireEvent.click(screen.getByLabelText('Require a CAPTCHA challenge'));
-    fireEvent.click(screen.getByRole('button', { name: /Test this CAPTCHA/ }));
+    fireEvent.click(screen.getByRole('button', { name: TEST_CAPTCHA }));
     fireEvent.click(screen.getByRole('button', { name: 'solve the challenge' }));
     fireEvent.click(save());
 
@@ -251,8 +257,8 @@ describe('CAPTCHA activation card', () => {
       handlers?.onError?.();
     });
 
-    expect(screen.queryByText(/Challenge solved/)).toBeNull();
-    expect(screen.getByRole('button', { name: /Test this CAPTCHA/ })).toBeInTheDocument();
+    expect(screen.queryByText(CHALLENGE_SOLVED)).toBeNull();
+    expect(screen.getByRole('button', { name: TEST_CAPTCHA })).toBeInTheDocument();
     expect(save()).toBeDisabled();
   });
 
@@ -263,13 +269,13 @@ describe('CAPTCHA activation card', () => {
 
     // The stored secret was issued by Turnstile; the server refuses to post it
     // to hCaptcha's siteverify, so there is nothing to solve a challenge with.
-    expect(screen.getByRole('alert')).toHaveTextContent(/secret key for the new provider/);
+    expect(screen.getByRole('alert')).toHaveTextContent(SECRET_KEY_NEW_PROVIDER);
     expect(save()).toBeDisabled();
-    expect(screen.queryByRole('button', { name: /Test this CAPTCHA/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: TEST_CAPTCHA })).toBeNull();
 
     fireEvent.change(screen.getByLabelText('Secret key'), { target: { value: 'hcaptcha-secret' } });
     expect(screen.queryByRole('alert')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: /Test this CAPTCHA/ }));
+    fireEvent.click(screen.getByRole('button', { name: TEST_CAPTCHA }));
     fireEvent.click(screen.getByRole('button', { name: 'solve the challenge' }));
     fireEvent.click(save());
     expect(update).toHaveBeenCalledWith(
@@ -291,7 +297,7 @@ describe('CAPTCHA activation card', () => {
     render(<CaptchaCard settings={settingsWith(['client'], stored)} />);
     // Only a legacy or direct-database write can store stray whitespace, and it
     // must not make this card demand a challenge the server would not.
-    expect(screen.queryByRole('button', { name: /Test this CAPTCHA/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: TEST_CAPTCHA })).toBeNull();
     fireEvent.click(save());
     expect(update).toHaveBeenCalledWith(
       { captcha: { enabled: true, provider: 'turnstile', site_key: 'public-site' } },
@@ -305,7 +311,7 @@ describe('CAPTCHA activation card', () => {
     fireEvent.change(screen.getByLabelText('Secret key'), { target: { value: '   ' } });
     // Sent as `secret_key: " "` the server would trim it to `""` and refuse the
     // patch as "enabled with no usable secret". Omitted, the stored one stands.
-    expect(screen.queryByRole('button', { name: /Test this CAPTCHA/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: TEST_CAPTCHA })).toBeNull();
     fireEvent.click(save());
     expect(update).toHaveBeenCalledWith(
       { captcha: { enabled: true, provider: 'turnstile', site_key: 'public-site' } },
@@ -316,6 +322,6 @@ describe('CAPTCHA activation card', () => {
   it('says so when the server is running with enforcement switched off', () => {
     const stored = { ...READY_TO_ENABLE, enabled: true, enforcement: 'disabled' as const };
     render(<CaptchaCard settings={settingsWith(['client'], stored)} />);
-    expect(screen.getByRole('alert')).toHaveTextContent(/NEXUS_CAPTCHA_ENFORCEMENT=disabled/);
+    expect(screen.getByRole('alert')).toHaveTextContent(NEXUS_CAPTCHA_ENFORCEMENT_DISABLED);
   });
 });

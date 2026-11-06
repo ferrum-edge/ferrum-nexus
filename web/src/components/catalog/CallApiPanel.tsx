@@ -6,6 +6,8 @@ import { Card, CardBody, CardHeader } from '../ui/Card';
 import { CopyField } from '../ui/CopyField';
 import { Icon } from '../ui/Icon';
 
+const SINGLE_QUOTE = /'/g;
+
 export interface CallApiPanelProps {
   /** Absolute gateway URL, or `null` when no public origin is configured. */
   invokeUrl: string | null;
@@ -30,7 +32,7 @@ export interface CallApiPanelProps {
  * adds an escaped one and reopens it.
  */
 export function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+  return `'${value.replace(SINGLE_QUOTE, `'\\''`)}'`;
 }
 
 /**

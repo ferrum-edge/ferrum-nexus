@@ -14,6 +14,8 @@ import { TooltipProvider } from '../ui/Tooltip';
 import { AppShell } from './AppShell';
 import { useNavLocationOverride } from './navLocation';
 
+const TEST_ADMIN = /Test Admin/;
+
 vi.mock('../../stores/auth', () => ({
   useAuth: () => ({
     status: 'authenticated',
@@ -127,7 +129,7 @@ describe('mobile navigation drawer', () => {
     expect(drawer()).toHaveAttribute('aria-hidden', 'true');
     expect(navigationToggle()).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByRole('complementary', { name: 'Primary' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: /Test Admin/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: TEST_ADMIN })).not.toBeInTheDocument();
     // Inert is the native tab-order exclusion; jsdom does not implement inert tabbing.
     for (const link of within(drawer()).getAllByRole('link', { hidden: true })) {
       expect(link.closest('[inert]')).toBe(drawer());
@@ -176,7 +178,7 @@ describe('mobile navigation drawer', () => {
     const user = userEvent.setup();
     await renderShell('/apis');
     await user.click(navigationToggle());
-    await user.click(within(drawer()).getByRole('link', { name: /Test Admin/ }));
+    await user.click(within(drawer()).getByRole('link', { name: TEST_ADMIN }));
 
     expect(await screen.findByRole('heading', { name: 'Profile page' })).toBeInTheDocument();
     expect(drawer()).toHaveAttribute('inert');

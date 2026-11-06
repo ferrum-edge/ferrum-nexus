@@ -11,6 +11,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AdminSettingsResponse } from '@ferrum-nexus/shared';
 import { BrandingTab } from './BrandingTab';
 
+const HEX_COLOR_HINT = /3- or 6-digit CSS hex/;
+const MIN_W_0_CLASS = /\bmin-w-0\b/;
+const MAX_W_FULL_CLASS = /\bmax-w-full\b/;
+
 const update = vi.hoisted(() => vi.fn());
 
 vi.mock('../../../hooks/useAdminSettings', () => ({
@@ -107,7 +111,7 @@ describe('branding colour validation', () => {
       target: { value: '#12345' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save branding' }));
-    expect(screen.getByRole('alert')).toHaveTextContent(/3- or 6-digit CSS hex/);
+    expect(screen.getByRole('alert')).toHaveTextContent(HEX_COLOR_HINT);
     expect(update).not.toHaveBeenCalled();
   });
 
@@ -117,7 +121,7 @@ describe('branding colour validation', () => {
       target: { value: '#1234567' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save branding' }));
-    expect(screen.getByRole('alert')).toHaveTextContent(/3- or 6-digit CSS hex/);
+    expect(screen.getByRole('alert')).toHaveTextContent(HEX_COLOR_HINT);
     expect(update).not.toHaveBeenCalled();
   });
 
@@ -147,26 +151,26 @@ describe('narrow viewport layout structure', () => {
   it('lets grid children, colour inputs and the preview shrink', () => {
     render(<BrandingTab settings={settings()} />);
     const layout = screen.getByTestId('branding-layout');
-    expect(layout.className).toMatch(/\bmin-w-0\b/);
-    expect(layout.className).toMatch(/\bmax-w-full\b/);
+    expect(layout.className).toMatch(MIN_W_0_CLASS);
+    expect(layout.className).toMatch(MAX_W_FULL_CLASS);
     expect(layout.className).toContain('minmax(0,1fr)');
     expect(layout.className).toContain('minmax(0,22rem)');
     for (const child of Array.from(layout.children)) {
-      expect(child.className).toMatch(/\bmin-w-0\b/);
-      expect(child.className).toMatch(/\bmax-w-full\b/);
+      expect(child.className).toMatch(MIN_W_0_CLASS);
+      expect(child.className).toMatch(MAX_W_FULL_CLASS);
     }
 
     const hex = screen.getByLabelText('Primary colour hex value');
     expect(hex).toHaveClass('min-w-0', 'w-full', 'max-w-full');
-    expect(screen.getByTestId('primary-color-row').className).toMatch(/\bmin-w-0\b/);
-    expect(screen.getByTestId('accent-color-row').className).toMatch(/\bmax-w-full\b/);
+    expect(screen.getByTestId('primary-color-row').className).toMatch(MIN_W_0_CLASS);
+    expect(screen.getByTestId('accent-color-row').className).toMatch(MAX_W_FULL_CLASS);
 
     const preview = screen.getByTestId('branding-preview');
-    expect(preview.className).toMatch(/\bmin-w-0\b/);
-    expect(preview.className).toMatch(/\bmax-w-full\b/);
+    expect(preview.className).toMatch(MIN_W_0_CLASS);
+    expect(preview.className).toMatch(MAX_W_FULL_CLASS);
     expect(preview.querySelector('.overflow-x-auto')).not.toBeNull();
-    expect(screen.getByLabelText('dark theme preview').className).toMatch(/\bmin-w-0\b/);
-    expect(screen.getByLabelText('dark theme preview').className).toMatch(/\bmax-w-full\b/);
+    expect(screen.getByLabelText('dark theme preview').className).toMatch(MIN_W_0_CLASS);
+    expect(screen.getByLabelText('dark theme preview').className).toMatch(MAX_W_FULL_CLASS);
     expect(screen.getByLabelText('light theme preview').querySelector('.flex-wrap')).not.toBeNull();
   });
 });

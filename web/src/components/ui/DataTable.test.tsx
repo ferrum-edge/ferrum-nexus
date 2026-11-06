@@ -4,6 +4,8 @@ import { afterEach, describe, expect, expectTypeOf, it, vi, type Matchers } from
 
 import { DataTable, type Columns } from './DataTable';
 
+const PAGE_3_4 = /page 3 of 4/;
+
 interface Item {
   id: string;
   name: string;
@@ -38,7 +40,7 @@ describe('DataTable with Table 9', () => {
     expect(within(rows[1]!).getByRole('cell', { name: 'Bravo' })).toBeInTheDocument();
     expect(within(rows[2]!).getByRole('cell', { name: 'alpha' })).toBeInTheDocument();
     expect(screen.getByText('5–6')).toBeInTheDocument();
-    expect(screen.getByText(/page 3 of 4/)).toBeInTheDocument();
+    expect(screen.getByText(PAGE_3_4)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
     expect(onOffsetChange).toHaveBeenLastCalledWith(2);
     fireEvent.click(screen.getByRole('button', { name: 'Next page' }));

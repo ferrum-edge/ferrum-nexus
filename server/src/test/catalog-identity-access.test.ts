@@ -30,6 +30,9 @@ import type {
 
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
+const PENDING = /pending/;
+const API_WORD = /API/;
+
 describe('per-identity catalog access', () => {
   let harness: TestApp;
   let admin: TestSession;
@@ -237,7 +240,7 @@ describe('per-identity catalog access', () => {
 
     const foreign = await identityAccess(other, appA);
     assert.equal(foreign.statusCode, 404, foreign.raw);
-    assert.doesNotMatch(foreign.raw, /pending/);
+    assert.doesNotMatch(foreign.raw, PENDING);
 
     const asAdmin = await identityAccess(admin, appA);
     assert.equal(asAdmin.statusCode, 404, asAdmin.raw);
@@ -276,7 +279,7 @@ describe('per-identity catalog access', () => {
     for (const scope of [null, appA, '00000000-0000-4000-8000-000000000000']) {
       const response = await identityAccess(owner, scope, privateSlug);
       assert.equal(response.statusCode, 404, response.raw);
-      assert.match(response.raw, /API/);
+      assert.match(response.raw, API_WORD);
     }
 
     const unknown = await identityAccess(owner, null, 'no-such-api');

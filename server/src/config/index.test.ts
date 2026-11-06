@@ -11,6 +11,8 @@ import {
 } from './index.js';
 import { isNexusError } from '../lib/errors.js';
 
+const REGEX_SPECIAL_CHARACTERS = /[.*+?^${}()|[\]\\]/g;
+
 const SECRET = 'a'.repeat(40);
 
 function baseEnv(overrides: EnvRecord = {}): EnvRecord {
@@ -28,7 +30,7 @@ function trustedProxies(value: string): TrustedProxies {
 
 /** `text` as a regular expression that matches it literally. */
 function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text.replace(REGEX_SPECIAL_CHARACTERS, '\\$&');
 }
 
 function expectConfigError(env: EnvRecord, needle: string): void {

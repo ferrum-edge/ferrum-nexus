@@ -19,6 +19,11 @@ import {
   type TestApp,
 } from './helpers.js';
 
+const MAX_AGE = /(?:^|;\s*)Max-Age=(-?\d+)/i;
+const HTTPONLY = /HttpOnly/i;
+const EXPIRED = /expired/;
+const BOOTSTRAP_TOKEN = /bootstrap token/;
+
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
@@ -329,7 +334,7 @@ describe('sliding session expiry', () => {
   }
 
   function maxAgeOf(header: string): number | null {
-    const match = /(?:^|;\s*)Max-Age=(-?\d+)/i.exec(header);
+    const match = MAX_AGE.exec(header);
     return match ? Number(match[1]) : null;
   }
 
@@ -368,8 +373,8 @@ describe('sliding session expiry', () => {
     // The values must not rotate — the client keeps using the tokens it has.
     assert.equal(cookieValue(response, SESSION_COOKIE), session.sessionToken);
     assert.equal(cookieValue(response, CSRF_COOKIE), session.csrfToken);
-    assert.match(sessionCookie, /HttpOnly/i);
-    assert.doesNotMatch(csrfCookie, /HttpOnly/i);
+    assert.match(sessionCookie, HTTPONLY);
+    assert.doesNotMatch(csrfCookie, HTTPONLY);
 
     const slid = await sessionRowFor(session.sessionToken);
     assert.ok(
@@ -574,7 +579,7 @@ describe('email verification', () => {
       payload: { token: expiredToken },
     });
     assert.equal(expired.statusCode, 400);
-    assert.match(expired.body, /expired/);
+    assert.match(expired.body, EXPIRED);
   });
 });
 
@@ -684,7 +689,7 @@ describe('bootstrap token', () => {
 
     assert.equal(response.statusCode, 403);
     assert.equal(errorCode(response.body), 'FORBIDDEN');
-    assert.match(response.body, /bootstrap token/);
+    assert.match(response.body, BOOTSTRAP_TOKEN);
     assert.equal(cookieValue(response, SESSION_COOKIE), undefined, 'no session is issued');
 
     // The refusal is total: no account, and the election is still unclaimed,

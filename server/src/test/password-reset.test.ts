@@ -34,6 +34,8 @@ import {
   type TestSession,
 } from './helpers.js';
 
+const RESET_TOKEN_LINK = /\/reset-password\?token=([A-Za-z0-9_-]+)/;
+
 /** The body every `forgot-password` call must produce, whatever it decided. */
 const OK_BODY = { ok: true };
 
@@ -74,7 +76,7 @@ describe('password reset', () => {
 
   /** Pull the reset token out of a delivered message. */
   function tokenIn(text: string): string {
-    const match = /\/reset-password\?token=([A-Za-z0-9_-]+)/.exec(text);
+    const match = RESET_TOKEN_LINK.exec(text);
     assert.ok(match, `no reset link in message: ${text}`);
     return match[1] ?? '';
   }

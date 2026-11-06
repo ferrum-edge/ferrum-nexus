@@ -21,6 +21,11 @@ import { apisApi } from '../../lib/api';
 import { ToastProvider } from '../../stores/toast';
 import { PluginsTab } from './PluginsTab';
 
+const EMPTY_SEGMENT = /empty segment/;
+const DOT_SEGMENT = /\. or \.\. segment/;
+const SEGMENT = /segment/;
+const AUTHENTICATION_ACCESS_GATE = /Authentication, the access gate/;
+
 const API: Api = {
   id: 'api-1',
   name: 'Billing API',
@@ -179,9 +184,9 @@ describe('<PluginsTab>', () => {
 
     // Edge v0.9.9 judges a segment by its text before any `;` parameter.
     for (const [value, message] of [
-      ['/a//b', /empty segment/],
-      ['/;x/b', /empty segment/],
-      ['/..;x/b', /\. or \.\. segment/],
+      ['/a//b', EMPTY_SEGMENT],
+      ['/;x/b', EMPTY_SEGMENT],
+      ['/..;x/b', DOT_SEGMENT],
     ] as const) {
       fireEvent.change(prefix, { target: { value } });
       expect(screen.getByText(message)).toBeInTheDocument();
@@ -190,14 +195,12 @@ describe('<PluginsTab>', () => {
     // A trailing slash and a `;` parameter on an ordinary segment are fine.
     for (const value of ['/nexus/billing/', '/nexus/billing;v=1/invoices']) {
       fireEvent.change(prefix, { target: { value } });
-      expect(screen.queryByText(/segment/)).toBeNull();
+      expect(screen.queryByText(SEGMENT)).toBeNull();
     }
   });
 
   it('points at the Settings tab for the first-class gateway controls', async () => {
     renderTab();
-    await waitFor(() =>
-      expect(screen.getByText(/Authentication, the access gate/)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(AUTHENTICATION_ACCESS_GATE)).toBeInTheDocument());
   });
 });

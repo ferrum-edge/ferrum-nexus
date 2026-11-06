@@ -35,6 +35,17 @@ import { conflict, specInvalid } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
 import { writeBody } from './edge-plugins.js';
 
+const SUCCESS_STATUS = /^2([0-9]{2}|XX)$/;
+const TILDE_ONE = /~1/g;
+const TILDE_ZERO = /~0/g;
+const REGEX_SPECIAL_CHARACTERS = /[\\.+*?()|[\]{}^$#&\-~]/g;
+const PATH_PARAMETER_SPLIT = /(\{[^{}/]+\})/;
+const PATH_PARAMETER_SEGMENT = /^\{[^{}/]+\}$/;
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+const UNSAFE_PATH_CHARACTER = /[%\\?#;\u0000-\u0020\u007f-\uffff]/;
+const BRACE = /[{}]/;
+const TEMPLATED_SEGMENT = /^\{[^{}]+\}$/;
+
 export interface AgentDeployment {
   apiId: string;
   slug: string;
@@ -337,7 +348,7 @@ function toolDefinition(reader: DefinitionReader, tool: AgentToolSelection): Too
   for (const status of statuses) {
     // Charged before it is matched, however long it is.
     meter.charge(status.length);
-    if (!/^2([0-9]{2}|XX)$/.test(status)) continue;
+    if (!SUCCESS_STATUS.test(status)) continue;
     const response = responses[status];
     if (!record(response)) {
       outputs[status] = response;
@@ -396,7 +407,7 @@ function pointerKey(ref: string): string {
   const segments = ref
     .slice(2)
     .split('/')
-    .map((segment) => decodeURIComponent(segment).replace(/~1/g, '/').replace(/~0/g, '~'));
+    .map((segment) => decodeURIComponent(segment).replace(TILDE_ONE, '/').replace(TILDE_ZERO, '~'));
   return JSON.stringify(segments);
 }
 
@@ -732,15 +743,15 @@ export function rotatedAgentTools(previous: ApiAgents | null, next: ApiAgents | 
 
 /** Literal escaping matches Edge's regex::escape; slash is not a metacharacter. */
 function escapeRegex(value: string): string {
-  return value.replace(/[\\.+*?()|[\]{}^$#&\-~]/g, '\\$&');
+  return value.replace(REGEX_SPECIAL_CHARACTERS, '\\$&');
 }
 
 function pathRegex(path: string): string {
   return (
     '^' +
     path
-      .split(/(\{[^{}/]+\})/)
-      .map((part) => (/^\{[^{}/]+\}$/.test(part) ? '[^/]+' : escapeRegex(part)))
+      .split(PATH_PARAMETER_SPLIT)
+      .map((part) => (PATH_PARAMETER_SEGMENT.test(part) ? '[^/]+' : escapeRegex(part)))
       .join('') +
     '$'
   );
@@ -991,7 +1002,7 @@ export function validateAgents(
     if (
       tool.description.trim() === '' ||
       tool.description.length > MAX_AGENT_DESCRIPTION_LENGTH ||
-      /[\u0000-\u001f\u007f]/.test(tool.description)
+      CONTROL_CHARACTER.test(tool.description)
     ) {
       invalid(`Provide a plain-text description for ${key}`);
     }
@@ -1003,10 +1014,10 @@ export function validateAgents(
   for (const operation of operations) {
     const path = operation.path;
     if (
-      /[%\\?#;\u0000-\u0020\u007f-\uffff]/.test(path) ||
+      UNSAFE_PATH_CHARACTER.test(path) ||
       path.split('/').some((segment) => segment === '.' || segment === '..') ||
       path.includes('//') ||
-      path.split('/').some((segment) => /[{}]/.test(segment) && !/^\{[^{}]+\}$/.test(segment))
+      path.split('/').some((segment) => BRACE.test(segment) && !TEMPLATED_SEGMENT.test(segment))
     ) {
       invalid(`Agent APIs require canonical paths with whole-segment parameters: ${path}`);
     }
@@ -1014,7 +1025,7 @@ export function validateAgents(
       new RegExp(pathRegex(path)).test('/mcp') ||
       path.toLowerCase().startsWith('/mcp/') ||
       path.toLowerCase() === '/mcp' ||
-      /^\{[^{}]+\}$/.test(path.split('/')[1] ?? '')
+      TEMPLATED_SEGMENT.test(path.split('/')[1] ?? '')
     ) {
       invalid(`The MCP endpoint collides with a REST operation: ${path}`);
     }

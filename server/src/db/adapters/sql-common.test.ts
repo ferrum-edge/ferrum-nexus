@@ -28,6 +28,8 @@ import {
   upsertSql,
 } from './sql-common.js';
 
+const CONNECTION_RESET = /connection reset/;
+
 describe('formatSql', () => {
   it('numbers placeholders left to right for postgres', () => {
     assert.equal(
@@ -267,7 +269,7 @@ describe('mapSqlConflict', () => {
         mapSqlConflict('unused', () => {
           throw Object.assign(new Error('connection reset'), { code: 'ECONNRESET' });
         }),
-      /connection reset/,
+      CONNECTION_RESET,
     );
   });
 });

@@ -12,6 +12,9 @@ import {
   ROUTES_VALIDATE_EXTENSION,
 } from './spec-document.js';
 
+const PATH_INVOICES_REF = /The path '\/invoices' is a \$ref/;
+const REF_GATEWAY_WOULD_RESOLVE = /is a \$ref the gateway would resolve outside/;
+
 /** A minimal document with one path, as a provider would upload it. */
 function document(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -372,7 +375,7 @@ describe('routesSpecDocument', () => {
       ),
     );
 
-    assert.match(failure.message, /The path '\/invoices' is a \$ref/);
+    assert.match(failure.message, PATH_INVOICES_REF);
     assert.deepEqual(failure.details, {
       field: 'spec',
       path: '/invoices',
@@ -403,7 +406,7 @@ describe('assertRoutesSubmittable', () => {
       ),
     );
 
-    assert.match(failure.message, /is a \$ref the gateway would resolve outside/);
+    assert.match(failure.message, REF_GATEWAY_WOULD_RESOLVE);
   });
 
   it('leaves a docs_only document alone', () => {

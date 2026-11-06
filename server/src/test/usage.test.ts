@@ -6,6 +6,17 @@ import type { ApiErrorBody, ApiUsageResponse, PublishApiResponse } from '@ferrum
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 import { reconcileGateway } from '../ferrum-admin/reconcile.js';
 
+const NO_TRAFFIC_ANY_CASE = /No traffic/i;
+const NO_REQUEST_METRICS_API = /no request metrics for this API/;
+const NO_TRAFFIC = /No traffic/;
+const CIRCUIT_BREAKER_OPEN = /circuit breaker is open/i;
+const UPSTREAM_TARGET = /10\.0\.5\.7:8080/;
+const NO_CIRCUIT_BREAKER_CONFIGURED = /No circuit breaker is configured/i;
+const COULD_NOT_REACHED = /could not be reached/;
+const REQUEST_METRICS_UNAVAILABLE = /Request metrics are unavailable/;
+const HTTP_503 = /HTTP 503/;
+const HTTP_500 = /HTTP 500/;
+
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
@@ -121,7 +132,7 @@ describe('api usage', () => {
       assert.equal(usage.requests.total, 0);
       assert.equal(usage.latency_ms, null);
       assert.equal(usage.backend.status, 'unknown');
-      assert.match(String(usage.backend.detail), /No traffic/i);
+      assert.match(String(usage.backend.detail), NO_TRAFFIC_ANY_CASE);
     });
 
     it('reports missing plugin measurements as unavailable through the real scrape', async () => {
@@ -133,8 +144,8 @@ describe('api usage', () => {
 
       assert.equal(usage.available, false);
       assert.equal(usage.unavailable_code, 'no_series');
-      assert.match(usage.unavailable_reason ?? '', /no request metrics for this API/);
-      assert.doesNotMatch(usage.backend.detail ?? '', /No traffic/);
+      assert.match(usage.unavailable_reason ?? '', NO_REQUEST_METRICS_API);
+      assert.doesNotMatch(usage.backend.detail ?? '', NO_TRAFFIC);
     });
 
     it('does not count another API’s traffic', async () => {
@@ -158,7 +169,7 @@ describe('api usage', () => {
       const usage = await usageFor(provider, apiId);
 
       assert.equal(usage.backend.status, 'failing');
-      assert.match(String(usage.backend.detail), /circuit breaker is open/i);
+      assert.match(String(usage.backend.detail), CIRCUIT_BREAKER_OPEN);
     });
 
     it('maps a half-open breaker to recovering', async () => {
@@ -180,7 +191,7 @@ describe('api usage', () => {
       const usage = await usageFor(provider, apiId);
 
       assert.equal(usage.backend.status, 'failing');
-      assert.match(String(usage.backend.detail), /10\.0\.5\.7:8080/);
+      assert.match(String(usage.backend.detail), UPSTREAM_TARGET);
       assert.ok(usage.backend.since && Date.parse(usage.backend.since) > 0);
     });
 
@@ -191,7 +202,7 @@ describe('api usage', () => {
       const usage = await usageFor(provider, apiId);
 
       assert.equal(usage.backend.status, 'unknown');
-      assert.match(String(usage.backend.detail), /No circuit breaker is configured/i);
+      assert.match(String(usage.backend.detail), NO_CIRCUIT_BREAKER_CONFIGURED);
     });
   });
 
@@ -211,7 +222,7 @@ describe('api usage', () => {
         assert.equal(usage.latency_ms, null);
         // Nothing was read, which is not the same as nothing being reported.
         assert.equal(usage.backend.status, 'unavailable');
-        assert.match(String(usage.backend.detail), /could not be reached/);
+        assert.match(String(usage.backend.detail), COULD_NOT_REACHED);
         assert.equal(usage.gateway_uptime_seconds, undefined);
       } finally {
         await harness.edge.start();
@@ -233,8 +244,8 @@ describe('api usage', () => {
       assert.equal(usage.latency_ms, null);
       assert.equal(usage.gateway_uptime_seconds, 3_600);
       assert.equal(usage.backend.status, 'unknown');
-      assert.match(String(usage.backend.detail), /Request metrics are unavailable/);
-      assert.doesNotMatch(String(usage.backend.detail), /No traffic/);
+      assert.match(String(usage.backend.detail), REQUEST_METRICS_UNAVAILABLE);
+      assert.doesNotMatch(String(usage.backend.detail), NO_TRAFFIC);
     });
 
     it('retains truthful counters when only the backend-state read fails', async () => {
@@ -246,8 +257,8 @@ describe('api usage', () => {
       assert.equal(usage.unavailable_code, undefined);
       assert.equal(usage.requests.total, 42);
       assert.equal(usage.backend.status, 'unavailable');
-      assert.match(String(usage.backend.detail), /HTTP 503/);
-      assert.doesNotMatch(String(usage.backend.detail), /No traffic/);
+      assert.match(String(usage.backend.detail), HTTP_503);
+      assert.doesNotMatch(String(usage.backend.detail), NO_TRAFFIC);
     });
 
     it('answers 200 with available:false when the metrics endpoints error', async () => {
@@ -263,10 +274,10 @@ describe('api usage', () => {
 
       assert.equal(usage.available, false);
       assert.equal(usage.unavailable_code, 'gateway_error');
-      assert.match(usage.unavailable_reason ?? '', /HTTP 503/);
+      assert.match(usage.unavailable_reason ?? '', HTTP_503);
       assert.equal(usage.requests.total, 0);
       assert.equal(usage.backend.status, 'unavailable');
-      assert.match(String(usage.backend.detail), /HTTP 500/);
+      assert.match(String(usage.backend.detail), HTTP_500);
     });
   });
 

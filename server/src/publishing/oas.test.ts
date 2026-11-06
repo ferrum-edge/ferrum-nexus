@@ -31,6 +31,25 @@ import {
   type UpstreamResolver,
 } from './oas.js';
 
+const SERVERS_0_URL = /servers\[0\]\.url/;
+const NO_UPSTREAM_COULD_DETERMINED = /No upstream could be determined/;
+const SWAGGER_2_0 = /Swagger 2\.0/;
+const ONLY_OPENAPI_3_X = /Only OpenAPI 3\.x/;
+const NOT_VALID_JSON = /not valid JSON/;
+const NOT_VALID_YAML = /not valid YAML/;
+const LARGER_THAN = /larger than/;
+const OPERATION_LIMIT_EXCEEDED = /3001 operations, more than the 3000 operation limit/;
+const PATH_LIMIT_EXCEEDED = /2001 paths, more than the 2000 path limit/;
+const SCHEMA_NODE_COUNTS = /99989 schema nodes, 6 parameters, 5 media types and 1 responses/;
+const MORE_THAN_100000_DOCUMENTATION = /more than the 100000 the documentation viewer can render/;
+const OVER_2048_CHARACTERS = /2049 characters long, more than the 2048/;
+const OVER_1024_CHARACTERS = /1025 characters long, more than the 1024/;
+const OVER_64_CHARACTERS = /'in' is 65 characters long, more than the 64/;
+const MORE_THAN = /more than the/;
+const PRIVATE_UPSTREAMS_MENTION = /NEXUS_ALLOW_PRIVATE_UPSTREAMS/;
+const LOOPBACK_ADDRESS = /127\.0\.0\.1/;
+const SERVER_VARIABLES = /server variables/;
+
 /** A minimal, structurally valid operation object. */
 const OPERATION = { responses: { '200': { description: 'OK' } } };
 
@@ -225,7 +244,7 @@ describe('OpenAPI parsing', () => {
       },
     ]) {
       const failure = expectSpecInvalid(() => parseOpenApiSpec(document(server)));
-      assert.match(failure.message, /servers\[0\]\.url/);
+      assert.match(failure.message, SERVERS_0_URL);
       assert.deepEqual(failure.details, {
         field: 'servers[0].url',
         limit: MAX_UPSTREAM_URL_LENGTH,
@@ -307,14 +326,14 @@ describe('OpenAPI parsing', () => {
     assert.equal(spec.defaultUpstream, null);
     // …and the publishing service then demands an explicit one.
     const failure = expectSpecInvalid(() => resolveUpstream(spec));
-    assert.match(failure.message, /No upstream could be determined/);
+    assert.match(failure.message, NO_UPSTREAM_COULD_DETERMINED);
   });
 
   it('rejects a Swagger 2.0 document by name', () => {
     const failure = expectSpecInvalid(() =>
       parseOpenApiSpec(JSON.stringify({ swagger: '2.0', info: { title: 'A', version: '1' } })),
     );
-    assert.match(failure.message, /Swagger 2\.0/);
+    assert.match(failure.message, SWAGGER_2_0);
     assert.deepEqual(failure.details, { field: 'swagger', value: '2.0' });
   });
 
@@ -324,7 +343,7 @@ describe('OpenAPI parsing', () => {
         JSON.stringify({ openapi: '4.0.0', info: { title: 'A', version: '1' }, paths: {} }),
       ),
     );
-    assert.match(failure.message, /Only OpenAPI 3\.x/);
+    assert.match(failure.message, ONLY_OPENAPI_3_X);
   });
 
   it('names the missing field for info.title, info.version and paths', () => {
@@ -351,15 +370,15 @@ describe('OpenAPI parsing', () => {
 
   it('rejects malformed JSON and malformed YAML with distinguishable messages', () => {
     const badJson = expectSpecInvalid(() => parseOpenApiSpec('{"openapi": '));
-    assert.match(badJson.message, /not valid JSON/);
+    assert.match(badJson.message, NOT_VALID_JSON);
     const badYaml = expectSpecInvalid(() => parseOpenApiSpec('foo:\n  - bar\n - baz'));
-    assert.match(badYaml.message, /not valid YAML/);
+    assert.match(badYaml.message, NOT_VALID_YAML);
   });
 
   it('rejects a document over MAX_SPEC_BYTES before trying to parse it', () => {
     const oversized = `openapi: 3.1.0\n#${'x'.repeat(MAX_SPEC_BYTES)}`;
     const failure = expectSpecInvalid(() => parseOpenApiSpec(oversized));
-    assert.match(failure.message, /larger than/);
+    assert.match(failure.message, LARGER_THAN);
     assert.equal((failure.details as { limit: number }).limit, MAX_SPEC_BYTES);
   });
 
@@ -421,7 +440,7 @@ describe('OpenAPI parsing', () => {
     const failure = expectSpecInvalid(() =>
       parseOpenApiSpec(specWithOperations(MAX_SPEC_OPERATIONS + 1)),
     );
-    assert.match(failure.message, /3001 operations, more than the 3000 operation limit/);
+    assert.match(failure.message, OPERATION_LIMIT_EXCEEDED);
     assert.deepEqual(failure.details, {
       field: 'paths',
       operations: MAX_SPEC_OPERATIONS + 1,
@@ -434,7 +453,7 @@ describe('OpenAPI parsing', () => {
     assert.equal(parseOpenApiSpec(specWithPaths(MAX_SPEC_PATHS)).pathCount, 2_000);
 
     const failure = expectSpecInvalid(() => parseOpenApiSpec(specWithPaths(MAX_SPEC_PATHS + 1)));
-    assert.match(failure.message, /2001 paths, more than the 2000 path limit/);
+    assert.match(failure.message, PATH_LIMIT_EXCEEDED);
     assert.deepEqual(failure.details, {
       field: 'paths',
       paths: MAX_SPEC_PATHS + 1,
@@ -453,11 +472,8 @@ describe('OpenAPI parsing', () => {
     const overLimit = renderCostSpec((MAX_SPEC_RENDER_UNITS - 14) / 2 + 1);
     assert.ok(Buffer.byteLength(overLimit, 'utf8') < MAX_SPEC_BYTES);
     const failure = expectSpecInvalid(() => parseOpenApiSpec(overLimit));
-    assert.match(
-      failure.message,
-      /99989 schema nodes, 6 parameters, 5 media types and 1 responses/,
-    );
-    assert.match(failure.message, /more than the 100000 the documentation viewer can render/);
+    assert.match(failure.message, SCHEMA_NODE_COUNTS);
+    assert.match(failure.message, MORE_THAN_100000_DOCUMENTATION);
     assert.deepEqual(failure.details, {
       field: 'paths',
       reason: 'too_much_to_render',
@@ -778,7 +794,7 @@ describe('OpenAPI parsing', () => {
     };
     const inSchema = respondingWith({ $ref: tooLong }, schemas);
     const failure = expectSpecInvalid(() => assertRenderCost(inSchema.document, inSchema.paths));
-    assert.match(failure.message, /2049 characters long, more than the 2048/);
+    assert.match(failure.message, OVER_2048_CHARACTERS);
     assert.deepEqual(failure.details, expected);
 
     const inParameter = { '/a': { get: { parameters: [{ $ref: tooLong }], responses: {} } } };
@@ -805,7 +821,7 @@ describe('OpenAPI parsing', () => {
     ];
     for (const paths of refused) {
       const failure = expectSpecInvalid(() => assertRenderCost({ paths, components }, paths));
-      assert.match(failure.message, /1025 characters long, more than the 1024/);
+      assert.match(failure.message, OVER_1024_CHARACTERS);
       assert.deepEqual(failure.details, {
         field: 'paths',
         reason: 'parameter_name_too_long',
@@ -830,7 +846,7 @@ describe('OpenAPI parsing', () => {
     ];
     for (const paths of refused) {
       const failure = expectSpecInvalid(() => assertRenderCost({ paths, components }, paths));
-      assert.match(failure.message, /'in' is 65 characters long, more than the 64/);
+      assert.match(failure.message, OVER_64_CHARACTERS);
       assert.deepEqual(failure.details, {
         field: 'paths',
         reason: 'parameter_in_too_long',
@@ -1031,7 +1047,7 @@ describe('OpenAPI parsing', () => {
     // at a time.
     const flood = specWithOperations(30_000);
     assert.ok(Buffer.byteLength(flood, 'utf8') < MAX_SPEC_BYTES);
-    assert.match(expectSpecInvalid(() => parseOpenApiSpec(flood)).message, /more than the/);
+    assert.match(expectSpecInvalid(() => parseOpenApiSpec(flood)).message, MORE_THAN);
   });
 });
 
@@ -1164,7 +1180,7 @@ describe('upstream destination policy', () => {
     const error = await expectSpecInvalidAsync(() =>
       assertUpstreamAllowed(upstream, { allowPrivate: false, resolve: neverResolve }),
     );
-    assert.match(error.message, /NEXUS_ALLOW_PRIVATE_UPSTREAMS/);
+    assert.match(error.message, PRIVATE_UPSTREAMS_MENTION);
     assert.deepEqual(error.details, {
       field: 'upstream_url',
       host: '169.254.169.254',
@@ -1464,8 +1480,8 @@ describe('upstream destination policy — DNS resolution', () => {
       reason: 'private_upstream',
       resolved: ['127.0.0.1'],
     });
-    assert.match(error.message, /127\.0\.0\.1/);
-    assert.match(error.message, /NEXUS_ALLOW_PRIVATE_UPSTREAMS/);
+    assert.match(error.message, LOOPBACK_ADDRESS);
+    assert.match(error.message, PRIVATE_UPSTREAMS_MENTION);
   });
 
   it('refuses RFC 1918 and cloud-metadata answers', async () => {
@@ -1707,7 +1723,7 @@ describe('OpenAPI server variables', () => {
       ]);
       assert.equal(spec.defaultUpstream, null);
       const failure = expectSpecInvalid(() => resolveUpstream(spec));
-      assert.match(failure.message, /server variables/);
+      assert.match(failure.message, SERVER_VARIABLES);
       assert.deepEqual(failure.details, { field: 'servers', reason: 'invalid_server_variables' });
     }
   });

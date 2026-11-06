@@ -41,6 +41,8 @@ import {
 
 import { validationFailed } from '../lib/errors.js';
 
+const WHITESPACE_PERCENT_OR_BACKSLASH = /[\s%\\]/;
+
 /** Anchor a descriptor's pattern the way Edge anchors its own: `^(?:…)$`. */
 function anchored(pattern: string): RegExp {
   return new RegExp(`^(?:${pattern})$`);
@@ -282,7 +284,7 @@ const pathPrefixSchema = z
   .min(1)
   .max(MAX_PLUGIN_TRIGGER_PATH_LENGTH)
   .refine((value) => value.startsWith('/'), { message: 'A path prefix must start with /' })
-  .refine((value) => !/[\s%\\]/.test(value), {
+  .refine((value) => !WHITESPACE_PERCENT_OR_BACKSLASH.test(value), {
     message:
       'A path prefix cannot contain whitespace, a percent escape or a backslash — the gateway ' +
       'compares the canonical request path, which never contains them',

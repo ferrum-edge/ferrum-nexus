@@ -1,6 +1,9 @@
 import { OPENAPI_OPERATION_METHODS, type HttpMethod } from './constants.js';
 import { resolveOpenApiPointer } from './openapi.js';
 
+const INVALID_TOOL_NAME_CHARS = /[^A-Za-z0-9_.-]/g;
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/g;
+
 /** A provider explicitly selected this operation; no spec extension grants access. */
 export interface AgentTool {
   /**
@@ -208,7 +211,7 @@ export function agentOperations(
       const fallback = `${method}_${path}`;
       // Cut before cleaning: one operation may be reached from every path,
       // and each replacement keeps the length, so this reads the same text.
-      const name = (operationId || fallback).slice(0, 128).replace(/[^A-Za-z0-9_.-]/g, '_');
+      const name = (operationId || fallback).slice(0, 128).replace(INVALID_TOOL_NAME_CHARS, '_');
       const text = operation.summary || operation.description;
       operations.push({
         path,
@@ -216,7 +219,7 @@ export function agentOperations(
         name,
         description: (typeof text === 'string' ? text : `${upper} ${path}`)
           .slice(0, MAX_AGENT_DESCRIPTION_LENGTH)
-          .replace(/[\u0000-\u001f\u007f]/g, ' '),
+          .replace(CONTROL_CHARACTERS, ' '),
         read_only: isReadOnlyAgentMethod(upper),
         supported: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(upper),
       });

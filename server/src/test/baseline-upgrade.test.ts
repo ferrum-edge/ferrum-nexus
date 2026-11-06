@@ -76,6 +76,10 @@ import { RELEASED_MIGRATIONS } from '../db/released-migrations.js';
 import { OUTBOX_PRIORITY, type NexusStore } from '../db/store.js';
 import { createCrypto, hashPassword, verifyPassword } from '../lib/crypto.js';
 
+const VERIFY_OR_RESET_KEY = /^(verify:|reset:)/;
+const ROLLBACK_PRIORITY_CLAIMS = /rollback priority claims/;
+const HYPHENS = /-/g;
+
 const SECRET = 'baseline-upgrade-secret-0123456789abcdef';
 
 /** The password every fixture account was created with. */
@@ -214,7 +218,7 @@ async function buildFixture(ids: readonly string[]): Promise<FixtureRow[]> {
   const decided = { decided_by: ID.provider, decided_at: T1, decision_note: 'Approved' };
   const shippedPriority = ids.includes('009_outbox_priority');
   const outboxPriority = (key: string): number =>
-    /^(verify:|reset:)/.test(key) ? OUTBOX_PRIORITY.high : OUTBOX_PRIORITY.normal;
+    VERIFY_OR_RESET_KEY.test(key) ? OUTBOX_PRIORITY.high : OUTBOX_PRIORITY.normal;
   const mail = (id: string, key: string, extra: Record<string, SqlValue> = {}): FixtureRow => ({
     table: 'email_outbox',
     row: {
@@ -810,7 +814,7 @@ async function assertPortalInvariants(store: NexusStore): Promise<void> {
         assert.equal(claimed[0]?.attempts, 3, 'retained security retry keeps its attempt count');
         throw new Error('rollback priority claims');
       }),
-    /rollback priority claims/,
+    ROLLBACK_PRIORITY_CLAIMS,
   );
   // Sign-in: the stored hash still verifies, and the lookup is case-insensitive.
   const client = await store.users.findByEmail('Client@Example.test');
@@ -959,7 +963,7 @@ function asLedger(rows: unknown[]): LedgerRow[] {
 }
 
 function throwawayDbName(): string {
-  return `nexus_upgrade_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  return `nexus_upgrade_${randomUUID().replace(HYPHENS, '').slice(0, 16)}`;
 }
 
 function withDatabase(url: string, database: string): string {

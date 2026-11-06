@@ -69,6 +69,8 @@ import {
   toBoolean,
 } from './common.js';
 
+const HTTP_ORIGIN = /^https?:\/\/[^*\s/]+$/;
+
 /** Services this route plugin needs. */
 export interface PublishingRoutesOptions {
   publishing: PublishingService;
@@ -181,7 +183,7 @@ const corsSchema = z
     if (
       value.enforce_websocket_origins &&
       resolved !== undefined &&
-      !resolved.every((origin) => /^https?:\/\/[^*\s/]+$/.test(origin))
+      !resolved.every((origin) => HTTP_ORIGIN.test(origin))
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

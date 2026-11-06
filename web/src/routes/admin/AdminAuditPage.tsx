@@ -13,6 +13,10 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { Input, SearchInput } from '../../components/ui/Input';
 import { QueryErrorState } from '../../components/ui/QueryErrorState';
 
+const DANGER_ACTION = /deny|denied|revoke|delete|disable|fail|remove|purge/;
+const SUCCESS_ACTION = /approve|create|publish|enable|grant|issue|repair/;
+const NEUTRAL_ACTION = /login|logout|session|settings|update|register/;
+
 interface Filters {
   action: string;
   actor: string;
@@ -39,9 +43,9 @@ function toIso(value: string): string | undefined {
  * being mis-coloured.
  */
 function actionTone(action: string): BadgeTone {
-  if (/deny|denied|revoke|delete|disable|fail|remove|purge/.test(action)) return 'danger';
-  if (/approve|create|publish|enable|grant|issue|repair/.test(action)) return 'success';
-  if (/login|logout|session|settings|update|register/.test(action)) return 'neutral';
+  if (DANGER_ACTION.test(action)) return 'danger';
+  if (SUCCESS_ACTION.test(action)) return 'success';
+  if (NEUTRAL_ACTION.test(action)) return 'neutral';
   return 'info';
 }
 

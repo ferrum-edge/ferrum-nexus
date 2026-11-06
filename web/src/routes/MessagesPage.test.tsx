@@ -6,6 +6,10 @@ import { changeField, clearClients, deferred, renderPage } from '../../test/help
 import { ApiError, threadsApi } from '../lib/api';
 import { MessagesPage } from './MessagesPage';
 
+const INVOICE_QUESTION = /Invoice question/;
+const MESSAGE = /Message/;
+const SUBJECT = /Subject/;
+
 const navigate = vi.hoisted(() => vi.fn());
 
 vi.mock('@tanstack/react-router', async () => {
@@ -60,7 +64,7 @@ describe('conversation inbox', () => {
     renderPage(<MessagesPage />);
     expect(screen.getByRole('status')).toHaveTextContent('Loading conversations');
     await act(async () => pending.resolve({ items: [THREAD], total: 1 }));
-    const link = await screen.findByRole('link', { name: /Invoice question/ });
+    const link = await screen.findByRole('link', { name: INVOICE_QUESTION });
     expect(link).toHaveAttribute('href', '/messages/thread-1');
     expect(within(link).getByText('Billing team · Billing API')).toBeInTheDocument();
     expect(within(link).getByText('Can I export invoices?')).toBeInTheDocument();
@@ -107,10 +111,10 @@ describe('conversation inbox', () => {
     const dialog = await screen.findByRole('dialog');
     expect(dialog).toHaveTextContent('This message goes to the portal administrators.');
     expect(within(dialog).getByRole('button', { name: 'Send' })).toBeDisabled();
-    changeField(/Message/, '   ');
+    changeField(MESSAGE, '   ');
     expect(within(dialog).getByRole('button', { name: 'Send' })).toBeDisabled();
-    changeField(/Subject/, '  Support question  ');
-    changeField(/Message/, '  Please help with access  ');
+    changeField(SUBJECT, '  Support question  ');
+    changeField(MESSAGE, '  Please help with access  ');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Send' }));
     await waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
     expect(threadsApi.create).toHaveBeenCalledWith({
@@ -125,7 +129,7 @@ describe('conversation inbox', () => {
     });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     compose();
-    expect(screen.getByLabelText(/Message/)).toHaveValue('');
+    expect(screen.getByLabelText(MESSAGE)).toHaveValue('');
   });
 
   it('uses a default subject and preserves a failed draft for retry', async () => {
@@ -133,12 +137,12 @@ describe('conversation inbox', () => {
     renderPage(<MessagesPage />);
     await screen.findByText('No conversations yet');
     compose();
-    changeField(/Subject/, '   ');
-    changeField(/Message/, 'Please help');
+    changeField(SUBJECT, '   ');
+    changeField(MESSAGE, 'Please help');
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     await waitFor(() => expect(threadsApi.create).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
-    expect(screen.getByLabelText(/Message/)).toHaveValue('Please help');
+    expect(screen.getByLabelText(MESSAGE)).toHaveValue('Please help');
     expect(navigate).not.toHaveBeenCalled();
     expect(screen.queryByText('Message sent')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));

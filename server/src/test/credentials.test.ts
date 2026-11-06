@@ -14,6 +14,10 @@ import { sha256Hex } from '../lib/crypto.js';
 import type { EdgeLogger } from '../ferrum-admin/index.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const HMAC_PASSWORD_HASH = /^hmac_sha256:[0-9a-f]{64}$/;
+const REVOKE_ROTATE = /revoke or rotate/;
+const RECONCILE_CONSUMER = /reconcile this consumer/;
+
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
@@ -125,7 +129,7 @@ describe('gateway credentials', () => {
     const entries = consumerOf(bob.user.id)?.credentials.basicauth;
     assert.equal(entries?.length, 1);
     assert.deepEqual(Object.keys(entries?.[0] ?? {}), ['password_hash']);
-    assert.match(String(entries?.[0]?.password_hash), /^hmac_sha256:[0-9a-f]{64}$/);
+    assert.match(String(entries?.[0]?.password_hash), HMAC_PASSWORD_HASH);
     assert.ok(!JSON.stringify(entries).includes(body.secret.password));
   });
 
@@ -222,7 +226,7 @@ describe('gateway credentials', () => {
     });
     assert.equal(response.statusCode, 409);
     assert.equal(errorCode(response.body), 'CONFLICT');
-    assert.match(JSON.parse(response.body).error.message, /revoke or rotate/);
+    assert.match(JSON.parse(response.body).error.message, REVOKE_ROTATE);
     assert.equal(
       harness.edge.callsTo('POST', '/credentials/keyauth').length,
       callsBefore,
@@ -332,7 +336,7 @@ describe('gateway credentials', () => {
     });
     assert.equal(response.statusCode, 502, response.body);
     assert.equal(errorCode(response.body), 'EDGE_ERROR');
-    assert.match(JSON.parse(response.body).error.message, /reconcile this consumer/);
+    assert.match(JSON.parse(response.body).error.message, RECONCILE_CONSUMER);
 
     // Nothing was created: no second row, no appended entry, no secret.
     assert.equal(consumerOf(drifted.user.id)?.credentials.keyauth, undefined);

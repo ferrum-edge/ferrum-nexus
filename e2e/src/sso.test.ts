@@ -46,6 +46,11 @@ import { before, describe, it } from 'node:test';
 
 import { PORTAL_URL, waitFor, waitForStack } from './harness.js';
 
+const HTML_ENTITY = /&(#x[0-9a-f]+|#[0-9]+|amp|lt|gt|quot|apos);/gi;
+const FORM_ACTION = /<form\b[^>]*\baction="([^"]*)"/i;
+const BASE64URL_43 = /^[A-Za-z0-9_-]{43}$/;
+const BASE64URL_43_OR_MORE = /^[A-Za-z0-9_-]{43,}$/;
+
 /** The provider as `NEXUS_OIDC_PROVIDERS` declares it in the compose file. */
 const PROVIDER_ID = 'dex';
 const CLIENT_ID = 'ferrum-nexus-e2e';
@@ -201,7 +206,7 @@ const NAMED_ENTITIES: Record<string, string> = {
 
 /** The character references Go's `html/template` puts in an attribute. */
 function decodeHtmlAttribute(value: string): string {
-  return value.replace(/&(#x[0-9a-f]+|#[0-9]+|amp|lt|gt|quot|apos);/gi, (_, entity: string) => {
+  return value.replace(HTML_ENTITY, (_, entity: string) => {
     const lower = entity.toLowerCase();
     if (lower.startsWith('#x')) return String.fromCodePoint(Number.parseInt(lower.slice(2), 16));
     if (lower.startsWith('#')) return String.fromCodePoint(Number.parseInt(lower.slice(1), 10));
@@ -272,7 +277,7 @@ async function authorizeAtDex(browser: Browser, user: DexUser): Promise<Authoriz
   const html = await response.text();
 
   // The form as Dex rendered it: its action, and the two fields it posts.
-  const action = /<form\b[^>]*\baction="([^"]*)"/i.exec(html)?.[1];
+  const action = FORM_ACTION.exec(html)?.[1];
   assert.ok(action !== undefined, `Dex served no login form at ${url.href}`);
   for (const field of ['login', 'password']) {
     assert.match(html, new RegExp(`<input\\b[^>]*\\bname="${field}"`), `no ${field} field`);
@@ -377,9 +382,9 @@ describe('single sign-on through a real Dex', { concurrency: false }, () => {
       assert.deepEqual(scopes, ['email', 'groups', 'openid', 'profile']);
       assert.equal(query.get('code_challenge_method'), 'S256');
       // 32 random bytes each, base64url: nothing guessable.
-      assert.match(query.get('code_challenge') ?? '', /^[A-Za-z0-9_-]{43}$/);
-      assert.match(query.get('state') ?? '', /^[A-Za-z0-9_-]{43,}$/);
-      assert.match(query.get('nonce') ?? '', /^[A-Za-z0-9_-]{43,}$/);
+      assert.match(query.get('code_challenge') ?? '', BASE64URL_43);
+      assert.match(query.get('state') ?? '', BASE64URL_43_OR_MORE);
+      assert.match(query.get('nonce') ?? '', BASE64URL_43_OR_MORE);
       assert.notEqual(query.get('state'), query.get('nonce'));
 
       // Dex came back to the registered callback with a code and the state.

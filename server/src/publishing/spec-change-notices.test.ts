@@ -27,6 +27,30 @@ import {
 } from './spec-change-notices.js';
 import { compareSpecRevisions } from './spec-changes.js';
 
+const FOUR_ADDED_SUMMARY =
+  /^4 operations added, 1 changed, 1 removed\. 7 changes in all, 2 breaking\. /;
+const CHANGE_DOES_NOT_LIST = /a change it does not list can still affect you\.$/;
+const REMOVED_DELETE_ORDERS_ID = /Removed: DELETE \/orders\/\{id\}.*; GET \/a: /;
+const CAN_STILL_AFFECT_YOU = /can still affect you\.$/;
+const EARLIER_REVISION_SINCE_YOU =
+  /An earlier revision since you last read included breaking changes/;
+const EARLIER_REVISIONS_SINCE_YOU =
+  /Earlier revisions since you last read are on the Changes tab too\.$/;
+const ONE_ADDED_SUMMARY = /^1 operation added\. 1 change in all, 0 breaking\. /;
+const ONLY_VERSION_DESCRIPTION_CHANGED = /^Only its version and description changed\. /;
+const ONLY_TITLE_VERSION_DESCRIPTION = /^Only its title, version and description changed\. /;
+const VERSION_CHANGED = /^Its version changed\. /;
+const COVERS_THEM_USE_THEM = /covers them\. To use them again, request them on your /;
+const AND_ONE_MORE_RENAMED = / and 1 more\)\. An explicit tool approval no longer covers them /;
+const COMPARISON_INCOMPLETE = /The comparison was incomplete/;
+const FOUND_NO_DIFFERENCE = /found no difference/;
+const ONLY_ITS = /Only its/;
+const VERSION_CHANGED_SENTENCE = /Its version changed\./;
+const COULD_NOT_FULLY_COMPARED = /could not be fully compared/;
+const POSSIBLY_BREAKING = /possibly breaking/;
+const URL_SCHEME_SLASHES = /https?:[/\\]{2}/;
+const LINE_BREAK = /[\r\n]/;
+
 function change(overrides: Partial<SpecChange>): SpecChange {
   return {
     kind: 'operation_added',
@@ -108,13 +132,10 @@ describe('spec change notices', () => {
       'and 2 more changes',
     ]);
     assert.equal(notice.lines.length, SPEC_CHANGE_NOTICE_NAMED + 1);
-    assert.match(
-      notice.summary,
-      /^4 operations added, 1 changed, 1 removed\. 7 changes in all, 2 breaking\. /,
-    );
-    assert.match(notice.summary, /a change it does not list can still affect you\.$/);
-    assert.match(notice.body, /Removed: DELETE \/orders\/\{id\}.*; GET \/a: /);
-    assert.match(notice.body, /can still affect you\.$/);
+    assert.match(notice.summary, FOUR_ADDED_SUMMARY);
+    assert.match(notice.summary, CHANGE_DOES_NOT_LIST);
+    assert.match(notice.body, REMOVED_DELETE_ORDERS_ID);
+    assert.match(notice.body, CAN_STILL_AFFECT_YOU);
   });
 
   it('keeps a rewritten notice marked breaking once an earlier revision was', () => {
@@ -125,10 +146,10 @@ describe('spec change notices', () => {
     assert.equal(harmless.breaking, false);
     const kept = rewrittenNotice(harmless, true);
     assert.equal(kept.title, `Billing spec updated to 2.0.0${BREAKING_TITLE_MARK}`);
-    assert.match(kept.body, /An earlier revision since you last read included breaking changes/);
+    assert.match(kept.body, EARLIER_REVISION_SINCE_YOU);
     const plain = rewrittenNotice(harmless, false);
     assert.equal(plain.title, 'Billing spec updated to 2.0.0');
-    assert.match(plain.body, /Earlier revisions since you last read are on the Changes tab too\.$/);
+    assert.match(plain.body, EARLIER_REVISIONS_SINCE_YOU);
   });
 
   it('labels a rollback', () => {
@@ -143,18 +164,18 @@ describe('spec change notices', () => {
       ),
     );
     assert.equal(notice.title, 'Billing spec rolled back to 1.0.0');
-    assert.match(notice.summary, /^1 operation added\. 1 change in all, 0 breaking\. /);
+    assert.match(notice.summary, ONE_ADDED_SUMMARY);
   });
 
   it('says so plainly when only the metadata changed', () => {
     const two = summarizeSpecChange('Billing', entry({ info_changes: ['version', 'description'] }));
-    assert.match(two.summary, /^Only its version and description changed\. /);
+    assert.match(two.summary, ONLY_VERSION_DESCRIPTION_CHANGED);
     assert.deepEqual(two.lines, []);
     const three = summarizeSpecChange(
       'Billing',
       entry({ info_changes: ['title', 'version', 'description'] }),
     );
-    assert.match(three.summary, /^Only its title, version and description changed\. /);
+    assert.match(three.summary, ONLY_TITLE_VERSION_DESCRIPTION);
   });
 
   it('names agent tools whose definition changed, even with no structural change', () => {
@@ -172,12 +193,12 @@ describe('spec change notices', () => {
       'Billing',
       entry({ info_changes: ['version'], agent_tools_changed: names }),
     );
-    assert.match(many.summary, /^Its version changed\. /);
+    assert.match(many.summary, VERSION_CHANGED);
     assert.match(
       many.summary,
       new RegExp(`${names.length} agent tools changed \\(.*tool_0.* and 2 more\\)`),
     );
-    assert.match(many.summary, /covers them\. To use them again, request them on your /);
+    assert.match(many.summary, COVERS_THEM_USE_THEM);
   });
 
   it('names renamed agent tools with their new names, bounded like other lists', () => {
@@ -192,7 +213,7 @@ describe('spec change notices', () => {
     for (let i = 0; i <= SPEC_CHANGE_NOTICE_NAMED; i += 1) pairs.push([`old_${i}`, `new_${i}`]);
     const text = agentToolsRenamedText(pairs);
     assert.match(text, new RegExp(`renamed ${pairs.length} agent tools \\(old_0 to new_0, `));
-    assert.match(text, / and 1 more\)\. An explicit tool approval no longer covers them /);
+    assert.match(text, AND_ONE_MORE_RENAMED);
   });
 
   it('says when the comparison was incomplete', () => {
@@ -204,7 +225,7 @@ describe('spec change notices', () => {
         counts: { ...counts, non_breaking: 1, operations_added: 1 },
       }),
     );
-    assert.match(notice.summary, /The comparison was incomplete/);
+    assert.match(notice.summary, COMPARISON_INCOMPLETE);
   });
 
   it('sends a comparison that ran out of budget at any stage as possibly breaking', () => {
@@ -249,7 +270,7 @@ describe('spec change notices', () => {
         notice.title.endsWith(BREAKING_TITLE_MARK) || notice.title.endsWith(INCOMPLETE_TITLE_MARK),
         `${stage}: ${notice.title}`,
       );
-      assert.doesNotMatch(notice.summary, /found no difference/, stage);
+      assert.doesNotMatch(notice.summary, FOUND_NO_DIFFERENCE, stage);
     }
 
     // Only a complete comparison that found nothing is withheld.
@@ -264,9 +285,9 @@ describe('spec change notices', () => {
       'Billing',
       entry({ complete: false, changed: true, info_changes: ['version'] }),
     );
-    assert.doesNotMatch(notice.summary, /Only its/);
-    assert.match(notice.summary, /Its version changed\./);
-    assert.match(notice.summary, /The comparison was incomplete/);
+    assert.doesNotMatch(notice.summary, ONLY_ITS);
+    assert.match(notice.summary, VERSION_CHANGED_SENTENCE);
+    assert.match(notice.summary, COMPARISON_INCOMPLETE);
     assert.equal(notice.breaking, true);
   });
 
@@ -277,7 +298,7 @@ describe('spec change notices', () => {
     );
     const rewritten = rewrittenNotice(harmless, 'incomplete');
     assert.ok(rewritten.title.endsWith(INCOMPLETE_TITLE_MARK), rewritten.title);
-    assert.match(rewritten.body, /could not be fully compared/);
+    assert.match(rewritten.body, COULD_NOT_FULLY_COMPARED);
     // Breaking outranks it, replacing the incomplete mark.
     const incomplete = summarizeSpecChange('Billing', entry({ complete: false, changed: false }));
     const upgraded = rewrittenNotice(incomplete, true);
@@ -289,8 +310,8 @@ describe('spec change notices', () => {
     const notice = summarizeSpecChange('Billing', entry({ complete: false, changed: false }));
     assert.equal(notice.breaking, true);
     assert.ok(notice.title.endsWith(INCOMPLETE_TITLE_MARK), notice.title);
-    assert.match(notice.summary, /The comparison was incomplete/);
-    assert.match(notice.summary, /possibly breaking/);
+    assert.match(notice.summary, COMPARISON_INCOMPLETE);
+    assert.match(notice.summary, POSSIBLY_BREAKING);
   });
 
   it('breaks up anything a mail client would turn into a link', () => {
@@ -302,7 +323,7 @@ describe('spec change notices', () => {
     // check both read as a URL too.
     assert.equal(inertText('see https:\\\\evil.example'), 'see https[:]\\\\evil.example');
     assert.equal(inertText('mixed http:/\\evil'), 'mixed http[:]/\\evil');
-    assert.doesNotMatch(inertText('a https://x.example b'), /https?:[/\\]{2}/);
+    assert.doesNotMatch(inertText('a https://x.example b'), URL_SCHEME_SLASHES);
   });
 
   it('keeps a title to one bounded line, whatever the version says', () => {
@@ -311,7 +332,7 @@ describe('spec change notices', () => {
       'Billing\nAPI',
       entry({ info_changes: ['version'] }, { version }),
     );
-    assert.doesNotMatch(notice.title, /[\r\n]/);
+    assert.doesNotMatch(notice.title, LINE_BREAK);
     assert.ok(notice.headline.length <= 'updated to '.length + MAX_SPEC_CHANGE_TEXT);
     assert.ok(notice.title.startsWith('Billing API spec updated to 2.0.0 999'));
   });

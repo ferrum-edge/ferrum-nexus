@@ -12,6 +12,17 @@ import {
   type OutboundMail,
 } from './service.js';
 
+const DOUBLE_DOT_PREFIX = /^\.\./;
+const FROM_HEADER = /^From: Nexus Relay <portal@example\.test>\r?$/m;
+const TO_HEADER = /^To: "Reader, One" <reader\+tag@example\.test>\r?$/m;
+const SUBJECT_HEADER = /^Subject: Nexus delivery regression\r?$/m;
+const CONTENT_TYPE_MULTIPART_ALTERNATIVE = /Content-Type: multipart\/alternative;/;
+const CONTENT_TYPE_TEXT_PLAIN = /Content-Type: text\/plain;/;
+const CONTENT_TYPE_TEXT_HTML = /Content-Type: text\/html;/;
+const QUOTED_LOCAL_PART_TO_HEADER = /^To: <"user@other\.test"@example\.test>\r?$/m;
+const FIXTURE_MAILBOX_UNAVAILABLE = /fixture mailbox unavailable/;
+const SUBJECT_FERRUM_NEXUS_SMTP = /Subject: Ferrum Nexus SMTP test/;
+
 const USER = 'fixture-user';
 const PASSWORD = 'fixture-password';
 const FROM = 'Nexus Relay <portal@example.test>';
@@ -50,7 +61,7 @@ async function startRelay() {
             data = null;
             socket.write('250 2.0.0 queued\r\n');
           } else {
-            data.push(line.replace(/^\.\./, '.'));
+            data.push(line.replace(DOUBLE_DOT_PREFIX, '.'));
           }
           continue;
         }
@@ -162,12 +173,12 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
     );
     assert.equal(relay.messages.length, 1);
     const message = relay.messages[0]!;
-    assert.match(message, /^From: Nexus Relay <portal@example\.test>\r?$/m);
-    assert.match(message, /^To: "Reader, One" <reader\+tag@example\.test>\r?$/m);
-    assert.match(message, /^Subject: Nexus delivery regression\r?$/m);
-    assert.match(message, /Content-Type: multipart\/alternative;/);
-    assert.match(message, /Content-Type: text\/plain;/);
-    assert.match(message, /Content-Type: text\/html;/);
+    assert.match(message, FROM_HEADER);
+    assert.match(message, TO_HEADER);
+    assert.match(message, SUBJECT_HEADER);
+    assert.match(message, CONTENT_TYPE_MULTIPART_ALTERNATIVE);
+    assert.match(message, CONTENT_TYPE_TEXT_PLAIN);
+    assert.match(message, CONTENT_TYPE_TEXT_HTML);
     assert.ok(message.includes(MAIL.text));
     assert.ok(message.includes(MAIL.html));
     assert.equal(message.includes(PASSWORD), false);
@@ -197,7 +208,7 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
       relay.commands.filter((line) => line.startsWith('RCPT TO:')),
       ['RCPT TO:<"user@other.test"@example.test>'],
     );
-    assert.match(relay.messages[0]!, /^To: <"user@other\.test"@example\.test>\r?$/m);
+    assert.match(relay.messages[0]!, QUOTED_LOCAL_PART_TO_HEADER);
   });
 
   it('delivers single mailboxes whose syntax holds group or list punctuation as data', async () => {
@@ -293,7 +304,7 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
       assert.equal(smtpError.code, 'EENVELOPE');
       assert.equal(smtpError.responseCode, 550);
       assert.equal(smtpError.command, 'RCPT TO');
-      assert.match(smtpError.message, /fixture mailbox unavailable/);
+      assert.match(smtpError.message, FIXTURE_MAILBOX_UNAVAILABLE);
       return true;
     });
     const response = await harness.authed(admin, {
@@ -304,7 +315,7 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
     assert.equal(response.statusCode, 200, response.body);
     const result = response.json<SmtpTestResponse>();
     assert.equal(result.ok, false);
-    assert.match(result.error ?? '', /fixture mailbox unavailable/);
+    assert.match(result.error ?? '', FIXTURE_MAILBOX_UNAVAILABLE);
     assert.equal(response.body.includes(PASSWORD), false);
     assert.equal(relay.messages.length, 0);
   });
@@ -336,6 +347,6 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
     assert.deepEqual(relay.credentials, [`\0${USER}\0${PASSWORD}`]);
     assert.ok(relay.commands.includes('MAIL FROM:<portal@example.test>'));
     assert.ok(relay.commands.includes('RCPT TO:<reader+probe@example.test>'));
-    assert.match(relay.messages[0]!, /Subject: Ferrum Nexus SMTP test/);
+    assert.match(relay.messages[0]!, SUBJECT_FERRUM_NEXUS_SMTP);
   });
 });

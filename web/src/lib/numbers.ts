@@ -1,3 +1,5 @@
+const DECIMAL_NUMBER = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
+
 /**
  * Parse the complete text of a number field as a whole number.
  *
@@ -12,7 +14,7 @@ export function parseWholeNumber(raw: string): number | null {
   const text = raw.trim();
   // Decimal notation only, optionally with an exponent: what a number input
   // produces. `Number` alone would also take `0x10`, `0b1` and `Infinity`.
-  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(text)) return null;
+  if (!DECIMAL_NUMBER.test(text)) return null;
   const value = Number(text);
   return Number.isSafeInteger(value) ? value : null;
 }

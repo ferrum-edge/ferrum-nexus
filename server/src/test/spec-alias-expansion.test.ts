@@ -39,6 +39,11 @@ import {
 import { rewriteSpecServers } from '../publishing/spec-document.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const SERVERS_ALIAS = /servers: \*/g;
+const ALIAS_OR_ANCHOR = /[&*]a\d/;
+const GATEWAY_SERVER_URL = /url: https:\/\/gateway\.example\.test/g;
+const EXPANDED_X_USES = /x-uses:\n {2}- Shared prose\n {2}- Shared prose\n/;
+
 /** Size of the anchored scalar the alias fixtures repeat. */
 const ANCHOR_BYTES = 64 * 1024;
 
@@ -296,7 +301,7 @@ describe('the catalog rendering of YAML', () => {
     const document = rewriteSpecServers(parsed.document, 'https://gateway.example.test', 'catalog');
     // yaml's default stringify anchors the shared array once and aliases it 300 times.
     const aliased = stringify(document, { lineWidth: 0 });
-    assert.equal(aliased.match(/servers: \*/g)?.length, 300);
+    assert.equal(aliased.match(SERVERS_ALIAS)?.length, 300);
     // Bounded within the limit, so the full rendering is attempted.
     const unaliased = stringify(document, { lineWidth: 0, aliasDuplicateObjects: false });
     const estimate = estimateUnaliasedYamlBytes(aliased);
@@ -313,8 +318,8 @@ describe('the catalog rendering of YAML', () => {
       },
     });
     assert.equal(anchorsOrAliases, 0);
-    assert.doesNotMatch(rendered, /[&*]a\d/);
-    assert.equal(rendered.match(/url: https:\/\/gateway\.example\.test/g)?.length, 301);
+    assert.doesNotMatch(rendered, ALIAS_OR_ANCHOR);
+    assert.equal(rendered.match(GATEWAY_SERVER_URL)?.length, 301);
     // Round-trips under this server's own parse and its alias limit of 100.
     const reparsed = parseOpenApiSpec(rendered);
     assert.equal(reparsed.operationCount, 150);
@@ -354,7 +359,7 @@ describe('the catalog rendering of YAML', () => {
     // Still served, as before: the aliased rendering fits.
     assert.equal(catalogSpecFitsLimit(rendered), true);
     assert.equal(rendered, stringify(document, { lineWidth: 0 }));
-    assert.equal(rendered.match(/servers: \*/g)?.length, 3000);
+    assert.equal(rendered.match(SERVERS_ALIAS)?.length, 3000);
     assert.equal(rendered.split(serverUrl).length - 1, 1);
   });
 
@@ -495,7 +500,7 @@ describe('publishing and serving an alias-expanded document', () => {
     fresh();
     const served = await catalog.spec(owner, 'alias-small');
     assert.equal(parseOpenApiSpec(served.raw_spec).description, 'Invoices and\npayments.');
-    assert.match(served.raw_spec, /x-uses:\n {2}- Shared prose\n {2}- Shared prose\n/);
+    assert.match(served.raw_spec, EXPANDED_X_USES);
   });
 
   it('refuses to render a stored revision whose aliases expand past the limit', async (t) => {

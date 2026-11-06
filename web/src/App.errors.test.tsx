@@ -5,6 +5,9 @@ import { ERROR_CODES } from '@ferrum-nexus/shared';
 import { App } from './App';
 import { router } from './router';
 
+const DISPLAY_NAME = /^Display name/;
+const PASSWORD = /password/i;
+
 const branding = {
   portal_name: 'Test portal',
   logo_data_url: null,
@@ -158,7 +161,7 @@ describe('App mutation error policy', () => {
   ])('shows a profile PATCH %s inline without a duplicate toast', async (status, message) => {
     stubApi(true, status, message);
     await openApp('/profile');
-    const input = await screen.findByLabelText(/^Display name/);
+    const input = await screen.findByLabelText(DISPLAY_NAME);
     fireEvent.change(input, { target: { value: '   ' } });
     const form = input.closest('form');
     expect(form).not.toBeNull();
@@ -182,7 +185,7 @@ describe('App mutation error policy', () => {
     stubApi(false, 400, message);
     await openApp(path);
     expect(await screen.findByRole('heading', { name: heading })).toBeInTheDocument();
-    for (const input of screen.queryAllByLabelText(/password/i)) {
+    for (const input of screen.queryAllByLabelText(PASSWORD)) {
       fireEvent.change(input, { target: { value: 'test-password-long-enough' } });
     }
     const form = document.querySelector('form');
@@ -196,7 +199,7 @@ describe('App mutation error policy', () => {
   it('tears down an unauthorized mutation without a failure toast', async () => {
     stubApi(true, 401, 'Session expired');
     await openApp('/profile');
-    const input = await screen.findByLabelText(/^Display name/);
+    const input = await screen.findByLabelText(DISPLAY_NAME);
     fireEvent.submit(input.closest('form')!);
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument();
     expect(screen.queryByText('Request failed')).not.toBeInTheDocument();
@@ -205,7 +208,7 @@ describe('App mutation error policy', () => {
   it('keeps the session when a late unauthorized mutation re-probes successfully', async () => {
     stubApi(true, 401, 'Session expired', { keepSession: true });
     await openApp('/profile');
-    const input = await screen.findByLabelText(/^Display name/);
+    const input = await screen.findByLabelText(DISPLAY_NAME);
     const meCalls = (): number =>
       vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === '/api/auth/me').length;
     const before = meCalls();
@@ -214,7 +217,7 @@ describe('App mutation error policy', () => {
     // Let the re-probe settle so a wrongful teardown would have rendered.
     await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
     expect(await screen.findByRole('alert')).toHaveTextContent('Session expired');
-    expect(screen.getByLabelText(/^Display name/)).toBeInTheDocument();
+    expect(screen.getByLabelText(DISPLAY_NAME)).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Sign in' })).not.toBeInTheDocument();
     expect(screen.queryByText('Request failed')).not.toBeInTheDocument();
   });

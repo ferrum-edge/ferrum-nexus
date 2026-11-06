@@ -39,6 +39,11 @@ import type { CredentialRecord } from '../db/store.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 import { mockBasicPasswordHash } from './mock-ferrum-edge.js';
 
+const RECONCILE_CONSUMER = /reconcile this consumer/;
+const REVOKE_RETIRING_CREDENTIAL = /revoke the retiring credential/;
+const CLEAR_TYPE = /clear_type/;
+const CLEAR_TYPE_TRUE = /clear_type=true/;
+
 function errorOf(body: string): ApiErrorBody['error'] {
   return (JSON.parse(body) as ApiErrorBody).error;
 }
@@ -211,10 +216,10 @@ describe('basicauth revocation removes the selected password', () => {
     const later = await tryIssue(user);
     assert.equal(later.statusCode, 409, later.body);
     assert.equal(errorOf(later.body).code, 'CONFLICT');
-    assert.match(errorOf(later.body).message, /reconcile this consumer/);
+    assert.match(errorOf(later.body).message, RECONCILE_CONSUMER);
     // No active row is left, so the repair on offer is revoking the retiring one.
-    assert.match(errorOf(later.body).message, /revoke the retiring credential/);
-    assert.doesNotMatch(errorOf(later.body).message, /clear_type/);
+    assert.match(errorOf(later.body).message, REVOKE_RETIRING_CREDENTIAL);
+    assert.doesNotMatch(errorOf(later.body).message, CLEAR_TYPE);
     assert.equal(livePasswordHashes(user).length, 1, 'nothing was appended');
 
     // Revoking the only row clears the type, the unrecorded entry with it.
@@ -398,7 +403,7 @@ describe('basicauth revocation removes the selected password', () => {
     assert.equal(retried.statusCode, 409, retried.body);
     assert.equal(errorOf(retried.body).code, 'CONFLICT');
     // An active credential remains beside it, so only an explicit clear helps.
-    assert.match(errorOf(retried.body).message, /clear_type=true/);
+    assert.match(errorOf(retried.body).message, CLEAR_TYPE_TRUE);
     assert.deepEqual(errorOf(retried.body).details, {
       consumer_id: consumerId,
       credential_type: 'basicauth',
@@ -811,7 +816,7 @@ describe('legacy basicauth append scan', () => {
     const refused = await revoke(user, first.id);
     assert.equal(refused.statusCode, 409, refused.body);
     assert.equal(errorOf(refused.body).code, 'CONFLICT');
-    assert.match(errorOf(refused.body).message, /clear_type=true/);
+    assert.match(errorOf(refused.body).message, CLEAR_TYPE_TRUE);
     assert.equal(gatewayEntries(user).length, 3, 'nothing was deleted');
     assert.equal(await statusOf(first.id), 'active');
 

@@ -16,6 +16,19 @@ import { apisApi } from '../lib/api';
 import { ApiNewPage } from './ApiNewPage';
 import { ApisPage } from './ApisPage';
 
+const NAME = /^Name/;
+const UPSTREAM_URL = /^Upstream URL/;
+const OPENAPI_SPECIFICATION_LABEL = /OpenAPI specification/;
+const SLUG = /^Slug/;
+const REQUEST_RESPONSE_BODIES_NOT = /Request and response bodies are not validated/;
+const CHANGING_REBUILDS = /Changing this rebuilds/;
+const DESCRIPTION = /^Description/;
+const VERSION = /^Version/;
+const FIX_BEFORE_PUBLISHING = /Fix it before publishing/;
+const SPEC_TOO_LARGE = /larger than the 2\.00 MB limit\. Fix it before publishing/;
+const PROD_SERVER_URL = /OpenAPI server URL: https:\/\/prod.example.com\/v1/;
+const SPEC_SERVER_URL = /OpenAPI server URL: https:\/\/spec.example.com/;
+
 const session = vi.hoisted(() => ({ allowed: true }));
 const navigate = vi.hoisted(() => vi.fn());
 
@@ -76,9 +89,9 @@ afterEach(() => {
 });
 
 function fillIdentity(): void {
-  changeField(/^Name/, '  Billing API  ');
-  changeField(/^Upstream URL/, 'https://billing.example.test');
-  changeField(/OpenAPI specification/, RAW_SPEC);
+  changeField(NAME, '  Billing API  ');
+  changeField(UPSTREAM_URL, 'https://billing.example.test');
+  changeField(OPENAPI_SPECIFICATION_LABEL, RAW_SPEC);
 }
 
 // Submit directly in validation tests so the handler's bounds are exercised
@@ -120,15 +133,15 @@ describe('API publishing', () => {
     renderPage(<ApiNewPage />);
     const publish = screen.getByRole('button', { name: 'Publish API' });
     expect(publish).toBeDisabled();
-    changeField(/^Name/, 'Billing API');
-    expect(screen.getByLabelText(/^Slug/)).toHaveValue('billing-api');
+    changeField(NAME, 'Billing API');
+    expect(screen.getByLabelText(SLUG)).toHaveValue('billing-api');
     expect(publish).toBeDisabled();
-    changeField(/^Upstream URL/, 'https://billing.example.test');
+    changeField(UPSTREAM_URL, 'https://billing.example.test');
     expect(publish).toBeDisabled();
-    changeField(/OpenAPI specification/, RAW_SPEC);
+    changeField(OPENAPI_SPECIFICATION_LABEL, RAW_SPEC);
     expect(publish).toBeEnabled();
-    expect(screen.getByText(/Request and response bodies are not validated/)).toBeInTheDocument();
-    expect(screen.queryByText(/Changing this rebuilds/)).not.toBeInTheDocument();
+    expect(screen.getByText(REQUEST_RESPONSE_BODIES_NOT)).toBeInTheDocument();
+    expect(screen.queryByText(CHANGING_REBUILDS)).not.toBeInTheDocument();
     fireEvent.click(publish);
     await waitFor(() => expect(apisApi.publish).toHaveBeenCalledTimes(1));
     expect(publish).toBeDisabled();
@@ -158,11 +171,11 @@ describe('API publishing', () => {
   it('preserves a custom slug and publishes the selected runtime policy', async () => {
     renderPage(<ApiNewPage />);
     fillIdentity();
-    changeField(/^Slug/, 'custom-invoices');
-    changeField(/^Name/, '  Renamed billing  ');
-    expect(screen.getByLabelText(/^Slug/)).toHaveValue('custom-invoices');
-    changeField(/^Description/, '  Export invoice data  ');
-    changeField(/^Version/, '2.0.0');
+    changeField(SLUG, 'custom-invoices');
+    changeField(NAME, '  Renamed billing  ');
+    expect(screen.getByLabelText(SLUG)).toHaveValue('custom-invoices');
+    changeField(DESCRIPTION, '  Export invoice data  ');
+    changeField(VERSION, '2.0.0');
     changeField('Authentication', 'jwt_auth');
     changeField('Visibility', 'internal');
     fireEvent.click(screen.getByLabelText('Require an approved access request'));
@@ -184,8 +197,8 @@ describe('API publishing', () => {
     expect(
       screen.getByRole('option', { name: 'Reject requests to paths and methods not in the spec' }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/Request and response bodies are not validated/)).toBeInTheDocument();
-    expect(screen.queryByText(/Changing this rebuilds/)).not.toBeInTheDocument();
+    expect(screen.getByText(REQUEST_RESPONSE_BODIES_NOT)).toBeInTheDocument();
+    expect(screen.queryByText(CHANGING_REBUILDS)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Publish API' }));
     await screen.findByText('API published');
     expect(apisApi.publish).toHaveBeenCalledWith({
@@ -219,19 +232,19 @@ describe('API publishing', () => {
   it('rejects an invalid document and permits correction', async () => {
     renderPage(<ApiNewPage />);
     fillIdentity();
-    changeField(/OpenAPI specification/, 'not an OpenAPI document');
+    changeField(OPENAPI_SPECIFICATION_LABEL, 'not an OpenAPI document');
     submitForm();
-    expect(screen.getByText(/Fix it before publishing/)).toBeInTheDocument();
+    expect(screen.getByText(FIX_BEFORE_PUBLISHING)).toBeInTheDocument();
     expect(apisApi.publish).not.toHaveBeenCalled();
-    changeField(/OpenAPI specification/, RAW_SPEC);
+    changeField(OPENAPI_SPECIFICATION_LABEL, RAW_SPEC);
     fireEvent.click(screen.getByRole('button', { name: 'Publish API' }));
     await screen.findByText('API published');
-    expect(screen.queryByText(/Fix it before publishing/)).not.toBeInTheDocument();
+    expect(screen.queryByText(FIX_BEFORE_PUBLISHING)).not.toBeInTheDocument();
   });
 
   it('refuses a pasted document over the upload limit without parsing it', () => {
     renderPage(<ApiNewPage />);
-    changeField(/^Name/, 'Billing API');
+    changeField(NAME, 'Billing API');
     const document = JSON.parse(RAW_SPEC) as Record<string, unknown>;
     const oversized = JSON.stringify({
       ...document,
@@ -240,11 +253,9 @@ describe('API publishing', () => {
     });
     const json = vi.spyOn(JSON, 'parse');
     try {
-      changeField(/OpenAPI specification/, oversized);
+      changeField(OPENAPI_SPECIFICATION_LABEL, oversized);
       submitForm();
-      expect(
-        screen.getByText(/larger than the 2\.00 MB limit\. Fix it before publishing/),
-      ).toBeInTheDocument();
+      expect(screen.getByText(SPEC_TOO_LARGE)).toBeInTheDocument();
       // Not parsed for its server URL or declared methods either.
       expect(json.mock.calls.some(([text]) => text === oversized)).toBe(false);
       expect(apisApi.publish).not.toHaveBeenCalled();
@@ -255,36 +266,36 @@ describe('API publishing', () => {
 
   it('bounds generated slugs and normalizes accents like the server', () => {
     renderPage(<ApiNewPage />);
-    const slug = screen.getByLabelText(/^Slug/);
-    changeField(/^Name/, 'a'.repeat(MAX_API_SLUG_LENGTH + 1));
+    const slug = screen.getByLabelText(SLUG);
+    changeField(NAME, 'a'.repeat(MAX_API_SLUG_LENGTH + 1));
     expect(slug).toHaveValue('a'.repeat(MAX_API_SLUG_LENGTH));
     expect(slug).toHaveAttribute('maxLength', String(MAX_API_SLUG_LENGTH));
-    changeField(/^Name/, 'Caféine API');
+    changeField(NAME, 'Caféine API');
     expect(slug).toHaveValue('cafeine-api');
   });
 
   it('flags invalid custom slugs inline and blocks submission', () => {
     renderPage(<ApiNewPage />);
     fillIdentity();
-    changeField(/^Slug/, 'Bad Slug!');
-    expect(screen.getByLabelText(/^Slug/)).toHaveAttribute('aria-invalid', 'true');
+    changeField(SLUG, 'Bad Slug!');
+    expect(screen.getByLabelText(SLUG)).toHaveAttribute('aria-invalid', 'true');
     expect(screen.getByRole('alert')).toHaveTextContent('lowercase letters');
     expect(screen.getByRole('button', { name: 'Publish API' })).toBeDisabled();
     submitForm();
     expect(apisApi.publish).not.toHaveBeenCalled();
-    changeField(/^Slug/, 'a'.repeat(MAX_API_SLUG_LENGTH + 1));
+    changeField(SLUG, 'a'.repeat(MAX_API_SLUG_LENGTH + 1));
     expect(screen.getByRole('alert')).toHaveTextContent(`at most ${MAX_API_SLUG_LENGTH}`);
     expect(screen.getByRole('button', { name: 'Publish API' })).toBeDisabled();
-    changeField(/^Slug/, 'valid-slug');
+    changeField(SLUG, 'valid-slug');
     expect(screen.getByRole('button', { name: 'Publish API' })).toBeEnabled();
   });
 
   it('uses an expanded spec server URL when the optional upstream field is empty', async () => {
     renderPage(<ApiNewPage />);
-    changeField(/^Name/, 'Billing API');
+    changeField(NAME, 'Billing API');
     const document = JSON.parse(RAW_SPEC) as Record<string, unknown>;
     changeField(
-      /OpenAPI specification/,
+      OPENAPI_SPECIFICATION_LABEL,
       JSON.stringify({
         ...document,
         servers: [
@@ -296,10 +307,8 @@ describe('API publishing', () => {
         ],
       }),
     );
-    expect(screen.getByLabelText(/^Upstream URL/)).not.toBeRequired();
-    expect(
-      screen.getByText(/OpenAPI server URL: https:\/\/prod.example.com\/v1/),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText(UPSTREAM_URL)).not.toBeRequired();
+    expect(screen.getByText(PROD_SERVER_URL)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Publish API' }));
     await screen.findByText('API published');
     expect(vi.mocked(apisApi.publish).mock.calls[0]?.[0]).not.toHaveProperty('upstream_url');
@@ -307,10 +316,10 @@ describe('API publishing', () => {
 
   it('requires an explicit upstream when the spec has no usable absolute server URL', () => {
     renderPage(<ApiNewPage />);
-    changeField(/^Name/, 'Billing API');
+    changeField(NAME, 'Billing API');
     const document = JSON.parse(RAW_SPEC) as Record<string, unknown>;
     changeField(
-      /OpenAPI specification/,
+      OPENAPI_SPECIFICATION_LABEL,
       JSON.stringify({ ...document, servers: [{ url: '/v1' }] }),
     );
     expect(screen.getByRole('alert')).toHaveTextContent('no usable absolute server URL');
@@ -321,14 +330,14 @@ describe('API publishing', () => {
 
   it('keeps an explicit upstream URL as the override', async () => {
     renderPage(<ApiNewPage />);
-    changeField(/^Name/, 'Billing API');
+    changeField(NAME, 'Billing API');
     const document = JSON.parse(RAW_SPEC) as Record<string, unknown>;
     changeField(
-      /OpenAPI specification/,
+      OPENAPI_SPECIFICATION_LABEL,
       JSON.stringify({ ...document, servers: [{ url: 'https://spec.example.com' }] }),
     );
-    changeField(/^Upstream URL/, 'https://override.example.com');
-    expect(screen.getByText(/OpenAPI server URL: https:\/\/spec.example.com/)).toBeInTheDocument();
+    changeField(UPSTREAM_URL, 'https://override.example.com');
+    expect(screen.getByText(SPEC_SERVER_URL)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Publish API' }));
     await screen.findByText('API published');
     expect(apisApi.publish).toHaveBeenCalledWith(
@@ -402,7 +411,7 @@ describe('API publishing', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Publish API' }));
     await waitFor(() => expect(apisApi.publish).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Publish API' })).toBeEnabled());
-    expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(RAW_SPEC);
+    expect(screen.getByLabelText(OPENAPI_SPECIFICATION_LABEL)).toHaveValue(RAW_SPEC);
     expect(screen.queryByText('API published')).not.toBeInTheDocument();
     expect(navigate).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Publish API' }));

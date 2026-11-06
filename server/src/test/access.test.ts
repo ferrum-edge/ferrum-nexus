@@ -17,6 +17,14 @@ import {
 
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const ACCESS_REQUESTED = /Access requested/;
+const LOOKS_REASONABLE = /Looks reasonable\./;
+const CONTRACT_ENDED = /Contract ended\./;
+const NOT_FIT_DATA_SET = /Not a fit for this data set\./;
+const ALREADY_HAVE_ACCESS = /already have access/;
+const DOES_NOT_ACCEPT_ACCESS = /does not accept access requests/;
+const RETIRED = /retired/;
+
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
@@ -103,7 +111,7 @@ describe('access workflow', () => {
     });
     const notified = providerBell.json<ListNotificationsResponse>();
     assert.equal(notified.total, 1);
-    assert.match(notified.items[0]?.title ?? '', /Access requested/);
+    assert.match(notified.items[0]?.title ?? '', ACCESS_REQUESTED);
     assert.equal(
       notified.items[0]?.link,
       `/apis/${apiId}`,
@@ -154,7 +162,7 @@ describe('access workflow', () => {
         row.to_email === 'acc-client@example.test' && row.subject.includes('Access approved'),
     );
     assert.equal(approvalMail.length, 1);
-    assert.match(approvalMail[0]?.body_text ?? '', /Looks reasonable\./);
+    assert.match(approvalMail[0]?.body_text ?? '', LOOKS_REASONABLE);
 
     const approveAudit = (await harness.auditRows('access.approve')).find(
       (row) => row.target_id === requestId,
@@ -185,7 +193,7 @@ describe('access workflow', () => {
       (row) => row.to_email === 'acc-client@example.test' && row.subject.includes('Access revoked'),
     );
     assert.equal(revokeMail.length, 1);
-    assert.match(revokeMail[0]?.body_text ?? '', /Contract ended\./);
+    assert.match(revokeMail[0]?.body_text ?? '', CONTRACT_ENDED);
 
     const revokeAudit = (await harness.auditRows('access.revoke')).find(
       (row) => row.target_id === approval.grant.id,
@@ -219,7 +227,7 @@ describe('access workflow', () => {
         row.subject.includes('Access request declined'),
     );
     assert.equal(mail.length, 1);
-    assert.match(mail[0]?.body_text ?? '', /Not a fit for this data set\./);
+    assert.match(mail[0]?.body_text ?? '', NOT_FIT_DATA_SET);
 
     assert.ok((await harness.auditRows('access.deny')).some((row) => row.target_id === requestId));
   });
@@ -283,7 +291,7 @@ describe('access workflow', () => {
       payload: { api_id: apiId, justification: 'Again please.' },
     });
     assert.equal(response.statusCode, 409);
-    assert.match(JSON.parse(response.body).error.message, /already have access/);
+    assert.match(JSON.parse(response.body).error.message, ALREADY_HAVE_ACCESS);
   });
 
   it('refuses a request for an API that does not accept them', async () => {
@@ -294,7 +302,7 @@ describe('access workflow', () => {
       payload: { api_id: apiId, justification: 'Please.' },
     });
     assert.equal(response.statusCode, 409);
-    assert.match(JSON.parse(response.body).error.message, /does not accept access requests/);
+    assert.match(JSON.parse(response.body).error.message, DOES_NOT_ACCEPT_ACCESS);
   });
 
   it('refuses a request for a retired API', async () => {
@@ -310,7 +318,7 @@ describe('access workflow', () => {
       payload: { api_id: apiId, justification: 'Please.' },
     });
     assert.equal(response.statusCode, 409);
-    assert.match(JSON.parse(response.body).error.message, /retired/);
+    assert.match(JSON.parse(response.body).error.message, RETIRED);
   });
 
   it('will not let a provider decide a request on somebody else’s API', async () => {

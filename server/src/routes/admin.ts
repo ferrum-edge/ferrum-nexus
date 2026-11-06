@@ -75,6 +75,8 @@ import {
 import type { SsoService } from '../sso/service.js';
 import { listOptions, listQuerySchema } from './common.js';
 
+const HTTP_SCHEME = /^https?:\/\//i;
+
 /** Services this route plugin needs. */
 export interface AdminRoutesOptions {
   settings: SettingsService;
@@ -159,7 +161,7 @@ const updateSettingsBody: z.ZodType<UpdateSettingsRequest> = z
                   .trim()
                   .max(2048)
                   .url()
-                  .refine((url) => /^https?:\/\//i.test(url), 'must be an http(s) URL'),
+                  .refine((url) => HTTP_SCHEME.test(url), 'must be an http(s) URL'),
               })
               .strict(),
           )

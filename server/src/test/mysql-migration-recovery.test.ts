@@ -5,10 +5,17 @@ import mysql from 'mysql2/promise';
 import { runMysqlMigrations } from '../db/adapters/mysql/migrations.js';
 import { loadMigrations, splitSqlStatements } from '../db/migrate.js';
 
+const WHITESPACE_RUN = /\s+/g;
+const HYPHENS = /-/g;
+const HAS_INCOMPATIBLE_DEFINITION = /has an incompatible definition/;
+const UNSUPPORTED_NON_REPLAYABLE_DDL = /unsupported non-replayable DDL/;
+const INDEX_HAS_INCOMPATIBLE_DEFINITION = /index .* has an incompatible definition/;
+
 const adminUrl = process.env.NEXUS_TEST_MYSQL_URL;
 const migrations = loadMigrations('mysql');
-const normalize = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+const normalize = (sql: string) => sql.replace(WHITESPACE_RUN, ' ').trim();
 const interruption = 'fixture interruption at committed migration boundary';
+const INTERRUPTION = new RegExp(interruption);
 
 type Fault = (
   method: string,
@@ -43,7 +50,7 @@ function intercept(pool: mysql.Pool, fault: Fault): mysql.Pool {
 }
 
 async function fixture<T>(body: (pool: mysql.Pool, url: string) => Promise<T>): Promise<T> {
-  const database = `nexus_recovery_${randomUUID().replace(/-/g, '')}`;
+  const database = `nexus_recovery_${randomUUID().replace(HYPHENS, '')}`;
   const admin = await mysql.createConnection(adminUrl!);
   const target = new URL(adminUrl!);
   target.pathname = `/${database}`;
@@ -161,7 +168,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
             throw new Error(interruption);
           }
         });
-        await assert.rejects(() => runMysqlMigrations(faulty), new RegExp(interruption));
+        await assert.rejects(() => runMysqlMigrations(faulty), INTERRUPTION);
         assert.ok(fired, boundary);
         await pool.query(`INSERT INTO users
           (id, email, password_hash, display_name, role, created_at, updated_at)
@@ -221,7 +228,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
             throw new Error(interruption);
           }
         });
-        await assert.rejects(() => runMysqlMigrations(faulty), new RegExp(interruption));
+        await assert.rejects(() => runMysqlMigrations(faulty), INTERRUPTION);
         assert.ok(fired, boundary);
         await restartAndVerify(pool, url, expected);
         const [rows] = await pool.query<mysql.RowDataPacket[]>(
@@ -268,7 +275,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
         );
         await pool.query(`ALTER TABLE ${table} MODIFY COLUMN ${column} ${definition}`);
         const [before] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
-        await assert.rejects(() => runMysqlMigrations(pool), /has an incompatible definition/);
+        await assert.rejects(() => runMysqlMigrations(pool), HAS_INCOMPATIBLE_DEFINITION);
         const [after] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
         assert.deepEqual(after, before);
       });
@@ -298,7 +305,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
             throw new Error(interruption);
           }
         });
-        await assert.rejects(() => runMysqlMigrations(faulty), new RegExp(interruption));
+        await assert.rejects(() => runMysqlMigrations(faulty), INTERRUPTION);
         assert.ok(fired, boundary);
         // The first CREATE installs organizations. Replaying the incomplete
         // baseline must preserve data already in a successfully created table.
@@ -319,7 +326,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
               sql: migrations[0]!.sql + '\nALTER TABLE users ADD COLUMN obsolete TEXT;',
             },
           ]),
-        /unsupported non-replayable DDL/,
+        UNSUPPORTED_NON_REPLAYABLE_DDL,
       );
       const [rows] = await pool.query<mysql.RowDataPacket[]>(
         'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()',
@@ -385,7 +392,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
               throw new Error(interruption);
             }
           });
-          await assert.rejects(() => runMysqlMigrations(faulty), new RegExp(interruption));
+          await assert.rejects(() => runMysqlMigrations(faulty), INTERRUPTION);
           assert.ok(fired, `${migration.id}: ${boundary}`);
           // Work committed after the ALTER must survive a replay too. Existing
           // release fixtures separately assert the new columns' defaults.
@@ -467,7 +474,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
             throw new Error(interruption);
           }
         });
-        await assert.rejects(() => runMysqlMigrations(faulty), new RegExp(interruption));
+        await assert.rejects(() => runMysqlMigrations(faulty), INTERRUPTION);
         assert.ok(fired, boundary);
         // A new writer may already use the low lane before a restart. Replaying
         // the default/backfill must preserve that explicit classification.
@@ -506,7 +513,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
         );
         await pool.query(`ALTER TABLE email_outbox ADD COLUMN priority ${definition}`);
         const [before] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
-        await assert.rejects(() => runMysqlMigrations(pool), /has an incompatible definition/);
+        await assert.rejects(() => runMysqlMigrations(pool), HAS_INCOMPATIBLE_DEFINITION);
         const [after] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
         assert.deepEqual(after, before);
       });
@@ -520,10 +527,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
       await pool.query(`CREATE INDEX ix_email_outbox_priority ON email_outbox
         (status, priority ASC, next_attempt_at ASC, created_at ASC, id ASC)`);
       const [before] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
-      await assert.rejects(
-        () => runMysqlMigrations(pool),
-        /index .* has an incompatible definition/,
-      );
+      await assert.rejects(() => runMysqlMigrations(pool), INDEX_HAS_INCOMPATIBLE_DEFINITION);
       const [after] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
       assert.deepEqual(after, before);
     });
@@ -544,7 +548,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
         );
         await pool.query(`ALTER TABLE email_outbox ADD COLUMN recipient_user_id ${definition}`);
         const [before] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
-        await assert.rejects(() => runMysqlMigrations(pool), /has an incompatible definition/);
+        await assert.rejects(() => runMysqlMigrations(pool), HAS_INCOMPATIBLE_DEFINITION);
         const [after] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
         assert.deepEqual(after, before);
       });
@@ -707,7 +711,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
             throw new Error(interruption);
           }
         });
-        await assert.rejects(() => runMysqlMigrations(faulty), new RegExp(interruption));
+        await assert.rejects(() => runMysqlMigrations(faulty), INTERRUPTION);
         assert.ok(fired);
         assert.deepEqual(await sessionState(migrator), before);
         const [tables] = await pool.query<mysql.RowDataPacket[]>(
@@ -798,7 +802,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
       try {
         // Start the second pool while the first owns the advisory lock. It
         // must resume the committed ALTER after the failing owner releases it.
-        await assert.rejects(() => runMysqlMigrations(faulty), new RegExp(interruption));
+        await assert.rejects(() => runMysqlMigrations(faulty), INTERRUPTION);
         assert.ok(next, 'the peer started while the failing runner held its advisory lock');
         await next;
         assert.ok(fired);

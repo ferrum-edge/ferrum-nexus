@@ -28,6 +28,14 @@ import {
 } from '../middleware/content-security-policy.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const WHITESPACE = /\s+/;
+const NONCE_SOURCE = / 'nonce-[^']+'/g;
+const QUOTED_NONCE = /^'nonce-(.+)'$/;
+const TEXT_HTML = /^text\/html/;
+const COOKIE = /cookie/i;
+const PRIVATE = /private/;
+const NO_CSP_NONCE_PLACEHOLDER = /no CSP nonce placeholder/;
+
 const SPA = `<!doctype html><meta property="csp-nonce" nonce="${CSP_NONCE_PLACEHOLDER}"><title>Nexus CSP shell</title>`;
 
 function hostsOf(vendor: CaptchaVendor): string[] {
@@ -41,7 +49,7 @@ const ALL_VENDOR_HOSTS = [...new Set(CAPTCHA_VENDORS.flatMap(hostsOf))];
 /** The directive `name` of `policy`, as its list of sources. */
 function directive(policy: string, name: string): string[] {
   for (const part of policy.split(';')) {
-    const [key, ...values] = part.trim().split(/\s+/);
+    const [key, ...values] = part.trim().split(WHITESPACE);
     if (key === name) return values;
   }
   assert.fail(`${name} is missing from ${policy}`);
@@ -49,12 +57,12 @@ function directive(policy: string, name: string): string[] {
 
 /** `policy` without the shell's style nonce, to compare with a nonce-free policy. */
 function withoutNonce(policy: string): string {
-  return policy.replace(/ 'nonce-[^']+'/g, '');
+  return policy.replace(NONCE_SOURCE, '');
 }
 
 /** The style nonce `policy` names. */
 function styleNonce(policy: string): string {
-  const nonce = /^'nonce-(.+)'$/.exec(directive(policy, 'style-src').at(-1) ?? '')?.[1];
+  const nonce = QUOTED_NONCE.exec(directive(policy, 'style-src').at(-1) ?? '')?.[1];
   assert.ok(nonce, `style-src names a nonce in ${policy}`);
   return nonce;
 }
@@ -132,7 +140,7 @@ describe('Content-Security-Policy on responses', () => {
       headers: session ? { cookie: session.cookieHeader } : {},
     });
     assert.equal(response.statusCode, 200);
-    assert.match(String(response.headers['content-type']), /^text\/html/);
+    assert.match(String(response.headers['content-type']), TEXT_HTML);
     const policy = response.headers['content-security-policy'];
     assert.equal(typeof policy, 'string');
     const nonce = styleNonce(policy as string);
@@ -189,8 +197,8 @@ describe('Content-Security-Policy on responses', () => {
     assert.equal(elevated.statusCode, 200);
     assertAdmitsOnly(String(elevated.headers['content-security-policy']), [...CAPTCHA_VENDORS]);
     styleNonce(String(elevated.headers['content-security-policy']));
-    assert.match(String(elevated.headers.vary), /cookie/i);
-    assert.match(String(elevated.headers['cache-control']), /private/);
+    assert.match(String(elevated.headers.vary), COOKIE);
+    assert.match(String(elevated.headers['cache-control']), PRIVATE);
 
     // The API is never widened, whoever asks.
     const api = await harness.app.inject({
@@ -237,7 +245,7 @@ describe('Content-Security-Policy on responses', () => {
     const stale = await mkdtemp(join(tmpdir(), 'nexus-csp-stale-'));
     try {
       await writeFile(join(stale, 'index.html'), '<!doctype html><title>stale</title>');
-      await assert.rejects(readSpaShell(stale), /no CSP nonce placeholder/);
+      await assert.rejects(readSpaShell(stale), NO_CSP_NONCE_PLACEHOLDER);
       await writeFile(join(stale, 'index.html'), SPA);
       assert.equal(await readSpaShell(stale), SPA);
     } finally {

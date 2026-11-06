@@ -28,6 +28,11 @@ import {
   type ResolvedSmtpSettings,
 } from './service.js';
 
+const WHITESPACE_OR_COLON = /[\s:]/;
+const SUBJECT_NEXUS_BUDGET_PROBE = /Subject: Nexus budget probe/;
+const BUDGET = /budget/;
+const CLOSED = /closed/;
+
 const MAIL: OutboundMail = {
   to: 'reader@example.test',
   subject: 'Nexus budget probe',
@@ -100,7 +105,7 @@ async function startRelay(options: RelayOptions = {}): Promise<Relay> {
       if (end === -1) return;
       const line = buffer.slice(0, end);
       buffer = buffer.slice(end + 2);
-      const command = line.split(/[\s:]/)[0]?.toUpperCase() ?? '';
+      const command = line.split(WHITESPACE_OR_COLON)[0]?.toUpperCase() ?? '';
       if (command === 'EHLO' || command === 'HELO') reply('250 nexus-budget-fixture\r\n');
       else if (command === 'DATA') {
         if (options.disconnect === 'before-data') {
@@ -183,7 +188,7 @@ describe('SMTP send budget', { timeout: 30_000 }, () => {
     const { relay, transport } = await connect({}, 5_000);
     await transport.send(MAIL);
     assert.equal(relay.received.length, 1);
-    assert.match(relay.received[0] ?? '', /Subject: Nexus budget probe/);
+    assert.match(relay.received[0] ?? '', SUBJECT_NEXUS_BUDGET_PROBE);
   });
 
   it('bounds a relay that answers every command just inside the socket timeout', async () => {
@@ -196,7 +201,7 @@ describe('SMTP send budget', { timeout: 30_000 }, () => {
     const elapsed = Date.now() - started;
 
     assert.ok(error instanceof Error, 'the attempt was cut off');
-    assert.match(error.message, /budget/);
+    assert.match(error.message, BUDGET);
     assert.ok(elapsed < 5_000, `the send returned after ${elapsed}ms, not on the relay's schedule`);
     assert.equal(
       isDeliveredUnacknowledged(error),
@@ -226,7 +231,7 @@ describe('SMTP send budget', { timeout: 30_000 }, () => {
     const errors = await Promise.all([first, second]);
     for (const error of errors) {
       assert.ok(error instanceof Error);
-      assert.match(error.message, /budget/);
+      assert.match(error.message, BUDGET);
       assert.equal(isDeliveredUnacknowledged(error), false);
     }
     await new Promise((resolve) => setTimeout(resolve, 750));
@@ -235,7 +240,7 @@ describe('SMTP send budget', { timeout: 30_000 }, () => {
 
   it('honors an expired handoff deadline without connecting', async () => {
     const { relay, transport } = await connect({}, 5_000);
-    await assert.rejects(transport.send(MAIL, { deadline: Date.now() - 1 }), /budget/);
+    await assert.rejects(transport.send(MAIL, { deadline: Date.now() - 1 }), BUDGET);
     assert.deepEqual(relay.received, []);
   });
 
@@ -248,7 +253,7 @@ describe('SMTP send budget', { timeout: 30_000 }, () => {
     // Only Date is mocked: the real timeout has not elapsed when DATA resumes.
     const error = await failureOf(transport, MAIL);
     assert.ok(error instanceof Error);
-    assert.match(error.message, /budget/);
+    assert.match(error.message, BUDGET);
     assert.equal(isDeliveredUnacknowledged(error), false);
     assert.deepEqual(relay.received, [], 'the resumed protocol cannot transmit the old message');
   });
@@ -260,7 +265,7 @@ describe('SMTP send budget', { timeout: 30_000 }, () => {
     await transport.close?.();
     const error = await pending;
     assert.ok(error instanceof Error);
-    assert.match(error.message, /closed/);
+    assert.match(error.message, CLOSED);
     await new Promise((resolve) => setTimeout(resolve, 750));
     assert.deepEqual(relay.received, [], 'close left no deliverable SMTP operation');
   });

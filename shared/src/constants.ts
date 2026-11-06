@@ -12,6 +12,8 @@ import type {
   BrandingSidebarStyle,
 } from './entities.js';
 
+const MCP_ACL_GROUP = /^nexus:api:([^:]+):mcp:(?:all|tool:[^:]+)$/;
+
 /* ── Ferrum Edge naming ─────────────────────────────────────────────────── */
 
 /** Prefix of every ACL group Nexus manages on the gateway. */
@@ -34,7 +36,7 @@ export function aclGroupForApi(apiId: string): string {
  * or `null` when the string is not a Nexus-managed group.
  */
 export function apiIdFromAclGroup(group: string): string | null {
-  const mcp = /^nexus:api:([^:]+):mcp:(?:all|tool:[^:]+)$/.exec(group);
+  const mcp = MCP_ACL_GROUP.exec(group);
   if (mcp) return mcp[1] ?? null;
   if (!group.startsWith(ACL_GROUP_PREFIX) || !group.endsWith(ACL_GROUP_APPROVED_SUFFIX)) {
     return null;

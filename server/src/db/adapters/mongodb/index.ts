@@ -206,6 +206,9 @@ import {
   transactionContentionError,
 } from '../transaction-retry.js';
 
+const REGEX_SPECIAL_CHARACTERS = /[.*+?^${}()|[\]\\]/g;
+const VERIFY_OR_RESET_KEY = /^(verify:|reset:)/;
+
 /* ── Collection names (identical to the SQL table names) ────────────────── */
 
 const COLLECTIONS = {
@@ -293,7 +296,7 @@ function normalizeJson<T>(value: T): T {
 
 /** Escape a user-supplied term for use inside a regular expression. */
 function escapeRegex(term: string): string {
-  return term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return term.replace(REGEX_SPECIAL_CHARACTERS, '\\$&');
 }
 
 /** Case-insensitive substring match — the Mongo spelling of the SQL `q` filters. */
@@ -1566,7 +1569,7 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
       // Match only the durable namespaces, never subject/body text. Both
       // updates are replayable without changing delivery state or claim tokens.
       await outbox.updateMany(
-        { priority: OUTBOX_PRIORITY.normal, idempotency_key: /^(verify:|reset:)/ },
+        { priority: OUTBOX_PRIORITY.normal, idempotency_key: VERIFY_OR_RESET_KEY },
         { $set: { priority: OUTBOX_PRIORITY.high } },
       );
       await createIndexes(db, EMAIL_OUTBOX_PRIORITY_INDEXES);

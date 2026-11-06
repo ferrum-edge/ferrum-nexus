@@ -1,6 +1,13 @@
 import { MAX_UPSTREAM_URL_LENGTH } from './constants.js';
 import type { SpecChange, SpecChangeReport } from './entities.js';
 
+const COMBINING_MARKS = /\p{M}/gu;
+const NON_ALPHANUMERIC_RUN = /[^a-z0-9]+/g;
+const EDGE_HYPHENS = /^-+|-+$/g;
+const TRAILING_HYPHENS = /-+$/g;
+const BRACE = /[{}]/;
+const TEMPLATE_VARIABLE = /\{([^{}]+)\}/g;
+
 /** Maximum length of the slug used in an API's listen path. */
 export const MAX_API_SLUG_LENGTH = 60;
 
@@ -16,17 +23,17 @@ export function slugify(name: string): string {
   return name
     .normalize('NFKD')
     .toLowerCase()
-    .replace(/\p{M}/gu, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
+    .replace(COMBINING_MARKS, '')
+    .replace(NON_ALPHANUMERIC_RUN, '-')
+    .replace(EDGE_HYPHENS, '')
     .slice(0, MAX_API_SLUG_LENGTH)
-    .replace(/-+$/g, '');
+    .replace(TRAILING_HYPHENS, '');
 }
 
 /** Parse a usable upstream without applying the server's destination policy. */
 export function parseAbsoluteHttpUrl(raw: string): URL | null {
   const trimmed = raw.trim();
-  if (trimmed === '' || /[{}]/.test(trimmed)) return null;
+  if (trimmed === '' || BRACE.test(trimmed)) return null;
   let url: URL;
   try {
     url = new URL(trimmed);
@@ -35,7 +42,7 @@ export function parseAbsoluteHttpUrl(raw: string): URL | null {
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
   if (url.hostname === '' || url.username !== '' || url.password !== '') return null;
-  if (/[{}]/.test(url.hostname)) return null;
+  if (BRACE.test(url.hostname)) return null;
   if (url.port !== '' && (Number(url.port) < 1 || Number(url.port) > 65_535)) return null;
   return url;
 }
@@ -59,7 +66,7 @@ export function expandServerUrl(server: Record<string, unknown>): ExpandedServer
     parts.push(part);
     return true;
   };
-  for (const match of template.matchAll(/\{([^{}]+)\}/g)) {
+  for (const match of template.matchAll(TEMPLATE_VARIABLE)) {
     const name = match[1] as string;
     if (!append(template.slice(offset, match.index))) return { url: null, tooLong: true };
     const variable = Object.hasOwn(variables, name) ? variables[name] : undefined;
@@ -76,7 +83,7 @@ export function expandServerUrl(server: Record<string, unknown>): ExpandedServer
   }
   if (!append(template.slice(offset))) return { url: null, tooLong: true };
   const expanded = parts.join('');
-  return { url: /[{}]/.test(expanded) ? null : expanded, tooLong: false };
+  return { url: BRACE.test(expanded) ? null : expanded, tooLong: false };
 }
 
 export interface SpecServerUrlResult {

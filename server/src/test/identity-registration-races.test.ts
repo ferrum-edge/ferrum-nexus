@@ -37,6 +37,10 @@ import {
 import { CONSUMER_SCAN_LIMIT, derivedConsumerId } from '../ferrum-admin/client.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
+const DISABLED = /disabled/i;
+const NO_LONGER_DISABLED = /no longer disabled/i;
+const MORE_CONSUMERS = /more consumers/i;
+
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
@@ -287,7 +291,7 @@ describe('first gateway identity versus disable', () => {
     assert.ok(stale);
     await assert.rejects(
       () => harness.services.publishing.createTestConsumer(stale, api.id),
-      (error: Error) => /disabled/i.test(error.message),
+      (error: Error) => DISABLED.test(error.message),
     );
     assert.equal(await registrations(provider.user.id), 0, 'nothing was registered');
     assert.equal(harness.edge.consumerByUsername(`nexus-test-${api.id}`), undefined);
@@ -480,7 +484,7 @@ describe('first gateway identity versus disable', () => {
     // A worker that claimed the job before the re-enable and only now runs it.
     await assert.rejects(
       () => harness.services.credentials.disableGatewayAccess(provider.user.id, founder.user.id),
-      (error: Error) => /no longer disabled/i.test(error.message),
+      (error: Error) => NO_LONGER_DISABLED.test(error.message),
     );
     assert.equal(harness.edge.consumerByUsername(username)?.id, recreated.id);
     assert.equal(harness.edge.consumerByUsername(username)?.credentials.keyauth?.length, 1);
@@ -622,7 +626,7 @@ describe('gateway identities past the username-scan cap', () => {
     // and says so rather than answering "not found".
     await assert.rejects(
       () => harness.edgeClient.consumers.getByUsername(username),
-      (error: Error) => /more consumers/i.test(error.message),
+      (error: Error) => MORE_CONSUMERS.test(error.message),
     );
 
     const disabled = await disable('patch', provider);

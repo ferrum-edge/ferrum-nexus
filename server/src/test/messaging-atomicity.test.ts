@@ -34,6 +34,8 @@ import type {
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const THREE_OF_SEVEN = /3 of 7/;
+
 function errorBody(body: string): ApiErrorBody['error'] {
   return (JSON.parse(body) as ApiErrorBody).error;
 }
@@ -189,7 +191,7 @@ describe('mass email fan-out is recorded first and chunked', () => {
       recipients: 7,
       enqueued: 3,
     });
-    assert.match(failure.message, /3 of 7/);
+    assert.match(failure.message, THREE_OF_SEVEN);
 
     const queued = (await harness.outbox()).filter((row) =>
       row.idempotency_key?.includes(':chunked-campaign:'),

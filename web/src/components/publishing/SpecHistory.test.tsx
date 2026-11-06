@@ -6,6 +6,9 @@ import { clearClients, renderPage } from '../../../test/helpers';
 import { apisApi } from '../../lib/api';
 import { SpecHistory } from './SpecHistory';
 
+const ADMIN_ACTOR = /admin-9f2c/;
+const PROVIDER_ACTOR = /provider-1/;
+
 vi.mock('../../stores/auth', () => ({ useAuth: () => ({ user: { id: 'provider-1' } }) }));
 
 const revision = (id: string, version: string, createdBy: string | null): ApiSpecSummary => ({
@@ -44,7 +47,7 @@ describe('revision authors', () => {
     expect(await screen.findByText('by you')).toBeInTheDocument();
     expect(screen.getByText('by another account')).toBeInTheDocument();
     expect(screen.getByText('author not recorded')).toBeInTheDocument();
-    expect(screen.queryByText(/admin-9f2c/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/provider-1/)).not.toBeInTheDocument();
+    expect(screen.queryByText(ADMIN_ACTOR)).not.toBeInTheDocument();
+    expect(screen.queryByText(PROVIDER_ACTOR)).not.toBeInTheDocument();
   });
 });

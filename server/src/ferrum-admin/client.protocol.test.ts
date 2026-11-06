@@ -15,6 +15,10 @@ import {
 } from './client.js';
 import type { EdgeDeploymentSnapshot } from './types.js';
 
+const COULD_NOT_SCAN_ALL = /Could not scan all gateway plugin configs/;
+const CANNOT_ESTABLISH_ORIGINAL_AUTHORITY = /cannot establish original authority/;
+const APPLICATION_UNCONFIRMED = /application is unconfirmed/;
+
 const ROW_TAG = '"' + 'a'.repeat(32) + '"';
 
 const consumer = {
@@ -547,7 +551,7 @@ describe('Edge response contracts over HTTP sockets', () => {
       (error: unknown) => {
         assert.ok(isNexusError(error));
         assert.equal(error.code, 'EDGE_ERROR');
-        assert.match(error.message, /Could not scan all gateway plugin configs/);
+        assert.match(error.message, COULD_NOT_SCAN_ALL);
         return true;
       },
     );
@@ -885,7 +889,7 @@ describe('released deployment authority over HTTP sockets', () => {
     }
     reply.headers = { 'cache-control': 'no-store', etag: snapshot.namespace_etag };
     reply.body = JSON.stringify({ ...snapshot, evidence: { secret: 'private-canary' } });
-    await assert.rejects(client.deployments.snapshot(), /cannot establish original authority/);
+    await assert.rejects(client.deployments.snapshot(), CANNOT_ESTABLISH_ORIGINAL_AUTHORITY);
     assert.ok(requests.every((request) => request.startsWith('GET ')));
     assert.ok(!JSON.stringify(logs).includes('private-canary'));
   });
@@ -1061,7 +1065,7 @@ describe('released deployment authority over HTTP sockets', () => {
     });
     await assert.rejects(
       client.deployments.replace('spec-1', { openapi: '3.1.0', paths: {} }, snapshot),
-      /application is unconfirmed/,
+      APPLICATION_UNCONFIRMED,
     );
     const offset = requests.length;
     await assert.rejects(client.deployments.replace('another-spec', {}, snapshot));

@@ -23,6 +23,9 @@ import {
   type TestSession,
 } from './helpers.js';
 
+const PUBLIC_MAX_AGE = /^public, max-age=\d+$/;
+const COOKIE = /(^|,\s*)Cookie$/;
+
 describe('branding rate limiting', () => {
   let harness: TestApp;
 
@@ -324,7 +327,7 @@ describe('branding response cache', () => {
   it('serves public cache headers and honours If-None-Match', async () => {
     const first = await harness.app.inject({ method: 'GET', url: '/api/branding' });
     assert.equal(first.statusCode, 200, first.body);
-    assert.match(first.headers['cache-control'] ?? '', /^public, max-age=\d+$/);
+    assert.match(first.headers['cache-control'] ?? '', PUBLIC_MAX_AGE);
     const etag = first.headers.etag;
     assert.ok(etag, 'expected an ETag');
     assert.equal(etag, brandingEtag(first.json()));
@@ -396,7 +399,7 @@ describe('branding and session cookies', () => {
     });
     assert.equal(first.statusCode, 200, first.body);
     assert.equal(first.headers['set-cookie'], undefined, 'a public response sets no cookies');
-    assert.match(first.headers['cache-control'] ?? '', /^public, max-age=\d+$/);
+    assert.match(first.headers['cache-control'] ?? '', PUBLIC_MAX_AGE);
     const etag = first.headers.etag;
     assert.ok(etag, 'expected an ETag');
 
@@ -443,7 +446,7 @@ describe('branding and session cookies', () => {
     assert.equal(me.statusCode, 200, me.body);
     assert.ok(cookieValue(me, SESSION_COOKIE) !== undefined, 'the slide re-issues the cookie');
     assert.equal(me.headers['cache-control'], COOKIE_RESPONSE_CACHE_CONTROL);
-    assert.match(String(me.headers.vary ?? ''), /(^|,\s*)Cookie$/);
+    assert.match(String(me.headers.vary ?? ''), COOKIE);
     assert.ok((await sessionExpiry(session)) > expiresAt, 'the row was extended');
   });
 });

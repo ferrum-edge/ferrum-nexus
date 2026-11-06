@@ -12,6 +12,12 @@ import {
   UPLOAD_SPEC_LIMITS,
 } from './parse';
 
+const ALIAS_OR_ANCHOR = /[&*]a\d/;
+const GATEWAY_SERVER_URL = /url: https:\/\/gateway\.example\.test\/v1/g;
+const SERVERS_ALIAS = /servers: \*/g;
+const ALIAS_COUNT = /alias count/;
+const COULD_NOT_PARSE_SPECIFICATION = /Could not parse the specification as JSON/;
+
 // The YAML parser is spied on rather than timed: the defect this guards is not
 // "YAML is slow" but "a JSON document was handed to the YAML parser at all",
 // whose cost is quadratic in the width of a flow mapping and freezes the tab.
@@ -142,8 +148,8 @@ describe('parseSpecText', () => {
       paths,
     };
     const text = stringifyYaml(document, { lineWidth: 0, aliasDuplicateObjects: false });
-    expect(text).not.toMatch(/[&*]a\d/);
-    expect(text.match(/url: https:\/\/gateway\.example\.test\/v1/g)?.length).toBe(301);
+    expect(text).not.toMatch(ALIAS_OR_ANCHOR);
+    expect(text.match(GATEWAY_SERVER_URL)?.length).toBe(301);
 
     const result = parseSpecText(text, CATALOG_SPEC_LIMITS);
 
@@ -156,7 +162,7 @@ describe('parseSpecText', () => {
 
     // Aliased instead, the same document is past the alias limit of 100.
     const aliased = stringifyYaml(document, { lineWidth: 0 });
-    expect(aliased.match(/servers: \*/g)?.length).toBe(300);
+    expect(aliased.match(SERVERS_ALIAS)?.length).toBe(300);
     expect(parseSpecText(aliased, CATALOG_SPEC_LIMITS)).toMatchObject({ ok: false });
   });
 
@@ -180,7 +186,7 @@ describe('parseSpecText', () => {
         const result = parseSpecText(aliasedSpec(aliases), limits);
         expect(result.ok).toBe(false);
         if (result.ok) continue;
-        expect(result.error).toMatch(/alias count/);
+        expect(result.error).toMatch(ALIAS_COUNT);
       }
     }
   });
@@ -198,7 +204,7 @@ describe('parseSpecText', () => {
       const result = parseSpecText(lines.join('\n'), limits);
       expect(result.ok).toBe(false);
       if (result.ok) continue;
-      expect(result.error).toMatch(/alias count/);
+      expect(result.error).toMatch(ALIAS_COUNT);
     }
   });
 
@@ -230,7 +236,7 @@ describe('parseSpecText', () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error).toMatch(/Could not parse the specification as JSON/);
+    expect(result.error).toMatch(COULD_NOT_PARSE_SPECIFICATION);
     expect(parseYaml).not.toHaveBeenCalled();
   });
 

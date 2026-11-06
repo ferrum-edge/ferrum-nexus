@@ -5,6 +5,13 @@ import type { ApiUsageResponse } from '@ferrum-nexus/shared';
 
 import { UsageDetails } from './ApiDetailPage';
 
+const GATEWAY_METRICS_UNAVAILABLE = /Gateway metrics are unavailable/;
+const CIRCUIT_BREAKER_CLOSED = /The circuit breaker is closed/;
+const RATE_LIMITED_429 = /429 rate limited/;
+const NO_TIMED_REQUESTS_YET = /No timed requests yet/;
+const NO_TRAFFIC = /No traffic/;
+const READ_REQUEST_METRICS = /read its request metrics/;
+
 const usage: ApiUsageResponse = {
   available: false,
   unavailable_reason: 'The gateway has no request metrics for this API yet.',
@@ -27,15 +34,15 @@ afterEach(cleanup);
 describe('API usage measurements', () => {
   it('shows the missing-series reason and backend state without fabricated zeros', () => {
     render(<UsageDetails usage={usage} />);
-    expect(screen.getByText(/Gateway metrics are unavailable/)).toHaveTextContent(
+    expect(screen.getByText(GATEWAY_METRICS_UNAVAILABLE)).toHaveTextContent(
       usage.unavailable_reason!,
     );
     expect(screen.getByText('Healthy')).toBeInTheDocument();
-    expect(screen.getByText(/The circuit breaker is closed/)).toBeInTheDocument();
+    expect(screen.getByText(CIRCUIT_BREAKER_CLOSED)).toBeInTheDocument();
     expect(screen.queryByText('Requests')).not.toBeInTheDocument();
-    expect(screen.queryByText(/429 rate limited/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/No timed requests yet/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/No traffic/)).not.toBeInTheDocument();
+    expect(screen.queryByText(RATE_LIMITED_429)).not.toBeInTheDocument();
+    expect(screen.queryByText(NO_TIMED_REQUESTS_YET)).not.toBeInTheDocument();
+    expect(screen.queryByText(NO_TRAFFIC)).not.toBeInTheDocument();
   });
 
   it('names a refused metrics read and an unreadable backend state', () => {
@@ -56,9 +63,7 @@ describe('API usage measurements', () => {
         }}
       />,
     );
-    expect(screen.getByText(/Gateway metrics are unavailable/)).toHaveTextContent(
-      /read its request metrics/,
-    );
+    expect(screen.getByText(GATEWAY_METRICS_UNAVAILABLE)).toHaveTextContent(READ_REQUEST_METRICS);
     expect(screen.getByText('Unavailable')).toBeInTheDocument();
     expect(screen.queryByText('Unknown')).not.toBeInTheDocument();
     expect(screen.queryByText('Requests')).not.toBeInTheDocument();
@@ -66,7 +71,7 @@ describe('API usage measurements', () => {
 
   it('displays explicitly measured zero traffic', () => {
     render(<UsageDetails usage={{ ...usage, available: true }} />);
-    expect(screen.queryByText(/Gateway metrics are unavailable/)).not.toBeInTheDocument();
+    expect(screen.queryByText(GATEWAY_METRICS_UNAVAILABLE)).not.toBeInTheDocument();
     expect(screen.getByText('Requests').nextElementSibling).toHaveTextContent('0');
     expect(screen.getByText('429 rate limited 0')).toBeInTheDocument();
     expect(screen.getByText('No timed requests yet')).toBeInTheDocument();

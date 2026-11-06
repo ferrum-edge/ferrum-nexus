@@ -39,6 +39,9 @@ import type { CreateInput, CredentialRecord } from '../db/store.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 import { mockBasicPasswordHash } from './mock-ferrum-edge.js';
 
+const PREVIOUS_CREDENTIAL_REMOVED = /previous credential was removed/i;
+const RECONCILE_CONSUMER = /reconcile this consumer/;
+
 const TYPES: readonly CredentialType[] = ['keyauth', 'basicauth', 'jwt'];
 
 /** The field each type's Edge entry carries its material in. */
@@ -258,7 +261,7 @@ describe('credential positions follow the append ordinal', () => {
       harness.edge.queueFailure(503, { error: 'down' }, '/credentials/', 'POST');
       const failed = await rotate(user, first.credential.id);
       assert.equal(failed.statusCode, 502, failed.body);
-      assert.match(failed.body, /previous credential was removed/i);
+      assert.match(failed.body, PREVIOUS_CREDENTIAL_REMOVED);
 
       assert.deepEqual(
         liveMaterial(user.user.id, type),
@@ -325,7 +328,7 @@ describe('credential positions follow the append ordinal', () => {
           const revoked = await revoke(user, target.credential.id);
           assert.equal(revoked.statusCode, 409, revoked.body);
           assert.equal(errorOf(revoked.body).code, 'CONFLICT');
-          assert.match(errorOf(revoked.body).message, /reconcile this consumer/);
+          assert.match(errorOf(revoked.body).message, RECONCILE_CONSUMER);
 
           const rotated = await rotate(user, target.credential.id);
           assert.equal(rotated.statusCode, 409, rotated.body);

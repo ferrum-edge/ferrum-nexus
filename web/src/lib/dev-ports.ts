@@ -7,6 +7,8 @@
  * `NEXUS_API_PROXY_TARGET` names a different origin.
  */
 
+const IPV6_BRACKETS = /^\[|\]$/g;
+
 /** Default Vite listen port (`NEXUS_WEB_PORT` / `VITE_DEV_PORT`). */
 export const DEFAULT_WEB_PORT = 5173;
 
@@ -59,7 +61,7 @@ function parsePort(name: string, raw: string, defaultValue: number): number {
 }
 
 function stripWrappingBrackets(host: string): string {
-  return host.replace(/^\[|\]$/g, '');
+  return host.replace(IPV6_BRACKETS, '');
 }
 
 /**

@@ -20,6 +20,11 @@ import type { ApiErrorBody, AppHealth, PublishApiResponse } from '@ferrum-nexus/
 import { checkNamespaceRoutability } from '../ferrum-admin/reconcile.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
+const NEXUS = /nexus/;
+const FERRUM = /ferrum/;
+const FERRUM_NAMESPACE_MENTION = /FERRUM_NAMESPACE/;
+const NAMESPACE_ACTIVE = /namespace\.active/;
+
 /** The namespace `buildTestApp` configures Nexus with. */
 const PORTAL_NAMESPACE = 'nexus';
 
@@ -95,9 +100,9 @@ describe('namespace routability', () => {
     assert.equal(refused.statusCode, 409, refused.body);
     assert.equal(errorCode(refused.body), 'EDGE_NAMESPACE_UNSERVED');
     // Both namespaces and the way out, or an operator cannot act on it.
-    assert.match(refused.body, /nexus/);
-    assert.match(refused.body, /ferrum/);
-    assert.match(refused.body, /FERRUM_NAMESPACE/);
+    assert.match(refused.body, NEXUS);
+    assert.match(refused.body, FERRUM);
+    assert.match(refused.body, FERRUM_NAMESPACE_MENTION);
     assert.equal(harness.edge.requests.length, before, 'refused before any gateway write');
     assert.equal(harness.edge.proxies.size, 0);
   });
@@ -217,7 +222,7 @@ describe('namespace routability', () => {
     });
     assert.equal(refused.statusCode, 409, refused.body);
     assert.equal(errorCode(refused.body), 'EDGE_NAMESPACE_UNSERVED');
-    assert.match(refused.body, /namespace\.active/);
+    assert.match(refused.body, NAMESPACE_ACTIVE);
   });
 
   it('never marks a read, and lets the gateway take the verdict back', async (t) => {

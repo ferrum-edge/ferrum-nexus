@@ -10,6 +10,12 @@ import {
   UNRESOLVED_REF,
 } from './parse';
 
+const SHOW_MORE = /Show .* more/;
+const SHOWING = /Showing/;
+const SHOW_NEGATIVE_MORE = /Show -\d+ more/;
+const TRUNCATED_S = /^s+…$/;
+const TRUNCATED_Q = /^q+…$/;
+
 const YAML_SPEC = `
 openapi: 3.0.3
 info:
@@ -109,8 +115,8 @@ describe('OpenApiView multi-tag paging', () => {
     expect(screen.getByRole('heading', { name: 'C' })).toBeInTheDocument();
     expect(screen.getByText('/last-group')).toBeInTheDocument();
     expect(container.querySelectorAll('button[aria-expanded]')).toHaveLength(201);
-    expect(screen.queryByRole('button', { name: /Show .* more/ })).not.toBeInTheDocument();
-    expect(screen.queryByText(/Showing/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: SHOW_MORE })).not.toBeInTheDocument();
+    expect(screen.queryByText(SHOWING)).not.toBeInTheDocument();
   });
 
   it.each([99, 100, 101, 250])(
@@ -129,7 +135,7 @@ describe('OpenApiView multi-tag paging', () => {
         ).toBeInTheDocument();
         const remaining = totalEntries - shown;
         expect(remaining).toBeGreaterThan(0);
-        expect(screen.queryByRole('button', { name: /Show -\d+ more/ })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: SHOW_NEGATIVE_MORE })).not.toBeInTheDocument();
         const nextPage = Math.min(200, remaining);
         fireEvent.click(screen.getByRole('button', { name: `Show ${nextPage} more` }));
         shown += nextPage;
@@ -144,8 +150,8 @@ describe('OpenApiView multi-tag paging', () => {
         (el) => el.textContent,
       );
       expect(renderedPaths).toEqual([...expectedPaths, ...expectedPaths]);
-      expect(screen.queryByRole('button', { name: /Show .* more/ })).not.toBeInTheDocument();
-      expect(screen.queryByText(/Showing/)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: SHOW_MORE })).not.toBeInTheDocument();
+      expect(screen.queryByText(SHOWING)).not.toBeInTheDocument();
     },
     PAGING_TEST_TIMEOUT_MS,
   );
@@ -201,7 +207,7 @@ describe('OpenApiView', () => {
     render(<OpenApiView text={text} />);
 
     // Summaries render on every collapsed card, without a click.
-    const summaries = screen.getAllByText(/^s+…$/);
+    const summaries = screen.getAllByText(TRUNCATED_S);
     expect(summaries).toHaveLength(3);
     for (const node of summaries) {
       expect(node.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
@@ -212,7 +218,7 @@ describe('OpenApiView', () => {
       fireEvent.click(button);
     }
 
-    const descriptions = screen.getAllByText(/^q+…$/);
+    const descriptions = screen.getAllByText(TRUNCATED_Q);
     expect(descriptions).toHaveLength(3);
     for (const node of descriptions) {
       expect(node.textContent).toHaveLength(MAX_DISPLAYED_DESCRIPTION_LENGTH + 1);

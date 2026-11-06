@@ -36,6 +36,9 @@ import {
 import { AuditAction } from '../audit/service.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
+const NO_GATEWAY_CONSUMER_MAPPING = /no gateway consumer mapping/;
+const RATE_LIMITED_CODE = /RATE_LIMITED/;
+
 const NAMESPACE = 'nexus';
 
 describe('application-scoped identities', () => {
@@ -508,7 +511,7 @@ describe('application-scoped identities', () => {
       payload: { status: 'active' },
     });
     assert.equal(reenabled.statusCode, 502, reenabled.body);
-    assert.match(reenabled.body, /no gateway consumer mapping/);
+    assert.match(reenabled.body, NO_GATEWAY_CONSUMER_MAPPING);
   });
 
   it('repairs an orphaned application consumer with that application’s grants', async () => {
@@ -697,7 +700,7 @@ describe('application-scoped identities', () => {
         payload: { name: 'One too many' },
       });
       assert.equal(refused.statusCode, 429, refused.body);
-      assert.match(refused.body, /RATE_LIMITED/);
+      assert.match(refused.body, RATE_LIMITED_CODE);
     } finally {
       await limited.close();
     }

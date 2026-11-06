@@ -20,12 +20,17 @@ import {
 } from './crypto.js';
 import { isNexusError } from './errors.js';
 
+const SCRYPT_HASH = /^scrypt:16384:8:1:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$/;
+const V1_CIPHERTEXT = /^v1:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]*:[A-Za-z0-9+/=]+$/;
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+const BASE64URL = /^[A-Za-z0-9_-]+$/;
+
 const SECRET = 'unit-test-master-secret-0123456789abcdef';
 
 describe('password hashing', () => {
   it('round-trips a password', async () => {
     const hash = await hashPassword('correct-horse-battery-staple');
-    assert.match(hash, /^scrypt:16384:8:1:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$/);
+    assert.match(hash, SCRYPT_HASH);
     assert.equal(await verifyPassword('correct-horse-battery-staple', hash), true);
     assert.equal(await verifyPassword('wrong-password', hash), false);
   });
@@ -116,7 +121,7 @@ describe('settings encryption', () => {
     for (const value of ['smtp-password', 42, true, null, { a: 1, b: ['x'] }]) {
       const blob = encryptJsonWithKey(key, value);
       assert.ok(isEncryptedBlob(blob));
-      assert.match(blob, /^v1:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]*:[A-Za-z0-9+/=]+$/);
+      assert.match(blob, V1_CIPHERTEXT);
       assert.deepEqual(decryptJsonWithKey(key, blob), value);
     }
   });
@@ -185,7 +190,7 @@ describe('createCrypto', () => {
     const hash = crypto.hashToken(token);
     assert.equal(crypto.hashToken(token), hash);
     assert.notEqual(hash, token);
-    assert.match(hash, /^[0-9a-f]{64}$/);
+    assert.match(hash, SHA256_HEX);
 
     const other = createCrypto('another-master-secret-0123456789abcdefgh');
     assert.notEqual(other.hashToken(token), hash);
@@ -251,7 +256,7 @@ describe('constantTimeEqual', () => {
 
 describe('fingerprints and tokens', () => {
   it('fingerprints with sha256 hex', () => {
-    assert.match(fingerprint('nxs_abc'), /^[0-9a-f]{64}$/);
+    assert.match(fingerprint('nxs_abc'), SHA256_HEX);
     assert.equal(fingerprint('nxs_abc'), fingerprint('nxs_abc'));
     assert.notEqual(fingerprint('nxs_abc'), fingerprint('nxs_abd'));
   });
@@ -264,6 +269,6 @@ describe('fingerprints and tokens', () => {
   it('produces unique url-safe tokens', () => {
     const tokens = new Set(Array.from({ length: 64 }, () => randomToken()));
     assert.equal(tokens.size, 64);
-    for (const token of tokens) assert.match(token, /^[A-Za-z0-9_-]+$/);
+    for (const token of tokens) assert.match(token, BASE64URL);
   });
 });

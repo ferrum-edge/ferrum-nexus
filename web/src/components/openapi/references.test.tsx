@@ -17,6 +17,14 @@ import {
   type SpecOperation,
 } from './parse';
 
+const TRUNCATED_X = /^x+…$/;
+const TRUNCATED_MEDIA_TYPE = /^application\/x+…$/;
+const TRUNCATED_N = /^n+…$/;
+const TRUNCATED_I = /^i+…$/;
+const TRUNCATED_PATH = /^\/p+…$/;
+const TRUNCATED_O = /^o+…$/;
+const UNRESOLVED_REF_COMPONENTS_PARAMETERS = /^unresolved \$ref #\/components\/parameters\/x+…$/;
+
 afterEach(cleanup);
 
 const OVERRIDE_SPEC = `
@@ -440,7 +448,7 @@ describe('reusable component references', () => {
     render(<OpenApiView text={text} />);
     fireEvent.click(screen.getByRole('button', { expanded: false }));
 
-    const renderedDescriptions = screen.getAllByText(/^x+…$/);
+    const renderedDescriptions = screen.getAllByText(TRUNCATED_X);
     expect(renderedDescriptions).toHaveLength(100);
     for (const node of renderedDescriptions) {
       expect(node.textContent).toHaveLength(MAX_DISPLAYED_DESCRIPTION_LENGTH + 1);
@@ -473,7 +481,7 @@ describe('reusable component references', () => {
     render(<OpenApiView text={text} />);
     fireEvent.click(screen.getByRole('button', { expanded: false }));
 
-    const renderedMediaTypes = screen.getAllByText(/^application\/x+…$/);
+    const renderedMediaTypes = screen.getAllByText(TRUNCATED_MEDIA_TYPE);
     expect(renderedMediaTypes).toHaveLength(50);
     for (const node of renderedMediaTypes) {
       expect(node.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
@@ -501,13 +509,13 @@ describe('reusable component references', () => {
     render(<OpenApiView text={text} />);
     fireEvent.click(screen.getByRole('button', { expanded: false }));
 
-    const renderedNames = screen.getAllByText(/^n+…$/);
+    const renderedNames = screen.getAllByText(TRUNCATED_N);
     expect(renderedNames).toHaveLength(50);
     for (const node of renderedNames) {
       expect(node.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
       expect(node).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
     }
-    const renderedLocations = screen.getAllByText(/^i+…$/);
+    const renderedLocations = screen.getAllByText(TRUNCATED_I);
     expect(renderedLocations).toHaveLength(50);
     for (const node of renderedLocations) {
       expect(node.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
@@ -526,12 +534,12 @@ describe('reusable component references', () => {
 
     render(<OpenApiView text={text} />);
 
-    const renderedPath = screen.getByText(/^\/p+…$/);
+    const renderedPath = screen.getByText(TRUNCATED_PATH);
     expect(renderedPath.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
     expect(renderedPath).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
 
     fireEvent.click(screen.getByRole('button', { expanded: false }));
-    const renderedOperationId = screen.getByText(/^o+…$/);
+    const renderedOperationId = screen.getByText(TRUNCATED_O);
     expect(renderedOperationId.textContent).toHaveLength(MAX_DISPLAYED_NAME_LENGTH + 1);
     expect(renderedOperationId).toHaveAttribute('title', TRUNCATED_TEXT_HINT);
   });
@@ -542,7 +550,7 @@ describe('reusable component references', () => {
     render(<OpenApiView text={JSON.stringify(spec)} />);
     fireEvent.click(screen.getByRole('button', { expanded: false }));
 
-    const badge = screen.getByText(/^unresolved \$ref #\/components\/parameters\/x+…$/);
+    const badge = screen.getByText(UNRESOLVED_REF_COMPONENTS_PARAMETERS);
     expect(badge.textContent?.length).toBeLessThan(250);
   });
 });

@@ -6,6 +6,9 @@
  */
 import { edgeError } from '../lib/errors.js';
 
+const HMAC_PASSWORD_HASH = /^hmac_sha256:[0-9a-f]{64}$/;
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
+
 export function consumerMetadataCredentials(
   credentials: Record<string, unknown>,
 ): Record<string, Record<string, unknown>[]> {
@@ -23,7 +26,7 @@ export function consumerMetadataCredentials(
           Object.keys(entry).length !== 1 ||
           !('password_hash' in entry) ||
           typeof entry.password_hash !== 'string' ||
-          !/^hmac_sha256:[0-9a-f]{64}$/.test(entry.password_hash),
+          !HMAC_PASSWORD_HASH.test(entry.password_hash),
       )
     ) {
       throw edgeError('Stored Basic credentials cannot pass the Edge metadata update contract', {
@@ -49,7 +52,7 @@ export function consumerMetadataCredentials(
         return typeof identity === 'string' &&
           identity.trim() !== '' &&
           [...identity].length <= 4096 &&
-          !/[\u0000-\u001f\u007f-\u009f]/.test(identity)
+          !CONTROL_CHARACTER.test(identity)
           ? [{ identity }]
           : [];
       });

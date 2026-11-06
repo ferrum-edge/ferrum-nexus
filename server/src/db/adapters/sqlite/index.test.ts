@@ -8,6 +8,14 @@ import { runMigrations, splitSqlStatements, type MigrationFile } from '../../mig
 import type { NexusStore, UserRecord } from '../../store.js';
 import { createSqliteStore, isGuardedRepo } from './index.js';
 
+const CREATE_TABLE_T = /^CREATE TABLE t/;
+const QUOTED_X_SEMICOLON_Y = /'x;y'/;
+const BOOM = /boom/;
+const ROLLS_BACK = /a rolls back/;
+const QUEUE_HEAD_FAILED = /queue head failed/;
+const OUTER_ROLLS_BACK = /outer rolls back/;
+const B_ROLLS_BACK = /b rolls back/;
+
 const SECRET = 'sqlite-adapter-test-secret-0123456789ab';
 
 /** Every repository property of {@link NexusStore}: its members that are not methods. */
@@ -88,8 +96,8 @@ describe('sqlite store', () => {
         "-- a comment;\nCREATE TABLE t (a TEXT);\nINSERT INTO t VALUES ('x;y'); -- trailing\n",
       );
       assert.equal(statements.length, 2);
-      assert.match(statements[0] ?? '', /^CREATE TABLE t/);
-      assert.match(statements[1] ?? '', /'x;y'/);
+      assert.match(statements[0] ?? '', CREATE_TABLE_T);
+      assert.match(statements[1] ?? '', QUOTED_X_SEMICOLON_Y);
     });
   });
 
@@ -858,7 +866,7 @@ describe('sqlite store', () => {
             });
             throw new Error('boom');
           }),
-        /boom/,
+        BOOM,
       );
       assert.equal(await store.users.findByEmail(email), null);
     });
@@ -963,7 +971,7 @@ describe('sqlite store', () => {
       assert.equal(bSettled, false);
 
       release();
-      await assert.rejects(() => a, /a rolls back/);
+      await assert.rejects(() => a, ROLLS_BACK);
       await b;
 
       assert.equal(await store.users.findByEmail(rolledBack), null);
@@ -986,7 +994,7 @@ describe('sqlite store', () => {
           email_verified: false,
         });
       });
-      await assert.rejects(() => failing, /queue head failed/);
+      await assert.rejects(() => failing, QUEUE_HEAD_FAILED);
       await following;
       assert.ok(await store.users.findByEmail(email));
     });
@@ -1011,7 +1019,7 @@ describe('sqlite store', () => {
             });
             throw new Error('outer rolls back');
           }),
-        /outer rolls back/,
+        OUTER_ROLLS_BACK,
       );
       assert.equal(await store.users.findByEmail(email), null);
     });
@@ -1069,7 +1077,7 @@ describe('sqlite store', () => {
       assert.equal(writeSettled, false, 'an outside write must wait for the open transaction');
 
       release();
-      await assert.rejects(() => a, /a rolls back/);
+      await assert.rejects(() => a, ROLLS_BACK);
       assert.equal(await read, null, 'the read ran after the rollback and saw no dirty row');
       assert.ok(await write, 'the write ran after the rollback');
       assert.ok(await store.users.findByEmail(outside), 'and survived it');
@@ -1235,7 +1243,7 @@ describe('sqlite store', () => {
       assert.equal(lateSettled, false, "A's dead token grants no access to B's transaction");
 
       release();
-      await assert.rejects(() => b, /b rolls back/);
+      await assert.rejects(() => b, B_ROLLS_BACK);
       assert.ok(await late, 'the late write ran after B');
       assert.ok(await store.users.findByEmail(fromA), 'and survived its rollback');
       assert.equal(await store.users.findByEmail(fromB), null);

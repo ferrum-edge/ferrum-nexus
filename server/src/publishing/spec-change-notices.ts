@@ -61,6 +61,9 @@ import type { EmailService } from '../email/service.js';
 import type { RenderedEmail } from '../email/templates.js';
 import { clipSpecText } from './spec-changes.js';
 
+const SCHEME_COLON = /:(?=[/\\]{2})/g;
+const CONTROL_OR_LINE_SEPARATOR_RUN = /[\u0000-\u001f\u007f\u2028\u2029]+/g;
+
 /** Recipients handled per transaction, so one fan-out never holds a long one. */
 export const SPEC_CHANGE_NOTICE_BATCH = 200;
 
@@ -122,7 +125,7 @@ export function specChangeIsBreaking(report: SpecChangeReport): boolean {
  * the colon of every scheme separator, `//` or `\\` alike, is bracketed.
  */
 export function inertText(text: string): string {
-  return text.replace(/:(?=[/\\]{2})/g, '[:]');
+  return text.replace(SCHEME_COLON, '[:]');
 }
 
 /**
@@ -131,7 +134,7 @@ export function inertText(text: string): string {
  */
 export function oneLine(text: string): string {
   return clipSpecText(
-    text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').trim(),
+    text.replace(CONTROL_OR_LINE_SEPARATOR_RUN, ' ').trim(),
     MAX_SPEC_CHANGE_TEXT,
   );
 }

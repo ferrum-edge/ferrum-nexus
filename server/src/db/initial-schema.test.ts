@@ -4,6 +4,13 @@ import { describe, it } from 'node:test';
 import { createSqliteMigrationDriver, openSqliteDatabase } from './adapters/sqlite/index.js';
 import { loadMigrations, runMigrations, splitSqlStatements } from './migrate.js';
 
+const CREATE_STATEMENT = /^CREATE\s/;
+const CREATE_TABLE_IF_NOT_EXISTS = /^CREATE TABLE IF NOT EXISTS (\w+)/;
+const CHECK_CONSTRAINT_FAILED = /CHECK constraint failed/;
+const NOT_NULL = /NOT NULL/;
+const UNIQUE_CONSTRAINT_FAILED = /UNIQUE constraint failed/;
+const UNIQUE_CONSTRAINT_FAILED_PRIMARY = /UNIQUE constraint failed|PRIMARY KEY/;
+
 describe('buildout schema baseline', () => {
   it('ships one complete initial schema for each SQL dialect', () => {
     for (const dialect of ['sqlite', 'pg', 'mysql'] as const) {
@@ -29,9 +36,9 @@ describe('buildout schema baseline', () => {
       );
       const statements = splitSqlStatements(files[0]!.sql);
       assert.ok(statements.length > 0);
-      assert.ok(statements.every((statement) => /^CREATE\s/.test(statement)));
+      assert.ok(statements.every((statement) => CREATE_STATEMENT.test(statement)));
       const tables = statements.flatMap((statement) => {
-        const match = /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement);
+        const match = CREATE_TABLE_IF_NOT_EXISTS.exec(statement);
         return match ? [match[1]] : [];
       });
       assert.deepEqual(tables.sort(), [
@@ -87,8 +94,8 @@ describe('buildout schema baseline', () => {
       for (const table of ['email_outbox', 'gateway_teardown_jobs']) {
         assert.deepEqual(db.prepare(`SELECT generation FROM ${table}`).get(), { generation: '' });
       }
-      assert.throws(() => db.exec('UPDATE messages SET broadcast = 2'), /CHECK constraint failed/);
-      assert.throws(() => db.exec('UPDATE email_outbox SET generation = NULL'), /NOT NULL/);
+      assert.throws(() => db.exec('UPDATE messages SET broadcast = 2'), CHECK_CONSTRAINT_FAILED);
+      assert.throws(() => db.exec('UPDATE email_outbox SET generation = NULL'), NOT_NULL);
       assert.throws(
         () =>
           db.exec(`
@@ -97,7 +104,7 @@ describe('buildout schema baseline', () => {
            fingerprint, last4, edge_ordinal, created_at, updated_at)
           VALUES ('c2', 'u', 'consumer', 'keyauth', 'keyauth:1', 'fp2', '5678', 1, 'now', 'now')
       `),
-        /UNIQUE constraint failed/,
+        UNIQUE_CONSTRAINT_FAILED,
       );
       assert.deepEqual(db.pragma('foreign_key_check'), []);
     } finally {
@@ -112,7 +119,7 @@ describe('buildout schema baseline', () => {
       // This migration is replayable without metadata checks.
       const statements = splitSqlStatements(forward.sql);
       assert.deepEqual(
-        statements.map((statement) => /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement)?.[1]),
+        statements.map((statement) => CREATE_TABLE_IF_NOT_EXISTS.exec(statement)?.[1]),
         ['api_gateway_plugins'],
       );
     }
@@ -138,7 +145,7 @@ describe('buildout schema baseline', () => {
         INSERT INTO api_gateway_plugins (api_id, role, ferrum_plugin_config_id, created_at, updated_at)
           VALUES ('a', 'rate_limit', 'other', 'now', 'now')
       `),
-        /UNIQUE constraint failed|PRIMARY KEY/,
+        UNIQUE_CONSTRAINT_FAILED_PRIMARY,
       );
       assert.throws(
         () =>
@@ -146,7 +153,7 @@ describe('buildout schema baseline', () => {
         INSERT INTO api_gateway_plugins (api_id, role, ferrum_plugin_config_id, created_at, updated_at)
           VALUES ('a', 'palette', 'other', 'now', 'now')
       `),
-        /CHECK constraint failed/,
+        CHECK_CONSTRAINT_FAILED,
       );
       // Deleting the API takes its ownership record with it.
       db.exec("DELETE FROM apis WHERE id = 'a'");
@@ -204,7 +211,7 @@ describe('buildout schema baseline', () => {
     // This migration is replayable without metadata checks.
     assert.deepEqual(
       splitSqlStatements(mysqlStep.sql).map(
-        (statement) => /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement)?.[1],
+        (statement) => CREATE_TABLE_IF_NOT_EXISTS.exec(statement)?.[1],
       ),
       ['api_spec_changes'],
     );
@@ -228,9 +235,9 @@ describe('buildout schema baseline', () => {
       `);
       // No foreign key to the revision: the summary outlives its document.
       insert('c1', 'pruned-revision', 2);
-      assert.throws(() => insert('c2', 'pruned-revision', 3), /UNIQUE constraint failed/);
-      assert.throws(() => insert('c3', 'other-revision', 2), /UNIQUE constraint failed/);
-      assert.throws(() => insert('c4', 'third-revision', 4, 'publish'), /CHECK constraint failed/);
+      assert.throws(() => insert('c2', 'pruned-revision', 3), UNIQUE_CONSTRAINT_FAILED);
+      assert.throws(() => insert('c3', 'other-revision', 2), UNIQUE_CONSTRAINT_FAILED);
+      assert.throws(() => insert('c4', 'third-revision', 4, 'publish'), CHECK_CONSTRAINT_FAILED);
       // Deleting the API takes its history with it.
       db.exec("DELETE FROM apis WHERE id = 'a'");
       assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM api_spec_changes').get(), { n: 0 });
@@ -246,7 +253,7 @@ describe('buildout schema baseline', () => {
       // This migration is replayable without metadata checks.
       const statements = splitSqlStatements(forward.sql);
       assert.deepEqual(
-        statements.map((statement) => /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement)?.[1]),
+        statements.map((statement) => CREATE_TABLE_IF_NOT_EXISTS.exec(statement)?.[1]),
         ['user_identities', 'user_email_proofs', 'user_password_locks'],
       );
     }
@@ -271,12 +278,12 @@ describe('buildout schema baseline', () => {
       // One account per subject at a provider and issuer…
       assert.throws(
         () => link('j', 'v', 'corp', 'https://a.example', 'subject-1'),
-        /UNIQUE constraint failed/,
+        UNIQUE_CONSTRAINT_FAILED,
       );
       // …one identity per account at a provider…
       assert.throws(
         () => link('k', 'u', 'corp', 'https://a.example', 'subject-2'),
-        /UNIQUE constraint failed/,
+        UNIQUE_CONSTRAINT_FAILED,
       );
       // …and the same subject under another issuer is another identity.
       link('l', 'v', 'corp', 'https://b.example', 'subject-1');
@@ -295,7 +302,7 @@ describe('buildout schema baseline', () => {
         INSERT INTO user_email_proofs (user_id, email, method, proven_at, created_at, updated_at)
           VALUES ('v', 'other@example.test', 'said-so', 'now', 'now', 'now')
       `),
-        /CHECK constraint failed/,
+        CHECK_CONSTRAINT_FAILED,
       );
       db.exec(`
         INSERT INTO user_password_locks (user_id, provider_id, created_at)

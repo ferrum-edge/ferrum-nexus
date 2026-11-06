@@ -10,6 +10,12 @@ import {
   parseNamespaceServing,
 } from './namespace.js';
 
+const NEXUSISO = /'nexusiso'/;
+const FERRUM_NAMESPACE_FERRUM_PORTAL = /FERRUM_NAMESPACE=ferrum on the portal/;
+const GATEWAY_FERRUM_NAMESPACE_NEXUSISO = /gateway with FERRUM_NAMESPACE=nexusiso/;
+const NAMESPACE_ACTIVE = /namespace\.active/;
+const FERRUM_NAMESPACE_NULL = /FERRUM_NAMESPACE=null/;
+
 /** The block a `database`-mode gateway serving `ferrum` publishes. */
 const SERVING_FERRUM = {
   active: 'ferrum',
@@ -183,9 +189,9 @@ describe('edge namespace routability', () => {
       const monitor = createNamespaceMonitor('nexusiso');
       monitor.observeHealth(parseNamespaceServing(SERVING_FERRUM));
       const routing = monitor.routing();
-      assert.match(namespaceUnservedMessage(routing), /'nexusiso'/);
-      assert.match(namespaceUnservedMessage(routing), /FERRUM_NAMESPACE=ferrum on the portal/);
-      assert.match(namespaceUnservedMessage(routing), /gateway with FERRUM_NAMESPACE=nexusiso/);
+      assert.match(namespaceUnservedMessage(routing), NEXUSISO);
+      assert.match(namespaceUnservedMessage(routing), FERRUM_NAMESPACE_FERRUM_PORTAL);
+      assert.match(namespaceUnservedMessage(routing), GATEWAY_FERRUM_NAMESPACE_NEXUSISO);
       let error: unknown;
       try {
         assertNamespaceServed(routing);
@@ -207,8 +213,8 @@ describe('edge namespace routability', () => {
       const monitor = createNamespaceMonitor('nexusiso');
       monitor.observeUnservedMutation();
       const message = namespaceUnservedMessage(monitor.routing());
-      assert.match(message, /namespace\.active/);
-      assert.doesNotMatch(message, /FERRUM_NAMESPACE=null/);
+      assert.match(message, NAMESPACE_ACTIVE);
+      assert.doesNotMatch(message, FERRUM_NAMESPACE_NULL);
     });
   });
 });

@@ -26,6 +26,9 @@ import type { EdgeProxy } from '../ferrum-admin/types.js';
 import { apiRestoreLockKey } from '../lib/keyed-serializer.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
+const SERVES_API_PROXY_AGAIN = /serves this API’s proxy again/;
+const ALREADY_HAS_GATEWAY_PROXY = /already has a gateway proxy/;
+
 const NAMESPACE = 'nexus';
 
 describe('gateway repair against a restored deployment', () => {
@@ -163,7 +166,7 @@ describe('gateway repair against a restored deployment', () => {
     const body = await repair();
     assert.ok(reinstated, 'the repair took the restore key');
     assert.equal(body.apis[0]?.flagged, false);
-    assert.match(body.apis[0]?.error ?? '', /serves this API’s proxy again/);
+    assert.match(body.apis[0]?.error ?? '', SERVES_API_PROXY_AGAIN);
 
     const row = await harness.store.apis.findById(apiId);
     assert.equal(row?.ferrum_proxy_id, proxyId, 'the live proxy is still referenced');
@@ -210,6 +213,6 @@ describe('gateway repair against a restored deployment', () => {
       payload: {},
     });
     assert.equal(again.statusCode, 409, again.body);
-    assert.match(again.body, /already has a gateway proxy/);
+    assert.match(again.body, ALREADY_HAS_GATEWAY_PROXY);
   });
 });

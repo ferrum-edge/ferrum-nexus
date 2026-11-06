@@ -17,6 +17,10 @@ import {
 } from './deployment.js';
 import type { EdgeDeploymentAcknowledgement, EdgeDeploymentSnapshot } from './types.js';
 
+const CANNOT_ESTABLISH_ORIGINAL_AUTHORITY = /cannot establish original authority/;
+const UNCONFIRMED = /unconfirmed/;
+const CANNOT_VERIFIED = /cannot be verified/;
+
 const contracts = new URL('../../../contracts/ferrum-contracts/', import.meta.url);
 
 function fixture<T>(path: string): T {
@@ -174,7 +178,7 @@ describe('published contracts-edge-0.9.17 deployment fixtures', () => {
     assert.ok(isDeploymentSnapshot(value));
     assert.throws(
       () => assertDeploymentEvidence(value, 'nexus'),
-      /cannot establish original authority/,
+      CANNOT_ESTABLISH_ORIGINAL_AUTHORITY,
     );
   });
 
@@ -222,7 +226,7 @@ describe('published contracts-edge-0.9.17 deployment fixtures', () => {
       tamper(snapshot);
       assert.throws(
         () => assertDeploymentEvidence(snapshot, snapshot.namespace),
-        /cannot establish original authority/,
+        CANNOT_ESTABLISH_ORIGINAL_AUTHORITY,
       );
     }
   });
@@ -241,10 +245,10 @@ describe('published contracts-edge-0.9.17 deployment fixtures', () => {
       false,
     );
     assert.equal(isDeploymentAcknowledgement({ ...acknowledgement, live: ['applied'] }), false);
-    assert.throws(() => assertDeploymentApplied(acknowledgement, 'another-proxy'), /unconfirmed/);
+    assert.throws(() => assertDeploymentApplied(acknowledgement, 'another-proxy'), UNCONFIRMED);
     assert.throws(
       () => assertDeploymentApplied({ ...acknowledgement, profile: undefined }, 'selected-proxy'),
-      /unconfirmed/,
+      UNCONFIRMED,
     );
     assert.throws(
       () =>
@@ -252,7 +256,7 @@ describe('published contracts-edge-0.9.17 deployment fixtures', () => {
           { ...acknowledgement, live: 'not_applicable', recovery_cleanup_authorized: false },
           'selected-proxy',
         ),
-      /unconfirmed/,
+      UNCONFIRMED,
     );
   });
 
@@ -273,7 +277,7 @@ describe('published contracts-edge-0.9.17 deployment fixtures', () => {
       { ...original, id: 'unlisted-spec' },
       { ...original, content_encoding: 'identity' },
     ]) {
-      assert.throws(() => deploymentSpecDocument(snapshot, changed), /cannot be verified/);
+      assert.throws(() => deploymentSpecDocument(snapshot, changed), CANNOT_VERIFIED);
     }
   });
 });

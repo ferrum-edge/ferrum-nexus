@@ -16,6 +16,15 @@ import {
   type RegistrableRole,
 } from '@ferrum-nexus/shared';
 
+const BECOMES_SUPER_ADMIN = /becomes its super-admin/;
+const BOOTSTRAP_TOKEN = /^Bootstrap token/;
+const BOOTSTRAP_TOKEN_MENTION = /NEXUS_BOOTSTRAP_TOKEN/;
+const DISPLAY_NAME = /^Display name/;
+const EMAIL = /^Email/;
+const PASSWORD = /^Password/;
+const CREATED = /created as/;
+const NOT_ACCEPTING_SELF_SERVICE = /not accepting self-service accounts/;
+
 const CAPTCHA = { enabled: false, provider: 'none', site_key: null };
 
 function json(body: unknown, status = 200): Response {
@@ -110,16 +119,16 @@ describe('RegisterPage bootstrap token', () => {
   it('asks for the token on an empty portal and sends it', async () => {
     const { bodies } = await renderRegisterPage(true);
 
-    expect(screen.getByText(/becomes its super-admin/)).toBeInTheDocument();
-    const token = await screen.findByLabelText(/^Bootstrap token/);
+    expect(screen.getByText(BECOMES_SUPER_ADMIN)).toBeInTheDocument();
+    const token = await screen.findByLabelText(BOOTSTRAP_TOKEN);
     expect(token).toHaveAttribute('type', 'password');
-    expect(screen.getByText(/NEXUS_BOOTSTRAP_TOKEN/)).toBeInTheDocument();
+    expect(screen.getByText(BOOTSTRAP_TOKEN_MENTION)).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText(/^Display name/), { target: { value: 'Founder' } });
-    fireEvent.change(screen.getByLabelText(/^Email/), {
+    fireEvent.change(screen.getByLabelText(DISPLAY_NAME), { target: { value: 'Founder' } });
+    fireEvent.change(screen.getByLabelText(EMAIL), {
       target: { value: 'founder@example.test' },
     });
-    fireEvent.change(screen.getByLabelText(/^Password/), {
+    fireEvent.change(screen.getByLabelText(PASSWORD), {
       target: { value: 'correct-horse-battery-staple' },
     });
     fireEvent.change(token, { target: { value: 'bootstrap-token-0123456789' } });
@@ -133,11 +142,11 @@ describe('RegisterPage bootstrap token', () => {
   it('hides the field once the portal has accounts', async () => {
     const { bodies } = await renderRegisterPage(false);
 
-    expect(screen.queryByLabelText(/^Bootstrap token/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(BOOTSTRAP_TOKEN)).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText(/^Display name/), { target: { value: 'Joiner' } });
-    fireEvent.change(screen.getByLabelText(/^Email/), { target: { value: 'joiner@example.test' } });
-    fireEvent.change(screen.getByLabelText(/^Password/), {
+    fireEvent.change(screen.getByLabelText(DISPLAY_NAME), { target: { value: 'Joiner' } });
+    fireEvent.change(screen.getByLabelText(EMAIL), { target: { value: 'joiner@example.test' } });
+    fireEvent.change(screen.getByLabelText(PASSWORD), {
       target: { value: 'correct-horse-battery-staple' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
@@ -164,12 +173,12 @@ describe('RegisterPage registration policy', () => {
   it('offers no choice, and registers as the one allowed role', async () => {
     const { bodies } = await renderRegisterPage(false, ['client']);
 
-    expect(await screen.findByText(/created as/)).toBeInTheDocument();
+    expect(await screen.findByText(CREATED)).toBeInTheDocument();
     expect(screen.queryByLabelText('Account type')).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText(/^Display name/), { target: { value: 'Joiner' } });
-    fireEvent.change(screen.getByLabelText(/^Email/), { target: { value: 'joiner@example.test' } });
-    fireEvent.change(screen.getByLabelText(/^Password/), {
+    fireEvent.change(screen.getByLabelText(DISPLAY_NAME), { target: { value: 'Joiner' } });
+    fireEvent.change(screen.getByLabelText(EMAIL), { target: { value: 'joiner@example.test' } });
+    fireEvent.change(screen.getByLabelText(PASSWORD), {
       target: { value: 'correct-horse-battery-staple' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
@@ -186,7 +195,7 @@ describe('RegisterPage registration policy', () => {
   it('refuses to submit when the policy allows no self-service role', async () => {
     const { bodies } = await renderRegisterPage(false, []);
 
-    expect(await screen.findByText(/not accepting self-service accounts/)).toBeInTheDocument();
+    expect(await screen.findByText(NOT_ACCEPTING_SELF_SERVICE)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Create account' })).toBeDisabled();
     expect(bodies).toHaveLength(0);
   });

@@ -16,6 +16,10 @@ import { Icon, type IconName } from '../components/ui/Icon';
 import { StatusPill } from '../components/ui/StatusPill';
 import { EmptyState } from '../components/ui/EmptyState';
 
+const WHITESPACE = /\s+/;
+const DANGER_ACTION = /(delete|revoke|deny|disable|remove|teardown|purge|reject|fail)/;
+const SUCCESS_ACTION = /(approve|create|grant|publish|issue|register|enable|add)/;
+
 /** Destinations reachable from a dashboard panel header. */
 type PanelLink = '/catalog' | '/credentials' | '/apis' | '/admin/audit';
 
@@ -26,7 +30,7 @@ type PanelLink = '/catalog' | '/credentials' | '/apis' | '/admin/audit';
  * its own presentation helpers.
  */
 function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
+  const parts = name.trim().split(WHITESPACE).filter(Boolean);
   if (parts.length === 0) return '?';
   if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
   return `${parts[0]![0] ?? ''}${parts[parts.length - 1]![0] ?? ''}`.toUpperCase();
@@ -101,9 +105,9 @@ const AUDIT_DOTS: Readonly<Record<AuditTone, string>> = {
  * falling off a hard-coded list.
  */
 function auditTone(action: string): AuditTone {
-  if (/(delete|revoke|deny|disable|remove|teardown|purge|reject|fail)/.test(action))
+  if (DANGER_ACTION.test(action))
     return 'danger';
-  if (/(approve|create|grant|publish|issue|register|enable|add)/.test(action)) return 'success';
+  if (SUCCESS_ACTION.test(action)) return 'success';
   return 'neutral';
 }
 

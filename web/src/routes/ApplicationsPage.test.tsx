@@ -6,6 +6,12 @@ import { changeField, clearClients, renderPage } from '../../test/helpers';
 import { applicationsApi } from '../lib/api';
 import { ApplicationsPage } from './ApplicationsPage';
 
+const SEPARATE_IDENTITY = /separate identity/;
+const NEW_APPLICATION = /New application/;
+const EXISTING_CREDENTIALS_KEEP_WORKING = /Existing credentials keep working/;
+const STOP_WORKING_IMMEDIATELY = /stop working immediately/;
+const TYPE = /Type/;
+
 /**
  * The page's job beyond CRUD is to keep "identity" and "label" apart, and to
  * keep "disable" and "delete" apart (issue #289).
@@ -50,7 +56,7 @@ describe('applications', () => {
     expect(screen.getByText('Invoicing integration')).toBeInTheDocument();
     expect(screen.getByText('Active')).toBeInTheDocument();
     // The distinction the page exists to make.
-    expect(screen.getByText(/separate identity/)).toBeInTheDocument();
+    expect(screen.getByText(SEPARATE_IDENTITY)).toBeInTheDocument();
   });
 
   it("lists only the caller's own, even for an administrator", async () => {
@@ -67,7 +73,7 @@ describe('applications', () => {
   it('creates one', async () => {
     await renderPage(<ApplicationsPage />);
     await screen.findByText('Billing worker');
-    fireEvent.click(screen.getByRole('button', { name: /New application/ }));
+    fireEvent.click(screen.getByRole('button', { name: NEW_APPLICATION }));
     const dialog = await screen.findByRole('dialog', { name: 'New application' });
     changeField('Name', '  Mobile app  ');
     changeField('Description', 'iOS client');
@@ -85,7 +91,7 @@ describe('applications', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
     await screen.findByText('Application disabled');
     expect(applicationsApi.update).toHaveBeenCalledWith('app-1', { status: 'disabled' });
-    expect(screen.getByText(/Existing credentials keep working/)).toBeInTheDocument();
+    expect(screen.getByText(EXISTING_CREDENTIALS_KEEP_WORKING)).toBeInTheDocument();
   });
 
   it('says a delete stops the credentials, and confirms by name', async () => {
@@ -93,11 +99,11 @@ describe('applications', () => {
     await screen.findByText('Billing worker');
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     const dialog = await screen.findByRole('dialog', { name: 'Delete this application' });
-    expect(within(dialog).getByText(/stop working immediately/)).toBeInTheDocument();
+    expect(within(dialog).getByText(STOP_WORKING_IMMEDIATELY)).toBeInTheDocument();
 
     const confirm = within(dialog).getByRole('button', { name: 'Delete application' });
     expect(confirm).toBeDisabled();
-    changeField(/Type/, 'Billing worker');
+    changeField(TYPE, 'Billing worker');
     await waitFor(() => expect(confirm).toBeEnabled());
     fireEvent.click(confirm);
     await screen.findByText('Application deleted');
@@ -137,7 +143,7 @@ describe('applications', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     const dialog = await screen.findByRole('dialog', { name: 'Delete this application' });
-    changeField(/Type/, `Integration ${DEFAULT_PAGE_SIZE}`);
+    changeField(TYPE, `Integration ${DEFAULT_PAGE_SIZE}`);
     const confirm = within(dialog).getByRole('button', { name: 'Delete application' });
     await waitFor(() => expect(confirm).toBeEnabled());
     fireEvent.click(confirm);

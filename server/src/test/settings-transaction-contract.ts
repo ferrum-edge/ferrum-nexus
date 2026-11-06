@@ -7,6 +7,12 @@ import type { NexusStore } from '../db/store.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, TEST_CAPTCHA_TOKEN, type TestApp, type TestSession } from './helpers.js';
 
+const CAPTCHA_SECRET_KEY = /captcha.secret_key/;
+const SMTP_PASSWORD = /smtp.password/;
+const PRIVATE_CAPTCHA_PRIVATE_SMTP = /private-captcha|private-smtp/;
+const ADMINISTRATOR_PASSWORD_ENVIRONMENT_PASSWORD =
+  /administrator-password|environment-password|environment\.example\.test/;
+
 /** The real settings endpoint must roll back configuration and audit on every adapter. */
 export function runSettingsTransactionContract(
   label: string,
@@ -185,9 +191,9 @@ export function runSettingsTransactionContract(
       }
       const audit = await harness.auditRows('admin.settings_update');
       assert.equal(audit.length, beforeAudit.length + 1);
-      assert.match(JSON.stringify(audit), /captcha.secret_key/);
-      assert.match(JSON.stringify(audit), /smtp.password/);
-      assert.doesNotMatch(response.body + JSON.stringify(audit), /private-captcha|private-smtp/);
+      assert.match(JSON.stringify(audit), CAPTCHA_SECRET_KEY);
+      assert.match(JSON.stringify(audit), SMTP_PASSWORD);
+      assert.doesNotMatch(response.body + JSON.stringify(audit), PRIVATE_CAPTCHA_PRIVATE_SMTP);
     });
 
     const environmentConnection = {
@@ -280,7 +286,7 @@ export function runSettingsTransactionContract(
         });
         assert.doesNotMatch(
           JSON.stringify([...added, ...replacementAudit]),
-          /administrator-password|environment-password|environment\.example\.test/,
+          ADMINISTRATOR_PASSWORD_ENVIRONMENT_PASSWORD,
         );
       });
     }

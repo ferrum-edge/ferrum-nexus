@@ -16,6 +16,10 @@ import {
   type SsoProviderSettings,
 } from '@ferrum-nexus/shared';
 
+const IPV6_BRACKETS = /^\[|\]$/g;
+const LEADING_AT = /^@/;
+const HYPHENS = /-/g;
+
 /** Most providers one deployment may configure, across both sources. */
 export const MAX_SSO_PROVIDERS = 10;
 
@@ -52,7 +56,7 @@ const EMAIL_DOMAIN =
  * loopback address, and no `*.localhost` name a resolver could point anywhere.
  */
 export function isLoopbackHostname(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const host = hostname.replace(IPV6_BRACKETS, '').toLowerCase();
   return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
@@ -103,7 +107,7 @@ export function issuerProblem(issuer: string, allowHttpLoopback: boolean): strin
  * `null` when it is not a domain.
  */
 export function normalizeEmailDomain(value: string): string | null {
-  const domain = value.trim().toLowerCase().replace(/^@/, '');
+  const domain = value.trim().toLowerCase().replace(LEADING_AT, '');
   return EMAIL_DOMAIN.test(domain) ? domain : null;
 }
 
@@ -207,7 +211,7 @@ export interface SsoEnvConfig {
  * the JSON: `corp-idp` → `NEXUS_OIDC_CLIENT_SECRET_CORP_IDP`.
  */
 export function envClientSecretVariable(providerId: string): string {
-  return `NEXUS_OIDC_CLIENT_SECRET_${providerId.toUpperCase().replace(/-/g, '_')}`;
+  return `NEXUS_OIDC_CLIENT_SECRET_${providerId.toUpperCase().replace(HYPHENS, '_')}`;
 }
 
 /**

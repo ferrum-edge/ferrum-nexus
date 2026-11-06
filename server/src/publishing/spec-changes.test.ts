@@ -24,6 +24,8 @@ import {
   type SpecChangeStats,
 } from './spec-changes.js';
 
+const SECRET_INTERNAL_EXAMPLE = /SECRET|internal\.example/;
+
 type Document = Record<string, unknown>;
 
 /** A minimal OpenAPI document. */
@@ -697,7 +699,7 @@ describe('consumer-facing revision comparison', () => {
     assert.deepEqual(report.info_changes, ['version', 'description']);
     assert.equal(report.counts.breaking, 1);
     const text = JSON.stringify(report);
-    assert.doesNotMatch(text, /SECRET|internal\.example/);
+    assert.doesNotMatch(text, SECRET_INTERNAL_EXAMPLE);
   });
 
   // A regression here would hang rather than fail, so it is given a deadline.

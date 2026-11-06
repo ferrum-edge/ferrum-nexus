@@ -17,6 +17,8 @@ import type {
   EdgeStoredContentDigest,
 } from './types.js';
 
+const DEPLOYMENT_ROW_TAG = /^"deployment-v1-[0-9a-f]{32}"(?![\s\S])/;
+
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -30,7 +32,7 @@ function exactKeys(value: Record<string, unknown>, keys: string[]): boolean {
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 export function isDeploymentTag(value: unknown): value is string {
-  return typeof value === 'string' && /^"deployment-v1-[0-9a-f]{32}"(?![\s\S])/.test(value);
+  return typeof value === 'string' && DEPLOYMENT_ROW_TAG.test(value);
 }
 
 /** `StoredContentDigest`: the snapshot's stand-in for stored bytes. */

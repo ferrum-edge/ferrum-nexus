@@ -10,6 +10,13 @@ import {
   type MigrationFile,
 } from '../../migrate.js';
 
+const WHITESPACE_RUN = /\s+/g;
+const CREATE_TABLE_IF_NOT_EXISTS = /^CREATE TABLE IF NOT EXISTS\s/i;
+const INDEX_COLUMN = /^([a-z][a-z0-9_]*)(?: (ASC|DESC))?$/i;
+const CHARSET_INTRODUCER = /^_[a-z0-9]+/i;
+const QUOTED_STRING_LITERAL = /^\\?'((?:[^'\\]|\\.)*?)\\?'$/s;
+const BACKSLASH_ESCAPE = /\\(.)/g;
+
 const digest = (text: string): string => createHash('sha256').update(text).digest('hex');
 const ADD_COLUMN = /^ALTER TABLE ([a-z][a-z0-9_]*) ADD COLUMN ([a-z][a-z0-9_]*) (.+)$/i;
 const STRING_COLUMN = /^(VARCHAR\([1-9][0-9]*\)) (NULL|NOT NULL DEFAULT '')$/i;
@@ -72,8 +79,8 @@ type MigrationStep = string | AddColumn | AddIndex | WidenColumn;
  */
 function migrationSteps(migration: MigrationFile): MigrationStep[] {
   return splitSqlStatements(migration.sql).map<MigrationStep>((sql) => {
-    const statement = sql.replace(/\s+/g, ' ').trim();
-    if (/^CREATE TABLE IF NOT EXISTS\s/i.test(statement)) return sql;
+    const statement = sql.replace(WHITESPACE_RUN, ' ').trim();
+    if (CREATE_TABLE_IF_NOT_EXISTS.test(statement)) return sql;
     if (migration.id === '009_outbox_priority' && statement === OUTBOX_PRIORITY_BACKFILL) {
       return statement;
     }
@@ -91,7 +98,7 @@ function migrationSteps(migration: MigrationFile): MigrationStep[] {
     const index = CREATE_INDEX.exec(statement);
     if (index) {
       const columns = index[3]!.split(',').map((column) => {
-        const match = /^([a-z][a-z0-9_]*)(?: (ASC|DESC))?$/i.exec(column.trim());
+        const match = INDEX_COLUMN.exec(column.trim());
         if (!match) throw new Error(`MySQL migration ${migration.id} has unsupported index DDL`);
         return {
           name: match[1]!,
@@ -157,10 +164,10 @@ function expressionDefaultLiteral(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   let text = value.trim();
   while (text.startsWith('(') && text.endsWith(')')) text = text.slice(1, -1).trim();
-  text = text.replace(/^_[a-z0-9]+/i, '');
-  const match = /^\\?'((?:[^'\\]|\\.)*?)\\?'$/s.exec(text);
+  text = text.replace(CHARSET_INTRODUCER, '');
+  const match = QUOTED_STRING_LITERAL.exec(text);
   if (!match) return null;
-  return match[1]!.replace(/\\(.)/g, '$1');
+  return match[1]!.replace(BACKSLASH_ESCAPE, '$1');
 }
 
 /**

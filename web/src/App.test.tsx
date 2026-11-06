@@ -4,6 +4,9 @@ import { ERROR_CODES } from '@ferrum-nexus/shared';
 import { App, describeError } from './App';
 import { ApiError } from './lib/api';
 
+const EMAIL = /^Email/;
+const PASSWORD = /^Password/;
+
 /**
  * Smoke test for the whole provider + router composition: an unauthenticated
  * visitor must land on the sign-in page without any route crashing.
@@ -62,8 +65,8 @@ describe('App', () => {
 
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument();
     // Required fields render an asterisk inside the label, hence the pattern.
-    expect(await screen.findByLabelText(/^Email/)).toBeInTheDocument();
-    expect(screen.getByLabelText(/^Password/)).toBeInTheDocument();
+    expect(await screen.findByLabelText(EMAIL)).toBeInTheDocument();
+    expect(screen.getByLabelText(PASSWORD)).toBeInTheDocument();
     // Branding is applied to the public shell (the hero panel and the compact
     // brand row both carry the name; which one is visible depends on viewport).
     expect((await screen.findAllByText('Acme Developer Portal')).length).toBeGreaterThan(0);

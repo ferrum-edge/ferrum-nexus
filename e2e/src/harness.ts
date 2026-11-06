@@ -13,6 +13,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 
+const MAIL_TOKEN = /[?&]token=([A-Za-z0-9._~-]+)/;
+
 /** The header the deterministic upstream stamps on everything it serves. */
 export const UPSTREAM_MARKER = 'x-upstream';
 
@@ -344,7 +346,7 @@ export async function registerVerifiedUser(
     // The verification link, out of the real message. A portal that stopped
     // sending it would fail here rather than in production.
     const mail = await latestMailTo(email);
-    const token = /[?&]token=([A-Za-z0-9._~-]+)/.exec(mail.text)?.[1];
+    const token = MAIL_TOKEN.exec(mail.text)?.[1];
     if (!token) throw new Error(`No verification token in the mail to ${email}: ${mail.subject}`);
     await portal('POST', '/api/auth/verify-email', { body: { token }, expect: 200 });
   }

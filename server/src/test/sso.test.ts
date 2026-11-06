@@ -46,6 +46,14 @@ import {
   type MockOidcProvider,
 } from './mock-oidc-provider.js';
 
+const SECRET = /secret/i;
+const BASE64URL_43 = /^[A-Za-z0-9_-]{43}$/;
+const PROFILE_SSO_ERROR = /\/profile\?sso_error=/;
+const PROFILE_SSO_ERROR_ADDRESS = /\/profile\?sso_error=address_unproven$/;
+const PROMOTING_ACCOUNT_SUPER_ADMIN = /promoting this account to super_admin/;
+const LOWER_TRUST_PROVIDER_IDS = /lower_trust_provider_ids/;
+const LINK_YOUR_OWN_ACCOUNT = /Link your own account/;
+
 const CORP_SECRET = 'corp-client-secret-value';
 const PARTNER_SECRET = 'partner-client-secret-value';
 
@@ -327,7 +335,7 @@ describe('single sign-on', () => {
       { id: 'corp', display_name: 'Corporate SSO' },
       { id: 'partner', display_name: 'Partner IdP' },
     ]);
-    assert.doesNotMatch(response.body, /secret/i);
+    assert.doesNotMatch(response.body, SECRET);
   });
 
   it('starts an authorization-code request with PKCE S256, state and nonce', async () => {
@@ -336,9 +344,9 @@ describe('single sign-on', () => {
     assert.equal(params.get('response_type'), 'code');
     assert.equal(params.get('client_id'), 'nexus-corp');
     assert.equal(params.get('code_challenge_method'), 'S256');
-    assert.match(params.get('code_challenge') ?? '', /^[A-Za-z0-9_-]{43}$/);
-    assert.match(params.get('state') ?? '', /^[A-Za-z0-9_-]{43}$/);
-    assert.match(params.get('nonce') ?? '', /^[A-Za-z0-9_-]{43}$/);
+    assert.match(params.get('code_challenge') ?? '', BASE64URL_43);
+    assert.match(params.get('state') ?? '', BASE64URL_43);
+    assert.match(params.get('nonce') ?? '', BASE64URL_43);
     assert.equal(params.get('redirect_uri'), `${h.config.publicUrl}/api/auth/sso/corp/callback`);
     assert.equal(params.get('scope'), 'openid email profile');
     // The attempt cookie is HttpOnly, scoped to the SSO routes, and the
@@ -923,7 +931,7 @@ describe('single sign-on', () => {
     const crossed = await beginLink(h, corp, 'corp', holder, claims);
     const crossedResponse = await finish(h, 'corp', crossed, { session: other });
     assert.equal(ssoError(crossedResponse), 'link_session_mismatch');
-    assert.match(String(crossedResponse.headers.location), /\/profile\?sso_error=/);
+    assert.match(String(crossedResponse.headers.location), PROFILE_SSO_ERROR);
     assert.deepEqual(await h.store.userIdentities.listByUser(holder.user.id), []);
 
     const linked = await link(h, corp, 'corp', holder, claims);
@@ -970,7 +978,7 @@ describe('single sign-on', () => {
     for (const [label, claims] of attempts) {
       const refused = await link(h, corp, 'corp', holder, { sub, ...claims });
       assert.equal(ssoError(refused), 'address_unproven', label);
-      assert.match(String(refused.headers.location), /\/profile\?sso_error=address_unproven$/);
+      assert.match(String(refused.headers.location), PROFILE_SSO_ERROR_ADDRESS);
     }
     assert.deepEqual(await h.store.userIdentities.listByUser(holder.user.id), []);
     assert.equal(await h.store.userIdentities.findBySubject('corp', corp.issuer, sub), null);
@@ -1639,7 +1647,7 @@ describe('single sign-on', () => {
     });
     assert.equal(elevated.statusCode, 409, elevated.body);
     // The refusal names the role actually being conferred.
-    assert.match(elevated.body, /promoting this account to super_admin/);
+    assert.match(elevated.body, PROMOTING_ACCOUNT_SUPER_ADMIN);
     assert.equal((await h.store.users.findById(target.id))?.role, 'client');
 
     const promotion = await h.authed(founder, {
@@ -1648,7 +1656,7 @@ describe('single sign-on', () => {
       payload: { role: 'admin' },
     });
     assert.equal(promotion.statusCode, 409, promotion.body);
-    assert.match(promotion.body, /lower_trust_provider_ids/);
+    assert.match(promotion.body, LOWER_TRUST_PROVIDER_IDS);
     assert.equal((await h.store.users.findById(target.id))?.role, 'client');
     assert.equal(
       (await h.authed(oldSession, { method: 'GET', url: '/api/auth/me' })).statusCode,
@@ -2254,7 +2262,7 @@ describe('single sign-on login policies', () => {
         });
       const refused = await put();
       assert.equal(refused.statusCode, 400, refused.body);
-      assert.match(refused.body, /Link your own account/);
+      assert.match(refused.body, LINK_YOUR_OWN_ACCOUNT);
       const linked = await link(h, corp, 'corp', founder, {
         sub: 'own-link-subject',
         email: founder.user.email,

@@ -35,6 +35,11 @@ import {
 import { AuditAction } from '../audit/service.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
+const DOES_NOT_ACCEPT_ACCESS = /does not accept access requests/;
+const DOES_NOT_LET_YOU = /does not let you call it/;
+const REGISTER_FIRST = /register first/;
+const ALREADY_HAVE_ACCESS = /already have access/;
+
 describe('private API visibility', () => {
   let harness: TestApp;
   let admin: TestSession;
@@ -167,7 +172,7 @@ describe('private API visibility', () => {
       payload: { api_id: notRequestableId, justification: 'Administrative check' },
     });
     assert.equal(adminResponse.statusCode, 409, adminResponse.body);
-    assert.match(adminResponse.body, /does not accept access requests/);
+    assert.match(adminResponse.body, DOES_NOT_ACCEPT_ACCESS);
   });
 
   it('shows it to the owner and to administrators', async () => {
@@ -215,7 +220,7 @@ describe('private API visibility', () => {
       (entry) => entry.title === 'You can now view a private API',
     );
     assert.ok(notice, 'the partner is notified');
-    assert.match(notice.body, /does not let you call it/);
+    assert.match(notice.body, DOES_NOT_LET_YOU);
   });
 
   it('lets the authorized partner list, open and read it', async () => {
@@ -277,7 +282,7 @@ describe('private API visibility', () => {
       payload: { email: 'nobody@example.test' },
     });
     assert.equal(response.statusCode, 400, response.body);
-    assert.match(response.json<{ error: { message: string } }>().error.message, /register first/);
+    assert.match(response.json<{ error: { message: string } }>().error.message, REGISTER_FIRST);
   });
 
   it('answers for an administrator exactly as for an account that does not exist', async () => {
@@ -375,7 +380,7 @@ describe('private API visibility', () => {
       payload: { api_id: privateId, justification: 'Again' },
     });
     assert.equal(requestedAgain.statusCode, 409, requestedAgain.body);
-    assert.match(requestedAgain.body, /already have access/);
+    assert.match(requestedAgain.body, ALREADY_HAVE_ACCESS);
   });
 
   it('leaves public APIs alone throughout', async () => {

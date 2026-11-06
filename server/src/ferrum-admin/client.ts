@@ -118,6 +118,14 @@ import {
   isSnapshotTooLargeRefusal,
 } from './deployment.js';
 
+const STRONG_ROW_TAG = /^"[\x21\x23-\x7e]+"(?![\s\S])/;
+const CONSUMER_VERIFICATION_SUFFIX = /\/consumers\/[^/]+\/verification$/;
+const SCOPED_RESOURCE_PATH = /^\/(consumers|proxies|plugins\/config)(?:\/|$)/;
+const CONSUMERS_PATH = /^\/consumers(?:\/|$)/;
+const CONSUMER_VERIFICATION_PATH = /^\/consumers\/[^/]+\/verification$/;
+const API_SPEC_PATH = /^\/api-specs(?:\/[^/]+)?$/;
+const PAGE_CURSOR = /^[0-9]+:[0-9]+(?![\s\S])/;
+
 /** Minimal logger surface, so this module does not depend on Fastify. */
 export interface EdgeLogger {
   debug(obj: Record<string, unknown>, message?: string): void;
@@ -596,7 +604,7 @@ type BodyValidator = (value: unknown) => boolean;
 
 /** Opaque single strong entity-tag syntax; this does not validate its MAC or freshness. */
 function isStrongRowTag(value: unknown): value is string {
-  return typeof value === 'string' && /^"[\x21\x23-\x7e]+"(?![\s\S])/.test(value);
+  return typeof value === 'string' && STRONG_ROW_TAG.test(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1604,7 +1612,7 @@ export function createFerrumAdminClient(
     if (
       path === '/backend-egress-policy' ||
       path === '/deployment-snapshot' ||
-      /\/consumers\/[^/]+\/verification$/.test(path)
+      CONSUMER_VERIFICATION_SUFFIX.test(path)
     ) {
       // These endpoints promise authoritative no-store reads. Refuse intermediary
       // cache evidence rather than treating an old policy/snapshot as admission.
@@ -1618,7 +1626,7 @@ export function createFerrumAdminClient(
       }
     }
     if (isRecord(parsed)) {
-      const scoped = /^\/(consumers|proxies|plugins\/config)(?:\/|$)/.exec(path);
+      const scoped = SCOPED_RESOURCE_PATH.exec(path);
       if (scoped && !options.deployment) {
         const rows = Array.isArray(parsed.data) ? parsed.data : [parsed];
         const id = path.slice(scoped[1]!.length + 2).split('/')[0];
@@ -1679,15 +1687,14 @@ export function createFerrumAdminClient(
       code?: unknown;
       failures?: unknown;
     };
-    const credentialWrite = method !== 'GET' && /^\/consumers(?:\/|$)/.test(path);
+    const credentialWrite = method !== 'GET' && CONSUMERS_PATH.test(path);
     const sensitive =
       credentialWrite ||
-      /^\/consumers\/[^/]+\/verification$/.test(path) ||
+      CONSUMER_VERIFICATION_PATH.test(path) ||
       path === '/backend-egress-policy' ||
       path === '/deployment-snapshot' ||
       deployment;
-    const isApiSpecWrite =
-      (method === 'POST' || method === 'PUT') && /^\/api-specs(?:\/[^/]+)?$/.test(path);
+    const isApiSpecWrite = (method === 'POST' || method === 'PUT') && API_SPEC_PATH.test(path);
     if (quiet) {
       // The caller logs this failure itself, once per change.
     } else if (sensitive) {
@@ -1758,7 +1765,7 @@ export function createFerrumAdminClient(
     // Edge v0.9.13 answers a bare 507 when the namespace exceeds its conditional
     // snapshot bound. The verification read issued nothing; name the cause and
     // keep failing closed.
-    if (status === 507 && /^\/consumers\/[^/]+\/verification$/.test(path)) {
+    if (status === 507 && CONSUMER_VERIFICATION_PATH.test(path)) {
       return edgeError('The gateway namespace is too large for consumer verification', {
         status,
         kind: 'namespace_snapshot_too_large',
@@ -1957,7 +1964,7 @@ export function createFerrumAdminClient(
     const cursor = headers['x-ferrum-config-cursor'];
     if (
       typeof cursor !== 'string' ||
-      !/^[0-9]+:[0-9]+(?![\s\S])/.test(cursor) ||
+      !PAGE_CURSOR.test(cursor) ||
       headers[NAMESPACE_UNSERVED_HEADER] === NAMESPACE_UNSERVED_HEADER_VALUE
     ) {
       throw edgeError('Gateway deployment covering application proof is unavailable', {

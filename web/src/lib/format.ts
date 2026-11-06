@@ -1,5 +1,8 @@
 /** Presentation helpers shared across pages. */
 
+const WORD_SEPARATORS = /[\s_.]+/;
+const NEWLINE_OR_COMMA = /[\n,]/;
+
 /** Format an ISO timestamp as a locale date+time, or an em dash when absent. */
 export function formatDateTime(value: string | null | undefined): string {
   if (!value) return '—';
@@ -72,7 +75,7 @@ const ACRONYMS: Readonly<Record<string, string>> = {
  */
 export function humanize(value: string): string {
   const words = value
-    .split(/[\s_.]+/)
+    .split(WORD_SEPARATORS)
     .filter((word) => word !== '')
     .map((word) => ACRONYMS[word.toLowerCase()] ?? word);
   const spaced = words.join(' ');
@@ -100,7 +103,7 @@ export function truncate(value: string, max: number): string {
  */
 export function parseCorsOrigins(text: string): string[] {
   return text
-    .split(/[\n,]/)
+    .split(NEWLINE_OR_COMMA)
     .map((entry) => entry.trim())
     .filter((entry) => entry !== '');
 }
