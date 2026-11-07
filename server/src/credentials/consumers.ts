@@ -153,6 +153,22 @@ export interface MutateAclGroupsOptions {
    * throw from it propagates after the write, which the caller compensates.
    */
   afterWrite?: (consumer: EdgeConsumer) => Promise<void>;
+  /**
+   * Runs **inside** the critical section, after the consumer's verification
+   * read and before the write; a `false` answer skips the write and resolves
+   * to `null`.
+   *
+   * For a write whose justification is portal state another holder of this
+   * key can change: a revocation removes its group only while it still owns
+   * its durable job and no active grant stands behind the group, and an
+   * approval commits its grant — or a revocation rollback restores one —
+   * under this same key, so the answer holds until the write lands. Checked
+   * after the read, which also narrows what a holder that stalled past its
+   * lease can do: a write that lands after the read changes the row the
+   * `PUT`'s `If-Match` names, so the stale `PUT` is refused. Like
+   * {@link afterWrite}, it must not take this key itself.
+   */
+  guard?: () => Promise<boolean>;
 }
 
 /** Dependencies of {@link createConsumerProvisioner}. */
@@ -283,6 +299,7 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
           }
         }
         const snapshot = await edge.consumers.verification(ferrumConsumerId, subject);
+        if (options?.guard && !(await options.guard())) return null;
         if (!snapshot) {
           if (options?.absentIsDone) return null;
           throw edgeError('The gateway consumer for this account no longer exists', {

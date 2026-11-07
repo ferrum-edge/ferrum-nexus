@@ -4446,6 +4446,257 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       await store.accountRecoveryJobs.deleteByUser(user.id);
     });
 
+    /* ── access gateway jobs ──────────────────────────────────────────── */
+
+    it('accessGatewayJobs: one claimed row per subject, re-owned rather than duplicated', async () => {
+      const grantee = await makeUser();
+      const actor = await makeUser({ role: 'provider' });
+      const input = {
+        kind: 'revoke' as const,
+        subject_id: newId(),
+        api_id: newId(),
+        user_id: grantee.id,
+        application_id: null,
+        requested_by: actor.id,
+      };
+      const first = await store.accessGatewayJobs.upsertClaimed(input, nowIso());
+      assert.equal(first.kind, 'revoke');
+      assert.equal(first.subject_id, input.subject_id);
+      assert.equal(first.api_id, input.api_id);
+      assert.equal(first.user_id, grantee.id);
+      assert.equal(first.application_id, null);
+      assert.equal(first.requested_by, actor.id);
+      assert.equal(first.status, 'sending', 'the claimer owns it from the start');
+      assert.equal(first.attempts, 0);
+      assert.equal(first.last_error, null);
+      assert.deepEqual(await store.accessGatewayJobs.findBySubject(input.subject_id), first);
+
+      // A claimed row is not due: only a reschedule or the stale sweep hands
+      // it to the worker.
+      const early = await store.accessGatewayJobs.claimDue(nowIso(), 50);
+      assert.equal(early.filter((row) => row.subject_id === input.subject_id).length, 0);
+
+      assert.equal(
+        await store.accessGatewayJobs.reschedule(first, isoInSeconds(-1), 'edge 503'),
+        true,
+      );
+      const handed = await store.accessGatewayJobs.findBySubject(input.subject_id);
+      assert.equal(handed?.status, 'pending');
+      assert.equal(handed?.last_error, 'edge 503');
+      assert.equal(await store.accessGatewayJobs.deleteClaimed(first), false, 'no longer sending');
+
+      const second = await store.accessGatewayJobs.upsertClaimed(
+        { ...input, kind: 'approve', application_id: null, requested_by: null },
+        nowIso(),
+      );
+      assert.equal(second.id, first.id, 'the same row is reused');
+      assert.notEqual(second.generation, first.generation);
+      assert.equal(second.kind, 'approve');
+      assert.equal(second.requested_by, null);
+      assert.equal(second.status, 'sending');
+      assert.equal(second.attempts, 0);
+      assert.equal(second.last_error, null);
+      assert.equal(await store.accessGatewayJobs.reschedule(first, nowIso(), 'stale'), false);
+
+      assert.equal(await store.accessGatewayJobs.deleteClaimed(second), true);
+      assert.equal(await store.accessGatewayJobs.findBySubject(input.subject_id), null);
+      assert.equal(await store.accessGatewayJobs.deleteClaimed(second), false);
+    });
+
+    it('accessGatewayJobs: claims a due job exactly once, and deleteBySubject ignores ownership', async () => {
+      const grantee = await makeUser();
+      const subject = newId();
+      const job = await store.accessGatewayJobs.upsertClaimed(
+        {
+          kind: 'approve',
+          subject_id: subject,
+          api_id: newId(),
+          user_id: grantee.id,
+          application_id: newId(),
+          requested_by: null,
+        },
+        nowIso(),
+      );
+      assert.ok(job.application_id);
+      await store.accessGatewayJobs.reschedule(job, isoInSeconds(-1), 'handed off');
+
+      const claimed = await store.accessGatewayJobs.claimDue(nowIso(), 50);
+      const mine = claimed.filter((row) => row.subject_id === subject);
+      assert.equal(mine.length, 1);
+      assert.equal(mine[0]?.status, 'sending');
+      assert.equal(mine[0]?.attempts, 1);
+      assert.notEqual(mine[0]?.generation, job.generation);
+      const again = await store.accessGatewayJobs.claimDue(nowIso(), 50);
+      assert.equal(again.filter((row) => row.subject_id === subject).length, 0);
+
+      // A row still backing off is not due.
+      assert.ok(mine[0]);
+      await store.accessGatewayJobs.reschedule(mine[0], isoInSeconds(600), 'edge 500');
+      const backingOff = await store.accessGatewayJobs.claimDue(nowIso(), 50);
+      assert.equal(backingOff.filter((row) => row.subject_id === subject).length, 0);
+
+      assert.equal(await store.accessGatewayJobs.deleteBySubject(subject), true);
+      assert.equal(await store.accessGatewayJobs.findBySubject(subject), null);
+      assert.equal(await store.accessGatewayJobs.deleteBySubject(subject), false);
+    });
+
+    it('accessGatewayJobs: releaseStale returns abandoned claims to pending', async () => {
+      const grantee = await makeUser();
+      const subject = newId();
+      await store.accessGatewayJobs.upsertClaimed(
+        {
+          kind: 'revoke',
+          subject_id: subject,
+          api_id: newId(),
+          user_id: grantee.id,
+          application_id: null,
+          requested_by: null,
+        },
+        nowIso(),
+      );
+      assert.ok((await store.accessGatewayJobs.releaseStale(isoInSeconds(60))) >= 1);
+      assert.equal((await store.accessGatewayJobs.findBySubject(subject))?.status, 'pending');
+      const claimed = await store.accessGatewayJobs.claimDue(isoInSeconds(60), 50);
+      assert.ok(claimed.some((row) => row.subject_id === subject));
+      await store.accessGatewayJobs.deleteBySubject(subject);
+    });
+
+    it('accessGatewayJobs: an upsert in a rolled-back transaction leaves no row', async () => {
+      const grantee = await makeUser();
+      const subject = newId();
+      await assert.rejects(
+        store.transaction(async (tx) => {
+          await tx.accessGatewayJobs.upsertClaimed(
+            {
+              kind: 'revoke',
+              subject_id: subject,
+              api_id: newId(),
+              user_id: grantee.id,
+              application_id: null,
+              requested_by: null,
+            },
+            nowIso(),
+          );
+          throw new Error('roll back the claim');
+        }),
+      );
+      assert.equal(await store.accessGatewayJobs.findBySubject(subject), null);
+    });
+
+    it('accessGatewayJobs: enqueueIfAbsent inserts a due pending row once and never re-owns one', async () => {
+      const grantee = await makeUser();
+      const input = {
+        kind: 'approve' as const,
+        subject_id: newId(),
+        api_id: newId(),
+        user_id: grantee.id,
+        application_id: null,
+        requested_by: null,
+      };
+      const due = nowIso();
+      assert.equal(await store.accessGatewayJobs.enqueueIfAbsent(input, due), true);
+      const queued = await store.accessGatewayJobs.findBySubject(input.subject_id);
+      assert.ok(queued);
+      assert.equal(queued.kind, 'approve');
+      assert.equal(queued.status, 'pending');
+      assert.equal(queued.attempts, 0);
+      assert.equal(queued.next_attempt_at, due);
+      assert.equal(queued.last_error, null);
+      const claimable = await store.accessGatewayJobs.claimDue(nowIso(), 50);
+      const mine = claimable.find((row) => row.subject_id === input.subject_id);
+      assert.ok(mine, 'the queued row is due at once');
+      assert.equal(await store.accessGatewayJobs.reschedule(mine, due, 'back to pending'), true);
+      const before = await store.accessGatewayJobs.findBySubject(input.subject_id);
+      assert.ok(before);
+
+      // A second call, and one for a row a live decision owns, leave it exactly as it is.
+      assert.equal(
+        await store.accessGatewayJobs.enqueueIfAbsent({ ...input, kind: 'revoke' }, nowIso()),
+        false,
+      );
+      assert.deepEqual(await store.accessGatewayJobs.findBySubject(input.subject_id), before);
+      const owned = await store.accessGatewayJobs.upsertClaimed(
+        { ...input, subject_id: newId() },
+        nowIso(),
+      );
+      assert.equal(
+        await store.accessGatewayJobs.enqueueIfAbsent(
+          { ...input, subject_id: owned.subject_id },
+          nowIso(),
+        ),
+        false,
+      );
+      const untouched = await store.accessGatewayJobs.findBySubject(owned.subject_id);
+      assert.equal(untouched?.id, owned.id);
+      assert.equal(untouched?.generation, owned.generation);
+      assert.equal(untouched?.status, 'sending');
+      await store.accessGatewayJobs.deleteBySubject(input.subject_id);
+      await store.accessGatewayJobs.deleteBySubject(owned.subject_id);
+    });
+
+    it('grants and accessRequests: pageByStatus walks one status by keyset', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const client = await makeUser();
+      const api = await makeApi(owner.id);
+      const requests = new Set<string>();
+      for (let index = 0; index < 5; index += 1) {
+        const row = await store.accessRequests.create({
+          api_id: api.id,
+          user_id: client.id,
+          justification: `keyset ${index}`,
+          status: 'denied',
+        });
+        requests.add(row.id);
+      }
+      const grants = new Set<string>();
+      for (let index = 0; index < 3; index += 1) {
+        const row = await store.grants.create({
+          api_id: api.id,
+          user_id: client.id,
+          acl_group: `nexus:api:${api.id}:approved`,
+          status: 'revoked',
+          granted_by: owner.id,
+        });
+        grants.add(row.id);
+      }
+
+      // Rows leaving the status behind the cursor cannot shift the next page,
+      // so every row is met exactly once.
+      const seenRequests: string[] = [];
+      let afterRequest: string | null = null;
+      for (;;) {
+        const page = await store.accessRequests.pageByStatus('denied', afterRequest, 2);
+        assert.ok(page.length <= 2);
+        const last = page.at(-1);
+        if (!last) break;
+        for (const row of page) {
+          assert.equal(row.status, 'denied');
+          if (requests.has(row.id)) {
+            seenRequests.push(row.id);
+            await store.accessRequests.update(row.id, { status: 'cancelled' });
+          }
+        }
+        afterRequest = last.id;
+      }
+      assert.equal(seenRequests.length, requests.size);
+      assert.deepEqual(new Set(seenRequests), requests);
+
+      const seenGrants: string[] = [];
+      let afterGrant: string | null = null;
+      for (;;) {
+        const page = await store.grants.pageByStatus('revoked', afterGrant, 2);
+        const last = page.at(-1);
+        if (!last) break;
+        for (const row of page) {
+          assert.equal(row.status, 'revoked');
+          if (grants.has(row.id)) seenGrants.push(row.id);
+        }
+        afterGrant = last.id;
+      }
+      assert.equal(seenGrants.length, grants.size);
+      assert.deepEqual(new Set(seenGrants), grants);
+    });
+
     it('stores spec metadata and audit details as large as the API accepts (#604, #605)', async () => {
       // MySQL held these in VARCHAR(255), VARCHAR(64) and TEXT (65,535 bytes),
       // narrower than what the parser and the agents schema accept; strict

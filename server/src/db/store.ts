@@ -478,6 +478,61 @@ export interface AccountRecoveryJobRecord {
   updated_at: IsoTimestamp;
 }
 
+/**
+ * What an `access_gateway_jobs` row owes the gateway.
+ *
+ * - `revoke`: a targeted revocation claimed its grant (`active → revoked`); the
+ *   grant's ACL groups must come off the identity's consumer.
+ * - `approve`: an approval claimed its request (`pending → approved`); the
+ *   grant must commit, or the groups the approval may have written must come
+ *   back off and the request leave `approved`.
+ */
+export type AccessGatewayJobKind = 'revoke' | 'approve';
+
+/**
+ * An `access_gateway_jobs` row — the gateway half of one access decision
+ * (issue #651).
+ *
+ * Written in the transaction that claims the decision, already `sending`: the
+ * request that claimed it owns it and settles it, deleting the row once the
+ * gateway matches the portal. A row that outlives its owner — a crash, a
+ * failed compensation — returns to `pending` through the stale sweep or a
+ * reschedule, and the access gateway worker drives it to completion. There is
+ * no `done` state: success deletes the row. At most one row exists per
+ * subject (`subject_id` is unique).
+ */
+export interface AccessGatewayJobRecord {
+  id: Uuid;
+  /** Opaque ownership token, replaced on every enqueue and every claim. Internal only. */
+  generation: string;
+  kind: AccessGatewayJobKind;
+  /** The grant a revocation withdrew, or the access request an approval decided. */
+  subject_id: Uuid;
+  api_id: Uuid;
+  /** The account holding the identity whose consumer carries the groups. */
+  user_id: Uuid;
+  /** The application identity, or `null` for the account's own. */
+  application_id: Uuid | null;
+  /** Who decided, or `null` once that account is gone. */
+  requested_by: Uuid | null;
+  status: 'pending' | 'sending';
+  attempts: number;
+  next_attempt_at: IsoTimestamp | null;
+  last_error: string | null;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
+/** What {@link AccessGatewayJobRepo.upsertClaimed} records. */
+export interface AccessGatewayJobInput {
+  kind: AccessGatewayJobKind;
+  subject_id: Uuid;
+  api_id: Uuid;
+  user_id: Uuid;
+  application_id: Uuid | null;
+  requested_by: Uuid | null;
+}
+
 /** An `audit_logs` row (append-only; without the joined actor summary). */
 export type AuditLogRecord = Omit<AuditLog, 'actor'>;
 
@@ -1241,6 +1296,17 @@ export interface AccessRequestRepo {
     patch: UpdateInput<AccessRequestRecord>,
   ): Promise<AccessRequestRecord | null>;
   list(filter: AccessRequestFilter, options?: ListOptions): Promise<Paginated<AccessRequestRecord>>;
+  /**
+   * Up to `limit` requests in `status` whose id sorts after `afterId` (from
+   * the first when `null`), in id order: a keyset page that rows changing
+   * status meanwhile cannot shift, unlike an offset over the same filter.
+   * For one-time scans over the whole table.
+   */
+  pageByStatus(
+    status: AccessRequestStatus,
+    afterId: Uuid | null,
+    limit: number,
+  ): Promise<AccessRequestRecord[]>;
   /** Duplicate guard: an open request by this user for this API. */
   findPendingByApiAndUser(
     apiId: Uuid,
@@ -1284,6 +1350,12 @@ export interface GrantRepo {
     patch: UpdateInput<GrantRecord>,
   ): Promise<GrantRecord | null>;
   list(filter: GrantFilter, options?: ListOptions): Promise<Paginated<GrantRecord>>;
+  /**
+   * Up to `limit` grants in `status` whose id sorts after `afterId` (from the
+   * first when `null`), in id order: a keyset page that rows changing status
+   * meanwhile cannot shift. For one-time scans over the whole table.
+   */
+  pageByStatus(status: GrantStatus, afterId: Uuid | null, limit: number): Promise<GrantRecord[]>;
   /**
    * The single `status = 'active'` grant for an API and one identity, if any.
    * The schema enforces at most one via a partial unique index over
@@ -1787,6 +1859,60 @@ export interface AccountRecoveryJobRepo {
   deleteByUser(userId: Uuid): Promise<boolean>;
 }
 
+/**
+ * The durable gateway half of targeted grant revocations and access approvals
+ * (issue #651).
+ *
+ * The row is written in the same transaction as the claim, so a decision can
+ * never commit without the gateway work it owes being recorded. The claiming
+ * request owns the row (`sending`) and deletes it once the gateway matches; a
+ * row it could not settle is drained by the access gateway worker with the
+ * same claim/backoff protocol as the email outbox, and no terminal failure
+ * state: access that outlives its grant is not something to give up on.
+ */
+export interface AccessGatewayJobRepo {
+  /**
+   * Record the job owed for `input.subject_id`, already claimed by the caller:
+   * `sending`, `attempts = 0`, a fresh opaque generation. `subject_id` is
+   * unique, so a subject already carrying a job has that row reset and
+   * re-owned instead of gaining a second one; the fresh generation invalidates
+   * every older snapshot and claim of it.
+   */
+  upsertClaimed(input: AccessGatewayJobInput, now: IsoTimestamp): Promise<AccessGatewayJobRecord>;
+  /**
+   * Queue a job for `input.subject_id` unless the subject already carries one:
+   * `pending`, due at `now`, `attempts = 0`. An existing row — owned by a live
+   * decision or already queued — is left exactly as it is. Resolves to
+   * whether this call inserted the row. Used by the one-time repair that
+   * queues gateway work decisions made before migration `015` stranded.
+   */
+  enqueueIfAbsent(input: AccessGatewayJobInput, now: IsoTimestamp): Promise<boolean>;
+  findBySubject(subjectId: Uuid): Promise<AccessGatewayJobRecord | null>;
+  /**
+   * Atomically claim up to `limit` rows that are `pending` with
+   * `next_attempt_at <= now`, flipping them to `sending` and incrementing
+   * `attempts` and replacing `generation`. Concurrent workers cannot both win
+   * the same pending generation.
+   */
+  claimDue(now: IsoTimestamp, limit: number): Promise<AccessGatewayJobRecord[]>;
+  /** Delete only the supplied sending generation; false means ownership was lost. */
+  deleteClaimed(job: AccessGatewayJobRecord): Promise<boolean>;
+  /** Return only this sending generation to pending; false means ownership was lost. */
+  reschedule(
+    job: AccessGatewayJobRecord,
+    nextAttemptAt: IsoTimestamp,
+    lastError: string,
+  ): Promise<boolean>;
+  /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
+  releaseStale(olderThan: IsoTimestamp): Promise<number>;
+  /**
+   * Drop whatever job the subject carries, in any status and generation: the
+   * decision it was owed for has settled another way — the approval's grant
+   * committed, or the revoked grant was put back. `false` when there was none.
+   */
+  deleteBySubject(subjectId: Uuid): Promise<boolean>;
+}
+
 /** Append-only audit trail. */
 export interface AuditLogRepo {
   /** Append one record. There is no update or delete. */
@@ -2051,6 +2177,7 @@ export interface NexusStore {
   readonly emailOutbox: EmailOutboxRepo;
   readonly gatewayTeardownJobs: GatewayTeardownJobRepo;
   readonly accountRecoveryJobs: AccountRecoveryJobRepo;
+  readonly accessGatewayJobs: AccessGatewayJobRepo;
   readonly auditLogs: AuditLogRepo;
   readonly settings: SettingRepo;
   readonly emailTemplates: EmailTemplateRepo;

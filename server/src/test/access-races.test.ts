@@ -505,12 +505,19 @@ describe('access workflow under concurrency', () => {
     // approval looks to the compensation: by the time it goes to clean up, an
     // active grant owns the group. Stripping it would revoke real access.
     // The consumer exists first, so the grant is the transaction that loses
-    // its acknowledgement rather than the consumer mapping's insert.
+    // its acknowledgement rather than the consumer mapping's insert. The
+    // claim's own transaction, which records the approval's durable job
+    // (issue #651), commits and is acknowledged normally.
     await harness.services.credentials.provisioner.ensureConsumer(client.user);
     const store = harness.store;
     const realTransaction = store.transaction.bind(store);
+    let claims = 1;
     store.transaction = async <T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> => {
-      await realTransaction(fn);
+      const result = await realTransaction(fn);
+      if (claims > 0) {
+        claims -= 1;
+        return result;
+      }
       throw new Error('the connection dropped after the commit');
     };
 

@@ -1365,8 +1365,8 @@ checksums and `release: 'v0.1.0'`, the forward migrations
 `009_outbox_priority`, `010_api_agents` and `011_mcp_tool_subsets` with
 `release: 'v0.4.0'`, `012_access_request_grant` with `release: 'v0.5.0'`, and
 `013_account_recovery_jobs` with `release: 'v0.5.1'`. `v0.5.2` adds no migration.
-`014_mysql_text_capacity` is listed with `release: null` until the next release
-ships it.
+`014_mysql_text_capacity` and `015_access_gateway_jobs` are listed with
+`release: null` until the next release ships them.
 
 **A released migration never changes.** A database only applies migrations its
 ledger lacks, so editing an applied one would make fresh and upgraded installs
@@ -1527,6 +1527,21 @@ is recorded and does nothing. `MODIFY COLUMN` rebuilds each table on MySQL, so
 plan for the copy time and disk space on a large `audit_logs` table. The runner
 skips a column that is already `LONGTEXT` on a replay, and refuses one whose
 type, nullability, default, generation or collation it does not expect.
+
+`015_access_gateway_jobs` (not yet released) adds the `access_gateway_jobs`
+table (a collection on MongoDB, with the same two indexes): at most one row per
+grant or access request, holding the gateway work a targeted revocation or an
+approval owes until it lands (see
+[access gateway jobs](#access-gateway-jobs)). On SQL backends its foreign keys
+to `users` cascade (`user_id`) and set null (`requested_by`) on delete. The
+migration itself copies no data, but a database an earlier release wrote may
+already hold decisions whose gateway half never ran, and an empty table does
+not mean nothing is owed. So the first start after it queues the
+[stranded-decision repair](#repairing-decisions-stranded-before-015) in the
+background. Before deploying it, stop and drain every older
+Nexus request handler and background writer: an older instance neither writes
+the row when it claims a revocation or an approval nor deletes it when the
+decision settles, and it runs no worker to drain the table.
 
 `003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
 `ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,
@@ -3113,6 +3128,155 @@ repeats mean self-service recovery is silently broken.
 runs it at once, returning `gateway_teardown: "ok"` if Edge accepted or
 `"pending"` if not. It is audited as `user.gateway_teardown_retry` and is the
 **Retry** button on the Users page. Do not edit the table by hand.
+
+### Access gateway jobs
+
+A targeted grant revocation and an access approval each change the gateway
+after their decision commits: the revocation takes the ACL group off the
+identity's consumer after `active → revoked`, and the approval writes it before
+its grant row. The claim writes an `access_gateway_jobs` row in the same
+transaction (issue #651), owned by the request that made it, which deletes the
+row once the gateway matches the portal: the removal landed, the grant
+committed, or the compensation left nothing behind. A revocation whose
+rollback put the grant back deletes it too.
+
+- `sending` is owned (by the request, or by a worker that claimed it; claiming
+  increments `attempts`); `pending` is owed at `next_attempt_at`. A `sending`
+  row untouched for five minutes returns to `pending`, which is how a row whose
+  process stopped between the claim and the Edge write reaches the worker.
+  Success deletes the row. There is no failed state.
+- `kind = 'revoke'` (`subject_id` is the grant): the worker takes the grant's
+  REST and MCP groups off, unless the grant is active again or another active
+  grant now holds them, and writes `access.revoke_complete`.
+- `kind = 'approve'` (`subject_id` is the request): under the API's proxy lease,
+  re-reading the API inside it, the worker sets the identity's groups for the
+  API to exactly what its active grant currently covers (removing what no grant
+  covers, and putting back a covered group a stale write dropped, while the
+  account is active) and returns a request still `approved` without
+  its grant to `pending`. It cancels it instead (clearing `decided_by` and
+  `decided_at`) for a tool request whose grant is gone, when another active
+  grant now holds the access, or when a newer request holds the identity's
+  pending slot (`pending_request_id`). It writes `access.approve_rollback` or
+  `access.tools_approve_rollback` with `recovered: true`. It never completes an
+  approval.
+- Retries back off `10 s × 2^attempts`, capped at five minutes, plus up to 10%
+  jitter.
+- Recovery of an approval rewrites the identity's consumer even when no group
+  changes. Edge stamps every row `PUT`, which retires the row's tag, so an
+  approval that froze after its own checks and wakes after recovery has its
+  late write refused by `If-Match` rather than landing a group no grant or job
+  stands behind. A compensation moves its request only while its own job, at
+  its generation, is still there, so it never resets a newer decision of the
+  same request.
+- A request holds its fresh job for at most about
+  `6 × FERRUM_ADMIN_TIMEOUT_MS + 2 × 30 s + 60 s` (Edge round trips, two lease
+  waits, and a rollback waiting out a crashed key holder): about 150 s by
+  default, 480 s at the 60 s ceiling. Above the five-minute stale threshold
+  the worker may start recovering a decision its request is still settling;
+  it re-checks under the same keys, so this wastes work rather than granting
+  access, and the worker logs a warning at startup when the configured
+  timeout allows it.
+
+```sql
+SELECT kind, subject_id, user_id, status, attempts, last_error, next_attempt_at, updated_at
+  FROM access_gateway_jobs
+  ORDER BY updated_at DESC LIMIT 20;
+```
+
+**Alert on** repeats of these `warn` lines, which carry the job, `attempts`
+and `error`: a row that keeps failing means an identity may hold access no
+active grant stands behind.
+
+```
+Access gateway retry failed; a revoked grant may still hold its ACL group
+Access gateway retry failed; an approval that never committed may still hold its ACL group
+Access gateway tick failed
+```
+
+The worker also logs `Released stale access gateway claims`,
+`Could not release stale access gateway claims`,
+`Access gateway job was abandoned mid-flight; the stale sweep recovers it` and
+`Dropped an access gateway job that was no longer owed`, and the access service
+`Completed the gateway removal of an interrupted revocation`,
+`Compensated an approval whose grant never committed` and
+`Could not settle an access gateway job; the worker recovers it`.
+
+To repair, read `last_error` and restore what it names (usually Edge
+reachability or the admin JWT). The worker keeps retrying and needs no
+re-driving. Do not edit the table by hand.
+
+A request that stalls past the stale threshold loses its job to the worker and
+then writes nothing: its consumer write re-checks, inside the consumer key, that
+it still owns the job at its generation and that no active grant now holds the
+group. A stalled approval answers `409 CONFLICT` and is compensated by the
+worker; a stalled revocation still answers with the revoked grant, and the
+worker finishes its removal.
+
+#### Repairing decisions stranded before 015
+
+Releases before `015_access_gateway_jobs` kept no record of a decision's
+gateway half, so an upgraded database may hold a revoked grant whose ACL group
+is still on its consumer, or an approved request that no grant was ever made
+from. The first start after the migration (any instance, under a lease) scans
+for both, a page at a time, and queues ordinary jobs for the worker:
+
+- one `revoke` job per identity and API that has a revoked grant, no active
+  grant and a consumer. The worker reads the consumer and takes the API's
+  groups off, so it costs one Edge read and write per such identity even where
+  the group is already gone; an identity granted again since keeps its access.
+- one `approve` job per approved request for access (`grant_id` null) that no
+  grant, in any status, names as its origin. The worker takes back any group no
+  grant covers and returns the request to `pending` (or cancels it when the
+  identity already holds a grant, or a newer request is pending).
+
+It pages through each table by id (a keyset, so rows the worker settles while
+the scan runs cannot shift unread ones out of a page), records
+`access.stranded_repair_queued` (with the counts) only after every candidate
+was considered, and later starts skip it. A start that stops part-way leaves the marker
+unwritten, and the next start resumes: a job is only inserted where its grant
+or request has none. Progress is logged as
+`Queued access gateway repairs for decisions made before 015`, failures as
+`Could not queue access gateway repairs; the next start tries again`.
+
+**Not repaired automatically: approved requests for more tools.** A tool request
+that succeeded stays `approved`, and a later prune or revocation of its grant
+makes it look exactly like one that was interrupted, so compensating these
+automatically could put an old request back in a provider's inbox. List the
+candidates and review each one:
+
+```sql
+SELECT r.id, r.api_id, r.user_id, r.application_id, r.approved_tools, g.status, g.approved_tools
+  FROM access_requests r JOIN grants g ON g.id = r.grant_id
+  WHERE r.status = 'approved' AND g.status = 'active';
+```
+
+On MongoDB the same rows live in the `access_requests` and `grants`
+collections (each keyed by `_id`); join them with `$lookup` in `mongosh`:
+
+```js
+db.access_requests.aggregate([
+  { $match: { status: 'approved', grant_id: { $ne: null } } },
+  { $lookup: { from: 'grants', localField: 'grant_id', foreignField: '_id', as: 'grant' } },
+  { $unwind: '$grant' },
+  { $match: { 'grant.status': 'active' } },
+  {
+    $project: {
+      api_id: 1,
+      user_id: 1,
+      application_id: 1,
+      approved_tools: 1,
+      grant_status: '$grant.status',
+      grant_tools: '$grant.approved_tools',
+    },
+  },
+]);
+```
+
+A row whose `r.approved_tools` are not all in `g.approved_tools`, and whose tools
+are still published, was interrupted. Its consumer may hold the extra tool
+groups. To repair it, revoke the grant (`POST /api/grants/:id/revoke`, which
+takes every group of the API off the identity's consumer) and approve a fresh
+request for the tools it should have.
 
 ### Account recovery revocations
 

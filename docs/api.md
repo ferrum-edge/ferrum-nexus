@@ -2933,7 +2933,11 @@ addition and returns the request to `pending` where possible; the
 `access.approve_rollback` audit row records the outcome (with
 `acl_group_possibly_applied: true` when the gateway write was not
 acknowledged). Check the request and grant before retrying an ambiguous
-failure.
+failure. A compensation that could not finish, or an approval interrupted
+before its grant committed, is completed by the access gateway worker: it
+takes the groups back and returns the request to `pending`, recording
+`access.approve_rollback` with `recovered: true`
+([operations](operations.md#access-gateway-jobs)).
 
 ### `POST /api/access-requests/:id/deny`
 
@@ -3020,7 +3024,11 @@ _session_, **API owner with the provider role, or admin** →
 Removes the ACL group from the grantee's consumer, marks the grant `revoked`,
 and moves the originating access request to `revoked`. The grantee is notified
 and emailed. `409 CONFLICT` when already revoked. Revocation holds the API's
-proxy lease, like approval.
+proxy lease, like approval. The claim commits a durable job with it, so a
+removal interrupted after the claim (the process stopped, or the removal and
+its rollback both failed) is finished by the access gateway worker, which
+records `access.revoke_complete`
+([operations](operations.md#access-gateway-jobs)).
 
 ### `POST /api/grants/:id/relinquish`
 

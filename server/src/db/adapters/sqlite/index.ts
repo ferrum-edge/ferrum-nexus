@@ -148,6 +148,8 @@ import type {
   EnqueueEmailInput,
   AccountRecoveryJobRecord,
   AccountRecoveryJobRepo,
+  AccessGatewayJobRecord,
+  AccessGatewayJobRepo,
   GatewayIdentityRecord,
   GatewayIdentityRepo,
   GatewayTeardownJobFilter,
@@ -692,6 +694,25 @@ function mapAccountRecoveryJob(row: Row): AccountRecoveryJobRecord {
   };
 }
 
+function mapAccessGatewayJob(row: Row): AccessGatewayJobRecord {
+  return {
+    id: text(row.id),
+    generation: text(row.generation),
+    kind: text(row.kind) as AccessGatewayJobRecord['kind'],
+    subject_id: text(row.subject_id),
+    api_id: text(row.api_id),
+    user_id: text(row.user_id),
+    application_id: textOrNull(row.application_id),
+    requested_by: textOrNull(row.requested_by),
+    status: text(row.status) as AccessGatewayJobRecord['status'],
+    attempts: int(row.attempts),
+    next_attempt_at: textOrNull(row.next_attempt_at),
+    last_error: textOrNull(row.last_error),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
 function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
   return {
     id: text(row.id),
@@ -957,6 +978,7 @@ class SqliteStore implements NexusStore {
     this.emailOutbox = guardRepo(this.emailOutbox, mediate, ['enqueue', 'claimDue']);
     this.gatewayTeardownJobs = guardRepo(this.gatewayTeardownJobs, mediate);
     this.accountRecoveryJobs = guardRepo(this.accountRecoveryJobs, mediate);
+    this.accessGatewayJobs = guardRepo(this.accessGatewayJobs, mediate);
     this.auditLogs = guardRepo(this.auditLogs, mediate);
     this.settings = guardRepo(this.settings, mediate);
     this.emailTemplates = guardRepo(this.emailTemplates, mediate);
@@ -2201,6 +2223,13 @@ class SqliteStore implements NexusStore {
       return { items: rows.map(mapAccessRequest), total };
     },
 
+    pageByStatus: async (status, afterId, limit) =>
+      queryAll(
+        this.db,
+        `SELECT * FROM access_requests WHERE status = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+        [status, afterId ?? '', Math.max(1, Math.floor(limit))],
+      ).map(mapAccessRequest),
+
     findPendingByApiAndUser: async (apiId, userId, applicationId = null) => {
       const where = new WhereBuilder()
         .always('api_id = ?', apiId)
@@ -2344,6 +2373,13 @@ class SqliteStore implements NexusStore {
       );
       return { items: rows.map(mapGrant), total };
     },
+
+    pageByStatus: async (status, afterId, limit) =>
+      queryAll(
+        this.db,
+        `SELECT * FROM grants WHERE status = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+        [status, afterId ?? '', Math.max(1, Math.floor(limit))],
+      ).map(mapGrant),
 
     findActiveByApiAndUser: async (apiId, userId, applicationId = null) => {
       const where = new WhereBuilder()
@@ -3571,6 +3607,136 @@ class SqliteStore implements NexusStore {
 
     deleteByUser: async (userId) =>
       execute(this.db, 'DELETE FROM account_recovery_jobs WHERE user_id = ?', [userId]) > 0,
+  };
+
+  /* ── accessGatewayJobs ────────────────────────────────────────────────── */
+
+  readonly accessGatewayJobs: AccessGatewayJobRepo = {
+    upsertClaimed: async (input, now) => {
+      // `subject_id` is unique, so the conflict target is the decision rather
+      // than the row id: a subject decided again re-owns its row instead of
+      // queueing a second one.
+      execute(
+        this.db,
+        `INSERT INTO access_gateway_jobs
+           (id, generation, kind, subject_id, api_id, user_id, application_id, requested_by,
+            status, attempts, next_attempt_at, last_error, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sending', 0, ?, NULL, ?, ?)
+         ON CONFLICT (subject_id) DO UPDATE SET
+           generation = excluded.generation,
+           kind = excluded.kind,
+           api_id = excluded.api_id,
+           user_id = excluded.user_id,
+           application_id = excluded.application_id,
+           requested_by = excluded.requested_by,
+           status = 'sending',
+           attempts = 0,
+           next_attempt_at = excluded.next_attempt_at,
+           last_error = NULL,
+           updated_at = excluded.updated_at`,
+        [
+          newId(),
+          newId(),
+          input.kind,
+          input.subject_id,
+          input.api_id,
+          input.user_id,
+          input.application_id,
+          input.requested_by,
+          now,
+          now,
+          now,
+        ],
+      );
+      const job = await this.accessGatewayJobs.findBySubject(input.subject_id);
+      if (!job) {
+        throw new Error('accessGatewayJobs.upsertClaimed: row vanished immediately after upsert');
+      }
+      return job;
+    },
+
+    enqueueIfAbsent: async (input, now) =>
+      execute(
+        this.db,
+        `INSERT INTO access_gateway_jobs
+           (id, generation, kind, subject_id, api_id, user_id, application_id, requested_by,
+            status, attempts, next_attempt_at, last_error, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?)
+         ON CONFLICT (subject_id) DO NOTHING`,
+        [
+          newId(),
+          newId(),
+          input.kind,
+          input.subject_id,
+          input.api_id,
+          input.user_id,
+          input.application_id,
+          input.requested_by,
+          now,
+          now,
+          now,
+        ],
+      ) > 0,
+
+    findBySubject: async (subjectId) => {
+      const row = queryOne(this.db, 'SELECT * FROM access_gateway_jobs WHERE subject_id = ?', [
+        subjectId,
+      ]);
+      return row ? mapAccessGatewayJob(row) : null;
+    },
+
+    claimDue: async (now, limit) => {
+      const claim = this.db.transaction((): AccessGatewayJobRecord[] => {
+        const ids = queryAll(
+          this.db,
+          `SELECT id FROM access_gateway_jobs
+           WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+           ORDER BY next_attempt_at ASC, created_at ASC LIMIT ?`,
+          [now, Math.max(1, Math.floor(limit))],
+        ).map((row) => text(row.id));
+        if (ids.length === 0) return [];
+        execute(
+          this.db,
+          `UPDATE access_gateway_jobs
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?
+           WHERE id IN (${ids.map(() => '?').join(', ')}) AND status = 'pending'`,
+          [nowIso(), newId(), ...ids],
+        );
+        return queryAll(
+          this.db,
+          `SELECT * FROM access_gateway_jobs WHERE id IN (${ids.map(() => '?').join(', ')})`,
+          ids,
+        ).map(mapAccessGatewayJob);
+      });
+      return claim();
+    },
+
+    deleteClaimed: async (job) =>
+      execute(
+        this.db,
+        "DELETE FROM access_gateway_jobs WHERE id = ? AND generation = ? AND status = 'sending'",
+        [job.id, job.generation],
+      ) > 0,
+
+    reschedule: async (job, nextAttemptAt, lastError) =>
+      execute(
+        this.db,
+        `UPDATE access_gateway_jobs
+         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ?
+         WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [nextAttemptAt, lastError, nowIso(), job.id, job.generation],
+      ) > 0,
+
+    releaseStale: async (olderThan) =>
+      execute(
+        this.db,
+        `UPDATE access_gateway_jobs SET status = 'pending', next_attempt_at = ?, updated_at = ?
+         WHERE status = 'sending' AND updated_at <= ?`,
+        [nowIso(), nowIso(), olderThan],
+      ),
+
+    deleteBySubject: async (subjectId) =>
+      execute(this.db, 'DELETE FROM access_gateway_jobs WHERE subject_id = ?', [subjectId]) > 0,
   };
 
   /* ── auditLogs ────────────────────────────────────────────────────────── */

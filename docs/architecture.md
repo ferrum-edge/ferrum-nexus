@@ -1243,6 +1243,36 @@ one inline attempt, and leaves failures to `credentials/account-recovery.ts`.
 
 See [`operations.md`](operations.md#account-recovery-revocations) for monitoring.
 
+### 7.3 Access gateway jobs
+
+A targeted revocation commits `active → revoked` and its `access.revoke` row,
+then takes the ACL group off the consumer. An approval commits
+`pending → approved`, writes the group, then commits the grant. Each claim
+writes an `access_gateway_jobs` row in its transaction, already `sending` and
+owned by the request (issue #651), and `access/gateway-job-worker.ts` finishes
+what the request could not:
+
+```
+claim(tx) ──> access_gateway_jobs(sending, owned) ──┬─> deleted: removal landed, grant committed,
+                                                    │            or rollback restored the grant
+                                                    ├─> reschedule (pending): compensation incomplete
+                                                    └─> stale after 5 min (pending): process stopped
+pending ──claim──> sending ──> recoverGatewayJob ──┬─> deleted
+                                                   └─> reschedule (pending, backoff)
+```
+
+- One row per subject (`subject_id`, the grant or the request, is unique).
+- Recovery never adds access. A revocation's removal is checked inside the
+  consumer key: it is skipped when the grant is active again or another active
+  grant holds the group. An approval is compensated, not completed: under the
+  proxy lease every approval holds, the identity's groups are set to what its
+  active grant currently covers and the request leaves `approved`. A
+  foreground approval refuses its write when another grant holds the identity,
+  or when the grant it extends changed since it was admitted.
+- Backoff and stale threshold match §7.1; there is no `failed` state.
+
+See [`operations.md`](operations.md#access-gateway-jobs) for monitoring.
+
 ---
 
 ## 8. Session and CSRF model

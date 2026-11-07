@@ -32,6 +32,7 @@ describe('buildout schema baseline', () => {
           '012_access_request_grant',
           '013_account_recovery_jobs',
           '014_mysql_text_capacity',
+          '015_access_gateway_jobs',
         ],
       );
       const statements = splitSqlStatements(files[0]!.sql);

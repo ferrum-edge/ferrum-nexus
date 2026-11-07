@@ -102,6 +102,20 @@
  * MCP membership also needs a current published exposure, protected by a
  * proxy lease through the restore commit. A lost proxy lease is reacquired
  * only after the original section releases all its keys.
+ *
+ * ## The in-between state is durable (issue #651)
+ *
+ * Between a claim and its gateway write, the only record of what the gateway
+ * still owed used to be the JS stack: a process that stopped there left a
+ * revoked grant whose group still opened the door, or an approved request
+ * with no grant behind a group that may already have landed. So a targeted
+ * revocation's claim and an approval's claim each commit an
+ * `access_gateway_jobs` row, owned by the request (`sending`). The request
+ * deletes it once the gateway matches the portal — the removal landed, the
+ * grant committed with it, a rollback put the grant back — and hands anything
+ * else to `access/gateway-job-worker.ts`, which finishes it through
+ * {@link AccessService.recoverGatewayJob}. The disable sweep needs none: the
+ * account teardown job already owes every group of the account.
  */
 
 import { isDeepStrictEqual } from 'node:util';
@@ -124,7 +138,12 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
-import { AuditAction, auditRowCommitted, type AuditService } from '../audit/service.js';
+import {
+  AuditAction,
+  SYSTEM_ACTOR,
+  auditRowCommitted,
+  type AuditService,
+} from '../audit/service.js';
 import {
   canReadApiSummary,
   canViewApi,
@@ -133,6 +152,7 @@ import {
 } from '../catalog/read-access.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
+  AccessGatewayJobRecord,
   AccessRequestFilter,
   AccessRequestRecord,
   ApiRecord,
@@ -140,6 +160,7 @@ import type {
   GrantRecord,
   ListOptions,
   NexusStore,
+  UpdateInput,
   UserRecord,
 } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
@@ -301,7 +322,37 @@ export interface AccessService {
     reason: string,
     ip?: string | null,
   ): Promise<BulkRevocationResult>;
+  /**
+   * Drive one `access_gateway_jobs` row the access gateway worker claimed to
+   * completion (issue #651). Never adds access:
+   *
+   * - `revoke`: the grant's ACL groups come off the identity's consumer,
+   *   unless the grant is active again or another active grant now owns them
+   *   (read inside the consumer key), and `access.revoke_complete` commits
+   *   with the job's deletion.
+   * - `approve`: under the API's proxy lease, the identity's groups for the
+   *   API are set to what its active grant currently covers (a covered group
+   *   a stale write dropped is put back), and a request still
+   *   `approved` without the grant it promised is returned to `pending` (or
+   *   `cancelled`, when the grant it would extend is gone). The rollback row
+   *   commits with the job's deletion.
+   *
+   * Throws when the gateway or the store refused; the worker reschedules.
+   */
+  recoverGatewayJob(job: AccessGatewayJobRecord): Promise<AccessGatewayJobOutcome>;
 }
+
+/**
+ * What {@link AccessService.recoverGatewayJob} did with a claimed job.
+ *
+ * - `completed`: the gateway work it owed was done, and the job deleted;
+ * - `obsolete`: nothing was owed any more — the revoked grant is active again,
+ *   another grant owns the group, or the identity, request or API is gone —
+ *   and the job was deleted without touching the gateway;
+ * - `superseded`: the claim is no longer the current one (a new decision
+ *   re-owned the row, or another worker took it over); nothing was done.
+ */
+export type AccessGatewayJobOutcome = 'completed' | 'obsolete' | 'superseded';
 
 /** One grant {@link AccessService.revokeAllForUser} could not fully revoke. */
 export interface BulkRevocationFailure {
@@ -344,6 +395,16 @@ const RESTORE_SKIP_MESSAGES: Record<RevocationRestoreSkip, string> = {
   application_missing: 'Left a failed revocation revoked: its application no longer exists',
   group_absent: 'Left a failed revocation revoked: its ACL group is no longer on the consumer',
 };
+
+/**
+ * How many times approval recovery retakes the proxy lease when the API's
+ * proxy changed between reading it and holding its key, before it gives up
+ * for this attempt (the worker reschedules).
+ */
+const RECOVERY_PROXY_ATTEMPTS = 5;
+
+/** The decision note a tool request cancelled because its grant is gone carries. */
+const INACTIVE_GRANT_NOTE = 'The grant this request would extend is no longer active';
 
 /** What a revocation rollback did with the grant it claimed. */
 interface RevocationRestore {
@@ -542,7 +603,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     apiId: Uuid,
     present: boolean,
     applicationId: Uuid | null,
-    options: Pick<MutateAclGroupsOptions, 'afterWrite' | 'absentIsDone'> = {},
+    options: Pick<MutateAclGroupsOptions, 'afterWrite' | 'absentIsDone' | 'guard'> = {},
     tools: string[] | null = null,
   ): Promise<string> {
     const group = aclGroupForApi(apiId);
@@ -809,6 +870,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       revoked_by: null,
       revoked_at: null,
     });
+    // The grant is active again, so the removal its claim queued is no longer
+    // owed: the job goes in the transaction that puts the grant back, and the
+    // worker can never take the group off an active grant (issue #651).
+    if (back) await db.accessGatewayJobs.deleteBySubject(claim.id);
     if (back && request) {
       await db.accessRequests.updateIfStatus(request.id, 'revoked', {
         status: request.status,
@@ -1186,7 +1251,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    *   slot, the release loses and is recorded as such rather than forced.
    *
    * Every step is best-effort: the caller re-throws the original failure, and
-   * an operator needs the trail whichever way the compensation went.
+   * an operator needs the trail whichever way the compensation went. Resolves
+   * to whether it left nothing behind — `false` when the group could not be
+   * taken back or the request could not be settled — so the caller knows
+   * whether the approval's durable job is done or owed to the worker.
    */
   async function unwindApproval(input: {
     actor: UserRecord;
@@ -1198,10 +1266,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     groupPossiblyApplied: boolean;
     /** The identity the approval was for; scopes both the re-check and the undo. */
     applicationId: Uuid | null;
+    /** The job this approval's claim wrote; the request moves only while it is still this one. */
+    job: AccessGatewayJobRecord;
     cause: unknown;
     ip: string | null;
-  }): Promise<void> {
+  }): Promise<boolean> {
     const { actor, api, requester, requestId, groupAdded, cause, ip } = input;
+    let settled = true;
     const details: Record<string, unknown> = {
       api_id: api.id,
       api_slug: api.slug,
@@ -1220,13 +1291,41 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // exactly as they are and let the audit row say so.
       details.acl_group_kept = groupAdded;
       details.kept_for_grant_id = live.id;
+      if (live.access_request_id !== requestId) {
+        // Another request's grant: this approval's whole-resource write may
+        // have replaced that grant's groups with a broader subset, and this
+        // request still reads `approved` with no grant of its own. Neither is
+        // settled here; the job goes to the worker, which cuts the groups
+        // back to that grant's subset and settles the request (issue #651).
+        details.deferred_to_recovery = true;
+        settled = false;
+      }
     } else {
+      const regrant: { grant?: GrantRecord | null } = {};
       if (groupAdded !== null) {
         try {
-          await setGroupMembership(requester, api.id, false, input.applicationId);
-          details.acl_group_removed = groupAdded;
+          // Re-checked inside the consumer key: an approval that committed a
+          // grant for the identity since — this one's lost acknowledgement,
+          // or a newer one after recovery took this one over — owns the group.
+          await setGroupMembership(requester, api.id, false, input.applicationId, {
+            guard: async () => {
+              regrant.grant = await store.grants.findActiveByApiAndUser(
+                api.id,
+                requester.id,
+                input.applicationId,
+              );
+              return regrant.grant === null;
+            },
+          });
+          if (regrant.grant) {
+            details.acl_group_kept = groupAdded;
+            details.kept_for_grant_id = regrant.grant.id;
+          } else {
+            details.acl_group_removed = groupAdded;
+          }
         } catch (error) {
           details.acl_group_orphaned = groupAdded;
+          settled = false;
           deps.log?.(
             {
               api_id: api.id,
@@ -1240,16 +1339,29 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       }
 
       try {
-        const released = await store.accessRequests.updateIfStatus(requestId, 'approved', {
-          status: 'pending',
-          decided_by: null,
-          decided_at: null,
-          decision_note: null,
-          approved_tools: null,
-        });
-        details.request_released = released !== null;
+        if (regrant.grant) {
+          // As at the entry check: a grant owns the access, so the decision
+          // stands as well as the group — and, when that grant is another
+          // request's, the worker reconciles both.
+          details.request_left = 'regranted';
+          if (regrant.grant.access_request_id !== requestId) {
+            details.deferred_to_recovery = true;
+            settled = false;
+          }
+        } else {
+          const outcome = await settleOwnRequest(input.job, requestId, {
+            status: 'pending',
+            decided_by: null,
+            decided_at: null,
+            decision_note: null,
+            approved_tools: null,
+          });
+          details.request_released = outcome.moved !== null;
+          if (outcome.superseded) details.request_left = 'superseded';
+        }
       } catch (error) {
         details.request_released = false;
+        settled = false;
         deps.log?.(
           {
             request_id: requestId,
@@ -1271,6 +1383,121 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       .catch(() => undefined);
 
     deps.log?.(details, 'Rolled back an approval that could not be committed');
+    return settled;
+  }
+
+  /**
+   * Move a request out of `approved` for a compensation, but only while `job`
+   * — the claim the compensating attempt wrote — is still its subject's job at
+   * that generation (issue #651). Status alone cannot tell this attempt's
+   * `approved` from a later approval of the same request after recovery took
+   * this one over; the job can, because recovery deletes it and a new claim
+   * replaces its generation. One transaction, so the check and the move commit
+   * together, fenced by whatever lease the caller holds. `superseded` is set
+   * when the job was no longer this attempt's and nothing moved.
+   */
+  async function settleOwnRequest(
+    job: AccessGatewayJobRecord,
+    requestId: Uuid,
+    patch: UpdateInput<AccessRequestRecord>,
+  ): Promise<{ moved: AccessRequestRecord | null; superseded: boolean }> {
+    return store.transaction(async (tx) => {
+      const current = await tx.accessGatewayJobs.findBySubject(job.subject_id);
+      if (
+        !current ||
+        current.id !== job.id ||
+        current.generation !== job.generation ||
+        current.status !== 'sending'
+      ) {
+        return { moved: null, superseded: true };
+      }
+      return {
+        moved: await tx.accessRequests.updateIfStatus(requestId, 'approved', patch),
+        superseded: false,
+      };
+    });
+  }
+
+  /**
+   * Claim an approval (`pending → approved`) and record the gateway work it
+   * owes, in one transaction (issue #651).
+   *
+   * The approval writes the gateway before its grant row, so between this
+   * claim and the grant's commit the request reads `approved` with no grant
+   * behind it, and the consumer may already carry the group. The job row,
+   * committed with the claim and owned by this request (`sending`), is what
+   * makes that window durable: the grant's transaction deletes it, a
+   * compensation that left nothing behind deletes it, and anything else —
+   * a crash, a failed compensation — leaves it for the access gateway worker,
+   * which takes the groups back and returns the request to `pending`.
+   */
+  async function claimApproval(
+    actor: UserRecord,
+    request: AccessRequestRecord,
+    requester: UserRecord,
+    decision: { approved_tools: string[] | null; decided_at: string; decision_note: string | null },
+  ): Promise<{ updated: AccessRequestRecord; job: AccessGatewayJobRecord }> {
+    const claimed = await store.transaction(async (tx) => {
+      const moved = await tx.accessRequests.updateIfStatus(request.id, 'pending', {
+        status: 'approved',
+        approved_tools: decision.approved_tools,
+        decided_by: actor.id,
+        decided_at: decision.decided_at,
+        decision_note: decision.decision_note,
+      });
+      if (!moved) return null;
+      const job = await tx.accessGatewayJobs.upsertClaimed(
+        {
+          kind: 'approve',
+          subject_id: request.id,
+          api_id: request.api_id,
+          user_id: requester.id,
+          application_id: request.application_id,
+          requested_by: actor.id,
+        },
+        decision.decided_at,
+      );
+      return { updated: moved, job };
+    });
+    if (!claimed) throw await decisionConflict(request.id);
+    return claimed;
+  }
+
+  /**
+   * Settle a job this request owns once its own attempt is over (issue #651).
+   *
+   * `done`: the gateway matches the portal, so the row goes. Otherwise it is
+   * handed to the access gateway worker, due at once (the worker applies the
+   * backoff to its own retries). Best-effort: a row this cannot touch stays
+   * `sending`, and the worker's stale sweep recovers it.
+   */
+  async function settleOwnedJob(
+    job: AccessGatewayJobRecord | null,
+    done: boolean,
+    cause?: unknown,
+  ): Promise<void> {
+    if (!job) return;
+    try {
+      if (done) {
+        await store.accessGatewayJobs.deleteClaimed(job);
+      } else {
+        await store.accessGatewayJobs.reschedule(
+          job,
+          nowIso(),
+          cause instanceof Error ? cause.message : String(cause),
+        );
+      }
+    } catch (error) {
+      deps.log?.(
+        {
+          job_id: job.id,
+          kind: job.kind,
+          subject_id: job.subject_id,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Could not settle an access gateway job; the worker recovers it',
+      );
+    }
   }
 
   /**
@@ -1420,6 +1647,17 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   }
 
   /**
+   * The error an approval raises when it no longer owns its durable job: it
+   * stalled past the stale threshold and the access gateway worker took the
+   * job over to compensate it (issue #651).
+   */
+  function supersededApproval(): NexusError {
+    return conflict(
+      'This approval took too long and was handed to recovery; reload the request and retry',
+    );
+  }
+
+  /**
    * The error a tool request or its approval raises when the grant it would
    * extend is gone, revoked, or no longer the requesting identity's.
    */
@@ -1446,7 +1684,12 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * leave the consumer holding access no grant stands behind. So when no active
    * grant exists for the identity, every group of the API comes off, as
    * {@link unwindApproval} does, and the request is cancelled rather than
-   * released: it could never be approved.
+   * released: it could never be approved. The cancellation clears the
+   * approver's `decided_by` and `decided_at`, as the system's other
+   * cancellations leave them: nobody decided it, and the approval it would
+   * otherwise still name never took effect (issue #651).
+   *
+   * Resolves to whether it left nothing behind, as {@link unwindApproval} does.
    */
   async function unwindToolApproval(input: {
     actor: UserRecord;
@@ -1458,10 +1701,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     groupPossiblyApplied: boolean;
     /** Whether the consumer write may have run at all. */
     attempted: boolean;
+    /** The job this approval's claim wrote; the request moves only while it is still this one. */
+    job: AccessGatewayJobRecord;
     cause: unknown;
     ip: string | null;
-  }): Promise<void> {
+  }): Promise<boolean> {
     const { actor, api, requester, request, added, ip } = input;
+    let settled = true;
     const details: Record<string, unknown> = {
       api_id: api.id,
       api_slug: api.slug,
@@ -1485,21 +1731,68 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     const covered = holder?.approved_tools;
     const uncovered = covered === null ? [] : added.filter((id) => !covered?.includes(id));
     if (active && uncovered.length === 0) {
-      // The grant already covers every added tool: the update committed, so
-      // the groups and the decision both stand.
+      // The grant already covers every added tool: the update committed, or a
+      // newer approval widened it, so the decision stands. The groups are set
+      // to the grant's current subset, not just left: a stale whole-resource
+      // write may have dropped a tool another approval added meanwhile.
       details.tool_groups_kept = mcpGroupsForGrant(api.id, added);
+      try {
+        const reconciled = await reconcileGroups(requester, api, request.application_id);
+        if (reconciled.removed.length > 0) details.acl_groups_removed = reconciled.removed;
+        if (reconciled.restored.length > 0) details.acl_groups_restored = reconciled.restored;
+      } catch (error) {
+        // The worker sets them right on a later pass.
+        details.deferred_to_recovery = true;
+        settled = false;
+        deps.log?.(
+          {
+            api_id: api.id,
+            user_id: requester.id,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'Could not set the groups of a tool approval to its grant; the worker retries',
+        );
+      }
+    } else if (!active && holder) {
+      // Another grant now holds the identity. This approval's whole-resource
+      // write carried the old grant's subset as well as the added tools, so
+      // the consumer may hold more than that grant covers: the job goes to the
+      // worker, which sets the groups to that grant and cancels the request.
+      details.kept_for_grant_id = holder.id;
+      details.deferred_to_recovery = true;
+      settled = false;
     } else {
+      // What the consumer key showed: a grant that now owns these groups, or
+      // the subset of the identity's active grant (`null`: every tool).
+      const regrant: { grant?: GrantRecord | null } = {};
+      const now: { covered?: string[] | null } = {};
       if (input.attempted && !holder) {
         // No active grant for the identity: the REST group and every tool
         // group the write put back come off together.
         try {
+          // Re-checked inside the consumer key: an approval that committed a
+          // grant for the identity since owns these groups now.
           await setGroupMembership(requester, api.id, false, request.application_id, {
             absentIsDone: true,
+            guard: async () => {
+              regrant.grant = await store.grants.findActiveByApiAndUser(
+                api.id,
+                requester.id,
+                request.application_id,
+              );
+              return regrant.grant === null;
+            },
           });
-          details.acl_group_removed = aclGroupForApi(api.id);
-          details.all_tool_groups_removed = true;
+          if (regrant.grant) {
+            details.acl_group_kept = aclGroupForApi(api.id);
+            details.kept_for_grant_id = regrant.grant.id;
+          } else {
+            details.acl_group_removed = aclGroupForApi(api.id);
+            details.all_tool_groups_removed = true;
+          }
         } catch (error) {
           details.acl_group_orphaned = aclGroupForApi(api.id);
+          settled = false;
           deps.log?.(
             {
               api_id: api.id,
@@ -1517,17 +1810,45 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             namespace,
             request.application_id,
           );
+          const removed: { groups: string[] } = { groups: [...strip] };
           if (consumer) {
+            // The grant's subset is re-read inside the consumer key: a tool
+            // that a later approval added to it since is no longer stripped.
             await provisioner.mutateAclGroups(
               consumer.ferrum_consumer_id,
-              (groups) => groups.filter((group) => !strip.has(group)),
+              (groups) => {
+                const covered = now.covered;
+                const still =
+                  covered === null
+                    ? new Set<string>()
+                    : new Set(
+                        mcpGroupsForGrant(
+                          api.id,
+                          uncovered.filter((id) => !(covered ?? []).includes(id)),
+                        ),
+                      );
+                removed.groups = [...still];
+                return groups.filter((group) => !still.has(group));
+              },
               requester.id,
-              { absentIsDone: true },
+              {
+                absentIsDone: true,
+                guard: async () => {
+                  const current = await store.grants.findActiveByApiAndUser(
+                    api.id,
+                    requester.id,
+                    request.application_id,
+                  );
+                  now.covered = current ? current.approved_tools : [];
+                  return true;
+                },
+              },
             );
           }
-          details.tool_groups_removed = [...strip];
+          details.tool_groups_removed = removed.groups;
         } catch (error) {
           details.tool_groups_orphaned = [...strip];
+          settled = false;
           deps.log?.(
             {
               api_id: api.id,
@@ -1539,27 +1860,42 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           );
         }
       }
+      // The consumer key showed the added tools covered after all (a newer
+      // approval of this request committed them), or a grant that now owns
+      // the groups: the decision stands with them.
+      const nowCovered = now.covered;
+      const decided =
+        regrant.grant != null ||
+        (nowCovered !== undefined &&
+          (nowCovered === null || added.every((id) => nowCovered.includes(id))));
       try {
-        if (active) {
-          const released = await store.accessRequests.updateIfStatus(request.id, 'approved', {
+        if (decided) {
+          details.request_left = 'regranted';
+        } else if (active) {
+          const outcome = await settleOwnRequest(input.job, request.id, {
             status: 'pending',
             decided_by: null,
             decided_at: null,
             decision_note: null,
             approved_tools: null,
           });
-          details.request_released = released !== null;
+          details.request_released = outcome.moved !== null;
+          if (outcome.superseded) details.request_left = 'superseded';
         } else {
           // It would extend a grant that is gone: it could never be approved.
-          const cancelled = await store.accessRequests.updateIfStatus(request.id, 'approved', {
+          const outcome = await settleOwnRequest(input.job, request.id, {
             status: 'cancelled',
+            decided_by: null,
+            decided_at: null,
             approved_tools: null,
-            decision_note: 'The grant this request would extend is no longer active',
+            decision_note: INACTIVE_GRANT_NOTE,
           });
-          details.request_cancelled = cancelled !== null;
+          details.request_cancelled = outcome.moved !== null;
+          if (outcome.superseded) details.request_left = 'superseded';
         }
       } catch (error) {
         details[active ? 'request_released' : 'request_cancelled'] = false;
+        settled = false;
         deps.log?.(
           {
             request_id: request.id,
@@ -1580,6 +1916,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       )
       .catch(() => undefined);
     deps.log?.(details, 'Rolled back a tool approval that could not be committed');
+    return settled;
   }
 
   /**
@@ -1629,19 +1966,16 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     validateToolSubset(api, added);
     const next = [...current, ...added];
 
-    const decidedAt = nowIso();
-    const updated = await store.accessRequests.updateIfStatus(request.id, 'pending', {
-      status: 'approved',
+    const { updated, job } = await claimApproval(actor, request, requester, {
       approved_tools: added,
-      decided_by: actor.id,
-      decided_at: decidedAt,
+      decided_at: nowIso(),
       decision_note: note ?? null,
     });
-    if (!updated) throw await decisionConflict(request.id);
 
     let attempted = true;
     let groupPossiblyApplied = true;
     const committed: { grant?: GrantRecord } = {};
+    const ownership: { superseded?: boolean; regranted?: boolean } = {};
     try {
       try {
         await setGroupMembership(
@@ -1650,6 +1984,29 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           true,
           request.application_id,
           {
+            // Inside the consumer key, before the write: an approval that
+            // stalled until recovery took its job over writes nothing, and
+            // neither does one whose identity is now held by another grant —
+            // its whole-resource write would replace that grant's groups.
+            guard: async () => {
+              ownership.superseded = !(await stillOwned(job));
+              if (ownership.superseded) return false;
+              const holder = await store.grants.findActiveByApiAndUser(
+                api.id,
+                requester.id,
+                request.application_id,
+              );
+              // A grant that is gone is the widen transaction's to refuse; the
+              // compensation then takes every group back off. A grant whose
+              // subset changed since this approval admitted it — another
+              // approval widened it — would lose those tools to `next`, which
+              // was computed from the old subset.
+              ownership.regranted =
+                holder !== null &&
+                (holder.id !== grantId ||
+                  !isDeepStrictEqual(holder.approved_tools ?? null, current));
+              return !ownership.regranted;
+            },
             afterWrite: async () => {
               groupPossiblyApplied = false;
               committed.grant = await store.transaction(async (tx) => {
@@ -1672,6 +2029,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
                   approved_tools: next,
                 });
                 if (!widened) throw inactiveGrant();
+                // The approval's gateway work is done with the subset it
+                // commits, so its durable job goes in the same transaction —
+                // and only while this request still owns it.
+                if (!(await tx.accessGatewayJobs.deleteClaimed(job))) throw supersededApproval();
                 await audit.forStore(tx).record(
                   { id: actor.id, role: actor.role },
                   AuditAction.ACCESS_TOOLS_APPROVE,
@@ -1694,6 +2055,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           },
           next,
         );
+        if (ownership.superseded) throw supersededApproval();
+        if (ownership.regranted) throw inactiveGrant();
       } catch (error) {
         // The provisioner's active-user guard runs before the ACL write.
         if (isNexusError(error) && error.code === 'USER_DISABLED') {
@@ -1703,7 +2066,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         throw error;
       }
     } catch (error) {
-      await unwindToolApproval({
+      // Refused before its write: the job's new owner compensates it.
+      if (ownership.superseded) throw error;
+      // Refused before its write because another grant holds the identity:
+      // the worker settles the request against that grant.
+      if (ownership.regranted) {
+        await settleOwnedJob(job, false, error);
+        throw error;
+      }
+      const settled = await unwindToolApproval({
         actor,
         api,
         requester,
@@ -1712,9 +2083,11 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         added,
         groupPossiblyApplied,
         attempted,
+        job,
         cause: error,
         ip,
       });
+      await settleOwnedJob(job, settled, error);
       throw error;
     }
     const widened = committed.grant;
@@ -1833,12 +2206,14 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       const revokedAt = nowIso();
       let movedRequest: AccessRequestRecord | null = null;
       let cancelledToolRequest: AccessRequestRecord | null = null;
+      let revokeJob: AccessGatewayJobRecord | null = null;
       const updated = await store.transaction(async (tx) => {
         // The body may be run again if the adapter retries it, so the only
         // things it writes outside the store start each attempt cleared:
         // a request moved by an attempt that rolled back was not moved.
         movedRequest = null;
         cancelledToolRequest = null;
+        revokeJob = null;
         const result = await tx.grants.updateIfStatus(grant.id, 'active', {
           status: 'revoked',
           revoked_by: actor.id,
@@ -1850,6 +2225,23 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         // approved.
         movedRequest = await moveRequestToRevoked(tx, grant, actor.id, revokedAt, reason);
         cancelledToolRequest = await cancelPendingToolRequest(tx, grant, actor, revokedAt, ip);
+        // The group removal this claim owes is recorded with it (issue #651).
+        // Until the removal lands, the grant reads `revoked` while the group
+        // may still open the door; with the job committed here, a process
+        // that stops in between leaves the access gateway worker a row to
+        // finish instead of working access nothing retries. This request owns
+        // the row (`sending`) and settles it below.
+        revokeJob = await tx.accessGatewayJobs.upsertClaimed(
+          {
+            kind: 'revoke',
+            subject_id: grant.id,
+            api_id: grant.api_id,
+            user_id: grant.user_id,
+            application_id: grant.application_id,
+            requested_by: actor.id,
+          },
+          revokedAt,
+        );
         // The revocation is recorded with the claim that makes it. Written
         // after the gateway step, a failed insert left the grant revoked and
         // unaudited behind a `500`, and a repeat found it already revoked
@@ -1879,9 +2271,25 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // touch it. `unwindRevocation` puts the rows back if the group will
       // not come off: a revocation the gateway did not accept must not stand
       // as one.
+      const job = revokeJob as AccessGatewayJobRecord | null;
+      // Read inside the consumer key, just before the write: a revocation
+      // that stalled until recovery took its job over — and possibly
+      // finished it, and a new grant was made since — must not strip what is
+      // there now. The worker's own removal checks the same.
+      const ownership: { lost?: string | null } = {};
       try {
-        if (grantee) await setGroupMembership(grantee, api.id, false, grant.application_id);
+        if (grantee) {
+          await setGroupMembership(grantee, api.id, false, grant.application_id, {
+            guard: async () => {
+              ownership.lost = job ? await revocationObsolete(job) : null;
+              return ownership.lost === null;
+            },
+          });
+        }
       } catch (error) {
+        // A rollback that puts the grant back deletes the job with it; one
+        // that leaves the grant `revoked` hands the job to the worker, which
+        // keeps retrying the removal (issue #651).
         const resume = await unwindRevocation({
           actor,
           claim: updated,
@@ -1894,10 +2302,22 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         if (resume) {
           return async () => {
             await resume();
+            await settleOwnedJob(job, false, error);
             throw error;
           };
         }
+        await settleOwnedJob(job, false, error);
         throw error;
+      }
+      if (ownership.lost === 'superseded') {
+        // The job's new owner finishes the removal; the revocation stands.
+        deps.log?.(
+          { grant_id: grant.id, user_id: grant.user_id },
+          'A stalled revocation found its gateway step taken over by recovery; it wrote nothing',
+        );
+      } else {
+        // The removal landed, or is no longer owed (a newer grant holds the group).
+        await settleOwnedJob(job, true);
       }
 
       // Inside the lease, as an approval announces inside it: a revocation
@@ -1941,6 +2361,325 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
     const [decorated] = await decorateGrants([updated], actor);
     return decorated ?? updated;
+  }
+
+  /* ── Durable gateway jobs (issue #651) ─────────────────────────────────── */
+
+  /** Whether `job` is still the current claim of its subject's row. */
+  async function stillOwned(job: AccessGatewayJobRecord): Promise<boolean> {
+    const current = await store.accessGatewayJobs.findBySubject(job.subject_id);
+    return (
+      current !== null &&
+      current.id === job.id &&
+      current.generation === job.generation &&
+      current.status === 'sending'
+    );
+  }
+
+  /** Delete a claim whose work is no longer owed, saying which outcome that is. */
+  async function dropJob(
+    job: AccessGatewayJobRecord,
+    reason: string,
+  ): Promise<AccessGatewayJobOutcome> {
+    if (!(await store.accessGatewayJobs.deleteClaimed(job))) return 'superseded';
+    deps.log?.(
+      { job_id: job.id, kind: job.kind, subject_id: job.subject_id, reason },
+      'Dropped an access gateway job that was no longer owed',
+    );
+    return 'obsolete';
+  }
+
+  /**
+   * Why a revocation job's removal is no longer owed, or `null` while it is.
+   * Read inside the consumer key, which every writer of the identity's groups
+   * holds — an approval committing its grant, a rollback restoring one — so the
+   * answer holds until the removal lands.
+   */
+  async function revocationObsolete(job: AccessGatewayJobRecord): Promise<string | null> {
+    if (!(await stillOwned(job))) return 'superseded';
+    const grant = await store.grants.findById(job.subject_id);
+    if (grant?.status === 'active') return 'grant_active';
+    const live = await store.grants.findActiveByApiAndUser(
+      job.api_id,
+      job.user_id,
+      job.application_id,
+    );
+    return live ? 'regranted' : null;
+  }
+
+  /**
+   * Finish a revocation whose gateway step never completed: take the grant's
+   * REST and MCP groups off the identity's consumer, then delete the job with
+   * an `access.revoke_complete` row. Idempotent — a group already gone, or a
+   * consumer already gone, is a removal done.
+   */
+  async function recoverRevocation(job: AccessGatewayJobRecord): Promise<AccessGatewayJobOutcome> {
+    const group = aclGroupForApi(job.api_id);
+    const grantee = await store.users.findById(job.user_id);
+    // An account that is gone took its consumers with it.
+    if (!grantee) return dropJob(job, 'grantee_missing');
+    const seen: { obsolete?: string | null } = {};
+    const owed = async (): Promise<boolean> => {
+      seen.obsolete = await revocationObsolete(job);
+      return seen.obsolete === null;
+    };
+    const consumer = await store.consumers.findByUserAndNamespace(
+      job.user_id,
+      namespace,
+      job.application_id,
+    );
+    if (consumer) {
+      await provisioner.mutateAclGroups(
+        consumer.ferrum_consumer_id,
+        (groups) =>
+          groups.filter((entry) => entry !== group && !isMcpGroupForApi(entry, job.api_id)),
+        grantee.id,
+        { absentIsDone: true, guard: owed },
+      );
+    } else {
+      // No consumer, no group: nothing to remove, but still only ours to settle.
+      await owed();
+    }
+    const obsolete = seen.obsolete ?? null;
+    if (obsolete === 'superseded') return 'superseded';
+    if (obsolete !== null) return dropJob(job, obsolete);
+
+    const completed = await store.transaction(async (tx) => {
+      if (!(await tx.accessGatewayJobs.deleteClaimed(job))) return false;
+      await audit.forStore(tx).record(
+        SYSTEM_ACTOR,
+        AuditAction.ACCESS_REVOKE_COMPLETE,
+        { type: 'grant', id: job.subject_id },
+        {
+          api_id: job.api_id,
+          user_id: job.user_id,
+          application_id: job.application_id,
+          acl_group: group,
+          revoked_by: job.requested_by,
+          attempts: job.attempts,
+          consumer_found: consumer !== null,
+        },
+        null,
+      );
+      return true;
+    });
+    if (!completed) return 'superseded';
+    deps.log?.(
+      { grant_id: job.subject_id, user_id: job.user_id, attempts: job.attempts },
+      'Completed the gateway removal of an interrupted revocation',
+    );
+    return 'completed';
+  }
+
+  /**
+   * Set the identity's groups for `api` to exactly what its active grant
+   * covers: nothing at all without one; with one, the REST group and the MCP
+   * groups of its **current** subset, exactly what an approval writes. A group
+   * the grant covers but the consumer lacks — dropped by a stale whole-resource
+   * write — is put back, but only while the account is active: a disabled
+   * account's groups are the teardown's to remove, and nothing is added for it.
+   * Groups of other APIs are never touched. The active grant and the account
+   * are read inside the consumer key, so no approval, restore, disable or
+   * re-enable can change the answer before the write lands. The consumer is
+   * rewritten even when no group changes, which fences any approval still
+   * holding the tag it read before this. Resolves to that grant and to the
+   * groups taken off and put back.
+   */
+  async function reconcileGroups(
+    requester: UserRecord,
+    api: ApiRecord,
+    applicationId: Uuid | null,
+  ): Promise<{ live: GrantRecord | null; removed: string[]; restored: string[] }> {
+    const rest = aclGroupForApi(api.id);
+    const seen: {
+      live: GrantRecord | null;
+      active: boolean;
+      removed: string[];
+      restored: string[];
+    } = { live: null, active: false, removed: [], restored: [] };
+    const readLive = async (): Promise<boolean> => {
+      seen.live = await store.grants.findActiveByApiAndUser(api.id, requester.id, applicationId);
+      seen.active = (await store.users.findById(requester.id))?.status === 'active';
+      return true;
+    };
+    const consumer = await store.consumers.findByUserAndNamespace(
+      requester.id,
+      namespace,
+      applicationId,
+    );
+    if (!consumer) {
+      await readLive();
+      return { live: seen.live, removed: [], restored: [] };
+    }
+    await provisioner.mutateAclGroups(
+      consumer.ferrum_consumer_id,
+      (groups) => {
+        const live = seen.live;
+        const canonical = live
+          ? [rest, ...(api.agents ? mcpGroupsForGrant(api.id, live.approved_tools) : [])]
+          : [];
+        const covered = new Set(canonical);
+        const kept = groups.filter(
+          (entry) => (entry !== rest && !isMcpGroupForApi(entry, api.id)) || covered.has(entry),
+        );
+        seen.removed = groups.filter((entry) => !kept.includes(entry));
+        seen.restored = seen.active ? canonical.filter((entry) => !kept.includes(entry)) : [];
+        return [...kept, ...seen.restored];
+      },
+      requester.id,
+      // Always written, even when nothing changes: Edge stamps every row
+      // `PUT`, which retires the consumer's tag, so a frozen approval that
+      // read the consumer before this and passed its own guard has its late
+      // `PUT` refused by `If-Match` instead of landing (issue #651).
+      { absentIsDone: true, guard: readLive },
+    );
+    return { live: seen.live, removed: seen.removed, restored: seen.restored };
+  }
+
+  /**
+   * Finish an approval whose grant never committed — the process stopped
+   * between the claim and the grant, or the compensation could not undo
+   * everything — by compensating it, never by completing it: the approver is
+   * not here to answer for an admission check made minutes ago.
+   *
+   * Under the API's proxy lease, which every approval holds from its claim to
+   * its grant, so a live approval is never compensated from under it. The API
+   * row is re-read inside that lease, which publishing holds too: an agents
+   * edit that enrolled an all-tools grantee in the MCP-all group before the
+   * lease was taken must be seen, or the reconcile would strip the group it
+   * just added. A proxy that changed meanwhile is retaken under its current
+   * key. The identity's groups come back to what its active grant covers,
+   * then a request still `approved` without the grant it promised goes back
+   * to `pending` — or to `cancelled` for a tool request whose grant is gone,
+   * or when another request now holds the identity's pending slot — with the
+   * rollback row and the job's deletion, in one transaction.
+   */
+  async function recoverApproval(job: AccessGatewayJobRecord): Promise<AccessGatewayJobOutcome> {
+    for (let attempt = 0; attempt < RECOVERY_PROXY_ATTEMPTS; attempt += 1) {
+      const seen = await store.apis.findById(job.api_id);
+      const proxyId = seen?.ferrum_proxy_id;
+      // No proxy means no approval holds a lease on this API; the row read
+      // here is the one reconciled against.
+      if (!proxyId) return settleApproval(job, seen);
+      const settled = await edge.serializePerKey(proxyLockKey(proxyId), async () => {
+        const api = await store.apis.findById(job.api_id);
+        if (api && api.ferrum_proxy_id !== proxyId) return null;
+        return { outcome: await settleApproval(job, api) };
+      });
+      if (settled) return settled.outcome;
+    }
+    throw conflict('The gateway proxy kept changing while an approval was being compensated');
+  }
+
+  /** {@link recoverApproval}'s body, run on an API row read under its proxy lease. */
+  async function settleApproval(
+    job: AccessGatewayJobRecord,
+    api: ApiRecord | null,
+  ): Promise<AccessGatewayJobOutcome> {
+    if (!(await stillOwned(job))) return 'superseded';
+    const [request, requester] = await Promise.all([
+      store.accessRequests.findById(job.subject_id),
+      store.users.findById(job.user_id),
+    ]);
+    // The API, the request or the account is gone, and its proxy, request
+    // rows or consumers went with it: there is nothing left to reconcile.
+    if (!api) return dropJob(job, 'api_missing');
+    if (!request) return dropJob(job, 'request_missing');
+    if (!requester) return dropJob(job, 'requester_missing');
+
+    const { live, removed, restored } = await reconcileGroups(requester, api, job.application_id);
+
+    let settle: 'release' | 'cancel' | 'kept' | 'none' = 'none';
+    if (request.status === 'approved') {
+      if (request.grant_id == null) {
+        if (live?.access_request_id === request.id) settle = 'kept';
+        else settle = live ? 'cancel' : 'release';
+      } else {
+        const grant = live?.id === request.grant_id ? live : null;
+        const added = request.approved_tools ?? [];
+        const covers =
+          grant !== null &&
+          (grant.approved_tools === null ||
+            added.every((id) => grant.approved_tools?.includes(id) === true));
+        if (covers) settle = 'kept';
+        else settle = grant ? 'release' : 'cancel';
+      }
+    }
+    const details: Record<string, unknown> = {
+      api_id: api.id,
+      api_slug: api.slug,
+      user_id: requester.id,
+      application_id: job.application_id,
+      recovered: true,
+      attempts: job.attempts,
+      approved_by: job.requested_by,
+      acl_groups_removed: removed,
+      ...(restored.length > 0 ? { acl_groups_restored: restored } : {}),
+      ...(request.grant_id ? { grant_id: request.grant_id } : {}),
+      ...(live ? { kept_for_grant_id: live.id } : {}),
+    };
+    const settled = await store.transaction(async (tx) => {
+      if (!(await tx.accessGatewayJobs.deleteClaimed(job))) return null;
+      // Re-decided per attempt: the body may be re-run.
+      let outcome = settle;
+      // The request cannot go back to `pending` once the identity has filed
+      // another request for the API: that one holds the one pending slot,
+      // and the unique index would refuse the release on every retry. It
+      // could never be approved anyway, so it is cancelled instead.
+      const occupied =
+        outcome === 'release'
+          ? await tx.accessRequests.findPendingByApiAndUser(
+              request.api_id,
+              request.user_id,
+              request.application_id,
+            )
+          : null;
+      if (occupied && occupied.id !== request.id) outcome = 'cancel';
+      let moved: AccessRequestRecord | null = null;
+      if (outcome === 'release') {
+        moved = await tx.accessRequests.updateIfStatus(request.id, 'approved', {
+          status: 'pending',
+          decided_by: null,
+          decided_at: null,
+          decision_note: null,
+          approved_tools: null,
+        });
+      } else if (outcome === 'cancel') {
+        moved = await tx.accessRequests.updateIfStatus(request.id, 'approved', {
+          status: 'cancelled',
+          decided_by: null,
+          decided_at: null,
+          approved_tools: null,
+          decision_note: occupied
+            ? 'A newer request for this API is pending'
+            : request.grant_id == null
+              ? 'This identity already holds an active grant for this API'
+              : INACTIVE_GRANT_NOTE,
+        });
+      }
+      await audit.forStore(tx).record(
+        SYSTEM_ACTOR,
+        request.grant_id
+          ? AuditAction.ACCESS_TOOLS_APPROVE_ROLLBACK
+          : AuditAction.ACCESS_APPROVE_ROLLBACK,
+        { type: 'access_request', id: request.id },
+        {
+          ...details,
+          ...(outcome === 'release' ? { request_released: moved !== null } : {}),
+          ...(outcome === 'cancel' ? { request_cancelled: moved !== null } : {}),
+          ...(outcome === 'cancel' && occupied ? { pending_request_id: occupied.id } : {}),
+          ...(outcome === 'kept' ? { request_kept: true } : {}),
+        },
+        null,
+      );
+      return { outcome };
+    });
+    if (!settled) return 'superseded';
+    deps.log?.(
+      { ...details, request_id: request.id, settle: settled.outcome },
+      'Compensated an approval whose grant never committed',
+    );
+    return 'completed';
   }
 
   return {
@@ -2343,15 +3082,16 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         // cancellation or a denial racing this approval either loses here, or
         // wins and leaves this call with a CONFLICT and no gateway side effect
         // to explain away.
-        const decidedAt = nowIso();
-        const updated = await store.accessRequests.updateIfStatus(request.id, 'pending', {
-          status: 'approved',
+        //
+        // The claim commits with the durable job its gateway work owes
+        // (issue #651), so a process that stops before the grant lands
+        // leaves the worker a row to finish rather than an `approved`
+        // request with no grant, and possibly a group no grant stands behind.
+        const { updated, job } = await claimApproval(actor, request, requester, {
           approved_tools: tools,
-          decided_by: actor.id,
-          decided_at: decidedAt,
+          decided_at: nowIso(),
           decision_note: note ?? null,
         });
-        if (!updated) throw await decisionConflict(request.id);
 
         // Steps 2 and 3 — see the module docblock for why the gateway goes
         // first, and `unwindApproval` for what happens when the grant does not
@@ -2360,6 +3100,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         let addedGroup: string | null = group;
         let groupPossiblyApplied = true;
         const committed: { grant?: GrantRecord } = {};
+        const ownership: { superseded?: boolean; regranted?: boolean } = {};
         try {
           try {
             // A rejected write may still have landed. Register compensation
@@ -2379,6 +3120,22 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
               true,
               request.application_id,
               {
+                // Inside the consumer key, before the write: an approval that
+                // stalled until recovery took its job over writes nothing, and
+                // neither does one whose identity another request's grant now
+                // holds — its whole-resource write would replace that grant's
+                // groups with this approval's subset.
+                guard: async () => {
+                  ownership.superseded = !(await stillOwned(job));
+                  if (ownership.superseded) return false;
+                  const holder = await store.grants.findActiveByApiAndUser(
+                    api.id,
+                    requester.id,
+                    request.application_id,
+                  );
+                  ownership.regranted = holder !== null && holder.access_request_id !== request.id;
+                  return !ownership.regranted;
+                },
                 afterWrite: async () => {
                   groupPossiblyApplied = false;
                   committed.grant = await store.transaction(async (tx) => {
@@ -2426,12 +3183,21 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
                       },
                       ip,
                     );
+                    // The grant is what the job was waiting for — and it
+                    // commits only while this request still owns the job.
+                    if (!(await tx.accessGatewayJobs.deleteClaimed(job))) {
+                      throw supersededApproval();
+                    }
                     return created;
                   });
                 },
               },
               tools,
             );
+            if (ownership.superseded) throw supersededApproval();
+            if (ownership.regranted) {
+              throw conflict('This identity already has an active grant for this API');
+            }
           } catch (error) {
             // The provisioner's active-user guard runs before the ACL write.
             if (isNexusError(error) && error.code === 'USER_DISABLED') {
@@ -2441,7 +3207,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             throw error;
           }
         } catch (error) {
-          await unwindApproval({
+          // Refused before its write: the job's new owner compensates it.
+          if (ownership.superseded) throw error;
+          // Refused before its write because another request's grant holds the
+          // identity: the worker settles this request against that grant.
+          if (ownership.regranted) {
+            await settleOwnedJob(job, false, error);
+            throw error;
+          }
+          const settled = await unwindApproval({
             actor,
             api,
             requester,
@@ -2449,9 +3223,11 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             groupAdded: addedGroup,
             groupPossiblyApplied,
             applicationId: request.application_id,
+            job,
             cause: error,
             ip,
           });
+          await settleOwnedJob(job, settled, error);
           throw error;
         }
         const grant = committed.grant;
@@ -2706,6 +3482,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         if (cause === null) revoked += 1;
       }
       return { revoked, failed };
+    },
+
+    async recoverGatewayJob(job): Promise<AccessGatewayJobOutcome> {
+      return job.kind === 'revoke' ? recoverRevocation(job) : recoverApproval(job);
     },
 
     async listRequests(actor, filter = {}, options): Promise<Paginated<AccessRequest>> {

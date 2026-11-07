@@ -217,4 +217,16 @@ export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
       mongodb: '2dd08d197a2c9e4c514c870186750fd1af03b55eaf67b3fc104eb9370d804f04',
     },
   },
+  {
+    id: '015_access_gateway_jobs',
+    // Pending: not shipped in a release yet. The release that ships it sets
+    // `release` and freezes these checksums.
+    release: null,
+    sha256: {
+      sqlite: 'ef4368b57baa1fed98fba0078449743b78e615180974d2735f37d296c3294dd1',
+      pg: 'ef4368b57baa1fed98fba0078449743b78e615180974d2735f37d296c3294dd1',
+      mysql: '5592b0ad13cc614b953133fd0006445f7a2cdf8f5212e6b3a44fefbcc8dd5d8f',
+      mongodb: 'ccb24cda0928d258debc9bc92df6e0b7f2ea63792d7144529ac5337093e6dd02',
+    },
+  },
 ];

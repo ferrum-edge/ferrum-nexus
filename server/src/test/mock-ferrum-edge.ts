@@ -1931,8 +1931,19 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     return [...consumers.values()].filter((consumer) => consumer.namespace === namespace);
   }
 
+  /**
+   * Row writes per consumer. Edge stamps `updated_at` on every row `PUT` and
+   * binds its tag to the complete stored state, so even a `PUT` that changes
+   * no field retires the previous tag. The mock's millisecond `updated_at`
+   * could repeat within one millisecond, so the tag also binds this count.
+   */
+  const consumerRevisions = new WeakMap<StoredConsumer, number>();
+
   function consumerTag(consumer: StoredConsumer): string {
-    const mac = createHmac('sha256', secret).update(JSON.stringify(consumer)).digest('hex');
+    const mac = createHmac('sha256', secret)
+      .update(JSON.stringify(consumer))
+      .update(`#${consumerRevisions.get(consumer) ?? 0}`)
+      .digest('hex');
     return '"' + mac.slice(0, 32) + '"';
   }
 
@@ -2374,6 +2385,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         stored.acl_groups = Array.isArray(body.acl_groups) ? body.acl_groups.map(String) : [];
         stored.credentials = credentials;
         stored.updated_at = nowIso();
+        consumerRevisions.set(stored, (consumerRevisions.get(stored) ?? 0) + 1);
         return send(res, 200, project(stored));
       }
       if (method === 'DELETE') {
