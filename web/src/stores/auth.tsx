@@ -20,6 +20,7 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  capabilitiesFor,
   roleAtLeast,
   type Capabilities,
   type LoginRequest,
@@ -55,18 +56,6 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-/** Capabilities inferred from the role, used until the server sends its own. */
-function capabilitiesForRole(role: Role): Capabilities {
-  return {
-    can_publish_apis: roleAtLeast(role, 'provider'),
-    can_review_access_requests: roleAtLeast(role, 'provider'),
-    can_manage_users: roleAtLeast(role, 'admin'),
-    can_manage_settings: roleAtLeast(role, 'admin'),
-    can_view_audit_log: roleAtLeast(role, 'admin'),
-    can_use_god_mode: roleAtLeast(role, 'super_admin'),
-  };
-}
-
 export function AuthProvider({ children }: { children: ReactNode }): ReactElement {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<AuthStatus>('loading');
@@ -99,7 +88,9 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
       }
       previousUserId.current = next.id;
       setUser(next);
-      setCapabilities(nextCapabilities ?? capabilitiesForRole(next.role));
+      // The server's capabilities are authoritative; the shared role derivation
+      // is only the fallback until a response carries them.
+      setCapabilities(nextCapabilities ?? capabilitiesFor(next.role));
       setStatus('authenticated');
     },
     [clearSessionCache],

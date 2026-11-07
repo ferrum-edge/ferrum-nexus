@@ -5,6 +5,8 @@
  * roles beneath it: `client` < `provider` < `admin` < `super_admin`.
  */
 
+import type { Capabilities } from './api-contract.js';
+
 /** Every role a Nexus account can hold. */
 export type Role = 'client' | 'provider' | 'admin' | 'super_admin';
 
@@ -65,4 +67,20 @@ export function roleRank(role: Role): number {
  */
 export function roleAtLeast(a: Role, b: Role): boolean {
   return roleRank(a) >= roleRank(b);
+}
+
+/**
+ * The role-derived permission flags `/api/auth/me` and sign-in return, and the
+ * SPA's fallback until a response carries them. One derivation, so the flags
+ * the server sends and the ones the SPA assumes cannot disagree.
+ */
+export function capabilitiesFor(role: Role): Capabilities {
+  return {
+    can_publish_apis: roleAtLeast(role, 'provider'),
+    can_review_access_requests: roleAtLeast(role, 'provider'),
+    can_manage_users: roleAtLeast(role, 'admin'),
+    can_manage_settings: roleAtLeast(role, 'admin'),
+    can_view_audit_log: roleAtLeast(role, 'admin'),
+    can_use_god_mode: roleAtLeast(role, 'super_admin'),
+  };
 }

@@ -29,6 +29,7 @@ export {
   type KeyedSerializer,
   type KeyedSerializerOptions,
 } from './client.js';
+export { consumerWithAclGroups } from './consumer-metadata.js';
 export type { BackendEgressAdmission, EgressProfile } from './egress-policy.js';
 
 export {

@@ -42,6 +42,7 @@
 
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import { newId } from '../lib/ids.js';
+import { proxyLockKey } from '../lib/keyed-serializer.js';
 import type {
   EdgePluginAssociation,
   EdgePluginConfig,
@@ -365,7 +366,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
      * what an undo step needs.
      */
     async withProxy(proxyId, fn) {
-      return edge.serializePerKey(`proxy:${proxyId}`, fn);
+      return edge.serializePerKey(proxyLockKey(proxyId), fn);
     },
 
     async mutateProxy(proxyId, change, subject) {

@@ -30,10 +30,8 @@
 import { z } from 'zod';
 
 import {
-  CORRELATION_ID_RESERVED_HEADERS,
   MAX_PLUGIN_TRIGGER_PATH_LENGTH,
-  isGatewayOwnedConsumerHeader,
-  isProxyHopsHeader,
+  PLUGIN_ADMISSION_RULES,
   type ApiPluginTrigger,
   type PluginFieldSpec,
   type ProviderPluginDescriptor,
@@ -161,91 +159,15 @@ export function buildPluginConfigSchema(
       ),
     );
 
-  const invariant = PLUGIN_INVARIANTS[descriptor.name];
-  if (!invariant) return object as unknown as z.ZodType<Record<string, unknown>>;
+  // Edge's cross-field admission rules, shared with the plugin form. The server
+  // judges the wire config, after the omissions above: an absent key is Edge's
+  // default, not an empty value. One issue at the config root.
+  const rule = PLUGIN_ADMISSION_RULES[descriptor.name];
+  if (!rule) return object as unknown as z.ZodType<Record<string, unknown>>;
   return object.superRefine((config, ctx) => {
-    const problem = invariant(config);
-    if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: problem });
+    const problem = rule(config);
+    if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: problem.message });
   }) as unknown as z.ZodType<Record<string, unknown>>;
-}
-
-/**
- * Admission rules Edge applies **beyond** its key set, for the plugins in the
- * palette that have one. Each returns a message, or `null` when the config is
- * acceptable.
- *
- * Everything here mirrors a documented gateway rejection; nothing here is a
- * portal-invented policy.
- */
-const PLUGIN_INVARIANTS: Readonly<
-  Record<string, (config: Record<string, unknown>) => string | null>
-> = {
-  /**
-   * `IpRestrictionConfig` requires at least one of `allow`/`deny` to be
-   * non-empty (`anyOf` in the schema): a config that lists neither restricts
-   * nobody and Edge refuses it rather than installing a no-op.
-   */
-  ip_restriction: (config) => {
-    const allow = asArray(config.allow);
-    const deny = asArray(config.deny);
-    if (allow.length === 0 && deny.length === 0) {
-      return 'List at least one allowed or denied address — an IP restriction with both lists empty would restrict nobody';
-    }
-    return null;
-  },
-
-  /**
-   * `BotDetectionConfig` refuses a no-op: an empty `blocked_patterns` is only
-   * valid when `allow_missing_user_agent: false` creates a reject path. An
-   * allow list on its own enforces nothing.
-   */
-  bot_detection: (config) => {
-    const blocked = asArray(config.blocked_patterns);
-    const explicitlyEmpty = Array.isArray(config.blocked_patterns) && blocked.length === 0;
-    if (explicitlyEmpty && config.allow_missing_user_agent !== false) {
-      return 'With no blocked User-Agent patterns, requests with no User-Agent must be rejected — otherwise the filter blocks nothing';
-    }
-    return null;
-  },
-
-  /**
-   * `CorrelationIdConfig.header_name` may not be a protocol, forwarding,
-   * tracing or credential header: Edge owns those, and letting a provider
-   * overwrite `authorization` or `x-forwarded-for` would be a security hole
-   * rather than a naming choice.
-   */
-  correlation_id: (config) => {
-    const header = typeof config.header_name === 'string' ? config.header_name.trim() : '';
-    if (header !== '' && CORRELATION_ID_RESERVED_HEADERS.includes(header.toLowerCase())) {
-      return `The gateway owns '${header}' and rejects it as a correlation header; choose a name of your own, such as x-request-id`;
-    }
-    if (header !== '' && isGatewayOwnedConsumerHeader(header)) {
-      return `The gateway owns every x-consumer-* header and X-Authenticated-Identity, and rejects '${header}' as a correlation header; choose a name of your own, such as x-request-id`;
-    }
-    if (header !== '' && isProxyHopsHeader(header)) {
-      return `The gateway owns X-Ferrum-Hops, its loop-guard hop count, and rejects '${header}' as a correlation header; choose a name of your own, such as x-request-id`;
-    }
-    return null;
-  },
-
-  /**
-   * `RequestDeduplicationConfig.header_name` may not be in the gateway-owned
-   * `x-consumer-*` namespace (Edge `v0.9.9`) or be `X-Authenticated-Identity`
-   * (Edge `v0.9.15`): the gateway strips those headers from every client
-   * request, so the key could never arrive. Edge's parser checks nothing
-   * else — `X-Ferrum-Hops` stays an ordinary client header here.
-   */
-  request_deduplication: (config) => {
-    const header = typeof config.header_name === 'string' ? config.header_name.trim() : '';
-    if (header !== '' && isGatewayOwnedConsumerHeader(header)) {
-      return `The gateway strips every x-consumer-* header and X-Authenticated-Identity from client requests, so '${header}' could never carry an idempotency key; choose a name of your own, such as Idempotency-Key`;
-    }
-    return null;
-  },
-};
-
-function asArray(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
 }
 
 /* ── Triggers ───────────────────────────────────────────────────────────── */

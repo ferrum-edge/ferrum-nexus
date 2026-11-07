@@ -5,6 +5,7 @@
  * The caller must keep the original credential-complete row If-Match.
  */
 import { edgeError } from '../lib/errors.js';
+import type { EdgeConsumerReplacement, EdgeVerifiedConsumer } from './types.js';
 
 const HMAC_PASSWORD_HASH = /^hmac_sha256:[0-9a-f]{64}$/;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
@@ -63,4 +64,31 @@ export function consumerMetadataCredentials(
   // It validates the restored state; truly unrepresentable history must fail
   // there, never be dropped here to make the metadata write succeed.
   return projected;
+}
+
+/**
+ * The whole-resource `PUT /consumers/{id}` body that replaces only a live
+ * consumer's `acl_groups` (CLAUDE.md rule 13): every other writable field is
+ * carried over from the credential-complete `verification()` row, so an ACL
+ * change never resets an operator's labels or `custom_id`. Send it with that
+ * snapshot's row tag.
+ *
+ * The mapped type lists every key of {@link EdgeConsumerReplacement}, so a
+ * writable field added to the Edge consumer body fails to compile here until it
+ * is preserved. Read-only fields (`namespace`, timestamps) are left out: Edge
+ * rejects unknown keys on write.
+ */
+export function consumerWithAclGroups(
+  live: EdgeVerifiedConsumer,
+  aclGroups: string[],
+): EdgeConsumerReplacement {
+  const body: { [K in keyof Required<EdgeConsumerReplacement>]: EdgeConsumerReplacement[K] } = {
+    id: live.id,
+    labels: live.labels,
+    username: live.username,
+    custom_id: live.custom_id ?? null,
+    credentials: live.credentials,
+    acl_groups: aclGroups,
+  };
+  return body;
 }

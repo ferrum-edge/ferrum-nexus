@@ -319,6 +319,25 @@ export function apiRestoreLockKey(apiId: string): string {
 }
 
 /**
+ * The per-proxy key every rewrite of a gateway proxy runs under, taken through
+ * the Edge client's `serializePerKey`: the plugin binder's `withProxy` (every
+ * proxy and first-class plugin write), access request and tool-request
+ * admission, approval, revocation and relinquishment, grant restoration, and
+ * the gateway repair that flags an orphaned proxy (inside
+ * {@link apiRestoreLockKey}).
+ *
+ * Catalog-policy changes and access decisions exclude each other only because
+ * all of them spell this key identically, and the `edge_leases` row behind it
+ * is shared by every Nexus instance, so the string is a cross-instance and
+ * rolling-deploy contract: never change it. Prefixed so it cannot collide with
+ * the bare consumer-id keys; distinct from the palette-only `proxy-palette:<id>`
+ * key on purpose.
+ */
+export function proxyLockKey(proxyId: string): string {
+  return `proxy:${proxyId}`;
+}
+
+/**
  * `CONFLICT` text for a caller that could not get {@link messageBudgetLockKey},
  * {@link broadcastLockKey}, {@link massEmailLockKey} or {@link smtpTestLockKey}.
  *

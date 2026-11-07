@@ -4,6 +4,7 @@ import { test } from 'node:test';
 
 import type { PublishApiResponse } from '@ferrum-nexus/shared';
 
+import { proxyLockKey } from '../lib/keyed-serializer.js';
 import { createConversionRaceFixture, createOwnedOperation } from './conversion-race-fixture.js';
 import { buildTestApp, specWithServer, testOperationSignal, type TestApp } from './helpers.js';
 
@@ -299,7 +300,7 @@ test(
       await fixture.waitFor(arrived.promise, request, 'gateway read');
       const serialize = peer.edgeClient.serializePerKey.bind(peer.edgeClient);
       peer.edgeClient.serializePerKey = (key, fn) => {
-        if (key === `proxy:${api.ferrum_proxy_id}`) contending.release();
+        if (key === proxyLockKey(api.ferrum_proxy_id!)) contending.release();
         return serialize(key, fn);
       };
       const rival = fixture.own(
@@ -322,7 +323,7 @@ test(
             async close(): Promise<void> {
               events.push('one shared teardown');
               try {
-                const key = `proxy:${api.ferrum_proxy_id}`;
+                const key = proxyLockKey(api.ferrum_proxy_id!);
                 const now = new Date().toISOString();
                 assert.equal(
                   await one.store.leases.acquire(

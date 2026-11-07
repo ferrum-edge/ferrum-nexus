@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import type { PublishApiResponse, SpecEnforcementLevel } from '@ferrum-nexus/shared';
 
+import { proxyLockKey } from '../lib/keyed-serializer.js';
 import { readRecoveryJournal } from '../publishing/recovery-storage.js';
 import { createConversionRaceFixture } from './conversion-race-fixture.js';
 import { buildTestApp, specWithServer, type TestApp } from './helpers.js';
@@ -127,7 +128,7 @@ for (const initial of ['routes', 'docs_only'] as const) {
             });
             const serialize = two.edgeClient.serializePerKey.bind(two.edgeClient);
             two.edgeClient.serializePerKey = (key, fn) => {
-              if (key === `proxy:${proxyId}`) waiting();
+              if (key === proxyLockKey(proxyId)) waiting();
               return serialize(key, fn);
             };
             const first = fixture.own(conversionFirst ? convert(one) : other(one));

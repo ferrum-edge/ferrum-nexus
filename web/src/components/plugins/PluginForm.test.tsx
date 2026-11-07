@@ -11,7 +11,11 @@
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { findProviderPlugin, type ProviderPluginDescriptor } from '@ferrum-nexus/shared';
+import {
+  findProviderPlugin,
+  pluginAdmissionProblem,
+  type ProviderPluginDescriptor,
+} from '@ferrum-nexus/shared';
 import {
   FORM_ERROR_KEY,
   PluginForm,
@@ -27,8 +31,12 @@ const DOES_NOT_ACCEPT = /does not accept/;
 const GATEWAY_OWNS_AUTHORIZATION = /gateway owns 'AUTHORIZATION'/;
 const CONSUMER_HEADER_WILDCARD = /x-consumer-\*/;
 const X_FERRUM_HOPS = /X-Ferrum-Hops/;
-const RESTRICT_NOBODY = /restrict nobody/;
-const BLOCKS_NOTHING = /blocks nothing/;
+// The server's own wording for the same refusals (`server/src/plugins/schema.ts`),
+// so the form and an API error say the same thing.
+const RESTRICT_NOBODY =
+  'List at least one allowed or denied address — an IP restriction with both lists empty would restrict nobody';
+const BLOCKS_NOTHING =
+  'With no blocked User-Agent patterns, requests with no User-Agent must be rejected — otherwise the filter blocks nothing';
 const BETWEEN_1 = /between 1 and/;
 
 afterEach(cleanup);
@@ -201,7 +209,7 @@ describe('validateDraft', () => {
       deny: '',
       mode: 'allow_first',
     });
-    expect(errors[FORM_ERROR_KEY]).toMatch(RESTRICT_NOBODY);
+    expect(errors[FORM_ERROR_KEY]).toBe(RESTRICT_NOBODY);
     expect(errors.allow).toBeUndefined();
   });
 
@@ -213,9 +221,30 @@ describe('validateDraft', () => {
       allow_missing_user_agent: true,
       custom_response_code: '403',
     };
-    expect(validateDraft(spec, draft)[FORM_ERROR_KEY]).toMatch(BLOCKS_NOTHING);
+    expect(validateDraft(spec, draft)[FORM_ERROR_KEY]).toBe(BLOCKS_NOTHING);
     // Rejecting missing-UA requests gives the filter something to do.
     expect(validateDraft(spec, { ...draft, allow_missing_user_agent: false })).toEqual({});
+  });
+
+  it('judges an emptied bot_detection list as typed, not as the body the server judges', () => {
+    // Intentional, and an open question: the form treats a cleared box as an
+    // empty list and refuses it, while the body omits the key, which the
+    // server's copy of the same rule accepts (Edge then applies its default
+    // list). Pinned so neither side changes without deciding which is right.
+    const spec = descriptor('bot_detection');
+    const draft: PluginDraft = { ...draftFor(spec, null), blocked_patterns: '' };
+    expect(validateDraft(spec, draft)[FORM_ERROR_KEY]).toBe(BLOCKS_NOTHING);
+    const body = draftToConfig(spec, draft);
+    expect(body).not.toHaveProperty('blocked_patterns');
+    expect(pluginAdmissionProblem('bot_detection', body)).toBeNull();
+  });
+
+  it('applies the shared admission rules, on the field a rule is about', () => {
+    const spec = descriptor('correlation_id');
+    const draft: PluginDraft = { ...draftFor(spec, null), header_name: ' X-Consumer-Trace ' };
+    const shared = pluginAdmissionProblem('correlation_id', { header_name: 'X-Consumer-Trace' });
+    expect(shared?.field).toBe('header_name');
+    expect(validateDraft(spec, draft)).toEqual({ header_name: shared?.message });
   });
 });
 
@@ -265,6 +294,6 @@ describe('<PluginForm>', () => {
 
   it('shows a whole-plugin message above the fields', () => {
     renderForm('ip_restriction', { allow: '', deny: '' });
-    expect(screen.getByRole('alert').textContent).toMatch(RESTRICT_NOBODY);
+    expect(screen.getByRole('alert').textContent).toContain(RESTRICT_NOBODY);
   });
 });

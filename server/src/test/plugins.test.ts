@@ -25,6 +25,7 @@ import {
   type SetApiPluginResponse,
 } from '@ferrum-nexus/shared';
 
+import { proxyLockKey } from '../lib/keyed-serializer.js';
 import { mockCacheStorageAllowed, mockPaletteCompositionError } from './mock-ferrum-edge.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -805,6 +806,13 @@ describe('provider plugin palette', () => {
         ).statusCode,
         200,
       );
+      // An absent list is Edge's default list, not an empty one: the server
+      // judges the body it forwards. (The plugin form refuses an emptied box;
+      // see admissionView in web/src/components/plugins/PluginForm.tsx.)
+      assert.equal(
+        (await setPlugin('bot_detection', { config: { allow_list: ['GoogleBot'] } })).statusCode,
+        200,
+      );
     });
 
     it('refuses a correlation header the gateway owns', async () => {
@@ -970,12 +978,12 @@ describe('provider plugin palette', () => {
         const owner = `probe-${probes.length}`;
         const now = new Date();
         const acquired = await harness.store.leases.acquire(
-          `proxy:${proxyId}`,
+          proxyLockKey(proxyId),
           owner,
           new Date(now.getTime() + 1_000).toISOString(),
           now.toISOString(),
         );
-        if (acquired) await harness.store.leases.release(`proxy:${proxyId}`, owner);
+        if (acquired) await harness.store.leases.release(proxyLockKey(proxyId), owner);
         probes.push(acquired ? 'free' : 'held');
         return transaction(fn, options);
       };

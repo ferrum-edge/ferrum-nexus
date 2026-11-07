@@ -28,7 +28,7 @@ import type {
   TransactionOptions,
 } from '../db/store.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
-import { userLifecycleLockKey } from '../lib/keyed-serializer.js';
+import { proxyLockKey, userLifecycleLockKey } from '../lib/keyed-serializer.js';
 import { heldLeaseFences, outsideHeldLeases } from '../lib/lease-fence.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
@@ -814,7 +814,7 @@ export function runMcpMembershipContract(
             const groups = ['operator-kept', mcpToolGroupForApi(f.api.id, f.ids[0]!)];
             f.live.acl_groups = [...groups];
             assert.ok(f.api.ferrum_proxy_id);
-            const key = `proxy:${f.api.ferrum_proxy_id}`;
+            const key = proxyLockKey(f.api.ferrum_proxy_id);
             const claimed: { grant?: GrantRecord; request?: AccessRequestRecord } = {};
             let failedRemoval = false;
             beforeFailedRemoval(f.live.id, async () => {
@@ -1439,7 +1439,7 @@ export function runMcpMembershipContract(
         const f = await fixture(true);
         f.live.acl_groups = [mcpToolGroupForApi(f.api.id, f.ids[0]!)];
         assert.ok(f.api.ferrum_proxy_id);
-        const key = `proxy:${f.api.ferrum_proxy_id}`;
+        const key = proxyLockKey(f.api.ferrum_proxy_id);
         beforeFailedRemoval(f.live.id, async () => {
           await loseProxyLease(key);
         });

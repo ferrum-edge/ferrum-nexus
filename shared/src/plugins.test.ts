@@ -3,8 +3,10 @@ import { describe, it } from 'node:test';
 
 import {
   CORRELATION_ID_RESERVED_HEADERS,
+  PLUGIN_ADMISSION_RULES,
   isGatewayOwnedConsumerHeader,
   isProxyHopsHeader,
+  pluginAdmissionProblem,
 } from './plugins.js';
 
 /**
@@ -109,6 +111,99 @@ describe('isProxyHopsHeader', () => {
     }
     for (const name of ['x-ferrum-hops-count', 'x-ferrum', 'x-hops', 'x-consumer-id']) {
       assert.equal(isProxyHopsHeader(name), false, name);
+    }
+  });
+});
+
+describe('pluginAdmissionProblem', () => {
+  it('has rules for exactly the four plugins Edge refuses beyond their key sets', () => {
+    assert.deepEqual(Object.keys(PLUGIN_ADMISSION_RULES).sort(), [
+      'bot_detection',
+      'correlation_id',
+      'ip_restriction',
+      'request_deduplication',
+    ]);
+    assert.equal(pluginAdmissionProblem('cors', { header_name: 'Authorization' }), null);
+    assert.equal(pluginAdmissionProblem('__proto__', {}), null);
+  });
+
+  it('ip_restriction: refuses a config whose allow and deny lists are both empty', () => {
+    for (const config of [{}, { allow: [], deny: [] }, { allow: [] }]) {
+      const problem = pluginAdmissionProblem('ip_restriction', config);
+      assert.ok(problem, JSON.stringify(config));
+      assert.equal(problem.field, undefined, 'a whole-plugin rule');
+      assert.match(problem.message, /restrict nobody/);
+    }
+    assert.equal(pluginAdmissionProblem('ip_restriction', { allow: ['10.0.0.0/8'] }), null);
+    assert.equal(pluginAdmissionProblem('ip_restriction', { deny: ['10.0.0.1'] }), null);
+  });
+
+  it('bot_detection: an explicit empty blocked list needs missing-UA requests rejected', () => {
+    const problem = pluginAdmissionProblem('bot_detection', { blocked_patterns: [] });
+    assert.ok(problem);
+    assert.equal(problem.field, undefined, 'a whole-plugin rule');
+    assert.match(problem.message, /blocks nothing/);
+    assert.ok(
+      pluginAdmissionProblem('bot_detection', {
+        blocked_patterns: [],
+        allow_missing_user_agent: true,
+      }),
+    );
+    assert.equal(
+      pluginAdmissionProblem('bot_detection', {
+        blocked_patterns: [],
+        allow_missing_user_agent: false,
+      }),
+      null,
+    );
+    assert.equal(pluginAdmissionProblem('bot_detection', { blocked_patterns: ['curl'] }), null);
+  });
+
+  it('bot_detection: an absent blocked list is Edge’s default list, not an empty one', () => {
+    // The server judges the wire body, where an omitted key means Edge's
+    // default. The plugin form deliberately passes an emptied box as `[]`.
+    assert.equal(pluginAdmissionProblem('bot_detection', {}), null);
+    assert.equal(pluginAdmissionProblem('bot_detection', { allow_list: ['GoogleBot'] }), null);
+  });
+
+  it('correlation_id: refuses reserved, consumer and hop-count headers on header_name', () => {
+    for (const [header, pattern] of [
+      ['  AUTHORIZATION ', /gateway owns 'AUTHORIZATION'/],
+      ['x-forwarded-for', /gateway owns 'x-forwarded-for'/],
+      ['X-Consumer-Trace', /x-consumer-\*/],
+      ['x_authenticated-identity', /X-Authenticated-Identity/],
+      ['x_ferrum-hops', /X-Ferrum-Hops/],
+    ] as const) {
+      const problem = pluginAdmissionProblem('correlation_id', { header_name: header });
+      assert.ok(problem, header);
+      assert.equal(problem.field, 'header_name');
+      assert.match(problem.message, pattern);
+    }
+    for (const config of [
+      {},
+      { header_name: '' },
+      { header_name: '  ' },
+      { header_name: 'x-request-id' },
+    ]) {
+      assert.equal(pluginAdmissionProblem('correlation_id', config), null, JSON.stringify(config));
+    }
+  });
+
+  it('request_deduplication: refuses only gateway-owned consumer headers', () => {
+    for (const header of ['X-Consumer-Idempotency-Key', 'x_authenticated-identity']) {
+      const problem = pluginAdmissionProblem('request_deduplication', { header_name: header });
+      assert.ok(problem, header);
+      assert.equal(problem.field, 'header_name');
+      assert.match(problem.message, /idempotency key/);
+    }
+    // Edge reserves X-Ferrum-Hops as a correlation destination only, and does
+    // not own a correlation-reserved name as a client-supplied key.
+    for (const header of ['X-Ferrum-Hops', 'Authorization', 'Idempotency-Key', '']) {
+      assert.equal(
+        pluginAdmissionProblem('request_deduplication', { header_name: header }),
+        null,
+        header,
+      );
     }
   });
 });

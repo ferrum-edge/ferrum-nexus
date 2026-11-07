@@ -46,6 +46,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { heldLeaseFences, type LeaseFence } from '../lib/lease-fence.js';
+import { proxyLockKey } from '../lib/keyed-serializer.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 import type { StoredConsumer } from './mock-ferrum-edge.js';
 
@@ -566,7 +567,7 @@ describe('credential and access ownership (issue #341)', () => {
     assert.deepEqual(groupsOf(owner.user.id), [group]);
     const api = await harness.store.apis.findById(apiId);
     assert.ok(api?.ferrum_proxy_id);
-    const proxyKey = `proxy:${api.ferrum_proxy_id}`;
+    const proxyKey = proxyLockKey(api.ferrum_proxy_id);
     const consumer = await harness.store.consumers.findByUserAndNamespace(
       owner.user.id,
       NAMESPACE,

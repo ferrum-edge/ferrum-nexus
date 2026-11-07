@@ -6,7 +6,9 @@ import {
   ERROR_CODES,
   THEME_DEFAULT_STORAGE_KEY,
   THEME_STORAGE_KEY,
+  capabilitiesFor,
   type BrandingResponse,
+  type Capabilities,
   type User,
 } from '@ferrum-nexus/shared';
 import { ApiError, authApi } from '../lib/api';
@@ -358,5 +360,48 @@ describe('session cache isolation', () => {
     expect(screen.getByText('Alice')).toBeInTheDocument();
     expect(screen.getByTestId('credentials')).toHaveTextContent('alice-credential');
     expect(client.getQueryCache().getAll()).toHaveLength(1);
+  });
+});
+
+describe('capabilities', () => {
+  function CapabilitiesProbe(): ReactElement {
+    const { capabilities } = useAuth();
+    return <p data-testid="capabilities">{JSON.stringify(capabilities)}</p>;
+  }
+
+  function renderWith(capabilities: Capabilities | null): void {
+    client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    vi.spyOn(authApi, 'meSilent').mockResolvedValue({
+      user: { ...alice, role: 'provider' },
+      csrf_token: 'csrf-token',
+      expires_at: '2026-09-09T00:00:00.000Z',
+      // The wire type says the server always sends them; an older or partial
+      // response is exactly the case the role fallback exists for.
+      capabilities: capabilities as Capabilities,
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <AuthProvider>
+          <CapabilitiesProbe />
+        </AuthProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  it('keeps the capabilities the server sent, even where the role would derive others', async () => {
+    const sent: Capabilities = { ...capabilitiesFor('provider'), can_publish_apis: false };
+    renderWith(sent);
+    await waitFor(() => {
+      expect(screen.getByTestId('capabilities')).toHaveTextContent(JSON.stringify(sent));
+    });
+  });
+
+  it('falls back to the shared role derivation when the server sent none', async () => {
+    renderWith(null);
+    await waitFor(() => {
+      expect(screen.getByTestId('capabilities')).toHaveTextContent(
+        JSON.stringify(capabilitiesFor('provider')),
+      );
+    });
   });
 });

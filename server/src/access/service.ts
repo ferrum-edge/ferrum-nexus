@@ -152,6 +152,7 @@ import {
   accessRequestBudgetLockKey,
   accountRecoveryLockKey,
   isLockTimeout,
+  proxyLockKey,
   userLifecycleLockKey,
   type KeyedSerializer,
 } from '../lib/keyed-serializer.js';
@@ -956,7 +957,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // exposure appears while this REST-only restore is running.
       if (!api?.agents || !proxyId) return restoreUnderKeys(claim, since, null, body);
       try {
-        const result = await edge.serializePerKey(`proxy:${proxyId}`, async () => {
+        const result = await edge.serializePerKey(proxyLockKey(proxyId), async () => {
           const current = await store.apis.findById(claim.api_id);
           if (current?.ferrum_proxy_id !== proxyId) return null;
           return { value: await restoreUnderKeys(claim, since, proxyId, body) };
@@ -1897,7 +1898,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     };
 
     const withdrawn = initialApi.ferrum_proxy_id
-      ? await edge.serializePerKey(`proxy:${initialApi.ferrum_proxy_id}`, withdraw)
+      ? await edge.serializePerKey(proxyLockKey(initialApi.ferrum_proxy_id), withdraw)
       : await withdraw();
     const updated = typeof withdrawn === 'function' ? await withdrawn() : withdrawn;
 
@@ -2068,7 +2069,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
               admit,
             );
       const created = api.ferrum_proxy_id
-        ? await edge.serializePerKey(`proxy:${api.ferrum_proxy_id}`, submit)
+        ? await edge.serializePerKey(proxyLockKey(api.ferrum_proxy_id), submit)
         : await submit();
 
       const [decorated] = await decorateRequests([created]);
@@ -2199,7 +2200,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
               admit,
             );
       const created = api.ferrum_proxy_id
-        ? await edge.serializePerKey(`proxy:${api.ferrum_proxy_id}`, submit)
+        ? await edge.serializePerKey(proxyLockKey(api.ferrum_proxy_id), submit)
         : await submit();
 
       const [decorated] = await decorateRequests([created]);
@@ -2447,7 +2448,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         };
       };
       return initial.api.ferrum_proxy_id
-        ? edge.serializePerKey(`proxy:${initial.api.ferrum_proxy_id}`, decide)
+        ? edge.serializePerKey(proxyLockKey(initial.api.ferrum_proxy_id), decide)
         : decide();
     },
 

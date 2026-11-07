@@ -62,7 +62,7 @@ import {
 
 import type { NexusConfig } from '../config/index.js';
 import type { ConsumerRecord, NexusStore, UserRecord } from '../db/store.js';
-import type { FerrumAdminClient } from '../ferrum-admin/index.js';
+import { consumerWithAclGroups, type FerrumAdminClient } from '../ferrum-admin/index.js';
 import type { EdgeConsumer } from '../ferrum-admin/types.js';
 import { conflict, edgeError, notFound, userDisabled } from '../lib/errors.js';
 
@@ -303,14 +303,7 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
         }
         const written = await edge.consumers.replace(
           ferrumConsumerId,
-          {
-            id: current.id,
-            labels: current.labels,
-            username: current.username,
-            custom_id: current.custom_id ?? null,
-            credentials: current.credentials,
-            acl_groups: groups,
-          },
+          consumerWithAclGroups(current, groups),
           subject,
           etag,
         );
