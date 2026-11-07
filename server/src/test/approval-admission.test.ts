@@ -111,13 +111,21 @@ for (const first of ['retire', 'approve']) {
           return transaction(fn, options);
         };
       } else {
-        const claim = h.store.accessRequests.updateIfStatus.bind(h.store.accessRequests);
-        h.store.accessRequests.updateIfStatus = async (...args) => {
-          if (args[0] === s.requestId) {
+        // Parked under the proxy lease, at the active-grant check just before
+        // the claim. Not inside the claim: it commits in a transaction with
+        // the approval's durable job (issue #651), and on SQLite an open
+        // transaction queues every other store call, the retirement's first
+        // read included.
+        const grants = h.store.grants;
+        const check = grants.findActiveByApiAndUser.bind(grants);
+        let parked = false;
+        grants.findActiveByApiAndUser = async (...args) => {
+          if (!parked && args[0] === s.apiId && args[1] === s.client.user.id) {
+            parked = true;
             entered.release();
             await release.promise;
           }
-          return claim(...args);
+          return check(...args);
         };
       }
       const leading = first === 'retire' ? s.change({ status: 'retired' }) : s.approve();

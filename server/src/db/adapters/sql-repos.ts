@@ -92,6 +92,8 @@ import type {
   CredentialRepo,
   AccountRecoveryJobRecord,
   AccountRecoveryJobRepo,
+  AccessGatewayJobRecord,
+  AccessGatewayJobRepo,
   EmailOutboxRecord,
   EmailOutboxRepo,
   EmailProofMethod,
@@ -631,6 +633,25 @@ function mapAccountRecoveryJob(row: Row): AccountRecoveryJobRecord {
   };
 }
 
+function mapAccessGatewayJob(row: Row): AccessGatewayJobRecord {
+  return {
+    id: text(row.id),
+    generation: text(row.generation),
+    kind: text(row.kind) as AccessGatewayJobRecord['kind'],
+    subject_id: text(row.subject_id),
+    api_id: text(row.api_id),
+    user_id: text(row.user_id),
+    application_id: textOrNull(row.application_id),
+    requested_by: textOrNull(row.requested_by),
+    status: text(row.status) as AccessGatewayJobRecord['status'],
+    attempts: int(row.attempts),
+    next_attempt_at: textOrNull(row.next_attempt_at),
+    last_error: textOrNull(row.last_error),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
 function mapAuditLog(row: Row): AuditLogRecord {
   return {
     id: text(row.id),
@@ -905,6 +926,7 @@ export interface SqlRepos {
   emailOutbox: EmailOutboxRepo;
   gatewayTeardownJobs: GatewayTeardownJobRepo;
   accountRecoveryJobs: AccountRecoveryJobRepo;
+  accessGatewayJobs: AccessGatewayJobRepo;
   auditLogs: AuditLogRepo;
   settings: SettingRepo;
   emailTemplates: EmailTemplateRepo;
@@ -3598,6 +3620,139 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       (await execute(exec, 'DELETE FROM account_recovery_jobs WHERE user_id = ?', [userId])) > 0,
   };
 
+  /* ── accessGatewayJobs ──────────────────────────────────────────────── */
+
+  const accessGatewayJobs: AccessGatewayJobRepo = {
+    upsertClaimed: async (input, now) =>
+      inTransaction(async (tx) => {
+        // Keep the upsert and returned ownership token in one transaction.
+        // The affectedRows count of an upsert is never an ownership signal.
+        await execute(
+          tx,
+          upsertSql(
+            dialect,
+            'access_gateway_jobs',
+            [
+              'id',
+              'generation',
+              'kind',
+              'subject_id',
+              'api_id',
+              'user_id',
+              'application_id',
+              'requested_by',
+              'status',
+              'attempts',
+              'next_attempt_at',
+              'last_error',
+              'created_at',
+              'updated_at',
+            ],
+            'subject_id',
+            [
+              'generation',
+              'kind',
+              'api_id',
+              'user_id',
+              'application_id',
+              'requested_by',
+              'status',
+              'attempts',
+              'next_attempt_at',
+              'last_error',
+              'updated_at',
+            ],
+          ),
+          [
+            newId(),
+            newId(),
+            input.kind,
+            input.subject_id,
+            input.api_id,
+            input.user_id,
+            input.application_id,
+            input.requested_by,
+            'sending',
+            0,
+            now,
+            null,
+            now,
+            now,
+          ],
+        );
+        const row = await queryOne(tx, 'SELECT * FROM access_gateway_jobs WHERE subject_id = ?', [
+          input.subject_id,
+        ]);
+        if (!row) {
+          throw new Error('accessGatewayJobs.upsertClaimed: row vanished immediately after upsert');
+        }
+        return mapAccessGatewayJob(row);
+      }),
+
+    findBySubject: async (subjectId) => {
+      const row = await queryOne(exec, 'SELECT * FROM access_gateway_jobs WHERE subject_id = ?', [
+        subjectId,
+      ]);
+      return row ? mapAccessGatewayJob(row) : null;
+    },
+
+    claimDue: async (now, limit) =>
+      inTransaction(async (tx) => {
+        const ids = (
+          await queryAll(
+            tx,
+            `SELECT id FROM access_gateway_jobs
+             WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+             ORDER BY ${nullsFirstAsc('next_attempt_at')}, created_at ASC
+             LIMIT ?${FOR_UPDATE_SKIP_LOCKED}`,
+            [now, Math.max(1, Math.floor(limit))],
+          )
+        ).map((row) => text(row.id));
+        if (ids.length === 0) return [];
+        await execute(
+          tx,
+          `UPDATE access_gateway_jobs
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?
+           WHERE id IN (${placeholders(ids.length)}) AND status = 'pending'`,
+          [nowIso(), newId(), ...ids],
+        );
+        const rows = await queryAll(
+          tx,
+          `SELECT * FROM access_gateway_jobs WHERE id IN (${placeholders(ids.length)})`,
+          ids,
+        );
+        return rows.map(mapAccessGatewayJob);
+      }),
+
+    deleteClaimed: async (job) =>
+      (await execute(
+        exec,
+        "DELETE FROM access_gateway_jobs WHERE id = ? AND generation = ? AND status = 'sending'",
+        [job.id, job.generation],
+      )) > 0,
+
+    reschedule: async (job, nextAttemptAt, lastError) =>
+      (await execute(
+        exec,
+        `UPDATE access_gateway_jobs
+         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ?
+         WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [nextAttemptAt, lastError, nowIso(), job.id, job.generation],
+      )) > 0,
+
+    releaseStale: async (olderThan) =>
+      execute(
+        exec,
+        `UPDATE access_gateway_jobs SET status = 'pending', next_attempt_at = ?, updated_at = ?
+         WHERE status = 'sending' AND updated_at <= ?`,
+        [nowIso(), nowIso(), olderThan],
+      ),
+
+    deleteBySubject: async (subjectId) =>
+      (await execute(exec, 'DELETE FROM access_gateway_jobs WHERE subject_id = ?', [subjectId])) >
+      0,
+  };
+
   /* ── auditLogs ──────────────────────────────────────────────────────── */
 
   const auditLogs: AuditLogRepo = {
@@ -3975,6 +4130,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     emailOutbox,
     gatewayTeardownJobs,
     accountRecoveryJobs,
+    accessGatewayJobs,
     auditLogs,
     settings,
     emailTemplates,
@@ -4072,6 +4228,7 @@ class SqlStore implements NexusStore {
   readonly emailOutbox: EmailOutboxRepo;
   readonly gatewayTeardownJobs: GatewayTeardownJobRepo;
   readonly accountRecoveryJobs: AccountRecoveryJobRepo;
+  readonly accessGatewayJobs: AccessGatewayJobRepo;
   readonly auditLogs: AuditLogRepo;
   readonly settings: SettingRepo;
   readonly emailTemplates: EmailTemplateRepo;
@@ -4122,6 +4279,7 @@ class SqlStore implements NexusStore {
     this.emailOutbox = repos.emailOutbox;
     this.gatewayTeardownJobs = repos.gatewayTeardownJobs;
     this.accountRecoveryJobs = repos.accountRecoveryJobs;
+    this.accessGatewayJobs = repos.accessGatewayJobs;
     this.auditLogs = repos.auditLogs;
     this.settings = repos.settings;
     this.emailTemplates = repos.emailTemplates;

@@ -157,6 +157,8 @@ import type {
   GatewayIdentityRepo,
   AccountRecoveryJobRecord,
   AccountRecoveryJobRepo,
+  AccessGatewayJobRecord,
+  AccessGatewayJobRepo,
   GatewayTeardownJobFilter,
   GatewayTeardownJobRecord,
   GatewayTeardownJobRepo,
@@ -237,6 +239,7 @@ const COLLECTIONS = {
   emailOutbox: 'email_outbox',
   gatewayTeardownJobs: 'gateway_teardown_jobs',
   accountRecoveryJobs: 'account_recovery_jobs',
+  accessGatewayJobs: 'access_gateway_jobs',
   auditLogs: 'audit_logs',
   settings: 'app_settings',
   emailTemplates: 'email_templates',
@@ -833,6 +836,25 @@ function mapGatewayIdentity(row: Row): GatewayIdentityRecord {
   };
 }
 
+function mapAccessGatewayJob(row: Row): AccessGatewayJobRecord {
+  return {
+    id: str(row._id),
+    generation: str(row.generation ?? ''),
+    kind: str(row.kind) as AccessGatewayJobRecord['kind'],
+    subject_id: str(row.subject_id),
+    api_id: str(row.api_id),
+    user_id: str(row.user_id),
+    application_id: strOrNull(row.application_id),
+    requested_by: strOrNull(row.requested_by),
+    status: str(row.status) as AccessGatewayJobRecord['status'],
+    attempts: num(row.attempts),
+    next_attempt_at: strOrNull(row.next_attempt_at),
+    last_error: strOrNull(row.last_error),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
 function mapAccountRecoveryJob(row: Row): AccountRecoveryJobRecord {
   return {
     id: str(row._id),
@@ -1366,6 +1388,24 @@ export const ACCOUNT_RECOVERY_JOB_INDEXES: readonly IndexDefinition[] = [
   },
 ];
 
+/**
+ * Indexes for the durable access gateway jobs (migration `015`), the MongoDB
+ * counterpart of the SQL table's unique subject key and due scan.
+ */
+export const ACCESS_GATEWAY_JOB_INDEXES: readonly IndexDefinition[] = [
+  {
+    collection: 'access_gateway_jobs',
+    name: 'ux_access_gateway_jobs_subject',
+    key: { subject_id: 1 },
+    unique: true,
+  },
+  {
+    collection: 'access_gateway_jobs',
+    name: 'ix_access_gateway_jobs_due',
+    key: { status: 1, next_attempt_at: 1 },
+  },
+];
+
 /** Create one batch of {@link IndexDefinition}s. */
 async function createIndexes(db: Db, indexes: readonly IndexDefinition[]): Promise<void> {
   for (const index of indexes) {
@@ -1646,6 +1686,11 @@ export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
     id: '014_mysql_text_capacity',
     indexes: [],
     apply: async (): Promise<void> => undefined,
+  },
+  {
+    id: '015_access_gateway_jobs',
+    indexes: ACCESS_GATEWAY_JOB_INDEXES,
+    apply: (db: Db): Promise<void> => createIndexes(db, ACCESS_GATEWAY_JOB_INDEXES),
   },
 ];
 
@@ -4480,6 +4525,120 @@ class MongoStore implements NexusStore {
     deleteByUser: async (userId) => {
       const result = await this.col(COLLECTIONS.accountRecoveryJobs).deleteOne(
         { user_id: userId } as Filter<NexusDoc>,
+        this.opts,
+      );
+      return result.deletedCount > 0;
+    },
+  };
+
+  /* ── accessGatewayJobs ────────────────────────────────────────────────── */
+
+  readonly accessGatewayJobs: AccessGatewayJobRepo = {
+    upsertClaimed: async (input, now) => {
+      // Keyed on `subject_id` (unique), so a subject decided again re-owns its
+      // row instead of queueing a second one. `_id` and `created_at` only land
+      // on the insert.
+      const doc = await this.col(COLLECTIONS.accessGatewayJobs).findOneAndUpdate(
+        { subject_id: input.subject_id } as Filter<NexusDoc>,
+        {
+          $set: {
+            generation: newId(),
+            kind: input.kind,
+            api_id: input.api_id,
+            user_id: input.user_id,
+            application_id: input.application_id,
+            requested_by: input.requested_by,
+            status: 'sending',
+            attempts: 0,
+            next_attempt_at: now,
+            last_error: null,
+            updated_at: now,
+          },
+          $setOnInsert: { _id: newId(), subject_id: input.subject_id, created_at: now },
+        } as UpdateFilter<NexusDoc>,
+        { ...this.opts, upsert: true, returnDocument: 'after' },
+      );
+      const row = asRow(doc);
+      if (!row) {
+        throw new Error('accessGatewayJobs.upsertClaimed: row vanished immediately after upsert');
+      }
+      return mapAccessGatewayJob(row);
+    },
+
+    findBySubject: async (subjectId) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.accessGatewayJobs).findOne({ subject_id: subjectId }, this.opts),
+      );
+      return row ? mapAccessGatewayJob(row) : null;
+    },
+
+    claimDue: async (now, limit) => {
+      // `findOneAndUpdate` is atomic on its own, so the claim needs no
+      // transaction — the same argument as the outbox claim.
+      const wanted = Math.max(1, Math.floor(limit));
+      const claimed: AccessGatewayJobRecord[] = [];
+      for (let i = 0; i < wanted; i += 1) {
+        const doc = await this.col(COLLECTIONS.accessGatewayJobs).findOneAndUpdate(
+          {
+            status: 'pending',
+            $or: [{ next_attempt_at: null }, { next_attempt_at: { $lte: now } }],
+          } as Filter<NexusDoc>,
+          [
+            {
+              $set: {
+                status: 'sending',
+                generation: newId(),
+                updated_at: nowIso(),
+                attempts: { $add: [{ $ifNull: ['$attempts', 0] }, 1] },
+              },
+            },
+          ],
+          { ...this.opts, sort: OUTBOX_CLAIM_ORDER, returnDocument: 'after' },
+        );
+        const row = asRow(doc);
+        if (!row) break;
+        claimed.push(mapAccessGatewayJob(row));
+      }
+      return claimed;
+    },
+
+    deleteClaimed: async (job) => {
+      const result = await this.col(COLLECTIONS.accessGatewayJobs).deleteOne(
+        { _id: job.id, generation: job.generation, status: 'sending' } as Filter<NexusDoc>,
+        this.opts,
+      );
+      return result.deletedCount > 0;
+    },
+
+    reschedule: async (job, nextAttemptAt, lastError) => {
+      const result = await this.col(COLLECTIONS.accessGatewayJobs).updateOne(
+        { _id: job.id, generation: job.generation, status: 'sending' } as Filter<NexusDoc>,
+        {
+          $set: {
+            status: 'pending',
+            next_attempt_at: nextAttemptAt,
+            last_error: lastError,
+            updated_at: nowIso(),
+          },
+        },
+        this.opts,
+      );
+      return result.modifiedCount > 0;
+    },
+
+    releaseStale: async (olderThan) => {
+      const at = nowIso();
+      const result = await this.col(COLLECTIONS.accessGatewayJobs).updateMany(
+        { status: 'sending', updated_at: { $lte: olderThan } } as Filter<NexusDoc>,
+        { $set: { status: 'pending', next_attempt_at: at, updated_at: at } },
+        this.opts,
+      );
+      return result.modifiedCount;
+    },
+
+    deleteBySubject: async (subjectId) => {
+      const result = await this.col(COLLECTIONS.accessGatewayJobs).deleteOne(
+        { subject_id: subjectId } as Filter<NexusDoc>,
         this.opts,
       );
       return result.deletedCount > 0;

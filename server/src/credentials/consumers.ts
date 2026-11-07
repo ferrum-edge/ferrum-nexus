@@ -153,6 +153,18 @@ export interface MutateAclGroupsOptions {
    * throw from it propagates after the write, which the caller compensates.
    */
   afterWrite?: (consumer: EdgeConsumer) => Promise<void>;
+  /**
+   * Runs **inside** the critical section, before the consumer is read; a
+   * `false` answer skips the write and resolves to `null`.
+   *
+   * For a write whose justification is portal state another holder of this
+   * key can change: the access gateway worker removes a revocation's group
+   * only while no active grant for the identity stands behind it, and an
+   * approval commits its grant — or a revocation rollback restores one —
+   * under this same key, so the answer holds until the write lands. Like
+   * {@link afterWrite}, it must not take this key itself.
+   */
+  guard?: () => Promise<boolean>;
 }
 
 /** Dependencies of {@link createConsumerProvisioner}. */
@@ -272,6 +284,7 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
       options,
     ): Promise<EdgeConsumer | null> {
       return edge.serializePerKey(ferrumConsumerId, async () => {
+        if (options?.guard && !(await options.guard())) return null;
         const requiredActive = options?.requireActiveUser;
         if (requiredActive !== undefined) {
           const owner = await store.users.findById(requiredActive);

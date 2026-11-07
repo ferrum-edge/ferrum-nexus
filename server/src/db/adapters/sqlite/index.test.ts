@@ -1331,6 +1331,7 @@ describe('sqlite store', () => {
         emailOutbox: true,
         gatewayTeardownJobs: true,
         accountRecoveryJobs: true,
+        accessGatewayJobs: true,
         auditLogs: true,
         settings: true,
         emailTemplates: true,

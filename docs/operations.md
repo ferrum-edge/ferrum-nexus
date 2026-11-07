@@ -1365,8 +1365,8 @@ checksums and `release: 'v0.1.0'`, the forward migrations
 `009_outbox_priority`, `010_api_agents` and `011_mcp_tool_subsets` with
 `release: 'v0.4.0'`, `012_access_request_grant` with `release: 'v0.5.0'`, and
 `013_account_recovery_jobs` with `release: 'v0.5.1'`. `v0.5.2` adds no migration.
-`014_mysql_text_capacity` is listed with `release: null` until the next release
-ships it.
+`014_mysql_text_capacity` and `015_access_gateway_jobs` are listed with
+`release: null` until the next release ships them.
 
 **A released migration never changes.** A database only applies migrations its
 ledger lacks, so editing an applied one would make fresh and upgraded installs
@@ -1527,6 +1527,18 @@ is recorded and does nothing. `MODIFY COLUMN` rebuilds each table on MySQL, so
 plan for the copy time and disk space on a large `audit_logs` table. The runner
 skips a column that is already `LONGTEXT` on a replay, and refuses one whose
 type, nullability, default, generation or collation it does not expect.
+
+`015_access_gateway_jobs` (not yet released) adds the `access_gateway_jobs`
+table (a collection on MongoDB, with the same two indexes): at most one row per
+grant or access request, holding the gateway work a targeted revocation or an
+approval owes until it lands (see
+[access gateway jobs](#access-gateway-jobs)). On SQL backends its foreign keys
+to `users` cascade (`user_id`) and set null (`requested_by`) on delete. It only
+adds an empty table and copies no data, so no retained grant or request owes
+anything after the upgrade. Before deploying it, stop and drain every older
+Nexus request handler and background writer: an older instance neither writes
+the row when it claims a revocation or an approval nor deletes it when the
+decision settles, and it runs no worker to drain the table.
 
 `003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
 `ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,
@@ -3113,6 +3125,62 @@ repeats mean self-service recovery is silently broken.
 runs it at once, returning `gateway_teardown: "ok"` if Edge accepted or
 `"pending"` if not. It is audited as `user.gateway_teardown_retry` and is the
 **Retry** button on the Users page. Do not edit the table by hand.
+
+### Access gateway jobs
+
+A targeted grant revocation and an access approval each change the gateway
+after their decision commits: the revocation takes the ACL group off the
+identity's consumer after `active → revoked`, and the approval writes it before
+its grant row. The claim writes an `access_gateway_jobs` row in the same
+transaction (issue #651), owned by the request that made it, which deletes the
+row once the gateway matches the portal: the removal landed, the grant
+committed, or the compensation left nothing behind. A revocation whose
+rollback put the grant back deletes it too.
+
+- `sending` is owned (by the request, or by a worker that claimed it; claiming
+  increments `attempts`); `pending` is owed at `next_attempt_at`. A `sending`
+  row untouched for five minutes returns to `pending`, which is how a row whose
+  process stopped between the claim and the Edge write reaches the worker.
+  Success deletes the row. There is no failed state.
+- `kind = 'revoke'` (`subject_id` is the grant): the worker takes the grant's
+  REST and MCP groups off, unless the grant is active again or another active
+  grant now holds them, and writes `access.revoke_complete`.
+- `kind = 'approve'` (`subject_id` is the request): under the API's proxy lease,
+  the worker cuts the identity's groups back to what its active grant covers
+  and returns a request still `approved` without its grant to `pending` (or
+  `cancelled`, for a tool request whose grant is gone), writing
+  `access.approve_rollback` or `access.tools_approve_rollback` with
+  `recovered: true`. It never completes an approval.
+- Retries back off `10 s × 2^attempts`, capped at five minutes, plus up to 10%
+  jitter.
+
+```sql
+SELECT kind, subject_id, user_id, status, attempts, last_error, next_attempt_at, updated_at
+  FROM access_gateway_jobs
+  ORDER BY updated_at DESC LIMIT 20;
+```
+
+**Alert on** repeats of these `warn` lines, which carry the job, `attempts`
+and `error`: a row that keeps failing means an identity may hold access no
+active grant stands behind.
+
+```
+Access gateway retry failed; a revoked grant may still hold its ACL group
+Access gateway retry failed; an approval that never committed may still hold its ACL group
+Access gateway tick failed
+```
+
+The worker also logs `Released stale access gateway claims`,
+`Could not release stale access gateway claims`,
+`Access gateway job was abandoned mid-flight; the stale sweep recovers it` and
+`Dropped an access gateway job that was no longer owed`, and the access service
+`Completed the gateway removal of an interrupted revocation`,
+`Compensated an approval whose grant never committed` and
+`Could not settle an access gateway job; the worker recovers it`.
+
+To repair, read `last_error` and restore what it names (usually Edge
+reachability or the admin JWT). The worker keeps retrying and needs no
+re-driving. Do not edit the table by hand.
 
 ### Account recovery revocations
 

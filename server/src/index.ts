@@ -54,6 +54,10 @@ import {
   type AccountRecoveryWorker,
 } from './credentials/account-recovery.js';
 import { createTeardownWorker, type TeardownWorker } from './credentials/teardown-worker.js';
+import {
+  createAccessGatewayWorker,
+  type AccessGatewayWorker,
+} from './access/gateway-job-worker.js';
 import { createStore } from './db/index.js';
 import type { NexusStore } from './db/store.js';
 import {
@@ -143,6 +147,12 @@ export interface NexusServices {
    * `tick()` runs one cycle deterministically in tests.
    */
   recovery: AccountRecoveryWorker;
+  /**
+   * Background finisher for grant revocations and access approvals whose
+   * gateway step never completed (issue #651); `tick()` runs one cycle
+   * deterministically in tests.
+   */
+  accessJobs: AccessGatewayWorker;
   /**
    * Hourly purge of expired sessions and verification tokens; `tick()` runs one
    * pass deterministically in tests.
@@ -239,6 +249,12 @@ export interface BuildServerDeps {
    * `services.recovery.tick()` themselves.
    */
   startAccountRecoveryWorker?: boolean;
+  /**
+   * Start the access gateway job poller. Same default as
+   * {@link BuildServerDeps.startOutboxWorker}: tests drive
+   * `services.accessJobs.tick()` themselves.
+   */
+  startAccessGatewayWorker?: boolean;
   /**
    * Start the expired-session and expired-token sweep. Same default as
    * {@link BuildServerDeps.startOutboxWorker}: tests drive
@@ -703,6 +719,15 @@ export async function buildServer(
     log: warn,
   });
 
+  // Finishes the gateway half of a grant revocation or an access approval
+  // that stopped between its claim and its Edge write — see
+  // `access/gateway-job-worker.ts`.
+  const accessJobs = createAccessGatewayWorker({
+    store: deps.store,
+    access,
+    log: warn,
+  });
+
   // Deletes the sessions and single-use links that have outlived `expires_at`.
   // Every read already ignores them; without this nothing ever removed them and
   // both tables grew for good (issue #338).
@@ -729,6 +754,7 @@ export async function buildServer(
     outbox,
     teardown,
     recovery,
+    accessJobs,
     expirySweep,
     notifications,
     settings,
@@ -1023,6 +1049,7 @@ export async function buildServer(
     await outbox.stop();
     await teardown.stop();
     await recovery.stop();
+    await accessJobs.stop();
     await expirySweep.stop();
     await reconciliation.stop();
     await deps.edge.close();
@@ -1036,6 +1063,7 @@ export async function buildServer(
   if (deps.startOutboxWorker ?? config.env !== 'test') outbox.start();
   if (deps.startTeardownWorker ?? config.env !== 'test') teardown.start();
   if (deps.startAccountRecoveryWorker ?? config.env !== 'test') recovery.start();
+  if (deps.startAccessGatewayWorker ?? config.env !== 'test') accessJobs.start();
   if (deps.startExpirySweepWorker ?? config.env !== 'test') expirySweep.start();
   if (deps.startReconciliationWorker ?? config.env !== 'test') reconciliation.start();
 

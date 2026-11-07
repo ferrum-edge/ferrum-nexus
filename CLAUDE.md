@@ -20,8 +20,8 @@ server (`server/`), which enforces RBAC and writes the audit log before forwardi
 `v0.9.17` for the next release (`release/compatibility.env`). `v0.1.0`, the first supported
 release, froze the `001_initial` schema baseline; `v0.2.0` froze the forward migrations `002` and
 `003`, `v0.3.0` froze `004` to `006`, `v0.4.0` froze `007` to `011`, `v0.5.0` froze `012`, and
-`v0.5.1` froze `013`. `v0.5.2` adds no migration; `014_mysql_text_capacity` is pending
-(`release: null`) on `main`:
+`v0.5.1` froze `013`. `v0.5.2` adds no migration; `014_mysql_text_capacity` and
+`015_access_gateway_jobs` are pending (`release: null`) on `main`:
 
 - `server/src/db/released-migrations.ts` lists every shipped or pending migration with its
   per-backend checksums; `released-migrations.test.ts` fails on any edit to a released SQL

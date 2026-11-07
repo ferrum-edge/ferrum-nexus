@@ -101,3 +101,120 @@ export function faultInjectingStore(base: NexusStore): FaultInjectingStore {
     },
   };
 }
+
+/** A store that can be made to stop answering, as a process that crashed would. */
+export interface CrashingStore {
+  /** The wrapped store; build the app that crashes over this. */
+  store: NexusStore;
+  /**
+   * Crash once the outermost transaction that calls `repo.method` commits:
+   * from then on every repository call through {@link CrashingStore.store}
+   * rejects, inside transactions included, until {@link CrashingStore.revive}.
+   * This is "the process stopped right after this commit".
+   */
+  crashAfterCommitOf(repo: keyof NexusStore, method: string): void;
+  /**
+   * Crash at the next call to `repo.method`: that call and every later one
+   * reject. This is "the process stopped just before this write".
+   */
+  crashAt(repo: keyof NexusStore, method: string): void;
+  /** Whether the crash has happened. */
+  crashed(): boolean;
+  /** Answer normally again, so the crashed app can be closed cleanly. */
+  revive(): void;
+}
+
+/**
+ * Wrap a store so that, at a chosen point, it stops answering — the durable
+ * state is exactly what had committed, and nothing after it runs.
+ *
+ * Lease calls keep working. A crashed process's leases expire after their TTL;
+ * letting the crashed section release them instead keeps a replacement
+ * instance, built over the same underlying store, from waiting out the TTL.
+ * Nothing else the crashed app does after the crash reaches the database.
+ */
+export function crashingStore(base: NexusStore): CrashingStore {
+  let dead = false;
+  let afterCommitOf: string | null = null;
+  let at: string | null = null;
+  /** Set while a transaction body has called the armed method. */
+  let pendingCrash = false;
+  let depth = 0;
+
+  const crash = (): Error => new Error('the process crashed');
+
+  function wrapRepo(repoName: string, repo: object): object {
+    return new Proxy(repo, {
+      get(target, property, receiver) {
+        const value: unknown = Reflect.get(target, property, receiver);
+        if (typeof property !== 'string' || typeof value !== 'function') return value;
+        if (repoName === 'leases') return value.bind(target);
+        const key = `${repoName}.${property}`;
+        return (...args: unknown[]): unknown => {
+          if (at === key) {
+            at = null;
+            dead = true;
+          }
+          if (dead) return Promise.reject(crash());
+          if (afterCommitOf === key) pendingCrash = true;
+          return Reflect.apply(value, target, args);
+        };
+      },
+    });
+  }
+
+  function wrapStore(store: NexusStore): NexusStore {
+    return new Proxy(store, {
+      get(target, property, receiver) {
+        if (property === 'transaction') {
+          return async <T>(
+            fn: (tx: NexusStore) => Promise<T>,
+            options?: TransactionOptions,
+          ): Promise<T> => {
+            if (dead) throw crash();
+            depth += 1;
+            try {
+              // Each attempt of a re-run body starts without the mark: only the
+              // attempt that commits counts.
+              const result = await target.transaction((tx) => {
+                if (depth === 1) pendingCrash = false;
+                return fn(wrapStore(tx));
+              }, options);
+              if (depth === 1 && pendingCrash && afterCommitOf !== null) {
+                afterCommitOf = null;
+                pendingCrash = false;
+                dead = true;
+              }
+              return result;
+            } finally {
+              depth -= 1;
+            }
+          };
+        }
+        const value: unknown = Reflect.get(target, property, receiver);
+        if (typeof value === 'function') return value.bind(target);
+        if (typeof property === 'string' && value !== null && typeof value === 'object') {
+          return wrapRepo(property, value);
+        }
+        return value;
+      },
+    });
+  }
+
+  return {
+    store: wrapStore(base),
+    crashAfterCommitOf(repo, method) {
+      afterCommitOf = `${String(repo)}.${method}`;
+    },
+    crashAt(repo, method) {
+      at = `${String(repo)}.${method}`;
+    },
+    crashed: () => dead,
+    revive() {
+      dead = false;
+      afterCommitOf = null;
+      at = null;
+      pendingCrash = false;
+    },
+  };
+}

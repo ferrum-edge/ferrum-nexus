@@ -1817,7 +1817,17 @@ describe('agent publishing and Nexus authorization', () => {
       [],
       'no REST or tool group remains without an active grant',
     );
-    assert.equal((await harness.store.accessRequests.findById(pending.id))?.status, 'cancelled');
+    const cancelled = await harness.store.accessRequests.findById(pending.id);
+    assert.equal(cancelled?.status, 'cancelled');
+    // Nobody decided it: the approval it would otherwise still name never
+    // took effect (issue #651).
+    assert.equal(cancelled?.decided_by, null);
+    assert.equal(cancelled?.decided_at, null);
+    assert.equal(
+      await harness.store.accessGatewayJobs.findBySubject(pending.id),
+      null,
+      'the compensation left nothing behind, so its job is settled',
+    );
     const rollback = (await harness.auditRows('access.tools_approve_rollback')).find(
       (row) => row.target_id === pending.id,
     );

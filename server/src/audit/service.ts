@@ -320,6 +320,14 @@ export const AuditAction = {
   /** A revocation the gateway refused; records whether the grant went back. */
   ACCESS_REVOKE_ROLLBACK: 'access.revoke_rollback',
   /**
+   * The access gateway worker finished a revocation whose gateway step never
+   * completed — the process stopped between the claim and the ACL removal, or
+   * the removal and its rollback both failed. Written by the system, in the
+   * transaction that settles the durable job, after the group came off. The
+   * revocation itself is the `access.revoke` row committed with its claim.
+   */
+  ACCESS_REVOKE_COMPLETE: 'access.revoke_complete',
+  /**
    * A provider's agent publish or spec build is about to add the API's MCP-all
    * group to an all-tools grantee whose consumer holds the REST group but not
    * that one. Committed before the consumer write.
@@ -636,6 +644,7 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.ACCESS_DENY]: TRANSACTIONAL,
   [AuditAction.ACCESS_REVOKE]: TRANSACTIONAL,
   [AuditAction.ACCESS_REVOKE_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
+  [AuditAction.ACCESS_REVOKE_COMPLETE]: TRANSACTIONAL,
   [AuditAction.ACCESS_MCP_ENROLL]: INTENT,
   [AuditAction.ACCESS_TOOLS_PRUNE]: TRANSACTIONAL,
   [AuditAction.ACCESS_TOOLS_REQUEST]: TRANSACTIONAL,

@@ -24,7 +24,8 @@
  * `006_user_identities`; from every release before `v0.4.0`,
  * `007_outbox_recipient` to `011_mcp_tool_subsets`; from every release before
  * `v0.5.0`, `012_access_request_grant`; from every release before `v0.5.1`,
- * `013_account_recovery_jobs`; and, pending, `014_mysql_text_capacity`) is
+ * `013_account_recovery_jobs`; and, pending, `014_mysql_text_capacity` and
+ * `015_access_gateway_jobs`) is
  * applied here on top of a
  * populated database with no change to the harness. `007_outbox_recipient`
  * adds a nullable account binding without changing retained message contents;
@@ -37,6 +38,8 @@
  * only adds an empty table, so no retained account owes a recovery revocation.
  * `014_mysql_text_capacity` widens eight MySQL text columns in place and changes
  * nothing on the other backends; retained values read back unchanged.
+ * `015_access_gateway_jobs` (pending) only adds an empty table, so no retained
+ * grant or request owes the gateway anything.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
@@ -1279,6 +1282,25 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
             assert.equal(readSpec?.parsed_title, 'T'.repeat(300));
             assert.equal(readSpec?.parsed_version, 'v'.repeat(100));
             assert.equal(await store.apiSpecs.delete(wideSpec.id), true);
+
+            // `015_access_gateway_jobs` only adds an empty table: no retained
+            // grant or request owes the gateway anything after the upgrade,
+            // and a decision on a retained row can record one.
+            assert.equal(await store.accessGatewayJobs.findBySubject(ID.grantAccount), null);
+            assert.equal(await store.accessGatewayJobs.findBySubject(ID.requestPending), null);
+            const owed = await store.accessGatewayJobs.upsertClaimed(
+              {
+                kind: 'revoke',
+                subject_id: ID.grantAccount,
+                api_id: ID.invoices,
+                user_id: ID.client,
+                application_id: null,
+                requested_by: null,
+              },
+              new Date().toISOString(),
+            );
+            assert.equal(owed.status, 'sending');
+            assert.equal(await store.accessGatewayJobs.deleteBySubject(ID.grantAccount), true);
 
             // Re-running in the same process changes nothing.
             await store.migrate();

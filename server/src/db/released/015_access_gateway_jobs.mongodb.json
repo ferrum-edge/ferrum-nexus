@@ -1,0 +1,18 @@
+{
+  "id": "015_access_gateway_jobs",
+  "backend": "mongodb",
+  "description": "Durable gateway work owed by a grant revocation or an access approval (one outstanding row per grant or request)",
+  "indexes": [
+    {
+      "collection": "access_gateway_jobs",
+      "name": "ux_access_gateway_jobs_subject",
+      "key": { "subject_id": 1 },
+      "unique": true
+    },
+    {
+      "collection": "access_gateway_jobs",
+      "name": "ix_access_gateway_jobs_due",
+      "key": { "status": 1, "next_attempt_at": 1 }
+    }
+  ]
+}
