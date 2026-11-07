@@ -389,6 +389,13 @@ const RESTORE_SKIP_MESSAGES: Record<RevocationRestoreSkip, string> = {
   group_absent: 'Left a failed revocation revoked: its ACL group is no longer on the consumer',
 };
 
+/**
+ * How many times approval recovery retakes the proxy lease when the API's
+ * proxy changed between reading it and holding its key, before it gives up
+ * for this attempt (the worker reschedules).
+ */
+const RECOVERY_PROXY_ATTEMPTS = 5;
+
 /** The decision note a tool request cancelled because its grant is gone carries. */
 const INACTIVE_GRANT_NOTE = 'The grant this request would extend is no longer active';
 
@@ -2251,105 +2258,142 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * not here to answer for an admission check made minutes ago.
    *
    * Under the API's proxy lease, which every approval holds from its claim to
-   * its grant, so a live approval is never compensated from under it. The
-   * identity's groups come back to what its active grant covers, then a
-   * request still `approved` without the grant it promised goes back to
-   * `pending` — or to `cancelled` for a tool request whose grant is gone — with
-   * the rollback row and the job's deletion, in one transaction.
+   * its grant, so a live approval is never compensated from under it. The API
+   * row is re-read inside that lease, which publishing holds too: an agents
+   * edit that enrolled an all-tools grantee in the MCP-all group before the
+   * lease was taken must be seen, or the reconcile would strip the group it
+   * just added. A proxy that changed meanwhile is retaken under its current
+   * key. The identity's groups come back to what its active grant covers,
+   * then a request still `approved` without the grant it promised goes back
+   * to `pending` — or to `cancelled` for a tool request whose grant is gone,
+   * or when another request now holds the identity's pending slot — with the
+   * rollback row and the job's deletion, in one transaction.
    */
   async function recoverApproval(job: AccessGatewayJobRecord): Promise<AccessGatewayJobOutcome> {
-    const api = await store.apis.findById(job.api_id);
-    const run = async (): Promise<AccessGatewayJobOutcome> => {
-      if (!(await stillOwned(job))) return 'superseded';
-      const [request, requester] = await Promise.all([
-        store.accessRequests.findById(job.subject_id),
-        store.users.findById(job.user_id),
-      ]);
-      // The API, the request or the account is gone, and its proxy, request
-      // rows or consumers went with it: there is nothing left to reconcile.
-      if (!api) return dropJob(job, 'api_missing');
-      if (!request) return dropJob(job, 'request_missing');
-      if (!requester) return dropJob(job, 'requester_missing');
-
-      const { live, removed } = await reconcileGroupsDown(requester, api, job.application_id);
-
-      let settle: 'release' | 'cancel' | 'kept' | 'none' = 'none';
-      if (request.status === 'approved') {
-        if (request.grant_id == null) {
-          if (live?.access_request_id === request.id) settle = 'kept';
-          else settle = live ? 'cancel' : 'release';
-        } else {
-          const grant = live?.id === request.grant_id ? live : null;
-          const added = request.approved_tools ?? [];
-          const covers =
-            grant !== null &&
-            (grant.approved_tools === null ||
-              added.every((id) => grant.approved_tools?.includes(id) === true));
-          if (covers) settle = 'kept';
-          else settle = grant ? 'release' : 'cancel';
-        }
-      }
-      const details: Record<string, unknown> = {
-        api_id: api.id,
-        api_slug: api.slug,
-        user_id: requester.id,
-        application_id: job.application_id,
-        recovered: true,
-        attempts: job.attempts,
-        approved_by: job.requested_by,
-        acl_groups_removed: removed,
-        ...(request.grant_id ? { grant_id: request.grant_id } : {}),
-        ...(live ? { kept_for_grant_id: live.id } : {}),
-      };
-      const settled = await store.transaction(async (tx) => {
-        if (!(await tx.accessGatewayJobs.deleteClaimed(job))) return false;
-        let moved: AccessRequestRecord | null = null;
-        if (settle === 'release') {
-          moved = await tx.accessRequests.updateIfStatus(request.id, 'approved', {
-            status: 'pending',
-            decided_by: null,
-            decided_at: null,
-            decision_note: null,
-            approved_tools: null,
-          });
-        } else if (settle === 'cancel') {
-          moved = await tx.accessRequests.updateIfStatus(request.id, 'approved', {
-            status: 'cancelled',
-            decided_by: null,
-            decided_at: null,
-            approved_tools: null,
-            decision_note:
-              request.grant_id == null
-                ? 'This identity already holds an active grant for this API'
-                : INACTIVE_GRANT_NOTE,
-          });
-        }
-        await audit.forStore(tx).record(
-          SYSTEM_ACTOR,
-          request.grant_id
-            ? AuditAction.ACCESS_TOOLS_APPROVE_ROLLBACK
-            : AuditAction.ACCESS_APPROVE_ROLLBACK,
-          { type: 'access_request', id: request.id },
-          {
-            ...details,
-            ...(settle === 'release' ? { request_released: moved !== null } : {}),
-            ...(settle === 'cancel' ? { request_cancelled: moved !== null } : {}),
-            ...(settle === 'kept' ? { request_kept: true } : {}),
-          },
-          null,
-        );
-        return true;
+    for (let attempt = 0; attempt < RECOVERY_PROXY_ATTEMPTS; attempt += 1) {
+      const seen = await store.apis.findById(job.api_id);
+      const proxyId = seen?.ferrum_proxy_id;
+      // No proxy means no approval holds a lease on this API; the row read
+      // here is the one reconciled against.
+      if (!proxyId) return settleApproval(job, seen);
+      const settled = await edge.serializePerKey(proxyLockKey(proxyId), async () => {
+        const api = await store.apis.findById(job.api_id);
+        if (api && api.ferrum_proxy_id !== proxyId) return null;
+        return { outcome: await settleApproval(job, api) };
       });
-      if (!settled) return 'superseded';
-      deps.log?.(
-        { ...details, request_id: request.id, settle },
-        'Compensated an approval whose grant never committed',
-      );
-      return 'completed';
+      if (settled) return settled.outcome;
+    }
+    throw conflict('The gateway proxy kept changing while an approval was being compensated');
+  }
+
+  /** {@link recoverApproval}'s body, run on an API row read under its proxy lease. */
+  async function settleApproval(
+    job: AccessGatewayJobRecord,
+    api: ApiRecord | null,
+  ): Promise<AccessGatewayJobOutcome> {
+    if (!(await stillOwned(job))) return 'superseded';
+    const [request, requester] = await Promise.all([
+      store.accessRequests.findById(job.subject_id),
+      store.users.findById(job.user_id),
+    ]);
+    // The API, the request or the account is gone, and its proxy, request
+    // rows or consumers went with it: there is nothing left to reconcile.
+    if (!api) return dropJob(job, 'api_missing');
+    if (!request) return dropJob(job, 'request_missing');
+    if (!requester) return dropJob(job, 'requester_missing');
+
+    const { live, removed } = await reconcileGroupsDown(requester, api, job.application_id);
+
+    let settle: 'release' | 'cancel' | 'kept' | 'none' = 'none';
+    if (request.status === 'approved') {
+      if (request.grant_id == null) {
+        if (live?.access_request_id === request.id) settle = 'kept';
+        else settle = live ? 'cancel' : 'release';
+      } else {
+        const grant = live?.id === request.grant_id ? live : null;
+        const added = request.approved_tools ?? [];
+        const covers =
+          grant !== null &&
+          (grant.approved_tools === null ||
+            added.every((id) => grant.approved_tools?.includes(id) === true));
+        if (covers) settle = 'kept';
+        else settle = grant ? 'release' : 'cancel';
+      }
+    }
+    const details: Record<string, unknown> = {
+      api_id: api.id,
+      api_slug: api.slug,
+      user_id: requester.id,
+      application_id: job.application_id,
+      recovered: true,
+      attempts: job.attempts,
+      approved_by: job.requested_by,
+      acl_groups_removed: removed,
+      ...(request.grant_id ? { grant_id: request.grant_id } : {}),
+      ...(live ? { kept_for_grant_id: live.id } : {}),
     };
-    return api?.ferrum_proxy_id
-      ? edge.serializePerKey(proxyLockKey(api.ferrum_proxy_id), run)
-      : run();
+    const settled = await store.transaction(async (tx) => {
+      if (!(await tx.accessGatewayJobs.deleteClaimed(job))) return null;
+      // Re-decided per attempt: the body may be re-run.
+      let outcome = settle;
+      // The request cannot go back to `pending` once the identity has filed
+      // another request for the API: that one holds the one pending slot,
+      // and the unique index would refuse the release on every retry. It
+      // could never be approved anyway, so it is cancelled instead.
+      const occupied =
+        outcome === 'release'
+          ? await tx.accessRequests.findPendingByApiAndUser(
+              request.api_id,
+              request.user_id,
+              request.application_id,
+            )
+          : null;
+      if (occupied && occupied.id !== request.id) outcome = 'cancel';
+      let moved: AccessRequestRecord | null = null;
+      if (outcome === 'release') {
+        moved = await tx.accessRequests.updateIfStatus(request.id, 'approved', {
+          status: 'pending',
+          decided_by: null,
+          decided_at: null,
+          decision_note: null,
+          approved_tools: null,
+        });
+      } else if (outcome === 'cancel') {
+        moved = await tx.accessRequests.updateIfStatus(request.id, 'approved', {
+          status: 'cancelled',
+          decided_by: null,
+          decided_at: null,
+          approved_tools: null,
+          decision_note: occupied
+            ? 'A newer request for this API is pending'
+            : request.grant_id == null
+              ? 'This identity already holds an active grant for this API'
+              : INACTIVE_GRANT_NOTE,
+        });
+      }
+      await audit.forStore(tx).record(
+        SYSTEM_ACTOR,
+        request.grant_id
+          ? AuditAction.ACCESS_TOOLS_APPROVE_ROLLBACK
+          : AuditAction.ACCESS_APPROVE_ROLLBACK,
+        { type: 'access_request', id: request.id },
+        {
+          ...details,
+          ...(outcome === 'release' ? { request_released: moved !== null } : {}),
+          ...(outcome === 'cancel' ? { request_cancelled: moved !== null } : {}),
+          ...(outcome === 'cancel' && occupied ? { pending_request_id: occupied.id } : {}),
+          ...(outcome === 'kept' ? { request_kept: true } : {}),
+        },
+        null,
+      );
+      return { outcome };
+    });
+    if (!settled) return 'superseded';
+    deps.log?.(
+      { ...details, request_id: request.id, settle: settled.outcome },
+      'Compensated an approval whose grant never committed',
+    );
+    return 'completed';
   }
 
   return {

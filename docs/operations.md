@@ -3146,13 +3146,24 @@ rollback put the grant back deletes it too.
   REST and MCP groups off, unless the grant is active again or another active
   grant now holds them, and writes `access.revoke_complete`.
 - `kind = 'approve'` (`subject_id` is the request): under the API's proxy lease,
-  the worker cuts the identity's groups back to what its active grant covers
-  and returns a request still `approved` without its grant to `pending` (or
-  `cancelled`, for a tool request whose grant is gone), writing
-  `access.approve_rollback` or `access.tools_approve_rollback` with
-  `recovered: true`. It never completes an approval.
+  re-reading the API inside it, the worker cuts the identity's groups back to
+  what its active grant covers and returns a request still `approved` without
+  its grant to `pending`. It cancels it instead (clearing `decided_by` and
+  `decided_at`) for a tool request whose grant is gone, when another active
+  grant now holds the access, or when a newer request holds the identity's
+  pending slot (`pending_request_id`). It writes `access.approve_rollback` or
+  `access.tools_approve_rollback` with `recovered: true`. It never completes an
+  approval.
 - Retries back off `10 s × 2^attempts`, capped at five minutes, plus up to 10%
   jitter.
+- A request holds its fresh job for at most about
+  `6 × FERRUM_ADMIN_TIMEOUT_MS + 2 × 30 s + 60 s` (Edge round trips, two lease
+  waits, and a rollback waiting out a crashed key holder): about 150 s by
+  default, 480 s at the 60 s ceiling. Above the five-minute stale threshold
+  the worker may start recovering a decision its request is still settling;
+  it re-checks under the same keys, so this wastes work rather than granting
+  access, and the worker logs a warning at startup when the configured
+  timeout allows it.
 
 ```sql
 SELECT kind, subject_id, user_id, status, attempts, last_error, next_attempt_at, updated_at

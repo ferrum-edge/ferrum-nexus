@@ -21,19 +21,58 @@ import { after, before, describe, it } from 'node:test';
 import {
   aclGroupForApi,
   consumerUsernameForUser,
+  mcpAllGroupForApi,
+  mcpToolGroupForApi,
+  type ApiAgents,
   type ApproveAccessRequestResponse,
   type CreateAccessRequestResponse,
   type PublishApiResponse,
+  type RequestGrantToolsResponse,
 } from '@ferrum-nexus/shared';
 
 import {
   ACCESS_GATEWAY_STALE_AFTER_MS,
+  accessGatewayBackoffMs,
   createAccessGatewayWorker,
   type AccessGatewayWorker,
 } from '../access/gateway-job-worker.js';
 import type { NexusStore } from '../db/store.js';
+import { proxyLockKey } from '../lib/keyed-serializer.js';
 import { crashingStore, type CrashingStore } from './fault-injection.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
+
+/** The document `agents.test.ts` publishes agents on, with two operations to select. */
+const AGENT_DOCUMENT = {
+  openapi: '3.1.0',
+  info: { title: 'Agent API', version: '1' },
+  servers: [{ url: 'https://api.example.com' }],
+  'x-ferrum-mcp': { endpoint: { path: '/escape' }, include: { tags: ['all'] } },
+  'x-ferrum-plugins': [{ plugin_name: 'ai_transcript_audit', config: { sink: 'provider' } }],
+  paths: {
+    '/items': {
+      get: { operationId: 'items', responses: { '200': { description: 'OK' } } },
+      post: { 'x-ferrum-mcp': true, responses: { '200': { description: 'OK' } } },
+    },
+    '/items/{id}': {
+      parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+      delete: { 'x-ferrum-mcp': { expose: true }, responses: { '200': { description: 'OK' } } },
+    },
+  },
+};
+
+const LIST_TOOL = {
+  path: '/items',
+  method: 'GET' as const,
+  name: 'list_items',
+  description: 'List',
+};
+const REMOVE_TOOL = {
+  path: '/items/{id}',
+  method: 'DELETE' as const,
+  name: 'remove',
+  description: 'Delete one item',
+};
+const TWO_TOOLS: ApiAgents = { operations: [LIST_TOOL, REMOVE_TOOL] };
 
 /** A clock the test advances by hand, starting from the real one. */
 function testClock(): { now(): Date; advance(ms: number): void } {
@@ -78,12 +117,68 @@ describe('access gateway jobs survive a crash between the claim and the Edge wri
     await crashed.close();
   });
 
-  function worker(clock: { now(): Date }): AccessGatewayWorker {
+  function worker(clock: { now(): Date }, random?: () => number): AccessGatewayWorker {
     return createAccessGatewayWorker({
       store: restarted.store,
       access: restarted.services.access,
       now: () => clock.now(),
+      ...(random ? { random } : {}),
     });
+  }
+
+  /** Publish an API on `AGENT_DOCUMENT` with `agents`, and return it. */
+  async function publishAgents(
+    app: TestApp,
+    agents: ApiAgents | null,
+  ): Promise<PublishApiResponse['api']> {
+    slugs += 1;
+    const response = await app.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: {
+        name: `Jobs agents ${slugs}`,
+        slug: `jobs-agents-${slugs}`,
+        spec: JSON.stringify(AGENT_DOCUMENT),
+        auth_plugin: 'key_auth',
+        requestable: true,
+        visibility: 'public',
+        spec_enforcement: 'routes',
+        agents,
+      },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    return response.json<PublishApiResponse>().api;
+  }
+
+  /** Crash an approval of `requestId` right after its claim commits. */
+  async function crashApprovalAfterClaim(requestId: string): Promise<void> {
+    crash.crashAfterCommitOf('accessGatewayJobs', 'upsertClaimed');
+    const stopped = await crashed.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/approve`,
+      payload: {},
+    });
+    assert.ok(crash.crashed());
+    assert.ok(stopped.statusCode >= 500, stopped.body);
+    crash.revive();
+    assert.equal((await database.accessRequests.findById(requestId))?.status, 'approved');
+  }
+
+  /** One tick of a worker whose clock is past the stale threshold. */
+  async function recoverStale(): Promise<void> {
+    const clock = testClock();
+    clock.advance(2 * ACCESS_GATEWAY_STALE_AFTER_MS);
+    const tick = await worker(clock).tick();
+    assert.equal(tick.claimed, 1);
+    assert.equal(tick.completed, 1);
+  }
+
+  async function rollbackRow(action: string, requestId: string) {
+    const row = (await restarted.auditRows(action)).find(
+      (entry) => entry.target_id === requestId && entry.details.recovered === true,
+    );
+    assert.ok(row, `${action} records the recovery`);
+    return row;
   }
 
   function groupsOf(userId: string): string[] {
@@ -339,5 +434,218 @@ describe('access gateway jobs survive a crash between the claim and the Edge wri
     assert.deepEqual(groupsOf(client.user.id), []);
     assert.equal((await database.accessRequests.findById(requestId))?.status, 'pending');
     assert.equal(await database.accessGatewayJobs.findBySubject(requestId), null);
+  });
+
+  it('cancels a stranded approval whose pending slot a newer request holds', async () => {
+    const client = await crashed.registerUser({ role: 'client' });
+    const apiId = await publish(crashed);
+    const stranded = await request(crashed, client, apiId);
+    await crashApprovalAfterClaim(stranded);
+
+    // The stranded request is `approved`, not pending, so the identity may
+    // ask again — and its new request holds the one pending slot a release
+    // of the stranded one would need.
+    const newer = await request(restarted, client, apiId);
+
+    await recoverStale();
+    const cancelled = await database.accessRequests.findById(stranded);
+    assert.equal(cancelled?.status, 'cancelled', 'cancelled, not released into a taken slot');
+    assert.equal(cancelled?.decided_by, null);
+    assert.equal(cancelled?.decided_at, null);
+    assert.equal((await database.accessRequests.findById(newer))?.status, 'pending');
+    assert.equal(await database.accessGatewayJobs.findBySubject(stranded), null);
+    const rollback = await rollbackRow('access.approve_rollback', stranded);
+    assert.equal(rollback.details.request_cancelled, true);
+    assert.equal(rollback.details.pending_request_id, newer);
+    assert.deepEqual(groupsOf(client.user.id), []);
+  });
+
+  it('reconciles against the API as publishing left it, not as it read before the lease', async () => {
+    const client = await crashed.registerUser({ role: 'client' });
+    const api = await publishAgents(crashed, null);
+    assert.ok(api.ferrum_proxy_id);
+    const stranded = await request(crashed, client, api.id);
+    await crashApprovalAfterClaim(stranded);
+
+    // A newer request is approved for every tool while the stranded one waits.
+    const grantId = await approve(restarted, await request(restarted, client, api.id));
+    assert.deepEqual(groupsOf(client.user.id), [aclGroupForApi(api.id)]);
+
+    // Publishing turns agents on — enrolling that grant in the MCP-all group —
+    // after recovery has started but before it holds the proxy lease.
+    const edge = restarted.edgeClient;
+    const serialize = edge.serializePerKey;
+    let armed = true;
+    edge.serializePerKey = async (key, work) => {
+      if (armed && key === proxyLockKey(api.ferrum_proxy_id ?? '')) {
+        armed = false;
+        const enabled = await restarted.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${api.id}`,
+          payload: { agents: { operations: [LIST_TOOL] } },
+        });
+        assert.equal(enabled.statusCode, 200, enabled.body);
+        assert.ok(groupsOf(client.user.id).includes(mcpAllGroupForApi(api.id)));
+      }
+      return serialize(key, work);
+    };
+    try {
+      await recoverStale();
+    } finally {
+      edge.serializePerKey = serialize;
+    }
+    assert.equal(armed, false, 'publishing ran inside the window');
+
+    const groups = groupsOf(client.user.id);
+    assert.ok(groups.includes(aclGroupForApi(api.id)));
+    assert.ok(
+      groups.includes(mcpAllGroupForApi(api.id)),
+      'the grant keeps the MCP access publishing enrolled it in',
+    );
+    assert.equal((await database.grants.findById(grantId))?.status, 'active');
+    const cancelled = await database.accessRequests.findById(stranded);
+    assert.equal(cancelled?.status, 'cancelled');
+    assert.equal(cancelled?.decided_by, null);
+    assert.equal(await database.accessGatewayJobs.findBySubject(stranded), null);
+  });
+
+  /** A grantee approved for `list_items` alone, asking for `remove` too. */
+  async function toolRequest(): Promise<{
+    client: TestSession;
+    api: PublishApiResponse['api'];
+    listId: string;
+    removeId: string;
+    grantId: string;
+    requestId: string;
+  }> {
+    const api = await publishAgents(crashed, TWO_TOOLS);
+    const [listId, removeId] = api.agents?.operations.map((tool) => tool.id) ?? [];
+    assert.ok(listId && removeId);
+    const client = await crashed.registerUser({ role: 'client' });
+    const asked = await crashed.authed(client, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: api.id, justification: 'List items', requested_tools: [listId] },
+    });
+    assert.equal(asked.statusCode, 201, asked.body);
+    const grantId = await approve(
+      crashed,
+      asked.json<CreateAccessRequestResponse>().access_request.id,
+    );
+    const more = await crashed.authed(client, {
+      method: 'POST',
+      url: `/api/grants/${grantId}/tool-requests`,
+      payload: { requested_tools: [removeId], justification: 'Remove items too' },
+    });
+    assert.equal(more.statusCode, 201, more.body);
+    const requestId = more.json<RequestGrantToolsResponse>().access_request.id;
+    return { client, api, listId, removeId, grantId, requestId };
+  }
+
+  for (const point of ['after the claim', 'after the Edge write'] as const) {
+    it(`compensates a tool approval that stopped ${point}`, async () => {
+      const f = await toolRequest();
+      const listGroup = mcpToolGroupForApi(f.api.id, f.listId);
+      const removeGroup = mcpToolGroupForApi(f.api.id, f.removeId);
+
+      if (point === 'after the claim') {
+        crash.crashAfterCommitOf('accessGatewayJobs', 'upsertClaimed');
+      } else {
+        // The widened groups have landed; the grant's new subset never commits.
+        crash.crashAt('grants', 'updateIfStatus');
+      }
+      const stopped = await crashed.authed(provider, {
+        method: 'POST',
+        url: `/api/access-requests/${f.requestId}/approve`,
+        payload: {},
+      });
+      assert.ok(crash.crashed());
+      assert.ok(stopped.statusCode >= 500, stopped.body);
+      crash.revive();
+
+      assert.equal((await database.accessRequests.findById(f.requestId))?.status, 'approved');
+      assert.deepEqual((await database.grants.findById(f.grantId))?.approved_tools, [f.listId]);
+      assert.equal(
+        groupsOf(f.client.user.id).includes(removeGroup),
+        point === 'after the Edge write',
+      );
+      assert.equal((await database.accessGatewayJobs.findBySubject(f.requestId))?.kind, 'approve');
+
+      await recoverStale();
+      const groups = groupsOf(f.client.user.id);
+      assert.ok(groups.includes(aclGroupForApi(f.api.id)), 'REST access never lapses');
+      assert.ok(groups.includes(listGroup), 'the approved tool stays');
+      assert.equal(groups.includes(removeGroup), false, 'the unapproved tool comes off');
+      const released = await database.accessRequests.findById(f.requestId);
+      assert.equal(released?.status, 'pending');
+      assert.equal(released?.decided_by, null);
+      assert.equal(released?.decided_at, null);
+      assert.equal(released?.approved_tools, null);
+      assert.deepEqual((await database.grants.findById(f.grantId))?.approved_tools, [f.listId]);
+      assert.equal(await database.accessGatewayJobs.findBySubject(f.requestId), null);
+      const rollback = await rollbackRow('access.tools_approve_rollback', f.requestId);
+      assert.equal(rollback.details.request_released, true);
+      assert.deepEqual(
+        rollback.details.acl_groups_removed,
+        point === 'after the claim' ? [] : [removeGroup],
+      );
+    });
+  }
+
+  it('cancels a stranded tool approval whose grant was revoked meanwhile', async () => {
+    const f = await toolRequest();
+    await crashApprovalAfterClaim(f.requestId);
+
+    const revoked = await revoke(restarted, f.grantId);
+    assert.equal(revoked.statusCode, 200, revoked.body);
+
+    await recoverStale();
+    assert.deepEqual(
+      groupsOf(f.client.user.id).filter((group) => group.startsWith(`nexus:api:${f.api.id}:`)),
+      [],
+    );
+    const cancelled = await database.accessRequests.findById(f.requestId);
+    assert.equal(cancelled?.status, 'cancelled');
+    assert.equal(cancelled?.decided_by, null);
+    assert.equal(cancelled?.decided_at, null);
+    assert.equal(await database.accessGatewayJobs.findBySubject(f.requestId), null);
+    const rollback = await rollbackRow('access.tools_approve_rollback', f.requestId);
+    assert.equal(rollback.details.request_cancelled, true);
+  });
+
+  it('reschedules a recovery the gateway refuses, on the backoff, then finishes it', async () => {
+    const { client, apiId, grantId } = await grantee();
+    crash.crashAfterCommitOf('accessGatewayJobs', 'upsertClaimed');
+    const stopped = await revoke(crashed, grantId);
+    assert.ok(stopped.statusCode >= 500, stopped.body);
+    crash.revive();
+
+    const clock = testClock();
+    clock.advance(2 * ACCESS_GATEWAY_STALE_AFTER_MS);
+    const noJitter = worker(clock, () => 0);
+    crashed.edge.queueFailure(503, { error: 'gateway unavailable' }, '/consumers/', 'PUT');
+    const refused = await noJitter.tick();
+    assert.equal(refused.claimed, 1);
+    assert.equal(refused.rescheduled, 1);
+    assert.equal(refused.completed, 0);
+    const pending = await database.accessGatewayJobs.findBySubject(grantId);
+    assert.equal(pending?.status, 'pending');
+    assert.equal(pending?.attempts, 1);
+    assert.ok(pending?.last_error);
+    assert.equal(
+      pending?.next_attempt_at,
+      new Date(clock.now().getTime() + accessGatewayBackoffMs(1, () => 0)).toISOString(),
+    );
+    assert.deepEqual(groupsOf(client.user.id), [aclGroupForApi(apiId)], 'still owed');
+
+    const backingOff = await noJitter.tick();
+    assert.equal(backingOff.claimed, 0, 'not due until the backoff passes');
+
+    clock.advance(accessGatewayBackoffMs(1, () => 0));
+    const retried = await noJitter.tick();
+    assert.equal(retried.claimed, 1);
+    assert.equal(retried.completed, 1);
+    assert.deepEqual(groupsOf(client.user.id), []);
+    assert.equal(await database.accessGatewayJobs.findBySubject(grantId), null);
   });
 });

@@ -726,6 +726,7 @@ export async function buildServer(
     store: deps.store,
     access,
     log: warn,
+    adminTimeoutMs: config.edge.timeoutMs,
   });
 
   // Deletes the sessions and single-use links that have outlived `expires_at`.

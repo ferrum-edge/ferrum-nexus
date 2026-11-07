@@ -54,6 +54,7 @@
  */
 
 import type { AccessGatewayJobRecord, NexusStore } from '../db/store.js';
+import { LEASE_TTL_MS, LEASE_WAIT_MS } from '../lib/keyed-serializer.js';
 import type { AccessGatewayJobOutcome, AccessService } from './service.js';
 
 /** Poll interval, matching the teardown worker's. */
@@ -81,6 +82,32 @@ export const ACCESS_GATEWAY_MAX_BACKOFF_MS = 5 * 60_000;
  * so a worker's claim lasts one job.
  */
 export const ACCESS_GATEWAY_STALE_AFTER_MS = 5 * 60_000;
+
+/**
+ * Edge round trips a request that owns a fresh job may make before it settles
+ * it: an approval's consumer lookup or create, `GET` and `PUT` of the consumer,
+ * and its compensation's `GET` and `PUT`; a revocation's `GET` and `PUT`, its
+ * rollback's consumer read and a retry of each. Six covers the longer path.
+ */
+export const ACCESS_GATEWAY_EDGE_CALLS = 6;
+
+/**
+ * How long a request can legitimately hold a fresh job, for an Admin API
+ * deadline of `adminTimeoutMs` (`FERRUM_ADMIN_TIMEOUT_MS`): its Edge round
+ * trips, two lease waits of up to `LEASE_WAIT_MS` (the proxy key and the
+ * consumer key), and a revocation rollback waiting out a key a crashed
+ * instance left held, for up to `LEASE_TTL_MS`. About 150 seconds on the
+ * default 5-second deadline; 480 at the 60-second ceiling.
+ *
+ * It must stay below {@link ACCESS_GATEWAY_STALE_AFTER_MS}, or a slow gateway
+ * looks like an abandoned claim and the worker starts recovering a decision
+ * its request is still settling. Recovery re-checks ownership under the keys
+ * it acts in, so the overlap is wasted work rather than wrong access, but the
+ * worker warns at start when the configuration allows it.
+ */
+export function accessGatewayJobBudgetMs(adminTimeoutMs: number): number {
+  return ACCESS_GATEWAY_EDGE_CALLS * adminTimeoutMs + 2 * LEASE_WAIT_MS + LEASE_TTL_MS;
+}
 
 /** What one {@link AccessGatewayWorker.tick} did. */
 export interface AccessGatewayTickResult {
@@ -124,6 +151,11 @@ export interface AccessGatewayWorkerDeps {
   now?: () => Date;
   /** Injectable jitter source; defaults to `Math.random`. */
   random?: () => number;
+  /**
+   * The Admin API deadline (`FERRUM_ADMIN_TIMEOUT_MS`), checked at `start()`
+   * against the stale threshold through {@link accessGatewayJobBudgetMs}.
+   */
+  adminTimeoutMs?: number;
 }
 
 /**
@@ -269,6 +301,19 @@ export function createAccessGatewayWorker(deps: AccessGatewayWorkerDeps): Access
 
     start(): void {
       if (timer !== null) return;
+      if (deps.adminTimeoutMs !== undefined) {
+        const budget = accessGatewayJobBudgetMs(deps.adminTimeoutMs);
+        if (budget >= ACCESS_GATEWAY_STALE_AFTER_MS) {
+          log(
+            {
+              job_budget_ms: budget,
+              stale_after_ms: ACCESS_GATEWAY_STALE_AFTER_MS,
+              admin_timeout_ms: deps.adminTimeoutMs,
+            },
+            'FERRUM_ADMIN_TIMEOUT_MS lets a request hold an access gateway job past the stale threshold; the worker may recover decisions still being settled',
+          );
+        }
+      }
       timer = setInterval(() => void tick(), pollIntervalMs);
       // Do not hold the event loop open just for the poller.
       timer.unref?.();
