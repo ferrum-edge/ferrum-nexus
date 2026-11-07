@@ -968,6 +968,12 @@ Query: `api_id`, `q` (substring of the subject), `limit`, `offset`.
 
 Non-admins see threads they sit in; admins also see every platform thread.
 
+`api` is the API's current summary, and only for a reader who may read that API
+now: for a `private` API the reader cannot open in the catalog (an
+authorization or grant withdrawn, or the API made `private` after the thread
+was opened) it is omitted and only `api_id` remains. The same applies to
+`GET /api/threads/:id`.
+
 ### `POST /api/threads`
 
 _session_ → `201 { "thread": { … }, "message": { … } }`
@@ -2854,6 +2860,12 @@ A `client` (or anyone with `mine=true`) sees their own; a `provider` sees
 requests for APIs they own; an `admin` sees all. A provider filtering by an
 `api_id` they do not own gets `403 FORBIDDEN`.
 
+The `api` summary is the API's current state and follows the catalog's read
+rule at the time of the read: on a `private` API the caller can no longer open
+(a viewer authorization or grant withdrawn, or the API made `private` after the
+request was filed) it is omitted, and the row keeps only `api_id`. The same
+holds for grants and for every other response that returns a request or grant.
+
 ### `POST /api/access-requests`
 
 _session_ → `201 { "access_request": AccessRequest }`
@@ -2992,7 +3004,7 @@ Registered under `/api/grants`; _session_.
 _session_ — `Paginated<Grant>`, each row with `api` and `user` summaries. Query:
 `mine` (boolean), `api_id`, `user_id` (admins only), `status` (`active` \|
 `revoked`), `limit`, `offset`. Scoped like access requests: own, owned APIs,
-or everything.
+or everything. `api` is omitted on the same terms as for access requests.
 
 ### `POST /api/grants/:id/revoke`
 

@@ -10,7 +10,10 @@
  *   cannot see — a request that got through would confirm the API exists;
  * - messaging, which must not let an account attach a thread to one — the
  *   thread listing embeds the API's name and slug, so a successful attach is a
- *   metadata read by another route.
+ *   metadata read by another route;
+ * - every listing that embeds an API summary in a row the account can still
+ *   see after losing read access — its access requests, grants and threads —
+ *   which asks again on every read ({@link filterReadableApis}).
  *
  * Three copies drifted. The catalog *list* counted a grant held by any of the
  * account's identities while its *detail* check counted only the account's own,
@@ -94,4 +97,48 @@ export function canViewApi(viewer: UserRecord, api: ApiRecord, access: ApiReadAc
   // `private` is the exception the mode exists for — there, not being on one
   // of the insider lists is the end of it.
   return api.status === 'published' && api.visibility !== 'private';
+}
+
+/** No grant and no authorization: what {@link canViewApi} grants on role and ownership alone. */
+const NO_STANDING: ApiReadAccess = { grant: null, isAuthorizedViewer: false };
+
+/**
+ * The APIs, of `apis`, whose summary `viewer` may be shown right now.
+ *
+ * An access request, a grant and a message thread each embed a summary of
+ * their API — name, slug, version, listen path, invoke URL, agent tools — read
+ * from the API's *current* row every time the row is listed. The private rule
+ * was checked when the row was written, but read access can end after that: a
+ * viewer authorization withdrawn, a grant revoked or given up, an API switched
+ * to `private`. The row stays the account's to see; the summary is a metadata
+ * read like any other and answers to {@link canViewApi} at read time, or it
+ * keeps reporting every later rename to an account the catalog answers `404`.
+ *
+ * Only `private` is gated, as at write time: `internal` is unlisted rather
+ * than secret, and a retired API is history the account took part in.
+ *
+ * The account's standing is read once for the whole page — its active grants
+ * through every identity and its viewer authorizations, the two bounded reads
+ * the catalog list makes — and only when a private API on the page is neither
+ * the viewer's own nor readable by role.
+ */
+export async function filterReadableApis(
+  store: NexusStore,
+  viewer: UserRecord,
+  apis: readonly ApiRecord[],
+): Promise<ApiRecord[]> {
+  const gated = apis.filter(
+    (api) => api.visibility === 'private' && !canViewApi(viewer, api, NO_STANDING),
+  );
+  if (gated.length === 0) return [...apis];
+  const [grants, authorized] = await Promise.all([
+    store.grants.listActiveByUser(viewer.id),
+    store.apiViewers.listApiIdsByUser(viewer.id),
+  ]);
+  const authorizedIds = new Set(authorized);
+  const standing = (api: ApiRecord): ApiReadAccess => ({
+    grant: grants.find((grant) => grant.api_id === api.id) ?? null,
+    isAuthorizedViewer: authorizedIds.has(api.id),
+  });
+  return apis.filter((api) => !gated.includes(api) || canViewApi(viewer, api, standing(api)));
 }

@@ -125,7 +125,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { AuditAction, auditRowCommitted, type AuditService } from '../audit/service.js';
-import { canViewApi, resolveReadAccess } from '../catalog/read-access.js';
+import { canViewApi, filterReadableApis, resolveReadAccess } from '../catalog/read-access.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
   AccessRequestFilter,
@@ -445,7 +445,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     );
   }
 
-  async function decorateRequests(rows: AccessRequestRecord[]): Promise<AccessRequest[]> {
+  /**
+   * `reader` is the account the rows are returned to. The embedded API summary
+   * is live metadata, so it is left out — `api_id` stays — for a private API
+   * the reader can no longer view ({@link filterReadableApis}).
+   */
+  async function decorateRequests(
+    rows: AccessRequestRecord[],
+    reader: UserRecord,
+  ): Promise<AccessRequest[]> {
     if (rows.length === 0) return [];
     // Every join keys off ids already in `rows`, and `store` is the root store
     // (never a transaction-scoped one), so the reads go out together.
@@ -455,7 +463,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       settings.getGatewayPublicUrl(),
       applicationsFor(rows),
     ]);
-    const apis = new Map(apiRows.map((api) => [api.id, api]));
+    const readable = await filterReadableApis(store, reader, apiRows);
+    const apis = new Map(readable.map((api) => [api.id, api]));
     const users = new Map(userRows.map((user) => [user.id, user]));
     return rows.map((row) => {
       const api = apis.get(row.api_id);
@@ -470,7 +479,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     });
   }
 
-  async function decorateGrants(rows: GrantRecord[]): Promise<Grant[]> {
+  /** Grants' joins, on the same terms as {@link decorateRequests}. */
+  async function decorateGrants(rows: GrantRecord[], reader: UserRecord): Promise<Grant[]> {
     if (rows.length === 0) return [];
     // Every join keys off ids already in `rows`, and `store` is the root store
     // (never a transaction-scoped one), so the reads go out together.
@@ -480,7 +490,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       settings.getGatewayPublicUrl(),
       applicationsFor(rows),
     ]);
-    const apis = new Map(apiRows.map((api) => [api.id, api]));
+    const readable = await filterReadableApis(store, reader, apiRows);
+    const apis = new Map(readable.map((api) => [api.id, api]));
     const users = new Map(userRows.map((user) => [user.id, user]));
     return rows.map((row) => {
       const api = apis.get(row.api_id);
@@ -1710,8 +1721,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       },
     );
 
-    const [decoratedRequest] = await decorateRequests([updated]);
-    const [decoratedGrant] = await decorateGrants([widened]);
+    const [decoratedRequest] = await decorateRequests([updated], actor);
+    const [decoratedGrant] = await decorateGrants([widened], actor);
     return { access_request: decoratedRequest ?? updated, grant: decoratedGrant ?? widened };
   }
 
@@ -1902,7 +1913,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       : await withdraw();
     const updated = typeof withdrawn === 'function' ? await withdrawn() : withdrawn;
 
-    const [decorated] = await decorateGrants([updated]);
+    const [decorated] = await decorateGrants([updated], actor);
     return decorated ?? updated;
   }
 
@@ -2072,7 +2083,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         ? await edge.serializePerKey(proxyLockKey(api.ferrum_proxy_id), submit)
         : await submit();
 
-      const [decorated] = await decorateRequests([created]);
+      const [decorated] = await decorateRequests([created], user);
       return decorated ?? created;
     },
 
@@ -2203,7 +2214,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         ? await edge.serializePerKey(proxyLockKey(api.ferrum_proxy_id), submit)
         : await submit();
 
-      const [decorated] = await decorateRequests([created]);
+      const [decorated] = await decorateRequests([created], user);
       return decorated ?? created;
     },
 
@@ -2241,7 +2252,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       });
       if (!updated) throw await decisionConflict(request.id);
 
-      const [decorated] = await decorateRequests([updated]);
+      const [decorated] = await decorateRequests([updated], user);
       return decorated ?? updated;
     },
 
@@ -2440,8 +2451,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           },
         );
 
-        const [decoratedRequest] = await decorateRequests([updated]);
-        const [decoratedGrant] = await decorateGrants([grant]);
+        const [decoratedRequest] = await decorateRequests([updated], actor);
+        const [decoratedGrant] = await decorateGrants([grant], actor);
         return {
           access_request: decoratedRequest ?? updated,
           grant: decoratedGrant ?? grant,
@@ -2512,7 +2523,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         },
       );
 
-      const [decorated] = await decorateRequests([updated]);
+      const [decorated] = await decorateRequests([updated], actor);
       return decorated ?? updated;
     },
 
@@ -2669,11 +2680,11 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
       if (filter.mine || !roleAtLeast(actor.role, 'provider')) {
         const page = await store.accessRequests.list({ ...base, user_id: actor.id }, options);
-        return { items: await decorateRequests(page.items), total: page.total };
+        return { items: await decorateRequests(page.items, actor), total: page.total };
       }
       if (roleAtLeast(actor.role, 'admin')) {
         const page = await store.accessRequests.list(base, options);
-        return { items: await decorateRequests(page.items), total: page.total };
+        return { items: await decorateRequests(page.items, actor), total: page.total };
       }
 
       // A provider's inbox is scoped to the APIs they own.
@@ -2686,7 +2697,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         { ...base, ...(base.api_id === undefined ? { api_ids: owned } : {}) },
         options,
       );
-      return { items: await decorateRequests(page.items), total: page.total };
+      return { items: await decorateRequests(page.items, actor), total: page.total };
     },
 
     async listGrants(actor, filter = {}, options): Promise<Paginated<Grant>> {
@@ -2697,14 +2708,14 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
       if (filter.mine || !roleAtLeast(actor.role, 'provider')) {
         const page = await store.grants.list({ ...base, user_id: actor.id }, options);
-        return { items: await decorateGrants(page.items), total: page.total };
+        return { items: await decorateGrants(page.items, actor), total: page.total };
       }
       if (roleAtLeast(actor.role, 'admin')) {
         const page = await store.grants.list(
           { ...base, ...(filter.user_id !== undefined ? { user_id: filter.user_id } : {}) },
           options,
         );
-        return { items: await decorateGrants(page.items), total: page.total };
+        return { items: await decorateGrants(page.items, actor), total: page.total };
       }
 
       const owned = await store.apis.listIdsByOwner(actor.id);
@@ -2720,7 +2731,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         },
         options,
       );
-      return { items: await decorateGrants(page.items), total: page.total };
+      return { items: await decorateGrants(page.items, actor), total: page.total };
     },
   };
 }

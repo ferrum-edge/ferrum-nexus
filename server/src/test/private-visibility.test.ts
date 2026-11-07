@@ -25,10 +25,20 @@ import { after, before, describe, it } from 'node:test';
 import {
   aclGroupForApi,
   consumerUsernameForUser,
+  type AccessRequest,
+  type ApproveAccessRequestResponse,
   type AuthorizeApiViewerResponse,
   type CatalogDetailResponse,
   type CatalogListResponse,
+  type CreateAccessRequestResponse,
+  type CreateThreadResponse,
+  type GetThreadResponse,
+  type Grant,
+  type ListAccessRequestsResponse,
   type ListApiViewersResponse,
+  type ListGrantsResponse,
+  type ListThreadsResponse,
+  type MessageThread,
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
@@ -388,5 +398,245 @@ describe('private API visibility', () => {
     assert.ok(slugs.includes('vis-public'));
     assert.equal(await openDetail(stranger, 'vis-public'), 200);
     assert.ok(publicId && internalId, 'both fixtures were published');
+  });
+});
+
+/**
+ * The rows an account keeps after it loses read access — its access requests,
+ * its grants, its message threads — embed a summary of their API read from the
+ * API's current row. The private rule was checked when each row was written;
+ * these tests pin that it is checked again on every read, so a former reader
+ * keeps `api_id` but stops seeing the API's later name, version, address and
+ * tools while the catalog answers it `404`.
+ */
+describe('API summaries embedded in an account’s own rows', () => {
+  let harness: TestApp;
+  let admin: TestSession;
+  let provider: TestSession;
+
+  async function publish(slug: string, visibility: 'public' | 'private'): Promise<string> {
+    const response = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: {
+        name: `Summary ${slug}`,
+        slug,
+        spec: SAMPLE_SPEC_YAML,
+        auth_plugin: 'key_auth',
+        requestable: true,
+        visibility,
+      },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    return response.json<PublishApiResponse>().api.id;
+  }
+
+  async function patchApi(apiId: string, payload: Record<string, string>): Promise<void> {
+    const response = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${apiId}`,
+      payload,
+    });
+    assert.equal(response.statusCode, 200, response.body);
+  }
+
+  async function authorizeViewer(apiId: string, session: TestSession): Promise<void> {
+    const response = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/apis/${apiId}/viewers`,
+      payload: { user_id: session.user.id },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+  }
+
+  async function revokeViewer(apiId: string, session: TestSession): Promise<void> {
+    const response = await harness.authed(provider, {
+      method: 'DELETE',
+      url: `/api/apis/${apiId}/viewers/${session.user.id}`,
+    });
+    assert.equal(response.statusCode, 200, response.body);
+  }
+
+  async function requestAccess(session: TestSession, apiId: string): Promise<AccessRequest> {
+    const response = await harness.authed(session, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: apiId, justification: 'Integration' },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    return response.json<CreateAccessRequestResponse>().access_request;
+  }
+
+  async function openThread(session: TestSession, apiId: string): Promise<MessageThread> {
+    const response = await harness.authed(session, {
+      method: 'POST',
+      url: '/api/threads',
+      payload: {
+        subject: 'About the API',
+        body: 'A question',
+        recipient_user_id: provider.user.id,
+        api_id: apiId,
+      },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    return response.json<CreateThreadResponse>().thread;
+  }
+
+  /** `session`'s access requests on `apiId`, as its own listing returns them. */
+  async function listRequests(session: TestSession, apiId: string): Promise<AccessRequest[]> {
+    const response = await harness.authed(session, {
+      method: 'GET',
+      url: `/api/access-requests?api_id=${apiId}`,
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    const items = response.json<ListAccessRequestsResponse>().items;
+    assert.ok(items.length > 0, 'the rows themselves stay listed');
+    return items;
+  }
+
+  /** `session`'s grants on `apiId`, as its own listing returns them. */
+  async function listGrants(session: TestSession, apiId: string): Promise<Grant[]> {
+    const response = await harness.authed(session, {
+      method: 'GET',
+      url: `/api/grants?api_id=${apiId}`,
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    const items = response.json<ListGrantsResponse>().items;
+    assert.ok(items.length > 0, 'the rows themselves stay listed');
+    return items;
+  }
+
+  /** The thread as `session` sees it in its listing and on its own page. */
+  async function readThread(
+    session: TestSession,
+    threadId: string,
+  ): Promise<{ listed: MessageThread; detail: GetThreadResponse; raw: string }> {
+    const list = await harness.authed(session, { method: 'GET', url: '/api/threads' });
+    assert.equal(list.statusCode, 200, list.body);
+    const listed = list.json<ListThreadsResponse>().items.find((entry) => entry.id === threadId);
+    assert.ok(listed, 'the thread itself stays listed');
+    const detail = await harness.authed(session, {
+      method: 'GET',
+      url: `/api/threads/${threadId}`,
+    });
+    assert.equal(detail.statusCode, 200, detail.body);
+    return { listed, detail: detail.json<GetThreadResponse>(), raw: list.body + detail.body };
+  }
+
+  before(async () => {
+    harness = await buildTestApp();
+    admin = await harness.registerUser({ email: 'summary-super@example.test' });
+    provider = await harness.registerUser({
+      email: 'summary-provider@example.test',
+      role: 'provider',
+    });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('drops the summary from a former viewer’s requests and threads once revoked', async () => {
+    const apiId = await publish('summary-viewer', 'private');
+    const former = await harness.registerUser({
+      email: 'summary-former-viewer@example.test',
+      role: 'client',
+    });
+    await authorizeViewer(apiId, former);
+    const created = await requestAccess(former, apiId);
+    assert.equal(created.api?.name, 'Summary summary-viewer', 'an authorized viewer sees it');
+    const thread = await openThread(former, apiId);
+    assert.equal(thread.api?.name, 'Summary summary-viewer');
+
+    await revokeViewer(apiId, former);
+    await patchApi(apiId, { name: 'Renamed after the revoke' });
+    const catalog = await harness.authed(former, {
+      method: 'GET',
+      url: '/api/catalog/summary-viewer',
+    });
+    assert.equal(catalog.statusCode, 404, 'the catalog refuses the former viewer');
+
+    const [request] = await listRequests(former, apiId);
+    assert.equal(request?.api_id, apiId, 'the row keeps its api_id');
+    assert.equal(request?.api, undefined, 'and loses the summary');
+
+    const read = await readThread(former, thread.id);
+    assert.equal(read.listed.api_id, apiId);
+    assert.equal(read.listed.api, undefined, 'the thread listing drops it');
+    assert.equal(read.detail.api, undefined, 'and so does the thread page');
+    assert.ok(!read.raw.includes('Renamed after the revoke'), 'the new name never reaches them');
+
+    // The owner and an administrator still read the live summary.
+    const [ownerView] = await listRequests(provider, apiId);
+    assert.equal(ownerView?.api?.name, 'Renamed after the revoke');
+    const [adminView] = await listRequests(admin, apiId);
+    assert.equal(adminView?.api?.name, 'Renamed after the revoke');
+    const ownerThread = await readThread(provider, thread.id);
+    assert.equal(ownerThread.detail.api?.name, 'Renamed after the revoke');
+  });
+
+  it('keeps it for an active grantee, and drops it once the grant is revoked', async () => {
+    const apiId = await publish('summary-grant', 'private');
+    const grantee = await harness.registerUser({
+      email: 'summary-grantee@example.test',
+      role: 'client',
+    });
+    await authorizeViewer(apiId, grantee);
+    const created = await requestAccess(grantee, apiId);
+    const approved = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${created.id}/approve`,
+      payload: {},
+    });
+    assert.equal(approved.statusCode, 200, approved.body);
+    const { grant } = approved.json<ApproveAccessRequestResponse>();
+
+    // The grant alone is read access: withdrawing the authorization changes nothing.
+    await revokeViewer(apiId, grantee);
+    const [active] = await listGrants(grantee, apiId);
+    assert.equal(active?.api?.name, 'Summary summary-grant', 'an active grantee sees it');
+
+    const revoked = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/grants/${grant.id}/revoke`,
+      payload: {},
+    });
+    assert.equal(revoked.statusCode, 200, revoked.body);
+    await patchApi(apiId, { name: 'Renamed after the grant' });
+
+    const [held] = await listGrants(grantee, apiId);
+    assert.equal(held?.status, 'revoked');
+    assert.equal(held?.api_id, apiId);
+    assert.equal(held?.api, undefined, 'the revoked grant loses the summary');
+    const [request] = await listRequests(grantee, apiId);
+    assert.equal(request?.api, undefined, 'and so does the request that led to it');
+
+    const [adminView] = await listGrants(admin, apiId);
+    assert.equal(adminView?.api?.name, 'Renamed after the grant');
+  });
+
+  it('drops it from rows written while the API was public once it turns private', async () => {
+    const apiId = await publish('summary-flip', 'public');
+    const early = await harness.registerUser({
+      email: 'summary-early@example.test',
+      role: 'client',
+    });
+    await requestAccess(early, apiId);
+    const thread = await openThread(early, apiId);
+    const [earlier] = await listRequests(early, apiId);
+    assert.equal(earlier?.api?.name, 'Summary summary-flip', 'a public API is anyone’s to read');
+
+    await patchApi(apiId, { visibility: 'private', name: 'Renamed once private' });
+
+    const [request] = await listRequests(early, apiId);
+    assert.equal(request?.api_id, apiId);
+    assert.equal(request?.api, undefined);
+    const read = await readThread(early, thread.id);
+    assert.equal(read.listed.api, undefined);
+    assert.equal(read.detail.api, undefined);
+    assert.ok(!read.raw.includes('Renamed once private'));
+
+    const [ownerView] = await listRequests(provider, apiId);
+    assert.equal(ownerView?.api?.name, 'Renamed once private');
   });
 });
