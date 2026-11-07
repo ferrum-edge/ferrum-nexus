@@ -75,7 +75,7 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
-import { canViewApi, resolveReadAccess } from '../catalog/read-access.js';
+import { canViewApi, filterReadableApis, resolveReadAccess } from '../catalog/read-access.js';
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
@@ -237,8 +237,15 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
       : `${flat.slice(0, MESSAGE_PREVIEW_LENGTH - 1)}…`;
   }
 
-  /** Attach api/participant/preview joins to a page of threads. */
-  async function decorate(threads: ThreadRecord[]): Promise<MessageThread[]> {
+  /**
+   * Attach api/participant/preview joins to a page of threads.
+   *
+   * `reader` is the account the page is returned to. Seats decide who reads a
+   * thread, not who reads its API: the summary is live metadata, so it is left
+   * out — `api_id` stays — for a private API the reader can no longer view
+   * ({@link filterReadableApis}), whatever was true when the thread was opened.
+   */
+  async function decorate(threads: ThreadRecord[], reader: UserRecord): Promise<MessageThread[]> {
     if (threads.length === 0) return [];
     const userIds = new Set<Uuid>();
     const apiIds = new Set<Uuid>();
@@ -257,7 +264,8 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
       store.messages.findLatestByThreads(threads.map((thread) => thread.id)),
     ]);
     const users = new Map(userRows.map((user) => [user.id, user]));
-    const apis = new Map(apiRows.map((api) => [api.id, api]));
+    const readable = await filterReadableApis(store, reader, apiRows);
+    const apis = new Map(readable.map((api) => [api.id, api]));
     const latestByThread = new Map(latestRows.map((message) => [message.thread_id, message]));
 
     return threads.map((thread) => {
@@ -614,7 +622,7 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
       // back to the bare thread rather than reporting the send as failed.
       let decorated: MessageThread | undefined;
       try {
-        [decorated] = await decorate([{ ...thread, last_message_at: at }]);
+        [decorated] = await decorate([{ ...thread, last_message_at: at }], input.actor);
       } catch (error) {
         deps.log?.(
           {
@@ -648,14 +656,14 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
         ? { platform_or_participant_user_id: user.id }
         : { participant_user_id: user.id };
       const page = await store.threads.list({ ...base, ...seats }, options);
-      return { items: await decorate(page.items), total: page.total };
+      return { items: await decorate(page.items, user), total: page.total };
     },
 
     async getThread(user, threadId, options): Promise<MessageThreadDetail> {
       const thread = await loadThread(threadId);
       assertCanRead(user, thread);
       const [decorated, messages] = await Promise.all([
-        decorate([thread]).then(([entry]) => entry),
+        decorate([thread], user).then(([entry]) => entry),
         messagePage(thread, options),
       ]);
       return { ...(decorated ?? thread), messages };
