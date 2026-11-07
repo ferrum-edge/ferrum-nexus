@@ -2131,6 +2131,15 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return { items: rows.map(mapAccessRequest), total };
     },
 
+    pageByStatus: async (status, afterId, limit) =>
+      (
+        await queryAll(
+          exec,
+          `SELECT * FROM access_requests WHERE status = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+          [status, afterId ?? '', Math.max(1, Math.floor(limit))],
+        )
+      ).map(mapAccessRequest),
+
     findPendingByApiAndUser: async (apiId, userId, applicationId = null) => {
       const where = new SqlWhereBuilder()
         .always('api_id = ?', apiId)
@@ -2281,6 +2290,15 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       );
       return { items: rows.map(mapGrant), total };
     },
+
+    pageByStatus: async (status, afterId, limit) =>
+      (
+        await queryAll(
+          exec,
+          `SELECT * FROM grants WHERE status = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+          [status, afterId ?? '', Math.max(1, Math.floor(limit))],
+        )
+      ).map(mapGrant),
 
     findActiveByApiAndUser: async (apiId, userId, applicationId = null) => {
       const where = new SqlWhereBuilder()

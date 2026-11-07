@@ -36,8 +36,10 @@ import {
   createAccessGatewayWorker,
   type AccessGatewayWorker,
 } from '../access/gateway-job-worker.js';
-import type { NexusStore } from '../db/store.js';
-import { proxyLockKey } from '../lib/keyed-serializer.js';
+import { queueStrandedAccessRepairs } from '../access/stranded-repair.js';
+import { canonicalConsumerLockKey } from '../credentials/consumers.js';
+import type { AccessRequestRepo, NexusStore } from '../db/store.js';
+import { createKeyedSerializer, proxyLockKey } from '../lib/keyed-serializer.js';
 import { crashingStore, type CrashingStore } from './fault-injection.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -680,5 +682,179 @@ describe('access gateway jobs survive a crash between the claim and the Edge wri
     assert.equal((await database.grants.findById(regranted))?.status, 'active');
     assert.equal((await database.grants.findById(grantId))?.status, 'revoked');
     assert.equal(await database.accessGatewayJobs.findBySubject(grantId), null);
+  });
+
+  /** Take a lease another instance holds over, then let it go, as a stall past its TTL allows. */
+  async function takeOver(key: string): Promise<void> {
+    const later = new Date(Date.now() + 10 * 60_000).toISOString();
+    assert.equal(await database.leases.acquire(key, 'takeover', later, later), true, key);
+    assert.equal(await database.leases.release(key, 'takeover'), true, key);
+  }
+
+  async function until(condition: () => boolean): Promise<void> {
+    const deadline = Date.now() + 10_000;
+    while (!condition()) {
+      assert.ok(Date.now() < deadline, 'timed out waiting for the condition');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  function approveOn(app: TestApp, requestId: string) {
+    return app.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/approve`,
+      payload: {},
+    });
+  }
+
+  it('leaves a newer decision of the same request alone when a superseded approval compensates', async () => {
+    const client = await crashed.registerUser({ role: 'client' });
+    await crashed.services.credentials.provisioner.ensureConsumer(client.user);
+    const apiId = await publish(crashed);
+    const proxyId = (await database.apis.findById(apiId))?.ferrum_proxy_id;
+    assert.ok(proxyId);
+    const requestId = await request(crashed, client, apiId);
+    const group = aclGroupForApi(apiId);
+
+    // Approval A claims, then stalls before its consumer write.
+    const beforeWrite = crash.stallAt('consumers', 'findByUserAndNamespace');
+    const first = approveOn(crashed, requestId);
+    await beforeWrite.reached;
+    await takeOver(proxyLockKey(proxyId));
+    await takeOver(canonicalConsumerLockKey('nexus', consumerUsernameForUser(client.user.id)));
+
+    // Recovery compensates A: the request is pending again.
+    await recoverStale();
+    assert.equal((await database.accessRequests.findById(requestId))?.status, 'pending');
+
+    // A wakes, its verification read fails before its ownership guard, and
+    // its compensation stalls just before it reaches the consumer.
+    crashed.edge.queueFailure(503, { error: 'gateway unavailable' }, '/verification', 'GET');
+    const beforeUndo = crash.stallAt('consumers', 'findByUserAndNamespace');
+    beforeWrite.resume();
+    await beforeUndo.reached;
+
+    // Approval B of the same request succeeds on the other instance.
+    const approved = await approveOn(restarted, requestId);
+    assert.equal(approved.statusCode, 200, approved.body);
+    const decision = approved.json<ApproveAccessRequestResponse>();
+
+    beforeUndo.resume();
+    const stale = await first;
+    assert.ok(stale.statusCode >= 400, stale.body);
+    const current = await database.accessRequests.findById(requestId);
+    assert.equal(current?.status, 'approved', 'B’s decision stands');
+    assert.equal(current?.decided_by, provider.user.id);
+    assert.equal(current?.decided_at, decision.access_request.decided_at);
+    assert.equal((await database.grants.findById(decision.grant.id))?.status, 'active');
+    assert.deepEqual(groupsOf(client.user.id), [group]);
+    assert.equal(await database.accessGatewayJobs.findBySubject(requestId), null);
+  });
+
+  for (const cleanup of ['lands', 'fails'] as const) {
+    it(`refuses a frozen approval's late consumer write after recovery (its cleanup ${cleanup})`, async () => {
+      const client = await crashed.registerUser({ role: 'client' });
+      const consumer = await crashed.services.credentials.provisioner.ensureConsumer(client.user);
+      const apiId = await publish(crashed);
+      const proxyId = (await database.apis.findById(apiId))?.ferrum_proxy_id;
+      assert.ok(proxyId);
+      const requestId = await request(crashed, client, apiId);
+      const path = `/consumers/${consumer.ferrum_consumer_id}`;
+      const puts = (): number => crashed.edge.callsTo('PUT', path).length;
+      const before = puts();
+
+      // Approval A passes its ownership guard; its PUT is then held in flight.
+      crashed.edge.delay(path, 2_000, 'PUT');
+      const first = approveOn(crashed, requestId);
+      await until(() => puts() > before);
+      await takeOver(proxyLockKey(proxyId));
+      await takeOver(consumer.ferrum_consumer_id);
+
+      // Recovery finds no group to remove, rewrites the consumer anyway, and
+      // returns the request to pending.
+      await recoverStale();
+      assert.equal(puts(), before + 2, 'recovery wrote the consumer although nothing changed');
+      assert.equal((await database.accessRequests.findById(requestId))?.status, 'pending');
+      assert.equal(await database.accessGatewayJobs.findBySubject(requestId), null);
+      // The held PUT is the next one Edge decides; the one after it is A's cleanup.
+      if (cleanup === 'fails') {
+        crashed.edge.queueFailure(503, { error: 'gateway unavailable' }, path, 'PUT', 1);
+      }
+
+      const stale = await first;
+      assert.ok(stale.statusCode >= 400, stale.body);
+      assert.deepEqual(
+        groupsOf(client.user.id),
+        [],
+        'the late write met a retired tag, so no group stands without a grant',
+      );
+      const released = await database.accessRequests.findById(requestId);
+      assert.equal(released?.status, 'pending');
+      assert.equal(released?.decided_by, null);
+      assert.equal(await database.grants.findActiveByApiAndUser(apiId, client.user.id), null);
+      assert.equal(await database.accessGatewayJobs.findBySubject(requestId), null);
+    });
+  }
+
+  it('the one-time repair considers every candidate while the worker drains them', async () => {
+    const client = await crashed.registerUser({ role: 'client' });
+    const apiId = await publish(crashed);
+    const stranded = new Set<string>();
+    for (let index = 0; index < 5; index += 1) {
+      const row = await database.accessRequests.create({
+        api_id: apiId,
+        user_id: client.user.id,
+        application_id: null,
+        justification: `Approved before 015 (${index})`,
+        status: 'approved',
+        decided_by: provider.user.id,
+        decided_at: new Date().toISOString(),
+        decision_note: null,
+      });
+      stranded.add(row.id);
+    }
+
+    // Each page read is followed by the worker settling what it returned, so
+    // the approved set shrinks under the scan — an offset would skip rows.
+    const requests = database.accessRequests;
+    const draining = new Proxy(requests, {
+      get(target, property, receiver): unknown {
+        if (property !== 'pageByStatus') {
+          const value: unknown = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        }
+        const page: AccessRequestRepo['pageByStatus'] = async (status, afterId, limit) => {
+          const rows = await target.pageByStatus(status, afterId, limit);
+          for (const row of rows) {
+            if (stranded.has(row.id)) {
+              await target.updateIfStatus(row.id, 'approved', { status: 'cancelled' });
+            }
+          }
+          return rows;
+        };
+        return page;
+      },
+    });
+    const store = new Proxy(database, {
+      get(target, property, receiver): unknown {
+        if (property === 'accessRequests') return draining;
+        const value: unknown = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const repair = await queueStrandedAccessRepairs({
+      store,
+      audit: restarted.services.audit,
+      locks: createKeyedSerializer({ leases: database.leases }),
+      namespace: 'nexus',
+      pageSize: 2,
+    });
+    assert.equal(repair.alreadyRecorded, false);
+    assert.ok(repair.approvals >= stranded.size);
+    for (const id of stranded) {
+      assert.equal((await database.accessGatewayJobs.findBySubject(id))?.kind, 'approve', id);
+      await database.accessGatewayJobs.deleteBySubject(id);
+    }
   });
 });

@@ -1296,6 +1296,17 @@ export interface AccessRequestRepo {
     patch: UpdateInput<AccessRequestRecord>,
   ): Promise<AccessRequestRecord | null>;
   list(filter: AccessRequestFilter, options?: ListOptions): Promise<Paginated<AccessRequestRecord>>;
+  /**
+   * Up to `limit` requests in `status` whose id sorts after `afterId` (from
+   * the first when `null`), in id order: a keyset page that rows changing
+   * status meanwhile cannot shift, unlike an offset over the same filter.
+   * For one-time scans over the whole table.
+   */
+  pageByStatus(
+    status: AccessRequestStatus,
+    afterId: Uuid | null,
+    limit: number,
+  ): Promise<AccessRequestRecord[]>;
   /** Duplicate guard: an open request by this user for this API. */
   findPendingByApiAndUser(
     apiId: Uuid,
@@ -1339,6 +1350,12 @@ export interface GrantRepo {
     patch: UpdateInput<GrantRecord>,
   ): Promise<GrantRecord | null>;
   list(filter: GrantFilter, options?: ListOptions): Promise<Paginated<GrantRecord>>;
+  /**
+   * Up to `limit` grants in `status` whose id sorts after `afterId` (from the
+   * first when `null`), in id order: a keyset page that rows changing status
+   * meanwhile cannot shift. For one-time scans over the whole table.
+   */
+  pageByStatus(status: GrantStatus, afterId: Uuid | null, limit: number): Promise<GrantRecord[]>;
   /**
    * The single `status = 'active'` grant for an API and one identity, if any.
    * The schema enforces at most one via a partial unique index over

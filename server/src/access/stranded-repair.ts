@@ -36,8 +36,11 @@
  * inbox. `docs/operations.md` ("Access gateway jobs") gives the supported
  * manual repair.
  *
- * Idempotent and bounded: rows are read a page at a time, a job is inserted
- * only where its subject has none, and the run is recorded once with an
+ * Idempotent and bounded: rows are read a keyset page at a time, in id order
+ * — the worker draining the jobs this queues moves rows out of the scanned
+ * statuses while the scan runs, and an offset over a shrinking set would skip
+ * rows — a job is inserted only where its subject has none, and the run is
+ * recorded once, after every candidate was considered, with an
  * `access.stranded_repair_queued` audit row, under a lease, so later starts —
  * on any instance — queue nothing.
  */
@@ -70,6 +73,8 @@ export interface StrandedRepairDeps {
   locks: KeyedSerializer;
   /** The Edge namespace consumers are looked up in. */
   namespace: string;
+  /** Rows read per page; defaults to `MAX_PAGE_SIZE`. Tests pass a small one. */
+  pageSize?: number;
 }
 
 async function repairRecorded(store: NexusStore): Promise<boolean> {
@@ -80,7 +85,21 @@ async function repairRecorded(store: NexusStore): Promise<boolean> {
   return recorded.items.length > 0;
 }
 
-/** Every row a paged list returns, a page at a time. */
+/** Every row of a keyset-paged scan, in id order. */
+async function* keyset<T extends { id: string }>(
+  read: (afterId: string | null) => Promise<T[]>,
+): AsyncGenerator<T> {
+  let afterId: string | null = null;
+  for (;;) {
+    const page = await read(afterId);
+    for (const item of page) yield item;
+    const last = page.at(-1);
+    if (!last) return;
+    afterId = last.id;
+  }
+}
+
+/** Every row an offset-paged list returns, a page at a time. */
 async function* pages<T>(
   read: (offset: number) => Promise<{ items: T[]; total: number }>,
 ): AsyncGenerator<T> {
@@ -102,6 +121,7 @@ export async function queueStrandedAccessRepairs(
   deps: StrandedRepairDeps,
 ): Promise<StrandedRepairResult> {
   const { store, audit, locks, namespace } = deps;
+  const pageSize = deps.pageSize ?? MAX_PAGE_SIZE;
   return locks(STRANDED_REPAIR_LOCK_KEY, async () => {
     if (await repairRecorded(store)) {
       return { alreadyRecorded: true, revocations: 0, approvals: 0 };
@@ -110,8 +130,8 @@ export async function queueStrandedAccessRepairs(
 
     // Revoked grants: one job per identity and API with no active grant.
     const seen = new Set<string>();
-    for await (const grant of pages((offset) =>
-      store.grants.list({ status: 'revoked' }, { limit: MAX_PAGE_SIZE, offset }),
+    for await (const grant of keyset((afterId) =>
+      store.grants.pageByStatus('revoked', afterId, pageSize),
     )) {
       const key = identityKey(grant);
       if (seen.has(key)) continue;
@@ -144,8 +164,8 @@ export async function queueStrandedAccessRepairs(
     }
 
     // Approved requests for access that no grant was ever made from.
-    for await (const request of pages<AccessRequestRecord>((offset) =>
-      store.accessRequests.list({ status: 'approved' }, { limit: MAX_PAGE_SIZE, offset }),
+    for await (const request of keyset((afterId) =>
+      store.accessRequests.pageByStatus('approved', afterId, pageSize),
     )) {
       if (request.grant_id != null) continue;
       if (await grantMadeFrom(store, request)) continue;

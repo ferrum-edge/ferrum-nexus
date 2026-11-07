@@ -2223,6 +2223,13 @@ class SqliteStore implements NexusStore {
       return { items: rows.map(mapAccessRequest), total };
     },
 
+    pageByStatus: async (status, afterId, limit) =>
+      queryAll(
+        this.db,
+        `SELECT * FROM access_requests WHERE status = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+        [status, afterId ?? '', Math.max(1, Math.floor(limit))],
+      ).map(mapAccessRequest),
+
     findPendingByApiAndUser: async (apiId, userId, applicationId = null) => {
       const where = new WhereBuilder()
         .always('api_id = ?', apiId)
@@ -2366,6 +2373,13 @@ class SqliteStore implements NexusStore {
       );
       return { items: rows.map(mapGrant), total };
     },
+
+    pageByStatus: async (status, afterId, limit) =>
+      queryAll(
+        this.db,
+        `SELECT * FROM grants WHERE status = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+        [status, afterId ?? '', Math.max(1, Math.floor(limit))],
+      ).map(mapGrant),
 
     findActiveByApiAndUser: async (apiId, userId, applicationId = null) => {
       const where = new WhereBuilder()

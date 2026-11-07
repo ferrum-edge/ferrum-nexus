@@ -1391,12 +1391,14 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
               // approval's group on a consumer whose other grant is live.
               app.edge.seedConsumer({
                 id: 'edge-consumer-former',
+                namespace: 'nexus',
                 username: `nexus-user-${ID.former}`,
                 custom_id: ID.former,
                 acl_groups: [approvedGroup(ID.invoices)],
               });
               app.edge.seedConsumer({
                 id: 'edge-consumer-client',
+                namespace: 'nexus',
                 username: `nexus-user-${ID.client}`,
                 custom_id: ID.client,
                 acl_groups: [approvedGroup(ID.invoices), approvedGroup(ID.ledger)],

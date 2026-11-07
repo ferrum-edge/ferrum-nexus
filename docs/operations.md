@@ -3159,6 +3159,13 @@ rollback put the grant back deletes it too.
   approval.
 - Retries back off `10 s × 2^attempts`, capped at five minutes, plus up to 10%
   jitter.
+- Recovery of an approval rewrites the identity's consumer even when no group
+  changes. Edge stamps every row `PUT`, which retires the row's tag, so an
+  approval that froze after its own checks and wakes after recovery has its
+  late write refused by `If-Match` rather than landing a group no grant or job
+  stands behind. A compensation moves its request only while its own job, at
+  its generation, is still there, so it never resets a newer decision of the
+  same request.
 - A request holds its fresh job for at most about
   `6 × FERRUM_ADMIN_TIMEOUT_MS + 2 × 30 s + 60 s` (Edge round trips, two lease
   waits, and a rollback waiting out a crashed key holder): about 150 s by
@@ -3220,8 +3227,10 @@ for both, a page at a time, and queues ordinary jobs for the worker:
   grant covers and returns the request to `pending` (or cancels it when the
   identity already holds a grant, or a newer request is pending).
 
-It records `access.stranded_repair_queued` (with the counts) when it finishes,
-and later starts skip it. A start that stops part-way leaves the marker
+It pages through each table by id (a keyset, so rows the worker settles while
+the scan runs cannot shift unread ones out of a page), records
+`access.stranded_repair_queued` (with the counts) only after every candidate
+was considered, and later starts skip it. A start that stops part-way leaves the marker
 unwritten, and the next start resumes: a job is only inserted where its grant
 or request has none. Progress is logged as
 `Queued access gateway repairs for decisions made before 015`, failures as
@@ -3237,6 +3246,28 @@ candidates and review each one:
 SELECT r.id, r.api_id, r.user_id, r.application_id, r.approved_tools, g.status, g.approved_tools
   FROM access_requests r JOIN grants g ON g.id = r.grant_id
   WHERE r.status = 'approved' AND g.status = 'active';
+```
+
+On MongoDB the same rows live in the `access_requests` and `grants`
+collections (each keyed by `_id`); join them with `$lookup` in `mongosh`:
+
+```js
+db.access_requests.aggregate([
+  { $match: { status: 'approved', grant_id: { $ne: null } } },
+  { $lookup: { from: 'grants', localField: 'grant_id', foreignField: '_id', as: 'grant' } },
+  { $unwind: '$grant' },
+  { $match: { 'grant.status': 'active' } },
+  {
+    $project: {
+      api_id: 1,
+      user_id: 1,
+      application_id: 1,
+      approved_tools: 1,
+      grant_status: '$grant.status',
+      grant_tools: '$grant.approved_tools',
+    },
+  },
+]);
 ```
 
 A row whose `r.approved_tools` are not all in `g.approved_tools`, and whose tools
