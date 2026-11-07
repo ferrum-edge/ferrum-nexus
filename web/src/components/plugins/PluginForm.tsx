@@ -242,14 +242,14 @@ export function validateDraft(
     const deny = linesOf(draft.deny ?? '');
     if (allow.length === 0 && deny.length === 0) {
       errors[FORM_ERROR_KEY] =
-        'List at least one allowed or denied address — a restriction with both lists empty would restrict nobody.';
+        'List at least one allowed or denied address — an IP restriction with both lists empty would restrict nobody';
     }
   }
   if (descriptor.name === 'bot_detection') {
     const blocked = linesOf(draft.blocked_patterns ?? '');
     if (blocked.length === 0 && draft.allow_missing_user_agent !== false) {
       errors[FORM_ERROR_KEY] =
-        'With no blocked patterns, requests with no User-Agent must be rejected — otherwise this filter blocks nothing.';
+        'With no blocked User-Agent patterns, requests with no User-Agent must be rejected — otherwise the filter blocks nothing';
     }
   }
   if (descriptor.name === 'correlation_id') {
