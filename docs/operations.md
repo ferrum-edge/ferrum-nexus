@@ -3149,8 +3149,10 @@ rollback put the grant back deletes it too.
   REST and MCP groups off, unless the grant is active again or another active
   grant now holds them, and writes `access.revoke_complete`.
 - `kind = 'approve'` (`subject_id` is the request): under the API's proxy lease,
-  re-reading the API inside it, the worker cuts the identity's groups back to
-  what its active grant covers and returns a request still `approved` without
+  re-reading the API inside it, the worker sets the identity's groups for the
+  API to exactly what its active grant currently covers (removing what no grant
+  covers, and putting back a covered group a stale write dropped, while the
+  account is active) and returns a request still `approved` without
   its grant to `pending`. It cancels it instead (clearing `decided_by` and
   `decided_at`) for a tool request whose grant is gone, when another active
   grant now holds the access, or when a newer request holds the identity's

@@ -75,6 +75,13 @@ const REMOVE_TOOL = {
   description: 'Delete one item',
 };
 const TWO_TOOLS: ApiAgents = { operations: [LIST_TOOL, REMOVE_TOOL] };
+const CREATE_TOOL = {
+  path: '/items',
+  method: 'POST' as const,
+  name: 'create',
+  description: 'Create an item',
+};
+const THREE_TOOLS: ApiAgents = { operations: [LIST_TOOL, REMOVE_TOOL, CREATE_TOOL] };
 
 /** A clock the test advances by hand, starting from the real one. */
 function testClock(): { now(): Date; advance(ms: number): void } {
@@ -894,6 +901,110 @@ describe('access gateway jobs survive a crash between the claim and the Edge wri
     ]);
     assert.ok(groupsOf(f.client.user.id).includes(removeGroup), 'the newly approved tool stays');
     assert.equal(await database.accessGatewayJobs.findBySubject(f.requestId), null);
+  });
+
+  it('stops a stalled tool approval from dropping tools a newer approval added to the same grant', async () => {
+    const api = await publishAgents(crashed, THREE_TOOLS);
+    const [x, y, z] = api.agents?.operations.map((tool) => tool.id) ?? [];
+    assert.ok(x && y && z && api.ferrum_proxy_id);
+    const client = await crashed.registerUser({ role: 'client' });
+    const asked = await crashed.authed(client, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: api.id, justification: 'X only', requested_tools: [x] },
+    });
+    assert.equal(asked.statusCode, 201, asked.body);
+    const grantId = await approve(
+      crashed,
+      asked.json<CreateAccessRequestResponse>().access_request.id,
+    );
+    const askY = await crashed.authed(client, {
+      method: 'POST',
+      url: `/api/grants/${grantId}/tool-requests`,
+      payload: { requested_tools: [y], justification: 'Y too' },
+    });
+    assert.equal(askY.statusCode, 201, askY.body);
+    const stalledRequest = askY.json<RequestGrantToolsResponse>().access_request.id;
+
+    // Tool approval A (adding Y) claims, then stalls before its consumer write;
+    // only its leases lapse, and nothing recovers its job.
+    const beforeWrite = crash.stallAt('consumers', 'findByUserAndNamespace');
+    const first = approveOn(crashed, stalledRequest);
+    await beforeWrite.reached;
+    await takeOver(proxyLockKey(api.ferrum_proxy_id));
+    await takeOver(canonicalConsumerLockKey('nexus', consumerUsernameForUser(client.user.id)));
+
+    // Request B widens the same grant to X, Y and Z on the other instance.
+    const askYZ = await restarted.authed(client, {
+      method: 'POST',
+      url: `/api/grants/${grantId}/tool-requests`,
+      payload: { requested_tools: [y, z], justification: 'Y and Z' },
+    });
+    assert.equal(askYZ.statusCode, 201, askYZ.body);
+    const newer = askYZ.json<RequestGrantToolsResponse>().access_request.id;
+    const approved = await approveOn(restarted, newer);
+    assert.equal(approved.statusCode, 200, approved.body);
+    const wide = [
+      aclGroupForApi(api.id),
+      mcpToolGroupForApi(api.id, x),
+      mcpToolGroupForApi(api.id, y),
+      mcpToolGroupForApi(api.id, z),
+    ].sort();
+    assert.deepEqual([...groupsOf(client.user.id)].sort(), wide);
+
+    // A wakes with the grant's old subset in hand.
+    beforeWrite.resume();
+    const stale = await first;
+    assert.ok(stale.statusCode >= 400, stale.body);
+    assert.deepEqual(
+      [...groupsOf(client.user.id)].sort(),
+      wide,
+      'A wrote nothing, so Z is still granted',
+    );
+    assert.deepEqual((await database.grants.findById(grantId))?.approved_tools, [x, y, z]);
+    assert.equal((await database.accessRequests.findById(newer))?.status, 'approved');
+    assert.equal(
+      (await database.accessGatewayJobs.findBySubject(stalledRequest))?.status,
+      'pending',
+      'A is handed to the worker',
+    );
+
+    // The worker settles A against the grant as it now stands: Y is covered.
+    const tick = await worker(testClock()).tick();
+    assert.equal(tick.claimed, 1);
+    assert.equal(tick.completed, 1);
+    assert.deepEqual([...groupsOf(client.user.id)].sort(), wide);
+    assert.equal((await database.accessRequests.findById(stalledRequest))?.status, 'approved');
+    assert.equal((await database.accessRequests.findById(newer))?.status, 'approved');
+    assert.equal(await database.accessGatewayJobs.findBySubject(stalledRequest), null);
+  });
+
+  it('puts back a tool group a stale write dropped, when the grant covers it', async () => {
+    const f = await toolRequest();
+    const removeGroup = mcpToolGroupForApi(f.api.id, f.removeId);
+    const approved = await approveOn(crashed, f.requestId);
+    assert.equal(approved.statusCode, 200, approved.body);
+    // A stale whole-resource write dropped the group the grant now covers.
+    const consumer = crashed.edge.consumerByUsername(consumerUsernameForUser(f.client.user.id));
+    assert.ok(consumer);
+    consumer.acl_groups = consumer.acl_groups.filter((group) => group !== removeGroup);
+    // Recovery of an interrupted decision for this identity sets the groups
+    // to the grant's current subset.
+    await database.accessGatewayJobs.enqueueIfAbsent(
+      {
+        kind: 'approve',
+        subject_id: f.requestId,
+        api_id: f.api.id,
+        user_id: f.client.user.id,
+        application_id: null,
+        requested_by: provider.user.id,
+      },
+      new Date().toISOString(),
+    );
+    const tick = await worker(testClock()).tick();
+    assert.equal(tick.completed, 1);
+    assert.ok(groupsOf(f.client.user.id).includes(removeGroup), 'the covered tool is back');
+    assert.equal((await database.accessRequests.findById(f.requestId))?.status, 'approved');
   });
 
   it('the one-time repair considers every candidate while the worker drains them', async () => {

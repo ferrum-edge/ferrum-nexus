@@ -331,7 +331,8 @@ export interface AccessService {
    *   (read inside the consumer key), and `access.revoke_complete` commits
    *   with the job's deletion.
    * - `approve`: under the API's proxy lease, the identity's groups for the
-   *   API are cut back to what its active grant covers, and a request still
+   *   API are set to what its active grant currently covers (a covered group
+   *   a stale write dropped is put back), and a request still
    *   `approved` without the grant it promised is returned to `pending` (or
    *   `cancelled`, when the grant it would extend is gone). The rollback row
    *   commits with the job's deletion.
@@ -1730,14 +1731,33 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     const covered = holder?.approved_tools;
     const uncovered = covered === null ? [] : added.filter((id) => !covered?.includes(id));
     if (active && uncovered.length === 0) {
-      // The grant already covers every added tool: the update committed, so
-      // the groups and the decision both stand.
+      // The grant already covers every added tool: the update committed, or a
+      // newer approval widened it, so the decision stands. The groups are set
+      // to the grant's current subset, not just left: a stale whole-resource
+      // write may have dropped a tool another approval added meanwhile.
       details.tool_groups_kept = mcpGroupsForGrant(api.id, added);
+      try {
+        const reconciled = await reconcileGroups(requester, api, request.application_id);
+        if (reconciled.removed.length > 0) details.acl_groups_removed = reconciled.removed;
+        if (reconciled.restored.length > 0) details.acl_groups_restored = reconciled.restored;
+      } catch (error) {
+        // The worker sets them right on a later pass.
+        details.deferred_to_recovery = true;
+        settled = false;
+        deps.log?.(
+          {
+            api_id: api.id,
+            user_id: requester.id,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'Could not set the groups of a tool approval to its grant; the worker retries',
+        );
+      }
     } else if (!active && holder) {
       // Another grant now holds the identity. This approval's whole-resource
       // write carried the old grant's subset as well as the added tools, so
       // the consumer may hold more than that grant covers: the job goes to the
-      // worker, which cuts the groups back to it and cancels the request.
+      // worker, which sets the groups to that grant and cancels the request.
       details.kept_for_grant_id = holder.id;
       details.deferred_to_recovery = true;
       settled = false;
@@ -1977,8 +1997,14 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
                 request.application_id,
               );
               // A grant that is gone is the widen transaction's to refuse; the
-              // compensation then takes every group back off.
-              ownership.regranted = holder !== null && holder.id !== grantId;
+              // compensation then takes every group back off. A grant whose
+              // subset changed since this approval admitted it — another
+              // approval widened it — would lose those tools to `next`, which
+              // was computed from the old subset.
+              ownership.regranted =
+                holder !== null &&
+                (holder.id !== grantId ||
+                  !isDeepStrictEqual(holder.approved_tools ?? null, current));
               return !ownership.regranted;
             },
             afterWrite: async () => {
@@ -2446,24 +2472,34 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   }
 
   /**
-   * Cut the identity's groups for `api` back to what its active grant covers:
-   * nothing at all without one; with one, the REST group and the MCP groups
-   * of its subset, exactly what an approval writes. Never adds a group. The
-   * active grant is read inside the consumer key, so no approval or restore
-   * can change the answer before the write lands. The consumer is rewritten
-   * even when no group changes, which fences any approval still holding the
-   * tag it read before this recovery. Resolves to that grant and to the
-   * groups taken off.
+   * Set the identity's groups for `api` to exactly what its active grant
+   * covers: nothing at all without one; with one, the REST group and the MCP
+   * groups of its **current** subset, exactly what an approval writes. A group
+   * the grant covers but the consumer lacks — dropped by a stale whole-resource
+   * write — is put back, but only while the account is active: a disabled
+   * account's groups are the teardown's to remove, and nothing is added for it.
+   * Groups of other APIs are never touched. The active grant and the account
+   * are read inside the consumer key, so no approval, restore, disable or
+   * re-enable can change the answer before the write lands. The consumer is
+   * rewritten even when no group changes, which fences any approval still
+   * holding the tag it read before this. Resolves to that grant and to the
+   * groups taken off and put back.
    */
-  async function reconcileGroupsDown(
+  async function reconcileGroups(
     requester: UserRecord,
     api: ApiRecord,
     applicationId: Uuid | null,
-  ): Promise<{ live: GrantRecord | null; removed: string[] }> {
+  ): Promise<{ live: GrantRecord | null; removed: string[]; restored: string[] }> {
     const rest = aclGroupForApi(api.id);
-    const seen: { live: GrantRecord | null; removed: string[] } = { live: null, removed: [] };
+    const seen: {
+      live: GrantRecord | null;
+      active: boolean;
+      removed: string[];
+      restored: string[];
+    } = { live: null, active: false, removed: [], restored: [] };
     const readLive = async (): Promise<boolean> => {
       seen.live = await store.grants.findActiveByApiAndUser(api.id, requester.id, applicationId);
+      seen.active = (await store.users.findById(requester.id))?.status === 'active';
       return true;
     };
     const consumer = await store.consumers.findByUserAndNamespace(
@@ -2473,30 +2509,31 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     );
     if (!consumer) {
       await readLive();
-      return seen;
+      return { live: seen.live, removed: [], restored: [] };
     }
     await provisioner.mutateAclGroups(
       consumer.ferrum_consumer_id,
       (groups) => {
         const live = seen.live;
-        const covered = new Set(
-          live ? [rest, ...(api.agents ? mcpGroupsForGrant(api.id, live.approved_tools) : [])] : [],
-        );
+        const canonical = live
+          ? [rest, ...(api.agents ? mcpGroupsForGrant(api.id, live.approved_tools) : [])]
+          : [];
+        const covered = new Set(canonical);
         const kept = groups.filter(
           (entry) => (entry !== rest && !isMcpGroupForApi(entry, api.id)) || covered.has(entry),
         );
         seen.removed = groups.filter((entry) => !kept.includes(entry));
-        return kept;
+        seen.restored = seen.active ? canonical.filter((entry) => !kept.includes(entry)) : [];
+        return [...kept, ...seen.restored];
       },
       requester.id,
       // Always written, even when nothing changes: Edge stamps every row
       // `PUT`, which retires the consumer's tag, so a frozen approval that
-      // read the consumer before this recovery and passed its own guard has
-      // its late `PUT` refused by `If-Match` instead of landing a group after
-      // its job is gone (issue #651).
+      // read the consumer before this and passed its own guard has its late
+      // `PUT` refused by `If-Match` instead of landing (issue #651).
       { absentIsDone: true, guard: readLive },
     );
-    return seen;
+    return { live: seen.live, removed: seen.removed, restored: seen.restored };
   }
 
   /**
@@ -2550,7 +2587,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     if (!request) return dropJob(job, 'request_missing');
     if (!requester) return dropJob(job, 'requester_missing');
 
-    const { live, removed } = await reconcileGroupsDown(requester, api, job.application_id);
+    const { live, removed, restored } = await reconcileGroups(requester, api, job.application_id);
 
     let settle: 'release' | 'cancel' | 'kept' | 'none' = 'none';
     if (request.status === 'approved') {
@@ -2577,6 +2614,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       attempts: job.attempts,
       approved_by: job.requested_by,
       acl_groups_removed: removed,
+      ...(restored.length > 0 ? { acl_groups_restored: restored } : {}),
       ...(request.grant_id ? { grant_id: request.grant_id } : {}),
       ...(live ? { kept_for_grant_id: live.id } : {}),
     };

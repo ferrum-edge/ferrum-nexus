@@ -1265,8 +1265,10 @@ pending ──claim──> sending ──> recoverGatewayJob ──┬─> delet
 - Recovery never adds access. A revocation's removal is checked inside the
   consumer key: it is skipped when the grant is active again or another active
   grant holds the group. An approval is compensated, not completed: under the
-  proxy lease every approval holds, the identity's groups are cut back to what
-  its active grant covers and the request leaves `approved`.
+  proxy lease every approval holds, the identity's groups are set to what its
+  active grant currently covers and the request leaves `approved`. A
+  foreground approval refuses its write when another grant holds the identity,
+  or when the grant it extends changed since it was admitted.
 - Backoff and stale threshold match §7.1; there is no `failed` state.
 
 See [`operations.md`](operations.md#access-gateway-jobs) for monitoring.
