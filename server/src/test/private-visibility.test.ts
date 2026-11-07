@@ -37,8 +37,10 @@ import {
   type ListAccessRequestsResponse,
   type ListApiViewersResponse,
   type ListGrantsResponse,
+  type ListNotificationsResponse,
   type ListThreadsResponse,
   type MessageThread,
+  type Notification,
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
@@ -523,6 +525,44 @@ describe('API summaries embedded in an account’s own rows', () => {
     return { listed, detail: detail.json<GetThreadResponse>(), raw: list.body + detail.body };
   }
 
+  /** The provider declines `requestId`. */
+  async function deny(requestId: string): Promise<void> {
+    const response = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/deny`,
+      payload: { decision_note: 'Not this quarter.' },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+  }
+
+  /** What `session` was told about a declined request: its bell entry and its email. */
+  async function denialNotices(
+    session: TestSession,
+  ): Promise<{ notice: Notification; mail: string; bell: string }> {
+    const response = await harness.authed(session, {
+      method: 'GET',
+      url: '/api/notifications?type=access_request_denied',
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    const notices = response.json<ListNotificationsResponse>().items;
+    assert.equal(notices.length, 1, 'one denial notice');
+    const mails = (await harness.outbox()).filter(
+      (row) =>
+        row.to_email === session.user.email && row.subject.includes('Access request declined'),
+    );
+    assert.equal(mails.length, 1, 'one denial email');
+    const [notice] = notices;
+    const [mail] = mails;
+    assert.ok(notice);
+    assert.ok(mail);
+    const all = await harness.authed(session, { method: 'GET', url: '/api/notifications' });
+    return {
+      notice,
+      mail: `${mail.subject}\n${mail.body_html}\n${mail.body_text}`,
+      bell: all.body,
+    };
+  }
+
   before(async () => {
     harness = await buildTestApp();
     admin = await harness.registerUser({ email: 'summary-super@example.test' });
@@ -573,6 +613,37 @@ describe('API summaries embedded in an account’s own rows', () => {
     assert.equal(adminView?.api?.name, 'Renamed after the revoke');
     const ownerThread = await readThread(provider, thread.id);
     assert.equal(ownerThread.detail.api?.name, 'Renamed after the revoke');
+
+    // Declining the request it filed while authorized tells it which request,
+    // not the API's new name, slug or catalog page — in the bell or by email.
+    await deny(created.id);
+    const told = await denialNotices(former);
+    assert.equal(told.notice.title, 'Access declined');
+    assert.ok(told.notice.body.includes(created.id), 'the notice names the request');
+    assert.equal(told.notice.link, '/');
+    for (const text of [`${told.notice.title} ${told.notice.body}`, told.mail]) {
+      assert.ok(!text.includes('Renamed after the revoke'), 'no current name');
+      assert.ok(!text.includes('summary-viewer'), 'no slug or catalog link');
+    }
+    assert.ok(told.mail.includes(created.id), 'the email names the request');
+    assert.ok(!told.bell.includes('Renamed after the revoke'), 'nothing in the bell does');
+  });
+
+  it('still names the API when it declines an account that may read it', async () => {
+    const apiId = await publish('summary-denied', 'private');
+    const reader = await harness.registerUser({
+      email: 'summary-denied-viewer@example.test',
+      role: 'client',
+    });
+    await authorizeViewer(apiId, reader);
+    const created = await requestAccess(reader, apiId);
+    await patchApi(apiId, { name: 'Renamed while authorized' });
+    await deny(created.id);
+
+    const told = await denialNotices(reader);
+    assert.equal(told.notice.title, 'Access declined: Renamed while authorized');
+    assert.equal(told.notice.link, '/catalog/summary-denied');
+    assert.ok(told.mail.includes('Renamed while authorized'), 'the email names it too');
   });
 
   it('keeps it for an active grantee, and drops it once the grant is revoked', async () => {

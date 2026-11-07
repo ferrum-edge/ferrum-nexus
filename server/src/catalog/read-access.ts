@@ -13,7 +13,9 @@
  *   metadata read by another route;
  * - every listing that embeds an API summary in a row the account can still
  *   see after losing read access — its access requests, grants and threads —
- *   which asks again on every read ({@link filterReadableApis}).
+ *   which asks again on every read ({@link filterReadableApis}), and the
+ *   notices and emails that name the API to such an account
+ *   ({@link canReadApiSummary}).
  *
  * Three copies drifted. The catalog *list* counted a grant held by any of the
  * account's identities while its *detail* check counted only the account's own,
@@ -141,4 +143,17 @@ export async function filterReadableApis(
     isAuthorizedViewer: authorizedIds.has(api.id),
   });
   return apis.filter((api) => !gated.includes(api) || canViewApi(viewer, api, standing(api)));
+}
+
+/**
+ * {@link filterReadableApis} for one API: whether `viewer` may be shown its
+ * live metadata now. What a notice or an email sent to `viewer` checks before
+ * naming the API.
+ */
+export async function canReadApiSummary(
+  store: NexusStore,
+  viewer: UserRecord,
+  api: ApiRecord,
+): Promise<boolean> {
+  return (await filterReadableApis(store, viewer, [api])).length > 0;
 }

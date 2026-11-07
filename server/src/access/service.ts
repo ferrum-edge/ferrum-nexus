@@ -125,7 +125,12 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { AuditAction, auditRowCommitted, type AuditService } from '../audit/service.js';
-import { canViewApi, filterReadableApis, resolveReadAccess } from '../catalog/read-access.js';
+import {
+  canReadApiSummary,
+  canViewApi,
+  filterReadableApis,
+  resolveReadAccess,
+} from '../catalog/read-access.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
   AccessRequestFilter,
@@ -1268,7 +1273,23 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     deps.log?.(details, 'Rolled back an approval that could not be committed');
   }
 
-  /** Best-effort notify + email; never allowed to undo a committed decision. */
+  /**
+   * How a notice names an API its recipient may no longer read: by the
+   * request, never by the API's current name, slug or catalog page.
+   */
+  function unreadableApiLabel(requestId: Uuid): string {
+    return `an API you can no longer view (request ${requestId})`;
+  }
+
+  /**
+   * Best-effort notify + email; never allowed to undo a committed decision.
+   *
+   * Every caller puts the API's name, slug and catalog link into the notice,
+   * so each one is sent only where the recipient may read that API when it
+   * is sent: an approval (the recipient now holds a grant), a revocation (the
+   * API row was read under the lease while the recipient still held the
+   * grant being withdrawn) and a denial (checked at send time, see `deny`).
+   */
   async function announce(
     recipient: UserRecord,
     notification: {
@@ -1885,6 +1906,11 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // grantee before the "revoked" it followed. `announce` never throws.
       // A grantee giving up its own access is told by the response, not by a
       // notice and an email saying somebody revoked it.
+      //
+      // The notice names the API even when the revocation ends the grantee's
+      // read access. `api` was read under this lease before the claim, while
+      // the grantee still held the grant, so it carries nothing the grantee
+      // could not read at that moment; nothing later reaches it.
       if (grantee && mode === 'review') {
         await announce(
           grantee,
@@ -2501,22 +2527,32 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
       // A declined tool request leaves its grant exactly as it was.
       const tools = request.grant_id != null;
+      // A pending request outlives a withdrawn viewer authorization, a revoked
+      // grant and a switch to `private`, and denying it changes nothing about
+      // the requester's standing. So the notice names the API only if the
+      // requester may read it now; one who may not is told which request was
+      // declined, and nothing of the API's current name, slug or catalog page.
+      // The decision has committed, so a failed read falls back to that
+      // generic notice rather than failing the response.
+      const named = await canReadApiSummary(store, requester, api).catch(() => false);
+      const apiLabel = named ? api.name : unreadableApiLabel(request.id);
+      const heading = tools ? 'Agent tools declined' : 'Access declined';
       await announce(
         requester,
         {
           type: 'access_request_denied',
-          title: tools ? `Agent tools declined: ${api.name}` : `Access declined: ${api.name}`,
+          title: named ? `${heading}: ${api.name}` : heading,
           body: tools
-            ? `${actor.display_name} declined your request for more agent tools on ${api.name}. ` +
+            ? `${actor.display_name} declined your request for more agent tools on ${apiLabel}. ` +
               'Your existing access is unchanged.'
-            : `${actor.display_name} declined your request for ${api.name}.`,
-          link: `/catalog/${api.slug}`,
+            : `${actor.display_name} declined your request for ${apiLabel}.`,
+          link: named ? `/catalog/${api.slug}` : '/',
         },
         {
           templateKey: 'access_denied',
           vars: {
-            api_name: api.name,
-            api_slug: api.slug,
+            api_name: apiLabel,
+            api_slug: named ? api.slug : '',
             decided_by_name: actor.display_name,
             decision_note: note ?? '',
           },

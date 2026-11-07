@@ -2941,6 +2941,12 @@ _session_, **API owner with the provider role, or admin** →
 `{ "access_request": AccessRequest }`. Body `{ "decision_note"?: string | null }`,
 optional. Nothing changes on the gateway. `409 CONFLICT` when already decided.
 
+The requester is notified in the portal and by email. The notice names the API
+only if the requester may read it when the notice is sent; for a `private` API
+the requester can no longer open (a viewer authorization withdrawn, or the API
+made `private`, while the request was pending) it names the request id instead,
+with no API name, slug or catalog link.
+
 ### Optional MCP access subsets
 
 `POST /api/access-requests` accepts `requested_tools?: string[] | null`.
