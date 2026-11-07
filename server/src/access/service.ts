@@ -144,7 +144,12 @@ import {
   auditRowCommitted,
   type AuditService,
 } from '../audit/service.js';
-import { canViewApi, resolveReadAccess } from '../catalog/read-access.js';
+import {
+  canReadApiSummary,
+  canViewApi,
+  filterReadableApis,
+  resolveReadAccess,
+} from '../catalog/read-access.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
   AccessGatewayJobRecord,
@@ -505,7 +510,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     );
   }
 
-  async function decorateRequests(rows: AccessRequestRecord[]): Promise<AccessRequest[]> {
+  /**
+   * `reader` is the account the rows are returned to. The embedded API summary
+   * is live metadata, so it is left out — `api_id` stays — for a private API
+   * the reader can no longer view ({@link filterReadableApis}).
+   */
+  async function decorateRequests(
+    rows: AccessRequestRecord[],
+    reader: UserRecord,
+  ): Promise<AccessRequest[]> {
     if (rows.length === 0) return [];
     // Every join keys off ids already in `rows`, and `store` is the root store
     // (never a transaction-scoped one), so the reads go out together.
@@ -515,7 +528,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       settings.getGatewayPublicUrl(),
       applicationsFor(rows),
     ]);
-    const apis = new Map(apiRows.map((api) => [api.id, api]));
+    const readable = await filterReadableApis(store, reader, apiRows);
+    const apis = new Map(readable.map((api) => [api.id, api]));
     const users = new Map(userRows.map((user) => [user.id, user]));
     return rows.map((row) => {
       const api = apis.get(row.api_id);
@@ -530,7 +544,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     });
   }
 
-  async function decorateGrants(rows: GrantRecord[]): Promise<Grant[]> {
+  /** Grants' joins, on the same terms as {@link decorateRequests}. */
+  async function decorateGrants(rows: GrantRecord[], reader: UserRecord): Promise<Grant[]> {
     if (rows.length === 0) return [];
     // Every join keys off ids already in `rows`, and `store` is the root store
     // (never a transaction-scoped one), so the reads go out together.
@@ -540,7 +555,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       settings.getGatewayPublicUrl(),
       applicationsFor(rows),
     ]);
-    const apis = new Map(apiRows.map((api) => [api.id, api]));
+    const readable = await filterReadableApis(store, reader, apiRows);
+    const apis = new Map(readable.map((api) => [api.id, api]));
     const users = new Map(userRows.map((user) => [user.id, user]));
     return rows.map((row) => {
       const api = apis.get(row.api_id);
@@ -1469,7 +1485,23 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     }
   }
 
-  /** Best-effort notify + email; never allowed to undo a committed decision. */
+  /**
+   * How a notice names an API its recipient may no longer read: by the
+   * request, never by the API's current name, slug or catalog page.
+   */
+  function unreadableApiLabel(requestId: Uuid): string {
+    return `an API you can no longer view (request ${requestId})`;
+  }
+
+  /**
+   * Best-effort notify + email; never allowed to undo a committed decision.
+   *
+   * Every caller puts the API's name, slug and catalog link into the notice,
+   * so each one is sent only where the recipient may read that API when it
+   * is sent: an approval (the recipient now holds a grant), a revocation (the
+   * API row was read under the lease while the recipient still held the
+   * grant being withdrawn) and a denial (checked at send time, see `deny`).
+   */
   async function announce(
     recipient: UserRecord,
     notification: {
@@ -2017,8 +2049,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       },
     );
 
-    const [decoratedRequest] = await decorateRequests([updated]);
-    const [decoratedGrant] = await decorateGrants([widened]);
+    const [decoratedRequest] = await decorateRequests([updated], actor);
+    const [decoratedGrant] = await decorateGrants([widened], actor);
     return { access_request: decoratedRequest ?? updated, grant: decoratedGrant ?? widened };
   }
 
@@ -2228,6 +2260,11 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // grantee before the "revoked" it followed. `announce` never throws.
       // A grantee giving up its own access is told by the response, not by a
       // notice and an email saying somebody revoked it.
+      //
+      // The notice names the API even when the revocation ends the grantee's
+      // read access. `api` was read under this lease before the claim, while
+      // the grantee still held the grant, so it carries nothing the grantee
+      // could not read at that moment; nothing later reaches it.
       if (grantee && mode === 'review') {
         await announce(
           grantee,
@@ -2256,7 +2293,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       : await withdraw();
     const updated = typeof withdrawn === 'function' ? await withdrawn() : withdrawn;
 
-    const [decorated] = await decorateGrants([updated]);
+    const [decorated] = await decorateGrants([updated], actor);
     return decorated ?? updated;
   }
 
@@ -2733,7 +2770,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         ? await edge.serializePerKey(proxyLockKey(api.ferrum_proxy_id), submit)
         : await submit();
 
-      const [decorated] = await decorateRequests([created]);
+      const [decorated] = await decorateRequests([created], user);
       return decorated ?? created;
     },
 
@@ -2864,7 +2901,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         ? await edge.serializePerKey(proxyLockKey(api.ferrum_proxy_id), submit)
         : await submit();
 
-      const [decorated] = await decorateRequests([created]);
+      const [decorated] = await decorateRequests([created], user);
       return decorated ?? created;
     },
 
@@ -2902,7 +2939,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       });
       if (!updated) throw await decisionConflict(request.id);
 
-      const [decorated] = await decorateRequests([updated]);
+      const [decorated] = await decorateRequests([updated], user);
       return decorated ?? updated;
     },
 
@@ -3119,8 +3156,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           },
         );
 
-        const [decoratedRequest] = await decorateRequests([updated]);
-        const [decoratedGrant] = await decorateGrants([grant]);
+        const [decoratedRequest] = await decorateRequests([updated], actor);
+        const [decoratedGrant] = await decorateGrants([grant], actor);
         return {
           access_request: decoratedRequest ?? updated,
           grant: decoratedGrant ?? grant,
@@ -3169,29 +3206,39 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
       // A declined tool request leaves its grant exactly as it was.
       const tools = request.grant_id != null;
+      // A pending request outlives a withdrawn viewer authorization, a revoked
+      // grant and a switch to `private`, and denying it changes nothing about
+      // the requester's standing. So the notice names the API only if the
+      // requester may read it now; one who may not is told which request was
+      // declined, and nothing of the API's current name, slug or catalog page.
+      // The decision has committed, so a failed read falls back to that
+      // generic notice rather than failing the response.
+      const named = await canReadApiSummary(store, requester, api).catch(() => false);
+      const apiLabel = named ? api.name : unreadableApiLabel(request.id);
+      const heading = tools ? 'Agent tools declined' : 'Access declined';
       await announce(
         requester,
         {
           type: 'access_request_denied',
-          title: tools ? `Agent tools declined: ${api.name}` : `Access declined: ${api.name}`,
+          title: named ? `${heading}: ${api.name}` : heading,
           body: tools
-            ? `${actor.display_name} declined your request for more agent tools on ${api.name}. ` +
+            ? `${actor.display_name} declined your request for more agent tools on ${apiLabel}. ` +
               'Your existing access is unchanged.'
-            : `${actor.display_name} declined your request for ${api.name}.`,
-          link: `/catalog/${api.slug}`,
+            : `${actor.display_name} declined your request for ${apiLabel}.`,
+          link: named ? `/catalog/${api.slug}` : '/',
         },
         {
           templateKey: 'access_denied',
           vars: {
-            api_name: api.name,
-            api_slug: api.slug,
+            api_name: apiLabel,
+            api_slug: named ? api.slug : '',
             decided_by_name: actor.display_name,
             decision_note: note ?? '',
           },
         },
       );
 
-      const [decorated] = await decorateRequests([updated]);
+      const [decorated] = await decorateRequests([updated], actor);
       return decorated ?? updated;
     },
 
@@ -3352,11 +3399,11 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
       if (filter.mine || !roleAtLeast(actor.role, 'provider')) {
         const page = await store.accessRequests.list({ ...base, user_id: actor.id }, options);
-        return { items: await decorateRequests(page.items), total: page.total };
+        return { items: await decorateRequests(page.items, actor), total: page.total };
       }
       if (roleAtLeast(actor.role, 'admin')) {
         const page = await store.accessRequests.list(base, options);
-        return { items: await decorateRequests(page.items), total: page.total };
+        return { items: await decorateRequests(page.items, actor), total: page.total };
       }
 
       // A provider's inbox is scoped to the APIs they own.
@@ -3369,7 +3416,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         { ...base, ...(base.api_id === undefined ? { api_ids: owned } : {}) },
         options,
       );
-      return { items: await decorateRequests(page.items), total: page.total };
+      return { items: await decorateRequests(page.items, actor), total: page.total };
     },
 
     async listGrants(actor, filter = {}, options): Promise<Paginated<Grant>> {
@@ -3380,14 +3427,14 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
       if (filter.mine || !roleAtLeast(actor.role, 'provider')) {
         const page = await store.grants.list({ ...base, user_id: actor.id }, options);
-        return { items: await decorateGrants(page.items), total: page.total };
+        return { items: await decorateGrants(page.items, actor), total: page.total };
       }
       if (roleAtLeast(actor.role, 'admin')) {
         const page = await store.grants.list(
           { ...base, ...(filter.user_id !== undefined ? { user_id: filter.user_id } : {}) },
           options,
         );
-        return { items: await decorateGrants(page.items), total: page.total };
+        return { items: await decorateGrants(page.items, actor), total: page.total };
       }
 
       const owned = await store.apis.listIdsByOwner(actor.id);
@@ -3403,7 +3450,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         },
         options,
       );
-      return { items: await decorateGrants(page.items), total: page.total };
+      return { items: await decorateGrants(page.items, actor), total: page.total };
     },
   };
 }
