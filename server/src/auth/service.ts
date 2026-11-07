@@ -38,9 +38,9 @@ import {
   PASSWORD_RESET_THROTTLE_SECONDS,
   PASSWORD_RESET_TTL_SECONDS,
   VERIFICATION_RESEND_THROTTLE_SECONDS,
+  capabilitiesFor,
   isRegistrableRole,
   isReleasedEmail,
-  roleAtLeast,
   type Capabilities,
   type RegistrableRole,
   type Role,
@@ -431,18 +431,6 @@ export interface AuthServiceDeps {
 export function toPublicUser(record: UserRecord): User {
   const { password_hash: _passwordHash, ...user } = record;
   return user;
-}
-
-/** Role-derived flags the SPA uses for nav filtering. */
-export function capabilitiesFor(role: Role): Capabilities {
-  return {
-    can_publish_apis: roleAtLeast(role, 'provider'),
-    can_review_access_requests: roleAtLeast(role, 'provider'),
-    can_manage_users: roleAtLeast(role, 'admin'),
-    can_manage_settings: roleAtLeast(role, 'admin'),
-    can_view_audit_log: roleAtLeast(role, 'admin'),
-    can_use_god_mode: roleAtLeast(role, 'super_admin'),
-  };
 }
 
 /** Read registration defaults or overrides through the supplied store. */

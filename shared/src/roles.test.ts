@@ -6,6 +6,7 @@ import {
   REGISTRABLE_ROLES,
   ROLE_LABELS,
   ROLE_ORDER,
+  capabilitiesFor,
   isRegistrableRole,
   isRole,
   roleAtLeast,
@@ -91,5 +92,37 @@ describe('isRegistrableRole', () => {
     assert.equal(isRegistrableRole('admin'), false);
     assert.equal(isRegistrableRole('super_admin'), false);
     assert.equal(isRegistrableRole(null), false);
+  });
+});
+
+describe('capabilitiesFor', () => {
+  // Each flag's minimum role. The server sends these flags and the SPA falls
+  // back to the same derivation, so a change here changes both on purpose.
+  const MINIMUM_ROLE = {
+    can_publish_apis: 'provider',
+    can_review_access_requests: 'provider',
+    can_manage_users: 'admin',
+    can_manage_settings: 'admin',
+    can_view_audit_log: 'admin',
+    can_use_god_mode: 'super_admin',
+  } as const satisfies Record<string, Role>;
+
+  it('grants each capability from its minimum role upwards, and only then', () => {
+    for (const role of ROLE_ORDER) {
+      const capabilities = capabilitiesFor(role);
+      assert.deepEqual(Object.keys(capabilities).sort(), Object.keys(MINIMUM_ROLE).sort());
+      for (const [flag, minimum] of Object.entries(MINIMUM_ROLE)) {
+        assert.equal(
+          capabilities[flag as keyof typeof MINIMUM_ROLE],
+          roleRank(role) >= roleRank(minimum),
+          `${role}.${flag}`,
+        );
+      }
+    }
+  });
+
+  it('gives a client nothing and a super_admin everything', () => {
+    assert.ok(Object.values(capabilitiesFor('client')).every((flag) => flag === false));
+    assert.ok(Object.values(capabilitiesFor('super_admin')).every((flag) => flag === true));
   });
 });
