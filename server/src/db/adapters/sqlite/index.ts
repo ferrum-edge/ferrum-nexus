@@ -3641,6 +3641,29 @@ class SqliteStore implements NexusStore {
       return job;
     },
 
+    enqueueIfAbsent: async (input, now) =>
+      execute(
+        this.db,
+        `INSERT INTO access_gateway_jobs
+           (id, generation, kind, subject_id, api_id, user_id, application_id, requested_by,
+            status, attempts, next_attempt_at, last_error, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?)
+         ON CONFLICT (subject_id) DO NOTHING`,
+        [
+          newId(),
+          newId(),
+          input.kind,
+          input.subject_id,
+          input.api_id,
+          input.user_id,
+          input.application_id,
+          input.requested_by,
+          now,
+          now,
+          now,
+        ],
+      ) > 0,
+
     findBySubject: async (subjectId) => {
       const row = queryOne(this.db, 'SELECT * FROM access_gateway_jobs WHERE subject_id = ?', [
         subjectId,

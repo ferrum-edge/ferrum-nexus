@@ -1533,9 +1533,12 @@ table (a collection on MongoDB, with the same two indexes): at most one row per
 grant or access request, holding the gateway work a targeted revocation or an
 approval owes until it lands (see
 [access gateway jobs](#access-gateway-jobs)). On SQL backends its foreign keys
-to `users` cascade (`user_id`) and set null (`requested_by`) on delete. It only
-adds an empty table and copies no data, so no retained grant or request owes
-anything after the upgrade. Before deploying it, stop and drain every older
+to `users` cascade (`user_id`) and set null (`requested_by`) on delete. The
+migration itself copies no data, but a database an earlier release wrote may
+already hold decisions whose gateway half never ran, and an empty table does
+not mean nothing is owed. So the first start after it queues the
+[stranded-decision repair](#repairing-decisions-stranded-before-015) in the
+background. Before deploying it, stop and drain every older
 Nexus request handler and background writer: an older instance neither writes
 the row when it claims a revocation or an approval nor deletes it when the
 decision settles, and it runs no worker to drain the table.
@@ -3192,6 +3195,55 @@ The worker also logs `Released stale access gateway claims`,
 To repair, read `last_error` and restore what it names (usually Edge
 reachability or the admin JWT). The worker keeps retrying and needs no
 re-driving. Do not edit the table by hand.
+
+A request that stalls past the stale threshold loses its job to the worker and
+then writes nothing: its consumer write re-checks, inside the consumer key, that
+it still owns the job at its generation and that no active grant now holds the
+group. A stalled approval answers `409 CONFLICT` and is compensated by the
+worker; a stalled revocation still answers with the revoked grant, and the
+worker finishes its removal.
+
+#### Repairing decisions stranded before 015
+
+Releases before `015_access_gateway_jobs` kept no record of a decision's
+gateway half, so an upgraded database may hold a revoked grant whose ACL group
+is still on its consumer, or an approved request that no grant was ever made
+from. The first start after the migration (any instance, under a lease) scans
+for both, a page at a time, and queues ordinary jobs for the worker:
+
+- one `revoke` job per identity and API that has a revoked grant, no active
+  grant and a consumer. The worker reads the consumer and takes the API's
+  groups off, so it costs one Edge read and write per such identity even where
+  the group is already gone; an identity granted again since keeps its access.
+- one `approve` job per approved request for access (`grant_id` null) that no
+  grant, in any status, names as its origin. The worker takes back any group no
+  grant covers and returns the request to `pending` (or cancels it when the
+  identity already holds a grant, or a newer request is pending).
+
+It records `access.stranded_repair_queued` (with the counts) when it finishes,
+and later starts skip it. A start that stops part-way leaves the marker
+unwritten, and the next start resumes: a job is only inserted where its grant
+or request has none. Progress is logged as
+`Queued access gateway repairs for decisions made before 015`, failures as
+`Could not queue access gateway repairs; the next start tries again`.
+
+**Not repaired automatically: approved requests for more tools.** A tool request
+that succeeded stays `approved`, and a later prune or revocation of its grant
+makes it look exactly like one that was interrupted, so compensating these
+automatically could put an old request back in a provider's inbox. List the
+candidates and review each one:
+
+```sql
+SELECT r.id, r.api_id, r.user_id, r.application_id, r.approved_tools, g.status, g.approved_tools
+  FROM access_requests r JOIN grants g ON g.id = r.grant_id
+  WHERE r.status = 'approved' AND g.status = 'active';
+```
+
+A row whose `r.approved_tools` are not all in `g.approved_tools`, and whose tools
+are still published, was interrupted. Its consumer may hold the extra tool
+groups. To repair it, revoke the grant (`POST /api/grants/:id/revoke`, which
+takes every group of the API off the identity's consumer) and approve a fresh
+request for the tools it should have.
 
 ### Account recovery revocations
 

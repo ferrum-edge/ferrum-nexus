@@ -3689,6 +3689,44 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         return mapAccessGatewayJob(row);
       }),
 
+    enqueueIfAbsent: async (input, now) =>
+      inTransaction(async (tx) => {
+        // Yield to an existing row instead of failing on it: a failed INSERT
+        // aborts a PostgreSQL transaction outright. MySQL spells the no-op
+        // `ON DUPLICATE KEY UPDATE id = id`, not `INSERT IGNORE` (which would
+        // downgrade a NOT NULL or CHECK violation to a warning), and its
+        // affected-row count cannot say which way that went, so the id of the
+        // row that now holds the subject does.
+        const id = newId();
+        const insertSql = `INSERT INTO access_gateway_jobs
+           (id, generation, kind, subject_id, api_id, user_id, application_id, requested_by,
+            status, attempts, next_attempt_at, last_error, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?)`;
+        await execute(
+          tx,
+          dialect === 'pg'
+            ? `${insertSql} ON CONFLICT (subject_id) DO NOTHING`
+            : `${insertSql} ON DUPLICATE KEY UPDATE id = id`,
+          [
+            id,
+            newId(),
+            input.kind,
+            input.subject_id,
+            input.api_id,
+            input.user_id,
+            input.application_id,
+            input.requested_by,
+            now,
+            now,
+            now,
+          ],
+        );
+        const row = await queryOne(tx, 'SELECT id FROM access_gateway_jobs WHERE subject_id = ?', [
+          input.subject_id,
+        ]);
+        return row !== null && text(row.id) === id;
+      }),
+
     findBySubject: async (subjectId) => {
       const row = await queryOne(exec, 'SELECT * FROM access_gateway_jobs WHERE subject_id = ?', [
         subjectId,

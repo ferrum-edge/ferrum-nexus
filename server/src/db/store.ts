@@ -1862,6 +1862,14 @@ export interface AccessGatewayJobRepo {
    * every older snapshot and claim of it.
    */
   upsertClaimed(input: AccessGatewayJobInput, now: IsoTimestamp): Promise<AccessGatewayJobRecord>;
+  /**
+   * Queue a job for `input.subject_id` unless the subject already carries one:
+   * `pending`, due at `now`, `attempts = 0`. An existing row — owned by a live
+   * decision or already queued — is left exactly as it is. Resolves to
+   * whether this call inserted the row. Used by the one-time repair that
+   * queues gateway work decisions made before migration `015` stranded.
+   */
+  enqueueIfAbsent(input: AccessGatewayJobInput, now: IsoTimestamp): Promise<boolean>;
   findBySubject(subjectId: Uuid): Promise<AccessGatewayJobRecord | null>;
   /**
    * Atomically claim up to `limit` rows that are `pending` with

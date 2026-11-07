@@ -1274,8 +1274,26 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     } else {
       if (groupAdded !== null) {
         try {
-          await setGroupMembership(requester, api.id, false, input.applicationId);
-          details.acl_group_removed = groupAdded;
+          // Re-checked inside the consumer key: an approval that committed a
+          // grant for the identity since — this one's lost acknowledgement,
+          // or a newer one after recovery took this one over — owns the group.
+          const regrant: { grant?: GrantRecord | null } = {};
+          await setGroupMembership(requester, api.id, false, input.applicationId, {
+            guard: async () => {
+              regrant.grant = await store.grants.findActiveByApiAndUser(
+                api.id,
+                requester.id,
+                input.applicationId,
+              );
+              return regrant.grant === null;
+            },
+          });
+          if (regrant.grant) {
+            details.acl_group_kept = groupAdded;
+            details.kept_for_grant_id = regrant.grant.id;
+          } else {
+            details.acl_group_removed = groupAdded;
+          }
         } catch (error) {
           details.acl_group_orphaned = groupAdded;
           settled = false;
@@ -1540,6 +1558,17 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   }
 
   /**
+   * The error an approval raises when it no longer owns its durable job: it
+   * stalled past the stale threshold and the access gateway worker took the
+   * job over to compensate it (issue #651).
+   */
+  function supersededApproval(): NexusError {
+    return conflict(
+      'This approval took too long and was handed to recovery; reload the request and retry',
+    );
+  }
+
+  /**
    * The error a tool request or its approval raises when the grant it would
    * extend is gone, revoked, or no longer the requesting identity's.
    */
@@ -1619,11 +1648,27 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         // No active grant for the identity: the REST group and every tool
         // group the write put back come off together.
         try {
+          // Re-checked inside the consumer key: an approval that committed a
+          // grant for the identity since owns these groups now.
+          const regrant: { grant?: GrantRecord | null } = {};
           await setGroupMembership(requester, api.id, false, request.application_id, {
             absentIsDone: true,
+            guard: async () => {
+              regrant.grant = await store.grants.findActiveByApiAndUser(
+                api.id,
+                requester.id,
+                request.application_id,
+              );
+              return regrant.grant === null;
+            },
           });
-          details.acl_group_removed = aclGroupForApi(api.id);
-          details.all_tool_groups_removed = true;
+          if (regrant.grant) {
+            details.acl_group_kept = aclGroupForApi(api.id);
+            details.kept_for_grant_id = regrant.grant.id;
+          } else {
+            details.acl_group_removed = aclGroupForApi(api.id);
+            details.all_tool_groups_removed = true;
+          }
         } catch (error) {
           details.acl_group_orphaned = aclGroupForApi(api.id);
           settled = false;
@@ -1645,11 +1690,35 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             request.application_id,
           );
           if (consumer) {
+            // The grant's subset is re-read inside the consumer key: a tool
+            // that a later approval added to it since is no longer stripped.
+            const now: { covered?: string[] | null } = {};
             await provisioner.mutateAclGroups(
               consumer.ferrum_consumer_id,
-              (groups) => groups.filter((group) => !strip.has(group)),
+              (groups) => {
+                const covered = now.covered;
+                if (covered === null) return groups;
+                const still = new Set(
+                  mcpGroupsForGrant(
+                    api.id,
+                    uncovered.filter((id) => !(covered ?? []).includes(id)),
+                  ),
+                );
+                return groups.filter((group) => !still.has(group));
+              },
               requester.id,
-              { absentIsDone: true },
+              {
+                absentIsDone: true,
+                guard: async () => {
+                  const current = await store.grants.findActiveByApiAndUser(
+                    api.id,
+                    requester.id,
+                    request.application_id,
+                  );
+                  now.covered = current ? current.approved_tools : [];
+                  return true;
+                },
+              },
             );
           }
           details.tool_groups_removed = [...strip];
@@ -1770,6 +1839,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     let attempted = true;
     let groupPossiblyApplied = true;
     const committed: { grant?: GrantRecord } = {};
+    const ownership: { superseded?: boolean } = {};
     try {
       try {
         await setGroupMembership(
@@ -1778,6 +1848,12 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           true,
           request.application_id,
           {
+            // Inside the consumer key, before the write: an approval that
+            // stalled until recovery took its job over writes nothing.
+            guard: async () => {
+              ownership.superseded = !(await stillOwned(job));
+              return !ownership.superseded;
+            },
             afterWrite: async () => {
               groupPossiblyApplied = false;
               committed.grant = await store.transaction(async (tx) => {
@@ -1801,8 +1877,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
                 });
                 if (!widened) throw inactiveGrant();
                 // The approval's gateway work is done with the subset it
-                // commits, so its durable job goes in the same transaction.
-                await tx.accessGatewayJobs.deleteBySubject(request.id);
+                // commits, so its durable job goes in the same transaction —
+                // and only while this request still owns it.
+                if (!(await tx.accessGatewayJobs.deleteClaimed(job))) throw supersededApproval();
                 await audit.forStore(tx).record(
                   { id: actor.id, role: actor.role },
                   AuditAction.ACCESS_TOOLS_APPROVE,
@@ -1825,6 +1902,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           },
           next,
         );
+        if (ownership.superseded) throw supersededApproval();
       } catch (error) {
         // The provisioner's active-user guard runs before the ACL write.
         if (isNexusError(error) && error.code === 'USER_DISABLED') {
@@ -1834,6 +1912,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         throw error;
       }
     } catch (error) {
+      // Refused before its write: the job's new owner compensates it.
+      if (ownership.superseded) throw error;
       const settled = await unwindToolApproval({
         actor,
         api,
@@ -2031,8 +2111,20 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // not come off: a revocation the gateway did not accept must not stand
       // as one.
       const job = revokeJob as AccessGatewayJobRecord | null;
+      // Read inside the consumer key, just before the write: a revocation
+      // that stalled until recovery took its job over — and possibly
+      // finished it, and a new grant was made since — must not strip what is
+      // there now. The worker's own removal checks the same.
+      const ownership: { lost?: string | null } = {};
       try {
-        if (grantee) await setGroupMembership(grantee, api.id, false, grant.application_id);
+        if (grantee) {
+          await setGroupMembership(grantee, api.id, false, grant.application_id, {
+            guard: async () => {
+              ownership.lost = job ? await revocationObsolete(job) : null;
+              return ownership.lost === null;
+            },
+          });
+        }
       } catch (error) {
         // A rollback that puts the grant back deletes the job with it; one
         // that leaves the grant `revoked` hands the job to the worker, which
@@ -2056,7 +2148,16 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         await settleOwnedJob(job, false, error);
         throw error;
       }
-      await settleOwnedJob(job, true);
+      if (ownership.lost === 'superseded') {
+        // The job's new owner finishes the removal; the revocation stands.
+        deps.log?.(
+          { grant_id: grant.id, user_id: grant.user_id },
+          'A stalled revocation found its gateway step taken over by recovery; it wrote nothing',
+        );
+      } else {
+        // The removal landed, or is no longer owed (a newer grant holds the group).
+        await settleOwnedJob(job, true);
+      }
 
       // Inside the lease, as an approval announces inside it: a revocation
       // and a quick re-approval of the same API are ordered by the lease,
@@ -2814,6 +2915,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         let addedGroup: string | null = group;
         let groupPossiblyApplied = true;
         const committed: { grant?: GrantRecord } = {};
+        const ownership: { superseded?: boolean } = {};
         try {
           try {
             // A rejected write may still have landed. Register compensation
@@ -2833,6 +2935,12 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
               true,
               request.application_id,
               {
+                // Inside the consumer key, before the write: an approval that
+                // stalled until recovery took its job over writes nothing.
+                guard: async () => {
+                  ownership.superseded = !(await stillOwned(job));
+                  return !ownership.superseded;
+                },
                 afterWrite: async () => {
                   groupPossiblyApplied = false;
                   committed.grant = await store.transaction(async (tx) => {
@@ -2880,14 +2988,18 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
                       },
                       ip,
                     );
-                    // The grant is what the job was waiting for.
-                    await tx.accessGatewayJobs.deleteBySubject(request.id);
+                    // The grant is what the job was waiting for — and it
+                    // commits only while this request still owns the job.
+                    if (!(await tx.accessGatewayJobs.deleteClaimed(job))) {
+                      throw supersededApproval();
+                    }
                     return created;
                   });
                 },
               },
               tools,
             );
+            if (ownership.superseded) throw supersededApproval();
           } catch (error) {
             // The provisioner's active-user guard runs before the ACL write.
             if (isNexusError(error) && error.code === 'USER_DISABLED') {
@@ -2897,6 +3009,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             throw error;
           }
         } catch (error) {
+          // Refused before its write: the job's new owner compensates it.
+          if (ownership.superseded) throw error;
           const settled = await unwindApproval({
             actor,
             api,

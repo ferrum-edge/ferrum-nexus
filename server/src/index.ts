@@ -58,6 +58,7 @@ import {
   createAccessGatewayWorker,
   type AccessGatewayWorker,
 } from './access/gateway-job-worker.js';
+import { queueStrandedAccessRepairs } from './access/stranded-repair.js';
 import { createStore } from './db/index.js';
 import type { NexusStore } from './db/store.js';
 import {
@@ -1064,7 +1065,30 @@ export async function buildServer(
   if (deps.startOutboxWorker ?? config.env !== 'test') outbox.start();
   if (deps.startTeardownWorker ?? config.env !== 'test') teardown.start();
   if (deps.startAccountRecoveryWorker ?? config.env !== 'test') recovery.start();
-  if (deps.startAccessGatewayWorker ?? config.env !== 'test') accessJobs.start();
+  if (deps.startAccessGatewayWorker ?? config.env !== 'test') {
+    // Once per database, after migration `015`: queue the gateway work that
+    // decisions made by an earlier release may have stranded (issue #651).
+    // In the background, so a large history never delays serving; a run that
+    // fails is retried by the next start.
+    void queueStrandedAccessRepairs({
+      store: deps.store,
+      audit,
+      locks,
+      namespace: config.edge.namespace,
+    })
+      .then((repair) => {
+        if (!repair.alreadyRecorded) {
+          app.log.info(repair, 'Queued access gateway repairs for decisions made before 015');
+        }
+      })
+      .catch((error: unknown) => {
+        app.log.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Could not queue access gateway repairs; the next start tries again',
+        );
+      });
+    accessJobs.start();
+  }
   if (deps.startExpirySweepWorker ?? config.env !== 'test') expirySweep.start();
   if (deps.startReconciliationWorker ?? config.env !== 'test') reconciliation.start();
 

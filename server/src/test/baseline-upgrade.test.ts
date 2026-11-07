@@ -38,8 +38,11 @@
  * only adds an empty table, so no retained account owes a recovery revocation.
  * `014_mysql_text_capacity` widens eight MySQL text columns in place and changes
  * nothing on the other backends; retained values read back unchanged.
- * `015_access_gateway_jobs` (pending) only adds an empty table, so no retained
- * grant or request owes the gateway anything.
+ * `015_access_gateway_jobs` (pending) adds an empty table, and the first start
+ * after it queues jobs for what an earlier release may have stranded: the
+ * fixture's revoked grant, whose group is still on its consumer, and its
+ * approved request that no grant was ever made from. The access gateway worker
+ * then repairs both, and a regrant's group is left alone.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
@@ -61,6 +64,7 @@ import pg from 'pg';
 
 import { emptySpecChangeReport, type DbDriver, type EmailTemplateKey } from '@ferrum-nexus/shared';
 
+import { queueStrandedAccessRepairs } from '../access/stranded-repair.js';
 import { SMTP_PASSWORD_SETTINGS_KEY } from '../admin/settings-service.js';
 import { SUPER_ADMIN_CLAIM_KEY } from '../auth/service.js';
 import { loadConfig } from '../config/index.js';
@@ -78,6 +82,8 @@ import {
 import { RELEASED_MIGRATIONS } from '../db/released-migrations.js';
 import { OUTBOX_PRIORITY, type NexusStore } from '../db/store.js';
 import { createCrypto, hashPassword, verifyPassword } from '../lib/crypto.js';
+import { createKeyedSerializer } from '../lib/keyed-serializer.js';
+import { buildTestApp } from './helpers.js';
 
 const VERIFY_OR_RESET_KEY = /^(verify:|reset:)/;
 const ROLLBACK_PRIORITY_CLAIMS = /rollback priority claims/;
@@ -151,6 +157,7 @@ const ID = {
   requestApp: '00000000-0000-4000-8000-000000000702',
   requestFormer: '00000000-0000-4000-8000-000000000703',
   requestPending: '00000000-0000-4000-8000-000000000704',
+  requestStranded: '00000000-0000-4000-8000-000000000705',
   grantAccount: '00000000-0000-4000-8000-000000000801',
   grantApp: '00000000-0000-4000-8000-000000000802',
   grantRevoked: '00000000-0000-4000-8000-000000000803',
@@ -446,6 +453,21 @@ async function buildFixture(ids: readonly string[]): Promise<FixtureRow[]> {
         decided_by: null,
         decided_at: null,
         decision_note: null,
+        ...stamps,
+      },
+    },
+    {
+      // Approved by a release before `015`, whose process stopped before the
+      // grant was written: no grant names it.
+      table: 'access_requests',
+      row: {
+        id: ID.requestStranded,
+        api_id: ID.ledger,
+        user_id: ID.client,
+        application_id: null,
+        justification: 'Ledger exports',
+        status: 'approved',
+        ...decided,
         ...stamps,
       },
     },
@@ -1283,9 +1305,9 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
             assert.equal(readSpec?.parsed_version, 'v'.repeat(100));
             assert.equal(await store.apiSpecs.delete(wideSpec.id), true);
 
-            // `015_access_gateway_jobs` only adds an empty table: no retained
-            // grant or request owes the gateway anything after the upgrade,
-            // and a decision on a retained row can record one.
+            // `015_access_gateway_jobs` adds an empty table; the repair that
+            // fills it runs at the first start, below. A decision on a
+            // retained row can record a job.
             assert.equal(await store.accessGatewayJobs.findBySubject(ID.grantAccount), null);
             assert.equal(await store.accessGatewayJobs.findBySubject(ID.requestPending), null);
             const owed = await store.accessGatewayJobs.upsertClaimed(
@@ -1319,6 +1341,94 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
             await assertPortalInvariants(restarted);
           } finally {
             await restarted.close();
+          }
+
+          // The first start after `015` queues what an earlier release may
+          // have stranded, once, and the access gateway worker repairs it.
+          const repairing = await target.openStore();
+          try {
+            const app = await buildTestApp({ store: repairing });
+            try {
+              const repair = (): ReturnType<typeof queueStrandedAccessRepairs> =>
+                queueStrandedAccessRepairs({
+                  store: repairing,
+                  audit: app.services.audit,
+                  locks: createKeyedSerializer({ leases: repairing.leases }),
+                  namespace: 'nexus',
+                });
+              assert.deepEqual(await repair(), {
+                alreadyRecorded: false,
+                revocations: 1,
+                approvals: 1,
+              });
+              assert.equal(
+                (await repairing.accessGatewayJobs.findBySubject(ID.grantRevoked))?.kind,
+                'revoke',
+              );
+              assert.equal(
+                (await repairing.accessGatewayJobs.findBySubject(ID.requestStranded))?.kind,
+                'approve',
+              );
+              // Settled decisions owe nothing.
+              for (const id of [
+                ID.grantAccount,
+                ID.grantApp,
+                ID.requestAccount,
+                ID.requestApp,
+                ID.requestFormer,
+                ID.requestPending,
+              ]) {
+                assert.equal(await repairing.accessGatewayJobs.findBySubject(id), null, id);
+              }
+              assert.deepEqual(
+                await repair(),
+                { alreadyRecorded: true, revocations: 0, approvals: 0 },
+                'a later start queues nothing',
+              );
+
+              // The gateway as the stranded decisions left it: the revoked
+              // grant's group still on its consumer, and the stranded
+              // approval's group on a consumer whose other grant is live.
+              app.edge.seedConsumer({
+                id: 'edge-consumer-former',
+                username: `nexus-user-${ID.former}`,
+                custom_id: ID.former,
+                acl_groups: [approvedGroup(ID.invoices)],
+              });
+              app.edge.seedConsumer({
+                id: 'edge-consumer-client',
+                username: `nexus-user-${ID.client}`,
+                custom_id: ID.client,
+                acl_groups: [approvedGroup(ID.invoices), approvedGroup(ID.ledger)],
+              });
+              const tick = await app.services.accessJobs.tick();
+              assert.equal(tick.claimed, 2);
+              assert.equal(tick.completed, 2);
+              assert.deepEqual(
+                app.edge.consumerByUsername(`nexus-user-${ID.former}`)?.acl_groups,
+                [],
+                'the revoked grant no longer opens the door',
+              );
+              assert.deepEqual(
+                app.edge.consumerByUsername(`nexus-user-${ID.client}`)?.acl_groups,
+                [approvedGroup(ID.invoices)],
+                'the stranded approval is taken back; the active grant keeps its group',
+              );
+              assert.equal(
+                (await repairing.accessRequests.findById(ID.requestStranded))?.status,
+                'pending',
+              );
+              assert.equal((await repairing.grants.findById(ID.grantAccount))?.status, 'active');
+              assert.equal(await repairing.accessGatewayJobs.findBySubject(ID.grantRevoked), null);
+              assert.equal(
+                await repairing.accessGatewayJobs.findBySubject(ID.requestStranded),
+                null,
+              );
+            } finally {
+              await app.close();
+            }
+          } finally {
+            await repairing.close();
           }
         } finally {
           await target.teardown();

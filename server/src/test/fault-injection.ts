@@ -118,6 +118,12 @@ export interface CrashingStore {
    * reject. This is "the process stopped just before this write".
    */
   crashAt(repo: keyof NexusStore, method: string): void;
+  /**
+   * Stall at the next call to `repo.method`, as a process paused by a long GC
+   * or a frozen VM would: the call waits until `resume()`, then runs. Only
+   * this store's callers stall; another app over the same database does not.
+   */
+  stallAt(repo: keyof NexusStore, method: string): { reached: Promise<void>; resume(): void };
   /** Whether the crash has happened. */
   crashed(): boolean;
   /** Answer normally again, so the crashed app can be closed cleanly. */
@@ -139,6 +145,7 @@ export function crashingStore(base: NexusStore): CrashingStore {
   let at: string | null = null;
   /** Set while a transaction body has called the armed method. */
   let pendingCrash = false;
+  let stall: { key: string; reach: () => void; resumed: Promise<void> } | null = null;
   let depth = 0;
 
   const crash = (): Error => new Error('the process crashed');
@@ -157,6 +164,12 @@ export function crashingStore(base: NexusStore): CrashingStore {
           }
           if (dead) return Promise.reject(crash());
           if (afterCommitOf === key) pendingCrash = true;
+          if (stall?.key === key) {
+            const held = stall;
+            stall = null;
+            held.reach();
+            return held.resumed.then(() => Reflect.apply(value, target, args));
+          }
           return Reflect.apply(value, target, args);
         };
       },
@@ -208,6 +221,18 @@ export function crashingStore(base: NexusStore): CrashingStore {
     },
     crashAt(repo, method) {
       at = `${String(repo)}.${method}`;
+    },
+    stallAt(repo, method) {
+      let reach!: () => void;
+      let resume!: () => void;
+      const reached = new Promise<void>((resolve) => {
+        reach = resolve;
+      });
+      const resumed = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      stall = { key: `${String(repo)}.${method}`, reach, resumed };
+      return { reached, resume };
     },
     crashed: () => dead,
     revive() {

@@ -4565,6 +4565,33 @@ class MongoStore implements NexusStore {
       return mapAccessGatewayJob(row);
     },
 
+    enqueueIfAbsent: async (input, now) => {
+      // `$setOnInsert` only: an existing row for the subject is left untouched.
+      const result = await this.col(COLLECTIONS.accessGatewayJobs).updateOne(
+        { subject_id: input.subject_id } as Filter<NexusDoc>,
+        {
+          $setOnInsert: {
+            _id: newId(),
+            generation: newId(),
+            kind: input.kind,
+            subject_id: input.subject_id,
+            api_id: input.api_id,
+            user_id: input.user_id,
+            application_id: input.application_id,
+            requested_by: input.requested_by,
+            status: 'pending',
+            attempts: 0,
+            next_attempt_at: now,
+            last_error: null,
+            created_at: now,
+            updated_at: now,
+          },
+        } as UpdateFilter<NexusDoc>,
+        { ...this.opts, upsert: true },
+      );
+      return result.upsertedCount > 0;
+    },
+
     findBySubject: async (subjectId) => {
       const row = asRow(
         await this.col(COLLECTIONS.accessGatewayJobs).findOne({ subject_id: subjectId }, this.opts),

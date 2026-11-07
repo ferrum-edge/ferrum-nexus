@@ -648,4 +648,37 @@ describe('access gateway jobs survive a crash between the claim and the Edge wri
     assert.deepEqual(groupsOf(client.user.id), []);
     assert.equal(await database.accessGatewayJobs.findBySubject(grantId), null);
   });
+
+  it('stops a stalled revocation whose job recovery took over from stripping a newer grant', async () => {
+    const { client, apiId, grantId } = await grantee();
+    const group = aclGroupForApi(apiId);
+    const proxyId = (await database.apis.findById(apiId))?.ferrum_proxy_id;
+    assert.ok(proxyId);
+
+    // Instance one commits the revocation, then stalls before its Edge write.
+    const stalled = crash.stallAt('consumers', 'findByUserAndNamespace');
+    const first = revoke(crashed, grantId);
+    await stalled.reached;
+    assert.equal((await database.grants.findById(grantId))?.status, 'revoked');
+
+    // Its proxy lease lapses and is taken over, as a stall past the TTL does.
+    const key = proxyLockKey(proxyId);
+    const later = new Date(Date.now() + 10 * 60_000).toISOString();
+    assert.equal(await database.leases.acquire(key, 'takeover', later, later), true);
+    assert.equal(await database.leases.release(key, 'takeover'), true);
+
+    // Instance two recovers the stale job, then grants the identity again.
+    await recoverStale();
+    assert.deepEqual(groupsOf(client.user.id), []);
+    const regranted = await approve(restarted, await request(restarted, client, apiId));
+    assert.deepEqual(groupsOf(client.user.id), [group]);
+
+    // Instance one wakes up and reaches the consumer it meant to strip.
+    stalled.resume();
+    await first;
+    assert.deepEqual(groupsOf(client.user.id), [group], 'the newer grant keeps its group');
+    assert.equal((await database.grants.findById(regranted))?.status, 'active');
+    assert.equal((await database.grants.findById(grantId))?.status, 'revoked');
+    assert.equal(await database.accessGatewayJobs.findBySubject(grantId), null);
+  });
 });
