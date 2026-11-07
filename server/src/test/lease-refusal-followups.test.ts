@@ -51,7 +51,7 @@ import {
 import { AuditAction } from '../audit/service.js';
 import type { CredentialRepo, NexusStore, TransactionOptions } from '../db/store.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
-import { userLifecycleLockKey } from '../lib/keyed-serializer.js';
+import { proxyLockKey, userLifecycleLockKey } from '../lib/keyed-serializer.js';
 import { isLeaseLost, LEASE_LOST_MESSAGE } from '../lib/lease-fence.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
@@ -740,7 +740,7 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
 
   it('puts a refused revocation back alone when the fence refuses its rollback', async () => {
     const { session, apiId, proxyId, grantId } = await grantee();
-    const key = `proxy:${proxyId}`;
+    const key = proxyLockKey(proxyId);
     refuseNextConsumerWrite(session.user.id);
 
     // The revocation stalls past the TTL at the gateway step, after its claim
@@ -931,7 +931,7 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
 
   it('leaves it revoked when the fence refuses the rollback of a disabled grantee', async () => {
     const { session, apiId, proxyId, grantId } = await grantee();
-    const key = `proxy:${proxyId}`;
+    const key = proxyLockKey(proxyId);
     const group = aclGroupForApi(apiId);
     // The account is disabled while the revocation is in flight, and the
     // revocation then stalls past the TTL, so another instance takes the
@@ -1274,7 +1274,7 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
 
   it('retries outside the lease when the fence refuses the fenced retry', async () => {
     const { session, apiId, proxyId, grantId } = await grantee();
-    const key = `proxy:${proxyId}`;
+    const key = proxyLockKey(proxyId);
     refuseNextConsumerWrite(session.user.id);
     const refused = watchRefusal();
 

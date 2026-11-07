@@ -4,6 +4,7 @@ import { it } from 'node:test';
 import { aclGroupForApi, consumerUsernameForUser } from '@ferrum-nexus/shared';
 
 import type { NexusStore, TransactionOptions } from '../db/store.js';
+import { proxyLockKey } from '../lib/keyed-serializer.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp } from './helpers.js';
 
 function barrier() {
@@ -84,7 +85,7 @@ for (const first of ['retire', 'approve']) {
       const queued = barrier();
       const release = barrier();
       const api = await h.store.apis.findById(s.apiId);
-      const key = `proxy:${api!.ferrum_proxy_id}`;
+      const key = proxyLockKey(api!.ferrum_proxy_id!);
       const serialize = h.edgeClient.serializePerKey;
       let arrivals = 0;
       h.edgeClient.serializePerKey = (candidate, work) => {

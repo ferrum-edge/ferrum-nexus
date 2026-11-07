@@ -116,7 +116,12 @@ import type { NexusStore, UserRecord } from '../db/store.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import { edgeUnavailable, forbidden, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
-import { apiRestoreLockKey, LEASE_TTL_MS, userLifecycleLockKey } from '../lib/keyed-serializer.js';
+import {
+  apiRestoreLockKey,
+  LEASE_TTL_MS,
+  proxyLockKey,
+  userLifecycleLockKey,
+} from '../lib/keyed-serializer.js';
 import { isLeaseLost } from '../lib/lease-fence.js';
 import type { NotificationsService } from '../notifications/service.js';
 
@@ -965,7 +970,7 @@ export function createGatewayReconciliationService(
       // Same API-then-proxy order as restore. Conversions and deletion already
       // hold the proxy key, so a transient teardown cannot be mistaken for loss.
       const outcome = await edge.serializePerKey(apiRestoreLockKey(orphan.api_id), () =>
-        edge.serializePerKey(`proxy:${orphan.ferrum_proxy_id}`, flag),
+        edge.serializePerKey(proxyLockKey(orphan.ferrum_proxy_id), flag),
       );
 
       if (outcome.kind === 'gone') {

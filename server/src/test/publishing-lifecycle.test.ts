@@ -28,7 +28,7 @@ import { after, afterEach, before, describe, it } from 'node:test';
 import type { GetApiResponse, PublishApiResponse } from '@ferrum-nexus/shared';
 
 import type { ApiRecord } from '../db/store.js';
-import { apiRestoreLockKey } from '../lib/keyed-serializer.js';
+import { apiRestoreLockKey, proxyLockKey } from '../lib/keyed-serializer.js';
 import { createConversionRaceFixture, createOwnedOperation } from './conversion-race-fixture.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
@@ -148,7 +148,7 @@ describe('deleting an API that races an enforcement conversion', () => {
       // reconciliation also use, so the second request for the API key is the
       // one queued behind the held operation, before it can ask for the proxy.
       const restoreKey = apiRestoreLockKey(api.id);
-      const proxyKey = `proxy:${proxyId}`;
+      const proxyKey = proxyLockKey(proxyId);
       const leases: string[] = [];
       let waiting = (): void => {};
       const contending = new Promise<void>((resolve) => {
@@ -330,7 +330,7 @@ describe('deleting an API that races an enforcement conversion', () => {
     try {
       fixture.own(
         createOwnedOperation(() =>
-          serialize(`proxy:${proxyId}`, async () => {
+          serialize(proxyLockKey(proxyId), async () => {
             announceHeld();
             await fixture.held;
           }),
@@ -338,7 +338,7 @@ describe('deleting an API that races an enforcement conversion', () => {
       );
       await fixture.within(held, 'held original proxy lease');
       harness.edgeClient.serializePerKey = (key, fn) => {
-        if (key === `proxy:${proxyId}`) announceQueued();
+        if (key === proxyLockKey(proxyId)) announceQueued();
         return serialize(key, fn);
       };
       const offset = harness.edge.requests.length;

@@ -25,6 +25,7 @@ import {
   type SetApiPluginResponse,
 } from '@ferrum-nexus/shared';
 
+import { proxyLockKey } from '../lib/keyed-serializer.js';
 import { mockCacheStorageAllowed, mockPaletteCompositionError } from './mock-ferrum-edge.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -970,12 +971,12 @@ describe('provider plugin palette', () => {
         const owner = `probe-${probes.length}`;
         const now = new Date();
         const acquired = await harness.store.leases.acquire(
-          `proxy:${proxyId}`,
+          proxyLockKey(proxyId),
           owner,
           new Date(now.getTime() + 1_000).toISOString(),
           now.toISOString(),
         );
-        if (acquired) await harness.store.leases.release(`proxy:${proxyId}`, owner);
+        if (acquired) await harness.store.leases.release(proxyLockKey(proxyId), owner);
         probes.push(acquired ? 'free' : 'held');
         return transaction(fn, options);
       };
