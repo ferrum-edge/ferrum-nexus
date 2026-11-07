@@ -237,7 +237,7 @@ import type {
   UserRecord,
 } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
-import type { FerrumAdminClient } from '../ferrum-admin/index.js';
+import { consumerWithAclGroups, type FerrumAdminClient } from '../ferrum-admin/index.js';
 import type {
   EdgeConsumer,
   EdgeCredentialEntry,
@@ -2588,19 +2588,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             (group) => apiIdFromAclGroup(group) !== null && !groups.includes(group),
           );
           if (grants.length === 0 && !stray) return;
-          await edge.consumers.replace(
-            live.id,
-            {
-              id: live.id,
-              labels: live.labels,
-              username: live.username,
-              custom_id: live.custom_id ?? null,
-              credentials: live.credentials,
-              acl_groups: groups,
-            },
-            subject,
-            etag,
-          );
+          await edge.consumers.replace(live.id, consumerWithAclGroups(live, groups), subject, etag);
         });
       }
     },
@@ -2698,14 +2686,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             // the original complete row tag. Secrets remain transient here.
             await edge.consumers.replace(
               id,
-              {
-                id: live.id,
-                labels: live.labels,
-                username: live.username,
-                custom_id: live.custom_id ?? null,
-                credentials: live.credentials,
-                acl_groups: [],
-              },
+              consumerWithAclGroups(live, []),
               subject,
               snapshot!.etag,
             );
