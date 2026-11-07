@@ -3742,7 +3742,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         const row = await queryOne(tx, 'SELECT id FROM access_gateway_jobs WHERE subject_id = ?', [
           input.subject_id,
         ]);
-        return row !== null && text(row.id) === id;
+        return row !== undefined && text(row.id) === id;
       }),
 
     findBySubject: async (subjectId) => {

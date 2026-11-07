@@ -1290,6 +1290,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // exactly as they are and let the audit row say so.
       details.acl_group_kept = groupAdded;
       details.kept_for_grant_id = live.id;
+      if (live.access_request_id !== requestId) {
+        // Another request's grant: this approval's whole-resource write may
+        // have replaced that grant's groups with a broader subset, and this
+        // request still reads `approved` with no grant of its own. Neither is
+        // settled here; the job goes to the worker, which cuts the groups
+        // back to that grant's subset and settles the request (issue #651).
+        details.deferred_to_recovery = true;
+        settled = false;
+      }
     } else {
       const regrant: { grant?: GrantRecord | null } = {};
       if (groupAdded !== null) {
@@ -1331,8 +1340,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       try {
         if (regrant.grant) {
           // As at the entry check: a grant owns the access, so the decision
-          // stands as well as the group.
+          // stands as well as the group — and, when that grant is another
+          // request's, the worker reconciles both.
           details.request_left = 'regranted';
+          if (regrant.grant.access_request_id !== requestId) {
+            details.deferred_to_recovery = true;
+            settled = false;
+          }
         } else {
           const outcome = await settleOwnRequest(input.job, requestId, {
             status: 'pending',
@@ -1719,6 +1733,14 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // The grant already covers every added tool: the update committed, so
       // the groups and the decision both stand.
       details.tool_groups_kept = mcpGroupsForGrant(api.id, added);
+    } else if (!active && holder) {
+      // Another grant now holds the identity. This approval's whole-resource
+      // write carried the old grant's subset as well as the added tools, so
+      // the consumer may hold more than that grant covers: the job goes to the
+      // worker, which cuts the groups back to it and cancels the request.
+      details.kept_for_grant_id = holder.id;
+      details.deferred_to_recovery = true;
+      settled = false;
     } else {
       // What the consumer key showed: a grant that now owns these groups, or
       // the subset of the identity's active grant (`null`: every tool).
@@ -1933,7 +1955,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     let attempted = true;
     let groupPossiblyApplied = true;
     const committed: { grant?: GrantRecord } = {};
-    const ownership: { superseded?: boolean } = {};
+    const ownership: { superseded?: boolean; regranted?: boolean } = {};
     try {
       try {
         await setGroupMembership(
@@ -1943,10 +1965,21 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           request.application_id,
           {
             // Inside the consumer key, before the write: an approval that
-            // stalled until recovery took its job over writes nothing.
+            // stalled until recovery took its job over writes nothing, and
+            // neither does one whose identity is now held by another grant —
+            // its whole-resource write would replace that grant's groups.
             guard: async () => {
               ownership.superseded = !(await stillOwned(job));
-              return !ownership.superseded;
+              if (ownership.superseded) return false;
+              const holder = await store.grants.findActiveByApiAndUser(
+                api.id,
+                requester.id,
+                request.application_id,
+              );
+              // A grant that is gone is the widen transaction's to refuse; the
+              // compensation then takes every group back off.
+              ownership.regranted = holder !== null && holder.id !== grantId;
+              return !ownership.regranted;
             },
             afterWrite: async () => {
               groupPossiblyApplied = false;
@@ -1997,6 +2030,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           next,
         );
         if (ownership.superseded) throw supersededApproval();
+        if (ownership.regranted) throw inactiveGrant();
       } catch (error) {
         // The provisioner's active-user guard runs before the ACL write.
         if (isNexusError(error) && error.code === 'USER_DISABLED') {
@@ -2008,6 +2042,12 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     } catch (error) {
       // Refused before its write: the job's new owner compensates it.
       if (ownership.superseded) throw error;
+      // Refused before its write because another grant holds the identity:
+      // the worker settles the request against that grant.
+      if (ownership.regranted) {
+        await settleOwnedJob(job, false, error);
+        throw error;
+      }
       const settled = await unwindToolApproval({
         actor,
         api,
@@ -3022,7 +3062,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         let addedGroup: string | null = group;
         let groupPossiblyApplied = true;
         const committed: { grant?: GrantRecord } = {};
-        const ownership: { superseded?: boolean } = {};
+        const ownership: { superseded?: boolean; regranted?: boolean } = {};
         try {
           try {
             // A rejected write may still have landed. Register compensation
@@ -3043,10 +3083,20 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
               request.application_id,
               {
                 // Inside the consumer key, before the write: an approval that
-                // stalled until recovery took its job over writes nothing.
+                // stalled until recovery took its job over writes nothing, and
+                // neither does one whose identity another request's grant now
+                // holds — its whole-resource write would replace that grant's
+                // groups with this approval's subset.
                 guard: async () => {
                   ownership.superseded = !(await stillOwned(job));
-                  return !ownership.superseded;
+                  if (ownership.superseded) return false;
+                  const holder = await store.grants.findActiveByApiAndUser(
+                    api.id,
+                    requester.id,
+                    request.application_id,
+                  );
+                  ownership.regranted = holder !== null && holder.access_request_id !== request.id;
+                  return !ownership.regranted;
                 },
                 afterWrite: async () => {
                   groupPossiblyApplied = false;
@@ -3107,6 +3157,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
               tools,
             );
             if (ownership.superseded) throw supersededApproval();
+            if (ownership.regranted) {
+              throw conflict('This identity already has an active grant for this API');
+            }
           } catch (error) {
             // The provisioner's active-user guard runs before the ACL write.
             if (isNexusError(error) && error.code === 'USER_DISABLED') {
@@ -3118,6 +3171,12 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         } catch (error) {
           // Refused before its write: the job's new owner compensates it.
           if (ownership.superseded) throw error;
+          // Refused before its write because another request's grant holds the
+          // identity: the worker settles this request against that grant.
+          if (ownership.regranted) {
+            await settleOwnedJob(job, false, error);
+            throw error;
+          }
           const settled = await unwindApproval({
             actor,
             api,

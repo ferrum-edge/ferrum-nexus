@@ -796,6 +796,106 @@ describe('access gateway jobs survive a crash between the claim and the Edge wri
     });
   }
 
+  it('stops a stalled all-tools approval from overwriting a narrower grant made meanwhile', async () => {
+    const api = await publishAgents(crashed, TWO_TOOLS);
+    const [listId] = api.agents?.operations.map((tool) => tool.id) ?? [];
+    assert.ok(listId && api.ferrum_proxy_id);
+    const client = await crashed.registerUser({ role: 'client' });
+    const stalledRequest = await request(crashed, client, api.id);
+
+    // Approval A (every tool) claims, then stalls before its consumer write.
+    const beforeWrite = crash.stallAt('consumers', 'findByUserAndNamespace');
+    const first = approveOn(crashed, stalledRequest);
+    await beforeWrite.reached;
+    // Only its leases lapse: its job is younger than the stale threshold, and
+    // nothing recovers it.
+    await takeOver(proxyLockKey(api.ferrum_proxy_id));
+    await takeOver(canonicalConsumerLockKey('nexus', consumerUsernameForUser(client.user.id)));
+
+    // Request B for the same identity, for `list_items` alone, is approved on
+    // the other instance.
+    const asked = await restarted.authed(client, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: api.id, justification: 'List only', requested_tools: [listId] },
+    });
+    assert.equal(asked.statusCode, 201, asked.body);
+    const narrower = await approveOn(
+      restarted,
+      asked.json<CreateAccessRequestResponse>().access_request.id,
+    );
+    assert.equal(narrower.statusCode, 200, narrower.body);
+    const narrow = [aclGroupForApi(api.id), mcpToolGroupForApi(api.id, listId)].sort();
+    assert.deepEqual([...groupsOf(client.user.id)].sort(), narrow);
+
+    // A wakes and reaches the consumer.
+    beforeWrite.resume();
+    const stale = await first;
+    assert.ok(stale.statusCode >= 400, stale.body);
+    assert.deepEqual(
+      [...groupsOf(client.user.id)].sort(),
+      narrow,
+      'A wrote nothing over the narrower grant’s groups',
+    );
+    assert.equal(groupsOf(client.user.id).includes(mcpAllGroupForApi(api.id)), false);
+    const owed = await database.accessGatewayJobs.findBySubject(stalledRequest);
+    assert.equal(owed?.status, 'pending', 'its request is handed to the worker, not dropped');
+
+    // The worker settles A against B's grant.
+    const tick = await worker(testClock()).tick();
+    assert.equal(tick.claimed, 1);
+    assert.equal(tick.completed, 1);
+    assert.deepEqual([...groupsOf(client.user.id)].sort(), narrow);
+    const cancelled = await database.accessRequests.findById(stalledRequest);
+    assert.equal(cancelled?.status, 'cancelled');
+    assert.equal(cancelled?.decided_by, null);
+    assert.equal(cancelled?.decided_at, null);
+    assert.equal(await database.accessGatewayJobs.findBySubject(stalledRequest), null);
+  });
+
+  it('leaves a newer tool decision alone when a superseded tool approval compensates', async () => {
+    const f = await toolRequest();
+    assert.ok(f.api.ferrum_proxy_id);
+    const removeGroup = mcpToolGroupForApi(f.api.id, f.removeId);
+
+    // Tool approval A claims, then stalls before its consumer write.
+    const beforeWrite = crash.stallAt('consumers', 'findByUserAndNamespace');
+    const first = approveOn(crashed, f.requestId);
+    await beforeWrite.reached;
+    await takeOver(proxyLockKey(f.api.ferrum_proxy_id));
+    await takeOver(canonicalConsumerLockKey('nexus', consumerUsernameForUser(f.client.user.id)));
+
+    // Recovery compensates A: the tool request is pending again.
+    await recoverStale();
+    assert.equal((await database.accessRequests.findById(f.requestId))?.status, 'pending');
+
+    // A wakes, its verification read fails before its ownership guard, and
+    // its compensation stalls just before it reaches the consumer.
+    crashed.edge.queueFailure(503, { error: 'gateway unavailable' }, '/verification', 'GET');
+    const beforeUndo = crash.stallAt('consumers', 'findByUserAndNamespace');
+    beforeWrite.resume();
+    await beforeUndo.reached;
+
+    // Approval B of the same tool request succeeds on the other instance.
+    const approved = await approveOn(restarted, f.requestId);
+    assert.equal(approved.statusCode, 200, approved.body);
+    const decision = approved.json<ApproveAccessRequestResponse>();
+    assert.ok(groupsOf(f.client.user.id).includes(removeGroup));
+
+    beforeUndo.resume();
+    const stale = await first;
+    assert.ok(stale.statusCode >= 400, stale.body);
+    const current = await database.accessRequests.findById(f.requestId);
+    assert.equal(current?.status, 'approved', 'B’s decision stands');
+    assert.equal(current?.decided_at, decision.access_request.decided_at);
+    assert.deepEqual((await database.grants.findById(f.grantId))?.approved_tools, [
+      f.listId,
+      f.removeId,
+    ]);
+    assert.ok(groupsOf(f.client.user.id).includes(removeGroup), 'the newly approved tool stays');
+    assert.equal(await database.accessGatewayJobs.findBySubject(f.requestId), null);
+  });
+
   it('the one-time repair considers every candidate while the worker drains them', async () => {
     const client = await crashed.registerUser({ role: 'client' });
     const apiId = await publish(crashed);
