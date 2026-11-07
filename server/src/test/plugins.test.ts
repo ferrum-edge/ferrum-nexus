@@ -806,6 +806,13 @@ describe('provider plugin palette', () => {
         ).statusCode,
         200,
       );
+      // An absent list is Edge's default list, not an empty one: the server
+      // judges the body it forwards. (The plugin form refuses an emptied box;
+      // see admissionView in web/src/components/plugins/PluginForm.tsx.)
+      assert.equal(
+        (await setPlugin('bot_detection', { config: { allow_list: ['GoogleBot'] } })).statusCode,
+        200,
+      );
     });
 
     it('refuses a correlation header the gateway owns', async () => {

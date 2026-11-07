@@ -24,9 +24,7 @@
 
 import { useId, type ReactElement } from 'react';
 import {
-  CORRELATION_ID_RESERVED_HEADERS,
-  isGatewayOwnedConsumerHeader,
-  isProxyHopsHeader,
+  pluginAdmissionProblem,
   type PluginFieldSpec,
   type ProviderPluginDescriptor,
 } from '@ferrum-nexus/shared';
@@ -221,11 +219,43 @@ function fieldError(field: PluginFieldSpec, draft: PluginDraft): string | null {
 }
 
 /**
- * Every message for a draft: one per field, plus the whole-plugin invariants
- * under {@link FORM_ERROR_KEY}.
+ * The draft as the provider typed it, for {@link pluginAdmissionProblem}: list
+ * fields as their entries, string fields trimmed, everything else as held.
  *
- * These invariants mirror the ones Edge itself enforces beyond its key sets,
- * so the provider is told before the save rather than after it.
+ * Deliberately **not** {@link draftToConfig}: an emptied list stays `[]` here,
+ * where the body omits it (and Edge then applies its default). The server
+ * judges the body, so the two differ for a bot filter whose blocked list was
+ * cleared: the form refuses it unless requests with no User-Agent are
+ * rejected, while the server would accept the body and Edge would block its
+ * default patterns. Kept as it was when the rules were shared; which side is
+ * right is an open question, not something to settle by changing this view.
+ */
+function admissionView(
+  descriptor: ProviderPluginDescriptor,
+  draft: PluginDraft,
+): Record<string, unknown> {
+  const view: Record<string, unknown> = {};
+  for (const field of descriptor.fields) {
+    const value = draft[field.key];
+    if (field.kind === 'string_list' || field.kind === 'integer_list') {
+      view[field.key] = linesOf(value ?? '');
+    } else if (field.kind === 'string' || field.kind === 'enum') {
+      view[field.key] = String(value ?? '').trim();
+    } else if (value !== undefined) {
+      view[field.key] = value;
+    }
+  }
+  return view;
+}
+
+/**
+ * Every message for a draft: one per field, plus Edge's cross-field admission
+ * rules — under the field a rule is about, or {@link FORM_ERROR_KEY} for a
+ * whole-plugin rule.
+ *
+ * These rules are the ones the server applies (`PLUGIN_ADMISSION_RULES` in
+ * `@ferrum-nexus/shared`), so the provider is told before the save rather
+ * than after it.
  */
 export function validateDraft(
   descriptor: ProviderPluginDescriptor,
@@ -237,46 +267,10 @@ export function validateDraft(
     if (message !== null) errors[field.key] = message;
   }
 
-  if (descriptor.name === 'ip_restriction') {
-    const allow = linesOf(draft.allow ?? '');
-    const deny = linesOf(draft.deny ?? '');
-    if (allow.length === 0 && deny.length === 0) {
-      errors[FORM_ERROR_KEY] =
-        'List at least one allowed or denied address — an IP restriction with both lists empty would restrict nobody';
-    }
-  }
-  if (descriptor.name === 'bot_detection') {
-    const blocked = linesOf(draft.blocked_patterns ?? '');
-    if (blocked.length === 0 && draft.allow_missing_user_agent !== false) {
-      errors[FORM_ERROR_KEY] =
-        'With no blocked User-Agent patterns, requests with no User-Agent must be rejected — otherwise the filter blocks nothing';
-    }
-  }
-  if (descriptor.name === 'correlation_id') {
-    const header = String(draft.header_name ?? '').trim();
-    if (CORRELATION_ID_RESERVED_HEADERS.includes(header.toLowerCase())) {
-      errors.header_name =
-        `The gateway owns '${header}' and rejects it as a correlation header; ` +
-        'choose a name of your own, such as x-request-id';
-    } else if (isGatewayOwnedConsumerHeader(header)) {
-      errors.header_name =
-        `The gateway owns every x-consumer-* header and X-Authenticated-Identity, and rejects ` +
-        `'${header}' as a correlation header; choose a name of your own, such as x-request-id`;
-    } else if (isProxyHopsHeader(header)) {
-      errors.header_name =
-        `The gateway owns X-Ferrum-Hops, its loop-guard hop count, and rejects ` +
-        `'${header}' as a correlation header; choose a name of your own, such as x-request-id`;
-    }
-  }
-  if (descriptor.name === 'request_deduplication') {
-    const header = String(draft.header_name ?? '').trim();
-    if (isGatewayOwnedConsumerHeader(header)) {
-      errors.header_name =
-        `The gateway strips every x-consumer-* header and X-Authenticated-Identity from client ` +
-        `requests, so '${header}' could never carry an idempotency key; choose a name of your ` +
-        'own, such as Idempotency-Key';
-    }
-  }
+  // Edge's cross-field admission rules, shared with the server. Judged on the
+  // draft as typed (see admissionView), not on the body draftToConfig sends.
+  const problem = pluginAdmissionProblem(descriptor.name, admissionView(descriptor, draft));
+  if (problem !== null) errors[problem.field ?? FORM_ERROR_KEY] = problem.message;
   return errors;
 }
 
