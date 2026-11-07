@@ -427,7 +427,13 @@ export interface AuthServiceDeps {
   onFirstEmailProof?: (user: UserRecord, ip: string | null) => Promise<void>;
 }
 
-/** Strip the password hash: the wire shape of a user. */
+/**
+ * Strip the password hash: the wire shape of a user.
+ *
+ * The only `UserRecord` → `User` projection. Routes declare no response
+ * schema, so every response that carries a user must go through this one
+ * (`test/public-user-projection.test.ts`).
+ */
 export function toPublicUser(record: UserRecord): User {
   const { password_hash: _passwordHash, ...user } = record;
   return user;

@@ -52,12 +52,12 @@ import {
   type GodDeleteApiResponse,
   type GodDisableUserResponse,
   type Grant,
-  type User,
   type Uuid,
 } from '@ferrum-nexus/shared';
 
 import type { AccessService, BulkRevocationResult } from '../access/service.js';
 import { AuditAction, type AuditService } from '../audit/service.js';
+import { toPublicUser } from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
 import { runGatewayTeardown, type CredentialsService } from '../credentials/service.js';
 import type { GatewayTeardownJobRecord, NexusStore, UserRecord } from '../db/store.js';
@@ -93,12 +93,6 @@ export const BROADCAST_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** Human label for {@link BROADCAST_BUDGET_WINDOW_MS}, echoed in the error details. */
 export const BROADCAST_BUDGET_WINDOW_LABEL = '24h';
-
-/** Public projection of a stored user (no password hash). */
-function toPublicUser(record: UserRecord): User {
-  const { password_hash: _hash, ...user } = record;
-  return user;
-}
 
 /** God-mode operations. Every method assumes the caller is a `super_admin`. */
 export interface GodService {
