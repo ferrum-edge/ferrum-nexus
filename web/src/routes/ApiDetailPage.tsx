@@ -15,6 +15,7 @@ import {
   HTTP_METHODS,
   MAX_CORS_ORIGINS,
   MAX_RATE_LIMIT_REQUESTS,
+  MAX_UPSTREAM_URL_LENGTH,
   aclGroupForApi,
   testConsumerUsername,
   type AccessRequest,
@@ -35,6 +36,7 @@ import {
   type SpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
 import { formatDateTime, parseCorsOrigins } from '../lib/format';
+import { upstreamUrlProblem } from '../lib/upstream';
 import {
   useApi,
   useApiSpec,
@@ -347,6 +349,8 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
 
   /** Whether this form is about to cut existing callers off from this API. */
   const authSwap = authSwapState(api.auth_plugin, authPlugin, acknowledgedSwap);
+  // Checked as the publish form checks it; blank keeps the current upstream.
+  const upstreamError = upstreamUrlProblem(upstreamUrl);
 
   // The current document is not on this page, so it is fetched to offer the
   // same "use the methods declared in the spec" shortcut the publish form has.
@@ -361,6 +365,8 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
 
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
+    // The field already shows why; the server would refuse it after the trip.
+    if (upstreamError) return;
     // The whole field, so `1e3` is 1000 rather than 1 (issue #597).
     const parsedLimit = parseWholeNumber(rateLimitValue);
     if (
@@ -494,8 +500,10 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                   className="md:col-span-2"
                   label="Upstream URL"
                   type="url"
+                  maxLength={MAX_UPSTREAM_URL_LENGTH}
                   value={upstreamUrl}
                   onChange={(event) => setUpstreamUrl(event.target.value)}
+                  error={upstreamError}
                   hint={
                     api.upstream_url ? (
                       <>

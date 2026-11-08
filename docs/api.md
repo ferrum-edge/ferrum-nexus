@@ -2925,10 +2925,12 @@ A request with `grant_id` set (a [tool request](#post-apigrantsidtool-requests))
 adds tools to that grant instead of creating one; see that section for its
 response and errors.
 
-Errors: `403 FORBIDDEN`; `409 CONFLICT` (already decided, the identity already
-holds an active grant, the API is retired or no longer requestable, or the
-request's application is disabled or deleted — the request stays `pending`);
-`502 EDGE_ERROR` / `EDGE_UNAVAILABLE`. A failed approval removes the ACL
+Errors: `403 FORBIDDEN`; `404 NOT_FOUND` (the request's application was
+deleted or no longer belongs to the requester — refused before any gateway
+write, and the request stays `pending`); `409 CONFLICT` (already decided, the
+identity already holds an active grant, the API is retired or no longer
+requestable, or the request's application is disabled — the request stays
+`pending`); `502 EDGE_ERROR` / `EDGE_UNAVAILABLE`. A failed approval removes the ACL
 addition and returns the request to `pending` where possible; the
 `access.approve_rollback` audit row records the outcome (with
 `acl_group_possibly_applied: true` when the gateway write was not

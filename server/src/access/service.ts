@@ -3047,9 +3047,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         // new access" has to hold here too — a check at request time alone
         // does not cover it. Checked inside the lease, before the decision is
         // claimed, so the request is left pending for when it is re-enabled.
+        // A missing or foreign application is `NOT_FOUND`, as in the
+        // in-transaction re-check below, and refused before any gateway write
+        // rather than undone after one (issue #661).
         if (request.application_id !== null) {
           const application = await store.applications.findById(request.application_id);
-          if (!application || application.status !== 'active') {
+          if (!application || application.owner_user_id !== requester.id) {
+            throw notFound('Application', request.application_id);
+          }
+          if (application.status !== 'active') {
             throw conflict('The application this request is for is disabled', {
               application_id: request.application_id,
             });

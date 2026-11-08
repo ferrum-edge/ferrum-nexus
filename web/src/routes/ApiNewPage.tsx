@@ -10,7 +10,6 @@ import {
   MAX_UPSTREAM_URL_LENGTH,
   firstUsableSpecServerUrl,
   isValidApiSlug,
-  parseAbsoluteHttpUrl,
   slugify,
   type ApiVisibility,
   type ApiAgents,
@@ -21,6 +20,7 @@ import {
   type SpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
 import { parseCorsOrigins } from '../lib/format';
+import { upstreamUrlProblem } from '../lib/upstream';
 import { usePublishApi } from '../hooks/useApis';
 import { useToast } from '../stores/toast';
 import { RoleGuard } from '../components/layout/RoleGuard';
@@ -146,13 +146,10 @@ function PublishForm(): ReactElement {
   const explicitUpstream = upstreamUrl.trim();
   const upstreamError = specServer.oversizedField
     ? `${specServer.oversizedField} exceeds the ${MAX_UPSTREAM_URL_LENGTH}-character limit.`
-    : explicitUpstream &&
-        (explicitUpstream.length > MAX_UPSTREAM_URL_LENGTH ||
-          !parseAbsoluteHttpUrl(explicitUpstream))
-      ? `Enter an absolute http:// or https:// URL of at most ${MAX_UPSTREAM_URL_LENGTH} characters.`
-      : spec.trim() && !explicitUpstream && !specServer.url
+    : (upstreamUrlProblem(explicitUpstream) ??
+      (spec.trim() && !explicitUpstream && !specServer.url
         ? 'Enter an upstream URL; this document has no usable absolute server URL.'
-        : null;
+        : null));
   // The document is right here, so the method list it declares is the obvious
   // starting point for the allow-list — issue #36's "default with an override".
   const specMethods = useMemo<HttpMethod[]>(() => {
