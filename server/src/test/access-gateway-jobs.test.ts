@@ -43,6 +43,8 @@ import { createKeyedSerializer, proxyLockKey } from '../lib/keyed-serializer.js'
 import { crashingStore, type CrashingStore } from './fault-injection.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
+const ANOTHER_GATEWAY_NAMESPACE = /another gateway namespace/;
+
 /** The document `agents.test.ts` publishes agents on, with two operations to select. */
 const AGENT_DOCUMENT = {
   openapi: '3.1.0',
@@ -1005,6 +1007,55 @@ describe('access gateway jobs survive a crash between the claim and the Edge wri
     assert.equal(tick.completed, 1);
     assert.ok(groupsOf(f.client.user.id).includes(removeGroup), 'the covered tool is back');
     assert.equal((await database.accessRequests.findById(f.requestId))?.status, 'approved');
+  });
+
+  // Issue #659 follow-up: recovery sets one API's groups by the rule restore
+  // and repair share, so an API recorded under another namespace puts nothing
+  // back on this namespace's consumer and its stale group comes off.
+  it('takes a foreign-namespace API’s group off the current consumer, leaving other APIs alone', async () => {
+    const { client, apiId, requestId, grantId } = await grantee();
+    const otherApi = await publish(crashed);
+    const otherGrant = await approve(crashed, await request(crashed, client, otherApi));
+    assert.deepEqual(groupsOf(client.user.id).sort(), [apiId, otherApi].map(aclGroupForApi).sort());
+    // The API is still recorded under a namespace the portal has since left.
+    await database.apis.update(apiId, { namespace: 'retired-namespace' });
+    await database.accessGatewayJobs.enqueueIfAbsent(
+      {
+        kind: 'approve',
+        subject_id: requestId,
+        api_id: apiId,
+        user_id: client.user.id,
+        application_id: null,
+        requested_by: provider.user.id,
+      },
+      new Date().toISOString(),
+    );
+    const tick = await worker(testClock()).tick();
+    assert.equal(tick.completed, 1);
+    // Per-API: only the foreign API's group comes off; the other grant's stays.
+    assert.deepEqual(groupsOf(client.user.id), [aclGroupForApi(otherApi)]);
+    // The decision stands; only the gateway copy follows the namespace rule.
+    assert.equal((await database.accessRequests.findById(requestId))?.status, 'approved');
+    assert.equal((await database.grants.findById(grantId))?.status, 'active');
+    assert.equal((await database.grants.findById(otherGrant))?.status, 'active');
+    assert.equal(await database.accessGatewayJobs.findBySubject(requestId), null);
+  });
+
+  it('refuses to approve access to an API recorded under another namespace', async () => {
+    const client = await crashed.registerUser({ role: 'client' });
+    const apiId = await publish(crashed);
+    const requestId = await request(crashed, client, apiId);
+    await database.apis.update(apiId, { namespace: 'retired-namespace' });
+    const refused = await crashed.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/approve`,
+      payload: {},
+    });
+    assert.equal(refused.statusCode, 409, refused.body);
+    assert.match(refused.body, ANOTHER_GATEWAY_NAMESPACE);
+    assert.deepEqual(groupsOf(client.user.id), []);
+    assert.equal((await database.accessRequests.findById(requestId))?.status, 'pending');
+    assert.equal(await database.accessGatewayJobs.findBySubject(requestId), null);
   });
 
   it('the one-time repair considers every candidate while the worker drains them', async () => {

@@ -74,6 +74,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   skipped those grants; both now build an identity's `nexus:api:<id>:…` groups
   through one shared rule, so a re-enable and a repair of the same identity
   write the same set (#659).
+- Approval recovery and approval follow the same per-API group rule as
+  re-enable and repair (#659 follow-up). Recovering an interrupted approval no
+  longer puts back the group of an API recorded under another gateway namespace
+  on this namespace's consumer, and takes a stale one off; other APIs' groups
+  are untouched. Approving access to such an API is refused with `409` until it
+  is republished, where it used to write a group that nothing here consumes.
 - Clearing the bot filter's **Blocked User-Agent substrings** now means "block
   no pattern". The form used to omit the emptied list, and Ferrum Edge reads an
   absent `blocked_patterns` as its default list, so `curl`, `wget` and its

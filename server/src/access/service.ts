@@ -138,6 +138,7 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
+import { grantApprovalGroups } from './approval-groups.js';
 import {
   AuditAction,
   SYSTEM_ACTOR,
@@ -607,8 +608,22 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     tools: string[] | null = null,
   ): Promise<string> {
     const group = aclGroupForApi(apiId);
-    const api = present ? await store.apis.findById(apiId) : null;
-    const toolGroups = api?.agents ? mcpGroupsForGrant(apiId, tools) : [];
+    // The grant's groups by the rule restore, repair and recovery share: none
+    // for an API outside this namespace, whose proxy here does not exist
+    // (issue #659). Approval refuses such an API before its claim, so this is
+    // the backstop: a grant is never written onto a consumer without its group.
+    const granted = present
+      ? grantApprovalGroups(
+          await store.apis.findById(apiId),
+          { api_id: apiId, approved_tools: tools },
+          namespace,
+        )
+      : [];
+    if (present && granted.length === 0) {
+      throw conflict("This API is not published in this portal's gateway namespace", {
+        api_id: apiId,
+      });
+    }
     // The identity, not the account. An application's grant belongs on its own
     // `nexus-app-<id>` consumer — putting it on the account's would hand every
     // one of that account's credentials the access, which is the whole thing
@@ -627,7 +642,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         const retained = groups.filter(
           (entry) => entry !== group && !isMcpGroupForApi(entry, apiId),
         );
-        return present ? [...retained, group, ...toolGroups] : retained;
+        return present ? [...retained, ...granted] : retained;
       },
       user.id,
       // Only the *grant* re-checks the account: an approval that passed its
@@ -2515,9 +2530,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       consumer.ferrum_consumer_id,
       (groups) => {
         const live = seen.live;
-        const canonical = live
-          ? [rest, ...(api.agents ? mcpGroupsForGrant(api.id, live.approved_tools) : [])]
-          : [];
+        // Same per-API rule as restore and repair: an API recorded under
+        // another namespace puts nothing back on this namespace's consumer,
+        // and its stale groups are taken off (issue #659).
+        const canonical = live ? grantApprovalGroups(api, live, namespace) : [];
         const covered = new Set(canonical);
         const kept = groups.filter(
           (entry) => (entry !== rest && !isMcpGroupForApi(entry, api.id)) || covered.has(entry),
@@ -3038,6 +3054,16 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         }
         if (!api.requestable) {
           throw conflict('This API does not accept access approvals');
+        }
+        // An API still recorded under a namespace the portal has left has no
+        // proxy here: its group would open nothing, and restore, repair and
+        // recovery would take it off again (issue #659). Republishing it here
+        // is what makes it approvable.
+        if (api.namespace !== namespace) {
+          throw conflict(
+            'This API is published under another gateway namespace; republish it before approving access',
+            { api_id: api.id, namespace: api.namespace },
+          );
         }
         if (request.status !== 'pending') {
           throw conflict(`This request is already ${request.status}`);
