@@ -95,8 +95,6 @@
  */
 
 import {
-  aclGroupForApi,
-  mcpGroupsForGrant,
   MAX_PAGE_SIZE,
   roleAtLeast,
   type GatewayReconciliationReport,
@@ -109,6 +107,7 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
+import { approvalGroupsForIdentity } from '../access/approval-groups.js';
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import { canonicalConsumerLockKey } from '../credentials/consumers.js';
@@ -472,25 +471,10 @@ export function createGatewayReconciliationService(
       if (!application || application.owner_user_id !== userId) return [];
       // Application disable revokes nothing; its existing grants still apply.
     }
-    const groups: string[] = [];
-    for (let offset = 0; ; offset += MAX_PAGE_SIZE) {
-      const page = await db.grants.list(
-        { user_id: userId, status: 'active', application_id: applicationId },
-        { limit: MAX_PAGE_SIZE, offset },
-      );
-      for (const grant of page.items) {
-        const api = await db.apis.findById(grant.api_id);
-        if (!api || api.namespace !== namespace) continue;
-        // The approved subset is authoritative, never the request or today's
-        // operation names. Expired exposure IDs stay inert; null retains all
-        // tools and [] retains REST alone, just as credential restoration does.
-        groups.push(
-          aclGroupForApi(grant.api_id),
-          ...(api.agents ? mcpGroupsForGrant(grant.api_id, grant.approved_tools) : []),
-        );
-      }
-      if (page.items.length === 0 || offset + page.items.length >= page.total) return groups;
-    }
+    // The grant-to-group rule itself is shared with account re-enable, so a
+    // repair and a restore of the same identity write the same group set
+    // (issue #659).
+    return approvalGroupsForIdentity(db, userId, applicationId, namespace);
   }
 
   /** Ids of the credential rows whose gateway entry `consumerId` should still hold. */
