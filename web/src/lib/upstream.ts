@@ -1,8 +1,10 @@
 import { MAX_UPSTREAM_URL_LENGTH, parseAbsoluteHttpUrl } from '@ferrum-nexus/shared';
 
 /**
- * Why `text` is not an upstream URL the server would accept, or `null` when it
- * is, or when it is blank (the caller decides what a blank field means).
+ * Why `text` fails the server's shape checks for an upstream URL, or `null`
+ * when it passes them, or is blank (the caller decides what a blank field
+ * means). The server also applies its destination policy, which only it can
+ * judge, so `null` is not a promise that the save succeeds.
  *
  * The same two checks the server makes on a typed upstream: the trimmed text is
  * at most {@link MAX_UPSTREAM_URL_LENGTH} characters, and it parses as an
