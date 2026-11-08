@@ -278,6 +278,20 @@ describe('provider plugin palette', () => {
       });
     });
 
+    it('bot_detection: an emptied block list reaches Edge as [] (issue #660)', async () => {
+      // The body the plugin form sends for a cleared box with missing-UA
+      // rejection on: `[]` means "no patterns", where an absent key would be
+      // Edge's default list.
+      const body = {
+        blocked_patterns: [],
+        allow_missing_user_agent: false,
+        custom_response_code: 403,
+      };
+      const response = await setPlugin('bot_detection', { config: body });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.deepEqual(edgeConfig('bot_detection').config, body);
+    });
+
     it('correlation_id: header name and echo', async () => {
       const response = await setPlugin('correlation_id', {
         config: { header_name: 'x-trace-id', echo_downstream: true },
@@ -807,8 +821,9 @@ describe('provider plugin palette', () => {
         200,
       );
       // An absent list is Edge's default list, not an empty one: the server
-      // judges the body it forwards. (The plugin form refuses an emptied box;
-      // see admissionView in web/src/components/plugins/PluginForm.tsx.)
+      // judges the body it forwards. The plugin form sends an emptied box as
+      // `[]` (`send_empty` on the descriptor), so it is judged as empty there
+      // and here alike (issue #660).
       assert.equal(
         (await setPlugin('bot_detection', { config: { allow_list: ['GoogleBot'] } })).statusCode,
         200,

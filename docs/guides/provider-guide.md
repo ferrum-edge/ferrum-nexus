@@ -468,7 +468,11 @@ If the gateway refuses, nothing is saved.
 Notes:
 
 - The **bot filter** is coarse. `User-Agent` is trivially spoofed; it deters
-  casual scrapers, not determined ones.
+  casual scrapers, not determined ones. Its blocked list starts with the
+  gateway's defaults (`curl`, `wget`, `python-requests`, `scrapy`,
+  `libwww-perl`). Emptying the box blocks no pattern at all, so it is accepted
+  only with **Allow requests with no User-Agent** turned off; the filter then
+  rejects just the requests that send no `User-Agent`.
 - **Response size limit has two contracts.** A response that declares its length
   is refused with `502 Bad Gateway` before any body is sent. A response of
   unknown length (a chunked or streamed body, SSE included) commits `200` first

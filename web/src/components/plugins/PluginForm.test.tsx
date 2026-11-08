@@ -226,17 +226,38 @@ describe('validateDraft', () => {
     expect(validateDraft(spec, { ...draft, allow_missing_user_agent: false })).toEqual({});
   });
 
-  it('judges an emptied bot_detection list as typed, not as the body the server judges', () => {
-    // Intentional, and an open question: the form treats a cleared box as an
-    // empty list and refuses it, while the body omits the key, which the
-    // server's copy of the same rule accepts (Edge then applies its default
-    // list). Pinned so neither side changes without deciding which is right.
+  // Issue #660: an emptied bot_detection box means "no patterns". Edge reads an
+  // absent `blocked_patterns` as its default list, so the body carries `[]`,
+  // and the form judges that body exactly as the server's copy of the rule does.
+  it('sends an emptied bot_detection list as [] and judges the body the server judges', () => {
     const spec = descriptor('bot_detection');
-    const draft: PluginDraft = { ...draftFor(spec, null), blocked_patterns: '' };
-    expect(validateDraft(spec, draft)[FORM_ERROR_KEY]).toBe(BLOCKS_NOTHING);
-    const body = draftToConfig(spec, draft);
-    expect(body).not.toHaveProperty('blocked_patterns');
-    expect(pluginAdmissionProblem('bot_detection', body)).toBeNull();
+    for (const allowMissing of [true, false]) {
+      const draft: PluginDraft = {
+        ...draftFor(spec, null),
+        blocked_patterns: '  \n',
+        allow_missing_user_agent: allowMissing,
+      };
+      const body = draftToConfig(spec, draft);
+      expect(body.blocked_patterns).toEqual([]);
+      expect(body.allow_missing_user_agent).toBe(allowMissing);
+      const shared = pluginAdmissionProblem('bot_detection', body);
+      expect(validateDraft(spec, draft)[FORM_ERROR_KEY]).toBe(shared?.message);
+      if (allowMissing) expect(shared?.message).toBe(BLOCKS_NOTHING);
+      else expect(validateDraft(spec, draft)).toEqual({});
+    }
+  });
+
+  it('still omits other cleared optional lists, so Edge applies its own default', () => {
+    const spec = descriptor('bot_detection');
+    const body = draftToConfig(spec, { ...draftFor(spec, null), allow_list: '' });
+    expect(body).not.toHaveProperty('allow_list');
+    expect(body.blocked_patterns).toEqual([
+      'curl',
+      'wget',
+      'python-requests',
+      'scrapy',
+      'libwww-perl',
+    ]);
   });
 
   it('applies the shared admission rules, on the field a rule is about', () => {

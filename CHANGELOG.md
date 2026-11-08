@@ -74,6 +74,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   skipped those grants; both now build an identity's `nexus:api:<id>:…` groups
   through one shared rule, so a re-enable and a repair of the same identity
   write the same set (#659).
+- Clearing the bot filter's **Blocked User-Agent substrings** now means "block
+  no pattern". The form used to omit the emptied list, and Ferrum Edge reads an
+  absent `blocked_patterns` as its default list, so `curl`, `wget`,
+  `python-requests`, `scrapy` and `libwww-perl` stayed blocked behind a form
+  that showed none. The list is now sent as `[]`, and the form judges the body
+  it sends, as the server does: an emptied list is accepted only with **Allow
+  requests with no User-Agent** turned off, and is refused with the same
+  message in the form and the API otherwise (#660).
 
 ### Security
 
