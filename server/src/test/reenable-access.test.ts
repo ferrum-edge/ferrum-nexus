@@ -216,6 +216,9 @@ test('a concurrent grant revocation wins after an in-flight restoration', async 
     assert.ok(grant);
     const actor = await h.store.users.findById(founder.user.id);
     assert.ok(actor);
+    const mapping = await h.services.credentials.provisioner.findConsumer(client.user.id);
+    assert.ok(mapping);
+    const group = aclGroupForApi(apiId);
     let arrived = () => {};
     const reading = new Promise<void>((resolve) => {
       arrived = resolve;
@@ -223,14 +226,24 @@ test('a concurrent grant revocation wins after an in-flight restoration', async 
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
+    // Pause the replay read itself: the account identity's scoped read, taken
+    // inside the consumer key, after it has captured a snapshot that still
+    // holds the grant. The unscoped mapping precheck before the key, and every
+    // other read, go straight through with both arguments.
     const realList = h.store.grants.listActiveByUser.bind(h.store.grants);
-    h.store.grants.listActiveByUser = async (userId) => {
+    h.store.grants.listActiveByUser = async (userId, applicationId) => {
+      const snapshot = await realList(userId, applicationId);
+      if (userId !== client.user.id || applicationId !== null) return snapshot;
       h.store.grants.listActiveByUser = realList;
-      const snapshot = await realList(userId);
+      assert.ok(
+        snapshot.some((row) => row.id === grant.id),
+        'the snapshot predates the claim',
+      );
       arrived();
       await held;
       return snapshot;
     };
+    const writesFrom = h.edge.requests.length;
     const restoring = h.services.credentials.restoreGatewayAccess(client.user.id, founder.user.id);
     await reading;
     let claimed = () => {};
@@ -244,12 +257,21 @@ test('a concurrent grant revocation wins after an in-flight restoration', async 
       claimed();
       return result;
     };
+    // The revocation claims the grant while restore holds the consumer key on
+    // its stale snapshot; its ACL removal then waits for that key.
     const revoked = h.services.access.revoke(actor, grant.id, 'Withdraw integration');
     await revoking;
     release();
     await Promise.all([restoring, revoked]);
-    const mapping = await h.services.credentials.provisioner.findConsumer(client.user.id);
-    const live = await h.edgeClient.consumers.get(mapping!.ferrum_consumer_id);
+
+    const consumerWrites = h.edge.requests
+      .slice(writesFrom)
+      .filter((entry) => entry.method === 'PUT' && entry.path.includes('/consumers/'))
+      .map((entry) => (entry.body as { acl_groups?: string[] }).acl_groups ?? []);
+    assert.ok(consumerWrites.length >= 2, 'restore and the revocation both wrote the consumer');
+    assert.ok(consumerWrites[0]?.includes(group), 'restore wrote its stale snapshot first');
+    assert.equal(consumerWrites.at(-1)?.includes(group), false, 'the revocation took it off');
+    const live = await h.edgeClient.consumers.get(mapping.ferrum_consumer_id);
     assert.deepEqual(live?.acl_groups, []);
     assert.equal((await h.store.grants.findById(grant.id))?.status, 'revoked');
   } finally {

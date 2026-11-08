@@ -2929,8 +2929,10 @@ Errors: `403 FORBIDDEN`; `404 NOT_FOUND` (the request's application was
 deleted or no longer belongs to the requester — refused before any gateway
 write, and the request stays `pending`); `409 CONFLICT` (already decided, the
 identity already holds an active grant, the API is retired or no longer
-requestable, or the request's application is disabled — the request stays
-`pending`); `502 EDGE_ERROR` / `EDGE_UNAVAILABLE`. A failed approval removes the ACL
+requestable, the API is still recorded under another gateway namespace — it was
+published before a `FERRUM_NAMESPACE` change, and only publishing it again
+under the current namespace, as a new API, makes access approvable — or the
+request's application is disabled; the request stays `pending`); `502 EDGE_ERROR` / `EDGE_UNAVAILABLE`. A failed approval removes the ACL
 addition and returns the request to `pending` where possible; the
 `access.approve_rollback` audit row records the outcome (with
 `acl_group_possibly_applied: true` when the gateway write was not

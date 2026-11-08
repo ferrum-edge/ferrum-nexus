@@ -1,6 +1,47 @@
 import { aclGroupForApi, mcpGroupsForGrant, type Uuid } from '@ferrum-nexus/shared';
 
-import type { NexusStore } from '../db/store.js';
+import type { ApiRecord, GrantRecord, NexusStore } from '../db/store.js';
+
+/**
+ * Whether `api` is served by this namespace's proxy: present, and recorded
+ * under `namespace`. The eligibility half of {@link grantApprovalGroups}, for a
+ * writer that adds one particular group (publishing's MCP-all enrollment)
+ * rather than a grant's whole set.
+ */
+export function apiInNamespace(
+  api: Pick<ApiRecord, 'namespace'> | null | undefined,
+  namespace: string,
+): boolean {
+  return api != null && api.namespace === namespace;
+}
+
+/**
+ * The groups **one** active grant on `api` puts on its identity's consumer in
+ * `namespace`: the REST group, plus the approved MCP groups for an agent API.
+ *
+ * The per-API rule every writer of approval groups shares, whether it rebuilds
+ * an identity's whole set ({@link approvalGroupsForIdentity}) or sets one API's
+ * groups (approval, and approval recovery's `reconcileGroups`). An API that is
+ * missing, or recorded under another namespace than `namespace`, contributes
+ * nothing: only this namespace's proxy for that API id consumes the group, so
+ * on this namespace's consumer it opens nothing (issue #659).
+ *
+ * The REST group is derived from the API id, never read from the stored
+ * `grant.acl_group`. The approved tool subset is authoritative, never the
+ * request or today's operation names: expired exposure ids stay inert, `null`
+ * keeps every tool and `[]` keeps REST alone.
+ */
+export function grantApprovalGroups(
+  api: ApiRecord | null | undefined,
+  grant: Pick<GrantRecord, 'api_id' | 'approved_tools'>,
+  namespace: string,
+): string[] {
+  if (!api || api.id !== grant.api_id || !apiInNamespace(api, namespace)) return [];
+  return [
+    aclGroupForApi(grant.api_id),
+    ...(api.agents ? mcpGroupsForGrant(grant.api_id, grant.approved_tools) : []),
+  ];
+}
 
 /**
  * The `nexus:api:<id>:…` ACL groups **one gateway identity** should carry,
@@ -15,15 +56,8 @@ import type { NexusStore } from '../db/store.js';
  *   account's whole grant list onto an application's consumer would hand that
  *   application every API its owner can reach (issue #289). `null` is the
  *   account's own consumer.
- * - A grant whose API row is missing, or whose API is recorded under another
- *   namespace than `namespace`, contributes nothing: only this namespace's
- *   proxy for that API id consumes its group, so there is nothing here for it
- *   to open.
- * - The REST group is derived from the API id, not read from the stored
- *   `grant.acl_group`.
- * - For an agent API the approved tool subset is authoritative, never the
- *   request or today's operation names. Expired exposure ids stay inert;
- *   `null` keeps every tool and `[]` keeps REST alone.
+ * - Each grant contributes {@link grantApprovalGroups}: nothing for a missing
+ *   API or one outside `namespace`, else its REST and approved MCP groups.
  *
  * Owner and application state are the callers' to check, because they react
  * differently: restore refuses an inactive owner, repair writes no groups.
@@ -45,11 +79,8 @@ export async function approvalGroupsForIdentity(
   );
   const groups = new Set<string>();
   for (const grant of grants) {
-    const api = apis.get(grant.api_id);
-    if (!api || api.namespace !== namespace) continue;
-    groups.add(aclGroupForApi(grant.api_id));
-    if (api.agents) {
-      for (const group of mcpGroupsForGrant(grant.api_id, grant.approved_tools)) groups.add(group);
+    for (const group of grantApprovalGroups(apis.get(grant.api_id), grant, namespace)) {
+      groups.add(group);
     }
   }
   return [...groups];
