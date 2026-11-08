@@ -38,6 +38,7 @@ import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from '
 
 const NO_GATEWAY_CONSUMER_MAPPING = /no gateway consumer mapping/;
 const RATE_LIMITED_CODE = /RATE_LIMITED/;
+const NOT_FOUND_CODE = /NOT_FOUND/;
 
 const NAMESPACE = 'nexus';
 
@@ -376,6 +377,49 @@ describe('application-scoped identities', () => {
     assert.deepEqual(groupsOf(appA), [], 'and nothing reached the gateway');
     const still = await harness.store.accessRequests.findById(requestId);
     assert.equal(still?.status, 'pending', 'the request is left for a decision once re-enabled');
+  });
+
+  it('answers 404 before any gateway write when the request’s application is gone or foreign', async () => {
+    // Issue #661: the approval pre-check used to call a missing application
+    // "disabled" (409) and skip the owner check, leaving both to the
+    // re-check that runs after the consumer write. It now classifies them as
+    // the re-check does, before the gateway is touched.
+    const requested = await harness.authed(owner, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: apiX, justification: 'Before the delete', application_id: appA },
+    });
+    assert.equal(requested.statusCode, 201, requested.body);
+    const requestId = requested.json<CreateAccessRequestResponse>().access_request.id;
+    const realFind = harness.store.applications.findById.bind(harness.store.applications);
+    const live = await realFind(appA);
+    assert.ok(live);
+    for (const stand of [null, { ...live, owner_user_id: other.user.id }]) {
+      harness.store.applications.findById = async (id) => (id === appA ? stand : realFind(id));
+      const offset = harness.edge.requests.length;
+      try {
+        const approved = await harness.authed(provider, {
+          method: 'POST',
+          url: `/api/access-requests/${requestId}/approve`,
+          payload: {},
+        });
+        assert.equal(approved.statusCode, 404, approved.body);
+        assert.match(approved.body, NOT_FOUND_CODE);
+      } finally {
+        harness.store.applications.findById = realFind;
+      }
+      assert.deepEqual(
+        harness.edge.requests
+          .slice(offset)
+          .filter((entry) => entry.method !== 'GET')
+          .map((entry) => `${entry.method} ${entry.path}`),
+        [],
+        'no gateway write',
+      );
+      assert.deepEqual(groupsOf(appA), []);
+      const still = await harness.store.accessRequests.findById(requestId);
+      assert.equal(still?.status, 'pending');
+    }
   });
 
   it('refuses to rotate a disabled application’s credential into a new secret', async () => {

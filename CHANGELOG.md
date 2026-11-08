@@ -85,6 +85,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   patterns, not five of them, so opening a config saved without the list and
   saving it unchanged no longer drops `python-urllib`, `httpclient`, `java/`,
   `mechanize` and `php/` (#660).
+- The API settings form checks a typed upstream URL the way the publish form
+  does: at most `MAX_UPSTREAM_URL_LENGTH` characters and an absolute
+  `http://` or `https://` URL, with the message under the field and no save
+  request. Before, the provider found out from the server after the round
+  trip. A blank field still keeps the current upstream (#661).
+- Approving an access request whose application has been deleted, or no
+  longer belongs to the requester, answers `404 NOT_FOUND` before any gateway
+  write. The pre-check used to answer `409` ("disabled") for a missing
+  application and skipped the owner check, leaving both to the re-check after
+  the consumer write. A disabled application still answers `409` (#661).
 
 ### Security
 

@@ -179,8 +179,13 @@ export function textOrNull(value: unknown): string | null {
  * Decode a 0/1 column into a boolean.
  *
  * PostgreSQL hands back `SMALLINT` as a number, MySQL hands back `TINYINT` as a
- * number, and both can hand back a string for a widened type — all three are
- * accepted, as they are in the sqlite adapter.
+ * number, and both can hand back a string for a widened type. So this accepts
+ * a boolean, any non-zero number or bigint, and the strings `'1'` and `'true'`.
+ *
+ * The sqlite adapter's own `bool` (`sqlite/sql.ts`) is narrower on purpose: it
+ * accepts only `1`, `true` and `'1'`, because better-sqlite3 hands back an
+ * `INTEGER` as a number. Every write goes through its adapter's `encodeBool`
+ * (0/1), so both decoders read the stored values the same way.
  */
 export function bool(value: unknown): boolean {
   if (typeof value === 'boolean') return value;

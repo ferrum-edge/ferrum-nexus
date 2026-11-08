@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_CORS_ORIGINS,
+  MAX_UPSTREAM_URL_LENGTH,
   type Api,
   type CreateTestConsumerResponse,
   type GetApiSpecResponse,
@@ -21,6 +22,7 @@ const NAME = /^Name/;
 const DESCRIPTION = /^Description/;
 const VERSION = /^Version/;
 const UPSTREAM_URL = /^Upstream URL/;
+const ABSOLUTE_HTTP_URL = /Enter an absolute http:\/\/ or https:\/\/ URL/;
 const EVERYONE_HOLDING_ACCESS_CREDENTIAL = /Everyone holding access with a credential/;
 const INVALIDATE_PORTAL_ISSUED_OLD = /Invalidate portal-issued old-method credentials/;
 const TYPE_BILLING_CONFIRM = /Type billing to confirm/;
@@ -408,6 +410,32 @@ describe('provider API workspace', () => {
     fireEvent.submit(form);
     await screen.findByText('Timeout out of range');
     expect(apisApi.update).not.toHaveBeenCalled();
+  });
+
+  // Issue #661: the settings form checks a typed upstream the way the publish
+  // form does, instead of learning about it from the server after the save.
+  it('refuses an over-long or non-http upstream URL inline without sending an update', async () => {
+    await openTab('Settings');
+    const form = screen.getByRole('button', { name: 'Save settings' }).closest('form')!;
+    expect(screen.getByLabelText(UPSTREAM_URL)).toHaveAttribute(
+      'maxLength',
+      String(MAX_UPSTREAM_URL_LENGTH),
+    );
+    for (const value of [
+      `https://billing.example.test/${'a'.repeat(MAX_UPSTREAM_URL_LENGTH)}`,
+      'ftp://files.example.test/billing',
+    ]) {
+      changeField(UPSTREAM_URL, value);
+      expect(screen.getByText(ABSOLUTE_HTTP_URL)).toBeInTheDocument();
+      fireEvent.submit(form);
+    }
+    expect(apisApi.update).not.toHaveBeenCalled();
+    // Blank keeps the current upstream and is not an error.
+    changeField(UPSTREAM_URL, '   ');
+    expect(screen.queryByText(ABSOLUTE_HTTP_URL)).not.toBeInTheDocument();
+    save();
+    await screen.findByText('API settings saved');
+    expect(vi.mocked(apisApi.update).mock.calls[0]?.[1]).not.toHaveProperty('upstream_url');
   });
 
   it('gates deletion on the API slug and allows cancellation', async () => {
