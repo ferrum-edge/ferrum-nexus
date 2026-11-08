@@ -251,12 +251,18 @@ describe('validateDraft', () => {
     const spec = descriptor('bot_detection');
     const body = draftToConfig(spec, { ...draftFor(spec, null), allow_list: '' });
     expect(body).not.toHaveProperty('allow_list');
+    // Untouched, the box holds Edge's own default list, all ten patterns.
     expect(body.blocked_patterns).toEqual([
       'curl',
       'wget',
       'python-requests',
+      'python-urllib',
       'scrapy',
+      'httpclient',
+      'java/',
       'libwww-perl',
+      'mechanize',
+      'php/',
     ]);
   });
 

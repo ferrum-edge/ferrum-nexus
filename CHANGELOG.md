@@ -76,12 +76,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   write the same set (#659).
 - Clearing the bot filter's **Blocked User-Agent substrings** now means "block
   no pattern". The form used to omit the emptied list, and Ferrum Edge reads an
-  absent `blocked_patterns` as its default list, so `curl`, `wget`,
-  `python-requests`, `scrapy` and `libwww-perl` stayed blocked behind a form
-  that showed none. The list is now sent as `[]`, and the form judges the body
-  it sends, as the server does: an emptied list is accepted only with **Allow
-  requests with no User-Agent** turned off, and is refused with the same
-  message in the form and the API otherwise (#660).
+  absent `blocked_patterns` as its default list, so `curl`, `wget` and its
+  other default patterns stayed blocked behind a form that showed none. The
+  list is now sent as `[]`, and the form judges the body it sends, as the
+  server does: an emptied list is accepted only with **Allow requests with no
+  User-Agent** turned off, and is refused with the same message in the form and
+  the API otherwise. The box now starts with all ten of Edge's default
+  patterns, not five of them, so opening a config saved without the list and
+  saving it unchanged no longer drops `python-urllib`, `httpclient`, `java/`,
+  `mechanize` and `php/` (#660).
 
 ### Security
 

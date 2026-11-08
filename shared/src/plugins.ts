@@ -672,7 +672,22 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
         max_entries: 64,
         item_pattern: '\\S(?:.*\\S)?',
         item_max_length: 200,
-        default: ['curl', 'wget', 'python-requests', 'scrapy', 'libwww-perl'],
+        // Edge's own default list (`default_blocked_patterns` in
+        // `src/plugins/bot_detection.rs`, unchanged from v0.9.15 to v0.9.17),
+        // so a config saved without the key opens showing what Edge enforces,
+        // and an untouched save does not narrow it.
+        default: [
+          'curl',
+          'wget',
+          'python-requests',
+          'python-urllib',
+          'scrapy',
+          'httpclient',
+          'java/',
+          'libwww-perl',
+          'mechanize',
+          'php/',
+        ],
         // An absent list is Edge's default list, so an emptied box must reach
         // the gateway as `[]` to mean "no patterns" (issue #660).
         send_empty: true,
