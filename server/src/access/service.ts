@@ -3057,11 +3057,12 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         }
         // An API still recorded under a namespace the portal has left has no
         // proxy here: its group would open nothing, and restore, repair and
-        // recovery would take it off again (issue #659). Republishing it here
-        // is what makes it approvable.
+        // recovery would take it off again (issue #659). Nothing moves an API
+        // row to another namespace, so the remedy is publishing it again
+        // under this one, as a new API.
         if (api.namespace !== namespace) {
           throw conflict(
-            'This API is published under another gateway namespace; republish it before approving access',
+            "This API is recorded under another gateway namespace, so access to it cannot be approved here; publish it again under this portal's namespace",
             { api_id: api.id, namespace: api.namespace },
           );
         }

@@ -3,6 +3,19 @@ import { aclGroupForApi, mcpGroupsForGrant, type Uuid } from '@ferrum-nexus/shar
 import type { ApiRecord, GrantRecord, NexusStore } from '../db/store.js';
 
 /**
+ * Whether `api` is served by this namespace's proxy: present, and recorded
+ * under `namespace`. The eligibility half of {@link grantApprovalGroups}, for a
+ * writer that adds one particular group (publishing's MCP-all enrollment)
+ * rather than a grant's whole set.
+ */
+export function apiInNamespace(
+  api: Pick<ApiRecord, 'namespace'> | null | undefined,
+  namespace: string,
+): boolean {
+  return api != null && api.namespace === namespace;
+}
+
+/**
  * The groups **one** active grant on `api` puts on its identity's consumer in
  * `namespace`: the REST group, plus the approved MCP groups for an agent API.
  *
@@ -18,19 +31,6 @@ import type { ApiRecord, GrantRecord, NexusStore } from '../db/store.js';
  * request or today's operation names: expired exposure ids stay inert, `null`
  * keeps every tool and `[]` keeps REST alone.
  */
-/**
- * Whether `api` is served by this namespace's proxy: present, and recorded
- * under `namespace`. The eligibility half of {@link grantApprovalGroups}, for a
- * writer that adds one particular group (publishing's MCP-all enrollment)
- * rather than a grant's whole set.
- */
-export function apiInNamespace(
-  api: Pick<ApiRecord, 'namespace'> | null | undefined,
-  namespace: string,
-): boolean {
-  return api != null && api.namespace === namespace;
-}
-
 export function grantApprovalGroups(
   api: ApiRecord | null | undefined,
   grant: Pick<GrantRecord, 'api_id' | 'approved_tools'>,

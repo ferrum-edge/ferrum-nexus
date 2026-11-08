@@ -78,8 +78,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   re-enable and repair (#659 follow-up). Recovering an interrupted approval no
   longer puts back the group of an API recorded under another gateway namespace
   on this namespace's consumer, and takes a stale one off; other APIs' groups
-  are untouched. Approving access to such an API is refused with `409` until it
-  is republished, where it used to write a group that nothing here consumes.
+  are untouched. Approving access to such an API is refused with `409`, where it
+  used to write a group that nothing here consumes; publishing it again under
+  the current namespace, as a new API, is what makes access approvable there.
   Enabling agents on such an API no longer enrolls its all-tools grantees in
   the MCP-all group either.
 - Clearing the bot filter's **Blocked User-Agent substrings** now means "block
