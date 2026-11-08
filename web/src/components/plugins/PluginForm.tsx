@@ -104,7 +104,9 @@ export function draftFor(
  * An optional field the provider left empty is **omitted**, never sent as `''`
  * or `[]`: Edge applies its own default for an absent key, while an empty
  * string is a real (empty) header value and an empty list is a real (empty)
- * policy.
+ * policy. The exception is a list marked `send_empty`, whose absent key is a
+ * non-empty Edge default: an emptied box there is sent as `[]`, the policy the
+ * provider chose, rather than letting the default back in.
  */
 export function draftToConfig(
   descriptor: ProviderPluginDescriptor,
@@ -136,7 +138,12 @@ export function draftToConfig(
       }
       case 'string_list': {
         const entries = linesOf(value);
-        if (entries.length === 0 && field.required !== true && field.min_entries === undefined) {
+        if (
+          entries.length === 0 &&
+          field.required !== true &&
+          field.min_entries === undefined &&
+          field.send_empty !== true
+        ) {
           break;
         }
         config[field.key] = entries;
@@ -219,36 +226,6 @@ function fieldError(field: PluginFieldSpec, draft: PluginDraft): string | null {
 }
 
 /**
- * The draft as the provider typed it, for {@link pluginAdmissionProblem}: list
- * fields as their entries, string fields trimmed, everything else as held.
- *
- * Deliberately **not** {@link draftToConfig}: an emptied list stays `[]` here,
- * where the body omits it (and Edge then applies its default). The server
- * judges the body, so the two differ for a bot filter whose blocked list was
- * cleared: the form refuses it unless requests with no User-Agent are
- * rejected, while the server would accept the body and Edge would block its
- * default patterns. Kept as it was when the rules were shared; which side is
- * right is an open question, not something to settle by changing this view.
- */
-function admissionView(
-  descriptor: ProviderPluginDescriptor,
-  draft: PluginDraft,
-): Record<string, unknown> {
-  const view: Record<string, unknown> = {};
-  for (const field of descriptor.fields) {
-    const value = draft[field.key];
-    if (field.kind === 'string_list' || field.kind === 'integer_list') {
-      view[field.key] = linesOf(value ?? '');
-    } else if (field.kind === 'string' || field.kind === 'enum') {
-      view[field.key] = String(value ?? '').trim();
-    } else if (value !== undefined) {
-      view[field.key] = value;
-    }
-  }
-  return view;
-}
-
-/**
  * Every message for a draft: one per field, plus Edge's cross-field admission
  * rules — under the field a rule is about, or {@link FORM_ERROR_KEY} for a
  * whole-plugin rule.
@@ -267,9 +244,10 @@ export function validateDraft(
     if (message !== null) errors[field.key] = message;
   }
 
-  // Edge's cross-field admission rules, shared with the server. Judged on the
-  // draft as typed (see admissionView), not on the body draftToConfig sends.
-  const problem = pluginAdmissionProblem(descriptor.name, admissionView(descriptor, draft));
+  // Edge's cross-field admission rules, shared with the server, judged on the
+  // body draftToConfig will send, exactly as the server judges it: an omitted
+  // list is Edge's default, an explicit `[]` is empty (issue #660).
+  const problem = pluginAdmissionProblem(descriptor.name, draftToConfig(descriptor, draft));
   if (problem !== null) errors[problem.field ?? FORM_ERROR_KEY] = problem.message;
   return errors;
 }

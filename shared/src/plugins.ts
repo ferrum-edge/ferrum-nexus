@@ -130,6 +130,15 @@ export interface StringListFieldSpec {
   /** Closed set of accepted entries; renders as checkboxes. */
   options?: readonly { value: string; label: string }[];
   default?: readonly string[];
+  /**
+   * Send an emptied list as `[]` instead of omitting the key.
+   *
+   * For a list whose **absent** key means a non-empty Edge default, omitting
+   * an emptied box would quietly bring that default back: the provider removed
+   * every entry and the gateway enforces the defaults anyway. Set it where an
+   * explicit empty list is a meaningful, different policy (issue #660).
+   */
+  send_empty?: boolean;
 }
 
 /**
@@ -657,12 +666,31 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
         key: 'blocked_patterns',
         label: 'Blocked User-Agent substrings',
         help:
-          'Case-insensitive substring matches, one per line. Leaving this empty is only valid ' +
-          'when requests with no User-Agent are rejected — an allow list alone enforces nothing.',
+          'Case-insensitive substring matches, one per line. Leaving this empty blocks no ' +
+          'pattern at all, and is only valid when requests with no User-Agent are rejected — ' +
+          'an allow list alone enforces nothing.',
         max_entries: 64,
         item_pattern: '\\S(?:.*\\S)?',
         item_max_length: 200,
-        default: ['curl', 'wget', 'python-requests', 'scrapy', 'libwww-perl'],
+        // Edge's own default list (`default_blocked_patterns` in
+        // `src/plugins/bot_detection.rs`, unchanged from v0.9.15 to v0.9.17),
+        // so a config saved without the key opens showing what Edge enforces,
+        // and an untouched save does not narrow it.
+        default: [
+          'curl',
+          'wget',
+          'python-requests',
+          'python-urllib',
+          'scrapy',
+          'httpclient',
+          'java/',
+          'libwww-perl',
+          'mechanize',
+          'php/',
+        ],
+        // An absent list is Edge's default list, so an emptied box must reach
+        // the gateway as `[]` to mean "no patterns" (issue #660).
+        send_empty: true,
       },
       {
         kind: 'string_list',
