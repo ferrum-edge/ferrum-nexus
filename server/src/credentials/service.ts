@@ -201,7 +201,6 @@ import {
   MAX_PAGE_SIZE,
   TEST_CONSUMER_USERNAME_PREFIX,
   apiIdFromAclGroup,
-  mcpGroupsForGrant,
   consumerUsernameForApplication,
   consumerUsernameForUser,
   roleAtLeast,
@@ -218,6 +217,7 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
+import { approvalGroupsForIdentity } from '../access/approval-groups.js';
 import {
   AuditAction,
   SYSTEM_ACTOR,
@@ -2556,11 +2556,21 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // the read is never replayed here. Scoped to *this* identity: a
           // replay that used the account's whole grant list would hand every
           // application every API the account can reach.
-          const grants = await store.grants.listActiveByUser(userId, consumer.application_id);
+          //
+          // The grant-to-group rule is the one consumer repair uses (issue
+          // #659): a grant whose API row is gone, or whose API is recorded
+          // under another namespace, restores nothing here, as it would write
+          // nothing there.
+          const restored = await approvalGroupsForIdentity(
+            store,
+            userId,
+            consumer.application_id,
+            namespace,
+          );
           const snapshot = await edge.consumers.verification(consumer.ferrum_consumer_id, subject);
           if (!snapshot) {
             // Nothing to restore onto, and nothing on it to leave behind.
-            if (grants.length === 0) return;
+            if (restored.length === 0) return;
             throw edgeError('The gateway consumer for this identity no longer exists');
           }
           const { consumer: live, etag } = snapshot;
@@ -2574,20 +2584,11 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // group outside that namespace is an operator's, and is kept.
           const current = live.acl_groups ?? [];
           const retained = current.filter((group) => apiIdFromAclGroup(group) === null);
-          const restored = await Promise.all(
-            grants.map(async (grant) => {
-              const api = await store.apis.findById(grant.api_id);
-              return [
-                grant.acl_group,
-                ...(api?.agents ? mcpGroupsForGrant(grant.api_id, grant.approved_tools) : []),
-              ];
-            }),
-          );
-          const groups = [...new Set([...retained, ...restored.flat()])];
+          const groups = [...new Set([...retained, ...restored])];
           const stray = current.some(
             (group) => apiIdFromAclGroup(group) !== null && !groups.includes(group),
           );
-          if (grants.length === 0 && !stray) return;
+          if (restored.length === 0 && !stray) return;
           await edge.consumers.replace(live.id, consumerWithAclGroups(live, groups), subject, etag);
         });
       }

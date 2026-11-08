@@ -3,8 +3,10 @@ import { test } from 'node:test';
 
 import {
   aclGroupForApi,
+  consumerUsernameForUser,
   type CreateAccessRequestResponse,
   type PublishApiResponse,
+  type RepairGatewayReferencesResponse,
   type UpdateUserResponse,
 } from '@ferrum-nexus/shared';
 
@@ -300,6 +302,69 @@ test('notification failures do not skip approval mail or re-enable gateway resto
     assert.deepEqual(live?.acl_groups, [aclGroupForApi(apiId)]);
     assert.equal(enabled.json<UpdateUserResponse>().user.role, 'provider');
     h.services.notifications.notify = notify;
+  } finally {
+    await h.close();
+  }
+});
+
+// Issue #659: re-enable and consumer repair rebuild an identity's approval
+// groups through one rule, so neither writes a group the other would not.
+test('re-enable and consumer repair restore the same groups, skipping missing and foreign-namespace APIs', async () => {
+  const h = await buildTestApp();
+  try {
+    const founder = await h.registerUser({ email: 'founder@example.test' });
+    const provider = await h.registerUser({ email: 'provider@example.test', role: 'provider' });
+    const client = await h.registerUser({ email: 'client@example.test', role: 'client' });
+    const kept = await publish(h, provider, 'parity-kept');
+    const moved = await publish(h, provider, 'parity-moved');
+    const vanished = await publish(h, provider, 'parity-vanished');
+    for (const apiId of [kept, moved, vanished]) await approve(h, provider, client, apiId);
+    const mapping = await h.services.credentials.provisioner.findConsumer(client.user.id);
+    assert.ok(mapping);
+    const before = await h.edgeClient.consumers.get(mapping.ferrum_consumer_id);
+    assert.deepEqual(
+      before?.acl_groups?.sort(),
+      [kept, moved, vanished].map(aclGroupForApi).sort(),
+    );
+
+    // An API still recorded under the namespace the portal left: its group
+    // names a proxy this namespace does not serve.
+    await h.store.apis.update(moved, { namespace: 'retired-namespace' });
+    // An active grant whose API row is gone. The relational stores cascade the
+    // delete, so the read is what is simulated here.
+    const findManyByIds = h.store.apis.findManyByIds.bind(h.store.apis);
+    h.store.apis.findManyByIds = async (ids) =>
+      (await findManyByIds(ids)).filter((api) => api.id !== vanished);
+
+    for (const status of ['disabled', 'active'] as const) {
+      const response = await h.authed(founder, {
+        method: 'PATCH',
+        url: `/api/users/${client.user.id}`,
+        payload: { status },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+    }
+    const restored = await h.edgeClient.consumers.get(mapping.ferrum_consumer_id);
+    assert.deepEqual(restored?.acl_groups, [aclGroupForApi(kept)]);
+
+    // Lose the consumer and repair the same identity: the same group set.
+    for (const [key, consumer] of h.edge.consumers) {
+      if (consumer.id === mapping.ferrum_consumer_id) h.edge.consumers.delete(key);
+    }
+    const repaired = await h.authed(founder, {
+      method: 'POST',
+      url: '/api/admin/gateway/repair',
+      payload: { all: true, reason: 'Parity check' },
+    });
+    assert.equal(repaired.statusCode, 200, repaired.body);
+    const entry = repaired
+      .json<RepairGatewayReferencesResponse>()
+      .consumers.find((row) => row.user_id === client.user.id);
+    assert.ok(entry, 'the client consumer was repaired');
+    assert.equal(entry.error, null);
+    const remote = h.edge.consumerByUsername(consumerUsernameForUser(client.user.id));
+    assert.ok(remote, 'the gateway holds the consumer again');
+    assert.deepEqual(remote.acl_groups, restored?.acl_groups);
   } finally {
     await h.close();
   }

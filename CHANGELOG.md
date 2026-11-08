@@ -66,6 +66,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   namespace, instead of silently dropping that association. Older
   gateways ignore the parameter. The mock Edge enforces it in tests.
 
+### Fixed
+
+- Re-enabling an account no longer restores an approval group for a grant whose
+  API row is missing or is recorded under another namespace than the portal's
+  (an API left behind by a `FERRUM_NAMESPACE` change). Consumer repair already
+  skipped those grants; both now build an identity's `nexus:api:<id>:…` groups
+  through one shared rule, so a re-enable and a repair of the same identity
+  write the same set (#659).
+
 ### Security
 
 - A grant revocation or an access approval that stops between its decision
