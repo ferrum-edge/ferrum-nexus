@@ -233,6 +233,7 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
+import { apiInNamespace } from '../access/approval-groups.js';
 import { AuditAction, earliestPriorAttempt, type AuditService } from '../audit/service.js';
 import type { EdgeRateLimitSyncConfig, NexusConfig } from '../config/index.js';
 import {
@@ -6354,10 +6355,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * included, from that row. A grantee with no consumer, on the gateway or in
    * the portal, is skipped for consumer repair. A consumer that already
    * carries the group is not written at all, and every enrollment commits an
-   * `access.mcp_enroll` intent row before its write.
+   * `access.mcp_enroll` intent row before its write. An API recorded under
+   * another namespace enrolls nobody.
    */
   async function enrollAllToolGrantees(apiId: Uuid, subject: string): Promise<void> {
     const group = mcpAllGroupForApi(apiId);
+    // The approval group rule every other writer applies (issue #659): an API
+    // still recorded under another namespace has no group to earn on this
+    // namespace's consumers, and restore, repair and recovery would take one
+    // off again. Read under the caller's proxy lease, so it is the current row.
+    if (!apiInNamespace(await store.apis.findById(apiId), namespace)) return;
     for (const grant of await store.grants.listActiveByApi(apiId)) {
       if (grant.approved_tools != null) continue;
       if ((await store.users.findById(grant.user_id))?.status !== 'active') continue;

@@ -80,6 +80,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   on this namespace's consumer, and takes a stale one off; other APIs' groups
   are untouched. Approving access to such an API is refused with `409` until it
   is republished, where it used to write a group that nothing here consumes.
+  Enabling agents on such an API no longer enrolls its all-tools grantees in
+  the MCP-all group either.
 - Clearing the bot filter's **Blocked User-Agent substrings** now means "block
   no pattern". The form used to omit the emptied list, and Ferrum Edge reads an
   absent `blocked_patterns` as its default list, so `curl`, `wget` and its

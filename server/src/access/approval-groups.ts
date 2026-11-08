@@ -18,12 +18,25 @@ import type { ApiRecord, GrantRecord, NexusStore } from '../db/store.js';
  * request or today's operation names: expired exposure ids stay inert, `null`
  * keeps every tool and `[]` keeps REST alone.
  */
+/**
+ * Whether `api` is served by this namespace's proxy: present, and recorded
+ * under `namespace`. The eligibility half of {@link grantApprovalGroups}, for a
+ * writer that adds one particular group (publishing's MCP-all enrollment)
+ * rather than a grant's whole set.
+ */
+export function apiInNamespace(
+  api: Pick<ApiRecord, 'namespace'> | null | undefined,
+  namespace: string,
+): boolean {
+  return api != null && api.namespace === namespace;
+}
+
 export function grantApprovalGroups(
   api: ApiRecord | null | undefined,
   grant: Pick<GrantRecord, 'api_id' | 'approved_tools'>,
   namespace: string,
 ): string[] {
-  if (!api || api.id !== grant.api_id || api.namespace !== namespace) return [];
+  if (!api || api.id !== grant.api_id || !apiInNamespace(api, namespace)) return [];
   return [
     aclGroupForApi(grant.api_id),
     ...(api.agents ? mcpGroupsForGrant(grant.api_id, grant.approved_tools) : []),

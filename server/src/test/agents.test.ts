@@ -1054,6 +1054,25 @@ describe('agent publishing and Nexus authorization', () => {
     assert.equal(await countAudit('access.mcp_enroll', grant.id), 1);
   });
 
+  // Issue #659 follow-up: enrollment follows the approval group rule every
+  // other writer shares, so an API recorded under another namespace enrolls
+  // nobody, even with a proxy here and a stale REST group on the consumer.
+  it('enrolls nobody when the API is recorded under another namespace', async () => {
+    const { api } = await publish({ agents: null });
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id);
+    assert.deepEqual(groupsOf(grantee), [aclGroupForApi(api.id)]);
+    await harness.store.apis.update(api.id, { namespace: 'retired-namespace' });
+    const enabled = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: AGENTS },
+    });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    assert.equal(groupsOf(grantee).includes(mcpAllGroupForApi(api.id)), false);
+    assert.equal(await countAudit('access.mcp_enroll', grant.id), 0);
+  });
+
   it('carries explicit subsets across spec revisions and prunes only removed tools', async () => {
     const remove = {
       path: '/items/{id}',
