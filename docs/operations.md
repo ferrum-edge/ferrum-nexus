@@ -1243,8 +1243,8 @@ refusals write nothing.
 
 ### Test-only
 
-`NEXUS_TEST_POSTGRES_URL`, `NEXUS_TEST_MYSQL_URL` and `NEXUS_TEST_MONGO_URL` are
-read by the cross-adapter tests, not by the server. See
+`NEXUS_TEST_POSTGRES_URL`, `NEXUS_TEST_MYSQL_URL`, `NEXUS_TEST_MONGO_URL` and
+`NEXUS_TEST_SKIP_SQLITE` are read by the cross-adapter tests, not by the server. See
 [`contributing.md`](contributing.md).
 
 ### First run and the bootstrap token
