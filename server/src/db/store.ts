@@ -827,7 +827,13 @@ export interface AuditLogFilter {
   actions?: string[];
   target_type?: string;
   target_id?: string;
-  /** Exact scalar matches against fields in the audit details object. */
+  /**
+   * Exact matches against **top-level** members of the audit details object.
+   * A member matches only with the same JSON type and value, so the string
+   * `'true'` never matches the boolean `true`; a nested member of the same
+   * name, or the text inside another value, never matches. Keys must be plain
+   * identifiers ({@link assertAuditDetailsKey}).
+   */
   details?: Record<string, string | boolean>;
   /** Inclusive lower bound on `created_at`. */
   from?: IsoTimestamp;
@@ -898,12 +904,8 @@ export interface UserRepo {
 export interface OrganizationRepo {
   create(input: CreateInput<OrganizationRecord>): Promise<OrganizationRecord>;
   findById(id: Uuid): Promise<OrganizationRecord | null>;
-  /** Case-insensitive lookup by name; names are unique. */
-  findByName(name: string): Promise<OrganizationRecord | null>;
   update(id: Uuid, patch: UpdateInput<OrganizationRecord>): Promise<OrganizationRecord | null>;
   list(options?: ListOptions & { q?: string }): Promise<Paginated<OrganizationRecord>>;
-  /** Members keep their `org_id` unless the caller clears it first. */
-  delete(id: Uuid): Promise<boolean>;
 }
 
 /** Links between portal accounts and identity-provider subjects. */
@@ -956,7 +958,6 @@ export interface SessionRepo {
   /** Sliding expiration: push `expires_at` forward on an authenticated request. */
   touch(id: Uuid, expiresAt: IsoTimestamp): Promise<void>;
   delete(id: Uuid): Promise<boolean>;
-  deleteByTokenHash(tokenHash: string): Promise<boolean>;
   /** Terminate every session of a user (logout-everywhere, disable, role change). */
   deleteForUser(userId: Uuid): Promise<number>;
   /** Housekeeping: drop sessions whose `expires_at` is at or before `now`. */
@@ -1048,8 +1049,6 @@ export interface ApplicationFilter {
 export interface ApplicationRepo {
   create(input: CreateInput<ApplicationRecord>): Promise<ApplicationRecord>;
   findById(id: Uuid): Promise<ApplicationRecord | null>;
-  /** Names are unique per owner, case-insensitively. */
-  findByOwnerAndName(ownerUserId: Uuid, name: string): Promise<ApplicationRecord | null>;
   findManyByIds(ids: Uuid[]): Promise<ApplicationRecord[]>;
   update(id: Uuid, patch: UpdateInput<ApplicationRecord>): Promise<ApplicationRecord | null>;
   list(filter: ApplicationFilter, options?: ListOptions): Promise<Paginated<ApplicationRecord>>;
@@ -1078,8 +1077,6 @@ export interface ApiRepo {
   findById(id: Uuid): Promise<ApiRecord | null>;
   /** Slugs are unique across the portal and form the gateway listen path. */
   findBySlug(slug: string): Promise<ApiRecord | null>;
-  /** Reverse lookup used when reconciling against Edge. */
-  findByProxyId(ferrumProxyId: string): Promise<ApiRecord | null>;
   findManyByIds(ids: Uuid[]): Promise<ApiRecord[]>;
   update(id: Uuid, patch: UpdateInput<ApiRecord>): Promise<ApiRecord | null>;
   list(filter: ApiFilter, options?: ListOptions): Promise<Paginated<ApiRecord>>;
@@ -1130,7 +1127,6 @@ export interface ApiSpecRepo {
    * `MAX_SPEC_BYTES`.
    */
   listSummaries(filter: ApiSpecFilter, options?: ListOptions): Promise<Paginated<ApiSpecSummary>>;
-  delete(id: Uuid): Promise<boolean>;
   /** Cascade helper for API deletion. Returns the number of revisions removed. */
   deleteByApi(apiId: Uuid): Promise<number>;
   /**
@@ -1274,7 +1270,6 @@ export interface ApiGatewayPluginRepo {
 export interface AccessRequestRepo {
   create(input: CreateInput<AccessRequestRecord>): Promise<AccessRequestRecord>;
   findById(id: Uuid): Promise<AccessRequestRecord | null>;
-  update(id: Uuid, patch: UpdateInput<AccessRequestRecord>): Promise<AccessRequestRecord | null>;
   /**
    * Atomically move a request out of one status: apply `patch` **only while the
    * row still has `expected`**, in one statement
@@ -1283,8 +1278,8 @@ export interface AccessRequestRepo {
    * Returns the updated row when this caller won the transition, `null` when it
    * lost — the request was absent, or somebody else already decided it.
    *
-   * **Every transition out of `pending` must go through here**, never through
-   * {@link AccessRequestRepo.update}. Approve, deny and cancel each read a
+   * **Every transition out of `pending` goes through here**; the repo has no
+   * blind update. Approve, deny and cancel each read a
    * pending row and write it back later; a blind write lets a cancellation
    * racing an approval succeed too, so the history says `cancelled` while the
    * approval's grant and ACL group stay live. Only the winner of this call may
@@ -1498,7 +1493,6 @@ export interface ConsumerRepo {
     applicationId?: Uuid | null,
   ): Promise<ConsumerRecord | null>;
   findByFerrumId(ferrumConsumerId: string): Promise<ConsumerRecord | null>;
-  findByUsername(namespace: string, ferrumUsername: string): Promise<ConsumerRecord | null>;
   update(id: Uuid, patch: UpdateInput<ConsumerRecord>): Promise<ConsumerRecord | null>;
   list(filter: ConsumerFilter, options?: ListOptions): Promise<Paginated<ConsumerRecord>>;
   delete(id: Uuid): Promise<boolean>;
@@ -1545,7 +1539,6 @@ export interface GatewayIdentityRepo {
 export interface ThreadRepo {
   create(input: CreateInput<ThreadRecord>): Promise<ThreadRecord>;
   findById(id: Uuid): Promise<ThreadRecord | null>;
-  update(id: Uuid, patch: UpdateInput<ThreadRecord>): Promise<ThreadRecord | null>;
   list(filter: ThreadFilter, options?: ListOptions): Promise<Paginated<ThreadRecord>>;
   /** Reuse an existing conversation instead of opening a duplicate. */
   findExisting(
@@ -1553,9 +1546,16 @@ export interface ThreadRepo {
     participantB: Uuid | null,
     apiId: Uuid | null,
   ): Promise<ThreadRecord | null>;
+  /**
+   * {@link findExisting}`(id, null, null)` for many ids in one read: every
+   * platform thread (no counterparty, no API) whose `participant_a` is one of
+   * `participantIds`, newest first by `(created_at, id)`. The first row for an
+   * id is the thread a broadcast reuses for it. A god-mode broadcast reads one
+   * chunk of recipients this way instead of one statement per recipient.
+   */
+  listPlatformByParticipants(participantIds: Uuid[]): Promise<ThreadRecord[]>;
   /** Bump `last_message_at` after a message is posted. */
   touchLastMessage(threadId: Uuid, at: IsoTimestamp): Promise<void>;
-  delete(id: Uuid): Promise<boolean>;
 }
 
 /** Messages inside a thread. */
@@ -1578,8 +1578,6 @@ export interface MessageRepo {
    * precede the window.
    */
   listByThread(threadId: Uuid, options?: MessageListOptions): Promise<Paginated<MessageRecord>>;
-  /** Newest message of a thread, for list previews. */
-  findLatestByThread(threadId: Uuid): Promise<MessageRecord | null>;
   /** Newest message of each supplied thread, ordered by `(created_at, id)` descending. */
   findLatestByThreads(threadIds: Uuid[]): Promise<MessageRecord[]>;
   countByThread(threadId: Uuid): Promise<number>;
@@ -1600,8 +1598,6 @@ export interface MessageRepo {
    * same ordering as by instant.
    */
   countBySenderSince(senderUserId: Uuid, sinceIso: IsoTimestamp): Promise<number>;
-  /** Cascade helper for thread deletion. */
-  deleteByThread(threadId: Uuid): Promise<number>;
 }
 
 /** In-app notifications. */
@@ -1788,6 +1784,13 @@ export interface GatewayTeardownJobRepo {
   /** Settle only the supplied sending generation; false means ownership was lost. */
   markDone(job: GatewayTeardownJobRecord, at: IsoTimestamp): Promise<boolean>;
   /**
+   * Stamp `updated_at = at` on exactly this sending generation, so
+   * {@link releaseStale} measures a claim from its worker's last progress
+   * rather than from the claim. `false` means ownership was lost: the claim
+   * was released, settled or superseded.
+   */
+  renewClaim(job: GatewayTeardownJobRecord, at: IsoTimestamp): Promise<boolean>;
+  /**
    * Delete only this generation while it is `sending`. IDs are reused by upsertPending:
    * the worker must also recheck account status under the lifecycle lease and
    * inside a transaction before cancelling. Pending replacement work is retained.
@@ -1852,11 +1855,6 @@ export interface AccountRecoveryJobRepo {
   markUnblocked(job: AccountRecoveryJobRecord, at: IsoTimestamp): Promise<boolean>;
   /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
   releaseStale(olderThan: IsoTimestamp): Promise<number>;
-  /**
-   * Drop the job for a user. Used when the account is gone: `false` when there
-   * was nothing queued.
-   */
-  deleteByUser(userId: Uuid): Promise<boolean>;
 }
 
 /**
@@ -1925,7 +1923,6 @@ export interface AuditLogRepo {
 /** Key/value application settings, some of them encrypted at rest. */
 export interface SettingRepo {
   get(key: string): Promise<SettingRecord | null>;
-  getMany(keys: string[]): Promise<SettingRecord[]>;
   /** Upsert. `encrypted` records how `value` was stored, not what it means. */
   set(key: string, value: unknown, encrypted?: boolean): Promise<SettingRecord>;
   /**
@@ -2087,6 +2084,20 @@ export function assertLeaseKeyLength(key: string): void {
       'INTERNAL',
       `Lease key is ${key.length} characters; the maximum is ${LEASE_KEY_MAX_LENGTH}`,
     );
+  }
+}
+
+/** A key {@link AuditLogFilter.details} can address: a plain identifier. */
+const AUDIT_DETAILS_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Refuse an {@link AuditLogFilter.details} key that is not a plain identifier.
+ * Every adapter turns the key into a path (`$."key"`, `details.key`), where a
+ * dot, quote or `$` would address another member; callers pass fixed names.
+ */
+export function assertAuditDetailsKey(key: string): void {
+  if (!AUDIT_DETAILS_KEY.test(key)) {
+    throw new NexusError('INTERNAL', `Unsupported audit details filter key: ${key}`);
   }
 }
 

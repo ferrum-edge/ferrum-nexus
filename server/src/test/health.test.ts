@@ -280,50 +280,18 @@ describe('health endpoints', () => {
     await assert.rejects(strict.edgeClient.assertBackendEgress());
 
     // The private opt-out admits the pairing for writes under its own audited
-    // profile without reporting it as public-only. The unattested opt-out still
-    // requires public_only_guaranteed=true, which schema 2 never reports for a
-    // control plane, so it admits none of these.
-    for (const [env, profile] of [
-      ['NEXUS_ALLOW_PRIVATE_UPSTREAMS', 'private-upstreams-opt-in'],
-      ['NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS', null],
-    ] as const) {
-      const optedOut = await buildTestApp({ env: { [env]: 'true' } });
-      t.after(() => optedOut.close());
-      const optedOutAdmin = await optedOut.registerUser();
-      optedOut.edge.setBackendEgressPolicy(controlPlane);
-      if (profile === null) {
-        for (const refusedPolicy of [
-          controlPlane,
-          {
-            ...publicEgressPolicy(),
-            mode: 'both',
-            mode_allowed_ip_classes: ['public', 'private-reserved'],
-            mode_blocked_ip_classes: [],
-            public_only_guaranteed: false,
-          },
-          {
-            ...controlPlane,
-            allow_cidr_overrides_present: true,
-            public_only_guaranteed: false,
-          },
-        ]) {
-          optedOut.edge.setBackendEgressPolicy(refusedPolicy);
-          const refusedPolicyHealth = await edgeHealth(optedOut, optedOutAdmin);
-          assert.equal(refusedPolicyHealth.json<EdgeHealth>().status, 'degraded');
-          assert.equal(refusedPolicyHealth.json<EdgeHealth>().reason, 'backend_egress_unverified');
-          assert.equal(refusedPolicyHealth.json<EdgeHealth>().public_egress_guaranteed, false);
-          await assert.rejects(optedOut.edgeClient.assertBackendEgress());
-        }
-        continue;
-      }
-      const admitted = await edgeHealth(optedOut, optedOutAdmin);
-      assert.equal(admitted.json<EdgeHealth>().status, 'ok', env);
-      assert.equal(admitted.json<EdgeHealth>().public_egress_guaranteed, false, env);
-      assert.deepEqual(await optedOut.edgeClient.assertBackendEgress(), {
-        egress_profile: profile,
-        enforcement_scope: 'admission-only',
-      });
-    }
+    // profile without reporting it as public-only.
+    const optedOut = await buildTestApp({ env: { NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'true' } });
+    t.after(() => optedOut.close());
+    const optedOutAdmin = await optedOut.registerUser();
+    optedOut.edge.setBackendEgressPolicy(controlPlane);
+    const admitted = await edgeHealth(optedOut, optedOutAdmin);
+    assert.equal(admitted.json<EdgeHealth>().status, 'ok');
+    assert.equal(admitted.json<EdgeHealth>().public_egress_guaranteed, false);
+    assert.deepEqual(await optedOut.edgeClient.assertBackendEgress(), {
+      egress_profile: 'private-upstreams-opt-in',
+      enforcement_scope: 'admission-only',
+    });
   });
 
   it('grants a control plane the guarantee only from full data-plane attestation', async (t) => {
@@ -428,13 +396,13 @@ describe('health endpoints', () => {
 
   it('names an unsupported policy schema to admins and keeps refusing writes', async (t) => {
     const portal = await buildTestApp({
-      env: { NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'true', NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: 'true' },
+      env: { NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'true' },
     });
     t.after(() => portal.close());
     const operator = await portal.registerUser();
     // Edge v0.9.12 and earlier publish schema 1, whose guarantee meant less.
     portal.edge.setBackendEgressPolicy({ ...publicEgressPolicy(), schema_version: 1 });
-    // Neither opt-out reaches past an unreadable policy.
+    // The opt-out does not reach past an unreadable policy.
     await assert.rejects(portal.edgeClient.assertBackendEgress(), (error: NexusError) => {
       assert.equal(error.code, 'EDGE_PROTOCOL_ERROR');
       assert.equal(

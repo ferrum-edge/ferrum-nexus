@@ -403,12 +403,16 @@ and saving a template that contains either is refused. Use `{{reset_url}}` and
 A refused save names the field and the host or construct. Templates are checked
 again before each email is queued, including mass-email HTML. A stored template
 that no longer passes is skipped in favour of the default, with a warning in the
-server log; edit it or restore the default to clear the warning. A mass email
+server log; edit it or select **Reset to default** to clear the warning. A mass email
 that links to an unapproved host is refused and nothing is queued.
 
 Each save is audited as `admin.template_update`, with SHA-256 digests of the two
 bodies (`body_html_sha256`, `body_text_sha256`) rather than the bodies
 themselves.
+
+**Reset to default** removes a template's override, so the built-in default is
+sent again. It is enabled only while the selected template is overridden, and
+is audited as `admin.template_reset`.
 
 ---
 

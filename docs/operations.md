@@ -103,7 +103,6 @@ See the README for a two-stack example.
 | `NEXUS_MAX_MASS_EMAIL_BYTES`                 | `67108864`                            | Rendered bytes per mass-email campaign (an upper bound on one message, HTML escaping included, × recipients), 0–17 179 869 184; `0` disables. Default 64 MiB.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `NEXUS_MAX_MASS_EMAILS_PER_DAY`              | `5`                                   | Mass-email campaigns per administrator per rolling 24 h, 0–100 000; `0` disables. A retry with the same `idempotency_key`, content and audience is not counted again; the same key with anything else is `409 CONFLICT`. Security mail has claim priority; this cap still bounds campaign storage.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `NEXUS_ALLOW_PRIVATE_UPSTREAMS`              | `false`                               | Whether an API upstream may be loopback, private (RFC 1918, CGNAT, link-local) or a `.local`/`.internal`/`.localhost`/`.home.arpa` name. At `false` Nexus also resolves every other upstream hostname and refuses it if any answer is private or the name does not resolve, so **the Nexus process needs public DNS**. Refusals are `400 SPEC_INVALID`. Set `true` for internal-only portals and local development. See [`security.md`](security.md#1-threat-model).                                                                                                                                                                                                                                                                                                                              |
-| `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS`         | `false`                               | Waives the gateway's public-only attestation for backend writes, but still requires the gateway to report `public_only_guaranteed: true`, which Edge reports only for a local data plane in public mode with no allow CIDRs: the pairing the default already admits. It therefore admits no control-plane/data-plane pairing; for those, set `NEXUS_EXPECTED_DATA_PLANES` (Edge v0.9.14 or later) or use `NEXUS_ALLOW_PRIVATE_UPSTREAMS`. Nexus keeps the upstream screening above, and startup logs a warning while it is set. Leave it `false`. See [the topology decision](#backend-egress-admission-and-the-public-only-guarantee).                                                                                                                                                           |
 | `NEXUS_EXPECTED_DATA_PLANES`                 | _(unset)_                             | Control-plane/data-plane pairings only: the number of running data-plane processes (replicas or pods) for the namespace across every control plane, a positive integer up to 1 000 000 (anything else refuses startup). Each Edge data-plane process reports its own random `node_id` for its lifetime, even when replicas share one CP/DP secret. A control plane's data-plane attestation proves public-only egress only while at least this many distinct `node_id`s are connected to the control plane Nexus reads and every one attests it, counting a `node_id` only once it has been listed long enough that a restarted data plane cannot count twice. Unset, an attestation never proves it. See [CP/DP pairings and data-plane attestation](#cpdp-pairings-and-data-plane-attestation). |
 | `NEXUS_ALLOW_ENV_OVERRIDE`                   | `false`                               | Allow the process environment to override `.env` for `FERRUM_NAMESPACE`/`FERRUM_ADMIN_URL` outside production (see above). No effect in production.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `NEXUS_WEB_DIST`                             | _(unset)_                             | Directory of the built SPA. Nexus uses the first of this, `../../web/dist` relative to the server, and `./web/dist` under the working directory that contains an `index.html`; with none, only the API is served.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
@@ -391,25 +390,18 @@ and any allow-CIDR overlay refuse writes. Preflight precedes destructive convers
 compensation repeats admission and records repair-required failures. A conversion's
 recovery state is kept in [gateway recovery journals](#gateway-recovery-journals).
 
-Two opt-outs relax different checks, and each one relaxes only its own:
+One opt-out relaxes these checks. `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` keeps its
+existing meaning: Nexus skips its own upstream screening, so internal and
+unresolvable names are permitted, and Edge alone decides reachability. A portal
+that publishes private upstreams on purpose cannot also run a public-only gateway,
+so recognized consistent weaker metadata is accepted too, including CP, `both`,
+`private` and overlays.
 
-- `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` keeps its existing meaning: Nexus skips its
-  own upstream screening, so internal and unresolvable names are permitted, and Edge
-  alone decides reachability. A portal that publishes private upstreams on purpose
-  cannot also run a public-only gateway, so recognized consistent weaker metadata
-  is accepted too, including CP, `both`, `private` and overlays.
-- `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` waives only the gateway's public-only
-  attestation. Nexus keeps its suffix, IP-literal and resolved-address screening of
-  every upstream. It still requires the gateway to report
-  `public_only_guaranteed=true`, and Edge v0.9.13 (schema 2) reports that only for
-  `local-data-plane`, so against Edge v0.9.13 it admits nothing the public profile
-  refuses. See the compatibility notes below.
-
-Under either opt-out, missing, malformed or unsupported-schema metadata is still
+Under the opt-out, missing, malformed or unsupported-schema metadata is still
 refused, the pairing is never reported as public-only, startup logs a
 `BACKEND EGRESS NOT GUARANTEED` warning naming the variable, and every publish,
-update and restore records the admitting `egress_profile` (`public-guaranteed`,
-`private-upstreams-opt-in` or `unattested-edge-opt-in`) and the policy's
+update and restore records the admitting `egress_profile` (`public-guaranteed` or
+`private-upstreams-opt-in`) and the policy's
 `enforcement_scope` in its audit row. Private plugin dependencies may require allow
 CIDRs; any such override removes public-only certification even when an operator
 considers the override harmless. Edge's `rediss://` hostname rebinding limitation
@@ -446,17 +438,18 @@ pairing reads `public_egress_guaranteed: false`. That includes a control plane t
 reports `public_only_guaranteed=true` for its own process: its own policy describes
 admission, not the remote data planes that connect to backends.
 
-| Pairing (schema 2)                                                                                                                                | Public profile (default)                          | `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`         | `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`              |
-| ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- |
-| Local data plane, public mode, no allow overrides                                                                                                 | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
-| Control plane; every connected data plane attests public-only and at least `NEXUS_EXPECTED_DATA_PLANES` have settled (v0.9.14+)                   | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
-| Any other control plane (v0.9.13; count unset or short; too few settled data planes; attestation unreadable; none, unknown or weaker data planes) | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
-| Any other recognized policy                                                                                                                       | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
-| Missing, malformed, unsupported-schema or unreachable policy                                                                                      | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed |
+| Pairing (schema 2)                                                                                                                                | Public profile (default)                          | `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`              |
+| ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- |
+| Local data plane, public mode, no allow overrides                                                                                                 | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
+| Control plane; every connected data plane attests public-only and at least `NEXUS_EXPECTED_DATA_PLANES` have settled (v0.9.14+)                   | Writes admitted; health `ok`; guaranteed          | Writes admitted; health `ok`; guaranteed          |
+| Any other control plane (v0.9.13; count unset or short; too few settled data planes; attestation unreadable; none, unknown or weaker data planes) | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
+| Any other recognized policy                                                                                                                       | Writes refused; health `degraded`; not guaranteed | Writes admitted; health `ok`; not guaranteed      |
+| Missing, malformed, unsupported-schema or unreachable policy                                                                                      | Writes refused; health `degraded`; not guaranteed | Writes refused; health `degraded`; not guaranteed |
 
-Nexus upstream screening runs in the first two columns and is skipped only in the
-last. Without the attestation Nexus never describes a CP/DP pairing as public-only,
-and the operator enforces public-only egress on every data plane (see the
+Nexus upstream screening runs under the public profile and is skipped only under
+`NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`. Without the attestation Nexus never describes
+a CP/DP pairing as public-only, and the operator enforces public-only egress on
+every data plane (see the
 [security guide](security.md#1-threat-model)).
 
 #### CP/DP pairings and data-plane attestation
@@ -621,11 +614,9 @@ real inventory (Edge's `GET /cluster` helps to check it), keep
 requalify when a data plane is added, replaced or reconfigured.
 
 **CP/DP pairings on Edge v0.9.13.** Against Edge v0.9.12, a public-mode control plane
-reported `public_only_guaranteed=true` for its own policy, and
-`NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` admitted its writes while keeping Nexus's
-upstream screening. Edge v0.9.13 withdrew that reading: a control plane now reports
-`false`. Nexus does not reinterpret the field from `mode` and the overlay flags, so
-the unattested opt-in no longer admits a CP/DP pairing. Edge v0.9.13 sends no
+reported `public_only_guaranteed=true` for its own policy. Edge v0.9.13 withdrew
+that reading: a control plane now reports `false`, and Nexus does not reinterpret
+the field from `mode` and the overlay flags. Edge v0.9.13 sends no
 data-plane attestation, so such a pairing publishes only with
 `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which also skips Nexus's upstream screening;
 enforce `FERRUM_BACKEND_ALLOW_IPS=public` without allow CIDRs on every data plane.
@@ -1522,11 +1513,16 @@ audit 256 tool descriptions of 2,048 characters each. An OpenAPI document's
 `info.title`, `info.version` and `info.description` have no length limit of
 their own, and `info.version` and `info.description` become the API's version
 and description when the request names none. Strict-mode MySQL refused such writes, and non-strict mode truncated them.
-Retained values are unchanged. On SQLite, PostgreSQL and MongoDB the migration
+Retained values are unchanged. It also adds the
+`ck_apis_circuit_breaker CHECK (circuit_breaker IN (0, 1))` constraint that the
+SQLite and PostgreSQL baselines declare and the MySQL baseline omitted; retained
+rows already hold 0 or 1. On SQLite, PostgreSQL and MongoDB the migration
 is recorded and does nothing. `MODIFY COLUMN` rebuilds each table on MySQL, so
 plan for the copy time and disk space on a large `audit_logs` table. The runner
 skips a column that is already `LONGTEXT` on a replay, and refuses one whose
-type, nullability, default, generation or collation it does not expect.
+type, nullability, default, generation or collation it does not expect. It
+likewise skips the CHECK when it already exists, and refuses a constraint of that
+name with another condition or on another table, or one that is not enforced.
 
 `015_access_gateway_jobs` (not yet released) adds the `access_gateway_jobs`
 table (a collection on MongoDB, with the same two indexes): at most one row per
@@ -1576,7 +1572,8 @@ PostgreSQL, MySQL and MongoDB run in the `store-contracts` job. Per backend:
   nonnegative default. It checks live column type, nullability, default,
   collation and generated-column metadata before replaying an ALTER. Added
   indexes are checked for columns/order, direction, uniqueness, prefixes,
-  visibility and type. A mismatched existing definition stops the upgrade
+  visibility and type, and an added `CHECK (<column> IN (0, 1))` for its table,
+  condition and enforcement. A mismatched existing definition stops the upgrade
   without recording that step. The exact 009 security-priority assignment is
   idempotent and may replay; arbitrary data changes are still refused.
   An advisory lock serializes metadata checks, DDL and ledger writes across
@@ -3042,11 +3039,13 @@ delete for each test or older foreign consumer. Each call is bounded by
 `FERRUM_ADMIN_TIMEOUT_MS`, and each identity can add up to 30 s waiting for its
 lease. That is about 55 s at the defaults for an account with only its own
 consumer, but several minutes for one with many applications on a slow gateway,
-or with a raised `FERRUM_ADMIN_TIMEOUT_MS`. The five-minute threshold is a fixed constant,
-so such a job can look like a crashed worker: its claim is released and a second
-attempt repeats the teardown. Each claim carries an internal `generation` token,
-so a superseded attempt cannot settle a newer job, and the duplicate costs only
-repeated gateway calls and misleading stale-claim log lines.
+or with a raised `FERRUM_ADMIN_TIMEOUT_MS`. The worker renews its claim before
+each identity, so the five minutes are measured from its last progress, not from
+the claim: only a single identity that outlasts them, which takes a
+`FERRUM_ADMIN_TIMEOUT_MS` near its 60 s ceiling, makes a live job look crashed. Its claim is then released, and the original attempt stops at its next
+identity instead of repeating work the new claim will redo. Each claim carries
+an internal `generation` token, so a superseded attempt cannot settle a newer
+job.
 
 ### Which identities a teardown finds
 

@@ -683,10 +683,10 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
     /* ── organizations ────────────────────────────────────────────────── */
 
-    it('organizations: unique case-insensitive names, lookup, update and delete', async () => {
+    it('organizations: unique case-insensitive names, lookup and update', async () => {
       const name = `Acme-${newId().slice(0, 8)}`;
       const org = await store.organizations.create({ name, description: 'first' });
-      assert.deepEqual(await store.organizations.findByName(name.toUpperCase()), org);
+      assert.deepEqual(await store.organizations.findById(org.id), org);
 
       await assert.rejects(
         () => store.organizations.create({ name: name.toLowerCase() }),
@@ -709,17 +709,14 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.ok((await store.organizations.list({ limit: 100 })).total >= 2);
       const searched = await store.organizations.list({ q: name.slice(0, 5), limit: 10 });
       assert.ok(searched.items.some((entry) => entry.id === org.id));
-      assert.equal(await store.organizations.delete(renamed.id), true);
-      assert.equal(await store.organizations.delete(renamed.id), false);
     });
 
     for (const transactional of [false, true]) {
-      it(`deletes clear references, as ON DELETE SET NULL does (transaction=${transactional})`, async () => {
-        // Issue #340: the SQL schemas declare `users.org_id` and
-        // `message_threads.api_id` ON DELETE SET NULL; MongoDB has no foreign
-        // keys, so its adapter has to clear them itself.
-        const org = await store.organizations.create({ name: `Gone-${newId().slice(0, 8)}` });
-        const member = await makeUser({ org_id: org.id });
+      it(`an API delete clears thread references, as ON DELETE SET NULL does (transaction=${transactional})`, async () => {
+        // Issue #340: the SQL schemas declare `message_threads.api_id` ON
+        // DELETE SET NULL; MongoDB has no foreign keys, so its adapter has to
+        // clear it itself.
+        const member = await makeUser();
         const bystander = await makeUser();
         const provider = await makeUser({ role: 'provider' });
         const api = await makeApi(provider.id);
@@ -741,16 +738,13 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
         const remove = async (db: NexusStore): Promise<void> => {
           assert.equal(await db.apis.delete(api.id), true);
-          assert.equal(await db.organizations.delete(org.id), true);
         };
         if (transactional) await store.transaction(remove);
         else await remove(store);
 
         // Exactly the reference is cleared: nothing else about either row moves.
         assert.deepEqual(await store.threads.findById(thread.id), { ...thread, api_id: null });
-        assert.deepEqual(await store.users.findById(member.id), { ...member, org_id: null });
         assert.deepEqual(await store.threads.findById(other.id), other, 'other threads are kept');
-        assert.deepEqual(await store.users.findById(bystander.id), bystander);
       });
     }
 
@@ -783,7 +777,8 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
       );
 
-      assert.equal(await store.sessions.deleteByTokenHash(session.token_hash), true);
+      assert.equal(await store.sessions.delete(session.id), true);
+      assert.equal(await store.sessions.findByTokenHash(session.token_hash), null);
       assert.equal(await store.sessions.delete(session.id), false);
     });
 
@@ -836,7 +831,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(api.requestable, true);
 
       assert.deepEqual(await store.apis.findBySlug(slug.toUpperCase()), api);
-      assert.deepEqual(await store.apis.findByProxyId(api.ferrum_proxy_id ?? ''), api);
 
       await assert.rejects(
         () => makeApi(owner.id, { slug: slug.toUpperCase() }),
@@ -1167,11 +1161,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       });
       assert.equal(app.status, 'active');
       assert.deepEqual(await store.applications.findById(app.id), app);
-      assert.deepEqual(
-        await store.applications.findByOwnerAndName(owner.id, `  billing ${marker}  `),
-        app,
-        'names are matched case-insensitively and trimmed',
-      );
 
       // Unique per owner, and only per owner.
       await assert.rejects(
@@ -1594,8 +1583,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal((await store.apiSpecs.list({ api_id: api.id, is_current: true })).total, 1);
       assert.equal((await store.apiSpecs.findById(v1.id))?.parsed_title, 'V1');
 
-      assert.equal(await store.apiSpecs.delete(v2.id), true);
-      assert.equal(await store.apiSpecs.deleteByApi(api.id), 1);
+      assert.equal(await store.apiSpecs.deleteByApi(api.id), 2);
     });
 
     it('apiSpecs: records the author and the revision a rollback restored', async () => {
@@ -1641,7 +1629,8 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
       // Provenance, not a dependency: retention drops the target and the link
       // goes to `null` rather than blocking the delete.
-      assert.equal(await store.apiSpecs.delete(original.id), true);
+      assert.equal(await store.apiSpecs.pruneHistory(api.id, 1), 1, 'only the original goes');
+      assert.equal(await store.apiSpecs.findById(original.id), null);
       assert.equal((await store.apiSpecs.findById(rolledBack.id))?.rolled_back_from_id, null);
     });
 
@@ -2244,7 +2233,10 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         await assert.rejects(
           store.transaction(async (tx) => {
             await tx.grants.update(grant.id, { approved_tools: [] });
-            await tx.accessRequests.update(requestId, { requested_tools: [], approved_tools: [] });
+            await tx.accessRequests.updateIfStatus(requestId, 'approved', {
+              requested_tools: [],
+              approved_tools: [],
+            });
             throw new Error('rollback subsets');
           }),
           ROLLBACK_SUBSETS,
@@ -2327,7 +2319,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
 
       // Deciding the request frees the slot for a fresh one.
-      await store.accessRequests.update(request.id, {
+      await store.accessRequests.updateIfStatus(request.id, 'pending', {
         status: 'denied',
         decided_by: owner.id,
         decided_at: nowIso(),
@@ -2756,10 +2748,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       });
       assert.deepEqual(await store.consumers.findByUserAndNamespace(user.id, 'nexus'), consumer);
       assert.deepEqual(await store.consumers.findByFerrumId(user.id), consumer);
-      assert.deepEqual(
-        await store.consumers.findByUsername('nexus', consumer.ferrum_username),
-        consumer,
-      );
 
       await assert.rejects(
         () =>
@@ -3119,7 +3107,10 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         'oldest first',
       );
       assert.equal(listed.total, 2);
-      assert.equal((await store.messages.findLatestByThread(thread.id))?.id, last.id);
+      assert.deepEqual(
+        (await store.messages.findLatestByThreads([thread.id])).map((message) => message.id),
+        [last.id],
+      );
       assert.equal(await store.messages.countByThread(thread.id), 2);
 
       const mine = await store.threads.list({ participant_user_id: client.id });
@@ -3134,12 +3125,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
       assert.equal((await store.threads.list({ q: thread.subject })).total, 1);
       assert.equal((await store.threads.list({ api_id: api.id })).total, 1);
-
-      const renamed = await store.threads.update(thread.id, { subject: 'Renamed' });
-      assert.equal(renamed?.subject, 'Renamed');
-
-      assert.equal(await store.messages.deleteByThread(thread.id), 2);
-      assert.equal(await store.threads.delete(thread.id), true);
     });
 
     it('messages: batches latest messages with timestamp and id ordering', async () => {
@@ -3252,12 +3237,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         ]),
       );
       assert.equal(latest.length, 4);
-      for (const threadId of [tiedThread.id, laterThread.id, historyThread.id, platformThread.id]) {
-        assert.equal(
-          latest.find((message) => message.thread_id === threadId)?.id,
-          (await store.messages.findLatestByThread(threadId))?.id,
-        );
-      }
       assert.deepEqual(await store.messages.findLatestByThreads([]), []);
       const emptyIds = [emptyThread.id, emptyPlatformThread.id];
       assert.equal(
@@ -3359,9 +3338,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         page.items.every((message) => typeof message.broadcast === 'boolean'),
         'ordinary rows read back as false, never as an absent field',
       );
-
-      await store.messages.deleteByThread(thread.id);
-      await store.threads.delete(thread.id);
     });
 
     it('threads: participant_user_id matches the seats, never the creator', async () => {
@@ -3385,6 +3361,50 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         0,
         'creating a thread is not a seat in it — access has to come from the current role',
       );
+    });
+
+    it('threads: lists the platform threads of many participants at once', async () => {
+      const admin = await makeUser({ role: 'admin' });
+      const [first, second, outsider] = [await makeUser(), await makeUser(), await makeUser()];
+      const provider = await makeUser({ role: 'provider' });
+      const api = await makeApi(provider.id);
+      const platform = (participant: string, created_at: string) =>
+        store.threads.create({
+          subject: `Platform ${newId().slice(0, 6)}`,
+          created_by: admin.id,
+          participant_a: participant,
+          created_at,
+        });
+      const older = await platform(first.id, isoInSeconds(-120));
+      const newer = await platform(first.id, isoInSeconds(-60));
+      const only = await platform(second.id, isoInSeconds(-90));
+      await platform(outsider.id, isoInSeconds(-30));
+      // Neither a direct thread nor an API thread is a platform thread.
+      await store.threads.create({
+        subject: 'Direct',
+        created_by: first.id,
+        participant_a: first.id,
+        participant_b: provider.id,
+      });
+      await store.threads.create({
+        subject: 'About an API',
+        api_id: api.id,
+        created_by: second.id,
+        participant_a: second.id,
+      });
+
+      const listed = await store.threads.listPlatformByParticipants([first.id, second.id]);
+      assert.deepEqual(
+        listed.map((thread) => thread.id),
+        [newer.id, only.id, older.id],
+        'newest first, only the named participants, only platform threads',
+      );
+      assert.equal(
+        listed.find((thread) => thread.participant_a === first.id)?.id,
+        (await store.threads.findExisting(first.id, null, null))?.id,
+        'the first row per participant is the one findExisting reuses',
+      );
+      assert.deepEqual(await store.threads.listPlatformByParticipants([]), []);
     });
 
     it('threads: platform_or_participant_user_id is the admin inbox as a predicate', async () => {
@@ -3437,8 +3457,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(first.total, 2);
       assert.equal(second.total, 2);
       assert.notEqual(first.items[0]?.id, second.items[0]?.id);
-
-      for (const id of [platform.id, seated.id, unrelated.id]) await store.threads.delete(id);
     });
 
     it('messages: newest_first and the before cursor page a long transcript', async () => {
@@ -3516,9 +3534,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       });
       assert.equal(none.total, 0, 'nothing precedes the first message');
       assert.equal(none.items.length, 0);
-
-      await store.messages.deleteByThread(thread.id);
-      await store.threads.delete(thread.id);
     });
 
     /* ── notifications ────────────────────────────────────────────────── */
@@ -4364,6 +4379,30 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.ok(pending.total >= 1);
     });
 
+    it('gatewayTeardownJobs: a renewed claim is measured from its renewal', async () => {
+      const user = await makeUser();
+      const queued = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
+      const claim = await store.gatewayTeardownJobs.claimPending(queued);
+      assert.ok(claim);
+      assert.equal(
+        await store.gatewayTeardownJobs.renewClaim(claim, claim.updated_at),
+        true,
+        'a renewal that changes nothing still holds the claim',
+      );
+      const renewedAt = isoInSeconds(600);
+      assert.equal(await store.gatewayTeardownJobs.renewClaim(claim, renewedAt), true);
+      assert.equal((await store.gatewayTeardownJobs.findByUser(user.id))?.updated_at, renewedAt);
+
+      // A sweep for claims untouched since before the renewal leaves it alone…
+      await store.gatewayTeardownJobs.releaseStale(isoInSeconds(300));
+      assert.equal((await store.gatewayTeardownJobs.findByUser(user.id))?.status, 'sending');
+
+      // …and once a sweep has released it, it is no longer this claim to renew.
+      await store.gatewayTeardownJobs.releaseStale(isoInSeconds(900));
+      assert.equal((await store.gatewayTeardownJobs.findByUser(user.id))?.status, 'pending');
+      assert.equal(await store.gatewayTeardownJobs.renewClaim(claim, nowIso()), false);
+    });
+
     /* ── account recovery jobs ────────────────────────────────────────── */
 
     it('accountRecoveryJobs: one row per user, reset rather than duplicated', async () => {
@@ -4403,9 +4442,10 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(second.last_error, null);
       assert.equal(second.unblocked_at, null, 'a fresh reset blocks issuance again');
 
-      assert.equal(await store.accountRecoveryJobs.deleteByUser(user.id), true);
+      const secondClaim = await store.accountRecoveryJobs.claimPending(second);
+      assert.ok(secondClaim);
+      assert.equal(await store.accountRecoveryJobs.deleteClaimed(secondClaim), true);
       assert.equal(await store.accountRecoveryJobs.findByUser(user.id), null);
-      assert.equal(await store.accountRecoveryJobs.deleteByUser(user.id), false);
     });
 
     it('accountRecoveryJobs: claims a due job exactly once, then deletes it', async () => {
@@ -4443,8 +4483,12 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(claimed.find((row) => row.user_id === user.id)?.status, 'sending');
 
       assert.ok((await store.accountRecoveryJobs.releaseStale(isoInSeconds(60))) >= 1);
-      assert.equal((await store.accountRecoveryJobs.findByUser(user.id))?.status, 'pending');
-      await store.accountRecoveryJobs.deleteByUser(user.id);
+      const released = await store.accountRecoveryJobs.findByUser(user.id);
+      assert.equal(released?.status, 'pending');
+      assert.ok(released);
+      const reclaimed = await store.accountRecoveryJobs.claimPending(released);
+      assert.ok(reclaimed);
+      assert.equal(await store.accountRecoveryJobs.deleteClaimed(reclaimed), true);
     });
 
     /* ── access gateway jobs ──────────────────────────────────────────── */
@@ -4674,7 +4718,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
           assert.equal(row.status, 'denied');
           if (requests.has(row.id)) {
             seenRequests.push(row.id);
-            await store.accessRequests.update(row.id, { status: 'cancelled' });
+            await store.accessRequests.updateIfStatus(row.id, 'denied', { status: 'cancelled' });
           }
         }
         afterRequest = last.id;
@@ -4899,6 +4943,47 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         const page = await store.auditLogs.list({ action: literal, details });
         assert.equal(page.total, 1, JSON.stringify(details));
       }
+      // Only a top-level member with the same JSON type and value matches: not
+      // a nested member of that name, not the text inside another value, not
+      // an array holding the value, and never a string for a boolean (#681).
+      const shaped = `parity.shape-${newId().slice(0, 8)}`;
+      const nested = await store.auditLogs.create({
+        action: shaped,
+        target_type: 'credential',
+        details: { outer: { reference: 'deep' }, note: '"reference":"inside"', tags: ['x'] },
+      });
+      const flagged = await store.auditLogs.create({
+        action: shaped,
+        target_type: 'credential',
+        details: { flag: true, reference: 'top' },
+      });
+      const quoted = await store.auditLogs.create({
+        action: shaped,
+        target_type: 'credential',
+        details: { flag: 'true' },
+      });
+      const shapes: [Record<string, string | boolean>, string[]][] = [
+        [{ reference: 'deep' }, []],
+        [{ reference: 'inside' }, []],
+        [{ tags: 'x' }, []],
+        [{ reference: 'top' }, [flagged.id]],
+        [{ flag: true }, [flagged.id]],
+        [{ flag: 'true' }, [quoted.id]],
+        [{ flag: false }, []],
+        [{ note: '"reference":"inside"' }, [nested.id]],
+      ];
+      for (const [details, ids] of shapes) {
+        const page = await store.auditLogs.list({ action: shaped, details });
+        assert.deepEqual(
+          page.items.map((row) => row.id).sort(),
+          [...ids].sort(),
+          JSON.stringify(details),
+        );
+      }
+      await assert.rejects(
+        () => store.auditLogs.list({ action: shaped, details: { 'outer.reference': 'deep' } }),
+        (error: unknown) => isNexusError(error) && error.code === 'INTERNAL',
+      );
       assert.equal(
         await store.auditLogs.count({
           actor_user_id: actor.id,
@@ -4948,8 +5033,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         { key: `registration-${newId().slice(0, 8)}`, value: { open_registration: false } },
       ]);
       assert.deepEqual((await store.settings.get(plainKey))?.value, { portal_name: 'Batched' });
-      assert.equal((await store.settings.getMany([plainKey, secretKey])).length, 2);
-      assert.deepEqual(await store.settings.getMany([]), []);
       assert.ok((await store.settings.all()).length >= 3);
 
       assert.equal(await store.settings.delete(plainKey), true);
@@ -5769,11 +5852,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       // already do on PostgreSQL, MySQL and MongoDB.
       const name = `Übersicht-${newId().slice(0, 8)}`;
       const org = await store.organizations.create({ name });
-      assert.deepEqual(
-        await store.organizations.findByName(name.toLowerCase()),
-        org,
-        'a non-ASCII name is found case-insensitively',
-      );
       await assert.rejects(
         () => store.organizations.create({ name: name.toLowerCase() }),
         (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
@@ -5792,10 +5870,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         name: appName,
         status: 'active',
       });
-      assert.deepEqual(
-        await store.applications.findByOwnerAndName(owner.id, appName.toLowerCase()),
-        app,
-      );
+      assert.equal(app.name, appName);
       await assert.rejects(
         () =>
           store.applications.create({

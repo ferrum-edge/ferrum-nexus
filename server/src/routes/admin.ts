@@ -47,6 +47,7 @@ import {
   type ReconcileCredentialsResponse,
   type ReconcileGatewayResponse,
   type RepairGatewayReferencesResponse,
+  type ResetEmailTemplateResponse,
   type SmtpTestResponse,
   type SsoAdminSettingsResponse,
   type UpdateEmailTemplateResponse,
@@ -417,6 +418,17 @@ export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, o
       { id: user.id, role: user.role },
       key,
       body,
+      clientIp(request),
+    );
+    return { template };
+  });
+
+  app.delete('/email-templates/:key', async (request): Promise<ResetEmailTemplateResponse> => {
+    const { user } = requireAuth(request);
+    const { key } = parseOrThrow(templateKeyParams, request.params);
+    const template = await settings.resetEmailTemplate(
+      { id: user.id, role: user.role },
+      key,
       clientIp(request),
     );
     return { template };

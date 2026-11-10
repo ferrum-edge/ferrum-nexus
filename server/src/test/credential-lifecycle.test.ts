@@ -517,9 +517,9 @@ describe('credential lifecycle across identities', () => {
       const worker = createTeardownWorker({
         store: solo.store,
         credentials: {
-          disableGatewayAccess: async (userId, subject) => {
+          disableGatewayAccess: async (userId, subject, options) => {
             await solo.store.users.update(victim.user.id, { status: 'active' });
-            return solo.services.credentials.disableGatewayAccess(userId, subject);
+            return solo.services.credentials.disableGatewayAccess(userId, subject, options);
           },
         },
         audit: solo.services.audit,

@@ -425,6 +425,16 @@ export interface SettingsService {
     value: { subject: string; body_html: string; body_text: string },
     ip?: string | null,
   ): Promise<EmailTemplate>;
+  /**
+   * Remove the override for a key, so the built-in default is used again, and
+   * return that default. Audited only when an override was actually removed;
+   * resetting a key that has none changes nothing.
+   */
+  resetEmailTemplate(
+    actor: AuditActor,
+    key: EmailTemplateKey,
+    ip?: string | null,
+  ): Promise<EmailTemplate>;
 }
 
 /** Dependencies of {@link createSettingsService}. */
@@ -949,6 +959,23 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
         );
         return template;
       });
+    },
+
+    async resetEmailTemplate(actor, key, ip = null): Promise<EmailTemplate> {
+      // The delete and its audit record commit together, like the save.
+      await store.transaction(async (tx) => {
+        if (!(await tx.emailTemplates.delete(key))) return;
+        await audit
+          .forStore(tx)
+          .record(
+            actor,
+            AuditAction.ADMIN_TEMPLATE_RESET,
+            { type: 'email_template', id: key },
+            { key },
+            ip,
+          );
+      });
+      return defaultTemplateRow(key);
     },
   };
 }

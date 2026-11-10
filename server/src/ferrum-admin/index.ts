@@ -78,7 +78,6 @@ export function createFerrumAdmin(
   return createFerrumAdminClient(config.edge, logger, {
     leases,
     allowPrivateUpstreams: config.allowPrivateUpstreams,
-    allowUnattestedEdgeEgress: config.allowUnattestedEdgeEgress,
     expectedDataPlanes: config.expectedDataPlanes,
   });
 }

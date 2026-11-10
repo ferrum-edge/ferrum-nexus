@@ -254,10 +254,14 @@ describe('strict settings route validation', () => {
 
   it('preserves omitted fields and secrets in valid partial edits', async () => {
     const before = await harness.services.settings.getAdminSettings();
-    const secretRows = await harness.store.settings.getMany([
-      'smtp.password',
-      'captcha.secret_key',
-    ]);
+    const secretRows = [
+      await harness.store.settings.get('smtp.password'),
+      await harness.store.settings.get('captcha.secret_key'),
+    ];
+    assert.ok(
+      secretRows.every((row) => row !== null),
+      'both secrets are stored',
+    );
     const auditCount = await harness.store.auditLogs.count({ action: 'admin.settings_update' });
     const patch: UpdateSettingsRequest = {
       branding: { portal_name: 'Updated portal' },
@@ -285,7 +289,10 @@ describe('strict settings route validation', () => {
     assert.ok(!response.body.includes('original-smtp-password'));
     assert.ok(!response.body.includes('original-captcha-secret'));
     assert.deepEqual(
-      await harness.store.settings.getMany(['smtp.password', 'captcha.secret_key']),
+      [
+        await harness.store.settings.get('smtp.password'),
+        await harness.store.settings.get('captcha.secret_key'),
+      ],
       secretRows,
     );
     const audit = await harness.store.auditLogs.list({ action: 'admin.settings_update' });

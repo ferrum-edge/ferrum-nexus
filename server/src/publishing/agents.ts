@@ -658,14 +658,6 @@ export function agentToolDefinitionDigests(
   return definitionDigests(document, tools, stats);
 }
 
-/** {@link agentToolDefinitionDigests} for one tool. */
-export function agentToolDefinitionHash(
-  document: Record<string, unknown>,
-  tool: AgentToolSelection,
-): string {
-  return agentToolDefinitionDigests(document, [tool])[0] as string;
-}
-
 /**
  * The stored `definition_hash`: a definition digest bound to the id that
  * consent was given under. A hash copied onto another id, as a release

@@ -7,6 +7,8 @@ import type {
   BrandingResponse,
   GetEmailTemplateResponse,
   ListAuditLogsResponse,
+  ListEmailTemplatesResponse,
+  ResetEmailTemplateResponse,
   SmtpTestResponse,
   UpdateEmailTemplateResponse,
 } from '@ferrum-nexus/shared';
@@ -247,7 +249,7 @@ describe('admin settings', () => {
     const resolved = await harness.services.email.resolveSettings();
     assert.equal(resolved.password, SMTP_PASSWORD);
     assert.equal(resolved.from, 'Portal <no-reply@example.test>');
-    assert.equal(await harness.services.email.isConfigured(), true);
+    assert.ok(resolved.host, 'the relay has a host to send to');
   });
 
   it('requires a fresh SMTP password when connection settings change', async () => {
@@ -555,6 +557,73 @@ describe('admin settings', () => {
 
     const audit = await harness.store.auditLogs.list({ action: 'admin.template_update' });
     assert.equal(audit.total, 1);
+  });
+
+  it('resets an overridden email template to the built-in default', async () => {
+    const overridden = async (): Promise<boolean> => {
+      const listed = await harness.authed(founder, {
+        method: 'GET',
+        url: '/api/admin/email-templates',
+      });
+      assert.equal(listed.statusCode, 200, listed.body);
+      return listed
+        .json<ListEmailTemplatesResponse>()
+        .templates.some((template) => template.key === 'access_denied');
+    };
+    const initial = await harness.authed(founder, {
+      method: 'GET',
+      url: '/api/admin/email-templates/access_denied',
+    });
+    assert.equal(initial.statusCode, 200, initial.body);
+    const builtIn = initial.json<GetEmailTemplateResponse>().template;
+
+    const saved = await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/email-templates/access_denied',
+      payload: { subject: 'Custom denial', body_html: 'Declined', body_text: 'Declined' },
+    });
+    assert.equal(saved.statusCode, 200, saved.body);
+    assert.equal(await overridden(), true);
+
+    const refused = await harness.authed(client, {
+      method: 'DELETE',
+      url: '/api/admin/email-templates/access_denied',
+    });
+    assert.equal(refused.statusCode, 403, refused.body);
+    assert.equal(await overridden(), true, 'a client cannot reset a template');
+
+    const reset = await harness.authed(founder, {
+      method: 'DELETE',
+      url: '/api/admin/email-templates/access_denied',
+    });
+    assert.equal(reset.statusCode, 200, reset.body);
+    const restored = reset.json<ResetEmailTemplateResponse>().template;
+    assert.equal(restored.key, 'access_denied');
+    assert.equal(restored.subject, builtIn.subject);
+    assert.equal(restored.body_html, builtIn.body_html);
+    assert.equal(restored.body_text, builtIn.body_text);
+    assert.equal(await overridden(), false);
+    const after = await harness.authed(founder, {
+      method: 'GET',
+      url: '/api/admin/email-templates/access_denied',
+    });
+    assert.equal(after.json<GetEmailTemplateResponse>().template.subject, builtIn.subject);
+
+    const audit = await harness.store.auditLogs.list({ action: 'admin.template_reset' });
+    assert.equal(audit.total, 1);
+    assert.equal(audit.items[0]?.actor_user_id, founder.user.id);
+    assert.equal(audit.items[0]?.target_type, 'email_template');
+    assert.equal(audit.items[0]?.target_id, 'access_denied');
+    assert.deepEqual(audit.items[0]?.details, { key: 'access_denied' });
+
+    // Nothing left to remove: the same answer, and no second audit row.
+    const again = await harness.authed(founder, {
+      method: 'DELETE',
+      url: '/api/admin/email-templates/access_denied',
+    });
+    assert.equal(again.statusCode, 200, again.body);
+    assert.equal(again.json<ResetEmailTemplateResponse>().template.subject, builtIn.subject);
+    assert.equal((await harness.store.auditLogs.list({ action: 'admin.template_reset' })).total, 1);
   });
 
   it('lists audit logs with filters', async () => {

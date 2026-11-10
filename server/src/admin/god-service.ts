@@ -61,7 +61,13 @@ import { AuditAction, type AuditService } from '../audit/service.js';
 import { toPublicUser } from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
 import { runGatewayTeardown, type CredentialsService } from '../credentials/service.js';
-import type { GatewayTeardownJobRecord, NexusStore, UserRecord } from '../db/store.js';
+import type {
+  EnqueueEmailInput,
+  GatewayTeardownJobRecord,
+  NexusStore,
+  ThreadRecord,
+  UserRecord,
+} from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import {
   NexusError,
@@ -87,7 +93,7 @@ import {
   type RenderedEmail,
   type TemplateVars,
 } from '../email/templates.js';
-import type { MassEmailService } from './mass-email-service.js';
+import { MASS_EMAIL_CHUNK_RECIPIENTS, type MassEmailService } from './mass-email-service.js';
 
 /** Width of the rolling per-administrator broadcast budget, in milliseconds. */
 export const BROADCAST_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -151,7 +157,18 @@ export interface GodServiceDeps {
    * in-process ordering.
    */
   broadcastLocks?: KeyedSerializer;
+  /**
+   * Most recipients per broadcast fan-out transaction. Defaults to
+   * `MASS_EMAIL_CHUNK_RECIPIENTS` (200), the mass-email chunk. A seam for
+   * tests; nothing in production sets it.
+   */
+  chunkRecipients?: number;
   log?: (obj: Record<string, unknown>, message: string) => void;
+}
+
+/** A thrown value as log text. */
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** Build the god-mode service. */
@@ -159,6 +176,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
   const { store, audit, notifications, email, massEmail, access, publishing, credentials } = deps;
   const locks: KeyedSerializer = deps.locks ?? ((_key, fn) => fn());
   const broadcastLocks: KeyedSerializer = deps.broadcastLocks ?? ((_key, fn) => fn());
+  const chunkRecipients = Math.max(1, deps.chunkRecipients ?? MASS_EMAIL_CHUNK_RECIPIENTS);
 
   function requireReason(reason: string): string {
     const trimmed = reason.trim();
@@ -653,24 +671,42 @@ export function createGodService(deps: GodServiceDeps): GodService {
         let failed = 0;
         // The template and branding are read once for the whole broadcast, as
         // the mass-email path does, instead of once per recipient inside
-        // `email.enqueue` (issue #343). Prepared on first use inside the
-        // per-recipient `try`, so a failed read costs that recipient's email
-        // exactly as it did before and is retried for the next one; only a
-        // successful preparation is kept.
+        // `email.enqueue` (issue #343). Prepared on first use, outside every
+        // transaction; a failed read costs that chunk's email copies and is
+        // retried for the next chunk. Only a successful preparation is kept.
         let render: ((vars?: TemplateVars) => RenderedEmail) | null = null;
-        for (const recipient of recipients) {
-          try {
-            const existing = await store.threads.findExisting(recipient.id, null, null);
+
+        /**
+         * One chunk's inbox rows, in the transaction it is handed: a single
+         * read finds every recipient's platform thread, then each recipient
+         * gets a thread if it had none, the message and the thread's activity
+         * stamp. Re-runnable: it writes only through `tx`, keeps no state, and
+         * returns which recipients were written and whose thread is new.
+         */
+        async function writeInbox(
+          tx: NexusStore,
+          chunk: readonly UserRecord[],
+        ): Promise<{ recipient: UserRecord; created: boolean }[]> {
+          const existing = new Map<Uuid, ThreadRecord>();
+          const found = await tx.threads.listPlatformByParticipants(chunk.map((user) => user.id));
+          // Newest first, so the first thread seen per recipient is the one
+          // `findExisting` would have reused.
+          for (const thread of found) {
+            if (!existing.has(thread.participant_a)) existing.set(thread.participant_a, thread);
+          }
+          const written: { recipient: UserRecord; created: boolean }[] = [];
+          for (const recipient of chunk) {
+            const reused = existing.get(recipient.id);
             const thread =
-              existing ??
-              (await store.threads.create({
+              reused ??
+              (await tx.threads.create({
                 subject,
                 api_id: null,
                 created_by: actor.id,
                 participant_a: recipient.id,
                 participant_b: null,
               }));
-            await store.messages.create({
+            await tx.messages.create({
               thread_id: thread.id,
               sender_user_id: actor.id,
               body,
@@ -682,55 +718,113 @@ export function createGodService(deps: GodServiceDeps): GodService {
               // next 24 hours. The ceilings above are the bound instead.
               broadcast: true,
             });
-            await store.threads.touchLastMessage(thread.id, nowIso());
-            if (!existing) threads += 1;
-            // The inbox message is what "delivered" means: the notification is
-            // dismissable and the mail is optional, but the thread row is what
-            // the recipient can still read tomorrow.
-            delivered += 1;
+            await tx.threads.touchLastMessage(thread.id, nowIso());
+            written.push({ recipient, created: reused === undefined });
+          }
+          return written;
+        }
 
-            if (input.send_email) {
-              // The mail copy is optional and its outcome is accounted
-              // separately: a renderer/outbox failure after the inbox write
-              // must not also count this recipient as failed (that counter
-              // means "inbox not written").
+        /**
+         * Queue the optional mail copies for recipients whose inbox row landed,
+         * returning how many rows were created. A copy that cannot be rendered
+         * or queued is logged and skipped: delivery is the inbox write, which
+         * has already happened, so it never counts the recipient as failed.
+         */
+        async function queueCopies(chunk: readonly UserRecord[]): Promise<number> {
+          let renderer: (vars?: TemplateVars) => RenderedEmail;
+          try {
+            renderer = render ??= await email.prepareRenderer('mass', MASS_RAW_HTML_VARS);
+          } catch (error) {
+            for (const recipient of chunk) copyFailed(recipient, error);
+            return 0;
+          }
+          const copies: EnqueueEmailInput[] = [];
+          for (const recipient of chunk) {
+            try {
+              const rendered = renderer({
+                recipient_name: recipient.display_name,
+                recipient_email: recipient.email,
+                subject,
+                body_html: `<p>${escapeHtml(body)}</p>`,
+                body_text: body,
+              });
+              copies.push({
+                to_email: recipient.email,
+                recipient_user_id: recipient.id,
+                subject: rendered.subject,
+                body_html: rendered.html,
+                body_text: rendered.text,
+                idempotency_key: `god-broadcast:${batch}:${recipient.id}`,
+              });
+            } catch (error) {
+              copyFailed(recipient, error);
+            }
+          }
+          try {
+            return await store.transaction(async (tx) => {
+              let created = 0;
+              for (const copy of copies) {
+                if ((await tx.emailOutbox.enqueue(copy)).created) created += 1;
+              }
+              return created;
+            });
+          } catch {
+            // As for the inbox: one copy the outbox refuses costs only itself.
+            let created = 0;
+            for (const copy of copies) {
               try {
-                render ??= await email.prepareRenderer('mass', MASS_RAW_HTML_VARS);
-                const rendered = render({
-                  recipient_name: recipient.display_name,
-                  recipient_email: recipient.email,
-                  subject,
-                  body_html: `<p>${escapeHtml(body)}</p>`,
-                  body_text: body,
-                });
-                const queued = await store.emailOutbox.enqueue({
-                  to_email: recipient.email,
-                  recipient_user_id: recipient.id,
-                  subject: rendered.subject,
-                  body_html: rendered.html,
-                  body_text: rendered.text,
-                  idempotency_key: `god-broadcast:${batch}:${recipient.id}`,
-                });
-                if (queued.created) emails += 1;
+                if ((await store.emailOutbox.enqueue(copy)).created) created += 1;
               } catch (error) {
                 deps.log?.(
-                  {
-                    recipient_id: recipient.id,
-                    error: error instanceof Error ? error.message : String(error),
-                  },
+                  { recipient_id: copy.recipient_user_id, error: errorText(error) },
                   'Could not queue the optional email copy of a god-mode broadcast',
                 );
               }
             }
-          } catch (error) {
-            failed += 1;
-            deps.log?.(
-              {
-                recipient_id: recipient.id,
-                error: error instanceof Error ? error.message : String(error),
-              },
-              'Could not deliver a god-mode broadcast to one recipient',
-            );
+            return created;
+          }
+        }
+
+        function copyFailed(recipient: UserRecord, error: unknown): void {
+          deps.log?.(
+            { recipient_id: recipient.id, error: errorText(error) },
+            'Could not queue the optional email copy of a god-mode broadcast',
+          );
+        }
+
+        // Chunked like the mass-email fan-out: one transaction and one thread
+        // read per chunk, instead of four or five autocommitted statements per
+        // recipient, and other writers get their turn between chunks.
+        for (let start = 0; start < recipients.length; start += chunkRecipients) {
+          const chunk = recipients.slice(start, start + chunkRecipients);
+          let written: { recipient: UserRecord; created: boolean }[];
+          try {
+            written = await store.transaction((tx) => writeInbox(tx, chunk));
+          } catch {
+            // The chunk rolled back as a whole. One account the database keeps
+            // refusing must not stop an announcement to everyone else, so the
+            // chunk is retried one recipient at a time and only the recipients
+            // that still fail are counted as failed.
+            written = [];
+            for (const recipient of chunk) {
+              try {
+                written.push(...(await store.transaction((tx) => writeInbox(tx, [recipient]))));
+              } catch (error) {
+                failed += 1;
+                deps.log?.(
+                  { recipient_id: recipient.id, error: errorText(error) },
+                  'Could not deliver a god-mode broadcast to one recipient',
+                );
+              }
+            }
+          }
+          // The inbox message is what "delivered" means: the notification is
+          // dismissable and the mail is optional, but the thread row is what
+          // the recipient can still read tomorrow.
+          delivered += written.length;
+          threads += written.filter((entry) => entry.created).length;
+          if (input.send_email && written.length > 0) {
+            emails += await queueCopies(written.map((entry) => entry.recipient));
           }
         }
 

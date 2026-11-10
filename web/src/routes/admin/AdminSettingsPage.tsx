@@ -17,6 +17,8 @@ import {
 import {
   useAdminSettings,
   useEmailTemplate,
+  useEmailTemplates,
+  useResetEmailTemplate,
   useSmtpTest,
   useUpdateAdminSettings,
   useUpdateEmailTemplate,
@@ -33,6 +35,7 @@ import { RoleGuard } from '../../components/layout/RoleGuard';
 import { Badge, type BadgeTone } from '../../components/ui/Badge';
 import { Button, buttonClassName } from '../../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../../components/ui/Card';
+import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { Icon, type IconName } from '../../components/ui/Icon';
 import { Checkbox, FieldGroup, LabeledInput, LabeledTextarea } from '../../components/ui/Input';
 import { LabeledSelect } from '../../components/ui/Select';
@@ -1002,8 +1005,11 @@ function EmailTab({ settings }: { settings: AdminSettingsResponse }): ReactEleme
 export function TemplatesTab(): ReactElement {
   const [key, setKey] = useState<EmailTemplateKey>('verification');
   const query = useEmailTemplate(key);
+  const overrides = useEmailTemplates();
   const update = useUpdateEmailTemplate();
+  const reset = useResetEmailTemplate();
   const toast = useToast();
+  const [confirmReset, setConfirmReset] = useState(false);
 
   const [subject, setSubject] = useState('');
   const [bodyHtml, setBodyHtml] = useState('');
@@ -1024,6 +1030,9 @@ export function TemplatesTab(): ReactElement {
   }, [query.data, key]);
 
   const editorReady = query.data !== undefined && loadedKey === key;
+  // Only a saved override can be reset; the default is what the editor shows
+  // for every other key.
+  const overridden = overrides.data?.templates.some((template) => template.key === key) ?? false;
 
   return (
     <Card>
@@ -1103,7 +1112,31 @@ export function TemplatesTab(): ReactElement {
         >
           Save template
         </Button>
+        <Button
+          variant="secondary"
+          disabled={!editorReady || !overridden || update.isPending}
+          onClick={() => setConfirmReset(true)}
+        >
+          Reset to default
+        </Button>
       </CardFooter>
+      <ConfirmDialog
+        open={confirmReset}
+        onOpenChange={setConfirmReset}
+        title="Reset template"
+        description={`The saved ${EMAIL_TEMPLATE_LABELS[key]} template is deleted and the built-in default is sent again.`}
+        confirmLabel="Reset"
+        danger
+        loading={reset.isPending}
+        onConfirm={() =>
+          reset.mutate(key, {
+            onSuccess: () => {
+              setConfirmReset(false);
+              toast.success('Template reset to the default');
+            },
+          })
+        }
+      />
     </Card>
   );
 }

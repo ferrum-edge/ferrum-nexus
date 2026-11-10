@@ -38,6 +38,7 @@ vi.mock('../../hooks/useAdminSettings', () => ({
   useEmailTemplates: () => ({ isLoading: true, data: undefined }),
   useEmailTemplate: () => ({ isLoading: true, data: undefined }),
   useUpdateEmailTemplate: () => ({ mutate: vi.fn(), isPending: false }),
+  useResetEmailTemplate: () => ({ mutate: vi.fn(), isPending: false }),
   useMassEmail: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 vi.mock('../../stores/toast', () => ({ useToast: () => ({ success: vi.fn(), error: vi.fn() }) }));
