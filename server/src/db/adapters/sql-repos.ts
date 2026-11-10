@@ -1,5 +1,5 @@
 /**
- * The seventeen {@link NexusStore} repositories, implemented once for both
+ * The {@link NexusStore} repositories, implemented once for both
  * asynchronous SQL adapters.
  *
  * PostgreSQL and MySQL differ in placeholder syntax, identifier quoting and a

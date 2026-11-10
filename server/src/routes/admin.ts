@@ -3,7 +3,7 @@
  *
  * The whole plugin is behind `requireRole('admin')`; god-mode endpoints add a
  * `super_admin` check of their own (see the marked section at the bottom), and
- * so do the `smtp`/`captcha` sections of `PUT /settings`, which are escalation
+ * so do the `smtp`/`captcha`/`gateway` sections of `PUT /settings`, which are escalation
  * surfaces rather than preferences. Secrets are write-only everywhere here:
  * `smtp.password` and `captcha.secret_key` go in and are never read back out.
  *
@@ -534,9 +534,10 @@ export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, o
 
   /* ── God mode (super_admin only) ───────────────────────────────────────
    * These four sit behind the plugin's `admin` hook and then raise the bar to
-   * `super_admin` per handler. Every one of them demands a non-empty `reason`,
-   * which the god service writes into the `god.*` audit row alongside the
-   * ordinary audit row the underlying operation produces.
+   * `super_admin` per handler. `revoke-grant`, `delete-api` and `disable-user`
+   * demand a non-empty `reason`, which the god service writes into the `god.*`
+   * audit row alongside the ordinary audit row the underlying operation
+   * produces; a broadcast records its subject as `reason` instead.
    */
 
   app.post('/god/revoke-grant', async (request): Promise<GodRevokeGrantResponse> => {

@@ -213,23 +213,6 @@ export const AuditAction = {
    */
   API_GATEWAY_REPAIR_REQUIRED: 'api.gateway_repair_required',
   /**
-   * An existing API's gateway deployment was rebuilt in place: same id, slug,
-   * owner, specification history, gateway URL and grants, new Edge proxy.
-   *
-   * `rebuilt: false` records the other way this clears — the proxy turned out
-   * to be live after all (an operator rebuilt it by hand), so the flag was
-   * dropped without touching the gateway.
-   */
-  /**
-   * A provider authorized one account to **read** a private API's
-   * documentation.
-   *
-   * `details.grants_invocation` is always `false`, spelled out on every row
-   * rather than left to be inferred: this authorization confers no ACL group,
-   * touches no Ferrum consumer and reaches no gateway. Somebody reading the
-   * log a year from now should not have to go and check.
-   */
-  /**
    * An application identity was created. `details` names it; the target is the
    * application.
    */
@@ -257,6 +240,15 @@ export const AuditAction = {
    * transaction that removes the rows.
    */
   APPLICATION_DELETE_START: 'application.delete_start',
+  /**
+   * A provider authorized one account to **read** a private API's
+   * documentation.
+   *
+   * `details.grants_invocation` is always `false`, spelled out on every row
+   * rather than left to be inferred: this authorization confers no ACL group,
+   * touches no Ferrum consumer and reaches no gateway. Somebody reading the
+   * log a year from now should not have to go and check.
+   */
   API_VIEWER_AUTHORIZE: 'api.viewer_authorize',
   /**
    * A read authorization was withdrawn. `details.revoked_grant` is always
@@ -264,6 +256,14 @@ export const AuditAction = {
    * separate, and removing one has never touched the other.
    */
   API_VIEWER_REVOKE: 'api.viewer_revoke',
+  /**
+   * An existing API's gateway deployment was rebuilt in place: same id, slug,
+   * owner, specification history, gateway URL and grants, new Edge proxy.
+   *
+   * `rebuilt: false` records the other way this clears — the proxy turned out
+   * to be live after all (an operator rebuilt it by hand), so the flag was
+   * dropped without touching the gateway.
+   */
   API_GATEWAY_RESTORE: 'api.gateway_restore',
   /**
    * A restore is about to build a new proxy and move it onto the public listen

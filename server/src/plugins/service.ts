@@ -219,19 +219,6 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
   }
 
   /**
-   * The exact body sent to Edge: the descriptor's own keys, plus the shared
-   * Redis settings for the one plugin that keeps cross-replica state.
-   *
-   * `request_deduplication` is the whole reason this is not simply `config`.
-   * Its idempotency records are **per gateway process** in `local` mode, so a
-   * portal in front of N data-plane replicas lets the same key execute up to N
-   * times — exactly the failure `rate_limiting` has, and stamped from exactly
-   * the same operator setting. `local` is Edge's own default and the Redis-only
-   * keys are *rejected* outside `sync_mode: 'redis'`, so nothing is sent at all
-   * in the local case.
-   */
-
-  /**
    * The gateway config this API's palette row owns, or `undefined` when there
    * is none to reuse and a fresh one has to be created.
    *

@@ -130,7 +130,7 @@ export class WhereBuilder {
   private readonly conditions: string[] = [];
   private readonly values: Param[] = [];
 
-  /** Add `condition` with its parameters when `value` is neither undefined nor null. */
+  /** Add `condition` with its parameters when `value` is not `undefined`. */
   add(value: unknown, condition: string, ...params: Param[]): this {
     if (value === undefined) return this;
     this.conditions.push(condition);

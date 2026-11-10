@@ -13,8 +13,9 @@
  * | `disable-user`   | `PATCH /api/users/:id`                 | optional bulk grant revocation |
  * | `broadcast`      | `POST /api/admin/mass-email`           | in-app + inbox, not only email |
  *
- * **`reason` is required on all four** and lands in the `god.*` audit row. The
- * underlying operation writes its own ordinary audit row too (`access.revoke`,
+ * **`reason` is required on the three that act on a resource** (`revoke-grant`,
+ * `delete-api`, `disable-user`) and lands in the `god.*` audit row; a broadcast
+ * records its subject as `reason` instead. The underlying operation writes its own ordinary audit row too (`access.revoke`,
  * `api.delete`, …), so an emergency action leaves a two-row trail: what was
  * done, and the fact that it was done under god mode and why.
  *

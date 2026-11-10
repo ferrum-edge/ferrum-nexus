@@ -1,14 +1,16 @@
 /**
  * All cryptography used by Nexus, in one module.
  *
- * Three independent concerns, deliberately kept apart:
+ * Five independent concerns, deliberately kept apart:
  *
  * 1. **Password hashing** — scrypt, self-describing string format
  *    `scrypt:N:r:p:<salt b64>:<hash b64>` so parameters can be raised later
  *    without invalidating existing hashes. Verification is constant-time.
  * 2. **Settings encryption** — AES-256-GCM over a JSON value, key HKDF-derived
- *    from `NEXUS_SECRET_KEY` with info `nexus-settings-v1`. Blob format is
- *    `v1:<iv b64>:<ciphertext b64>:<tag b64>`.
+ *    from `NEXUS_SECRET_KEY` with info `nexus-settings-v1`, bound to its row
+ *    key through the additional authenticated data `app_settings:v2:<key>`.
+ *    Blob format is `v2:<iv b64>:<ciphertext b64>:<tag b64>`; an unbound
+ *    legacy `v1` blob is refused at runtime.
  * 3. **Session token hashing** — HMAC-SHA-256 under a *separate* HKDF-derived
  *    key (info `nexus-session-hmac-v1`), so a leaked settings key cannot be
  *    used to forge session lookups and vice versa.

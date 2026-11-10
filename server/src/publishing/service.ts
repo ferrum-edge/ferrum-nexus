@@ -76,11 +76,10 @@
  * is therefore only half the job — every create is followed by an association
  * write, and every removal is preceded by a disassociation.
  *
- * Nexus stores the proxy id on the `apis` row and **does not** store the plugin
- * config ids: they are looked up with `GET /plugins/config` filtered by
- * `proxy_id` whenever they need changing. That keeps the schema free of ids
- * whose lifecycle Nexus does not own, and reconciles automatically if an
- * operator ever recreates one by hand.
+ * Nexus stores the proxy id on the `apis` row and the id of every plugin config
+ * it created: first-class configs in `api_gateway_plugins`, palette configs in
+ * `api_plugins.ferrum_plugin_config_id`. Only a recorded id is ever replaced or
+ * deleted.
  *
  * ## Every proxy write is read-modify-write
  *
@@ -6166,18 +6165,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     },
   };
 
-  /**
-   * Point a proxy at a new backend, leaving everything else exactly as it is.
-   *
-   * Only the four `backend_*` fields are touched: `name`, `listen_path`,
-   * `hosts`, the timeouts, the TLS paths, `upstream_id` and the plugin
-   * association list all come back off the `GET` untouched. Rebuilding the
-   * document from the slug instead, as this used to, reset every one of them to
-   * a default on a whole-resource `PUT`.
-   *
-   * Returns the proxy as it was before the move, ready for
-   * {@link restoreProxyBackendLocked}.
-   */
   /* ── Spec-owned proxies (`routes` mode) ───────────────────────────────── */
 
   /** Carry generated resource/config fields; the owner alone regenerates operation schemas. */
@@ -6924,15 +6911,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   /**
-   * Undo step that puts a proxy's backend back where
-   * {@link replaceProxyBackendLocked} found it.
-   *
-   * Only the backend fields are rewound, on top of a fresh read. A blanket
-   * restore of the whole captured document would also revert the plugin
-   * association changes a later step of the same PATCH made — those are undone
-   * by their own steps, in their own order.
-   */
-  /**
    * Undo step that puts a proxy's runtime settings back where the PATCH found
    * them.
    *
@@ -6957,7 +6935,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     };
   }
 
-  /** Restore backend fields while the caller holds the canonical proxy lease. */
+  /**
+   * Undo step that puts a proxy's backend back where
+   * {@link replaceProxyBackendLocked} found it. Runs while the caller holds the
+   * canonical proxy lease.
+   *
+   * Only the backend fields are rewound, on top of a fresh read. A blanket
+   * restore of the whole captured document would also revert the plugin
+   * association changes a later step of the same PATCH made — those are undone
+   * by their own steps, in their own order.
+   */
   function restoreProxyBackendLocked(previous: EdgeProxy, subject: string): () => Promise<void> {
     const backend = proxyBackendFields(previous);
     return async () => {

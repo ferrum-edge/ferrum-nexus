@@ -17,8 +17,8 @@
  *
  * ## Ordering matters, and so does serialisation
  *
- * `PUT /consumers/{id}` is a whole-resource replace with no concurrency token.
- * Two approvals for the same user landing at the same instant would each read
+ * `PUT /consumers/{id}` is a whole-resource replace; the row `If-Match` tag only
+ * fences a stale writer, it does not merge two of them. Two approvals for the same user landing at the same instant would each read
  * the pre-change group list and one would overwrite the other, silently losing
  * a grant that the portal believes it made. Every consumer mutation therefore
  * goes through the Edge client's per-consumer promise queue (via
@@ -483,7 +483,6 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     return { request, api, requester };
   }
 
-  /** Attach the API and user joins list/detail payloads carry. */
   /**
    * The applications named by a page of rows, keyed by id.
    *
@@ -573,17 +572,6 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     });
   }
 
-  /**
-   * Put the ACL group on (or take it off) one identity's consumer.
-   *
-   * Serialised per consumer by the provisioner, so concurrent decisions for the
-   * same user compose instead of overwriting each other.
-   *
-   * `options.afterWrite` runs inside the consumer key once the write landed —
-   * how an approval commits its grant before anything else can act on the
-   * consumer. `options.absentIsDone` lets a removal treat a consumer that is
-   * already gone as done.
-   */
   function validateToolSubset(api: ApiRecord, tools: string[] | null | undefined): void {
     if (tools == null) return;
     if (api.agents?.operations.some((tool) => !tool.id)) {
@@ -599,6 +587,17 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     }
   }
 
+  /**
+   * Put the ACL group on (or take it off) one identity's consumer.
+   *
+   * Serialised per consumer by the provisioner, so concurrent decisions for the
+   * same user compose instead of overwriting each other.
+   *
+   * `options.afterWrite` runs inside the consumer key once the write landed —
+   * how an approval commits its grant before anything else can act on the
+   * consumer. `options.absentIsDone` lets a removal treat a consumer that is
+   * already gone as done.
+   */
   async function setGroupMembership(
     user: UserRecord,
     apiId: Uuid,
@@ -732,7 +731,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       status: 'cancelled',
       decided_by: actor.id,
       decided_at: at,
-      decision_note: 'The grant this request would extend is no longer active',
+      decision_note: INACTIVE_GRANT_NOTE,
     });
     if (!closed) return null;
     await audit
@@ -2791,7 +2790,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
                     status: 'cancelled',
                     decided_by: user.id,
                     decided_at: nowIso(),
-                    decision_note: 'The grant this request would extend is no longer active',
+                    decision_note: INACTIVE_GRANT_NOTE,
                   })
                 : null;
               if (!closed) throw conflict('You already have a pending request for this API');

@@ -807,8 +807,8 @@ export function openSqliteDatabase(path: string): Database {
   // The mapping is deterministic (JS `toLowerCase`) so SQLite accepts it inside
   // an index expression. An existing file database has its unique indexes built
   // with the old ASCII `lower`, so it must be recreated (or `REINDEX` the four
-  // `lower(...)` indexes) to pick the new mapping up; the baseline is still
-  // unreleased and development databases are disposable, so no forward
+  // `lower(...)` indexes) to pick the new mapping up. Every released database
+  // was created with this mapping (it predates v0.1.0), so no forward
   // migration or reindex path is required (see docs/operations.md).
   db.function('lower', { deterministic: true }, (value: unknown): string | null => {
     if (value === null || value === undefined) return null;

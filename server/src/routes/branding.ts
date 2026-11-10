@@ -110,7 +110,7 @@ function memoizeBootstrapRequired(
   };
 }
 
-/** Weak ETag for a branding payload — stable for the cached object identity. */
+/** ETag for a branding payload — stable for the cached object identity. */
 export function brandingEtag(payload: BrandingResponse): string {
   return `"${createHash('sha256').update(JSON.stringify(payload)).digest('hex')}"`;
 }

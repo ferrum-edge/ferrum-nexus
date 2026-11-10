@@ -535,7 +535,6 @@ export interface CredentialsService {
     },
     options?: ListOptions,
   ): Promise<Paginated<CredentialRecord>>;
-  /** Mint a credential on the caller's own consumer. Show-once. */
   /**
    * Mint a credential on one of the caller's identities. Show-once.
    *

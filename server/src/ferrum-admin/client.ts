@@ -502,7 +502,8 @@ export interface FerrumAdminClient {
    * optional credential, and a refusal reads as unavailable with the cause,
    * never as "no traffic" or "no circuit breakers".
    *
-   * Both are cached in-process per proxy for {@link METRICS_CACHE_TTL_MS}. Edge
+   * Both are cached in-process, one entry shared by every proxy, for
+   * {@link METRICS_CACHE_TTL_MS}. Edge
    * caches its own rendering for 5 seconds, so polling faster than this buys
    * nothing but load.
    */

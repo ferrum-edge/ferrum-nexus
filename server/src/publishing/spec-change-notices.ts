@@ -434,7 +434,7 @@ function carriedFrom(
   };
 }
 
-/** What an email adds when a replaced revision broke something and this one did not. */
+/** What an email adds when a replaced revision could not be fully compared and this one could. */
 const SUPERSEDED_INCOMPLETE_NOTE =
   'A revision published just before this one could not be fully compared and may include ' +
   'breaking changes; see the Changes tab.';
