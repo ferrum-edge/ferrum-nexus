@@ -74,6 +74,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   all-tools grantees in the MCP group read the acting or affected account once,
   not once per grant. Responses are unchanged.
 
+- Organization creates and updates (`POST /api/organizations`,
+  `PATCH /api/organizations/:id`) are limited to 30 a minute per account per
+  route, like the other admin-facing mutation groups. The `/api/organizations`
+  scope had no limiter at all; its reads stay unlimited.
+
 - The notification type `api_published` is gone from `NotificationType`, the
   `GET /api/notifications` type filter and the docs. Nothing ever wrote a
   notice of that type, so `?type=api_published` now answers `400` like any

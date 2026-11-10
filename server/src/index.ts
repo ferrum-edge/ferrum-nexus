@@ -900,9 +900,17 @@ export async function buildServer(
     { prefix: '/api/users' },
   );
 
-  await app.register(async (scope) => scope.register(organizationRoutes, { users, config, sso }), {
-    prefix: '/api/organizations',
-  });
+  await app.register(
+    async (scope) => {
+      // `global: false` so only the create and update routes carry a limit,
+      // bucketed per account (see `userOrIpKey`); the reads stay unlimited.
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(organizationRoutes, { users, config, sso });
+    },
+    { prefix: '/api/organizations' },
+  );
 
   await app.register(
     async (scope) => {
