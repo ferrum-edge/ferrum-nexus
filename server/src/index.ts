@@ -1191,8 +1191,9 @@ function logBackendEgressOptOuts(app: FastifyInstance, config: NexusConfig): voi
   if (config.allowUnattestedEdgeEgress) {
     app.log.warn(
       { egress_profile: 'unattested-edge-opt-in' },
-      'BACKEND EGRESS NOT GUARANTEED: NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true admits backend ' +
-        'writes the gateway cannot attest as public-only; every data plane must enforce it',
+      'BACKEND EGRESS NOT GUARANTEED: NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true waives the ' +
+        'gateway egress attestation but still requires public_only_guaranteed, so it admits ' +
+        'no control-plane/data-plane pairing; set NEXUS_EXPECTED_DATA_PLANES for one',
     );
   }
 }

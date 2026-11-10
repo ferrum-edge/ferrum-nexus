@@ -510,18 +510,17 @@ export interface NexusConfig {
    */
   allowPrivateUpstreams: boolean;
   /**
-   * Whether backend writes may proceed when the gateway cannot attest public-only
-   * egress on its own data plane (`NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS`), as in a
-   * control-plane/data-plane pairing.
+   * `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS`: waive the gateway's public-only
+   * attestation for backend writes. Defaults to `false`.
    *
-   * Narrower than {@link allowPrivateUpstreams}: it relaxes only the Edge
-   * attestation, so Nexus keeps its own suffix, IP-literal and resolved-address
-   * screening of every upstream. The operator takes responsibility for enforcing
-   * public-only egress on every data plane. Defaults to `false`.
-   *
-   * It still requires `public_only_guaranteed=true`. Edge v0.9.13 (egress policy
-   * schema 2) reports that only for `local-data-plane`, so against it this opt-in
-   * admits no control plane.
+   * Narrower than {@link allowPrivateUpstreams}: Nexus keeps its own suffix,
+   * IP-literal and resolved-address screening of every upstream. It still
+   * requires `public_only_guaranteed=true`, which egress policy schema 2 reports
+   * only for a local data plane in public mode with no allow CIDRs, the pairing
+   * the public profile already admits, so it admits no control-plane/data-plane
+   * pairing. Those publish under the public profile through
+   * `NEXUS_EXPECTED_DATA_PLANES` (Edge v0.9.14 and later), or under
+   * {@link allowPrivateUpstreams}.
    */
   allowUnattestedEdgeEgress: boolean;
   /**

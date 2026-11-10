@@ -1885,8 +1885,9 @@ export function createFerrumAdminClient(
 
   async function assertBackendEgress(): Promise<BackendEgressAdmission> {
     const { reading, freshness } = await readEgressPolicy();
-    // Either opt-out admits a recognized weaker process policy, but neither
-    // describes it as public-only, and neither skips the parse above.
+    // The private-upstreams opt-out admits a recognized weaker process policy
+    // without describing it as public-only; the unattested opt-out still needs
+    // `public_only_guaranteed`. Neither skips the parse above.
     const assessment = assessBackendEgress(reading, deps, freshness);
     if (assessment.admission === null) {
       const message = 'The gateway cannot establish the required local public egress policy';
