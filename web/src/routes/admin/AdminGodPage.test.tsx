@@ -28,6 +28,10 @@ const { revoke, remove, disable, sendBroadcast, recent } = vi.hoisted(() => ({
     role: 'client',
   })),
 }));
+const { toastSuccess, toastError } = vi.hoisted(() => ({
+  toastSuccess: vi.fn(),
+  toastError: vi.fn(),
+}));
 vi.mock('../../hooks/useGrants', () => ({
   useGrants: () => ({ data: { items: recent, total: 201 } }),
 }));
@@ -46,7 +50,7 @@ vi.mock('../../hooks/useGodMode', () => ({
   useGodBroadcast: () => ({ mutate: sendBroadcast, isPending: false }),
 }));
 vi.mock('../../stores/toast', () => ({
-  useToast: () => ({ success: vi.fn(), error: vi.fn() }),
+  useToast: () => ({ success: toastSuccess, error: toastError }),
 }));
 vi.mock('../../components/layout/RoleGuard', () => ({
   RoleGuard: ({ children }: { children: ReactNode }) => children,
@@ -104,6 +108,51 @@ describe('emergency targets beyond the first page', () => {
       expect.objectContaining({ [entry.field]: oldest, reason: 'Reviewed emergency request' }),
       expect.any(Object),
     );
+  });
+});
+
+describe('disabling an account', () => {
+  /** Disable `oldest` through the confirmation dialog and return the mutation's callbacks. */
+  function confirmDisable(): { onSuccess: (response: unknown) => void } {
+    renderGodPage();
+    fireEvent.change(screen.getByLabelText('Account ID'), { target: { value: oldest } });
+    fireEvent.change(screen.getAllByLabelText(REASON)[2]!, {
+      target: { value: 'Compromised key' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Disable account' }));
+    const dialog = within(screen.getByRole('dialog'));
+    fireEvent.change(dialog.getByPlaceholderText('DISABLE'), { target: { value: 'DISABLE' } });
+    fireEvent.click(dialog.getByRole('button', { name: 'Disable account' }));
+    expect(disable).toHaveBeenCalledTimes(1);
+    return disable.mock.calls[0]![1] as { onSuccess: (response: unknown) => void };
+  }
+
+  function response(gatewayTeardown: string): unknown {
+    return {
+      user: { id: oldest },
+      revoked_grants: 0,
+      terminated_sessions: 2,
+      gateway_teardown: gatewayTeardown,
+    };
+  }
+
+  it('does not report a disable as done while gateway revocation is pending', () => {
+    const { onSuccess } = confirmDisable();
+    act(() => onSuccess(response('pending')));
+
+    expect(toastSuccess).not.toHaveBeenCalled();
+    expect(toastError).toHaveBeenCalledWith(
+      'Account disabled; gateway revocation pending',
+      expect.stringContaining('gateway credentials keep working'),
+    );
+  });
+
+  it.each(['ok', 'no_consumer'])('reports a disable with teardown %s as done', (outcome) => {
+    const { onSuccess } = confirmDisable();
+    act(() => onSuccess(response(outcome)));
+
+    expect(toastError).not.toHaveBeenCalled();
+    expect(toastSuccess).toHaveBeenCalledWith('Account disabled', '2 session(s) terminated.');
   });
 });
 

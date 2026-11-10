@@ -1,5 +1,11 @@
 # Static, SMTP and SQLite dependency remediation (#165)
 
+> **Historical record.** This is the 2026-09-07 preparation record of
+> [PR #166](https://github.com/ferrum-edge/ferrum-nexus/pull/166), which merged. Every version
+> it names has since moved on, and its "draft" is that PR; read `package.json`, the lockfile
+> and [CHANGELOG.md](../CHANGELOG.md) for what Nexus uses now. The log path it cites is outside
+> this repository.
+
 Metadata and public advisories checked on 2026-09-07. The baseline is
 `3d12382f3d8aaa837ae9f1b7e3bfb774b0c6a42f`, after #164's Fastify/Undici update.
 In this report, "static" means `@fastify/static` and "SQLite" means `better-sqlite3`.

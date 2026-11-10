@@ -1,5 +1,5 @@
 import type { OpenApiRefFailure } from '@ferrum-nexus/shared';
-import { useMemo, useState, type ReactElement } from 'react';
+import { useId, useMemo, useState, type ReactElement } from 'react';
 import { cn } from '../../lib/cn';
 import { Badge, type BadgeTone } from '../ui/Badge';
 import { Button } from '../ui/Button';
@@ -247,7 +247,9 @@ function OperationCard({
   open: boolean;
   onToggle: () => void;
 }): ReactElement {
-  const panelId = `op-panel-${operation.id}`;
+  // One id per card: an operation with two tags is rendered on two cards, and
+  // each button has to control its own panel.
+  const panelId = useId();
   // Created inside this render body so the allowance is spent afresh on every
   // invocation: one budget per card, shared by every schema the card mounts.
   const budget = createRenderBudget(allowance);

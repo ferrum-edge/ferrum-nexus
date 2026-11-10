@@ -174,6 +174,13 @@ export function AgentSubsetPicker({
   );
 }
 
+/**
+ * The agent tools a grant or request covers. An API that publishes no agent
+ * tools gets no line for a grant that names none: every other agent surface is
+ * hidden for it, and approval adds no tool group for it. An explicit subset
+ * still shows, so a grant whose tools were withdrawn reports their exposures as
+ * expired.
+ */
 export function AgentGrantSummary({
   agents,
   subset,
@@ -182,7 +189,8 @@ export function AgentGrantSummary({
   agents?: ApiAgents | null;
   subset?: string[] | null;
   label?: string;
-}): ReactElement {
+}): ReactElement | null {
+  if (!agents && subset == null) return null;
   const selected = agents ? grantedAgentTools(agents, subset).operations : [];
   const stale = subset?.filter((id) => !agents?.operations.some((tool) => tool.id === id)) ?? [];
   return (

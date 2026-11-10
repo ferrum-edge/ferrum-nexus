@@ -226,6 +226,34 @@ describe('OpenApiView', () => {
     }
   });
 
+  it('gives each card of a multi-tag operation its own panel id', () => {
+    const text = JSON.stringify({
+      openapi: '3.0.3',
+      info: { title: 'Tagged API', version: '1.0.0' },
+      paths: {
+        '/shared': {
+          get: { tags: ['A', 'B'], responses: { '200': { description: 'ok' } } },
+        },
+      },
+    });
+
+    render(<OpenApiView text={text} />);
+    const buttons = screen.getAllByRole('button', { expanded: false });
+    expect(buttons).toHaveLength(2);
+    for (const button of buttons) fireEvent.click(button);
+
+    const panels = buttons.map((button) =>
+      document.getElementById(button.getAttribute('aria-controls') ?? ''),
+    );
+    expect(panels[0]).not.toBeNull();
+    expect(panels[1]).not.toBeNull();
+    expect(panels[0]).not.toBe(panels[1]);
+    // Each panel sits in the card of the button that controls it.
+    buttons.forEach((button, index) => {
+      expect(button.parentElement).toContainElement(panels[index] ?? null);
+    });
+  });
+
   it('leaves a short summary whole and untitled', () => {
     render(<OpenApiView text={YAML_SPEC} />);
 

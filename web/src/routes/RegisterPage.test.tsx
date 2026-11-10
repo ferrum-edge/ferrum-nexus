@@ -24,6 +24,7 @@ const EMAIL = /^Email/;
 const PASSWORD = /^Password/;
 const CREATED = /created as/;
 const NOT_ACCEPTING_SELF_SERVICE = /not accepting self-service accounts/;
+const REGISTRATION_CLOSED = /not accepting self-service accounts\. If it offers single sign-on/;
 
 const CAPTCHA = { enabled: false, provider: 'none', site_key: null };
 
@@ -38,6 +39,7 @@ function json(body: unknown, status = 200): Response {
 function stubApi(
   bootstrapRequired: boolean,
   allowedRoles: readonly RegistrableRole[] = REGISTRABLE_ROLES,
+  openRegistration = true,
 ): { bodies: RegisterRequest[] } {
   const bodies: RegisterRequest[] = [];
   vi.stubGlobal(
@@ -55,7 +57,10 @@ function stubApi(
             tagline: null,
             support_email: null,
             captcha: CAPTCHA,
-            registration: { open_registration: true, allowed_roles: [...allowedRoles] },
+            registration: {
+              open_registration: openRegistration,
+              allowed_roles: [...allowedRoles],
+            },
             bootstrap_required: bootstrapRequired,
           }),
         );
@@ -97,10 +102,11 @@ function stubApi(
 async function renderRegisterPage(
   bootstrapRequired: boolean,
   allowedRoles?: readonly RegistrableRole[],
+  openRegistration?: boolean,
 ): Promise<{
   bodies: RegisterRequest[];
 }> {
-  const stub = stubApi(bootstrapRequired, allowedRoles);
+  const stub = stubApi(bootstrapRequired, allowedRoles, openRegistration);
   vi.resetModules();
   const { App } = await import('../App');
   window.history.pushState({}, '', '/register');
@@ -198,5 +204,34 @@ describe('RegisterPage registration policy', () => {
     expect(await screen.findByText(NOT_ACCEPTING_SELF_SERVICE)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Create account' })).toBeDisabled();
     expect(bodies).toHaveLength(0);
+  });
+});
+
+/**
+ * With self-service registration closed the server refuses every sign-up but
+ * the founding one, so the page says so instead of collecting the form.
+ */
+describe('RegisterPage closed registration', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    window.history.pushState({}, '', '/');
+  });
+
+  it('shows a notice instead of the form', async () => {
+    const { bodies } = await renderRegisterPage(false, REGISTRABLE_ROLES, false);
+
+    expect(await screen.findByText(REGISTRATION_CLOSED)).toBeInTheDocument();
+    expect(screen.queryByLabelText(DISPLAY_NAME)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Create account' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Go to sign in' })).toHaveAttribute('href', '/login');
+    expect(bodies).toHaveLength(0);
+  });
+
+  it('still offers the founding registration', async () => {
+    await renderRegisterPage(true, REGISTRABLE_ROLES, false);
+
+    expect(await screen.findByLabelText(BOOTSTRAP_TOKEN)).toBeInTheDocument();
+    expect(screen.queryByText(REGISTRATION_CLOSED)).not.toBeInTheDocument();
   });
 });
