@@ -9,18 +9,9 @@ import { QueryErrorState } from '../components/ui/QueryErrorState';
 import { SearchInput } from '../components/ui/Input';
 import { PaginationBar } from '../components/ui/DataTable';
 import { StatusPill, VisibilityBadge } from '../components/ui/StatusPill';
-
-const WHITESPACE = /\s+/;
+import { initials } from '../lib/format';
 
 const GRID = 'grid gap-4 md:grid-cols-2 xl:grid-cols-3';
-
-/** Initials for an owner's avatar tile: first letters of up to two words. */
-function initials(name: string): string {
-  const parts = name.trim().split(WHITESPACE).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-  return `${parts[0]![0] ?? ''}${parts[parts.length - 1]![0] ?? ''}`.toUpperCase();
-}
 
 function CatalogCard({ api }: { api: CatalogApi }): ReactElement {
   return (

@@ -9,7 +9,7 @@ import { Tooltip } from '../ui/Tooltip';
 import { locationForPath } from './nav';
 import { useNavPathname } from './navLocation';
 import { NotificationsBell } from './NotificationsBell';
-import { initials } from './Sidebar';
+import { initials } from '../../lib/format';
 
 const ICON_BUTTON =
   'inline-flex h-9 w-9 items-center justify-center rounded-md text-fg-muted transition-colors ' +

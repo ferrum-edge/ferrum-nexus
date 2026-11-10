@@ -5,8 +5,7 @@ import { cn } from '../../lib/cn';
 import { Icon } from '../ui/Icon';
 import { NAV_SECTIONS, isNavItemActive, navItemsForSection } from './nav';
 import { useNavPathname } from './navLocation';
-
-const WHITESPACE = /\s+/;
+import { initials } from '../../lib/format';
 
 export interface SidebarProps {
   id: string;
@@ -20,14 +19,6 @@ export interface SidebarProps {
   logoDataUrl: string | null;
   /** Signed-in account, shown in the rail footer. */
   user?: Pick<User, 'display_name' | 'email' | 'role'> | null;
-}
-
-/** Initials for an avatar tile: first letters of up to two words. */
-export function initials(name: string): string {
-  const parts = name.trim().split(WHITESPACE).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-  return `${parts[0]![0] ?? ''}${parts[parts.length - 1]![0] ?? ''}`.toUpperCase();
 }
 
 /** Brand tile: the uploaded logo, or a monogram of the portal name on the accent. */

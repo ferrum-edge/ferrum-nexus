@@ -2,7 +2,7 @@ import { auditActorLabel, auditTone, type AuditTone } from '../lib/audit';
 import { Link } from '@tanstack/react-router';
 import type { ReactElement, ReactNode } from 'react';
 import { CREDENTIAL_TYPE_LABELS } from '../lib/credential-labels';
-import { formatRelative, humanize } from '../lib/format';
+import { formatRelative, humanize, initials } from '../lib/format';
 import { queryLoadState } from '../lib/query-state';
 import { useAccessRequests } from '../hooks/useAccessRequests';
 import { useAuditLogs } from '../hooks/useAuditLogs';
@@ -18,23 +18,8 @@ import { StatusPill } from '../components/ui/StatusPill';
 import { EmptyState } from '../components/ui/EmptyState';
 import { QueryErrorState } from '../components/ui/QueryErrorState';
 
-const WHITESPACE = /\s+/;
-
 /** Destinations reachable from a dashboard panel header. */
 type PanelLink = '/catalog' | '/credentials' | '/apis' | '/admin/audit';
-
-/**
- * Initials for an avatar tile: first letters of up to two words.
- *
- * Kept local rather than imported from the navigation rail so this page owns
- * its own presentation helpers.
- */
-function initials(name: string): string {
-  const parts = name.trim().split(WHITESPACE).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-  return `${parts[0]![0] ?? ''}${parts[parts.length - 1]![0] ?? ''}`.toUpperCase();
-}
 
 /** Monogram tile standing in for a person's picture in a list row. */
 function Avatar({ name }: { name: string }): ReactElement {

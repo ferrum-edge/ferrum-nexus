@@ -320,23 +320,30 @@ function forgetDeletedApi(queryClient: QueryClient, id: string): void {
   });
 }
 
+/**
+ * Bring the cache up to date after an API was deleted, by its owner or through
+ * god mode: forget the API itself and refresh everything that listed it or
+ * counted its access requests, grants and per-application access.
+ */
+export function refreshAfterApiDelete(queryClient: QueryClient, id: string): void {
+  forgetDeletedApi(queryClient, id);
+  void queryClient.invalidateQueries({
+    queryKey: queryKeys.apis.all,
+    predicate: (query) => !isQueryForApi(query, id),
+  });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.grants.all });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.accessRequests.all });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.applications.all });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.credentials.all });
+}
+
 /** Delete an API and its Edge proxy. */
 export function useDeleteApi(): UseMutationResult<DeleteApiResponse, Error, string> {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => apisApi.remove(id),
-    onSuccess: (_response, id) => {
-      forgetDeletedApi(queryClient, id);
-      void queryClient.invalidateQueries({
-        queryKey: queryKeys.apis.all,
-        predicate: (query) => !isQueryForApi(query, id),
-      });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.grants.all });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.accessRequests.all });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.applications.all });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.credentials.all });
-    },
+    onSuccess: (_response, id) => refreshAfterApiDelete(queryClient, id),
   });
 }
 

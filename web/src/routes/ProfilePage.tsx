@@ -1,7 +1,7 @@
 import { useSearch } from '@tanstack/react-router';
 import { useState, type FormEvent, type ReactElement } from 'react';
 import { isSsoErrorReason, MIN_PASSWORD_LENGTH } from '@ferrum-nexus/shared';
-import { formatDateTime } from '../lib/format';
+import { formatDateTime, initials } from '../lib/format';
 import { SSO_ERROR_MESSAGES } from '../lib/sso-errors';
 import { useSsoConfig } from '../hooks/useBranding';
 import { useMyIdentities, useStartSsoLink, useUpdateProfile } from '../hooks/useUsers';
@@ -15,16 +15,6 @@ import { RoleBadge, StatusPill } from '../components/ui/StatusPill';
 import { FormNotice } from '../components/auth/AuthShell';
 import { PasswordField } from '../components/auth/PasswordField';
 import { NotificationPreferencesCard } from '../components/profile/NotificationPreferencesCard';
-
-const WHITESPACE = /\s+/;
-
-/** Initials for the identity tile: first letters of up to two words. */
-function initials(name: string): string {
-  const parts = name.trim().split(WHITESPACE).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-  return `${parts[0]![0] ?? ''}${parts[parts.length - 1]![0] ?? ''}`.toUpperCase();
-}
 
 /**
  * The account's single sign-on links, and a button per provider it is not

@@ -133,6 +133,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   reporting "0 references are still orphaned" as a success. The admin **All
   APIs** list shows **Not deployed** for such APIs, as **My APIs** does, and
   says when it failed to load instead of "No APIs match these filters" (#701).
+- Web UI consistency (#702). Deleting an API through god mode refreshes the
+  same views an ordinary delete does, so the session no longer keeps showing
+  the deleted API's access requests, credentials and per-application counts. A
+  refused single sign-on save is shown once, in the card, instead of also in a
+  toast. Avatar initials come from one helper, so a one-word name such as
+  "alice" reads "AL" in the users table as it does in the header. The routes
+  enforcement and agent operation hints say "Edge v0.9.15 and later" rather
+  than naming one Edge release.
 
 ### Security
 

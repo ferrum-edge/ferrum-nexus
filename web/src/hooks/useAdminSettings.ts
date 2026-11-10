@@ -67,6 +67,8 @@ export function useUpdateAdminSso(): UseMutationResult<
 > {
   const queryClient = useQueryClient();
   return useMutation({
+    // Both SSO cards render the error inline, so the global toast stays out.
+    meta: { silent: true },
     mutationFn: (body: UpdateSsoSettingsRequest) => adminApi.updateSso(body),
     onSuccess: (data) => {
       queryClient.setQueryData(queryKeys.adminSso, data);
