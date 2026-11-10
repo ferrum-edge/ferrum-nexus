@@ -344,6 +344,10 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
       return edge.pluginConfigs.listByProxy(proxyId);
     },
 
+    async withProxy(proxyId, fn) {
+      return edge.serializePerKey(proxyLockKey(proxyId), fn);
+    },
+
     /**
      * `PUT /proxies/{id}` is a whole-resource replace with no concurrency
      * token, so `change` receives the document the gateway just returned and
@@ -365,10 +369,6 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
      * the write entirely. Returns the document **as it was found**, which is
      * what an undo step needs.
      */
-    async withProxy(proxyId, fn) {
-      return edge.serializePerKey(proxyLockKey(proxyId), fn);
-    },
-
     async mutateProxy(proxyId, change, subject) {
       return binder.withProxy(proxyId, () => binder.mutateProxyLocked(proxyId, change, subject));
     },

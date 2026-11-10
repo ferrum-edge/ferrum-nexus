@@ -41,7 +41,7 @@ describe('readableForeground', () => {
   it('always reaches at least 4.5:1 against a saturated mid-tone', () => {
     for (const hex of ['#f97316', '#22d3ee', '#16a34a', '#dc2626', '#7c3aed', '#0ea5e9']) {
       const bg = parseHex(hex)!;
-      expect(contrastRatio(bg, readableForeground(bg))).toBeGreaterThanOrEqual(3);
+      expect(contrastRatio(bg, readableForeground(bg))).toBeGreaterThanOrEqual(4.5);
     }
   });
 });

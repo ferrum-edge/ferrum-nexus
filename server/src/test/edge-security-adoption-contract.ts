@@ -1605,7 +1605,7 @@ export function runEdgeSecurityAdoptionContract(
         },
       },
     ]) {
-      it(`retains recovery after a landed delete with ${response.status}/${String(response.body.live)} acknowledgement`, async () => {
+      it(`retains recovery after a landed delete with ${response.status}/${String(response.body.durable)}/${String(response.body.live)}/${String(response.body.profile)} acknowledgement`, async () => {
         const published = await publish('docs_only');
         const proxyId = published.api.ferrum_proxy_id!;
         const key = `gateway_recovery:nexus:${published.api.id}`;

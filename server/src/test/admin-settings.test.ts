@@ -575,7 +575,17 @@ describe('admin settings', () => {
       method: 'GET',
       url: `/api/admin/audit-logs?actor_user_id=${founder.user.id}&target_type=settings`,
     });
-    assert.ok(byActor.json<ListAuditLogsResponse>().total >= 3);
+    assert.equal(byActor.statusCode, 200, byActor.body);
+    const rows = byActor.json<ListAuditLogsResponse>();
+    assert.ok(rows.total >= 3);
+    assert.ok(rows.items.length > 0);
+    assert.ok(
+      rows.items.every(
+        (row) => row.actor_user_id === founder.user.id && row.target_type === 'settings',
+      ),
+    );
+    // Both filters must narrow: the log also holds rows on other targets.
+    assert.ok(rows.total < all.json<ListAuditLogsResponse>().total);
 
     const future = await harness.authed(founder, {
       method: 'GET',

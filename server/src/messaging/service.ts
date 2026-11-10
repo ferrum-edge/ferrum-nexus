@@ -57,9 +57,9 @@
  * it, never the other way round: the child insert takes a shared lock on the
  * parent for the foreign key, so inserting first and touching afterwards let
  * two simultaneous replies cycle S→X on one row and deadlock. Nothing outside
- * the store happens inside the transaction — the audit row, the notification
- * and the email all follow the commit — so the body is safely re-runnable if
- * an adapter does have to retry it.
+ * the store happens inside the transaction — the audit row is written through
+ * `tx`, and the notification and the email follow the commit — so the body is
+ * safely re-runnable if an adapter does have to retry it.
  */
 
 import {

@@ -847,6 +847,7 @@ describe('password reset', () => {
       purpose: 'email_verification',
       expires_at: isoInSeconds(3600),
     });
+    const before = (await harness.store.users.findById(session.user.id))?.password_hash;
 
     // A 24-hour verification link must not be spendable as a password reset:
     // that would turn "can read this mailbox once" into "can take the account
@@ -858,10 +859,7 @@ describe('password reset', () => {
     });
     assert.equal(response.statusCode, 400, response.body);
     assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
-    assert.equal(
-      (await harness.store.users.findById(session.user.id))?.password_hash,
-      (await harness.store.users.findByEmail('crossed-wires@example.test'))?.password_hash,
-    );
+    assert.equal((await harness.store.users.findById(session.user.id))?.password_hash, before);
     const stillWorks = await harness.loginUser('crossed-wires@example.test');
     assert.ok(stillWorks.sessionToken, 'the account still has its original password');
   });

@@ -73,14 +73,10 @@ describe('deleting an API that races an enforcement conversion', () => {
     await harness.close();
   });
 
-  /** Undo the patches a test installed, whether or not it reached its own. */
-  const cleanups: (() => void)[] = [];
-
   // Both injections are one-shot *and* matched, so one a test armed but never
   // met would stay armed and fire inside the next test instead.
   afterEach(() => {
     harness.edge.clearInjections();
-    while (cleanups.length > 0) cleanups.pop()?.();
   });
 
   /**

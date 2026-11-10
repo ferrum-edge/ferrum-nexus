@@ -57,7 +57,9 @@ Every change must keep three rules true:
    is decided.
 
 The public reads are `GET /api/health`, `GET /api/health/edge`,
-`GET /api/auth/captcha` and `GET /api/branding`. Branding lets the login page
+`GET /api/auth/captcha`, `GET /api/auth/sso` (the login policy and the enabled
+providers' ids and display names) and `GET /api/branding`; the single sign-on
+`start` and `callback` routes are public browser navigations. Branding lets the login page
 render the right name, logo and colours before a session exists. It carries the
 CAPTCHA _site_ key (never the secret) and the public part of the registration
 policy (whether sign-up is open and which roles it offers).
@@ -87,7 +89,7 @@ docker/    Dockerfile + docker-compose.example.yml
 | `index.ts`                                     | Composition root: `buildServer(config, deps)` + `main()`. No business logic.                                                                                           |
 | `config/index.ts`                              | The **only** reader of `process.env`. zod-validated into `NexusConfig`.                                                                                                |
 | `lib/`                                         | `crypto.ts`, `errors.ts` (`NexusError`), `keyed-serializer.ts` + `lease-fence.ts` (§5.2), `ids.ts`, `logger.ts`.                                                       |
-| `db/store.ts`                                  | The `NexusStore` interface: 30 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                                                 |
+| `db/store.ts`                                  | The `NexusStore` interface: 31 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                                                 |
 | `db/adapters/{sqlite,postgres,mysql,mongodb}/` | The four implementations.                                                                                                                                              |
 | `db/adapters/sql-common.ts`, `sql-repos.ts`    | Dialect shims and the repository bodies shared by PostgreSQL and MySQL.                                                                                                |
 | `db/migrations/`                               | SQL migrations per dialect: `.sql` (SQLite), `.pg.sql`, `.mysql.sql`. MongoDB declares its indexes in code.                                                            |
@@ -161,13 +163,13 @@ Why this shape:
   once and passed to each. That puts every consumer write behind the same
   per-consumer lock (§5.2).
 
-Five background pollers start after `app.ready()` and stop on `onClose`: the
+Six background pollers start after `app.ready()` and stop on `onClose`: the
 email outbox (§7), gateway teardown (§7.1), account-recovery revocation (§7.2),
-the hourly session/token expiry sweep (§8.1), and the periodic gateway-reference
-reconciliation
+access gateway jobs (§7.3), the hourly session/token expiry sweep (§8.1), and the
+periodic gateway-reference reconciliation
 (`NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`, see
 [`operations.md`](operations.md#13-retargeting-or-rebuilding-ferrum-edge)). All
-five are off under `NEXUS_ENV=test`, where tests call `tick()` / `scan()`
+six are off under `NEXUS_ENV=test`, where tests call `tick()` / `scan()`
 directly.
 
 ---

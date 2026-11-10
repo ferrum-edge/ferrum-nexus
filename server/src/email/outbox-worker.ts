@@ -287,7 +287,7 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
     });
     const deadline = Date.parse(at) + OUTBOX_SEND_BUDGET_MS;
     if (authorized === 'lost') {
-      lostClaim(result, entry, 'markSent');
+      lostClaim(result, entry, 'authorize');
       return;
     }
     if (authorized === 'ineligible') {
@@ -434,7 +434,8 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
   }
 
   /**
-   * Record a settling write that was refused because the claim moved on.
+   * Record a settling write that was refused because the claim moved on, or
+   * (`authorize`) a claim found gone before SMTP was contacted.
    *
    * The row now belongs to whichever worker reclaimed it after the stale sweep,
    * so this attempt has no say in its outcome. Overwriting it anyway is what
@@ -443,7 +444,7 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
   function lostClaim(
     result: OutboxTickResult,
     entry: EmailOutboxRecord,
-    write: 'markSent' | 'markFailed' | 'reschedule',
+    write: 'authorize' | 'markSent' | 'markFailed' | 'reschedule',
   ): void {
     result.lost += 1;
     log(

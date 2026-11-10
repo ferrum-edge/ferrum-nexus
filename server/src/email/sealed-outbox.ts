@@ -125,11 +125,6 @@ export function sealedEnqueueInput(
   };
 }
 
-/** True when the row's content is a sealed envelope rather than rendered text. */
-export function isSealedOutboxRecord(entry: EmailOutboxRecord): boolean {
-  return entry.subject === OUTBOX_SEALED_SUBJECT && entry.body_text.startsWith(SEALED_BODY_PREFIX);
-}
-
 /**
  * The content to deliver for `entry`: opened when it is sealed, as stored when
  * it is not.

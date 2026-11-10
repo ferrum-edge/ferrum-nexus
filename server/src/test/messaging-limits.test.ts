@@ -88,8 +88,9 @@ describe('messaging rate limits', () => {
       const response = await harness.authed(alice, {
         method: 'POST',
         url: '/api/threads',
-        // A distinct api-less subject each time, so nothing is deduplicated
-        // into an existing thread and every request is a real creation.
+        // Platform threads are reused per account, so these land in one thread;
+        // each accepted request still stores one message, which is what the
+        // limiter is counted against below.
         payload: { subject: `Burst ${attempt}`, body: 'Please answer' },
       });
       statuses.push(response.statusCode);
@@ -104,8 +105,8 @@ describe('messaging rate limits', () => {
     assert.equal(statuses.filter((status) => status === 429).length, 2);
     assert.equal(error(refusal).code, 'RATE_LIMITED');
 
-    // Ten accepted creations, ten messages, ten platform threads — and not one
-    // row more from the two that were refused.
+    // Ten accepted requests, ten messages (all in the sender's one platform
+    // thread) — and not one row more from the two that were refused.
     const counts = await rowCounts(harness);
     assert.equal(counts.messages, 10, 'a refused request writes no message row');
   });
@@ -144,9 +145,8 @@ describe('messaging rate limits', () => {
     const before = await rowCounts(harness);
     const statuses: number[] = [];
     let refusal = '';
-    // Bob has spent 2 of his 30 replies on the two thread-creation openers
-    // above, which are separate routes with separate buckets — so all 30 of
-    // these fit until the 31st.
+    // The two thread-creation openers above are a separate route with a
+    // separate bucket, so all 30 of these fit until the 31st.
     for (let attempt = 0; attempt < 32; attempt += 1) {
       const response = await harness.authed(bob, {
         method: 'POST',

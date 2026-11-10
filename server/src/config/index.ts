@@ -108,11 +108,10 @@ export const DEFAULT_MAX_MASS_EMAIL_BYTES = 64 * 1024 * 1024;
  * Default ceiling on mass-email campaigns per administrator per rolling 24
  * hours (`NEXUS_MAX_MASS_EMAILS_PER_DAY`): 5.
  *
- * Deliberately low for now. Campaign mail and password-reset and verification
- * mail share one first-in, first-out outbox, so a day's campaigns are backlog
- * ahead of every security message; 5 × the 64 MiB campaign ceiling bounds that
- * at about 320 MiB per administrator. Expected to rise once security mail gets
- * a priority lane in the outbox (issue #500).
+ * Deliberately low: it bounds campaign storage. Security mail has had claim
+ * priority in the outbox since issue #500, so campaigns no longer queue ahead
+ * of it, but 5 × the 64 MiB campaign ceiling still bounds a day's campaign
+ * mail at about 320 MiB per administrator.
  */
 export const DEFAULT_MAX_MASS_EMAILS_PER_DAY = 5;
 
@@ -339,7 +338,7 @@ export interface NexusConfig {
    * a startup banner for as long as it is set.
    */
   captchaEnforcement: CaptchaEnforcement;
-  /** Whether the `/api/auth/*`, `/api/health`, `/api/branding`, `/api/apis/*`, `/api/threads/*` and `/api/access-requests/*` rate limiters are installed. Off under `NEXUS_ENV=test`. */
+  /** Whether any `@fastify/rate-limit` instance is installed. Off under `NEXUS_ENV=test`. */
   rateLimitEnabled: boolean;
   /**
    * How long `GET /api/health` reuses a dependency probe

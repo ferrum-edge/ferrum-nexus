@@ -126,8 +126,8 @@ describe('register to verified, end to end through the outbox', () => {
     assert.ok(token);
 
     // Fail the account update exactly once, after the token has been burned.
-    // There is no resend endpoint, so a burn that outlives its own purpose
-    // locks the account out of the portal permanently.
+    // A burn that outlives its own purpose would leave the visitor with a dead
+    // link until they ask for a new one.
     const users: UserRepo = harness.store.users;
     const realUpdate = users.update.bind(users);
     let attempts = 0;

@@ -29,9 +29,9 @@ const FIXTURE = [
   'ferrum_mesh_cert_expiry_seconds{namespace="nexus",} 86400',
   // No labels at all, plus an explicit millisecond timestamp.
   'ferrum_rate_limit_exceeded_total 18 1711720800000',
-  // Escapes: a quote, a backslash and a newline inside one label value.
+  // Escapes: a quote and a backslash inside one label value.
   'ferrum_gateway_listener_failures_active{reason="bind \\"failed\\" on C:\\\\edge",protocol="tcp"} 1',
-  // Scientific notation and the three non-finite spellings.
+  // Scientific notation and two of the non-finite spellings (`+Inf`, `NaN`).
   'ferrum_overload_resource_limit{resource="memory"} 1.5e3',
   'ferrum_tls_cert_expiry_seconds{source="file"} +Inf',
   'ferrum_tls_inventory_snapshot_max_age_seconds NaN',

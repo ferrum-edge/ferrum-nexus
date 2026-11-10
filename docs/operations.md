@@ -1738,7 +1738,7 @@ NEXUS_DB_DRIVER=mongodb
 NEXUS_DB_URL=mongodb://mongo-a:27017,mongo-b:27017/nexus?replicaSet=rs0
 ```
 
-**Supported servers: MongoDB 4.4.2 through 9.0.** The `mongodb` 7.7 Node.js
+**Supported servers: MongoDB 4.4.2 through 9.0.** The `mongodb` 7.x Node.js
 driver rejects servers older than 4.4 (wire version 9), and `init()` sends the
 `hello` command, which MongoDB added in 4.4.2. CI runs the store contracts on
 MongoDB 9.0 and the standalone-refusal check on 4.4.29. Azure Cosmos DB for
@@ -1872,9 +1872,11 @@ you register replaces it. If you set `NEXUS_BOOTSTRAP_TOKEN` instead, put it in
 The image ([`docker/Dockerfile`](../docker/Dockerfile)) is a two-stage build on
 a digest-pinned `node:22-bookworm-slim`. The supported Node range since `v0.4.0` is
 `^22.22.2 || ^24.15.0 || >=26.0.0`; releases before it supported Node 22.14 or later.
-The pinned digest contains Node 22.23.3 on amd64 and arm64; the
+Dependabot advances the pinned digest within that channel, so the exact Node 22
+patch release changes over time; the
 [migration notes](dependency-majors-449-higher-floor-draft.md) record the published OCI
-evidence and the rollback boundary. The image sets:
+evidence for the digest `v0.4.0` through `v0.5.2` shipped (Node 22.23.3) and the
+rollback boundary. The image sets:
 
 - `NODE_ENV=production`, and runs as the unprivileged `node` user.
 - `NEXUS_HOST=0.0.0.0`, `NEXUS_PORT=8787`.
@@ -2806,8 +2808,8 @@ replica-set database. SQLite cannot be shared, so SQLite means one instance.
 
 ### Other multi-instance notes
 
-- **The outbox, teardown and account-recovery workers are safe on several
-  instances.** Claims are atomic, and any instance's stale sweep recovers
+- **The outbox, teardown, account-recovery and access-gateway workers are safe
+  on several instances.** Claims are atomic, and any instance's stale sweep recovers
   another's abandoned claims.
 - **Sessions live in the database**, so any instance serves any session.
 - **Rate limiters are per process** (N instances allow N × the limit).
@@ -2913,7 +2915,7 @@ mean the gateway is down.
 ### Shutdown
 
 `SIGINT`/`SIGTERM` shut down gracefully: the outbox, gateway-teardown,
-account-recovery, expiry-sweep and reconciliation workers stop, the Admin API
+account-recovery, access-gateway, expiry-sweep and reconciliation workers stop, the Admin API
 client closes, Fastify drains, and the store closes. Allow a few seconds of
 termination grace. Anything a worker had claimed but not finished is recovered
 by a stale sweep five minutes after the claim.

@@ -551,7 +551,7 @@ describe('mass email aggregate size ceiling', () => {
       assert.equal(defaults.config.maxMassEmailBytes, DEFAULT_MAX_MASS_EMAIL_BYTES);
       assert.equal(DEFAULT_MAX_MASS_EMAIL_BYTES, 64 * 1024 * 1024);
       assert.equal(defaults.config.maxMassEmailsPerDay, DEFAULT_MAX_MASS_EMAILS_PER_DAY);
-      // Low until security mail gets its own outbox lane (issue #500).
+      // Kept low to bound campaign storage; security mail has had claim priority since #500.
       assert.equal(DEFAULT_MAX_MASS_EMAILS_PER_DAY, 5);
     } finally {
       await defaults.close();

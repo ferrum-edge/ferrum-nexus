@@ -117,13 +117,6 @@ export function encodeJson(value: unknown): string | null {
   return value === null || value === undefined ? null : JSON.stringify(value);
 }
 
-/** Encode an optional string, normalising `undefined` to SQL NULL. */
-export function encodeNullable(value: unknown): Param {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'number' || typeof value === 'string') return value;
-  return String(value);
-}
-
 /* ── Statement building ─────────────────────────────────────────────────── */
 
 /** A `WHERE` fragment plus its bound parameters. */
@@ -137,7 +130,7 @@ export class WhereBuilder {
   private readonly conditions: string[] = [];
   private readonly values: Param[] = [];
 
-  /** Add `condition` with its parameters when `value` is neither undefined nor null. */
+  /** Add `condition` with its parameters when `value` is not `undefined`. */
   add(value: unknown, condition: string, ...params: Param[]): this {
     if (value === undefined) return this;
     this.conditions.push(condition);

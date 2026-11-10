@@ -11,7 +11,7 @@ import { useAuth } from '../../stores/auth';
 import { useToast } from '../../stores/toast';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
-import { Card, CardBody, CardHeader } from '../ui/Card';
+import { Card, CardHeader } from '../ui/Card';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { EmptyState } from '../ui/EmptyState';
 import { Icon } from '../ui/Icon';

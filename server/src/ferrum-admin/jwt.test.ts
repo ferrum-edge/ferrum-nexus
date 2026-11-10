@@ -185,11 +185,9 @@ describe('createAdminTokenMinter', () => {
   });
 
   it('re-mints whenever the token is inside the refresh window', async () => {
-    // The refresh buffer is min(60, max(1, ttl / 4)). With ttl = 5 the buffer
-    // is 1s, so a token is only reused while more than 4s of life remain —
-    // with ttl = 5 that is immediately true, and with ttl = 5 and a buffer
-    // equal to the whole lifetime it is never true. Use ttl = 5 for the reuse
-    // case and ttl = 1 (buffer == ttl) for the always-refresh case.
+    // The refresh buffer is min(60, max(1, floor(ttl / 4))) seconds. With
+    // ttl = 1 the buffer equals the whole lifetime, so a token is never reused;
+    // with ttl = 5 the buffer is 1s, so a fresh token is reused.
     const shortLived = createAdminTokenMinter(edgeConfig({ jwtTtlSeconds: 1 }));
     const first = await shortLived.getToken();
     const second = await shortLived.getToken();

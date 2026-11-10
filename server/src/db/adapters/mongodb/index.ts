@@ -1,5 +1,5 @@
 /**
- * MongoDB implementation of {@link NexusStore} (`mongodb` driver v6).
+ * MongoDB implementation of {@link NexusStore} (`mongodb` driver v7).
  *
  * The logical schema is unchanged: **one collection per logical table**, with
  * the same names the SQL migrations use. Only the physical representation
@@ -665,8 +665,8 @@ function mapApiPlugin(row: Row): ApiPluginRecord {
     // both sides of the store contract see the same parsed objects.
     config: (row.config ?? {}) as Record<string, unknown>,
     trigger: (row.trigger ?? null) as ApiPluginTrigger | null,
-    // Absent on every document written before 015, which is exactly the `null`
-    // the SQL dialects get from the new column.
+    // Absent on a document written without the field, which reads as the
+    // `null` the SQL dialects get from the column.
     ferrum_plugin_config_id: strOrNull(row.ferrum_plugin_config_id),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),

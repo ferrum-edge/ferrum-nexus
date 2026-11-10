@@ -330,13 +330,3 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
     },
   };
 }
-
-/** Add `group` to `groups` if absent, preserving order. */
-export function withGroup(groups: string[], group: string): string[] {
-  return groups.includes(group) ? groups : [...groups, group];
-}
-
-/** Remove every occurrence of `group` from `groups`. */
-export function withoutGroup(groups: string[], group: string): string[] {
-  return groups.filter((entry) => entry !== group);
-}

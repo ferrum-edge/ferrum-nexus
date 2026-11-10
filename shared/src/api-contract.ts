@@ -1204,7 +1204,7 @@ export interface ShowOnceSecret {
   password?: string;
   /** JWT signing secret — present for `jwt`. */
   jwt_secret?: string;
-  /** JWT `iss`/key id the gateway expects — present for `jwt`. */
+  /** The consumer username; the client puts it in the token's `sub` claim. Present for `jwt`. */
   jwt_key?: string;
 }
 

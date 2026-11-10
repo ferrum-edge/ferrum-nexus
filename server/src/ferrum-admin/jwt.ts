@@ -30,7 +30,7 @@
  *
  * Tokens are cached in a small LRU keyed by every signing input (the secret is
  * hashed into the key, never stored in it) and re-minted once the remaining
- * lifetime drops below `min(60, ttl / 4)` seconds, so the token handed to
+ * lifetime drops below `min(60, max(1, floor(ttl / 4)))` seconds, so the token handed to
  * undici always has meaningful life left. This is the ferrum-foundry pattern.
  */
 

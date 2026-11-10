@@ -50,15 +50,6 @@ export function useApplications(
   });
 }
 
-/** One application, with its live grant and credential counts. */
-export function useApplication(id: string): UseQueryResult<GetApplicationResponse> {
-  return useQuery({
-    queryKey: queryKeys.applications.detail(id),
-    queryFn: () => applicationsApi.get(id),
-    enabled: id.length > 0,
-  });
-}
-
 /**
  * The applications with these ids, keyed by id, fetched one by one.
  *

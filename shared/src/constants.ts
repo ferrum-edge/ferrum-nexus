@@ -198,11 +198,6 @@ export const HTTP_METHODS = [
 /** One entry of {@link HTTP_METHODS}. */
 export type HttpMethod = (typeof HTTP_METHODS)[number];
 
-/** Runtime type guard for {@link HttpMethod}. */
-export function isHttpMethod(value: unknown): value is HttpMethod {
-  return typeof value === 'string' && (HTTP_METHODS as readonly string[]).includes(value);
-}
-
 /**
  * Shortest backend timeout the portal will accept, in milliseconds.
  *

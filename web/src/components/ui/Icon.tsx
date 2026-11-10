@@ -50,11 +50,8 @@ export type IconName =
   | 'code'
   | 'eye'
   | 'eye-off'
-  | 'filter'
   | 'globe'
   | 'help'
-  | 'home'
-  | 'image'
   | 'inbox'
   | 'info'
   | 'layout'
@@ -63,7 +60,6 @@ export type IconName =
   | 'message'
   | 'palette'
   | 'sparkles'
-  | 'type'
   | 'upload'
   | 'zap';
 
@@ -291,11 +287,6 @@ const PATHS: Readonly<Record<IconName, ReactNode>> = {
       <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
     </>
   ),
-  filter: (
-    <>
-      <path d="M4 5h16l-6.5 8v5l-3 2v-7L4 5Z" />
-    </>
-  ),
   globe: (
     <>
       <circle cx="12" cy="12" r="8.5" />
@@ -308,20 +299,6 @@ const PATHS: Readonly<Record<IconName, ReactNode>> = {
       <circle cx="12" cy="12" r="8.5" />
       <path d="M9.6 9.5a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1 .9-1 1.6" />
       <path d="M12 16.5v.5" />
-    </>
-  ),
-  home: (
-    <>
-      <path d="m4 11 8-7 8 7" />
-      <path d="M6 9.5V20h12V9.5" />
-      <path d="M10 20v-6h4v6" />
-    </>
-  ),
-  image: (
-    <>
-      <rect x="4" y="5" width="16" height="14" rx="2" />
-      <circle cx="9" cy="10" r="1.5" />
-      <path d="m20 15-4.5-4.5L8 18" />
     </>
   ),
   inbox: (
@@ -375,13 +352,6 @@ const PATHS: Readonly<Record<IconName, ReactNode>> = {
       <path d="M12 4l1.6 4.4L18 10l-4.4 1.6L12 16l-1.6-4.4L6 10l4.4-1.6L12 4Z" />
       <path d="M5 17l.7 1.8L7.5 19.5l-1.8.7L5 22l-.7-1.8-1.8-.7 1.8-.7L5 17Z" />
       <path d="M19 3l.5 1.3L20.8 4.8l-1.3.5L19 6.6l-.5-1.3-1.3-.5 1.3-.5L19 3Z" />
-    </>
-  ),
-  type: (
-    <>
-      <path d="M5 6.5V4.5h14v2" />
-      <path d="M12 4.5v15" />
-      <path d="M9 19.5h6" />
     </>
   ),
   upload: (

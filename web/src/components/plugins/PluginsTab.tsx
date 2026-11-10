@@ -33,7 +33,6 @@ import { Checkbox, Field, Input } from '../ui/Input';
 import { LoadingPanel } from '../ui/Spinner';
 import { QueryErrorState } from '../ui/QueryErrorState';
 import {
-  FORM_ERROR_KEY,
   PluginForm,
   draftFor,
   draftToConfig,
@@ -61,7 +60,6 @@ const PLUGIN_ICONS: Readonly<Record<string, IconName>> = {
   compression: 'zap',
   request_deduplication: 'copy',
   request_termination: 'x',
-  response_caching: 'stack',
 };
 
 const CATEGORY_ICONS: Readonly<Record<PluginCategory, IconName>> = {

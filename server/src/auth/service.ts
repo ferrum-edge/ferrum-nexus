@@ -272,10 +272,9 @@ interface RegistrationOutcome {
 /**
  * Hook invoked after a successful registration, before the response is sent.
  *
- * The email service is composed later in the build; until it exists this stays
- * `undefined` and the verification token is simply not delivered. When wired,
- * enqueue the `verification` template with `verificationToken` and an
- * `idempotencyKey` of `verify:<user.id>`.
+ * The composition root supplies `defaultOnRegistered` (`server/src/index.ts`),
+ * which enqueues the `verification` template with `verificationToken` and an
+ * `idempotencyKey` of `verify:<user.id>`; tests may replace it.
  */
 export type OnRegistered = (event: {
   user: User;
@@ -977,10 +976,10 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         throw validationFailed('That verification link has expired');
       }
 
-      // Burn, verify and audit in one transaction. The token is single-use and
-      // there is no resend endpoint, so spending it and *then* failing to mark
-      // the account verified locked that account out permanently: the retry saw
-      // a spent token and the user could never sign in. The `used_at IS NULL`
+      // Burn, verify and audit in one transaction. The token is single-use, so
+      // spending it and *then* failing to mark the account verified left the
+      // account unverified behind a dead link until a new one was requested:
+      // the retry saw a spent token. The `used_at IS NULL`
       // predicate on the burn still does the work of making it single-use —
       // the transaction only makes sure the burn does not outlive its purpose.
       const updated = await store.transaction(async (tx) => {

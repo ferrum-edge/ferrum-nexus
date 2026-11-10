@@ -17,14 +17,6 @@ export function formatDateTime(value: string | null | undefined): string {
   });
 }
 
-/** Format an ISO timestamp as a locale date only. */
-export function formatDate(value: string | null | undefined): string {
-  if (!value) return '—';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' });
-}
-
 const RELATIVE_UNITS: Array<[Intl.RelativeTimeFormatUnit, number]> = [
   ['year', 365 * 24 * 60 * 60 * 1000],
   ['month', 30 * 24 * 60 * 60 * 1000],

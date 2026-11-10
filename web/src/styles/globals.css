@@ -406,20 +406,6 @@
     background-size: 200% 100%;
     animation: var(--animate-shimmer);
   }
-
-  .fx-kbd {
-    display: inline-flex;
-    align-items: center;
-    padding: 0 0.35rem;
-    height: 1.25rem;
-    border: 1px solid var(--border-strong);
-    border-bottom-width: 2px;
-    border-radius: var(--radius-xs);
-    background: var(--inset);
-    font-family: var(--font-mono);
-    font-size: 0.7rem;
-    color: var(--fg-muted);
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -15,7 +15,6 @@ TAG_EXCEPTIONS = {
     'mysql:8.4': 'MySQL 8.4 LTS channel.',
     'mongo:9': 'MongoDB 9 major channel.',
     'postgres:18-alpine': 'PostgreSQL 18 Alpine channel.',
-    'axllent/mailpit:v1.31': 'Mailpit two-part release tag.',
     'alpine:3': 'Alpine 3 major channel.',
     'postgres:17-alpine': 'PostgreSQL 17 Alpine channel.',
 }

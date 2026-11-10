@@ -73,6 +73,6 @@ const server = createServer((request, response) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  // eslint-disable-next-line no-console -- the container's only liveness signal
+  // The container's only liveness signal.
   console.log(`e2e upstream listening on ${PORT}`);
 });

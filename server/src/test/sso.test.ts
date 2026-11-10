@@ -2027,11 +2027,12 @@ describe('single sign-on organization mapping and deprovisioning', () => {
     const who = person('deprovision');
     const claims = { ...who, email_verified: true, groups: ['partners'] };
     const account = await sessionOf(h, await signIn(h, partner, 'partner', claims));
-    await h.authed(account, {
+    const issued = await h.authed(account, {
       method: 'POST',
       url: '/api/credentials',
       payload: { credential_type: 'keyauth' },
     });
+    assert.equal(issued.statusCode, 201, issued.body);
 
     // A live recovery link an administrator would expect a disable to end.
     const resetToken = 'a-live-reset-link-for-deprovision';
@@ -2065,6 +2066,7 @@ describe('single sign-on organization mapping and deprovisioning', () => {
     const job = await h.store.gatewayTeardownJobs.findByUser(account.user.id);
     assert.ok(job, 'a gateway teardown was queued');
     const credentials = await h.store.credentials.list({ user_id: account.user.id });
+    assert.equal(credentials.items.length, 1);
     assert.ok(credentials.items.every((credential) => credential.status === 'revoked'));
     const row = (await h.auditRows(AuditAction.AUTH_SSO_DEPROVISION)).find(
       (entry) => entry.target_id === account.user.id,

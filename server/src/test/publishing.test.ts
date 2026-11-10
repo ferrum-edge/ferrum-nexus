@@ -4641,7 +4641,7 @@ describe('publishing', () => {
     });
 
     it('takes the real path for nothing when the association write fails', async () => {
-      // The association is the second `PUT /proxies/{id}` — there is no earlier
+      // The association is the first `PUT /proxies/{id}` — there is no earlier
       // one — so a queued `PUT` failure lands on exactly it.
       harness.edge.queueFailure(500, { error: 'config_rejected' }, '/proxies/', 'PUT');
       const response = await harness.authed(provider, {

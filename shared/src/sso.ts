@@ -52,11 +52,6 @@ export const SSO_MAPPABLE_ROLES = [
 /** One of {@link SSO_MAPPABLE_ROLES}. */
 export type SsoMappableRole = (typeof SSO_MAPPABLE_ROLES)[number];
 
-/** Runtime type guard for {@link SsoMappableRole}. */
-export function isSsoMappableRole(value: unknown): value is SsoMappableRole {
-  return typeof value === 'string' && (SSO_MAPPABLE_ROLES as readonly string[]).includes(value);
-}
-
 /**
  * HttpOnly cookie carrying one sealed sign-in attempt — its `state`, `nonce`
  * and PKCE verifier — from `/api/auth/sso/:provider/start` to the callback.
