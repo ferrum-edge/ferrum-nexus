@@ -181,6 +181,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   one of these leases answers `409 CONFLICT` in its own words. Super-admin
   exceptions are unchanged.
 
+- The one-time legacy `basicauth` scan no longer treats a whole-type
+  `keyauth` or `jwt` revoke as having cleared `basicauth`
+  (GHSA-jhjw-5g7j-m528). It asked only whether the consumer had a
+  `scope: 'whole-type'` `credential.revoke` after the historical append, of
+  any credential type, and then skipped the `retiring` placeholder for an
+  entry that may still be on the gateway with no row, leaving a later
+  positional revoke free to delete a different password. The check now
+  requires `credential_type: 'basicauth'`, as its reconcile check already did.
+
 ### Added
 
 - **Separate credentials for the gateway's fleet-wide metrics reads**
