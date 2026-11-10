@@ -3048,11 +3048,13 @@ delete for each test or older foreign consumer. Each call is bounded by
 `FERRUM_ADMIN_TIMEOUT_MS`, and each identity can add up to 30 s waiting for its
 lease. That is about 55 s at the defaults for an account with only its own
 consumer, but several minutes for one with many applications on a slow gateway,
-or with a raised `FERRUM_ADMIN_TIMEOUT_MS`. The five-minute threshold is a fixed constant,
-so such a job can look like a crashed worker: its claim is released and a second
-attempt repeats the teardown. Each claim carries an internal `generation` token,
-so a superseded attempt cannot settle a newer job, and the duplicate costs only
-repeated gateway calls and misleading stale-claim log lines.
+or with a raised `FERRUM_ADMIN_TIMEOUT_MS`. The worker renews its claim before
+each identity, so the five minutes are measured from its last progress, not from
+the claim: only a single identity that outlasts them, which takes a
+`FERRUM_ADMIN_TIMEOUT_MS` near its 60 s ceiling, makes a live job look crashed. Its claim is then released, and the original attempt stops at its next
+identity instead of repeating work the new claim will redo. Each claim carries
+an internal `generation` token, so a superseded attempt cannot settle a newer
+job.
 
 ### Which identities a teardown finds
 

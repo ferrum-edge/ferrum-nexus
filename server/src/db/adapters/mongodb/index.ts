@@ -4277,6 +4277,17 @@ class MongoStore implements NexusStore {
       return result.modifiedCount > 0;
     },
 
+    renewClaim: async (job, at) => {
+      const result = await this.col(COLLECTIONS.gatewayTeardownJobs).updateOne(
+        { _id: job.id, generation: job.generation, status: 'sending' } as Filter<NexusDoc>,
+        { $set: { updated_at: at } },
+        this.opts,
+      );
+      // Matched, not modified: a renewal in the claim's own millisecond
+      // changes nothing and still holds the claim.
+      return result.matchedCount > 0;
+    },
+
     reschedule: async (job, nextAttemptAt, lastError) => {
       const result = await this.col(COLLECTIONS.gatewayTeardownJobs).updateOne(
         { _id: job.id, generation: job.generation, status: 'sending' } as Filter<NexusDoc>,

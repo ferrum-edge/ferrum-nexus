@@ -4379,6 +4379,30 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.ok(pending.total >= 1);
     });
 
+    it('gatewayTeardownJobs: a renewed claim is measured from its renewal', async () => {
+      const user = await makeUser();
+      const queued = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
+      const claim = await store.gatewayTeardownJobs.claimPending(queued);
+      assert.ok(claim);
+      assert.equal(
+        await store.gatewayTeardownJobs.renewClaim(claim, claim.updated_at),
+        true,
+        'a renewal that changes nothing still holds the claim',
+      );
+      const renewedAt = isoInSeconds(600);
+      assert.equal(await store.gatewayTeardownJobs.renewClaim(claim, renewedAt), true);
+      assert.equal((await store.gatewayTeardownJobs.findByUser(user.id))?.updated_at, renewedAt);
+
+      // A sweep for claims untouched since before the renewal leaves it alone…
+      await store.gatewayTeardownJobs.releaseStale(isoInSeconds(300));
+      assert.equal((await store.gatewayTeardownJobs.findByUser(user.id))?.status, 'sending');
+
+      // …and once a sweep has released it, it is no longer this claim to renew.
+      await store.gatewayTeardownJobs.releaseStale(isoInSeconds(900));
+      assert.equal((await store.gatewayTeardownJobs.findByUser(user.id))?.status, 'pending');
+      assert.equal(await store.gatewayTeardownJobs.renewClaim(claim, nowIso()), false);
+    });
+
     /* ── account recovery jobs ────────────────────────────────────────── */
 
     it('accountRecoveryJobs: one row per user, reset rather than duplicated', async () => {

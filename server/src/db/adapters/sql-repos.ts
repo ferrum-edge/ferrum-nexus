@@ -3411,6 +3411,16 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         [at, at, job.id, job.generation],
       )) > 0,
 
+    // A renewal in the claim's own millisecond changes nothing; it still
+    // counts, because MySQL reports matched rows (CLIENT_FOUND_ROWS).
+    renewClaim: async (job, at) =>
+      (await execute(
+        exec,
+        `UPDATE gateway_teardown_jobs SET updated_at = ?
+         WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, job.id, job.generation],
+      )) > 0,
+
     reschedule: async (job, nextAttemptAt, lastError) =>
       (await execute(
         exec,

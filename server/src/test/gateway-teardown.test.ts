@@ -20,7 +20,9 @@ import {
   type User,
 } from '@ferrum-nexus/shared';
 
+import { runGatewayTeardown, type GatewayTeardown } from '../credentials/service.js';
 import { createTeardownWorker, type TeardownWorker } from '../credentials/teardown-worker.js';
+import { isoInSeconds, nowIso } from '../lib/ids.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 /** Give an account a working gateway identity: one API key and one ACL group. */
@@ -371,5 +373,90 @@ describe('gateway teardown jobs', () => {
     });
     assert.equal(conflict.statusCode, 409, conflict.body);
     assert.equal((JSON.parse(conflict.body) as ApiErrorBody).error.code, 'CONFLICT');
+  });
+});
+
+describe('a long gateway teardown', () => {
+  let harness: TestApp;
+  let founder: TestSession;
+  const nothing: GatewayTeardown = {
+    consumer_id: null,
+    revoked_credentials: 0,
+    removed_groups: [],
+    deleted_consumers: [],
+  };
+
+  before(async () => {
+    harness = await buildTestApp();
+    founder = await harness.registerUser({ email: 'long-teardown-founder@example.test' });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('renews its claim before each identity (#683)', async () => {
+    const target = await harness.registerUser({ email: 'long-teardown-renews@example.test' });
+    const queued = await harness.store.gatewayTeardownJobs.upsertPending(
+      target.user.id,
+      null,
+      nowIso(),
+    );
+    const stamps: string[] = [];
+    const attempt = await runGatewayTeardown({
+      store: harness.store,
+      userId: target.user.id,
+      subject: founder.user.id,
+      job: queued,
+      credentials: {
+        async disableGatewayAccess(_userId, _subject, options) {
+          for (let identity = 0; identity < 3; identity += 1) {
+            await options?.beforeIdentity?.();
+            const job = await harness.store.gatewayTeardownJobs.findByUser(target.user.id);
+            assert.ok(job);
+            assert.equal(job.status, 'sending');
+            stamps.push(job.updated_at);
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          return nothing;
+        },
+      },
+    });
+    assert.equal(attempt.outcome, 'no_consumer', attempt.error ?? undefined);
+    assert.equal(new Set(stamps).size, 3, 'each identity moved the claim forward');
+    assert.deepEqual([...stamps].sort(), stamps, 'and only forward');
+  });
+
+  it('stops at the next identity once its claim was released as stale (#683)', async () => {
+    const target = await harness.registerUser({ email: 'long-teardown-released@example.test' });
+    const queued = await harness.store.gatewayTeardownJobs.upsertPending(
+      target.user.id,
+      null,
+      nowIso(),
+    );
+    let reached = 0;
+    const attempt = await runGatewayTeardown({
+      store: harness.store,
+      userId: target.user.id,
+      subject: founder.user.id,
+      job: queued,
+      credentials: {
+        async disableGatewayAccess(_userId, _subject, options) {
+          await options?.beforeIdentity?.();
+          reached += 1;
+          // Another worker's stale sweep gives the claim back to the queue
+          // while this attempt is still on its first identity.
+          await harness.store.gatewayTeardownJobs.releaseStale(isoInSeconds(60));
+          await options?.beforeIdentity?.();
+          reached += 1;
+          return nothing;
+        },
+      },
+    });
+    assert.equal(attempt.outcome, 'pending');
+    assert.equal(attempt.error, 'Gateway teardown attempt was superseded');
+    assert.equal(reached, 1, 'no identity after the release is touched');
+    const job = await harness.store.gatewayTeardownJobs.findByUser(target.user.id);
+    assert.equal(job?.status, 'pending', 'the released job waits for its next claim');
   });
 });

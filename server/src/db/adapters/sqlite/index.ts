@@ -3390,6 +3390,14 @@ class SqliteStore implements NexusStore {
         [at, at, job.id, job.generation],
       ) > 0,
 
+    renewClaim: async (job, at) =>
+      execute(
+        this.db,
+        `UPDATE gateway_teardown_jobs SET updated_at = ?
+         WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, job.id, job.generation],
+      ) > 0,
+
     reschedule: async (job, nextAttemptAt, lastError) =>
       execute(
         this.db,

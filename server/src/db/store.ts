@@ -1784,6 +1784,13 @@ export interface GatewayTeardownJobRepo {
   /** Settle only the supplied sending generation; false means ownership was lost. */
   markDone(job: GatewayTeardownJobRecord, at: IsoTimestamp): Promise<boolean>;
   /**
+   * Stamp `updated_at = at` on exactly this sending generation, so
+   * {@link releaseStale} measures a claim from its worker's last progress
+   * rather than from the claim. `false` means ownership was lost: the claim
+   * was released, settled or superseded.
+   */
+  renewClaim(job: GatewayTeardownJobRecord, at: IsoTimestamp): Promise<boolean>;
+  /**
    * Delete only this generation while it is `sending`. IDs are reused by upsertPending:
    * the worker must also recheck account status under the lifecycle lease and
    * inside a transaction before cancelling. Pending replacement work is retained.

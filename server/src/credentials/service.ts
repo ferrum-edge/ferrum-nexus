@@ -646,8 +646,16 @@ export interface CredentialsService {
    * live credential rows. Both are consumed as they are finished — the
    * registration is deleted, the rows are `revoked` — so a retry does not
    * touch what an earlier attempt already completed.
+   *
+   * `beforeIdentity`, when given, runs before each identity's work; a throw
+   * stops the teardown there. {@link runGatewayTeardown} uses it to renew its
+   * job claim, so a long teardown is measured by its progress, not its length.
    */
-  disableGatewayAccess(userId: Uuid, subject: string): Promise<GatewayTeardown>;
+  disableGatewayAccess(
+    userId: Uuid,
+    subject: string,
+    options?: GatewayTeardownOptions,
+  ): Promise<GatewayTeardown>;
   /**
    * Restore retained active-grant groups, without restoring credential material.
    *
@@ -937,6 +945,12 @@ export interface GatewayTeardownAttempt {
   error: string | null;
 }
 
+/** Options for {@link CredentialsService.disableGatewayAccess}. */
+export interface GatewayTeardownOptions {
+  /** Runs before each identity is torn down; a throw stops the teardown. */
+  beforeIdentity?: () => Promise<void>;
+}
+
 /** Input for {@link runGatewayTeardown}. */
 export interface RunGatewayTeardownInput {
   credentials: Pick<CredentialsService, 'disableGatewayAccess'>;
@@ -993,7 +1007,18 @@ export async function runGatewayTeardown(
     ) {
       throw new Error('Gateway teardown attempt was superseded');
     }
-    const result = await credentials.disableGatewayAccess(userId, subject);
+    const claim = claimed;
+    const result = await credentials.disableGatewayAccess(userId, subject, {
+      // Each identity can take a minute or more on a slow gateway, and an
+      // account may hold dozens. Renewing the claim before each one keeps the
+      // stale sweep from releasing it while this attempt is still making
+      // progress — and stops this attempt early once it has been released.
+      beforeIdentity: async () => {
+        if (!(await store.gatewayTeardownJobs.renewClaim(claim, nowIso()))) {
+          throw new Error('Gateway teardown attempt was superseded');
+        }
+      },
+    });
     if (!(await store.gatewayTeardownJobs.markDone(claimed, nowIso()))) {
       throw new Error('Gateway teardown attempt was superseded');
     }
@@ -2595,7 +2620,8 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       }
     },
 
-    async disableGatewayAccess(userId, subject): Promise<GatewayTeardown> {
+    async disableGatewayAccess(userId, subject, options = {}): Promise<GatewayTeardown> {
+      const beforeIdentity = options.beforeIdentity ?? (async (): Promise<void> => {});
       // Every identity the account *durably* holds: its canonical consumer and
       // one per application it owns. These are stripped and kept, not deleted —
       // an application is a lasting identity of the account, not a disposable
@@ -2622,6 +2648,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // creation holds for the whole of its work, so an in-flight issuance is
       // waited for and then undone rather than raced.
       for (const identity of await store.gatewayIdentities.listByUser(userId, namespace)) {
+        await beforeIdentity();
         const outcome = await teardownIdentity(identity.ferrum_username, subject, {
           requireDisabledOwner: userId,
         });
@@ -2649,6 +2676,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // append can never interleave. Sequential, not concurrent: a failure must
       // leave the identities behind it untouched for the retry to pick up.
       for (const foreignId of foreign) {
+        await beforeIdentity();
         revoked += await edge.serializePerKey(foreignId, async () => {
           await assertStillDisabled(userId);
           const live = await edge.consumers.get(foreignId, CONFIRMED_ABSENCE);
@@ -2677,6 +2705,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // identities behind it for the retry.
       for (const identity of durableConsumers) {
         const id = identity.ferrum_consumer_id;
+        await beforeIdentity();
         await edge.serializePerKey(id, async () => {
           await assertStillDisabled(userId);
           const snapshot = await edge.consumers.verification(id, subject);
