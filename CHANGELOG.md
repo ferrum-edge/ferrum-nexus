@@ -66,6 +66,24 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   namespace, instead of silently dropping that association. Older
   gateways ignore the parameter. The mock Edge enforces it in tests.
 
+- Less repeated work on three paths (#682). `GET /api/branding` hashes each
+  cached payload once for its `ETag` instead of serialising and hashing it,
+  logo included, on every request and every `304`. The publish and settings
+  forms parse an edited OpenAPI document once per change instead of once for
+  each place that reads it. A god-mode disable's grant sweep and enrolling
+  all-tools grantees in the MCP group read the acting or affected account once,
+  not once per grant. Responses are unchanged.
+
+- Organization creates and updates (`POST /api/organizations`,
+  `PATCH /api/organizations/:id`) are limited to 30 a minute per account per
+  route, like the other admin-facing mutation groups. The `/api/organizations`
+  scope had no limiter at all; its reads stay unlimited.
+
+- The notification type `api_published` is gone from `NotificationType`, the
+  `GET /api/notifications` type filter and the docs. Nothing ever wrote a
+  notice of that type, so `?type=api_published` now answers `400` like any
+  other unknown type instead of always listing nothing (#688).
+
 ### Fixed
 
 - Re-enabling an account no longer restores an approval group for a grant whose
@@ -104,6 +122,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   write. The pre-check used to answer `409` ("disabled") for a missing
   application and skipped the owner check, leaving both to the re-check after
   the consumer write. A disabled application still answers `409` (#661).
+- An administrator's account edit (`PATCH /api/users/:id`) records only the
+  fields that moved. The **Edit user** dialog always sends `display_name` and
+  `org_id`, and every save wrote a `user.update` row with both in
+  `changed_fields`, showing organization moves that never happened. An edit
+  that changes nothing now writes no row, as the self-service, organization
+  and API edits already did (#686).
+- Deleting an API, or changing its authentication method, tells each grantee
+  account once. An account holding access for itself and for two applications
+  used to get three identical notices, one per grant. A failure to read the
+  grantees after an authentication change has committed is now logged instead
+  of answering `500` for a change that happened (#687).
 - Documentation corrections. Only the god-mode `revoke-grant`, `delete-api` and
   `disable-user` operations take a `reason`; a broadcast records its subject
   there instead. The admin route summary lists `PUT /api/admin/sso` and an SMTP

@@ -13,11 +13,12 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 
-import type {
-  DeleteCredentialResponse,
-  IssueCredentialResponse,
-  ListCredentialsResponse,
-  RotateCredentialResponse,
+import {
+  ACCOUNT_IDENTITY_SCOPE,
+  type DeleteCredentialResponse,
+  type IssueCredentialResponse,
+  type ListCredentialsResponse,
+  type RotateCredentialResponse,
 } from '@ferrum-nexus/shared';
 
 import type { ApplicationsService } from '../applications/service.js';
@@ -48,9 +49,6 @@ const listCredentialsQuery = listQuerySchema.extend({
   application_id: z.string().trim().min(1).max(64).optional(),
 });
 
-/** The `application_id` query sentinel meaning "the account's own identity". */
-const ACCOUNT_SCOPE = 'account';
-
 const issueBody = z.object({
   credential_type: z.enum(CREDENTIAL_TYPES),
   label: z.string().trim().max(120).nullish(),
@@ -80,7 +78,8 @@ export const credentialsRoutes: FastifyPluginAsync<CredentialsRoutesOptions> = a
         ...(query.application_id === undefined
           ? {}
           : {
-              application_id: query.application_id === ACCOUNT_SCOPE ? null : query.application_id,
+              application_id:
+                query.application_id === ACCOUNT_IDENTITY_SCOPE ? null : query.application_id,
             }),
       },
       listOptions(query),

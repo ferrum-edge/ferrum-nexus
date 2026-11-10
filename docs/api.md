@@ -1039,11 +1039,11 @@ own.
 
 _session_
 
-| Query             | Type                                                                                                                                                                                           |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `unread`          | boolean — only unread                                                                                                                                                                          |
-| `type`            | one of `access_request_created`, `access_request_approved`, `access_request_denied`, `access_revoked`, `message_received`, `credential_rotated`, `api_published`, `api_spec_updated`, `system` |
-| `limit`, `offset` | pagination                                                                                                                                                                                     |
+| Query             | Type                                                                                                                                                                          |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unread`          | boolean — only unread                                                                                                                                                         |
+| `type`            | one of `access_request_created`, `access_request_approved`, `access_request_denied`, `access_revoked`, `message_received`, `credential_rotated`, `api_spec_updated`, `system` |
+| `limit`, `offset` | pagination                                                                                                                                                                    |
 
 ```json
 { "items": [ … ], "total": 42, "unread_count": 3 }

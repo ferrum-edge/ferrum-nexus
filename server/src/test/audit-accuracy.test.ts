@@ -172,7 +172,16 @@ test('profile, organization and API audit fields exclude unchanged submitted val
     });
     assert.equal(published.statusCode, 201, published.body);
     const api = published.json<PublishApiResponse>().api;
+    const member = await h.registerUser({ role: 'client' });
     const cases = [
+      {
+        // The admin "Edit user" dialog always sends both fields (issue #686).
+        url: `/api/users/${member.user.id}`,
+        action: 'user.update',
+        same: { display_name: member.user.display_name, org_id: null },
+        change: { org_id: organization.id },
+        field: 'org_id',
+      },
       {
         url: '/api/users/me',
         action: 'user.update',

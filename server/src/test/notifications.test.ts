@@ -71,6 +71,15 @@ describe('notifications', () => {
     assert.equal(page.items.length, 2);
   });
 
+  it('refuses a type filter that nothing produces', async () => {
+    // `api_published` was listed but never written (issue #688).
+    const response = await harness.authed(owner, {
+      method: 'GET',
+      url: '/api/notifications?type=api_published',
+    });
+    assert.equal(response.statusCode, 400, response.body);
+  });
+
   it('marks selected notifications read and ignores ids owned by someone else', async () => {
     const list = await harness.authed(owner, { method: 'GET', url: '/api/notifications' });
     const mine = list.json<ListNotificationsResponse>().items[0]?.id ?? '';

@@ -149,6 +149,24 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
     auth.getBrandingRevision,
     auth.bootstrapRequired,
   );
+  // The tag of each cached payload, per `bootstrap_required` value. The memo
+  // hands back one object until it reassembles, and nothing mutates it, so its
+  // identity stands for its content: repeat traffic, 304s included, no longer
+  // serialises and hashes a payload whose logo can run to 512 Ki characters.
+  const etags = new WeakMap<CachedBrandingPayload, Map<boolean, string>>();
+  const etagFor = (cachedValue: CachedBrandingPayload, payload: BrandingResponse): string => {
+    let tags = etags.get(cachedValue);
+    if (!tags) {
+      tags = new Map();
+      etags.set(cachedValue, tags);
+    }
+    let etag = tags.get(payload.bootstrap_required);
+    if (etag === undefined) {
+      etag = brandingEtag(payload);
+      tags.set(payload.bootstrap_required, etag);
+    }
+    return etag;
+  };
 
   app.get(
     '/',
@@ -163,7 +181,7 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
         config.brandingCacheMs > 0 ? Math.max(1, Math.ceil(config.brandingCacheMs / 1000)) : 0;
 
       if (maxAgeSec > 0) {
-        const etag = brandingEtag(payload);
+        const etag = etagFor(cached.value, payload);
         reply.header('cache-control', `public, max-age=${maxAgeSec}`);
         reply.header('etag', etag);
         if (request.headers['if-none-match'] === etag) {

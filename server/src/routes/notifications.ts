@@ -36,7 +36,6 @@ const NOTIFICATION_TYPES = [
   'access_revoked',
   'message_received',
   'credential_rotated',
-  'api_published',
   'api_spec_updated',
   'system',
 ] as const satisfies readonly NotificationType[];

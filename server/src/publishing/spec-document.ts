@@ -93,7 +93,7 @@
  * docs/plugin_execution_order.md in the Ferrum Edge repository.
  */
 
-import type { SpecEnforcementLevel } from '@ferrum-nexus/shared';
+import { OPENAPI_OPERATION_METHODS, type SpecEnforcementLevel } from '@ferrum-nexus/shared';
 
 import type { EdgeApiSpecDocument, EdgePluginConfig, EdgeProxy } from '../ferrum-admin/types.js';
 import { specInvalid } from '../lib/errors.js';
@@ -183,16 +183,7 @@ export function submittableProxyBody(proxy: EdgeProxy): Record<string, unknown> 
  * appear. Everything else under a path item (`parameters`, `summary`, `$ref`,
  * vendor extensions) is left exactly as uploaded.
  */
-const OPENAPI_OPERATION_KEYS = [
-  'get',
-  'put',
-  'post',
-  'delete',
-  'options',
-  'head',
-  'patch',
-  'trace',
-] as const;
+const OPENAPI_OPERATION_KEYS = OPENAPI_OPERATION_METHODS;
 
 /** A plain object, i.e. something that could be an OpenAPI node. */
 function isRecord(value: unknown): value is Record<string, unknown> {

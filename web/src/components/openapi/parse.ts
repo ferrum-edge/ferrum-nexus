@@ -367,6 +367,9 @@ export const CATALOG_SPEC_LIMITS: SpecParseLimits = {
  */
 const YAML_SPEC_OPTIONS = { schema: 'core', merge: false, resolveKnownTags: false } as const;
 
+/** The last call to {@link parseSpecText}; see there. */
+let lastParse: { text: string; limits: SpecParseLimits; result: SpecParseResult } | null = null;
+
 /**
  * Parse an OpenAPI document supplied as JSON or YAML text.
  *
@@ -374,11 +377,25 @@ const YAML_SPEC_OPTIONS = { schema: 'core', merge: false, resolveKnownTags: fals
  * cosmetic. Never throws: syntax errors and structurally invalid documents both
  * come back as `{ ok: false, error }`. `limits` defaults to the server's upload
  * limits; the catalog viewer passes {@link CATALOG_SPEC_LIMITS}.
+ *
+ * The last result is kept and returned again for the same text and limits:
+ * the publish form reads one document, up to 2 MiB, in several places per edit
+ * (the upstream and method shortcuts, the editor's summary, the agent operation
+ * picker), and they share one parse. Callers treat the result as read-only.
  */
 export function parseSpecText(
   text: string,
   limits: SpecParseLimits = UPLOAD_SPEC_LIMITS,
 ): SpecParseResult {
+  if (lastParse && lastParse.text === text && lastParse.limits === limits) {
+    return lastParse.result;
+  }
+  const result = parseSpecTextUncached(text, limits);
+  lastParse = { text, limits, result };
+  return result;
+}
+
+function parseSpecTextUncached(text: string, limits: SpecParseLimits): SpecParseResult {
   // A document past the limit is not worth a synchronous parse.
   if (specByteLength(text, limits.maxBytes) > limits.maxBytes) {
     return {
