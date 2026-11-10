@@ -110,6 +110,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `changed_fields`, showing organization moves that never happened. An edit
   that changes nothing now writes no row, as the self-service, organization
   and API edits already did (#686).
+- Deleting an API, or changing its authentication method, tells each grantee
+  account once. An account holding access for itself and for two applications
+  used to get three identical notices, one per grant. A failure to read the
+  grantees after an authentication change has committed is now logged instead
+  of answering `500` for a change that happened (#687).
 - Documentation corrections. Only the god-mode `revoke-grant`, `delete-api` and
   `disable-user` operations take a `reason`; a broadcast records its subject
   there instead. The admin route summary lists `PUT /api/admin/sso` and an SMTP

@@ -5835,10 +5835,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         );
       }
 
-      for (const grant of grants) {
+      // One notice per account, however many of its identities (the account
+      // and each application) held a grant on the API.
+      for (const userId of new Set(grants.map((grant) => grant.user_id))) {
         await notifications
           .notify(
-            grant.user_id,
+            userId,
             'access_revoked',
             `${api.name} was removed`,
             `The provider removed ${api.name} from the portal. Your access to it has ended.`,
@@ -7024,7 +7026,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return { grantees: [...grantees], apiOwned };
   }
 
-  /** Best-effort in-app notice to everyone holding an active grant on `apiId`. */
+  /**
+   * Best-effort in-app notice to every account holding an active grant on
+   * `apiId`: one per account, however many of its identities hold a grant. It
+   * runs after the change has committed, so a failed grant read is logged
+   * rather than turned into an error for a change that happened.
+   */
   async function notifyGrantees(
     apiId: Uuid,
     type: Parameters<NotificationsService['notify']>[1],
@@ -7032,9 +7039,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     body: string,
     link: string,
   ): Promise<void> {
-    const grants = await store.grants.listActiveByApi(apiId);
-    for (const grant of grants) {
-      await notifications.notify(grant.user_id, type, title, body, link).catch(() => undefined);
+    const userIds = await store.grants.listActiveByApi(apiId).then(
+      (grants) => new Set(grants.map((grant) => grant.user_id)),
+      (error: unknown) => {
+        deps.log?.(
+          { api_id: apiId, error: errorMessage(error) },
+          'the grantees of an API could not be read to notify them of a change',
+        );
+        return new Set<Uuid>();
+      },
+    );
+    for (const userId of userIds) {
+      await notifications.notify(userId, type, title, body, link).catch(() => undefined);
     }
   }
 }
