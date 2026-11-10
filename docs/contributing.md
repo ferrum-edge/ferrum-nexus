@@ -104,9 +104,10 @@ npm test --workspace server
 
 **Always do this when touching `server/src/db/`.** A new store method implemented in three adapters
 out of four typechecks fine and fails only at runtime, on whichever backend the reviewer does not
-run. CI's `store-contracts` check runs this suite on all four backends, together with the MySQL
-migration tests and the baseline-upgrade fixture, in one lane per server backend (each lane also
-runs SQLite).
+run. CI runs this suite on all four backends: SQLite in every `checks` leg through `npm test`, and
+each server backend in its own `store-contracts` lane, together with the MySQL migration tests and
+the baseline-upgrade fixture. The lanes set `NEXUS_TEST_SKIP_SQLITE=true` so they do not repeat the
+SQLite suite.
 
 The Mongo URL must point at a replica set (single-node is fine). A standalone `mongod` is rejected
 at `init()` unless `NEXUS_DB_ALLOW_STANDALONE=true`, and the smoke suite's transaction cases need

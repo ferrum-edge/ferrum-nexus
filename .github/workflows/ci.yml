@@ -164,7 +164,9 @@ jobs:
           retention-days: 14
 
   # One lane per pooled backend, each with its own 15-minute budget; the
-  # combined suite outgrew a single job. Every lane also runs SQLite.
+  # combined suite outgrew a single job. The SQLite smoke suite is skipped
+  # here (NEXUS_TEST_SKIP_SQLITE): every `checks` leg already runs it through
+  # `npm test`. The other files still run their SQLite cases.
   store-contract-lanes:
     name: store-contracts (${{ matrix.backend }})
     runs-on: ubuntu-26.04
@@ -282,6 +284,7 @@ jobs:
           NEXUS_TEST_MYSQL_URL: ${{ matrix.mysql_url }}
           NEXUS_TEST_MONGO_URL: ${{ matrix.mongo_url }}
           NEXUS_TEST_MONGO_STANDALONE_URL: ${{ matrix.mongo_standalone_url }}
+          NEXUS_TEST_SKIP_SQLITE: 'true'
         run: >-
           node --import tsx --test src/test/smoke.test.ts
           src/test/mysql-migration-recovery.test.ts src/test/mysql-user-transition.test.ts
