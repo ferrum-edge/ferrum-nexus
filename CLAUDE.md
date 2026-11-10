@@ -86,8 +86,8 @@ from [server/src/test/helpers.ts](server/src/test/helpers.ts).
 **Cross-adapter smoke tests** ([server/src/test/smoke.test.ts](server/src/test/smoke.test.ts)) run
 on SQLite by default. Set `NEXUS_TEST_POSTGRES_URL`, `NEXUS_TEST_MYSQL_URL`, and/or
 `NEXUS_TEST_MONGO_URL` (for example, disposable Docker containers) to also run Postgres, MySQL,
-and MongoDB. Do this whenever you change anything under `server/src/db/`. CI's `store-contracts`
-job runs all four.
+and MongoDB. Do this whenever you change anything under `server/src/db/`. CI runs all four: SQLite
+in `checks`, the others in the `store-contracts` lanes.
 
 **The acceptance suite** ([e2e/](e2e/README.md)) runs the **packaged container image** against a
 real, digest-pinned Edge release (pinned in `release/compatibility.env`), PostgreSQL, a

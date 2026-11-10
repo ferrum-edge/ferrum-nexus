@@ -5,7 +5,8 @@
  * and run against every adapter, so "the four adapters behave identically" is a
  * thing the test run proves rather than a thing the docs assert.
  *
- * - **sqlite** always runs, against `:memory:`.
+ * - **sqlite** runs against `:memory:` unless `NEXUS_TEST_SKIP_SQLITE=true`
+ *   (set only by CI's store-contract lanes, since `npm test` already runs it).
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
  *   `NEXUS_TEST_MYSQL_URL` or `NEXUS_TEST_MONGO_URL` is set, and are reported as
  *   skipped otherwise. Each one provisions a **throwaway database** with a
@@ -5869,7 +5870,18 @@ function register(
   runSmokeSuite(label, () => makeStore(url));
 }
 
-runSmokeSuite('sqlite', sqliteTarget);
+// CI's store-contract lanes set NEXUS_TEST_SKIP_SQLITE=true: `npm test` in
+// every `checks` leg already runs the SQLite suite, and repeating it serially
+// before each pooled backend cost each lane about two minutes.
+if (process.env.NEXUS_TEST_SKIP_SQLITE === 'true') {
+  describe('store contract — sqlite', () => {
+    it('skipped — NEXUS_TEST_SKIP_SQLITE=true; `npm test` runs it', {
+      skip: 'NEXUS_TEST_SKIP_SQLITE is true',
+    });
+  });
+} else {
+  runSmokeSuite('sqlite', sqliteTarget);
+}
 register(
   'postgres',
   process.env.NEXUS_TEST_POSTGRES_URL,
