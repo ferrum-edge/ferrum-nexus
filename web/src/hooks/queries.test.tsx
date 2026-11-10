@@ -6,7 +6,12 @@ import type { EmailTemplate, ListNotificationsResponse } from '@ferrum-nexus/sha
 import { CREATED_AT } from '../../test/fixtures';
 import { adminApi, catalogApi, healthApi, notificationsApi, threadsApi } from '../lib/api';
 import { queryKeys } from './keys';
-import { useEmailTemplate, useEmailTemplates, useUpdateEmailTemplate } from './useAdminSettings';
+import {
+  useEmailTemplate,
+  useEmailTemplates,
+  useUpdateAdminSso,
+  useUpdateEmailTemplate,
+} from './useAdminSettings';
 import { useCatalogApi, useCatalogSpec } from './useCatalog';
 import { useEdgeHealth, useHealth } from './useHealth';
 import {
@@ -193,5 +198,19 @@ describe('email template cache', () => {
     });
     expect(adminApi.updateEmailTemplate).toHaveBeenCalledWith('message_received', body);
     expect(client.getQueryState(queryKeys.credentials.list({}))?.isInvalidated).toBe(false);
+  });
+});
+
+describe('single sign-on settings save', () => {
+  it('is silent to the global error toast, because both SSO cards render its error', async () => {
+    vi.spyOn(adminApi, 'updateSso').mockRejectedValue(new Error('Issuer is not https'));
+    const { result } = renderHook(() => useUpdateAdminSso(), { wrapper });
+    await act(async () => {
+      await expect(result.current.mutateAsync({ policy: 'sso_only' })).rejects.toThrow(
+        'Issuer is not https',
+      );
+    });
+    const [mutation] = client.getMutationCache().getAll();
+    expect(mutation?.options.meta?.silent).toBe(true);
   });
 });

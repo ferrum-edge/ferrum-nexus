@@ -161,6 +161,14 @@ describe('restoring a missing gateway deployment', () => {
   });
 
   it('rebuilds the existing API in place, keeping its identity and its grants', async () => {
+    // The unapproved account holds a credential too, so it has a consumer and
+    // the gate assertion at the end reads real ACL groups.
+    const outsiderIssued = await harness.authed(other, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(outsiderIssued.statusCode, 201, outsiderIssued.body);
     const before = await harness.store.apis.findById(apiId);
     assert.ok(before);
     deleteProxyOnly(originalProxyId);
@@ -214,8 +222,9 @@ describe('restoring a missing gateway deployment', () => {
       consumerUsernameForUser(other.user.id),
       NAMESPACE,
     );
+    assert.ok(outsider, 'the unapproved account has a consumer to check');
     assert.ok(
-      !outsider?.acl_groups?.includes(aclGroupForApi(apiId)),
+      !outsider.acl_groups.includes(aclGroupForApi(apiId)),
       'an unapproved account is still outside the gate',
     );
   });

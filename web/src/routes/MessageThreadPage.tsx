@@ -1,7 +1,7 @@
 import { Link, useParams } from '@tanstack/react-router';
 import { useEffect, useState, type FormEvent, type ReactElement } from 'react';
 import type { Message, MessagePage } from '@ferrum-nexus/shared';
-import { formatDateTime } from '../lib/format';
+import { formatDateTime, initials } from '../lib/format';
 import { useOlderMessages, useSendMessage, useThread } from '../hooks/useThreads';
 import { useAuth } from '../stores/auth';
 import { Badge } from '../components/ui/Badge';
@@ -12,16 +12,6 @@ import { Icon } from '../components/ui/Icon';
 import { Textarea } from '../components/ui/Input';
 import { LoadingPanel } from '../components/ui/Spinner';
 import { cn } from '../lib/cn';
-
-const WHITESPACE = /\s+/;
-
-/** Initials for a sender tile: first letters of up to two words. */
-function initials(name: string): string {
-  const parts = name.trim().split(WHITESPACE).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-  return `${parts[0]![0] ?? ''}${parts[parts.length - 1]![0] ?? ''}`.toUpperCase();
-}
 
 /**
  * Fold `incoming` into `current`, de-duplicated by id and back in reading order.

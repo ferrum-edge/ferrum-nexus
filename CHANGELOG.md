@@ -172,6 +172,40 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   error-styled notice that the account's gateway credentials keep working
   until the gateway accepts the revocation, which is retried automatically,
   and points to Users to follow or retry it (#698).
+- The dashboard no longer says "Nothing waiting on you", "No gateway
+  credentials" or "No access requests yet" for a panel whose list is still
+  loading or failed to load: it shows placeholder rows, then an error with
+  **Retry**. A count whose query failed shows "—" instead of `0`. The
+  "Published APIs" and "APIs you publish" counts leave retired APIs out. Audit
+  actions are coloured by one shared rule on the dashboard and the audit page,
+  matched on whole words: a rollback, failure, stalled recovery or required
+  repair is amber rather than green, and `user.address_release` is no longer
+  read as an `add` (#700).
+- The **Gateway references need repair** card follows an incident through to
+  the end. It counts the APIs awaiting a gateway restore (`awaiting_restore`)
+  beside the two orphan counts; once nothing is left to repair it replaces
+  **Repair all** with a link to **All APIs**; its text names **Restore gateway
+  deployment** as the remedy for a gone proxy instead of a new publish; a
+  repair with a failed row is reported as an error naming the failure; and
+  **Re-check now** names the APIs still awaiting a restore instead of
+  reporting "0 references are still orphaned" as a success. The admin **All
+  APIs** list shows **Not deployed** for such APIs, as **My APIs** does, and
+  says when it failed to load instead of "No APIs match these filters" (#701).
+- Web UI consistency (#702). Deleting an API through god mode refreshes the
+  same views an ordinary delete does, so the session no longer keeps showing
+  the deleted API's access requests, credentials and per-application counts. A
+  refused single sign-on save is shown once, in the card, instead of also in a
+  toast. Avatar initials come from one helper, so a one-word name such as
+  "alice" reads "AL" in the users table as it does in the header. The routes
+  enforcement and agent operation hints say "Edge v0.9.15 and later" rather
+  than naming one Edge release.
+- The gateway cutover runbook (operations guide §12 and §13) describes
+  consumer repair per identity, as the repair works: an account and each of its
+  applications has its own consumer (`nexus-user-<user_id>` or
+  `nexus-app-<application_id>`), its own orphan entry with `application_id`,
+  and its own grants' REST and approved MCP groups replayed. It used to
+  describe one consumer per account, so an operator saw more orphans than
+  accounts and the §12 hand check rejected an application's username (#703).
 - The hourly expiry sweep also deletes expired `edge_leases` rows (#675). A
   lease whose holder crashed, or whose release failed, stayed until its key was
   acquired again, so the leases of deleted consumers, proxies and applications

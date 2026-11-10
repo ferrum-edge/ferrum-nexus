@@ -15,7 +15,7 @@ import { Badge } from '../ui/Badge';
 
 const AGENT_OPERATION_DESCRIPTION =
   'Requires routes enforcement and approved access. GET operations are preselected; mutations ' +
-  'require an explicit tick. With Edge v0.9.15, native WebSocket (403) and gRPC ' +
+  'require an explicit tick. With Edge v0.9.15 and later, native WebSocket (403) and gRPC ' +
   '(PERMISSION_DENIED) requests to this API are refused.';
 
 export interface AgentOperationPickerProps {

@@ -226,9 +226,9 @@ them. The tree mirrors [ferrum-edge](https://github.com/ferrum-edge/ferrum-edge)
 
 | Skill (directory)        | Worker model (pinned by the launcher)         | CLI            | `--effort` / `--fast`                                             |
 | ------------------------ | --------------------------------------------- | -------------- | ----------------------------------------------------------------- |
-| `astra-agents`           | `gpt-6-astra`                                 | `codex`        | `low` to `max`, `ultra`; `--fast` on explicit request             |
+| `astra-agents`           | `gpt-6-astra`                                 | `codex`        | `low` to `max`, `ultra`; optional `--fast` / `--no-fast`          |
 | `sol-agents`             | `gpt-6.1-sol`                                 | `codex`        | `low` to `max`, `ultra`; optional `--fast` / `--no-fast`          |
-| `luna-agents`            | `gpt-6-luna`                                  | `codex`        | `low` to `max`; `--fast` on explicit request                      |
+| `luna-agents`            | `gpt-6-luna`                                  | `codex`        | `low` to `max`; optional `--fast` / `--no-fast`                   |
 | `opus-agents`            | `claude-opus-5-5[1m]`                         | `claude`       | `low` to `max`; `--fast` on explicit request                      |
 | `fable-5-1-agents`       | `claude-fable-5-1`                            | `claude`       | `low` to `max`                                                    |
 | `grok-agents`            | `cursor-grok-4.6-<effort>`                    | `cursor-agent` | picks the SKU (default `high`; `max` clamps to `xhigh`); `--fast` |

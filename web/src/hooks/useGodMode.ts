@@ -11,6 +11,7 @@ import type {
 } from '@ferrum-nexus/shared';
 import { godApi } from '../lib/api';
 import { queryKeys } from './keys';
+import { refreshAfterApiDelete } from './useApis';
 
 /** Emergency grant revocation, bypassing API ownership. */
 export function useGodRevokeGrant(): UseMutationResult<
@@ -42,11 +43,9 @@ export function useGodDeleteApi(): UseMutationResult<
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (body: GodDeleteApiRequest) => godApi.deleteApi(body),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.grants.all });
-    },
+    // The same surfaces as an ordinary delete, which also drops the API's
+    // access requests and per-application counts (issue #336).
+    onSuccess: (_response, body) => refreshAfterApiDelete(queryClient, body.api_id),
   });
 }
 

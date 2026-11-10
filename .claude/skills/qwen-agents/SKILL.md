@@ -26,7 +26,8 @@ isolation, failure handling, and verification. For implementer mode, read
 For fix-round or shepherd mode, also read
 [continuation-brief.md](../../../.agents/skills/qwen-agents/references/continuation-brief.md).
 Resolve all worker paths to absolute paths. Run each worker in its own background or long-lived
-execution session and retain that session's identity. Honor the user's selected effort without
-clamping or substituting. Never recursively invoke this skill from a dispatched worker. Assign
+execution session and retain that session's identity. Pass the user's selected effort through, but
+never report it as applied: the launcher ignores it.
+Never recursively invoke this skill from a dispatched worker. Assign
 commit, push, review-trigger, and CI actions only when the user's request includes them; the
 canonical skill's stopping-point rules apply to every prompt you construct.

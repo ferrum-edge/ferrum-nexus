@@ -162,14 +162,36 @@ describe('administrative mutations', () => {
     expectStale('requests', 'grants', 'apis', 'catalog');
   });
 
-  it('refreshes the catalog, API workspace, and grants after emergency deletion', async () => {
+  it('forgets the API and refreshes everything that listed it after emergency deletion', async () => {
+    // The same surfaces as an ordinary delete (issue #336): the deleted API's
+    // own entries go, and lists, access requests, grants, credentials and
+    // per-application counts are refreshed.
+    const applications = queryKeys.applications.list({});
+    const apiList = queryKeys.apis.list({});
+    client.setQueryData(applications, { cached: true });
+    client.setQueryData(apiList, { cached: true });
     const { result } = renderHook(useActions, { wrapper });
     const body = { api_id: API.id, reason: 'Retire compromised API', revoke_grants: true };
     await act(async () => {
       await result.current.remove.mutateAsync(body);
     });
     expect(godApi.deleteApi).toHaveBeenCalledWith(body);
-    expectStale('apis', 'catalog', 'grants');
+    expect(client.getQueryState(queryKeys.apis.detail(API.id))).toBeUndefined();
+    expect(client.getQueryState(apiList)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(applications)?.isInvalidated).toBe(true);
+    for (const name of ['catalog', 'grants', 'requests', 'credentials'] as const) {
+      expect(client.getQueryState(cacheKeys[name])?.isInvalidated, name).toBe(true);
+    }
+    for (const name of [
+      'health',
+      'edge',
+      'users',
+      'notifications',
+      'threads',
+      'branding',
+    ] as const) {
+      expect(client.getQueryState(cacheKeys[name])?.isInvalidated, name).toBe(false);
+    }
   });
 
   it('preserves pending gateway teardown information when disabling an account', async () => {

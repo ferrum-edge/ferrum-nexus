@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { humanize } from './format';
+import { humanize, initials } from './format';
 
 describe('humanize', () => {
   it('turns snake_case and dotted identifiers into sentence case', () => {
@@ -32,5 +32,14 @@ describe('humanize', () => {
     expect(humanize('rapid_ship')).toBe('Rapid ship');
     expect(humanize('identity.update')).toBe('Identity update');
     expect(humanize('description')).toBe('Description');
+  });
+});
+
+describe('initials', () => {
+  it('gives every avatar tile the same letters for the same name', () => {
+    expect(initials('Ada Lovelace')).toBe('AL');
+    expect(initials('Ada King Lovelace')).toBe('AL');
+    expect(initials('alice')).toBe('AL');
+    expect(initials('  ')).toBe('?');
   });
 });

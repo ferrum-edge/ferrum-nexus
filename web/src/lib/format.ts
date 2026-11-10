@@ -1,6 +1,7 @@
 /** Presentation helpers shared across pages. */
 
 const WORD_SEPARATORS = /[\s_.]+/;
+const WHITESPACE = /\s+/;
 const NEWLINE_OR_COMMA = /[\n,]/;
 
 /** Format an ISO timestamp as a locale date+time, or an em dash when absent. */
@@ -98,4 +99,18 @@ export function parseCorsOrigins(text: string): string[] {
     .split(NEWLINE_OR_COMMA)
     .map((entry) => entry.trim())
     .filter((entry) => entry !== '');
+}
+
+/**
+ * Initials for an avatar tile: the first letters of the first and last words,
+ * the first two letters of a one-word name ("alice" is "AL"), or `?`.
+ *
+ * One definition for every tile, so the same account reads the same in the
+ * header, the rail, the directory and every list.
+ */
+export function initials(name: string): string {
+  const parts = name.trim().split(WHITESPACE).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
+  return `${parts[0]![0] ?? ''}${parts[parts.length - 1]![0] ?? ''}`.toUpperCase();
 }

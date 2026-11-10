@@ -11,7 +11,7 @@ import { DataTable, type Columns } from '../components/ui/DataTable';
 import { EmptyState } from '../components/ui/EmptyState';
 import { QueryErrorState } from '../components/ui/QueryErrorState';
 import { Icon } from '../components/ui/Icon';
-import { AccessModeBadge, StatusPill } from '../components/ui/StatusPill';
+import { AccessModeBadge, ApiStatusBadges } from '../components/ui/StatusPill';
 
 function MyApisTable(): ReactElement {
   const [offset, setOffset] = useState(0);
@@ -53,19 +53,7 @@ function MyApisTable(): ReactElement {
       {
         id: 'status',
         header: 'Status',
-        // `published` and "actually serving traffic" are two different things,
-        // and an API whose gateway deployment is gone looked exactly like a
-        // healthy one in this list (issue #284).
-        cell: ({ row }) => (
-          <span className="flex flex-wrap items-center gap-1.5">
-            <StatusPill status={row.original.status} />
-            {row.original.gateway_state === 'repair_required' ? (
-              <Badge tone="danger" dot>
-                Not deployed
-              </Badge>
-            ) : null}
-          </span>
-        ),
+        cell: ({ row }) => <ApiStatusBadges api={row.original} />,
       },
       {
         id: 'updated',

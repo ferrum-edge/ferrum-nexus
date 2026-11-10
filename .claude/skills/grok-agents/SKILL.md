@@ -27,7 +27,9 @@ isolation, failure handling, and verification. For implementer mode, read
 For fix-round or shepherd mode, also read
 [continuation-brief.md](../../../.agents/skills/grok-agents/references/continuation-brief.md).
 Resolve all worker paths to absolute paths. Run each worker in its own background or long-lived
-execution session and retain that session's identity. Honor the user's selected effort without
-clamping or substituting. Never recursively invoke this skill from a dispatched worker. Assign
+execution session and retain that session's identity. Pass the user's selected effort to
+`--effort` as given; the launcher maps it as above, so `max` runs `cursor-grok-4.6-xhigh` with a
+warning. Report the tier that was applied, never `max`, and do not invent a higher SKU. Never
+recursively invoke this skill from a dispatched worker. Assign
 commit, push, review-trigger, and CI actions only when the user's request includes them; the
 canonical skill's stopping-point rules apply to every prompt you construct.

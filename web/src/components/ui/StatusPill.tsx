@@ -2,6 +2,7 @@ import type { ReactElement } from 'react';
 import {
   ROLE_LABELS,
   type AccessRequestStatus,
+  type Api,
   type ApiStatus,
   type ApiVisibility,
   type CatalogAccessState,
@@ -142,5 +143,28 @@ export function AccessModeBadge({
     </Badge>
   ) : (
     <Badge className={className}>Open</Badge>
+  );
+}
+
+/**
+ * An API's status cell in a list: its lifecycle status, plus "Not deployed"
+ * while its gateway deployment is gone. `published` and "actually serving
+ * traffic" are two different things, and an API whose deployment is gone
+ * looked exactly like a healthy one in a list (issue #284).
+ */
+export function ApiStatusBadges({
+  api,
+}: {
+  api: Pick<Api, 'status' | 'gateway_state'>;
+}): ReactElement {
+  return (
+    <span className="flex flex-wrap items-center gap-1.5">
+      <StatusPill status={api.status} />
+      {api.gateway_state === 'repair_required' ? (
+        <Badge tone="danger" dot>
+          Not deployed
+        </Badge>
+      ) : null}
+    </span>
   );
 }
