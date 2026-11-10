@@ -211,7 +211,7 @@ function userUpdateColumns(patch: UpdateInput<UserRecord>): Record<string, SqlPa
   };
 }
 
-/** Encoded `SET` columns of an access-request patch, shared by both updates. */
+/** Encoded `SET` columns of an access-request patch for `updateIfStatus`. */
 function accessRequestUpdateColumns(
   patch: UpdateInput<AccessRequestRecord>,
 ): Record<string, SqlParam | undefined> {
@@ -1271,13 +1271,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return row ? mapOrganization(row) : null;
     },
 
-    findByName: async (name) => {
-      const row = await queryOne(exec, 'SELECT * FROM organizations WHERE lower(name) = ?', [
-        name.trim().toLowerCase(),
-      ]);
-      return row ? mapOrganization(row) : null;
-    },
-
     update: async (id, patch) => {
       const set = setParts({ name: patch.name, description: patch.description });
       if (set) {
@@ -1307,8 +1300,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       );
       return { items: rows.map(mapOrganization), total };
     },
-
-    delete: async (id) => (await execute(exec, 'DELETE FROM organizations WHERE id = ?', [id])) > 0,
   };
 
   /* ── sessions ───────────────────────────────────────────────────────── */
@@ -1360,9 +1351,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     delete: async (id) => (await execute(exec, 'DELETE FROM sessions WHERE id = ?', [id])) > 0,
 
-    deleteByTokenHash: async (tokenHash) =>
-      (await execute(exec, 'DELETE FROM sessions WHERE token_hash = ?', [tokenHash])) > 0,
-
     deleteForUser: async (userId) =>
       execute(exec, 'DELETE FROM sessions WHERE user_id = ?', [userId]),
 
@@ -1401,15 +1389,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     findById: async (id) => {
       const row = await queryOne(exec, 'SELECT * FROM applications WHERE id = ?', [id]);
-      return row ? mapApplication(row) : null;
-    },
-
-    findByOwnerAndName: async (ownerUserId, name) => {
-      const row = await queryOne(
-        exec,
-        'SELECT * FROM applications WHERE owner_user_id = ? AND lower(name) = ?',
-        [ownerUserId, name.trim().toLowerCase()],
-      );
       return row ? mapApplication(row) : null;
     },
 
@@ -1519,13 +1498,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     findBySlug: async (slug) => {
       const row = await queryOne(exec, 'SELECT * FROM apis WHERE lower(slug) = ?', [
         slug.trim().toLowerCase(),
-      ]);
-      return row ? mapApi(row) : null;
-    },
-
-    findByProxyId: async (ferrumProxyId) => {
-      const row = await queryOne(exec, 'SELECT * FROM apis WHERE ferrum_proxy_id = ?', [
-        ferrumProxyId,
       ]);
       return row ? mapApi(row) : null;
     },
@@ -1737,8 +1709,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     listSummaries: async (filter, options) =>
       listSpecRows(filter, options, API_SPEC_SUMMARY_COLUMNS, mapApiSpecSummary),
-
-    delete: async (id) => (await execute(exec, 'DELETE FROM api_specs WHERE id = ?', [id])) > 0,
 
     deleteByApi: async (apiId) => execute(exec, 'DELETE FROM api_specs WHERE api_id = ?', [apiId]),
 
@@ -2078,20 +2048,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     findById: async (id) => {
       const row = await queryOne(exec, 'SELECT * FROM access_requests WHERE id = ?', [id]);
       return row ? mapAccessRequest(row) : null;
-    },
-
-    update: async (id, patch) => {
-      const set = setParts(accessRequestUpdateColumns(patch));
-      if (set) {
-        await mapSqlConflict('You already have a pending request for this API', () =>
-          execute(exec, `UPDATE access_requests SET ${set.sql}, updated_at = ? WHERE id = ?`, [
-            ...set.params,
-            nowIso(),
-            id,
-          ]),
-        );
-      }
-      return accessRequests.findById(id);
     },
 
     updateIfStatus: async (id, expected, patch) => {
@@ -2562,15 +2518,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return row ? mapConsumer(row) : null;
     },
 
-    findByUsername: async (namespace, ferrumUsername) => {
-      const row = await queryOne(
-        exec,
-        'SELECT * FROM consumers WHERE namespace = ? AND ferrum_username = ?',
-        [namespace, ferrumUsername],
-      );
-      return row ? mapConsumer(row) : null;
-    },
-
     update: async (id, patch) => {
       const set = setParts({
         ferrum_consumer_id: patch.ferrum_consumer_id,
@@ -2725,23 +2672,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return row ? mapThread(row) : null;
     },
 
-    update: async (id, patch) => {
-      const set = setParts({
-        subject: patch.subject,
-        api_id: patch.api_id,
-        participant_b: patch.participant_b,
-        last_message_at: patch.last_message_at,
-      });
-      if (set) {
-        await execute(exec, `UPDATE message_threads SET ${set.sql}, updated_at = ? WHERE id = ?`, [
-          ...set.params,
-          nowIso(),
-          id,
-        ]);
-      }
-      return threads.findById(id);
-    },
-
     list: async (filter, options) => {
       const builder = new SqlWhereBuilder();
       if (filter.participant_user_id !== undefined) {
@@ -2798,9 +2728,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         [at, nowIso(), threadId],
       );
     },
-
-    delete: async (id) =>
-      (await execute(exec, 'DELETE FROM message_threads WHERE id = ?', [id])) > 0,
   };
 
   /* ── messages ───────────────────────────────────────────────────────── */
@@ -2863,15 +2790,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return { items: rows.map(mapMessage), total };
     },
 
-    findLatestByThread: async (threadId) => {
-      const row = await queryOne(
-        exec,
-        'SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at DESC, id DESC LIMIT 1',
-        [threadId],
-      );
-      return row ? mapMessage(row) : null;
-    },
-
     findLatestByThreads: async (threadIds) => {
       if (threadIds.length === 0) return [];
       const placeholders = threadIds.map(() => '?').join(', ');
@@ -2907,9 +2825,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
           WHERE sender_user_id = ? AND created_at >= ? AND broadcast = 0`,
         [senderUserId, sinceIso],
       ),
-
-    deleteByThread: async (threadId) =>
-      execute(exec, 'DELETE FROM messages WHERE thread_id = ?', [threadId]),
   };
 
   /* ── notifications ──────────────────────────────────────────────────── */
@@ -3636,9 +3551,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
          WHERE status = 'sending' AND updated_at <= ?`,
         [nowIso(), nowIso(), olderThan],
       ),
-
-    deleteByUser: async (userId) =>
-      (await execute(exec, 'DELETE FROM account_recovery_jobs WHERE user_id = ?', [userId])) > 0,
   };
 
   /* ── accessGatewayJobs ──────────────────────────────────────────────── */
@@ -3886,16 +3798,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     get: async (key) => {
       const row = await queryOne(exec, 'SELECT * FROM app_settings WHERE "key" = ?', [key]);
       return row ? mapSetting(row) : null;
-    },
-
-    getMany: async (keys) => {
-      if (keys.length === 0) return [];
-      const rows = await queryAll(
-        exec,
-        `SELECT * FROM app_settings WHERE "key" IN (${placeholders(keys.length)})`,
-        keys,
-      );
-      return rows.map(mapSetting);
     },
 
     set: async (key, value, encrypted = false) => {

@@ -383,6 +383,22 @@ export function cookieValue(response: LightMyRequestResponse, name: string): str
   return cookies.find((cookie) => cookie.name === name)?.value;
 }
 
+/**
+ * Drop an account's recovery job the way the worker retires one: claim the
+ * pending generation, then delete exactly that claim. A test that queued a job
+ * by hand uses this to leave the portal clean.
+ */
+export async function dropAccountRecoveryJob(store: NexusStore, userId: string): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const job = await store.accountRecoveryJobs.findByUser(userId);
+    if (!job) return;
+    const claimed =
+      job.status === 'pending' ? await store.accountRecoveryJobs.claimPending(job) : job;
+    if (claimed && (await store.accountRecoveryJobs.deleteClaimed(claimed))) return;
+  }
+  throw new Error(`The recovery job of ${userId} could not be dropped`);
+}
+
 function sessionFrom(response: LightMyRequestResponse, user: User): TestSession {
   const sessionToken = cookieValue(response, SESSION_COOKIE);
   const csrfToken = cookieValue(response, CSRF_COOKIE);

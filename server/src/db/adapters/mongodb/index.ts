@@ -452,7 +452,7 @@ function userUpdateFields(patch: UpdateInput<UserRecord>): Record<string, unknow
   };
 }
 
-/** Settable fields of an access-request patch, shared by both updates. */
+/** Settable fields of an access-request patch for `updateIfStatus`. */
 function accessRequestUpdateFields(
   patch: UpdateInput<AccessRequestRecord>,
 ): Record<string, unknown> {
@@ -2301,16 +2301,6 @@ class MongoStore implements NexusStore {
       return row ? mapOrganization(row) : null;
     },
 
-    findByName: async (name) => {
-      const row = asRow(
-        await this.col(COLLECTIONS.organizations).findOne(
-          { name_lower: name.trim().toLowerCase() },
-          this.opts,
-        ),
-      );
-      return row ? mapOrganization(row) : null;
-    },
-
     update: async (id, patch) => {
       const set = setDoc({
         name: patch.name,
@@ -2337,22 +2327,6 @@ class MongoStore implements NexusStore {
         options,
         mapOrganization,
       ),
-
-    delete: async (id) => {
-      // Stand in for `users.org_id … REFERENCES organizations (id) ON DELETE
-      // SET NULL`: without it a member kept pointing at an organization that no
-      // longer existed on Mongo while the same row on PostgreSQL read `null`.
-      // Through the same session as the delete, so a transaction covers both.
-      await this.col(COLLECTIONS.users).updateMany(
-        { org_id: id } as Filter<NexusDoc>,
-        { $set: { org_id: null } } as UpdateFilter<NexusDoc>,
-        this.opts,
-      );
-      return (
-        (await this.col(COLLECTIONS.organizations).deleteOne({ _id: id }, this.opts)).deletedCount >
-        0
-      );
-    },
   };
 
   /* ── sessions ─────────────────────────────────────────────────────────── */
@@ -2404,10 +2378,6 @@ class MongoStore implements NexusStore {
     delete: async (id) =>
       (await this.col(COLLECTIONS.sessions).deleteOne({ _id: id }, this.opts)).deletedCount > 0,
 
-    deleteByTokenHash: async (tokenHash) =>
-      (await this.col(COLLECTIONS.sessions).deleteOne({ token_hash: tokenHash }, this.opts))
-        .deletedCount > 0,
-
     deleteForUser: async (userId) =>
       (await this.col(COLLECTIONS.sessions).deleteMany({ user_id: userId }, this.opts))
         .deletedCount,
@@ -2450,16 +2420,6 @@ class MongoStore implements NexusStore {
 
     findById: async (id) => {
       const row = asRow(await this.col(COLLECTIONS.applications).findOne({ _id: id }, this.opts));
-      return row ? mapApplication(row) : null;
-    },
-
-    findByOwnerAndName: async (ownerUserId, name) => {
-      const row = asRow(
-        await this.col(COLLECTIONS.applications).findOne(
-          { owner_user_id: ownerUserId, name_lower: name.trim().toLowerCase() },
-          this.opts,
-        ),
-      );
       return row ? mapApplication(row) : null;
     },
 
@@ -2584,13 +2544,6 @@ class MongoStore implements NexusStore {
           { slug_lower: slug.trim().toLowerCase() },
           this.opts,
         ),
-      );
-      return row ? mapApi(row) : null;
-    },
-
-    findByProxyId: async (ferrumProxyId) => {
-      const row = asRow(
-        await this.col(COLLECTIONS.apis).findOne({ ferrum_proxy_id: ferrumProxyId }, this.opts),
       );
       return row ? mapApi(row) : null;
     },
@@ -2783,13 +2736,6 @@ class MongoStore implements NexusStore {
         options,
         mapApiSpecSummary,
         SPEC_SUMMARY_PROJECTION,
-      );
-    },
-
-    delete: async (id) => {
-      await this.clearRollbackLinks([id]);
-      return (
-        (await this.col(COLLECTIONS.apiSpecs).deleteOne({ _id: id }, this.opts)).deletedCount > 0
       );
     },
 
@@ -3138,20 +3084,6 @@ class MongoStore implements NexusStore {
     findById: async (id) => {
       const row = asRow(await this.col(COLLECTIONS.accessRequests).findOne({ _id: id }, this.opts));
       return row ? mapAccessRequest(row) : null;
-    },
-
-    update: async (id, patch) => {
-      const set = setDoc(accessRequestUpdateFields(patch));
-      if (set) {
-        await mapConflict('You already have a pending request for this API', () =>
-          this.col(COLLECTIONS.accessRequests).updateOne(
-            { _id: id },
-            { $set: { ...set, updated_at: nowIso() } },
-            this.opts,
-          ),
-        );
-      }
-      return this.accessRequests.findById(id);
     },
 
     updateIfStatus: async (id, expected, patch) => {
@@ -3528,16 +3460,6 @@ class MongoStore implements NexusStore {
       return row ? mapConsumer(row) : null;
     },
 
-    findByUsername: async (namespace, ferrumUsername) => {
-      const row = asRow(
-        await this.col(COLLECTIONS.consumers).findOne(
-          { namespace, ferrum_username: ferrumUsername },
-          this.opts,
-        ),
-      );
-      return row ? mapConsumer(row) : null;
-    },
-
     update: async (id, patch) => {
       const set = setDoc({
         ferrum_consumer_id: patch.ferrum_consumer_id,
@@ -3672,23 +3594,6 @@ class MongoStore implements NexusStore {
       return row ? mapThread(row) : null;
     },
 
-    update: async (id, patch) => {
-      const set = setDoc({
-        subject: patch.subject,
-        api_id: patch.api_id,
-        participant_b: patch.participant_b,
-        last_message_at: patch.last_message_at,
-      });
-      if (set) {
-        await this.col(COLLECTIONS.threads).updateOne(
-          { _id: id },
-          { $set: { ...set, updated_at: nowIso() } },
-          this.opts,
-        );
-      }
-      return this.threads.findById(id);
-    },
-
     list: async (filter, options) => {
       const conditions: Record<string, unknown>[] = [];
       if (filter.participant_user_id !== undefined) {
@@ -3762,9 +3667,6 @@ class MongoStore implements NexusStore {
         this.opts,
       );
     },
-
-    delete: async (id) =>
-      (await this.col(COLLECTIONS.threads).deleteOne({ _id: id }, this.opts)).deletedCount > 0,
   };
 
   /* ── messages ─────────────────────────────────────────────────────────── */
@@ -3817,16 +3719,6 @@ class MongoStore implements NexusStore {
       );
     },
 
-    findLatestByThread: async (threadId) => {
-      const docs = await this.col(COLLECTIONS.messages)
-        .find({ thread_id: threadId }, this.opts)
-        .sort(NEWEST_FIRST)
-        .limit(1)
-        .toArray();
-      const row = asRow(docs[0]);
-      return row ? mapMessage(row) : null;
-    },
-
     findLatestByThreads: async (threadIds) => {
       if (threadIds.length === 0) return [];
       const docs = await this.col(COLLECTIONS.threads)
@@ -3844,10 +3736,6 @@ class MongoStore implements NexusStore {
         { sender_user_id: senderUserId, created_at: { $gte: sinceIso }, broadcast: { $ne: true } },
         this.opts,
       ),
-
-    deleteByThread: async (threadId) =>
-      (await this.col(COLLECTIONS.messages).deleteMany({ thread_id: threadId }, this.opts))
-        .deletedCount,
   };
 
   /* ── notifications ────────────────────────────────────────────────────── */
@@ -4539,14 +4427,6 @@ class MongoStore implements NexusStore {
       );
       return result.modifiedCount;
     },
-
-    deleteByUser: async (userId) => {
-      const result = await this.col(COLLECTIONS.accountRecoveryJobs).deleteOne(
-        { user_id: userId } as Filter<NexusDoc>,
-        this.opts,
-      );
-      return result.deletedCount > 0;
-    },
   };
 
   /* ── accessGatewayJobs ────────────────────────────────────────────────── */
@@ -4723,14 +4603,6 @@ class MongoStore implements NexusStore {
     get: async (key) => {
       const row = asRow(await this.col(COLLECTIONS.settings).findOne({ _id: key }, this.opts));
       return row ? mapSetting(row) : null;
-    },
-
-    getMany: async (keys) => {
-      if (keys.length === 0) return [];
-      const docs = await this.col(COLLECTIONS.settings)
-        .find({ _id: { $in: keys } } as Filter<NexusDoc>, this.opts)
-        .toArray();
-      return docs.map((doc) => mapSetting(doc as Row));
     },
 
     set: async (key, value, encrypted = false) => {

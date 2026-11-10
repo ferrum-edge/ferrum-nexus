@@ -28,6 +28,7 @@ import {
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
 import {
   buildTestApp,
+  dropAccountRecoveryJob,
   SAMPLE_SPEC_YAML,
   TEST_PASSWORD,
   type TestApp,
@@ -427,7 +428,7 @@ describe('password reset', () => {
     );
     assert.deepEqual(revoked, []);
     // Left for an administrator in production; dropped so later tests start clean.
-    await harness.store.accountRecoveryJobs.deleteByUser(account.user.id);
+    await dropAccountRecoveryJob(harness.store, account.user.id);
   });
 
   it('sweeps another account’s retiring basicauth row with the recovered one', async () => {
@@ -564,7 +565,7 @@ describe('password reset', () => {
       assert.equal(refused.statusCode, 409, refused.body);
       assert.equal(errorCode(refused.body), 'CONFLICT');
     } finally {
-      await harness.store.accountRecoveryJobs.deleteByUser(provider.user.id);
+      await dropAccountRecoveryJob(harness.store, provider.user.id);
     }
     const live = await harness.store.credentials.list({
       user_id: provider.user.id,
@@ -600,7 +601,7 @@ describe('password reset', () => {
       assert.equal(refused.statusCode, 409, refused.body);
       assert.equal(errorCode(refused.body), 'CONFLICT');
     } finally {
-      await harness.store.accountRecoveryJobs.deleteByUser(provider.user.id);
+      await dropAccountRecoveryJob(harness.store, provider.user.id);
     }
     // The refusal came before the delete: the provider's test consumer and its
     // key are still there, for the recovery to revoke.

@@ -270,36 +270,36 @@ describe('daily message budget', () => {
   });
 
   it('slides: messages older than the window stop counting', async () => {
-    // Age the sender's three messages out by writing them straight through the
-    // store with a `created_at` a day and an hour back. Nothing else about them
-    // changes, so this is exactly the state the portal is in tomorrow.
+    // A full budget written straight through the store with a `created_at` a
+    // day and an hour back: exactly the state an account is in the day after
+    // it spent its allowance.
+    const late = await harness.registerUser({ email: 'budget-late@example.test' });
     const stale = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
-    const page = await harness.store.messages.listByThread(threadId, { limit: 50 });
-    const own = page.items.filter((message) => message.sender_user_id === sender.user.id);
-    assert.equal(own.length, 3, 'the three that filled the budget');
-
-    for (const message of own) {
-      await harness.store.messages.deleteByThread(message.thread_id);
-    }
-    for (const message of own) {
+    const thread = await harness.store.threads.create({
+      subject: 'Yesterday',
+      created_by: late.user.id,
+      participant_a: late.user.id,
+      participant_b: founder.user.id,
+    });
+    for (const body of ['One', 'Two', 'Three']) {
       await harness.store.messages.create({
-        thread_id: message.thread_id,
-        sender_user_id: message.sender_user_id,
-        body: message.body,
+        thread_id: thread.id,
+        sender_user_id: late.user.id,
+        body,
         created_at: stale,
       });
     }
 
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     assert.equal(
-      await harness.store.messages.countBySenderSince(sender.user.id, since),
+      await harness.store.messages.countBySenderSince(late.user.id, since),
       0,
       'aged-out rows are outside the window',
     );
 
-    const response = await harness.authed(sender, {
+    const response = await harness.authed(late, {
       method: 'POST',
-      url: `/api/threads/${threadId}/messages`,
+      url: `/api/threads/${thread.id}/messages`,
       payload: { body: 'A new day' },
     });
     assert.equal(response.statusCode, 201, `the window slid, so the send fits: ${response.body}`);

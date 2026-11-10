@@ -265,7 +265,7 @@ function userUpdateColumns(patch: UpdateInput<UserRecord>): Record<string, Param
   };
 }
 
-/** Encoded `SET` columns of an access-request patch, shared by both updates. */
+/** Encoded `SET` columns of an access-request patch for `updateIfStatus`. */
 function accessRequestUpdateColumns(
   patch: UpdateInput<AccessRequestRecord>,
 ): Record<string, Param | undefined> {
@@ -1410,13 +1410,6 @@ class SqliteStore implements NexusStore {
       return row ? mapOrganization(row) : null;
     },
 
-    findByName: async (name) => {
-      const row = queryOne(this.db, 'SELECT * FROM organizations WHERE lower(name) = ?', [
-        name.trim().toLowerCase(),
-      ]);
-      return row ? mapOrganization(row) : null;
-    },
-
     update: async (id, patch) => {
       const set = setParts({ name: patch.name, description: patch.description });
       if (set) {
@@ -1446,8 +1439,6 @@ class SqliteStore implements NexusStore {
       );
       return { items: rows.map(mapOrganization), total };
     },
-
-    delete: async (id) => execute(this.db, 'DELETE FROM organizations WHERE id = ?', [id]) > 0,
   };
 
   /* ── sessions ─────────────────────────────────────────────────────────── */
@@ -1499,9 +1490,6 @@ class SqliteStore implements NexusStore {
 
     delete: async (id) => execute(this.db, 'DELETE FROM sessions WHERE id = ?', [id]) > 0,
 
-    deleteByTokenHash: async (tokenHash) =>
-      execute(this.db, 'DELETE FROM sessions WHERE token_hash = ?', [tokenHash]) > 0,
-
     deleteForUser: async (userId) =>
       execute(this.db, 'DELETE FROM sessions WHERE user_id = ?', [userId]),
 
@@ -1538,15 +1526,6 @@ class SqliteStore implements NexusStore {
 
     findById: async (id) => {
       const row = queryOne(this.db, 'SELECT * FROM applications WHERE id = ?', [id]);
-      return row ? mapApplication(row) : null;
-    },
-
-    findByOwnerAndName: async (ownerUserId, name) => {
-      const row = queryOne(
-        this.db,
-        'SELECT * FROM applications WHERE owner_user_id = ? AND lower(name) = ?',
-        [ownerUserId, name.trim().toLowerCase()],
-      );
       return row ? mapApplication(row) : null;
     },
 
@@ -1660,13 +1639,6 @@ class SqliteStore implements NexusStore {
     findBySlug: async (slug) => {
       const row = queryOne(this.db, 'SELECT * FROM apis WHERE lower(slug) = ?', [
         slug.trim().toLowerCase(),
-      ]);
-      return row ? mapApi(row) : null;
-    },
-
-    findByProxyId: async (ferrumProxyId) => {
-      const row = queryOne(this.db, 'SELECT * FROM apis WHERE ferrum_proxy_id = ?', [
-        ferrumProxyId,
       ]);
       return row ? mapApi(row) : null;
     },
@@ -1842,8 +1814,6 @@ class SqliteStore implements NexusStore {
 
     listSummaries: async (filter, options) =>
       listSpecRows(this.db, filter, options, API_SPEC_SUMMARY_COLUMNS, mapApiSpecSummary),
-
-    delete: async (id) => execute(this.db, 'DELETE FROM api_specs WHERE id = ?', [id]) > 0,
 
     deleteByApi: async (apiId) =>
       execute(this.db, 'DELETE FROM api_specs WHERE api_id = ?', [apiId]),
@@ -2171,20 +2141,6 @@ class SqliteStore implements NexusStore {
     findById: async (id) => {
       const row = queryOne(this.db, 'SELECT * FROM access_requests WHERE id = ?', [id]);
       return row ? mapAccessRequest(row) : null;
-    },
-
-    update: async (id, patch) => {
-      const set = setParts(accessRequestUpdateColumns(patch));
-      if (set) {
-        mapConflict('You already have a pending request for this API', () =>
-          execute(this.db, `UPDATE access_requests SET ${set.sql}, updated_at = ? WHERE id = ?`, [
-            ...set.params,
-            nowIso(),
-            id,
-          ]),
-        );
-      }
-      return this.accessRequests.findById(id);
     },
 
     updateIfStatus: async (id, expected, patch) => {
@@ -2633,15 +2589,6 @@ class SqliteStore implements NexusStore {
       return row ? mapConsumer(row) : null;
     },
 
-    findByUsername: async (namespace, ferrumUsername) => {
-      const row = queryOne(
-        this.db,
-        'SELECT * FROM consumers WHERE namespace = ? AND ferrum_username = ?',
-        [namespace, ferrumUsername],
-      );
-      return row ? mapConsumer(row) : null;
-    },
-
     update: async (id, patch) => {
       const set = setParts({
         ferrum_consumer_id: patch.ferrum_consumer_id,
@@ -2789,23 +2736,6 @@ class SqliteStore implements NexusStore {
       return row ? mapThread(row) : null;
     },
 
-    update: async (id, patch) => {
-      const set = setParts({
-        subject: patch.subject,
-        api_id: patch.api_id,
-        participant_b: patch.participant_b,
-        last_message_at: patch.last_message_at,
-      });
-      if (set) {
-        execute(this.db, `UPDATE message_threads SET ${set.sql}, updated_at = ? WHERE id = ?`, [
-          ...set.params,
-          nowIso(),
-          id,
-        ]);
-      }
-      return this.threads.findById(id);
-    },
-
     list: async (filter, options) => {
       const builder = new WhereBuilder();
       if (filter.participant_user_id !== undefined) {
@@ -2861,8 +2791,6 @@ class SqliteStore implements NexusStore {
         [at, nowIso(), threadId],
       );
     },
-
-    delete: async (id) => execute(this.db, 'DELETE FROM message_threads WHERE id = ?', [id]) > 0,
   };
 
   /* ── messages ─────────────────────────────────────────────────────────── */
@@ -2925,15 +2853,6 @@ class SqliteStore implements NexusStore {
       return { items: rows.map(mapMessage), total };
     },
 
-    findLatestByThread: async (threadId) => {
-      const row = queryOne(
-        this.db,
-        'SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at DESC, id DESC LIMIT 1',
-        [threadId],
-      );
-      return row ? mapMessage(row) : null;
-    },
-
     findLatestByThreads: async (threadIds) => {
       if (threadIds.length === 0) return [];
       const placeholders = threadIds.map(() => '?').join(', ');
@@ -2969,9 +2888,6 @@ class SqliteStore implements NexusStore {
           WHERE sender_user_id = ? AND created_at >= ? AND broadcast = 0`,
         [senderUserId, sinceIso],
       ),
-
-    deleteByThread: async (threadId) =>
-      execute(this.db, 'DELETE FROM messages WHERE thread_id = ?', [threadId]),
   };
 
   /* ── notifications ────────────────────────────────────────────────────── */
@@ -3604,9 +3520,6 @@ class SqliteStore implements NexusStore {
          WHERE status = 'sending' AND updated_at <= ?`,
         [nowIso(), nowIso(), olderThan],
       ),
-
-    deleteByUser: async (userId) =>
-      execute(this.db, 'DELETE FROM account_recovery_jobs WHERE user_id = ?', [userId]) > 0,
   };
 
   /* ── accessGatewayJobs ────────────────────────────────────────────────── */
@@ -3798,15 +3711,6 @@ class SqliteStore implements NexusStore {
     get: async (key) => {
       const row = queryOne(this.db, 'SELECT * FROM app_settings WHERE key = ?', [key]);
       return row ? mapSetting(row) : null;
-    },
-
-    getMany: async (keys) => {
-      if (keys.length === 0) return [];
-      return queryAll(
-        this.db,
-        `SELECT * FROM app_settings WHERE key IN (${keys.map(() => '?').join(', ')})`,
-        keys,
-      ).map(mapSetting);
     },
 
     set: async (key, value, encrypted = false) => {

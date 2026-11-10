@@ -402,9 +402,10 @@ describe('messaging list previews', () => {
       }
     }
 
-    // Every preview must match what the per-thread lookup reports.
+    // Every preview must match the thread's newest message.
     for (const [id, text] of expected) {
-      const latest = await harness.store.messages.findLatestByThread(id);
+      const [latest] = (await harness.store.messages.listByThread(id, { newest_first: true }))
+        .items;
       assert.equal(latest ? latest.body.replace(WHITESPACE_RUN, ' ').trim() : null, text);
     }
 
