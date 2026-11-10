@@ -138,6 +138,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   Documentation tab, an operation listed under two tags gets a distinct panel
   id on each card, so each button's `aria-controls` names its own panel
   (#697).
+- Disabling an account from god mode, or from Users, no longer reports
+  success while its gateway revocation is still `pending`. The page shows an
+  error-styled notice that the account's gateway credentials keep working
+  until the gateway accepts the revocation, which is retried automatically,
+  and points to Users to follow or retry it (#698).
 
 ### Security
 

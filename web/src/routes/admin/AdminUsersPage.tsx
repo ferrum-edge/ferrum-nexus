@@ -13,6 +13,7 @@ import {
   type UserStatus,
 } from '@ferrum-nexus/shared';
 import { formatDateTime, formatRelative } from '../../lib/format';
+import { GATEWAY_REVOCATION_PENDING } from '../../lib/gateway-teardown';
 import {
   useReleaseUserAddress,
   useRetryGatewayTeardown,
@@ -705,8 +706,17 @@ function UsersTable(): ReactElement {
               body: { status: statusTarget.status === 'active' ? 'disabled' : 'active' },
             },
             {
-              onSuccess: () => {
-                toast.success('Account updated');
+              onSuccess: (response) => {
+                // Present only when this request disabled the account; `pending`
+                // means its gateway credentials still work.
+                if (response.gateway_teardown === 'pending') {
+                  toast.error(
+                    'Account disabled; gateway revocation pending',
+                    GATEWAY_REVOCATION_PENDING,
+                  );
+                } else {
+                  toast.success('Account updated');
+                }
                 setStatusTarget(null);
               },
             },
