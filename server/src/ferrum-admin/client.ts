@@ -1303,11 +1303,6 @@ export interface FerrumAdminClientDeps {
   /** Derived only from NEXUS_ALLOW_PRIVATE_UPSTREAMS; defaults to the public profile. */
   allowPrivateUpstreams?: boolean;
   /**
-   * Derived only from NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS. Waives the gateway's
-   * public-only attestation and nothing else; defaults to requiring it.
-   */
-  allowUnattestedEdgeEgress?: boolean;
-  /**
    * Derived only from NEXUS_EXPECTED_DATA_PLANES. Unset, a control plane's
    * data-plane attestation never proves public-only egress.
    */
@@ -1886,8 +1881,7 @@ export function createFerrumAdminClient(
   async function assertBackendEgress(): Promise<BackendEgressAdmission> {
     const { reading, freshness } = await readEgressPolicy();
     // The private-upstreams opt-out admits a recognized weaker process policy
-    // without describing it as public-only; the unattested opt-out still needs
-    // `public_only_guaranteed`. Neither skips the parse above.
+    // without describing it as public-only. It does not skip the parse above.
     const assessment = assessBackendEgress(reading, deps, freshness);
     if (assessment.admission === null) {
       const message = 'The gateway cannot establish the required local public egress policy';
@@ -2225,7 +2219,7 @@ export function createFerrumAdminClient(
         try {
           const { reading, freshness } = await readEgressPolicy(signal);
           const assessment = assessBackendEgress(reading, deps, freshness);
-          // The guarantee is the gateway's alone: an opt-out accepts a weaker
+          // The guarantee is the gateway's alone: the opt-out accepts a weaker
           // policy for writes, but never turns it into public-only egress.
           publicEgressGuaranteed = assessment.publicEgressGuaranteed;
           backendEgressVerified = assessment.admission !== null;

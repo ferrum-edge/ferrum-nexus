@@ -690,14 +690,8 @@ export function createDataPlaneSightings(
  * - `private-upstreams-opt-in`: `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`. The portal
  *   publishes private upstreams on purpose, so the gateway cannot also be
  *   public-only and its attestation is not required.
- * - `unattested-edge-opt-in`: `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true`. Only
- *   the gateway attestation is waived; Nexus still screens every upstream. It
- *   still requires `public_only_guaranteed=true`, which schema 2 reports only
- *   for `local-data-plane`, so it admits no pairing the public profile would
- *   refuse (a control plane reports `false`).
  */
-export type EgressProfile =
-  'public-guaranteed' | 'private-upstreams-opt-in' | 'unattested-edge-opt-in';
+export type EgressProfile = 'public-guaranteed' | 'private-upstreams-opt-in';
 
 /** The admission verdict for one backend write. */
 export interface BackendEgressAdmission {
@@ -705,13 +699,12 @@ export interface BackendEgressAdmission {
   enforcement_scope: BackendEgressPolicy['enforcement_scope'];
 }
 
-/** The two operator opt-outs; each relaxes a different check. */
+/** The operator opt-out: `NEXUS_ALLOW_PRIVATE_UPSTREAMS`. */
 export interface EgressOptOuts {
   allowPrivateUpstreams?: boolean;
-  allowUnattestedEdgeEgress?: boolean;
 }
 
-/** The opt-outs, and the operator's data-plane inventory for a control plane. */
+/** The opt-out, and the operator's data-plane inventory for a control plane. */
 export interface EgressAdmissionOptions extends EgressOptOuts {
   /** `NEXUS_EXPECTED_DATA_PLANES`; unset, an attestation never grants the guarantee. */
   expectedDataPlanes?: number;
@@ -719,7 +712,7 @@ export interface EgressAdmissionOptions extends EgressOptOuts {
 
 /** Everything one policy reading establishes. */
 export interface BackendEgressAssessment {
-  /** Whether the reading proves public-only egress; independent of the opt-outs. */
+  /** Whether the reading proves public-only egress; independent of the opt-out. */
   publicEgressGuaranteed: boolean;
   /** The admission verdict, or `null` to refuse the write. */
   admission: BackendEgressAdmission | null;
@@ -730,7 +723,7 @@ export interface BackendEgressAssessment {
 /**
  * Assess one reading, taken as `freshness` describes. A set-aside attestation
  * proves nothing, whatever the rest of the answer says, but it never refuses
- * what an opt-out admits.
+ * what the opt-out admits.
  */
 export function assessBackendEgress(
   reading: BackendEgressPolicyReading,
@@ -750,17 +743,13 @@ export function assessBackendEgress(
     admission = { egress_profile: 'public-guaranteed', enforcement_scope };
   } else if (options.allowPrivateUpstreams === true) {
     admission = { egress_profile: 'private-upstreams-opt-in', enforcement_scope };
-  } else if (options.allowUnattestedEdgeEgress === true && policy.public_only_guaranteed === true) {
-    // Never relaxed to `mode === 'public'`: under schema 2 that would grant a
-    // control plane the policy-only reading the owner withdrew.
-    admission = { egress_profile: 'unattested-edge-opt-in', enforcement_scope };
   }
   return { publicEgressGuaranteed, admission, dataPlaneAttestation };
 }
 
 /**
  * Admit a recognized policy, or return `null` to refuse it. A policy that
- * proves public-only egress is always reported as such, whatever the opt-outs.
+ * proves public-only egress is always reported as such, whatever the opt-out.
  */
 export function admitBackendEgress(
   policy: BackendEgressPolicy,

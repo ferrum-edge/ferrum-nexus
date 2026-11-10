@@ -370,9 +370,7 @@ inconsistent, or Edge v0.9.13, which sends no attestation and reports
 condition failed, and a refused write's `EDGE_ERROR` carries the same reason in its
 message and a bounded `details.data_plane_attestation` code.
 `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` admits its
-writes without changing that verdict. `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` still
-requires `public_only_guaranteed=true`, so against Edge v0.9.13 it admits no such
-pairing. Egress policy schema 1 (Edge v0.9.12 and earlier) is refused as
+writes without changing that verdict. Egress policy schema 1 (Edge v0.9.12 and earlier) is refused as
 `unsupported_egress_policy_schema`.
 See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee).

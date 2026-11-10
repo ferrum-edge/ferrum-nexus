@@ -697,7 +697,7 @@ export interface EdgeProbe {
    * connected data plane public-only and at least `NEXUS_EXPECTED_DATA_PLANES`
    * distinct data planes (`node_id`) connected, counting each only once it has
    * been listed long enough that no restarted one can count twice. Independent
-   * of either opt-out.
+   * of `NEXUS_ALLOW_PRIVATE_UPSTREAMS`.
    * Observational only.
    */
   publicEgressGuaranteed?: boolean;

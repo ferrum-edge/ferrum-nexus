@@ -465,7 +465,6 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
     createFerrumAdminClient(config.edge, options.edgeLogger, {
       leases: store.leases,
       allowPrivateUpstreams: config.allowPrivateUpstreams,
-      allowUnattestedEdgeEgress: config.allowUnattestedEdgeEgress,
       expectedDataPlanes: config.expectedDataPlanes,
     }),
   );
