@@ -606,10 +606,15 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       if (patch.display_name !== undefined) {
         const name = patch.display_name.trim();
         if (name === '') throw validationFailed('Display name cannot be empty');
-        update.display_name = name;
-        changed.push('display_name');
+        // Compared like `updateMe`: the admin editor always sends both fields,
+        // and an unchanged one must not appear in the audit row's
+        // `changed_fields` (docs/security.md).
+        if (name !== target.display_name) {
+          update.display_name = name;
+          changed.push('display_name');
+        }
       }
-      if (patch.org_id !== undefined) {
+      if (patch.org_id !== undefined && patch.org_id !== target.org_id) {
         if (patch.org_id !== null && !(await store.organizations.findById(patch.org_id))) {
           throw notFound('Organization', patch.org_id);
         }

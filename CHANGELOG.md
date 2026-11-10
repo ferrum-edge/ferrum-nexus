@@ -104,6 +104,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   write. The pre-check used to answer `409` ("disabled") for a missing
   application and skipped the owner check, leaving both to the re-check after
   the consumer write. A disabled application still answers `409` (#661).
+- An administrator's account edit (`PATCH /api/users/:id`) records only the
+  fields that moved. The **Edit user** dialog always sends `display_name` and
+  `org_id`, and every save wrote a `user.update` row with both in
+  `changed_fields`, showing organization moves that never happened. An edit
+  that changes nothing now writes no row, as the self-service, organization
+  and API edits already did (#686).
 - Documentation corrections. Only the god-mode `revoke-grant`, `delete-api` and
   `disable-user` operations take a `reason`; a broadcast records its subject
   there instead. The admin route summary lists `PUT /api/admin/sso` and an SMTP
