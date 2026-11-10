@@ -104,6 +104,30 @@ interface RenderArgs {
   seen: readonly string[];
 }
 
+/**
+ * Entries of a `type` array read. JSON Schema has seven type names and a valid
+ * array repeats none, so this bounds only a hostile document, whose array is
+ * otherwise read again at every `$ref` to its schema.
+ */
+const MAX_TYPE_NAMES = 8;
+
+/**
+ * The type names a schema declares: one name, or (OpenAPI 3.1) an array of
+ * them, where `'null'` says what OpenAPI 3.0's `nullable: true` says.
+ */
+function schemaTypes(value: unknown): { names: string[]; nullable: boolean } {
+  const declared = typeof value === 'string' ? [value] : (asArray(value) ?? []);
+  const names: string[] = [];
+  let nullable = false;
+  for (const entry of declared.slice(0, MAX_TYPE_NAMES)) {
+    if (entry === 'null') nullable = true;
+    else if (typeof entry === 'string') names.push(entry);
+  }
+  // `type: 'null'`, or `type: ['null']`, names the null type itself.
+  if (names.length === 0 && nullable) return { names: ['null'], nullable: false };
+  return { names, nullable };
+}
+
 function renderTypeLine({
   schema,
   budget,
@@ -111,13 +135,13 @@ function renderTypeLine({
   schema: SpecNode;
   budget: RenderBudget;
 }): ReactElement | null {
-  const type = asString(schema.type);
+  const types = schemaTypes(schema.type);
   const format = asString(schema.format);
   const enumValues = asArray(schema.enum);
   const parts: string[] = [];
-  if (type) parts.push(type);
+  if (types.names.length > 0) parts.push(types.names.join(' | '));
   if (format) parts.push(`<${format}>`);
-  if (schema.nullable === true) parts.push('| null');
+  if (types.nullable || schema.nullable === true) parts.push('| null');
 
   if (parts.length === 0 && !enumValues) return null;
 

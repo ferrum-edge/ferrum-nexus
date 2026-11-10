@@ -114,6 +114,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   are safe on several instances. Edge v0.9.17's hop budget and the published
   service-manifest contract are no longer described as pending, and the
   mass-email daily default is described as the storage bound it now is.
+- The catalog's Documentation tab renders an OpenAPI 3.1 `type` array:
+  `type: ['string', 'null']` reads `string | null`, as `nullable: true` does
+  in OpenAPI 3.0, where it used to show no type at all (#692).
 
 ### Security
 
