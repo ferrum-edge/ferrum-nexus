@@ -4548,13 +4548,24 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               'an auth_plugin change could not revoke every credential the API itself owned',
             );
           }
-          await audit.record(
-            { id: actor.id, role: actor.role },
-            AuditAction.API_AUTH_PLUGIN_CHANGED,
-            { type: 'api', id: api.id },
-            summary,
-            ip,
-          );
+          // Best effort, like the notices below: the swap committed with its
+          // api.update row, and each revocation wrote its own credential.revoke
+          // row. A failed summary must not answer 500 for a change that
+          // happened and invite a retry of it.
+          try {
+            await audit.record(
+              { id: actor.id, role: actor.role },
+              AuditAction.API_AUTH_PLUGIN_CHANGED,
+              { type: 'api', id: api.id },
+              summary,
+              ip,
+            );
+          } catch (error) {
+            deps.log?.(
+              { api_id: api.id, error: errorMessage(error) },
+              'an auth_plugin change was applied but its summary audit row could not be written',
+            );
+          }
         }
 
         if (details.existing_credentials_invalidated === true) {
