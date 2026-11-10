@@ -75,7 +75,6 @@ import {
   isUnsupportedEgressPolicySchema,
   readBackendEgressPolicy,
   type BackendEgressAdmission,
-  type BackendEgressPolicy,
   type BackendEgressPolicyReading,
   type DataPlaneFreshness,
 } from './egress-policy.js';
@@ -241,8 +240,6 @@ export interface FerrumAdminClient {
   version(): Promise<string | null>;
   /** Combined reachability probe for `GET /api/health`; never throws. */
   probe(timeoutMs?: number): Promise<EdgeProbe>;
-  /** Fresh authenticated process policy; never backed by health or startup caches. */
-  backendEgressPolicy(signal?: AbortSignal): Promise<BackendEgressPolicy>;
   /**
    * Admission before side effects; each backend write repeats it at the
    * boundary. Returns the bounded verdict the caller records in its audit row.
@@ -1885,10 +1882,6 @@ export function createFerrumAdminClient(
     return { reading, freshness: { readAt, gatewayDate, settledNodeIds } };
   }
 
-  async function backendEgressPolicy(signal?: AbortSignal): Promise<BackendEgressPolicy> {
-    return (await readEgressPolicy(signal)).reading.policy;
-  }
-
   async function assertBackendEgress(): Promise<BackendEgressAdmission> {
     const { reading, freshness } = await readEgressPolicy();
     // Either opt-out admits a recognized weaker process policy, but neither
@@ -2177,7 +2170,6 @@ export function createFerrumAdminClient(
   return {
     namespace,
     namespaceMonitor,
-    backendEgressPolicy,
     assertBackendEgress,
     deployments: {
       async snapshot(subject?: string): Promise<EdgeDeploymentSnapshot> {

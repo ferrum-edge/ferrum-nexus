@@ -147,13 +147,6 @@ export function accessDisruptionConfirmationRequired(
   return new NexusError('ACCESS_DISRUPTION_CONFIRMATION_REQUIRED', message, details);
 }
 
-/** 410 — show-once credential material was already retrieved. */
-export function showOnceAlready(
-  message = 'This secret was already shown and cannot be shown again',
-): NexusError {
-  return new NexusError('SHOW_ONCE_ALREADY', message);
-}
-
 /**
  * 502 — the Ferrum Edge Admin API could not be reached (DNS, connect, TLS,
  * socket or timeout). Never carries upstream text; the cause is logged.
@@ -180,11 +173,6 @@ export function edgeError(
 /** 400 — uploaded OpenAPI document could not be parsed or failed validation. */
 export function specInvalid(message: string, details?: unknown): NexusError {
   return new NexusError('SPEC_INVALID', message, details);
-}
-
-/** 500 — email could not be enqueued, or exhausted its outbox retries. */
-export function outboxFailure(message = 'Email could not be queued for delivery'): NexusError {
-  return new NexusError('OUTBOX_FAILURE', message);
 }
 
 /** 500 — unexpected server-side failure. The message is never sent verbatim to clients. */

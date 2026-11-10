@@ -512,8 +512,6 @@ export interface EmailService {
    * admin settings page can report a configuration error immediately.
    */
   sendTest(to: string): Promise<{ ok: boolean; error: string | null }>;
-  /** The admin override for a key, or the built-in default. */
-  resolveTemplate(key: EmailTemplateKey): Promise<EmailTemplateContent>;
 }
 
 /** Dependencies of {@link createEmailService}. */
@@ -620,18 +618,6 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
         from: stored.from_address ?? config.smtp.from,
       };
     });
-  }
-
-  async function resolveTemplate(key: EmailTemplateKey): Promise<EmailTemplateContent> {
-    const override = await store.emailTemplates.get(key);
-    if (override) {
-      return {
-        subject: override.subject,
-        body_html: override.body_html,
-        body_text: override.body_text,
-      };
-    }
-    return DEFAULT_EMAIL_TEMPLATES[key];
   }
 
   /**
@@ -762,7 +748,6 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
 
   return {
     resolveSettings,
-    resolveTemplate,
     render,
     prepareRenderer,
 

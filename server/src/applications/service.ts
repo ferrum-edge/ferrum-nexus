@@ -56,7 +56,6 @@ import {
   roleAtLeast,
   type Application,
   type ApplicationStatus,
-  type ApplicationSummary,
   type Paginated,
   type Uuid,
 } from '@ferrum-nexus/shared';
@@ -130,8 +129,6 @@ export interface ApplicationsService {
    * admin a secret that authenticates as them), and be `active`.
    */
   resolveForActor(actor: UserRecord, applicationId: Uuid | null): Promise<ApplicationRecord | null>;
-  /** The compact form embedded in requests, grants and credentials. */
-  summarize(record: ApplicationRecord): ApplicationSummary;
 }
 
 /** Dependencies of {@link createApplicationsService}. */
@@ -147,15 +144,6 @@ export interface ApplicationsServiceDeps {
 /** Build the applications service. */
 export function createApplicationsService(deps: ApplicationsServiceDeps): ApplicationsService {
   const { config, store, edge, audit, provisioner } = deps;
-
-  function summarize(record: ApplicationRecord): ApplicationSummary {
-    return {
-      id: record.id,
-      name: record.name,
-      owner_user_id: record.owner_user_id,
-      status: record.status,
-    };
-  }
 
   /** The row, plus the owner-or-admin check every read and write shares. */
   async function load(actor: UserRecord, applicationId: Uuid): Promise<ApplicationRecord> {
@@ -205,8 +193,6 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
   }
 
   return {
-    summarize,
-
     async list(actor, filter = {}, options): Promise<Paginated<Application>> {
       // A client only ever sees their own; `owner_user_id` is the admin's
       // opt-in, exactly as it is on the API listing.
@@ -480,19 +466,4 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
       return application;
     },
   };
-}
-
-/** Every application id an account owns, for the teardown and repair walks. */
-export async function listApplicationIds(store: NexusStore, ownerUserId: Uuid): Promise<Uuid[]> {
-  const ids: Uuid[] = [];
-  let offset = 0;
-  for (;;) {
-    const page = await store.applications.list(
-      { owner_user_id: ownerUserId },
-      { limit: MAX_PAGE_SIZE, offset },
-    );
-    ids.push(...page.items.map((row) => row.id));
-    offset += page.items.length;
-    if (page.items.length === 0 || offset >= page.total) return ids;
-  }
 }

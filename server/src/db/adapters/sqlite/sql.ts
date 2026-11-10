@@ -117,13 +117,6 @@ export function encodeJson(value: unknown): string | null {
   return value === null || value === undefined ? null : JSON.stringify(value);
 }
 
-/** Encode an optional string, normalising `undefined` to SQL NULL. */
-export function encodeNullable(value: unknown): Param {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'number' || typeof value === 'string') return value;
-  return String(value);
-}
-
 /* ── Statement building ─────────────────────────────────────────────────── */
 
 /** A `WHERE` fragment plus its bound parameters. */
