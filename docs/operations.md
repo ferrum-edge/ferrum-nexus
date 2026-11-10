@@ -3035,12 +3035,17 @@ disabled. Re-enabling the account deletes the job. There is one job per account;
 disabling again resets it.
 
 A `sending` job untouched for five minutes returns to `pending` at the start of
-every worker tick. One job is five Edge calls (each bounded by
-`FERRUM_ADMIN_TIMEOUT_MS`) plus up to 30 s waiting for the consumer's lease:
-about 55 s at the defaults. The five-minute threshold is a fixed constant, so if
-you raise `FERRUM_ADMIN_TIMEOUT_MS` toward its 60 s maximum, a slow gateway can
-look like a crashed worker. Each claim carries an internal `generation` token,
-so a superseded attempt cannot settle a newer job.
+every worker tick. One job tears down every identity the account holds: five
+Edge calls for its own consumer and for each application, and a read and a
+delete for each test or older foreign consumer. Each call is bounded by
+`FERRUM_ADMIN_TIMEOUT_MS`, and each identity can add up to 30 s waiting for its
+lease. That is about 55 s at the defaults for an account with only its own
+consumer, but several minutes for one with many applications on a slow gateway,
+or with a raised `FERRUM_ADMIN_TIMEOUT_MS`. The five-minute threshold is a fixed constant,
+so such a job can look like a crashed worker: its claim is released and a second
+attempt repeats the teardown. Each claim carries an internal `generation` token,
+so a superseded attempt cannot settle a newer job, and the duplicate costs only
+repeated gateway calls and misleading stale-claim log lines.
 
 ### Which identities a teardown finds
 
