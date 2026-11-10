@@ -196,6 +196,7 @@ import type {
 } from '../../store.js';
 import {
   API_GATEWAY_PLUGIN_ROLES,
+  assertAuditDetailsKey,
   assertLeaseKeyLength,
   OUTBOX_PRIORITY,
   OUTBOX_SEALED_SUBJECT,
@@ -1053,7 +1054,13 @@ function auditFilter(filter: AuditLogFilter): Filter<NexusDoc> {
   combineEqualityAndIn(query, filter.action, filter.actions, 'action');
   if (filter.target_type !== undefined) query.target_type = filter.target_type;
   if (filter.target_id !== undefined) query.target_id = filter.target_id;
-  for (const [key, value] of Object.entries(filter.details ?? {})) query[`details.${key}`] = value;
+  // The top-level member only: the key is a plain identifier, so the dotted
+  // path cannot reach a nested one, and an array holding the value is not the
+  // value, as on the SQL adapters (issue #681).
+  for (const [key, value] of Object.entries(filter.details ?? {})) {
+    assertAuditDetailsKey(key);
+    query[`details.${key}`] = { $eq: value, $not: { $type: 'array' } };
+  }
   if (filter.from !== undefined || filter.to !== undefined) {
     const range: Record<string, unknown> = {};
     if (filter.from !== undefined) range.$gte = filter.from;

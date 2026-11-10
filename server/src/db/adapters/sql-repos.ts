@@ -140,6 +140,7 @@ import type {
 } from '../store.js';
 import {
   API_GATEWAY_PLUGIN_ROLES,
+  assertAuditDetailsKey,
   assertLeaseKeyLength,
   OUTBOX_PRIORITY,
   OUTBOX_SEALED_SUBJECT,
@@ -833,7 +834,7 @@ async function countByApplication(
   return counts;
 }
 
-function auditWhere(filter: AuditLogFilter): SqlWhereBuilder {
+function auditWhere(dialect: SqlDialect, filter: AuditLogFilter): SqlWhereBuilder {
   const builder = new SqlWhereBuilder()
     .add(filter.actor_user_id, 'actor_user_id = ?', filter.actor_user_id ?? null)
     .add(filter.action, 'action = ?', filter.action ?? null)
@@ -842,11 +843,22 @@ function auditWhere(filter: AuditLogFilter): SqlWhereBuilder {
     .add(filter.from, 'created_at >= ?', filter.from ?? null)
     .add(filter.to, 'created_at < ?', filter.to ?? null);
   if (filter.actions !== undefined) builder.addIn('action', filter.actions);
-  // A literal substring of the stored JSON, not a LIKE pattern: `_` and `%` in
-  // keys and values are ordinary characters, and a value whose JSON holds `\`
-  // matches itself on MySQL too (issue #681, as for searches in #595).
+  // The top-level member, compared as JSON by type and value (issue #681): a
+  // nested member of the same name, or the text inside another value, never
+  // matches, as on MongoDB. PostgreSQL's `->` takes the key itself; MySQL's
+  // JSON comparison of strings follows the column's binary collation.
   for (const [key, value] of Object.entries(filter.details ?? {})) {
-    builder.add(value, 'POSITION(? IN details_json) > 0', `"${key}":${JSON.stringify(value)}`);
+    assertAuditDetailsKey(key);
+    if (dialect === 'pg') {
+      builder.add(value, '(details_json::jsonb -> ?::text) = ?::jsonb', key, JSON.stringify(value));
+    } else {
+      builder.add(
+        value,
+        'JSON_EXTRACT(details_json, ?) = CAST(? AS JSON)',
+        `$."${key}"`,
+        JSON.stringify(value),
+      );
+    }
   }
   return builder;
 }
@@ -3752,7 +3764,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     },
 
     list: async (filter, options) => {
-      const where = auditWhere(filter).build();
+      const where = auditWhere(dialect, filter).build();
       const { limit, offset } = page(options);
       const total = await queryCount(
         exec,
@@ -3768,7 +3780,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     },
 
     count: async (filter) => {
-      const where = auditWhere(filter).build();
+      const where = auditWhere(dialect, filter).build();
       return queryCount(exec, `SELECT COUNT(*) AS cnt FROM audit_logs${where.sql}`, where.params);
     },
   };

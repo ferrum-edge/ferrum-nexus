@@ -4875,6 +4875,47 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         const page = await store.auditLogs.list({ action: literal, details });
         assert.equal(page.total, 1, JSON.stringify(details));
       }
+      // Only a top-level member with the same JSON type and value matches: not
+      // a nested member of that name, not the text inside another value, not
+      // an array holding the value, and never a string for a boolean (#681).
+      const shaped = `parity.shape-${newId().slice(0, 8)}`;
+      const nested = await store.auditLogs.create({
+        action: shaped,
+        target_type: 'credential',
+        details: { outer: { reference: 'deep' }, note: '"reference":"inside"', tags: ['x'] },
+      });
+      const flagged = await store.auditLogs.create({
+        action: shaped,
+        target_type: 'credential',
+        details: { flag: true, reference: 'top' },
+      });
+      const quoted = await store.auditLogs.create({
+        action: shaped,
+        target_type: 'credential',
+        details: { flag: 'true' },
+      });
+      const shapes: [Record<string, string | boolean>, string[]][] = [
+        [{ reference: 'deep' }, []],
+        [{ reference: 'inside' }, []],
+        [{ tags: 'x' }, []],
+        [{ reference: 'top' }, [flagged.id]],
+        [{ flag: true }, [flagged.id]],
+        [{ flag: 'true' }, [quoted.id]],
+        [{ flag: false }, []],
+        [{ note: '"reference":"inside"' }, [nested.id]],
+      ];
+      for (const [details, ids] of shapes) {
+        const page = await store.auditLogs.list({ action: shaped, details });
+        assert.deepEqual(
+          page.items.map((row) => row.id).sort(),
+          [...ids].sort(),
+          JSON.stringify(details),
+        );
+      }
+      await assert.rejects(
+        () => store.auditLogs.list({ action: shaped, details: { 'outer.reference': 'deep' } }),
+        (error: unknown) => isNexusError(error) && error.code === 'INTERNAL',
+      );
       assert.equal(
         await store.auditLogs.count({
           actor_user_id: actor.id,

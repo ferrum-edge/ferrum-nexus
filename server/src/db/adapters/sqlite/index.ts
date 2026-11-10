@@ -188,6 +188,7 @@ import type {
 } from '../../store.js';
 import {
   API_GATEWAY_PLUGIN_ROLES,
+  assertAuditDetailsKey,
   assertLeaseKeyLength,
   OUTBOX_PRIORITY,
   OUTBOX_SEALED_SUBJECT,
@@ -4081,11 +4082,24 @@ function auditWhere(filter: AuditLogFilter): WhereBuilder {
     .add(filter.from, 'created_at >= ?', filter.from ?? null)
     .add(filter.to, 'created_at < ?', filter.to ?? null);
   if (filter.actions !== undefined) builder.addIn('action', filter.actions);
-  // A literal substring of the stored JSON, not a LIKE pattern, as on the
-  // pooled adapters: `_` and `%` in keys and values are ordinary characters
-  // (issue #681, as for searches in #595).
+  // The top-level member, compared by JSON type and value (issue #681): a
+  // nested member of the same name, or the text inside another value, never
+  // matches, as on MongoDB. `json_type` tells a boolean from the string
+  // `"true"`, which `json_extract` would not.
   for (const [key, value] of Object.entries(filter.details ?? {})) {
-    builder.add(value, 'instr(details_json, ?) > 0', `"${key}":${JSON.stringify(value)}`);
+    assertAuditDetailsKey(key);
+    const path = `$."${key}"`;
+    if (typeof value === 'boolean') {
+      builder.add(value, 'json_type(details_json, ?) = ?', path, value ? 'true' : 'false');
+    } else {
+      builder.add(
+        value,
+        "(json_type(details_json, ?) = 'text' AND json_extract(details_json, ?) = ?)",
+        path,
+        path,
+        value,
+      );
+    }
   }
   return builder;
 }

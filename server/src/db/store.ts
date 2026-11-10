@@ -827,7 +827,13 @@ export interface AuditLogFilter {
   actions?: string[];
   target_type?: string;
   target_id?: string;
-  /** Exact scalar matches against fields in the audit details object. */
+  /**
+   * Exact matches against **top-level** members of the audit details object.
+   * A member matches only with the same JSON type and value, so the string
+   * `'true'` never matches the boolean `true`; a nested member of the same
+   * name, or the text inside another value, never matches. Keys must be plain
+   * identifiers ({@link assertAuditDetailsKey}).
+   */
   details?: Record<string, string | boolean>;
   /** Inclusive lower bound on `created_at`. */
   from?: IsoTimestamp;
@@ -2063,6 +2069,20 @@ export function assertLeaseKeyLength(key: string): void {
       'INTERNAL',
       `Lease key is ${key.length} characters; the maximum is ${LEASE_KEY_MAX_LENGTH}`,
     );
+  }
+}
+
+/** A key {@link AuditLogFilter.details} can address: a plain identifier. */
+const AUDIT_DETAILS_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Refuse an {@link AuditLogFilter.details} key that is not a plain identifier.
+ * Every adapter turns the key into a path (`$."key"`, `details.key`), where a
+ * dot, quote or `$` would address another member; callers pass fixed names.
+ */
+export function assertAuditDetailsKey(key: string): void {
+  if (!AUDIT_DETAILS_KEY.test(key)) {
+    throw new NexusError('INTERNAL', `Unsupported audit details filter key: ${key}`);
   }
 }
 
