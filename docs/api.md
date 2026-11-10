@@ -1510,6 +1510,13 @@ paths, query strings or tokens. Stored templates are revalidated before each
 send; a refused one logs a warning and queues nothing. See the
 [template authoring rules](guides/admin-guide.md#placeholders).
 
+### `DELETE /api/admin/email-templates/:key`
+
+_admin_ — removes the override for `key` → `{ "template": EmailTemplate }`, the
+built-in default now in force (with a synthetic id). Removing an override writes
+an `admin.template_reset` audit row; a key with no override is left as it is,
+answers the same and writes nothing.
+
 ### `POST /api/admin/mass-email`
 
 _admin_ — enqueues **one outbox row per recipient**, never a BCC blast.

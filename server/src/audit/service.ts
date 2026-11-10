@@ -443,6 +443,8 @@ export const AuditAction = {
    */
   SETTINGS_ENCRYPTION_BOUND: 'settings.encryption_bound',
   ADMIN_TEMPLATE_UPDATE: 'admin.template_update',
+  /** An email template override was removed, restoring the built-in default. */
+  ADMIN_TEMPLATE_RESET: 'admin.template_reset',
   /**
    * A mass-email campaign was started. Written in a transaction of its own
    * **before** the first outbox row is queued, so a campaign whose fan-out or
@@ -683,6 +685,7 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
       'convert it is the transaction’s only write.',
   ),
   [AuditAction.ADMIN_TEMPLATE_UPDATE]: TRANSACTIONAL,
+  [AuditAction.ADMIN_TEMPLATE_RESET]: TRANSACTIONAL,
   [AuditAction.ADMIN_MASS_EMAIL]: INTENT,
   [AuditAction.ADMIN_MASS_EMAIL_COMPLETE]: postCommit(
     'The outcome of a fan-out whose campaign admin.mass_email already recorded; failing the ' +

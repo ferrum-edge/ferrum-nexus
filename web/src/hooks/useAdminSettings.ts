@@ -12,6 +12,7 @@ import type {
   ListEmailTemplatesResponse,
   MassEmailRequest,
   MassEmailResponse,
+  ResetEmailTemplateResponse,
   SmtpTestRequest,
   SmtpTestResponse,
   SsoAdminSettingsResponse,
@@ -113,6 +114,21 @@ export function useUpdateEmailTemplate(): UseMutationResult<
   return useMutation({
     mutationFn: ({ key, body }: { key: EmailTemplateKey; body: UpdateEmailTemplateRequest }) =>
       adminApi.updateEmailTemplate(key, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.emailTemplates.all });
+    },
+  });
+}
+
+/** Remove a template's override, so the built-in default is sent again. */
+export function useResetEmailTemplate(): UseMutationResult<
+  ResetEmailTemplateResponse,
+  Error,
+  EmailTemplateKey
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (key: EmailTemplateKey) => adminApi.resetEmailTemplate(key),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.emailTemplates.all });
     },

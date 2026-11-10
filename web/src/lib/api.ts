@@ -133,6 +133,7 @@ import {
   type ResendVerificationResponse,
   type ResetPasswordRequest,
   type ResetPasswordResponse,
+  type ResetEmailTemplateResponse,
   type ReleaseUserAddressRequest,
   type ReleaseUserAddressResponse,
   type RetryGatewayTeardownResponse,
@@ -695,6 +696,8 @@ export const adminApi = {
     body: UpdateEmailTemplateRequest,
   ): Promise<UpdateEmailTemplateResponse> =>
     put<UpdateEmailTemplateResponse>(`/admin/email-templates/${encodeURIComponent(key)}`, body),
+  resetEmailTemplate: (key: EmailTemplateKey): Promise<ResetEmailTemplateResponse> =>
+    del<ResetEmailTemplateResponse>(`/admin/email-templates/${encodeURIComponent(key)}`),
   massEmail: (body: MassEmailRequest): Promise<MassEmailResponse> =>
     post<MassEmailResponse>('/admin/mass-email', body),
   auditLogs: (query: ListAuditLogsQuery = {}): Promise<ListAuditLogsResponse> =>

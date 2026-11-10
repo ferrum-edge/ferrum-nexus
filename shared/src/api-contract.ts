@@ -1495,6 +1495,11 @@ export interface UpdateEmailTemplateResponse {
   template: EmailTemplate;
 }
 
+/** `DELETE /api/admin/email-templates/:key`: the built-in default now in force. */
+export interface ResetEmailTemplateResponse {
+  template: EmailTemplate;
+}
+
 /** `GET /api/admin/email-templates` */
 export interface ListEmailTemplatesResponse {
   templates: EmailTemplate[];
