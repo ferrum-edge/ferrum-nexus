@@ -124,6 +124,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   the driver error kept as its `cause`; before, SQLite, PostgreSQL and
   MongoDB printed only the bare driver error, so the operator had to work out
   which migration ran it.
+- `GET /api/health` reports the version in `server/package.json` (#679). It
+  read `npm_package_version`, which the image's `node server/dist/index.js`
+  never sets, and otherwise a literal that each release had to bump by hand.
 
 ### Security
 
