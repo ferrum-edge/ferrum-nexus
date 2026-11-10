@@ -114,6 +114,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   are safe on several instances. Edge v0.9.17's hop budget and the published
   service-manifest contract are no longer described as pending, and the
   mass-email daily default is described as the storage bound it now is.
+- The dashboard no longer says "Nothing waiting on you", "No gateway
+  credentials" or "No access requests yet" for a panel whose list is still
+  loading or failed to load: it shows placeholder rows, then an error with
+  **Retry**. A count whose query failed shows "—" instead of `0`. The
+  "Published APIs" and "APIs you publish" counts leave retired APIs out. Audit
+  actions are coloured by one shared rule on the dashboard and the audit page,
+  matched on whole words: a rollback, failure, stalled recovery or required
+  repair is amber rather than green, and `user.address_release` is no longer
+  read as an `add` (#700).
 
 ### Security
 

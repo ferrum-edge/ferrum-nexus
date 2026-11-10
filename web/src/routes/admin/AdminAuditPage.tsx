@@ -1,21 +1,17 @@
-import { auditActorLabel } from '../../lib/audit';
+import { auditActorLabel, auditTone } from '../../lib/audit';
 import { useMemo, useState, type ReactElement } from 'react';
 import { DEFAULT_PAGE_SIZE, type AuditLog } from '@ferrum-nexus/shared';
 import { cn } from '../../lib/cn';
 import { formatDateTime, formatRelative, humanize } from '../../lib/format';
 import { useAuditLogs } from '../../hooks/useAuditLogs';
 import { RoleGuard } from '../../components/layout/RoleGuard';
-import { Badge, type BadgeTone } from '../../components/ui/Badge';
+import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { PageHeader } from '../../components/ui/Card';
 import { DataTable, type Columns } from '../../components/ui/DataTable';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Input, SearchInput } from '../../components/ui/Input';
 import { QueryErrorState } from '../../components/ui/QueryErrorState';
-
-const DANGER_ACTION = /deny|denied|revoke|delete|disable|fail|remove|purge/;
-const SUCCESS_ACTION = /approve|create|publish|enable|grant|issue|repair/;
-const NEUTRAL_ACTION = /login|logout|session|settings|update|register/;
 
 interface Filters {
   action: string;
@@ -32,21 +28,6 @@ function toIso(value: string): string | undefined {
   if (!value) return undefined;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
-}
-
-/**
- * Colour an action by what it does, read off its own name.
- *
- * The catalog lives on the server and grows with every feature, so the tone is
- * derived from the verb rather than from a table the browser would have to be
- * taught about — an unrecognised action lands on the neutral tone instead of
- * being mis-coloured.
- */
-function actionTone(action: string): BadgeTone {
-  if (DANGER_ACTION.test(action)) return 'danger';
-  if (SUCCESS_ACTION.test(action)) return 'success';
-  if (NEUTRAL_ACTION.test(action)) return 'neutral';
-  return 'info';
 }
 
 /**
@@ -118,7 +99,7 @@ function AuditTable(): ReactElement {
         header: 'Action',
         cell: ({ row }) => (
           <span className="block">
-            <Badge tone={actionTone(row.original.action)}>{humanize(row.original.action)}</Badge>
+            <Badge tone={auditTone(row.original.action)}>{humanize(row.original.action)}</Badge>
             <code className="mt-1 block font-mono text-xs text-fg-subtle">
               {row.original.action}
             </code>
