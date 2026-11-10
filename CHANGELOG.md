@@ -18,6 +18,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `relinquished: true`, and notifies nobody. Providers see the grant as withdrawn
   by the grantee.
 
+- Administrators can reset an email template to its built-in default
+  (`DELETE /api/admin/email-templates/:key`, **Reset to default** on the
+  Templates tab). Before, a saved override could only be undone by pasting the
+  default back by hand. The reset is audited as `admin.template_reset` (#676).
+
 ### Changed
 
 - Spec-summary reads no longer fetch the OpenAPI document. The catalog detail
@@ -83,6 +88,56 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `GET /api/notifications` type filter and the docs. Nothing ever wrote a
   notice of that type, so `?type=api_published` now answers `400` like any
   other unknown type instead of always listing nothing (#688).
+
+- God-mode broadcasts write their inbox rows in one transaction per chunk of
+  up to 200 recipients, with one read for the chunk's platform threads,
+  instead of four or five autocommitted statements per recipient. A chunk that
+  fails is retried one recipient at a time, so one refused account still costs
+  only itself (#682).
+
+- A gateway teardown renews its job claim before each identity it strips. A
+  long teardown of an account with many applications is no longer released as
+  stale and repeated while it is still running, and an attempt whose claim was
+  released stops at its next identity (#683).
+
+- The audit-log `details` filter matches only a top-level member with the same
+  JSON type and value on every backend. On the SQL stores it no longer matches
+  a nested member of the same name or the text inside another value (#681).
+
+- The `api.auth_plugin_changed` summary is best-effort: a failure to write it
+  is logged and no longer answers `500` for an `auth_plugin` swap that
+  committed (#687).
+
+- Email template saves and resets (`PUT` and
+  `DELETE /api/admin/email-templates/:key`) are limited to 30 a minute per
+  account per route, like the other admin-facing mutation groups. The template
+  reads stay unlimited.
+
+- CI builds the production image once per run: `acceptance` builds it and runs
+  the bundled-schema check, and the required `docker` check reports that
+  result. Each `store-contracts` lane is its own job and starts only its own
+  database. The image pin check no longer allows the retired `ferrum-nexus:ci`
+  tag.
+
+- TypeScript now rejects unused locals and imports (`noUnusedLocals`) in
+  shared, server and web.
+
+- Removed exports that only tests used: shared `isRole`, `ElevatedRole`,
+  `isAuthPluginType`, `isEmailTemplateKey`, `resolveOpenApiObject` and
+  `openApiParameterKey`; web `isSpecValid`, `statusLabel`, the `SchemaView`
+  component and `requiredRoleForPath`; and the unused `shadow-raised` utility.
+  The e2e package's unused `test`, `test:sso` and `test:browser` scripts are
+  gone too; run the suite with `./e2e/run.sh`.
+
+### Removed
+
+- `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS` and the `unattested-edge-opt-in` egress
+  profile. The flag admitted no gateway pairing the default profile refused;
+  `NEXUS_ALLOW_PRIVATE_UPSTREAMS` is the one remaining opt-out (#684).
+- Store and server methods nothing in production called, among them
+  `accessRequests.update` (every status change goes through `updateIfStatus`),
+  organization deletion from the store contract, and the Edge client's
+  whole-type `consumers.replaceCredentials` (#676, #685).
 
 ### Fixed
 
@@ -229,6 +284,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   key or value (every caller's keys contain `_`) were wildcards, and on MySQL a
   value whose JSON holds a backslash did not match itself. It is now a literal
   substring test, as the search filters already are (#595).
+- MySQL now enforces `apis.circuit_breaker IN (0, 1)`, as SQLite and
+  PostgreSQL always have; the pending `014_mysql_text_capacity` migration adds
+  the constraint (#677).
+- The released-baseline upgrade suite now seeds the structures each source
+  release's later migrations added (gateway plugin ownership, change
+  summaries, notification preferences, identity links, a bound outbox row,
+  agent and tool selections, a request for more tools, a recovery job), so
+  their data is proven to survive the upgrade on every backend.
+- Publish and spec-revision rollback tests, and the refused-compensation
+  contract, now fail if the injected failure never fires or no gateway write
+  preceded it.
 
 ### Security
 
