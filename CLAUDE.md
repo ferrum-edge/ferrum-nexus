@@ -241,7 +241,7 @@ them. The tree mirrors [ferrum-edge](https://github.com/ferrum-edge/ferrum-edge)
 
 `low` to `max` is `low|medium|high|xhigh|max`. "Ignored" means the launcher accepts `--effort` for
 parity with the other skills but the model has no effort tiers; the `opencode` launchers accept only
-`medium|high|xhigh|max`. The `opencode-laguna-agents` skill registers under the name `opencode-agents`.
+`medium|high|xhigh|max`.
 
 **Trigger shorthand.** "astra xhigh sub agent" (and the same shape for other skills: "opus high",
 "grok medium", "muse ultra") means: use that skill as the orchestrator, dispatch a worker at that

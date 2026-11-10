@@ -10,7 +10,7 @@ point before ending. Never merge a PR yourself.
 Complete the implementation and assigned validation yourself in this session. Do not stop at
 analysis, partial work, or a handoff for the controller to finish. Perform commit, push, PR, review
 handling, and CI repair actions only when the dispatch prompt assigns them. Do not invoke any
-agent-dispatch skill or script in the environment, including `opencode-agents`, `grok-agents`,
+agent-dispatch skill or script in the environment, including `opencode-laguna-agents`, `grok-agents`,
 `muse-agents`, `astra-agents`, `sol-agents`, `luna-agents`,
 `opus-agents`, `fable-5-1-agents`, `.agents/skills/*/scripts/dispatch-agent.sh`, Codex CLI workers, or
 Claude CLI workers. Do not spawn nested workers. The orchestrator chose this session's model
