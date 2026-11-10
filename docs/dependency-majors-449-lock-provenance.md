@@ -80,9 +80,9 @@ independent review. The [qualification record](dependency-majors-449-higher-floo
 links those runs and preserves the review history. The explicit owner approval is current;
 the earlier pending decision is historical. No new lock import is needed.
 
-This documentation adoption changes no source, producer input, manifest or lock. Its hosted
-qualification, full root review and fresh independent review remain pending. No artifact or
-successful gate is claimed for the new documentation head; root owns those post-push gates.
+The documentation adoption that followed changed no source, producer input, manifest or lock,
+so no new lock import was made for it. PR #521 merged on 2026-10-05 and shipped in `v0.4.0`;
+issue #449 closed the same day. Everything above is the preparation record.
 
 ## PR #518 provenance
 

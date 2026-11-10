@@ -120,7 +120,7 @@ patch, recorded in the integration section below; its hash now differs from this
 Artifact `11308824128` is named
 `dependency-locks-15c47ec5f92d47fa6d491d4cc8f16fa2aa1e50ec`. GitHub metadata identifies
 the same source/run and repository `1244400882` (`ferrum-edge/ferrum-nexus`), with expiry
-`2026-10-18T16:45:42Z`; it was nonexpired when verified on 2026-10-04. The downloaded
+`2026-10-18T16:45:42Z` (it has since expired); it was nonexpired when verified on 2026-10-04. The downloaded
 archive's SHA-256 matches GitHub's digest:
 `06cfb6dd727d02621f026c45c6ba495f4c414803dc08a61a676dfb5809e43bba`.
 Its ten members are safe relative regular files. Root verified provenance independently;
@@ -202,8 +202,10 @@ passed. Root completed whole and fresh independent reviews before it merged at
 `559c350a5370335791cdc3082225dce6056cf547` on 2026-10-04 at 17:42:42 UTC;
 issue #446 closed at 17:42:43 UTC. Its MCP subsets, migration 011, manifest consumer,
 authorization, claim comparisons, leases, compensation, bounds/redaction and strict fixtures
-are preserved without source edits. The manifest contract remains PROPOSED pending the
-canonical tracking/freeze decision. That main head's implementation and qualification are complete.
+are preserved without source edits. The manifest contract was then still PROPOSED pending the
+canonical tracking/freeze decision; it has since been published and implemented (see
+[Service-manifest preview](service-manifest-preview.md)). That main head's implementation and
+qualification are complete.
 
 The immutable heads share base `48ea760098d1aa858dc7cee06bf7f8fb7536cdaf`. Their only
 overlapping changed files are `.github/workflows/ci.yml`, `CHANGELOG.md` and `README.md`.
@@ -332,12 +334,11 @@ including PR #523's `@types/node` 22.20.5 patch. No new lock import is needed. T
 belongs to `059b428`; it does not relabel the original source `15c47ec` or either historical
 main producer.
 
-**Owner approval is complete. Hosted qualification, full root review and fresh independent
-review are pending for this documentation adoption head.** The successful prior head does
-not qualify this new head, and no new hosted run or artifact is claimed for it. Root owns
-those post-push gates and subsequent PR metadata, protected merge and verified issue closure.
-The source, manifests, locks, workflows, tests, MCP contract status, migration inventory,
-release compatibility and lifecycle/security behavior are unchanged by this adoption.
+**Owner approval is complete, and the change has shipped.** PR #521 merged on 2026-10-05 and
+shipped in `v0.4.0`; issue #449 closed the same day. Everything above is the preparation
+record. The documentation adoption head left the source, manifests, locks, workflows, tests,
+MCP contract status, migration inventory, release compatibility and lifecycle/security
+behavior unchanged.
 
 ## Historical decline path and rollback
 

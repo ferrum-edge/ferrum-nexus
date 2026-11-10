@@ -143,6 +143,35 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   are safe on several instances. Edge v0.9.17's hop budget and the published
   service-manifest contract are no longer described as pending, and the
   mass-email daily default is described as the storage bound it now is.
+- The catalog's Documentation tab renders an OpenAPI 3.1 `type` array:
+  `type: ['string', 'null']` reads `string | null`, as `nullable: true` does
+  in OpenAPI 3.0, where it used to show no type at all (#692).
+- Grants, access requests and "Your API access" rows for an API that
+  publishes no agent tools no longer carry an "Approved tools: all published
+  tools" line. A grant that names tools the API has since withdrawn still
+  reports them as expired (#693).
+- An image built from a developer checkout matches one built from a fresh
+  clone. The Docker build context no longer carries local `node_modules`,
+  `dist`, `coverage`, `.tsbuildinfo` files, databases, `.env` files, `.git`,
+  docs or the acceptance suite, so a stale file in a local `server/dist` can no
+  longer reach the runtime stage (#696).
+- With self-service registration closed, the sign-in page no longer links to
+  the sign-up form, and `/register` says the portal is not accepting
+  self-service accounts instead of collecting a name, address, password and
+  CAPTCHA only to answer `403`. The founding registration is still offered
+  (#699).
+- Accessibility: on a wide sign-in or registration page, the operator's
+  footer links and support address beside the form are no longer inside an
+  `aria-hidden` region, and the support address there is a `mailto:` link.
+  Only the hero's marketing copy is hidden from assistive technology. On the
+  Documentation tab, an operation listed under two tags gets a distinct panel
+  id on each card, so each button's `aria-controls` names its own panel
+  (#697).
+- Disabling an account from god mode, or from Users, no longer reports
+  success while its gateway revocation is still `pending`. The page shows an
+  error-styled notice that the account's gateway credentials keep working
+  until the gateway accepts the revocation, which is retried automatically,
+  and points to Users to follow or retry it (#698).
 - The dashboard no longer says "Nothing waiting on you", "No gateway
   credentials" or "No access requests yet" for a panel whose list is still
   loading or failed to load: it shows placeholder rows, then an error with

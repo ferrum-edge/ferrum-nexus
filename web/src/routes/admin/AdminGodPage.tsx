@@ -9,6 +9,7 @@ import {
   useGodDisableUser,
   useGodRevokeGrant,
 } from '../../hooks/useGodMode';
+import { GATEWAY_REVOCATION_PENDING } from '../../lib/gateway-teardown';
 import { useToast } from '../../stores/toast';
 import {
   AudienceFields,
@@ -325,10 +326,17 @@ function DisableUserPanel(): ReactElement {
                 setOpen(false);
                 setUserId('');
                 setReason('');
-                toast.success(
-                  'Account disabled',
-                  `${response.terminated_sessions} session(s) terminated.`,
-                );
+                const sessions = `${response.terminated_sessions} session(s) terminated.`;
+                // `pending`: the account is off but its gateway credentials still
+                // work, so the disable is not finished and must not read as done.
+                if (response.gateway_teardown === 'pending') {
+                  toast.error(
+                    'Account disabled; gateway revocation pending',
+                    `${sessions} ${GATEWAY_REVOCATION_PENDING}`,
+                  );
+                } else {
+                  toast.success('Account disabled', sessions);
+                }
               },
             },
           )

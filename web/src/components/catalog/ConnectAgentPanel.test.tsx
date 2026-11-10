@@ -11,6 +11,8 @@ import {
 const CREDENTIAL_ISSUED_ORDERS_APP = /credential issued to Orders app/;
 const APPROVED_TOOLS_READ = /Approved tools: Read/;
 const EMPTY_GRANT_NONE_REST = /Empty grant: none; REST access only/;
+const APPROVED_TOOLS = /^Approved tools:/;
+const REQUESTED_TOOLS = /^Requested tools:/;
 
 afterEach(() => {
   cleanup();
@@ -111,5 +113,22 @@ describe('agent connection guidance', () => {
     expect(screen.getByText(APPROVED_TOOLS_READ)).toHaveTextContent('1 expired exposure');
     render(<AgentGrantSummary agents={agents} subset={[]} label="Empty grant" />);
     expect(screen.getByText(EMPTY_GRANT_NONE_REST)).toBeInTheDocument();
+  });
+
+  it('says nothing about tools for an API that publishes none', () => {
+    render(<AgentGrantSummary agents={null} subset={null} />);
+    render(<AgentGrantSummary subset={null} label="Requested tools" />);
+    expect(screen.queryByText(APPROVED_TOOLS)).not.toBeInTheDocument();
+    expect(screen.queryByText(REQUESTED_TOOLS)).not.toBeInTheDocument();
+    // Tools withdrawn after the grant named them still read as expired.
+    render(<AgentGrantSummary agents={null} subset={['withdrawn-id']} />);
+    expect(screen.getByText(APPROVED_TOOLS)).toHaveTextContent('1 expired exposure');
+  });
+
+  it('covers future tools when the grant names no subset', () => {
+    render(<AgentGrantSummary agents={{ operations: [] }} subset={null} />);
+    expect(screen.getByText(APPROVED_TOOLS)).toHaveTextContent(
+      'all published tools (including future tools)',
+    );
   });
 });

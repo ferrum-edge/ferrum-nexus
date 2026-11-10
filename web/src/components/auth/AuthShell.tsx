@@ -73,6 +73,10 @@ export function BrandingFooter({
  * `login_layout: 'split'` (the default) shows a branded hero on wide screens
  * beside the form; `'centered'` shows the form alone. Both collapse to a
  * centred card on small screens.
+ *
+ * On wide screens the hero holds the only visible copy of the operator footer
+ * and support address, so only its marketing copy is hidden from assistive
+ * technology, never the whole hero.
  */
 export function AuthShell({ title, description, children, footer }: AuthShellProps): ReactElement {
   const { data: branding } = useBranding();
@@ -87,12 +91,9 @@ export function AuthShell({ title, description, children, footer }: AuthShellPro
   return (
     <div className="flex min-h-full flex-col lg:flex-row">
       {split ? (
-        <section
-          aria-hidden="true"
-          className="fx-brand-gradient relative hidden overflow-hidden border-r border-border lg:flex lg:w-[46%] lg:max-w-2xl lg:flex-col lg:justify-between lg:p-12"
-        >
-          <div className="fx-dot-grid pointer-events-none absolute inset-0" />
-          <div className="relative flex items-center gap-3">
+        <section className="fx-brand-gradient relative hidden overflow-hidden border-r border-border lg:flex lg:w-[46%] lg:max-w-2xl lg:flex-col lg:justify-between lg:p-12">
+          <div aria-hidden="true" className="fx-dot-grid pointer-events-none absolute inset-0" />
+          <div aria-hidden="true" className="relative flex items-center gap-3">
             <BrandMark logoDataUrl={logo} portalName={portalName} className="h-10 w-10 text-base" />
             <div>
               <p className="text-base font-semibold text-fg">{portalName}</p>
@@ -101,7 +102,7 @@ export function AuthShell({ title, description, children, footer }: AuthShellPro
               </p>
             </div>
           </div>
-          <div className="relative max-w-md">
+          <div aria-hidden="true" className="relative max-w-md">
             <h2 className="text-3xl leading-tight font-semibold tracking-tight text-fg text-balance">
               {tagline}
             </h2>
@@ -124,7 +125,16 @@ export function AuthShell({ title, description, children, footer }: AuthShellPro
           <div className="relative flex flex-col gap-1.5">
             <BrandingFooter text={footerText} links={footerLinks} />
             <p className="text-xs text-fg-subtle">
-              {supportEmail ? <>Need help? {supportEmail}</> : <>Powered by Ferrum Nexus</>}
+              {supportEmail ? (
+                <>
+                  Need help?{' '}
+                  <a className="text-accent-text hover:underline" href={`mailto:${supportEmail}`}>
+                    {supportEmail}
+                  </a>
+                </>
+              ) : (
+                <>Powered by Ferrum Nexus</>
+              )}
             </p>
           </div>
         </section>

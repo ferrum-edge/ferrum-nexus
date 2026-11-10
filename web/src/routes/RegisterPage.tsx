@@ -31,6 +31,9 @@ const ROLE_ICONS: Readonly<Record<RegistrableRole, IconName>> = {
 const SSO_ONLY_NOTICE =
   'This portal signs people in with single sign-on, which creates your account the first time you use it.';
 
+const REGISTRATION_CLOSED_NOTICE =
+  'This portal is not accepting self-service accounts. If it offers single sign-on, sign in with that; otherwise ask an administrator about access.';
+
 /** Self-service registration. */
 export function RegisterPage(): ReactElement {
   const { status, register } = useAuth();
@@ -132,13 +135,20 @@ export function RegisterPage(): ReactElement {
     );
   }
 
-  // Under the `sso_only` policy accounts come from the identity provider. The
+  // Under the `sso_only` policy accounts come from the identity provider, and
+  // with registration closed the server refuses every sign-up with a 403. The
   // founding registration is the exception, whatever the policy.
-  if (sso?.registration_enabled === false && !bootstrapRequired) {
+  const closedNotice =
+    sso?.registration_enabled === false
+      ? SSO_ONLY_NOTICE
+      : branding?.registration?.open_registration === false
+        ? REGISTRATION_CLOSED_NOTICE
+        : null;
+  if (closedNotice !== null && !bootstrapRequired) {
     return (
       <AuthShell title="Create an account">
         <div className="flex flex-col gap-4">
-          <FormNotice tone="info">{SSO_ONLY_NOTICE}</FormNotice>
+          <FormNotice tone="info">{closedNotice}</FormNotice>
           <Link
             to="/login"
             className={buttonClassName({ variant: 'primary', size: 'lg', className: 'w-full' })}

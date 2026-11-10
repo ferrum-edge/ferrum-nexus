@@ -1,9 +1,10 @@
 /**
  * The single source of truth for sidebar navigation.
  *
- * Both the sidebar and the route guards read this list, so a section can never
- * be visible to a role that cannot enter it. Visibility is decided purely by
- * the shared role ordering (`client` < `provider` < `admin` < `super_admin`).
+ * The sidebar reads this list. Each guarded page repeats its `minRole` on
+ * `RoleGuard`, so the two are kept in step by hand: change a role here and on
+ * the page together. Visibility is decided purely by the shared role ordering
+ * (`client` < `provider` < `admin` < `super_admin`).
  */
 
 import { roleAtLeast, type Role } from '@ferrum-nexus/shared';

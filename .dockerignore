@@ -1,2 +1,30 @@
 # Generated deployment credentials (see docs/operations.md) must never enter the build context.
 /nexus.env
+**/.env
+**/.env.*
+
+# The image builds from a clean tree: the package manifests, tsconfig.base.json,
+# contracts/ and the shared/, server/ and web/ workspaces. Local installs, build
+# output and databases must not leak into it: tsc deletes nothing, so a stale
+# file in a local server/dist would survive into the runtime stage.
+.git
+**/node_modules
+**/dist
+**/dist-server
+**/coverage
+**/*.tsbuildinfo
+**/data
+**/*.sqlite
+**/*.sqlite-journal
+**/*.log
+**/.DS_Store
+
+# Not part of the build.
+.github
+.agents
+.claude
+ci
+docs
+e2e
+release
+*.md

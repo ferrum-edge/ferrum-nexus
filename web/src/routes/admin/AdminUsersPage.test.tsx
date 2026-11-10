@@ -5,6 +5,7 @@ import type { ReactElement, ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GatewayTeardownState, Organization, User } from '@ferrum-nexus/shared';
 import { organizationsApi, usersApi } from '../../lib/api';
+import { GATEWAY_REVOCATION_PENDING } from '../../lib/gateway-teardown';
 import { TooltipProvider } from '../../components/ui/Tooltip';
 import { AdminUsersPage } from './AdminUsersPage';
 
@@ -14,8 +15,9 @@ const DISPLAY_NAME = /^Display name/;
 vi.mock('../../components/layout/RoleGuard', () => ({
   RoleGuard: ({ children }: { children: ReactNode }) => children,
 }));
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 vi.mock('../../stores/toast', () => ({
-  useToast: () => ({ success: vi.fn(), error: vi.fn() }),
+  useToast: () => toast,
 }));
 /** The signed-in administrator; each test may swap it. */
 const session = vi.hoisted(() => ({
@@ -111,6 +113,8 @@ function renderUsers(organizations: Organization[] = []): void {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  toast.success.mockClear();
+  toast.error.mockClear();
   session.user = { id: 'actor-1', role: 'super_admin' };
 });
 
@@ -239,6 +243,45 @@ describe('organization and status management', () => {
     await waitFor(() =>
       expect(list).toHaveBeenCalledWith(expect.objectContaining({ org_id: GLOBEX.id })),
     );
+  });
+
+  it('does not report a disable as done while gateway revocation is pending', async () => {
+    vi.spyOn(usersApi, 'list').mockResolvedValue(page);
+    vi.spyOn(usersApi, 'update').mockResolvedValue({
+      user: { ...member, status: 'disabled' },
+      gateway_teardown: 'pending',
+    });
+    renderUsers([ACME, GLOBEX]);
+    await screen.findByText(member.email);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
+    const dialog = within(await screen.findByRole('dialog'));
+    fireEvent.click(dialog.getByRole('button', { name: 'Disable' }));
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        'Account disabled; gateway revocation pending',
+        GATEWAY_REVOCATION_PENDING,
+      ),
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('reports a disable the gateway accepted as done', async () => {
+    vi.spyOn(usersApi, 'list').mockResolvedValue(page);
+    vi.spyOn(usersApi, 'update').mockResolvedValue({
+      user: { ...member, status: 'disabled' },
+      gateway_teardown: 'ok',
+    });
+    renderUsers([ACME, GLOBEX]);
+    await screen.findByText(member.email);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
+    const dialog = within(await screen.findByRole('dialog'));
+    fireEvent.click(dialog.getByRole('button', { name: 'Disable' }));
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Account updated'));
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
   it('assigns an account to another organization and renames it', async () => {

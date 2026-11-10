@@ -86,6 +86,31 @@ describe('SchemaView', () => {
     expect(screen.getByText('number')).toBeInTheDocument();
   });
 
+  it('renders OpenAPI 3.1 type arrays and the 3.0 nullable flag', () => {
+    const doc = { components: { schemas: {} } } as SpecNode;
+    render(
+      <SchemaView
+        doc={doc}
+        budget={createRenderBudget()}
+        schema={{
+          type: 'object',
+          properties: {
+            nickname: { type: ['string', 'null'] },
+            seen_at: { type: ['null', 'string'], format: 'date-time' },
+            id: { type: ['integer', 'string'] },
+            nothing: { type: ['null'] },
+            score: { type: 'number', nullable: true },
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText('string | null')).toBeInTheDocument();
+    expect(screen.getByText('string <date-time> | null')).toBeInTheDocument();
+    expect(screen.getByText('integer | string')).toBeInTheDocument();
+    expect(screen.getByText('null')).toBeInTheDocument();
+    expect(screen.getByText('number | null')).toBeInTheDocument();
+  });
+
   it('spends the page budget on primitive schemas and their property wrappers', () => {
     const doc = { components: { schemas: {} } } as SpecNode;
     const budget = createRenderBudget(7);
