@@ -173,7 +173,7 @@ export function runDisableRevokesResetLinksContract(
 
     it('a failure deleting the link rolls the whole disable back', async () => {
       const subject = await freshTarget();
-      const { token, hash } = await issueReset(subject);
+      const { hash } = await issueReset(subject);
 
       faults.failNext('verificationTokens', 'deleteForUser', new Error('injected delete failure'));
       const disabled = await patchStatus(founder, subject, 'disabled');

@@ -34,13 +34,7 @@ import { Badge, type BadgeTone } from '../../components/ui/Badge';
 import { Button, buttonClassName } from '../../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../../components/ui/Card';
 import { Icon, type IconName } from '../../components/ui/Icon';
-import {
-  Checkbox,
-  FieldGroup,
-  Input,
-  LabeledInput,
-  LabeledTextarea,
-} from '../../components/ui/Input';
+import { Checkbox, FieldGroup, LabeledInput, LabeledTextarea } from '../../components/ui/Input';
 import { LabeledSelect } from '../../components/ui/Select';
 import { LoadingPanel } from '../../components/ui/Spinner';
 import { QueryErrorState } from '../../components/ui/QueryErrorState';
