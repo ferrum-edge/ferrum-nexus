@@ -576,7 +576,6 @@ export type NotificationType =
   | 'access_revoked'
   | 'message_received'
   | 'credential_rotated'
-  | 'api_published'
   | 'api_spec_updated'
   | 'system';
 

@@ -66,6 +66,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   namespace, instead of silently dropping that association. Older
   gateways ignore the parameter. The mock Edge enforces it in tests.
 
+- The notification type `api_published` is gone from `NotificationType`, the
+  `GET /api/notifications` type filter and the docs. Nothing ever wrote a
+  notice of that type, so `?type=api_published` now answers `400` like any
+  other unknown type instead of always listing nothing (#688).
+
 ### Fixed
 
 - Re-enabling an account no longer restores an approval group for a grant whose
