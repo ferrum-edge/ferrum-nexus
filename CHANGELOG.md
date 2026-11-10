@@ -119,6 +119,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   acquired again, so the leases of deleted consumers, proxies and applications
   were never removed. `leases.deleteExpired` and the `expires_at` index existed
   for this sweep, but nothing called it.
+- A failed migration names itself, as the upgrade runbook says it does
+  (#678). The error now reads `Migration <id> failed: <driver error>`, with
+  the driver error kept as its `cause`; before, SQLite, PostgreSQL and
+  MongoDB printed only the bare driver error, so the operator had to work out
+  which migration ran it.
 
 ### Security
 
