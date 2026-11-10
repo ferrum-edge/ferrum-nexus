@@ -127,6 +127,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - `GET /api/health` reports the version in `server/package.json` (#679). It
   read `npm_package_version`, which the image's `node server/dist/index.js`
   never sets, and otherwise a literal that each release had to bump by hand.
+- `GET /api/apis/:id/usage` is rate limited per account, like every other
+  route behind a session (#680). It was keyed by client IP, so everyone
+  behind one egress address shared 30 usage loads a minute, while one account
+  could multiply its allowance by changing address. The `/api/apis` scope now
+  keys its limiter per account too.
 
 ### Security
 

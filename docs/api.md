@@ -107,7 +107,7 @@ trust, not from an untrusted forwarded header.
 | `POST /api/threads/:id/messages`                                               | 30               | account  |
 | `GET /api/catalog/:slug/spec`, `…/changes`, `…/changes/:revisionId`, per route | 60               | account  |
 | `/api/apis` mutations and the two spec diffs, per route                        | 30               | account  |
-| `GET /api/apis/:id/usage`                                                      | 30               | IP       |
+| `GET /api/apis/:id/usage`                                                      | 30               | account  |
 | `POST /api/access-requests`                                                    | 10               | account  |
 | `POST /api/access-requests/:id/cancel`                                         | 30               | account  |
 | `POST`, `PATCH`, `DELETE` on `/api/applications`, per route                    | 30               | account  |

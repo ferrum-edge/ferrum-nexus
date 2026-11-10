@@ -453,11 +453,12 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
    *
    * This answers `200` even when the gateway is unreachable — the body then
    * carries `available: false`. A provider's overview page must not break
-   * because Edge is restarting.
+   * because Edge is restarting. Limited per account, like every route behind
+   * a session ({@link userOrIpKey}).
    */
   app.get(
     '/:id/usage',
-    { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
+    { config: { rateLimit: { max: 30, timeWindow: '1 minute', keyGenerator: userOrIpKey } } },
     async (request): Promise<ApiUsageResponse> => {
       const { user } = requireAuth(request);
       const { id } = parseOrThrow(idParamSchema, request.params);

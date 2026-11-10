@@ -968,7 +968,7 @@ export async function buildServer(
   await app.register(
     async (scope) => {
       if (config.rateLimitEnabled) {
-        await scope.register(rateLimit, { global: false });
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
       }
       await scope.register(publishingRoutes, { publishing, usage, apiPlugins, apiViewers });
     },
