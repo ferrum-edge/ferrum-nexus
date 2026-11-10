@@ -22,7 +22,7 @@ TAG_EXCEPTIONS = {
 # These Compose values are deliberate runtime inputs; see docs/image-pin-check.md.
 REQUIRED_VARIABLE = re.compile(r'^\$\{(FERRUM_EDGE_IMAGE|NEXUS_IMAGE):\?[^}]+\}$')
 NEXUS_FALLBACK = re.compile(r'^\$\{NEXUS_IMAGE:-([^}]+)\}$')
-LOCAL_IMAGES = {'ferrum-nexus:ci', 'ferrum-nexus:e2e'}
+LOCAL_IMAGES = {'ferrum-nexus:e2e'}
 VERSION = re.compile(r'v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\Z')
 PIN = re.compile(r'[^\s"\'@$]+(?::[^\s"\'@$]+)?@sha256:[0-9a-f]{64}\Z')
 FIELD = re.compile(
