@@ -16,6 +16,10 @@
  *    so a broadcast that reached nobody looked exactly like one that reached
  *    everybody. `delivered` and `failed` are counted in the loop and appear in
  *    both.
+ *
+ * The fan-out writes one transaction per chunk of recipients (issue #682); a
+ * chunk that fails is retried one recipient at a time, so a persistent failure
+ * still costs only the account it belongs to.
  */
 
 import assert from 'node:assert/strict';
@@ -36,6 +40,7 @@ describe('broadcast accounting', () => {
   let harness: TestApp;
   let faults: FaultInjectingStore;
   let founder: TestSession;
+  const members: TestSession[] = [];
 
   before(async () => {
     harness = await buildTestApp({
@@ -47,7 +52,9 @@ describe('broadcast accounting', () => {
     });
     founder = await harness.registerUser({ email: 'accounting-founder@example.test' });
     for (const index of [1, 2, 3]) {
-      await harness.registerUser({ email: `accounting-member-${index}@example.test` });
+      members.push(
+        await harness.registerUser({ email: `accounting-member-${index}@example.test` }),
+      );
     }
   });
 
@@ -65,14 +72,25 @@ describe('broadcast accounting', () => {
   }
 
   it('reports delivered and failed, and says so in the completion row', async () => {
-    // The second recipient's message insert fails. The other two still get the
-    // announcement — that is the whole point of catching per-recipient errors —
-    // but the counts have to say one of them did not.
-    faults.failAfter('messages', 'create', 1);
-    const response = await send('Partly delivered');
+    // The second recipient's platform thread can never be created. The other
+    // two still get the announcement — that is the whole point of catching
+    // per-recipient errors — but the counts have to say one of them did not.
+    const refused = members[1]!.user.id;
+    let refusals = 0;
+    faults.failWhen('threads', 'create', (input) => {
+      const hit = (input as { participant_a?: string }).participant_a === refused;
+      if (hit) refusals += 1;
+      return hit;
+    });
+    let response: LightMyRequestResponse;
+    try {
+      response = await send('Partly delivered');
+    } finally {
+      faults.clear();
+    }
 
     assert.equal(response.statusCode, 200, response.body);
-    assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
+    assert.ok(refusals > 0, 'the intended failure was reached');
     const body = response.json<GodBroadcastResponse>();
     assert.equal(body.delivered, 2, 'two of the three recipients got the message');
     assert.equal(body.failed, 1);
@@ -86,20 +104,30 @@ describe('broadcast accounting', () => {
   });
 
   it('does not count an optional email failure as an undelivered recipient', async () => {
-    // The first outbox enqueue fails after that recipient's inbox row lands:
+    // One recipient's mail copy is refused after its inbox row landed:
     // delivery is the inbox write, so all recipients count delivered and
-    // none failed; only the two remaining mail copies queue.
-    faults.failAfter('emailOutbox', 'enqueue', 0);
-    const response = await harness.authed(founder, {
-      method: 'POST',
-      url: '/api/admin/god/broadcast',
-      payload: {
-        subject: 'Mail copy failed',
-        body: 'An announcement',
-        audience: { scope: 'all' },
-        send_email: true,
-      },
-    });
+    // none failed; only the two other mail copies queue.
+    const refused = members[0]!.user.id;
+    faults.failWhen(
+      'emailOutbox',
+      'enqueue',
+      (input) => (input as { recipient_user_id?: string }).recipient_user_id === refused,
+    );
+    let response: LightMyRequestResponse;
+    try {
+      response = await harness.authed(founder, {
+        method: 'POST',
+        url: '/api/admin/god/broadcast',
+        payload: {
+          subject: 'Mail copy failed',
+          body: 'An announcement',
+          audience: { scope: 'all' },
+          send_email: true,
+        },
+      });
+    } finally {
+      faults.clear();
+    }
     assert.equal(response.statusCode, 200, response.body);
     const body = response.json<GodBroadcastResponse>();
     assert.equal(body.delivered, 3);
@@ -205,6 +233,81 @@ describe('a broadcast whose audience matches nobody', () => {
           payload: { subject, body: 'An announcement', audience: { scope: 'all' } },
         });
         assert.equal(sent.statusCode, 200, sent.body);
+      }
+    } finally {
+      await harness.close();
+    }
+  });
+});
+
+describe('a broadcast fanned out in chunks', () => {
+  it('reuses each platform thread and confines a failure to its account (#682)', async () => {
+    let faults: FaultInjectingStore | undefined;
+    // Two recipients per transaction: five accounts make three chunks.
+    const harness = await buildTestApp({
+      deps: { startOutboxWorker: false, massEmailChunkRecipients: 2 },
+      wrapStore: (store) => {
+        faults = faultInjectingStore(store);
+        return faults.store;
+      },
+    });
+    try {
+      const founder = await harness.registerUser({ email: 'chunk-founder@example.test' });
+      const members: TestSession[] = [];
+      for (const index of [1, 2, 3, 4, 5]) {
+        members.push(await harness.registerUser({ email: `chunk-member-${index}@example.test` }));
+      }
+      const ids = members.map((member) => member.user.id);
+      const broadcast = async (subject: string): Promise<GodBroadcastResponse> => {
+        const response = await harness.authed(founder, {
+          method: 'POST',
+          url: '/api/admin/god/broadcast',
+          payload: { subject, body: subject, audience: { scope: 'all' } },
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        return response.json<GodBroadcastResponse>();
+      };
+
+      const first = await broadcast('First announcement');
+      assert.equal(first.delivered, 5);
+      assert.equal(first.failed, 0);
+      assert.equal(first.threads_created, 5, 'every recipient gets a platform thread');
+
+      // One recipient can no longer be written to. Whoever shares its chunk,
+      // and the other chunks, still are.
+      const refused = ids[3]!;
+      const ownerOf = new Map(
+        (await harness.store.threads.listPlatformByParticipants(ids)).map((thread) => [
+          thread.id,
+          thread.participant_a,
+        ]),
+      );
+      faults!.failWhen(
+        'messages',
+        'create',
+        (input) => ownerOf.get((input as { thread_id: string }).thread_id) === refused,
+      );
+      let second: GodBroadcastResponse;
+      try {
+        second = await broadcast('Second announcement');
+      } finally {
+        faults!.clear();
+      }
+      assert.equal(second.delivered, 4);
+      assert.equal(second.failed, 1);
+      assert.equal(second.threads_created, 0, 'the existing threads are reused');
+
+      const threads = await harness.store.threads.listPlatformByParticipants(ids);
+      assert.equal(threads.length, 5, 'still one platform thread per recipient');
+      for (const thread of threads) {
+        const messages = await harness.store.messages.listByThread(thread.id);
+        assert.deepEqual(
+          messages.items.map((message) => message.body),
+          thread.participant_a === refused
+            ? ['First announcement']
+            : ['First announcement', 'Second announcement'],
+          thread.participant_a,
+        );
       }
     } finally {
       await harness.close();

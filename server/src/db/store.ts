@@ -1546,6 +1546,14 @@ export interface ThreadRepo {
     participantB: Uuid | null,
     apiId: Uuid | null,
   ): Promise<ThreadRecord | null>;
+  /**
+   * {@link findExisting}`(id, null, null)` for many ids in one read: every
+   * platform thread (no counterparty, no API) whose `participant_a` is one of
+   * `participantIds`, newest first by `(created_at, id)`. The first row for an
+   * id is the thread a broadcast reuses for it. A god-mode broadcast reads one
+   * chunk of recipients this way instead of one statement per recipient.
+   */
+  listPlatformByParticipants(participantIds: Uuid[]): Promise<ThreadRecord[]>;
   /** Bump `last_message_at` after a message is posted. */
   touchLastMessage(threadId: Uuid, at: IsoTimestamp): Promise<void>;
 }

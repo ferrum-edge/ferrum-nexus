@@ -2733,6 +2733,19 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return row ? mapThread(row) : null;
     },
 
+    listPlatformByParticipants: async (participantIds) => {
+      if (participantIds.length === 0) return [];
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM message_threads
+         WHERE api_id IS NULL AND participant_b IS NULL
+           AND participant_a IN (${placeholders(participantIds.length)})
+         ORDER BY created_at DESC, id DESC`,
+        participantIds,
+      );
+      return rows.map(mapThread);
+    },
+
     touchLastMessage: async (threadId, at) => {
       await execute(
         exec,

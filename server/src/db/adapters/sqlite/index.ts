@@ -2785,6 +2785,18 @@ class SqliteStore implements NexusStore {
       return row ? mapThread(row) : null;
     },
 
+    listPlatformByParticipants: async (participantIds) => {
+      if (participantIds.length === 0) return [];
+      return queryAll(
+        this.db,
+        `SELECT * FROM message_threads
+         WHERE api_id IS NULL AND participant_b IS NULL
+           AND participant_a IN (${participantIds.map(() => '?').join(', ')})
+         ORDER BY created_at DESC, id DESC`,
+        participantIds,
+      ).map(mapThread);
+    },
+
     touchLastMessage: async (threadId, at) => {
       execute(
         this.db,

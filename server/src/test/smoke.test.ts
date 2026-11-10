@@ -3363,6 +3363,50 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
     });
 
+    it('threads: lists the platform threads of many participants at once', async () => {
+      const admin = await makeUser({ role: 'admin' });
+      const [first, second, outsider] = [await makeUser(), await makeUser(), await makeUser()];
+      const provider = await makeUser({ role: 'provider' });
+      const api = await makeApi(provider.id);
+      const platform = (participant: string, created_at: string) =>
+        store.threads.create({
+          subject: `Platform ${newId().slice(0, 6)}`,
+          created_by: admin.id,
+          participant_a: participant,
+          created_at,
+        });
+      const older = await platform(first.id, isoInSeconds(-120));
+      const newer = await platform(first.id, isoInSeconds(-60));
+      const only = await platform(second.id, isoInSeconds(-90));
+      await platform(outsider.id, isoInSeconds(-30));
+      // Neither a direct thread nor an API thread is a platform thread.
+      await store.threads.create({
+        subject: 'Direct',
+        created_by: first.id,
+        participant_a: first.id,
+        participant_b: provider.id,
+      });
+      await store.threads.create({
+        subject: 'About an API',
+        api_id: api.id,
+        created_by: second.id,
+        participant_a: second.id,
+      });
+
+      const listed = await store.threads.listPlatformByParticipants([first.id, second.id]);
+      assert.deepEqual(
+        listed.map((thread) => thread.id),
+        [newer.id, only.id, older.id],
+        'newest first, only the named participants, only platform threads',
+      );
+      assert.equal(
+        listed.find((thread) => thread.participant_a === first.id)?.id,
+        (await store.threads.findExisting(first.id, null, null))?.id,
+        'the first row per participant is the one findExisting reuses',
+      );
+      assert.deepEqual(await store.threads.listPlatformByParticipants([]), []);
+    });
+
     it('threads: platform_or_participant_user_id is the admin inbox as a predicate', async () => {
       const admin = await makeUser({ role: 'admin' });
       const asker = await makeUser();

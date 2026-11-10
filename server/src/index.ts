@@ -297,10 +297,10 @@ export interface BuildServerDeps {
    */
   storeLockWaitMs?: number;
   /**
-   * Most recipients per mass-email fan-out transaction. Defaults to
-   * `MASS_EMAIL_CHUNK_RECIPIENTS` (200). A seam for the tests that drive a
-   * failure between two chunks, which would otherwise need hundreds of
-   * accounts. Nothing in production sets it.
+   * Most recipients per mass-email and god-mode broadcast fan-out
+   * transaction. Defaults to `MASS_EMAIL_CHUNK_RECIPIENTS` (200). A seam for
+   * the tests that drive a failure between two chunks, which would otherwise
+   * need hundreds of accounts. Nothing in production sets it.
    */
   massEmailChunkRecipients?: number;
 }
@@ -682,6 +682,9 @@ export async function buildServer(
     locks,
     broadcastLocks: sendLocks,
     log: warn,
+    ...(deps.massEmailChunkRecipients === undefined
+      ? {}
+      : { chunkRecipients: deps.massEmailChunkRecipients }),
   });
 
   // The worker owns no SMTP knowledge of its own: it asks the email service for

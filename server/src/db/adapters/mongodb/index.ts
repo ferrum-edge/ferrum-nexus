@@ -3667,6 +3667,22 @@ class MongoStore implements NexusStore {
       return row ? mapThread(row) : null;
     },
 
+    listPlatformByParticipants: async (participantIds) => {
+      if (participantIds.length === 0) return [];
+      const docs = await this.col(COLLECTIONS.threads)
+        .find(
+          {
+            api_id: null,
+            participant_b: null,
+            participant_a: { $in: participantIds },
+          } as Filter<NexusDoc>,
+          this.opts,
+        )
+        .sort({ created_at: -1, _id: -1 })
+        .toArray();
+      return docs.map((doc) => mapThread(doc as Row));
+    },
+
     touchLastMessage: async (threadId, at) => {
       await this.col(COLLECTIONS.threads).updateOne(
         { _id: threadId },
