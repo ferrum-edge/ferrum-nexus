@@ -123,6 +123,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   matched on whole words: a rollback, failure, stalled recovery or required
   repair is amber rather than green, and `user.address_release` is no longer
   read as an `add` (#700).
+- The **Gateway references need repair** card follows an incident through to
+  the end. It counts the APIs awaiting a gateway restore (`awaiting_restore`)
+  beside the two orphan counts; once nothing is left to repair it replaces
+  **Repair all** with a link to **All APIs**; its text names **Restore gateway
+  deployment** as the remedy for a gone proxy instead of a new publish; a
+  repair with a failed row is reported as an error naming the failure; and
+  **Re-check now** names the APIs still awaiting a restore instead of
+  reporting "0 references are still orphaned" as a success. The admin **All
+  APIs** list shows **Not deployed** for such APIs, as **My APIs** does, and
+  says when it failed to load instead of "No APIs match these filters" (#701).
 
 ### Security
 

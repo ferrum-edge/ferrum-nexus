@@ -8,7 +8,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Api } from '@ferrum-nexus/shared';
@@ -71,5 +71,39 @@ describe('portal-wide API inventory', () => {
 
     fireEvent.click((await screen.findByText('Billing')).closest('tr') as HTMLElement);
     expect(navigate).toHaveBeenCalledWith({ to: '/apis/$apiId', params: { apiId: foreign.id } });
+  });
+
+  it('marks an API whose gateway deployment is gone as not deployed', async () => {
+    vi.spyOn(apisApi, 'list').mockResolvedValue({
+      items: [
+        foreign,
+        { ...foreign, id: 'api-10', name: 'Ledger', gateway_state: 'repair_required' },
+      ],
+      total: 2,
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <AdminApisPage />
+      </QueryClientProvider>,
+    );
+
+    const ledger = (await screen.findByText('Ledger')).closest('tr') as HTMLElement;
+    const billing = screen.getByText('Billing').closest('tr') as HTMLElement;
+    expect(within(ledger).getByText('Not deployed')).toBeInTheDocument();
+    expect(within(billing).queryByText('Not deployed')).not.toBeInTheDocument();
+  });
+
+  it('says the list failed to load rather than that no API matches', async () => {
+    vi.spyOn(apisApi, 'list').mockRejectedValue(new Error('boom'));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <AdminApisPage />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText('Could not load data')).toBeInTheDocument();
+    expect(screen.queryByText('No APIs match these filters')).not.toBeInTheDocument();
   });
 });

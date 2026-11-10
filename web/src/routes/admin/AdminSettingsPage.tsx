@@ -1,3 +1,4 @@
+import { Link } from '@tanstack/react-router';
 import { useCallback, useEffect, useState, type ReactElement, type ReactNode } from 'react';
 import {
   EMAIL_TEMPLATE_KEYS,
@@ -9,7 +10,9 @@ import {
   type EdgeHealthStatus,
   type EdgeHealthNamespaceRouting,
   type EmailTemplateKey,
+  type ReconcileGatewayResponse,
   type RegistrableRole,
+  type RepairGatewayReferencesResponse,
 } from '@ferrum-nexus/shared';
 import {
   useAdminSettings,
@@ -28,7 +31,7 @@ import { useToast } from '../../stores/toast';
 import { CaptchaWidget } from '../../components/auth/CaptchaWidget';
 import { RoleGuard } from '../../components/layout/RoleGuard';
 import { Badge, type BadgeTone } from '../../components/ui/Badge';
-import { Button } from '../../components/ui/Button';
+import { Button, buttonClassName } from '../../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../../components/ui/Card';
 import { Icon, type IconName } from '../../components/ui/Icon';
 import {
@@ -124,14 +127,74 @@ function CardFooter({ children }: { children: ReactNode }): ReactElement {
  * Prose the warning card closes with.
  *
  * Held as a constant rather than as JSX text so the repair's two hard limits —
- * credentials cannot come back, proxies have to be republished — are stated in
- * one place and read the same as the operations guide.
+ * credentials cannot come back, proxies are not rebuilt by the repair — are
+ * stated in one place and read the same as the operations guide.
  */
 const REPAIR_EXPLANATION =
-  'Repairing recreates each account’s gateway consumer under the same identity and replays its ' +
-  'approved access. Credentials cannot be recovered, because their secrets were only ever shown ' +
-  'once, so the portal’s rows are revoked and each holder issues new ones. An API whose ' +
-  'proxy is gone has the dead id cleared and must be published again by its provider.';
+  'Repairing recreates the gateway consumer of each account and application under the same ' +
+  'identity and replays its approved access. Credentials cannot be recovered, because their ' +
+  'secrets were only ever shown once, so the portal’s rows are revoked and each holder issues ' +
+  'new ones. An API whose proxy is gone has the dead id cleared and is marked “Not deployed”; ' +
+  'its owner or an admin then rebuilds it with “Restore gateway deployment” on the API’s page.';
+
+/**
+ * The toast for a finished repair, read from its per-row results.
+ *
+ * A `200` only says the request ran: each consumer and API reports its own
+ * outcome, and a row that failed has to be visible rather than buried under
+ * "repaired".
+ */
+export function repairToast(response: RepairGatewayReferencesResponse): {
+  variant: 'success' | 'error';
+  title: string;
+  description: string;
+} {
+  const failedConsumers = response.consumers.filter((row) => row.error !== null);
+  const failedApis = response.apis.filter((row) => row.error !== null);
+  const recreated = response.consumers.length - failedConsumers.length;
+  const flagged = response.apis.filter((row) => row.flagged).length;
+  const done =
+    `${recreated} gateway consumer(s) recreated, ${flagged} API(s) marked for a gateway ` +
+    'restore.';
+  const failed = failedConsumers.length + failedApis.length;
+  if (failed === 0) {
+    return { variant: 'success', title: 'Gateway references repaired', description: done };
+  }
+  const firstError = failedConsumers[0]?.error ?? failedApis[0]?.error ?? '';
+  return {
+    variant: 'error',
+    title: `${failed} gateway reference(s) could not be repaired`,
+    description: `${done} First failure: ${firstError}`,
+  };
+}
+
+/** The toast for a finished re-check, naming everything still outstanding. */
+export function recheckToast(report: ReconcileGatewayResponse): {
+  variant: 'success' | 'error' | 'info';
+  title: string;
+  description?: string;
+} {
+  if (report.status === 'ok') {
+    return { variant: 'success', title: 'Every stored gateway reference is live' };
+  }
+  if (report.status === 'unknown') {
+    return {
+      variant: 'error',
+      title: 'The gateway references could not be checked',
+      ...(report.error ? { description: report.error } : {}),
+    };
+  }
+  const orphaned = report.consumers.orphaned + report.proxies.orphaned;
+  const outstanding: string[] = [];
+  if (orphaned > 0) outstanding.push(`${orphaned} reference(s) are still orphaned`);
+  if (report.awaiting_restore > 0) {
+    outstanding.push(`${report.awaiting_restore} API(s) await a gateway restore`);
+  }
+  return {
+    variant: 'info',
+    title: outstanding.length > 0 ? outstanding.join('; ') : 'Gateway references still need repair',
+  };
+}
 
 /**
  * The gateway-reference reconciliation warning.
@@ -146,7 +209,7 @@ const REPAIR_EXPLANATION =
  * background pass rather than probing — so re-checking is an explicit button,
  * and so is the repair.
  */
-function GatewayReconciliationCard(): ReactElement | null {
+export function GatewayReconciliationCard(): ReactElement | null {
   const health = useEdgeHealth();
   const { canSuperAdmin } = useAuth();
   const reconcile = useReconcileGateway();
@@ -161,11 +224,27 @@ function GatewayReconciliationCard(): ReactElement | null {
 
   const consumers = state.orphaned_consumers ?? 0;
   const apis = state.orphaned_proxies ?? 0;
+  // The server keeps the verdict `orphaned` while any API is still flagged
+  // `repair_required`, so after a repair this is often the only non-zero
+  // count: the dead references are cleared, the deployments are not back.
+  const awaiting = state.awaiting_restore ?? 0;
+  const repairable = consumers > 0 || apis > 0;
   const checked = state.checked_at ? new Date(state.checked_at).toLocaleString() : 'unknown';
-  const summary =
-    `${consumers} account(s) have no gateway consumer and ${apis} published API(s) point at a ` +
-    'proxy that no longer exists. Approvals and credential operations on those accounts fail, ' +
-    `and those APIs serve nothing. Last checked ${checked}.`;
+  const findings: string[] = [];
+  if (repairable) {
+    findings.push(
+      `${consumers} identity(ies) (accounts or applications) have no gateway consumer and ` +
+        `${apis} published API(s) point at a proxy that no longer exists. Approvals and ` +
+        'credential operations on those identities fail, and those APIs serve nothing.',
+    );
+  }
+  if (awaiting > 0) {
+    findings.push(
+      `${awaiting} API(s) are not deployed on the gateway and wait for “Restore gateway ` +
+        'deployment” on their page.',
+    );
+  }
+  const summary = `${findings.join(' ')} Last checked ${checked}.`;
 
   return (
     <Card>
@@ -181,38 +260,51 @@ function GatewayReconciliationCard(): ReactElement | null {
       />
       <CardBody className="flex flex-col gap-4">
         <FormNotice tone="warning">{summary}</FormNotice>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <ReferenceCount icon="users" label="Accounts with no consumer" value={consumers} />
+        <div className="grid gap-3 sm:grid-cols-3">
+          <ReferenceCount icon="users" label="Identities with no consumer" value={consumers} />
           <ReferenceCount icon="spec" label="APIs pointing at a dead proxy" value={apis} />
+          <ReferenceCount icon="refresh" label="APIs awaiting a restore" value={awaiting} />
         </div>
         <p className="text-sm leading-relaxed text-fg-muted">{REPAIR_EXPLANATION}</p>
       </CardBody>
       <CardFooter>
+        {repairable ? null : (
+          // Nothing is left for the repair to do: what remains is a restore,
+          // which the API's owner or any admin runs from the API's own page.
+          <Link to="/admin/apis" className={buttonClassName({ variant: 'primary' })}>
+            Find the APIs to restore
+          </Link>
+        )}
         {canSuperAdmin ? (
           <>
-            <Button
-              variant="primary"
-              loading={repair.isPending}
-              onClick={() =>
-                repair.mutate(
-                  { all: true },
-                  { onSuccess: () => toast.success('Gateway references repaired') },
-                )
-              }
-            >
-              Repair all
-            </Button>
+            {repairable ? (
+              <Button
+                variant="primary"
+                loading={repair.isPending}
+                onClick={() =>
+                  repair.mutate(
+                    { all: true },
+                    {
+                      onSuccess: (response) => {
+                        const { variant, title, description } = repairToast(response);
+                        toast.push(title, { variant, description });
+                      },
+                    },
+                  )
+                }
+              >
+                Repair all
+              </Button>
+            ) : null}
             <Button
               variant="secondary"
               loading={reconcile.isPending}
               onClick={() =>
                 reconcile.mutate(undefined, {
-                  onSuccess: (report) =>
-                    toast.success(
-                      report.status === 'orphaned'
-                        ? `${report.consumers.orphaned + report.proxies.orphaned} references are still orphaned`
-                        : 'Every stored gateway reference is live',
-                    ),
+                  onSuccess: (report) => {
+                    const { variant, title, description } = recheckToast(report);
+                    toast.push(title, { variant, description });
+                  },
                 })
               }
             >
@@ -220,9 +312,9 @@ function GatewayReconciliationCard(): ReactElement | null {
               Re-check now
             </Button>
           </>
-        ) : (
+        ) : repairable ? (
           <SuperAdminOnlyNotice what="the portal’s gateway references" />
-        )}
+        ) : null}
       </CardFooter>
     </Card>
   );

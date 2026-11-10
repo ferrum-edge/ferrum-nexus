@@ -14,8 +14,9 @@ import { PageHeader } from '../../components/ui/Card';
 import { DataTable, type Columns } from '../../components/ui/DataTable';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { SearchInput } from '../../components/ui/Input';
+import { QueryErrorState } from '../../components/ui/QueryErrorState';
 import { Select } from '../../components/ui/Select';
-import { AccessModeBadge, StatusPill, VisibilityBadge } from '../../components/ui/StatusPill';
+import { AccessModeBadge, ApiStatusBadges, VisibilityBadge } from '../../components/ui/StatusPill';
 
 function AllApisTable(): ReactElement {
   const [offset, setOffset] = useState(0);
@@ -71,7 +72,7 @@ function AllApisTable(): ReactElement {
       {
         id: 'status',
         header: 'Status',
-        cell: ({ row }) => <StatusPill status={row.original.status} />,
+        cell: ({ row }) => <ApiStatusBadges api={row.original} />,
       },
       {
         id: 'updated',
@@ -98,6 +99,11 @@ function AllApisTable(): ReactElement {
       limit={limit}
       onOffsetChange={setOffset}
       loading={query.isLoading}
+      error={
+        query.isError ? (
+          <QueryErrorState onRetry={() => query.refetch()} retrying={query.isFetching} />
+        ) : undefined
+      }
       onRowClick={(api) => void navigate({ to: '/apis/$apiId', params: { apiId: api.id } })}
       toolbar={
         <>
